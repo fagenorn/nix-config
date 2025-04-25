@@ -55,6 +55,7 @@ in
       #"borders"
     ];
     taps = [
+      "nikitabobko/tap"
       #"FelixKratz/formulae" #sketchybar
     ];
     casks = [
