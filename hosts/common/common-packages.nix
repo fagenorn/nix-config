@@ -22,7 +22,7 @@ in
     jq                # Command-line JSON processor
 
     # Disk Usage Analyzers
-    (du-dust.override { RUST_BACKTRACE = 1; }) # Modern `du` replacement (`dust`)
+    dust              # Modern `du` replacement (`dust`)
     # dua             # Alternative interactive disk usage analyzer
     duf               # Modern `df` (disk free) replacement
 
@@ -50,6 +50,8 @@ in
     # Infrastructure & Virtualization
     # terraform         # Infrastructure as Code tool
     # qemu              # Machine emulator and virtualizer
+
+
 
     # === Networking Tools ===
     iperf3            # Network bandwidth testing tool
