@@ -31,7 +31,7 @@
 
       darwinConfigurations = {
         # personal
-        mbp = libx.mkDarwin { hostname = "mbp"; username = "anis"; system ="aarch64-darwin"; }
+        mbp = libx.mkDarwin { hostname = "mbp"; username = "anis"; system ="aarch64-darwin"; };
       };
 
     };
