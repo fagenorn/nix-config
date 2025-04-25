@@ -15,6 +15,8 @@
     home-manager.url = "github:nix-community/home-manager/release-24.11";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
 
+    catppuccin.url = "github:catppuccin/nix";
+
     # sops-nix.url = "github:Mic92/sops-nix";
     # sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
@@ -24,14 +26,15 @@
     let
       inherit (self) outputs;
 
+      myvars = import ../vars { inherit outputs; };
+
       stateVersion = "24.05";
       libx = import ./lib { inherit inputs outputs stateVersion; };
-
     in {
 
       darwinConfigurations = {
         # personal
-        mbp = libx.mkDarwin { hostname = "mbp"; username = "anis"; system ="aarch64-darwin"; };
+        mbp = libx.mkDarwin { hostname = "mbp"; username = "anis"; system ="aarch64-darwin"; inherit libx; };
       };
 
     };

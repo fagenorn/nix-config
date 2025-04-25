@@ -10,6 +10,7 @@ in
 {
   inherit (helpers)
     mkDarwin
+    scanPaths
     #mkNixos
     ;
 }

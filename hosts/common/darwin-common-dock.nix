@@ -2,8 +2,8 @@
 {
   system.defaults.dock = {
     persistent-apps = [
-      "/Applications/Edge.app"
-      "/Applications/Whatsapp.app"
+      "/Applications/Microsoft Edge.app"
+      "/Applications/WhatsApp.app"
       "/Applications/Discord.app"
       "/Applications/Slack.app"
       "/Applications/Fantastical.app"

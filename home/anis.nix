@@ -1,16 +1,19 @@
-{ config, inputs, pkgs, lib, unstablePkgs, ... }:
+{ config, inputs, pkgs, lib, unstablePkgs, libx, ... }:
 {
   home.stateVersion = "23.11";
 
   # list of programs
   # https://mipmip.github.io/home-manager-option-search
 
-  # aerospace config
-  # home.file = lib.mkMerge [
-  #   (lib.mkIf pkgs.stdenv.isDarwin {
-  #     ".config/aerospace/aerospace.toml".text = builtins.readFile ./aerospace/aerospace.toml;
-  #   })
-  # ];
+#   programs.aerospace = {
+#     enable = true;
+#   };
+
+#   home.file = lib.mkMerge [
+#     (lib.mkIf pkgs.stdenv.isDarwin {
+#       ".config/aerospace/aerospace.toml".text = builtins.readFile ./aerospace/aerospace.toml;
+#     })
+#   ];
 
   programs.gpg.enable = true;
 
@@ -87,6 +90,15 @@
   programs.home-manager.enable = true;
   programs.nix-index.enable = true;
 
+#   imports = [
+#     catppuccin.homeManagerModules.catppuccin
+#   ];
+
+#   catppuccin = {
+#     enable = true;
+#     flavor = "mocha";
+#   };
+
   programs.bat.enable = true;
   programs.bat.config.theme = "Nord";
   #programs.zsh.shellAliases.cat = "${pkgs.bat}/bin/bat";
@@ -127,4 +139,5 @@
       # };
     };
   };
+    imports = (libx.scanPaths ./.) ++ [];
 }
