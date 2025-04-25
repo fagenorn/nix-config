@@ -15,13 +15,8 @@
     home-manager.url = "github:nix-community/home-manager/release-24.11";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
 
-    sops-nix.url = "github:Mic92/sops-nix";
-    sops-nix.inputs.nixpkgs.follows = "nixpkgs";
-
-    # disko.url = "github:nix-community/disko";
-    # disko.inputs.nixpkgs.follows = "nixpkgs";
-
-    # vscode-server.url = "github:nix-community/nixos-vscode-server";
+    # sops-nix.url = "github:Mic92/sops-nix";
+    # sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs = { ... }@inputs:
@@ -36,37 +31,7 @@
 
       darwinConfigurations = {
         # personal
-        slartibartfast = libx.mkDarwin { hostname = "slartibartfast"; };
-        nauvis = libx.mkDarwin { hostname = "nauvis"; };
-        mac-studio = libx.mkDarwin { hostname = "mac-studio"; };
-        mac-mini = libx.mkDarwin { hostname = "mac-mini"; };
-        mooncake = libx.mkDarwin { hostname = "mooncake"; };
-
-        # work
-        baldrick = libx.mkDarwin { hostname = "baldrick"; };
-        magrathea = libx.mkDarwin { hostname = "magrathea"; };
-      };
-
-      colmena = {
-        meta = {
-          nixpkgs = import inputs.nixpkgs { system = "x86_64-linux"; };
-          specialArgs = {
-            inherit inputs outputs stateVersion self;
-          };
-        };
-
-        defaults = { lib, config, name, ... }: {
-          imports = [
-            inputs.home-manager.nixosModules.home-manager
-          ];
-        };
-
-        # wd
-        morphnix = import ./hosts/nixos/morphnix;
-        nvllama = import ./hosts/nixos/nvllama;
-
-        # test system
-        # yeager = nixosSystem "x86_64-linux" "yeager" "alex";
+        mbp = libx.mkDarwin { hostname = "mbp"; username = "anis"; system ="aarch64-darwin"; }
       };
 
     };

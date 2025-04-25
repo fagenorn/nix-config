@@ -43,8 +43,8 @@
 
   programs.git = {
     enable = true;
-    userEmail = "alexktz@gmail.com";
-    userName = "Alex Kretzschmar";
+    userEmail = "anisanissakkaf@gmail.com";
+    userName = "Anis Sakkaf";
     diff-so-fancy.enable = true;
     lfs.enable = true;
     extraConfig = {
@@ -84,67 +84,12 @@
     #initExtra = (builtins.readFile ../mac-dot-zshrc);
   };
 
-  programs.tmux = {
-    enable = true;
-    #keyMode = "vi";
-    clock24 = true;
-    historyLimit = 10000;
-    plugins = with pkgs.tmuxPlugins; [
-      gruvbox
-      vim-tmux-navigator
-    ];
-    extraConfig = ''
-      new-session -s main
-      bind-key -n C-a send-prefix
-    '';
-  };
-
   programs.home-manager.enable = true;
   programs.nix-index.enable = true;
-
-  programs.alacritty.enable = true;
 
   programs.bat.enable = true;
   programs.bat.config.theme = "Nord";
   #programs.zsh.shellAliases.cat = "${pkgs.bat}/bin/bat";
-
-  programs.neovim = {
-    enable = true;
-    viAlias = true;
-    vimAlias = true;
-    vimdiffAlias = true;
-    plugins = with pkgs.vimPlugins; [
-      ## regular
-      comment-nvim
-      lualine-nvim
-      nvim-web-devicons
-      vim-tmux-navigator
-
-      ## with config
-      # {
-      #   plugin = gruvbox-nvim;
-      #   config = "colorscheme gruvbox";
-      # }
-
-      {
-        plugin = catppuccin-nvim;
-        config = "colorscheme catppuccin";
-      }
-
-      ## telescope
-      {
-        plugin = telescope-nvim;
-        type = "lua";
-        config = builtins.readFile ./nvim/plugins/telescope.lua;
-      }
-      telescope-fzf-native-nvim
-
-    ];
-    extraLuaConfig = ''
-      ${builtins.readFile ./nvim/options.lua}
-      ${builtins.readFile ./nvim/keymap.lua}
-    '';
-  };
 
   programs.zoxide.enable = true;
 

@@ -3,7 +3,7 @@ let
   inherit (inputs) nixpkgs nixpkgs-unstable;
 in
 {
-  users.users.alex.home = "/Users/alex";
+  users.users.anis.home = "/Users/anis";
 
   nix = {
     settings = {
@@ -19,30 +19,6 @@ in
     config.allowUnfree = true;
     hostPlatform = lib.mkDefault "${system}";
   };
-
-  environment.systemPackages = with pkgs; [
-    ## unstable
-    unstablePkgs.yt-dlp
-    unstablePkgs.get_iplayer
-    unstablePkgs.colmena
-
-    ## stable CLI
-    pkgs.comma
-    pkgs.just
-    pkgs.lima
-    pkgs.nix
-  ];
-
-  fonts.packages = [
-    (pkgs.nerdfonts.override {
-      fonts = [
-        "FiraCode"
-        "FiraMono"
-        "Hack"
-        "JetBrainsMono"
-      ];
-    })
-  ];
 
   # pins to stable as unstable updates very often
   nix.registry = {
@@ -74,116 +50,140 @@ in
     global.autoUpdate = true;
 
     brews = [
-      "bitwarden-cli"
+      #"bitwarden-cli"
       #"borders"
     ];
     taps = [
       #"FelixKratz/formulae" #sketchybar
     ];
     casks = [
-      "screenflow"
-      "cleanshot"
-      "adobe-creative-cloud"
-      #"nikitabobko/tap/aerospace"
-      "alacritty"
-      "alcove"
-      "audacity"
-      #"balenaetcher"
-      "bambu-studio"
-      "bentobox"
-      #"clop"
-      "discord"
-      "displaylink"
-      #"docker"
-      "element"
-      "elgato-camera-hub"
-      "elgato-control-center"
-      "elgato-stream-deck"
-      "firefox"
-      "flameshot"
-      "font-fira-code"
-      "font-fira-code-nerd-font"
-      "font-fira-mono-for-powerline"
-      "font-hack-nerd-font"
-      "font-jetbrains-mono-nerd-font"
-      "font-meslo-lg-nerd-font"
-      "ghostty"
-      "google-chrome"
-      "iina"
-      "istat-menus"
-      "iterm2"
-      "jordanbaird-ice"
-      "lm-studio"
-      "logitech-options"
-      "macwhisper"
-      "marta"
-      "mqtt-explorer"
-      "music-decoy" # github/FuzzyIdeas/MusicDecoy
-      "nextcloud"
-      "notion"
-      "obs"
-      "obsidian"
-      "ollama"
-      "omnidisksweeper"
-      "orbstack"
-      "openscad"
-      "openttd"
-      "plexamp"
-      "popclip"
-      "prusaslicer"
-      "raycast"
-      "signal"
-      "shortcat"
-      "slack"
-      "spotify"
-      "steam"
-      "tailscale"
-      #"wireshark"
-      "viscosity"
-      "visual-studio-code"
-      "vlc"
-      # "lm-studio"
+        # === Browsers ===
+        "microsoft-edge"
 
-      # # rogue amoeba
-      "audio-hijack"
-      "farrago"
-      "loopback"
-      "soundsource"
+        # === Communication ===
+        "discord"            # Chat and VoIP platform
+        "whatsapp"           
+        "slack"              # Team communication platform
+
+        # === Development & IT ===
+        # Terminals
+        "ghostty"            # Modern GPU terminal
+        # Code Editors
+        "visual-studio-code" # Widely used code editor
+        # Containers & Virtualization
+        #"docker",            # Docker Desktop (Resource heavy, consider alternatives)
+        "orbstack"            # Fast Docker Desktop alternative & Linux VMs
+        # AI / Machine Learning Tools
+        # "lm-studio"          # UI for running local Large Language Models (LLMs)
+        # Utilities
+        #"wireshark",         # Network protocol analyzer
+
+        # === Multimedia & Creativity ===
+        # Audio Production & Playback
+        # "audacity"           # Free audio editor and recorder
+        # "plexamp"            # Headless Plex music player
+        "spotify"            # Music streaming service client
+        # Rogue Amoeba Audio Tools (Specialized Audio Routing/Recording)
+        # "audio-hijack"       # Record audio from any application
+        # "farrago"            # Soundboard application
+        # "loopback"           # Cable-free audio routing between apps
+        # "soundsource"        # System-wide audio control and effects
+        # Video Production & Playback
+        "iina"               # Modern, powerful video player for macOS
+        "obs"                # Open Broadcaster Software (Streaming/Recording)
+        # "screenflow"         # Screen recording and video editing (Paid)
+        # "vlc"                # Versatile cross-platform media player
+        # Graphics, 3D Printing & Design
+        "adobe-creative-cloud" # Manager for Adobe Creative Cloud suite
+        # "bambu-studio",       # Slicer software for Bambu Lab 3D printers
+        # "prusaslicer",        # Slicer software for Prusa and other 3D printers
+        # Screen Capture
+        # "cleanshot"          # Advanced screenshot, annotation, and recording tool (Paid)
+        # "flameshot"          # Powerful screenshot tool (often used on Linux)
+
+        # === Productivity & Utilities ===
+        # Launchers & Automation
+        # "popclip",            # Context menu utility appearing on text selection (Paid)
+        # "raycast",            # Extensible launcher and workflow tool (Spotlight replacement)
+        # "shortcat",           # Control UI elements via keyboard search
+        # System Utilities & Monitoring
+        # "alcove",             # Window management / Spacial computing utility (?) - Verify function
+        # "istat-menus",        # System monitoring in the menu bar (Paid)
+        # "jordanbaird-ice",    # Menu bar icon manager/hider (Open Source)
+        # "omnidisksweeper",    # Utility to find and delete large files
+        # Notes & Organization
+        # "notion",             # All-in-one workspace app (notes, tasks, wikis)
+        # "obsidian",           # Powerful Markdown knowledge base and note-taking app
+        # File Management
+        # "marta",              # Native macOS dual-pane file manager
+        # Transcription
+        # "macwhisper",         # Local audio transcription using OpenAI Whisper
+        # Other Utilities
+        # "music-decoy",        # Hides music player info during screen recording (github/FuzzyIdeas/MusicDecoy)
+        #"clop",              # Clipboard manager (?) - Verify function and name
+
+        # === Hardware Specific Utilities ===
+        # Display/Dock Drivers
+        # "displaylink",        # Driver for DisplayLink USB graphics adapters/docks
+
+        # === Networking ===
+        # "tailscale",          # Mesh VPN client
+        # "viscosity",          # Feature-rich OpenVPN client (Paid)
+
+        # === Gaming ===
+        "starsector"         # Open-world single-player space combat and trading RPG
+        # "steam"              # Valve's game distribution platform client
+
+        # === Window Management ===
+        #"nikitabobko/tap/aerospace", # Tiling window manager (Requires custom tap `brew tap nikitabobko/tap`)
+
+        # === OS Image Flashing ===
+        #"balenaetcher",      # Tool to flash OS images to SD cards/USB drives
     ];
     masApps = {
-      "Amphetamine" = 937984704;
-      "AutoMounter" = 1160435653;
-      "Bitwarden" = 1352778147;
-      "Creator's Best Friend" = 1524172135;
-      "DaVinci Resolve" = 571213070;
-      "Disk Speed Test" = 425264550;
-      "Fantastical" = 975937182;
-      "Ivory for Mastodon by Tapbots" = 6444602274;
-      "Home Assistant Companion" = 1099568401;
-      "Microsoft Remote Desktop" = 1295203466;
-      "Perplexity" = 6714467650;
-      "Resize Master" = 102530679;
-      "rCmd" = 1596283165;
-      "Snippety" = 1530751461;
-      #"Tailscale" = 1475387142;
-      "Telegram" = 747648890;
-      "The Unarchiver" = 425424353;
-      "Todoist" = 585829637;
-      "UTM" = 1538878817;
-      "Wireguard" = 1451685025;
+        # === Productivity & Utilities ===
+        # "Amphetamine" = 937984704;        # Keep your Mac awake
+        # "AutoMounter" = 1160435653;       # Automatically mount network shares
+        # "Bitwarden" = 1352778147;         # Password manager
+        # "Fantastical" = 975937182;        # Calendar application
+        # "Perplexity" = 6714467650;        # AI Search / Assistant app
+        # "Resize Master" = 102530679;      # Batch image resizing tool
+        # "rCmd" = 1596283165;              # Use Right Command for app switching/shortcuts
+        # "Snippety" = 1530751461;          # Snippet manager (?) - Verify function
+        # "The Unarchiver" = 425424353;     # Versatile file archive extractor
+        # "Todoist" = 585829637;          # Task management and to-do list app
 
-      "Final Cut Pro" = 424389933;
+        # === Development & IT ===
+        # "Disk Speed Test" = 425264550;    # Blackmagic Disk Speed Test utility
+        "Microsoft Remote Desktop" = 1295203466; # RDP client
+        # "UTM" = 1538878817;             # Virtual machine host (QEMU frontend)
 
-      # these apps only available via uk apple id
-      #"Logic Pro" = 634148309;
-      #"MainStage" = 634159523;
-      #"Garageband" = 682658836;
-      #"ShutterCount" = 720123827;
-      #"Teleprompter" = 1533078079;
+        # === Communication ===
+        # "Ivory for Mastodon by Tapbots" = 6444602274; # Mastodon client
+        # "Telegram" = 747648890;         # Messaging application
 
-      "Keynote" = 409183694;
-      "Numbers" = 409203825;
-      "Pages" = 409201541;
+        # === Networking & Home Automation ===
+        # "Home Assistant Companion" = 1099568401; # Client for Home Assistant
+        #"Tailscale" = 1475387142;       # Mesh VPN client (also available as cask, choose one)
+        # "Wireguard" = 1451685025;        # WireGuard VPN client
+
+        # === Multimedia & Creativity ===
+        # "Creator's Best Friend" = 1524172135; # YouTube management tool (?) - Verify function
+        # "DaVinci Resolve" = 571213070;    # Professional video editing suite
+        # "Final Cut Pro" = 424389933;     # Professional video editing suite (Apple)
+
+        # === Apple Productivity Suite ===
+        # "Keynote" = 409183694;
+        # "Numbers" = 409203825;
+        # "Pages" = 409201541;
+
+        # === Region/Account Restricted Apps (Example: UK Apple ID needed) ===
+        # (Keep these grouped if they share specific account requirements)
+        #"Logic Pro" = 634148309;       # Professional audio workstation (Apple)
+        #"MainStage" = 634159523;       # Live performance audio tool (Apple)
+        #"Garageband" = 682658836;      # Consumer audio workstation (Apple)
+        #"ShutterCount" = 720123827;    # Reads camera shutter actuations
+        #"Teleprompter" = 1533078079;   # Teleprompter application
     };
   };
 
@@ -282,12 +282,12 @@ in
       "com.apple.ImageCapture".disableHotPlug = true;
       # Turn on app auto-update
       "com.apple.commerce".AutoUpdate = true;
-      "com.googlecode.iterm2".PromptOnQuit = false;
-      "com.google.Chrome" = {
-        AppleEnableSwipeNavigateWithScrolls = true;
-        DisablePrintPreview = true;
-        PMPrintingExpandedStateForPrint2 = true;
-      };
+    #   "com.googlecode.iterm2".PromptOnQuit = false;
+    #   "com.google.Chrome" = {
+    #     AppleEnableSwipeNavigateWithScrolls = true;
+    #     DisablePrintPreview = true;
+    #     PMPrintingExpandedStateForPrint2 = true;
+    #   };
   };
 
 }
