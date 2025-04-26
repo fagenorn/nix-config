@@ -138,7 +138,6 @@ alt-n = 'workspace N'
 alt-o = 'workspace O'
 alt-p = 'workspace P'
 alt-q = 'workspace Q'
-alt-r = 'workspace R'
 alt-s = 'workspace S'
 alt-t = 'workspace T'
 alt-u = 'workspace U'
@@ -171,7 +170,6 @@ alt-shift-n = 'move-node-to-workspace N'
 alt-shift-o = 'move-node-to-workspace O'
 alt-shift-p = 'move-node-to-workspace P'
 alt-shift-q = 'move-node-to-workspace Q'
-alt-shift-r = 'move-node-to-workspace R'
 alt-shift-s = 'move-node-to-workspace S'
 alt-shift-t = 'move-node-to-workspace T'
 alt-shift-u = 'move-node-to-workspace U'
@@ -186,8 +184,21 @@ alt-tab = 'workspace-back-and-forth'
 # See: https://nikitabobko.github.io/AeroSpace/commands#move-workspace-to-monitor
 alt-shift-tab = 'move-workspace-to-monitor --wrap-around next'
 
+cmd-h = []     # Disable "hide application"
+cmd-alt-h = [] # Disable "hide others"
+
 # See: https://nikitabobko.github.io/AeroSpace/commands#mode
 alt-shift-semicolon = 'mode service'
+
+alt-shift-r = 'mode resize'
+
+[mode.resize.binding]
+h = 'resize width -50'
+j = 'resize height +50'
+k = 'resize height -50'
+l = 'resize width +50'
+enter = 'mode main'
+esc = 'mode main'
 
 # 'service' binding mode declaration.
 # See: https://nikitabobko.github.io/AeroSpace/guide#binding-modes
@@ -204,3 +215,7 @@ alt-shift-h = ['join-with left', 'mode main']
 alt-shift-j = ['join-with down', 'mode main']
 alt-shift-k = ['join-with up', 'mode main']
 alt-shift-l = ['join-with right', 'mode main']
+
+[[on-window-detected]]
+check-further-callbacks = true
+run = 'layout floating'

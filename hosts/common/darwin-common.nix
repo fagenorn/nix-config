@@ -50,7 +50,6 @@ in
     global.autoUpdate = true;
 
     brews = [
-      "aerospace"
       #"bitwarden-cli"
       #"borders"
     ];
@@ -69,6 +68,7 @@ in
         # === Development & IT ===
         # Terminals
         "ghostty"            # Modern GPU terminal
+        "nikitabobko/tap/aerospace"
         # Code Editors
         "visual-studio-code" # Widely used code editor
         # Containers & Virtualization
