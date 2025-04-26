@@ -1,11 +1,6 @@
 # nix run nixpkgs#ssh-to-age -- -private-key -i .ssh/id_ed25519 > ~/.config/sops/age/keys.txt
 # nix shell nixpkgs#age -c age-keygen -y ~/.config/sops/age/keys.txt
 
-keys:
-  - &hosts:
-    - &my: age16rlmfvww24j5en8w0xgvsppk6hztmazw7tcdnflj6yp5cecr999qktyjuh
 creation_rules:
   - path_regex: secrets/[^/]+\.(yaml|json|env|ini)$
-    key_groups:
-      - age:
-        - *my
+    age: age16rlmfvww24j5en8w0xgvsppk6hztmazw7tcdnflj6yp5cecr999qktyjuh

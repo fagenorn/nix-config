@@ -1,4 +1,14 @@
-{ config, inputs, pkgs, lib, unstablePkgs, libx, ... }: {
+{
+  config,
+  inputs,
+  pkgs,
+  lib,
+  unstablePkgs,
+  libx,
+  myvars,
+  ...
+}:
+{
   home.stateVersion = "23.11";
 
   # list of programs
@@ -26,7 +36,11 @@
     enableZshIntegration = true;
     icons = "auto";
     git = true;
-    extraOptions = [ "--group-directories-first" "--header" "--color=auto" ];
+    extraOptions = [
+      "--group-directories-first"
+      "--header"
+      "--color=auto"
+    ];
   };
 
   programs.fzf = {
@@ -44,13 +58,19 @@
     diff-so-fancy.enable = true;
     lfs.enable = true;
     extraConfig = {
-      init = { defaultBranch = "main"; };
+      init = {
+        defaultBranch = "main";
+      };
       merge = {
         conflictStyle = "diff3";
         tool = "meld";
       };
-      push = { autoSetupRemote = true; };
-      pull = { rebase = true; };
+      push = {
+        autoSetupRemote = true;
+      };
+      pull = {
+        rebase = true;
+      };
     };
   };
 
