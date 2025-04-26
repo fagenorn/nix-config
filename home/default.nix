@@ -79,6 +79,13 @@
       pull = {
         rebase = true;
       };
+      gpg = {
+        format = "ssh";
+      };
+    };
+    signing = {
+      signByDefault = true;
+      key = "${config.home.homeDirectory}/.ssh/id_ed25519";
     };
   };
 
