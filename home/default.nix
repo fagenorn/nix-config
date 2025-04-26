@@ -1,19 +1,18 @@
-{ config, inputs, pkgs, lib, unstablePkgs, libx, ... }:
-{
+{ config, inputs, pkgs, lib, unstablePkgs, libx, ... }: {
   home.stateVersion = "23.11";
 
   # list of programs
   # https://mipmip.github.io/home-manager-option-search
 
-#   programs.aerospace = {
-#     enable = true;
-#   };
+  #   programs.aerospace = {
+  #     enable = true;
+  #   };
 
-#   home.file = lib.mkMerge [
-#     (lib.mkIf pkgs.stdenv.isDarwin {
-#       ".config/aerospace/aerospace.toml".text = builtins.readFile ./aerospace/aerospace.toml;
-#     })
-#   ];
+  #   home.file = lib.mkMerge [
+  #     (lib.mkIf pkgs.stdenv.isDarwin {
+  #       ".config/aerospace/aerospace.toml".text = builtins.readFile ./aerospace/aerospace.toml;
+  #     })
+  #   ];
 
   programs.gpg.enable = true;
 
@@ -27,11 +26,7 @@
     enableZshIntegration = true;
     icons = "auto";
     git = true;
-    extraOptions = [
-      "--group-directories-first"
-      "--header"
-      "--color=auto"
-    ];
+    extraOptions = [ "--group-directories-first" "--header" "--color=auto" ];
   };
 
   programs.fzf = {
@@ -39,9 +34,7 @@
     enableBashIntegration = true;
     enableZshIntegration = true;
     tmux.enableShellIntegration = true;
-    defaultOptions = [
-      "--no-mouse"
-    ];
+    defaultOptions = [ "--no-mouse" ];
   };
 
   programs.git = {
@@ -51,16 +44,13 @@
     diff-so-fancy.enable = true;
     lfs.enable = true;
     extraConfig = {
-      init = {
-        defaultBranch = "main";
-      };
+      init = { defaultBranch = "main"; };
       merge = {
         conflictStyle = "diff3";
         tool = "meld";
       };
-      pull = {
-        rebase = true;
-      };
+      push = { autoSetupRemote = true; };
+      pull = { rebase = true; };
     };
   };
 
@@ -70,13 +60,6 @@
   };
 
   programs.lf.enable = true;
-
-  programs.starship = {
-    enable = true;
-    enableZshIntegration = true;
-    enableBashIntegration = true;
-    settings = pkgs.lib.importTOML ./starship/starship.toml;
-  };
 
   programs.bash.enable = true;
 
@@ -90,14 +73,14 @@
   programs.home-manager.enable = true;
   programs.nix-index.enable = true;
 
-#   imports = [
-#     catppuccin.homeManagerModules.catppuccin
-#   ];
+  #   imports = [
+  #     catppuccin.homeManagerModules.catppuccin
+  #   ];
 
-#   catppuccin = {
-#     enable = true;
-#     flavor = "mocha";
-#   };
+  #   catppuccin = {
+  #     enable = true;
+  #     flavor = "mocha";
+  #   };
 
   programs.bat.enable = true;
   programs.bat.config.theme = "Nord";
@@ -105,39 +88,5 @@
 
   programs.zoxide.enable = true;
 
-  programs.ssh = {
-    enable = true;
-    extraConfig = ''
-  StrictHostKeyChecking no
-    '';
-    matchBlocks = {
-      # ~/.ssh/config
-      "github.com" = {
-        hostname = "ssh.github.com";
-        port = 443;
-      };
-      "*" = {
-        user = "root";
-      };
-      # wd
-
-      # lancs
-      # "e elrond" = {
-      #   hostname = "100.117.223.78";
-      #   user = "alexktz";
-      # };
-      # # jb
-      # "core" = {
-      #   hostname = "demo.selfhosted.show";
-      #   user = "ironicbadger";
-      #   port = 53142;
-      # };
-      # "status" = {
-      #   hostname = "hc.ktz.cloud";
-      #   user = "ironicbadger";
-      #   port = 53142;
-      # };
-    };
-  };
-    imports = (libx.scanPaths ./.) ++ [];
+  imports = (libx.scanPaths ./.) ++ [ ];
 }

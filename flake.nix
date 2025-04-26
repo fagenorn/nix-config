@@ -8,21 +8,34 @@
     nix-darwin.inputs.nixpkgs.follows = "nixpkgs-darwin";
 
     nix-homebrew.url = "github:zhaofengli-wip/nix-homebrew";
-    homebrew-core = { url = "github:homebrew/homebrew-core"; flake = false; };
-    homebrew-cask = { url = "github:homebrew/homebrew-cask"; flake = false; };
-    homebrew-bundle = { url = "github:homebrew/homebrew-bundle"; flake = false; };
-    nikitabobko-tap = { url = "github:nikitabobko/homebrew-tap"; flake = false; };
+    homebrew-core = {
+      url = "github:homebrew/homebrew-core";
+      flake = false;
+    };
+    homebrew-cask = {
+      url = "github:homebrew/homebrew-cask";
+      flake = false;
+    };
+    homebrew-bundle = {
+      url = "github:homebrew/homebrew-bundle";
+      flake = false;
+    };
+    nikitabobko-tap = {
+      url = "github:nikitabobko/homebrew-tap";
+      flake = false;
+    };
 
     home-manager.url = "github:nix-community/home-manager/release-24.11";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
 
     catppuccin.url = "github:catppuccin/nix";
 
-    # sops-nix.url = "github:Mic92/sops-nix";
-    # sops-nix.inputs.nixpkgs.follows = "nixpkgs";
+    sops-nix.url = "github:Mic92/sops-nix";
+    sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { ... }@inputs:
+  outputs =
+    { ... }@inputs:
     with inputs;
     let
       inherit (self) outputs;
@@ -31,11 +44,17 @@
 
       stateVersion = "24.05";
       libx = import ./lib { inherit inputs outputs stateVersion; };
-    in {
+    in
+    {
 
       darwinConfigurations = {
         # personal
-        mbp = libx.mkDarwin { hostname = "mbp"; username = "anis"; system ="aarch64-darwin"; inherit libx; };
+        mbp = libx.mkDarwin {
+          hostname = "mbp";
+          username = "anis";
+          system = "aarch64-darwin";
+          inherit libx;
+        };
       };
 
     };

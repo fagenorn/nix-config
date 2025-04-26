@@ -1,4 +1,9 @@
-{ inputs, pkgs, unstablePkgs, ... }:
+{
+  inputs,
+  pkgs,
+  unstablePkgs,
+  ...
+}:
 let
   inherit (inputs) nixpkgs nixpkgs-unstable;
 in
@@ -6,42 +11,42 @@ in
   nixpkgs.config.allowUnfree = true;
   environment.systemPackages = with pkgs; [
     # === Core System & File Utilities ===
-    coreutils         # Standard GNU utilities (ls, cp, mv, rm, etc.)
-    mc                # Midnight Commander - Text-based visual file manager
-    tree              # Display directory contents as a tree
-    unzip             # Utility for extracting ZIP archives
+    coreutils # Standard GNU utilities (ls, cp, mv, rm, etc.)
+    mc # Midnight Commander - Text-based visual file manager
+    tree # Display directory contents as a tree
+    unzip # Utility for extracting ZIP archives
 
     # === Enhanced CLI Utilities & Replacements ===
     # File Searching & Navigation
-    fd                # Fast, user-friendly alternative to `find`
-    ripgrep           # Very fast recursive file search (grep alternative) (`rg`)
-    zoxide            # Smarter `cd` - remembers frequent directories
+    fd # Fast, user-friendly alternative to `find`
+    ripgrep # Very fast recursive file search (grep alternative) (`rg`)
+    zoxide # Smarter `cd` - remembers frequent directories
 
     # File Comparison & Manipulation
-    difftastic        # Structural diff tool (syntax-aware)
-    jq                # Command-line JSON processor
+    difftastic # Structural diff tool (syntax-aware)
+    jq # Command-line JSON processor
 
     # Disk Usage Analyzers
-    dust              # Modern `du` replacement (`dust`)
+    dust # Modern `du` replacement (`dust`)
     # dua             # Alternative interactive disk usage analyzer
-    duf               # Modern `df` (disk free) replacement
+    duf # Modern `df` (disk free) replacement
 
     # Process/Task Automation & Monitoring
-    entr              # Run command when files change (for auto-reloads/tests)
-    watch             # Standard utility to run a command repeatedly
+    entr # Run command when files change (for auto-reloads/tests)
+    watch # Standard utility to run a command repeatedly
 
     # === System Monitoring & Information ===
-    btop              # Comprehensive terminal resource monitor
-    fastfetch         # Fast, customizable system information tool
-    smartmontools     # Disk health monitoring via S.M.A.R.T. (`smartctl`)
+    btop # Comprehensive terminal resource monitor
+    fastfetch # Fast, customizable system information tool
+    smartmontools # Disk health monitoring via S.M.A.R.T. (`smartctl`)
 
     # === Development, DevOps & Virtualization ===
     # Version Control & Collaboration
-    gh                # GitHub official CLI
+    gh # GitHub official CLI
 
     # Build & Automation
-    hugo              # Static site generator
-    just              # Handy command runner (simpler `make`)
+    hugo # Static site generator
+    just # Handy command runner (simpler `make`)
 
     # Containers & Cloud Native
     # kubectl           # Kubernetes CLI tool
@@ -51,26 +56,27 @@ in
     # terraform         # Infrastructure as Code tool
     # qemu              # Machine emulator and virtualizer
 
-
-
     # === Networking Tools ===
-    iperf3            # Network bandwidth testing tool
-    mosh              # Mobile Shell (robust replacement for SSH sessions)
-    nmap              # Network scanner and security auditor
-    wget              # Non-interactive web downloader (HTTP, HTTPS, FTP)
-    wireguard-tools   # Tools to manage WireGuard VPN connections (`wg`, `wg-quick`)
+    iperf3 # Network bandwidth testing tool
+    mosh # Mobile Shell (robust replacement for SSH sessions)
+    nmap # Network scanner and security auditor
+    wget # Non-interactive web downloader (HTTP, HTTPS, FTP)
+    wireguard-tools # Tools to manage WireGuard VPN connections (`wg`, `wg-quick`)
 
     # === Multimedia & Graphics ===
-    ffmpeg            # Command-line multimedia framework (convert, stream, record)
-    figurine          # Utility for creating FIGlet-style text banners/ASCII art
+    ffmpeg # Command-line multimedia framework (convert, stream, record)
+    figurine # Utility for creating FIGlet-style text banners/ASCII art
     # television        # Application for watching TV streams (e.g., IPTV) - Verify exact function
 
     # === Fonts ===
     # Install specific fonts you use. NerdFonts provides patched fonts with icons.
-    fira-code         # Monospaced font with programming ligatures
+    fira-code # Monospaced font with programming ligatures
     fira-code-nerdfont # Fira Code patched with Nerd Font icons
-    fira-mono         # Standard Fira monospaced font
+    fira-mono # Standard Fira monospaced font
 
+    nixfmt-rfc-style
+    devenv
+    sops
 
     # === Packages from nixpkgs-unstable ===
     # Ensure 'nixpkgs-unstable' is defined as an input (e.g., in your flake.nix)
