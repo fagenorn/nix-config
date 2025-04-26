@@ -1,12 +1,27 @@
-{ inputs, outputs, config, lib, hostname, system, username, pkgs, unstablePkgs
-, ... }:
-let inherit (inputs) nixpkgs nixpkgs-unstable;
-in {
+{
+  inputs,
+  outputs,
+  config,
+  lib,
+  hostname,
+  system,
+  username,
+  pkgs,
+  unstablePkgs,
+  ...
+}:
+let
+  inherit (inputs) nixpkgs nixpkgs-unstable;
+in
+{
   users.users.anis.home = "/Users/anis";
 
   nix = {
     settings = {
-      experimental-features = [ "nix-command" "flakes" ];
+      experimental-features = [
+        "nix-command"
+        "flakes"
+      ];
       warn-dirty = false;
     };
     channel.enable = false;
@@ -136,6 +151,7 @@ in {
       # "steam"              # Valve's game distribution platform client
 
       # === Window Management ===
+      "parsec"
       #"nikitabobko/tap/aerospace", # Tiling window manager (Requires custom tap `brew tap nikitabobko/tap`)
 
       # === OS Image Flashing ===
@@ -156,7 +172,7 @@ in {
 
       # === Development & IT ===
       # "Disk Speed Test" = 425264550;    # Blackmagic Disk Speed Test utility
-      "Microsoft Remote Desktop" = 1295203466; # RDP client
+      # "Microsoft Remote Desktop" = 1295203466; # RDP client
       # "UTM" = 1538878817;             # Virtual machine host (QEMU frontend)
 
       # === Communication ===
@@ -274,7 +290,9 @@ in {
       UniversalSearchEnabled = false;
       SuppressSearchSuggestions = true;
     };
-    "com.apple.AdLib" = { allowApplePersonalizedAdvertising = false; };
+    "com.apple.AdLib" = {
+      allowApplePersonalizedAdvertising = false;
+    };
     "com.apple.SoftwareUpdate" = {
       AutomaticCheckEnabled = true;
       # Check for software updates daily, not just once per week

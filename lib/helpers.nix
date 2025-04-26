@@ -26,7 +26,7 @@ let
       )
     );
 
-  myvars = import ../vars { inherit outputs; };
+  myvars = import ../vars;
 
 in
 {
@@ -46,7 +46,6 @@ in
           (customConfPath + "/default.nix")
         else
           ./../hosts/common/darwin-common-dock.nix;
-      sopsConf = inputs.sops-nix.darwinModules.sops;
     in
     inputs.nix-darwin.lib.darwinSystem {
       specialArgs = {
@@ -62,7 +61,6 @@ in
         ../hosts/common/common-packages.nix
         ../hosts/common/darwin-common.nix
         customConf
-        sopsConf
         inputs.home-manager.darwinModules.home-manager
         {
           networking.hostName = hostname;

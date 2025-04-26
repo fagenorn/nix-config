@@ -75,6 +75,7 @@ in
     fira-mono # Standard Fira monospaced font
 
     nixfmt-rfc-style
+    nil
     devenv
     sops
 

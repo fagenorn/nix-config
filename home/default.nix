@@ -10,6 +10,7 @@
 }:
 {
   home.stateVersion = "23.11";
+  home.homeDirectory = "/Users/${myvars.username}";
 
   # list of programs
   # https://mipmip.github.io/home-manager-option-search
@@ -25,6 +26,13 @@
   #   ];
 
   programs.gpg.enable = true;
+
+  programs.gh = {
+    enable = true;
+    settings = {
+      git_protocol = "ssh";
+    };
+  };
 
   programs.direnv = {
     enable = true;

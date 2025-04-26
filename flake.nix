@@ -30,7 +30,8 @@
 
     catppuccin.url = "github:catppuccin/nix";
 
-    sops-nix.url = "github:Mic92/sops-nix";
+    # sops-nix.url = "github:Mic92/sops-nix";
+    sops-nix.url = "https://flakehub.com/f/Mic92/sops-nix/0.1.887.tar.gz";
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
