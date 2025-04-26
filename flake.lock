@@ -295,16 +295,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1731850885,
-        "narHash": "sha256-V5eA7YtZwUnjtDK8hHoiXB17hBKZ+L6kpgR0UxKehtQ=",
-        "rev": "793c07f331a831e4321038e3e8ac2e503167af8b",
-        "revCount": 887,
-        "type": "tarball",
-        "url": "https://api.flakehub.com/f/pinned/Mic92/sops-nix/0.1.887%2Brev-793c07f331a831e4321038e3e8ac2e503167af8b/01933a5d-224a-74d8-bbdb-08ceebbdd708/source.tar.gz"
+        "lastModified": 1745310711,
+        "narHash": "sha256-ePyTpKEJTgX0gvgNQWd7tQYQ3glIkbqcW778RpHlqgA=",
+        "owner": "Mic92",
+        "repo": "sops-nix",
+        "rev": "5e3e92b16d6fdf9923425a8d4df7496b2434f39c",
+        "type": "github"
       },
       "original": {
-        "type": "tarball",
-        "url": "https://flakehub.com/f/Mic92/sops-nix/0.1.887.tar.gz"
+        "owner": "Mic92",
+        "repo": "sops-nix",
+        "type": "github"
       }
     }
   },
