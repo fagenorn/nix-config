@@ -13,4 +13,4 @@ alias ........='cd ../../../../../../..'
 alias clip='powershell.exe -noprofile -command "chcp 65001 >\$null; clip.exe"'
 alias paste='powershell.exe -noprofile -command Get-Clipboard'
 
-figurine -f "Roman.flf" slut
+figurine -f "Roman.flf" "Que?"

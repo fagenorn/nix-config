@@ -10,4 +10,4 @@ alias ........='cd ../../../../../../..'
   nix run nixpkgs#comma -- "$@"
 }
 
-figurine -f "Roman.flf" slut
+figurine -f "Roman.flf" "Que?"
