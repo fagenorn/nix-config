@@ -96,9 +96,13 @@
   programs.command-not-found.enable = false;
 
   programs.bat.enable = true;
-  programs.bat.config.theme = "Nord";
 
   programs.zoxide.enable = true;
+
+  catppuccin = {
+    enable = true;
+    flavor = "macchiato";
+  };
 
   imports = (libx.scanPaths ./common) ++ [ ];
 }

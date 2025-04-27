@@ -36,7 +36,6 @@ in
   system.stateVersion = 5;
 
   nixpkgs = {
-    config.allowUnfree = true;
     hostPlatform = lib.mkDefault "${system}";
   };
 

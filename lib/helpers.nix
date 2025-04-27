@@ -108,8 +108,17 @@ in
       myvars,
     }:
     let
-      pkgs = inputs.nixpkgs.legacyPackages.${system};
-      unstablePkgs = inputs.nixpkgs-unstable.legacyPackages.${system};
+      # pkgs = inputs.nixpkgs.legacyPackages.${system};
+      pkgs = import inputs.nixpkgs {
+        inherit system;
+        config.allowUnfree = true;
+        config.cudaSupport = true;
+      };
+      unstablePkgs = import inputs.nixpkgs-unstable {
+        inherit system;
+        config.allowUnfree = true;
+        config.cudaSupport = true;
+      };
     in
     # Optional: Path to host-specific NixOS config
     # customConfPath = ./../hosts/nixos/${hostname};

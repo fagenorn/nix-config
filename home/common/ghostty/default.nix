@@ -3,7 +3,6 @@
   programs.ghostty = {
     settings =
       {
-        theme = "dark:catppuccin-frappe";
         window-title-font-family = "FiraCode Nerd Font Mono Med";
         background-opacity = 0.93;
       }
