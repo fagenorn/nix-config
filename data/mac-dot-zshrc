@@ -55,4 +55,4 @@ eval "$(starship init zsh)"
 # alias tailscale="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 alias ghostty="/Applications/Ghostty.app/Contents/MacOS/ghostty"
 
-#/Users/alex/go/bin/figurine -f "Doom.flf" magrathea
+figurine -f "Doom.flf" slut

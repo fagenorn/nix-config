@@ -69,7 +69,10 @@ in
           ];
 
           home-manager.users.${username} = {
-            imports = [ ./../home/default.nix ];
+            imports = [
+              ./../home/default.nix
+              ./../home/darwin-common.nix
+            ];
           };
         }
         inputs.nix-homebrew.darwinModules.nix-homebrew
@@ -95,21 +98,21 @@ in
       #   ];
     };
 
-    mkNixos =
+  mkNixos =
     {
-     hostname,
-     username,
-     system,
-     libx,
-     myvars,
+      hostname,
+      username,
+      system,
+      libx,
+      myvars,
     }:
     let
       pkgs = inputs.nixpkgs.legacyPackages.${system};
       unstablePkgs = inputs.nixpkgs-unstable.legacyPackages.${system};
-      # Optional: Path to host-specific NixOS config
-      # customConfPath = ./../hosts/nixos/${hostname};
-      # customConf = if builtins.pathExists customConfPath then (customConfPath + "/default.nix") else {};
     in
+    # Optional: Path to host-specific NixOS config
+    # customConfPath = ./../hosts/nixos/${hostname};
+    # customConf = if builtins.pathExists customConfPath then (customConfPath + "/default.nix") else {};
     inputs.nixpkgs.lib.nixosSystem {
       specialArgs = {
         inherit
@@ -135,14 +138,21 @@ in
         inputs.home-manager.nixosModules.home-manager
         {
           # Basic NixOS config for the user
-        #   users.users.${username}.isNormalUser = true;
-        #   users.users.${username}.home = "/home/${username}"; # Standard Linux home
-        #   users.users.${username}.extraGroups = [ "wheel" "networkmanager" "docker" ]; # Adjust as needed, 'wheel' for sudo
+          #   users.users.${username}.isNormalUser = true;
+          #   users.users.${username}.home = "/home/${username}"; # Standard Linux home
+          #   users.users.${username}.extraGroups = [ "wheel" "networkmanager" "docker" ]; # Adjust as needed, 'wheel' for sudo
 
           # Configure Home Manager
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
-          home-manager.extraSpecialArgs = { inherit inputs libx myvars pkgs; }; # Pass pkgs for conditional logic
+          home-manager.extraSpecialArgs = {
+            inherit
+              inputs
+              libx
+              myvars
+              pkgs
+              ;
+          }; # Pass pkgs for conditional logic
 
           # Shared modules for all users managed by HM on this system
           home-manager.sharedModules = [
@@ -152,8 +162,10 @@ in
 
           # Specific user's HM configuration
           home-manager.users.${username} = {
-            imports = [ ./../home/default.nix ]; # Import the main home config
-            # Add user-specific overrides for this host if needed
+            imports = [
+              ./../home/default.nix
+              ./../home/linux-common.nix
+            ];
           };
         }
 

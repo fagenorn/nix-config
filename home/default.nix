@@ -9,10 +9,7 @@
   ...
 }:
 {
- home.stateVersion = lib.mkDefault "23.11";
-   home.homeDirectory = if pkgs.stdenv.isDarwin
-                       then "/Users/${myvars.username}"
-                       else "/home/${myvars.username}";
+  home.stateVersion = lib.mkDefault "23.11";
 
   programs.gpg.enable = true;
 
@@ -91,7 +88,6 @@
     enable = true;
     enableCompletion = true;
     autosuggestion.enable = true;
-    #initExtra = (builtins.readFile ../mac-dot-zshrc);
   };
 
   programs.home-manager.enable = true;
@@ -100,20 +96,10 @@
   programs.nix-index.enableBashIntegration = true;
   programs.command-not-found.enable = false;
 
-  #   imports = [
-  #     catppuccin.homeManagerModules.catppuccin
-  #   ];
-
-  #   catppuccin = {
-  #     enable = true;
-  #     flavor = "mocha";
-  #   };
-
   programs.bat.enable = true;
   programs.bat.config.theme = "Nord";
-  #programs.zsh.shellAliases.cat = "${pkgs.bat}/bin/bat";
 
   programs.zoxide.enable = true;
 
-  imports = (libx.scanPaths ./.) ++ [ ];
+  imports = (libx.scanPaths ./common/.) ++ [ ];
 }
