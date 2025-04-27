@@ -2,15 +2,12 @@
   inputs,
   outputs,
   stateVersion,
+  myvars,
   ...
 }:
 let
-  # Use the standard lib from nixpkgs input for the helper function
   lib = inputs.nixpkgs.lib;
-
   attrs = import ./attrs.nix { inherit lib; };
-
-  # Define scanPaths at this level, making it potentially exportable
   scanPaths =
     path:
     builtins.map (f: path + "/${f}") (
@@ -25,9 +22,6 @@ let
         ) (builtins.readDir path)
       )
     );
-
-  myvars = import ../vars;
-
 in
 {
   inherit scanPaths;
@@ -37,6 +31,7 @@ in
       username,
       system,
       libx,
+      myvars,
     }:
     let
       unstablePkgs = inputs.nixpkgs-unstable.legacyPackages.${system};
@@ -97,5 +92,75 @@ in
       # ] ++ lib.optionals (builtins.pathExists ./../hosts/darwin/${hostname}/default.nix) [
       #     (import ./../hosts/darwin/${hostname}/default.nix)
       #   ];
+    };
+
+    mkNixos =
+    {
+     hostname,
+     username,
+     system,
+     libx,
+     myvars,
+    }:
+    let
+      pkgs = inputs.nixpkgs.legacyPackages.${system};
+      unstablePkgs = inputs.nixpkgs-unstable.legacyPackages.${system};
+      # Optional: Path to host-specific NixOS config
+      # customConfPath = ./../hosts/nixos/${hostname};
+      # customConf = if builtins.pathExists customConfPath then (customConfPath + "/default.nix") else {};
+    in
+    inputs.nixpkgs.lib.nixosSystem {
+      specialArgs = {
+        inherit
+          system
+          inputs
+          outputs # Pass outputs if needed by modules
+          username
+          unstablePkgs
+          myvars # Pass myvars
+          libx # Pass libx if needed by modules
+          ;
+      };
+      modules = [
+        # === Core NixOS/WSL Setup ===
+        inputs.nixos-wsl.nixosModules.wsl # Use the nixos-wsl module
+        ./../hosts/common/linux-common.nix # Your common Linux settings
+        # customConf # Include host-specific config if it exists
+
+        # === Common Packages ===
+        ./../hosts/common/common-packages.nix
+
+        # === Home Manager Setup ===
+        inputs.home-manager.nixosModules.home-manager
+        {
+          # Basic NixOS config for the user
+          users.users.${username}.isNormalUser = true;
+          users.users.${username}.home = "/home/${username}"; # Standard Linux home
+        #   users.users.${username}.extraGroups = [ "wheel" "networkmanager" "docker" ]; # Adjust as needed, 'wheel' for sudo
+
+          # Configure Home Manager
+          home-manager.useGlobalPkgs = true;
+          home-manager.useUserPackages = true;
+          home-manager.extraSpecialArgs = { inherit inputs libx myvars pkgs; }; # Pass pkgs for conditional logic
+
+          # Shared modules for all users managed by HM on this system
+          home-manager.sharedModules = [
+            inputs.sops-nix.homeManagerModules.sops
+            # Add other shared HM modules if any
+          ];
+
+          # Specific user's HM configuration
+          home-manager.users.${username} = {
+            imports = [ ./../home/default.nix ]; # Import the main home config
+            # Add user-specific overrides for this host if needed
+          };
+        }
+
+        # === SOPS Setup (System-wide if needed, often handled by HM) ===
+        # inputs.sops-nix.nixosModules.sops # If you need system-level secrets
+
+        # === System State Version ===
+        { system.stateVersion = stateVersion; } # Use the global stateVersion
+      ];
     };
 }

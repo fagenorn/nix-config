@@ -9,21 +9,10 @@
   ...
 }:
 {
-  home.stateVersion = "23.11";
-  home.homeDirectory = "/Users/${myvars.username}";
-
-  # list of programs
-  # https://mipmip.github.io/home-manager-option-search
-
-  #   programs.aerospace = {
-  #     enable = true;
-  #   };
-
-  #   home.file = lib.mkMerge [
-  #     (lib.mkIf pkgs.stdenv.isDarwin {
-  #       ".config/aerospace/aerospace.toml".text = builtins.readFile ./aerospace/aerospace.toml;
-  #     })
-  #   ];
+ home.stateVersion = lib.mkDefault "23.11";
+   home.homeDirectory = if pkgs.stdenv.isDarwin
+                       then "/Users/${myvars.username}"
+                       else "/home/${myvars.username}";
 
   programs.gpg.enable = true;
 

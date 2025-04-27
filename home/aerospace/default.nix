@@ -1,3 +1,8 @@
+{ lib, pkgs, ... }:
 {
-  home.file.".aerospace.toml".source = ./aerospace.toml;
+    home.file = lib.mkMerge [
+    (lib.mkIf pkgs.stdenv.isDarwin {
+      ".aerospace.toml".source = ./aerospace.toml;
+    })
+  ];
 }

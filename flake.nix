@@ -32,6 +32,10 @@
 
     sops-nix.url = "github:Mic92/sops-nix";
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
+
+    nixos-wsl.url = "github:nix-community/nixos-wsl";
+    nixos-wsl.inputs.flake-compat.follows = "";
+    nixos-wsl.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -40,20 +44,28 @@
     let
       inherit (self) outputs;
 
-      myvars = import ../vars { inherit outputs; };
-
+      myvars = import ./vars { inherit outputs; };
       stateVersion = "24.05";
-      libx = import ./lib { inherit inputs outputs stateVersion; };
+      libx = import ./lib { inherit inputs outputs stateVersion myvars; };
     in
     {
 
       darwinConfigurations = {
-        # personal
         mbp = libx.mkDarwin {
           hostname = "mbp";
-          username = "anis";
+          username = myvars.username;
           system = "aarch64-darwin";
-          inherit libx;
+          inherit libx myvars;
+        };
+      };
+
+
+      nixosConfigurations = {
+        anis-desktop = libx.mkNixos {
+          hostname = "anis-desktop";
+          username = myvars.username;
+          system = "x86_64-linux";
+          inherit libx myvars;
         };
       };
 
