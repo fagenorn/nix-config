@@ -14,7 +14,12 @@ let
   inherit (inputs) nixpkgs nixpkgs-unstable;
 in
 {
-  users.users.anis.home = "/Users/anis";
+  users.users = {
+    "${username}" = {
+      home = "/Users/anis";
+      shell = pkgs.zsh;
+    };
+  };
 
   nix = {
     settings = {

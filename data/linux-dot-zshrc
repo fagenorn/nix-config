@@ -1,37 +1,3 @@
-# Default key bindings
-[[ -n ${key[Delete]} ]] && bindkey "${key[Delete]}" delete-char
-[[ -n ${key[Home]} ]] && bindkey "${key[Home]}" beginning-of-line
-[[ -n ${key[End]} ]] && bindkey "${key[End]}" end-of-line
-[[ -n ${key[Up]} ]] && bindkey "${key[Up]}" up-line-or-search
-[[ -n ${key[Down]} ]] && bindkey "${key[Down]}" down-line-or-search
-
-# Default prompt
-PS1="%n@%m %1~ %# "
-if [[ "$(ps -o uid= $PPID)" -eq "$UID" ]]; then
-	PS1='%F{red}↳nix%f '"$PS1"
-fi
-
-# Enable colours in ls etc.
-export CLICOLOR=1
-export LSCOLORS=gxfxcxdxbxgggdabagacad
-export SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt
-
-# path fix for homebrew
-# export PATH=$PATH:/Users/anis/go/bin
-#export EDITOR=vi
-# export VISUAL=/etc/profiles/per-user/anis/bin/nvim
-# export EDITOR=/etc/profiles/per-user/anis/bin/nvim
-# export TERM=xterm
-
-# Nix
-if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then
-  . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'
-fi
-
-
-autoload -Uz compinit
-compinit
-
 alias ..='cd ..'
 alias ...='cd ../..'
 alias ....='cd ../../..'
@@ -44,9 +10,7 @@ alias ........='cd ../../../../../../..'
   nix run nixpkgs#comma -- "$@"
 }
 
-eval "$(starship init zsh)"
-
 alias clip='powershell.exe -noprofile -command "chcp 65001 >\$null; clip.exe"'
-alias past='powershell.exe -noprofile -command Get-Clipboard'
+alias paste='powershell.exe -noprofile -command Get-Clipboard'
 
-figurine -f "Doom.flf" slut
+figurine -f "Roman.flf" slut

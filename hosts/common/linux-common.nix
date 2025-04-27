@@ -11,7 +11,12 @@ let
   inherit (inputs) nixpkgs nixpkgs-unstable;
 in
 {
-  users.users.anis.home = "/home/anis";
+  users.users = {
+    "${username}" = {
+      home = "/home/anis";
+      shell = pkgs.zsh;
+    };
+  };
 
   # === Basic System Settings ===
   time.timeZone = "Europe/Brussels";
@@ -54,8 +59,6 @@ in
 
   programs.zsh = {
     enable = true;
-    enableCompletion = true;
-    promptInit = builtins.readFile ./../../data/linux-dot-zshrc;
   };
 
   wsl = {

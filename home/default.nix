@@ -39,7 +39,6 @@
 
   programs.fzf = {
     enable = true;
-    enableBashIntegration = true;
     enableZshIntegration = true;
     tmux.enableShellIntegration = true;
     defaultOptions = [ "--no-mouse" ];
@@ -82,7 +81,7 @@
 
   programs.lf.enable = true;
 
-  programs.bash.enable = true;
+  programs.bash.enable = false;
 
   programs.zsh = {
     enable = true;
@@ -93,7 +92,7 @@
   programs.home-manager.enable = true;
   programs.nix-index.enable = true;
   programs.nix-index.enableZshIntegration = true;
-  programs.nix-index.enableBashIntegration = true;
+  programs.nix-index.enableBashIntegration = false;
   programs.command-not-found.enable = false;
 
   programs.bat.enable = true;
