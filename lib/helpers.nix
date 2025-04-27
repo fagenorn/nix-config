@@ -65,6 +65,7 @@ in
           home-manager.extraSpecialArgs = { inherit inputs libx myvars; };
 
           home-manager.sharedModules = [
+            inputs.catppuccin.homeModules.catppuccin
             inputs.sops-nix.homeManagerModules.sops
           ];
 
@@ -156,8 +157,8 @@ in
 
           # Shared modules for all users managed by HM on this system
           home-manager.sharedModules = [
+            inputs.catppuccin.homeModules.catppuccin
             inputs.sops-nix.homeManagerModules.sops
-            # Add other shared HM modules if any
           ];
 
           # Specific user's HM configuration
