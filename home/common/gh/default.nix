@@ -10,7 +10,7 @@
       prompt = "enabled";
     };
 
-    extensions = [ pkgs.gh-copilot ];
+    extensions = [ ];
   };
 
   programs.gh-dash.enable = true;
