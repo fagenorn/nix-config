@@ -56,6 +56,11 @@ in
     enable = true;
   };
 
+  fonts.packages = [
+    pkgs.fira-code
+    pkgs.fira-code-nerdfont
+  ];
+
   homebrew = {
     enable = true;
     onActivation = {
