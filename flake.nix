@@ -44,7 +44,7 @@
     let
       inherit (self) outputs;
 
-      myvars = import ./vars { inherit outputs; };
+      myvars = import ./vars;
       stateVersion = "24.05";
       libx = import ./lib { inherit inputs outputs stateVersion myvars; };
     in

@@ -1,66 +1,97 @@
-{ config, pkgs, lib, inputs, username, ... }:
-
 {
-  # === Basic System Settings ===
-  time.timeZone = "Europe/Brussels"; # Set your timezone
-  i18n.defaultLocale = "en_US.UTF-8";
+  config,
+  pkgs,
+  lib,
+  inputs,
+  system,
+  username,
+  ...
+}:
+let
+  inherit (inputs) nixpkgs nixpkgs-unstable;
+in
+{
+  users.users.anis.home = "/home/anis";
 
+  # === Basic System Settings ===
+  time.timeZone = "Europe/Brussels";
+  i18n.defaultLocale = "en_US.UTF-8";
 
   # === Nix Settings ===
   nix = {
-    package = pkgs.nixFlakes;
-    extraOptions = ''
-      experimental-features = nix-command flakes
-      warn-dirty = false
-    '';
-
+    settings = {
+      experimental-features = [
+        "nix-command"
+        "flakes"
+      ];
+      warn-dirty = false;
+    };
     gc = {
       automatic = true;
       dates = "weekly";
       options = "--delete-older-than 7d";
     };
-    settings.auto-optimise-store = true;
+
+    optimise.automatic = true;
+    channel.enable = false;
   };
 
-    # === Networking (Basic for WSL) ===
-  networking.hostName = config.networking.hostName; # Set in mkNixos call
-  networking.networkmanager.enable = true; # Usually good for desktop/WSL
+  nixpkgs = {
+    config.allowUnfree = true;
+    hostPlatform = lib.mkDefault "${system}";
+  };
 
-    # === WSL Specific Configuration (using nixos-wsl) ===
+  nix.registry = {
+    n.to = {
+      type = "path";
+      path = inputs.nixpkgs;
+    };
+    u.to = {
+      type = "path";
+      path = inputs.nixpkgs-unstable;
+    };
+  };
+
+  programs.zsh = {
+    enable = true;
+    enableCompletion = true;
+    promptInit = builtins.readFile ./../../data/linux-dot-zshrc;
+  };
+
   wsl = {
     enable = true;
-    defaultUser = username; # Set default user for WSL session
-    # Enable integration with Windows (mounting drives, interop)
-    interop.enable = true;
-    # Optional: Enable systemd support (Requires setup in .wslconfig on Windows)
-    # systemd.enable = true;
+    defaultUser = username;
+    useWindowsDriver = true;
   };
 
-    # === Environment ===
-    # environment.pathsToLink = [ "/share/zsh" ]; # Example if needed
+  services.xserver.videoDrivers = [ "nvidia" ];
+  hardware.nvidia.open = true;
 
-  # === Programs ===
-  programs.zsh.enable = true; # Enable Zsh globally
-  # Note: Zsh prompt/config often better handled by Home Manager
+  hardware = {
+    nvidia-container-toolkit = {
+      enable = true;
+      mount-nvidia-executables = false;
+    };
+    graphics = {
+      enable = true;
+      enable32Bit = true;
+    };
+  };
 
-  # === Bootloader (Not needed for WSL) ===
-#   boot.loader.systemd-boot.enable = false;
-#   boot.loader.grub.enable = false;
+  environment.sessionVariables = {
+    CUDA_PATH = "${pkgs.cudatoolkit}";
+    EXTRA_LDFLAGS = "-L/lib -L${pkgs.linuxPackages.nvidia_x11}/lib";
+    EXTRA_CCFLAGS = "-I/usr/include";
+    LD_LIBRARY_PATH = [
+      "/usr/lib/wsl/lib"
+      "${pkgs.linuxPackages.nvidia_x11}/lib"
+      "${pkgs.ncurses5}/lib"
+    ];
+    MESA_D3D12_DEFAULT_ADAPTER_NAME = "Nvidia";
+  };
 
-  # === Security ===
-#   security.rtkit.enable = true; # RealtimeKit - often useful for audio/pipewire
-#   services.pipewire = {
-#     enable = true;
-#     alsa.enable = true;
-#     alsa.support32Bit = true;
-#     pulse.enable = true;
-    # If using nixos-wsl, wireplumber might conflict, check documentation
-    # wireplumber.enable = true; # Use instead of media-session if preferred
-    # jack.enable = true; # If JACK audio support is needed
-#   };
-  # Allow users in 'wheel' group to use sudo
-#   security.sudo.wheelNeedsPassword = false; # Or true if you want password prompts
-
-  # === Fonts (if managing system-wide, otherwise use Home Manager) ===
-  # fonts.packages = with pkgs; [ fira-code fira-code-nerdfont ];
+  programs.nix-ld = {
+    enable = true;
+    package = pkgs.nix-ld-rs;
+  };
 }

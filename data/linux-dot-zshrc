@@ -54,4 +54,7 @@ eval "$(starship init zsh)"
 # alias tailscale="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 # alias ghostty="/Applications/Ghostty.app/Contents/MacOS/ghostty"
 
+alias clip='powershell.exe -noprofile -command "chcp 65001 >\$null; clip.exe"'
+alias past='powershell.exe -noprofile -command Get-Clipboard'
+
 #/Users/alex/go/bin/figurine -f "Doom.flf" magrathea

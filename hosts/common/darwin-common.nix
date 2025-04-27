@@ -26,6 +26,7 @@ in
     };
     channel.enable = false;
   };
+
   services.nix-daemon.enable = true;
   system.stateVersion = 5;
 
@@ -45,8 +46,6 @@ in
       path = inputs.nixpkgs-unstable;
     };
   };
-
-  programs.nix-index.enable = true;
 
   programs.zsh = {
     enable = true;

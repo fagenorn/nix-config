@@ -25,6 +25,7 @@ let
 in
 {
   inherit scanPaths;
+
   mkDarwin =
     {
       hostname,
@@ -134,8 +135,8 @@ in
         inputs.home-manager.nixosModules.home-manager
         {
           # Basic NixOS config for the user
-          users.users.${username}.isNormalUser = true;
-          users.users.${username}.home = "/home/${username}"; # Standard Linux home
+        #   users.users.${username}.isNormalUser = true;
+        #   users.users.${username}.home = "/home/${username}"; # Standard Linux home
         #   users.users.${username}.extraGroups = [ "wheel" "networkmanager" "docker" ]; # Adjust as needed, 'wheel' for sudo
 
           # Configure Home Manager

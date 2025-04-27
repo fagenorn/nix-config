@@ -96,6 +96,9 @@
 
   programs.home-manager.enable = true;
   programs.nix-index.enable = true;
+  programs.nix-index.enableZshIntegration = true;
+  programs.nix-index.enableBashIntegration = true;
+  programs.command-not-found.enable = false;
 
   #   imports = [
   #     catppuccin.homeManagerModules.catppuccin
