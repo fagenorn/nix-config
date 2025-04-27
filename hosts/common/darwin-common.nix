@@ -156,6 +156,8 @@ in
 
       # === OS Image Flashing ===
       #"balenaetcher",      # Tool to flash OS images to SD cards/USB drives
+
+      "jetbrains-toolbox"
     ];
     masApps = {
       # === Productivity & Utilities ===

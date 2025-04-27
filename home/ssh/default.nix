@@ -1,4 +1,4 @@
-{ config, ... }:
+{ lib, config, ... }:
 {
   programs.ssh = {
     enable = true;
@@ -7,22 +7,23 @@
       StrictHostKeyChecking no
     '';
     matchBlocks = {
-      # ~/.ssh/config
-      "github.com" = {
-        hostname = "ssh.github.com";
-        port = 443;
-      };
       "*" = {
         user = "root";
         identityFile = "~/.ssh/id_ed25519";
       };
-      # wd
 
-      # lancs
-      # "e elrond" = {
-      #   hostname = "100.117.223.78";
-      #   user = "alexktz";
-      # };
+      "github.com" = lib.hm.dag.entryBefore [ "*" ] {
+        hostname = "ssh.github.com";
+        port = 443;
+      };
+
+      "anis-desktop" = lib.hm.dag.entryBefore [ "*" ] {
+        hostname = "fagenorn.com";
+        user = "anis";
+        port = 48521;
+        identityFile = "~/.ssh/id_ed25519";
+      };
+
       # # jb
       # "core" = {
       #   hostname = "demo.selfhosted.show";
