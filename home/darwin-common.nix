@@ -13,5 +13,5 @@
 
   programs.zsh.initExtra = (builtins.readFile ../data/mac-dot-zshrc);
 
-  imports = (libx.scanPaths ./darwin/.) ++ [ ];
+  imports = (libx.scanPaths ./darwin) ++ [ ];
 }

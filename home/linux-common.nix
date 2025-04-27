@@ -13,5 +13,5 @@
 
   programs.zsh.initExtra = (builtins.readFile ../data/linux-dot-zshrc);
 
-  imports = (libx.scanPaths ./linux/.) ++ [ ];
+  imports = (libx.scanPaths ./linux) ++ [ ];
 }

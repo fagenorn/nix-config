@@ -101,5 +101,5 @@
 
   programs.zoxide.enable = true;
 
-  imports = (libx.scanPaths ./common/.) ++ [ ];
+  imports = (libx.scanPaths ./common) ++ [ ];
 }
