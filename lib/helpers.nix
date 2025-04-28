@@ -47,6 +47,7 @@ in
       specialArgs = {
         inherit
           system
+          hostname
           inputs
           username
           unstablePkgs
@@ -130,6 +131,7 @@ in
           inputs
           outputs # Pass outputs if needed by modules
           username
+          hostname
           unstablePkgs
           myvars # Pass myvars
           libx # Pass libx if needed by modules

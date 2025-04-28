@@ -4,6 +4,7 @@
   lib,
   inputs,
   system,
+  hostname,
   username,
   ...
 }:
@@ -64,6 +65,7 @@ in
     enable = true;
     defaultUser = username;
     useWindowsDriver = true;
+    wslConf.network.hostname = hostname;
   };
 
   services.xserver.videoDrivers = [ "nvidia" ];
