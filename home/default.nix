@@ -9,7 +9,7 @@
   ...
 }:
 {
-  home.stateVersion = lib.mkDefault "23.11";
+  home.stateVersion = lib.mkDefault "24.11";
 
   programs.gpg.enable = true;
 
@@ -25,16 +25,13 @@
     nix-direnv.enable = true;
   };
 
-  programs.eza = {
+  programs.lsd = {
+    enable = true;
+  };
+
+  programs.yazi = {
     enable = true;
     enableZshIntegration = true;
-    icons = "auto";
-    git = true;
-    extraOptions = [
-      "--group-directories-first"
-      "--header"
-      "--color=auto"
-    ];
   };
 
   programs.fzf = {
@@ -87,6 +84,18 @@
     enable = true;
     enableCompletion = true;
     autosuggestion.enable = true;
+    syntaxHighlighting.enable = true;
+    initExtra = ''
+      source ${pkgs.zsh-vi-mode}/share/zsh-vi-mode/zsh-vi-mode.plugin.zsh
+    '';
+  };
+
+  programs.atuin = {
+    enable = true;
+    enableZshIntegration = true;
+    flags = [
+      "--disable-up-arrow"
+    ];
   };
 
   programs.home-manager.enable = true;

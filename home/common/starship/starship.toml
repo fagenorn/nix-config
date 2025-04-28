@@ -3,6 +3,7 @@
 # Define the prompt format using Catppuccin colors
 # Note: `fg:<color>` in the separator (``) refers to the *background* color of the *previous* segment.
 # Note: `bg:<color>` in the separator (``) refers to the *background* color of the *current* segment.
+# Using 'Text' foreground on accent backgrounds for a softer, more harmonious Catppuccin feel.
 format = """
 [](peach)\
 $os\
@@ -32,8 +33,9 @@ $line_break$character"""
 
 [os]
 disabled = false
-# Use peach background and crust (darkest) foreground for contrast
-style = "bg:peach fg:crust"
+# Use peach background and standard 'text' foreground for better harmony
+style = "bg:peach fg:text"
+format = '[ $symbol ]($style)' # Simplified format slightly
 
 [os.symbols]
 Windows = "󰍲"
@@ -59,21 +61,21 @@ RedHatEnterprise = "󱄛"
 
 [username]
 show_always = true
-# Use peach background and crust (darkest) foreground for contrast
-style_user = "bg:peach fg:crust"
-style_root = "bg:peach fg:crust"
-format = '[ $user]($style)'
+# Use peach background and standard 'text' foreground
+style_user = "bg:peach fg:text"
+style_root = "bg:peach fg:maroon" # Maybe use a different color for root for distinction? Or keep text.
+format = '[$user]($style)' # Removed leading space
 
 [hostname]
 ssh_only = false
+# Use peach background and standard 'text' foreground
+style = "bg:peach fg:text"
 format = "[@$hostname ]($style)"
-# Use peach background and crust (darkest) foreground for contrast
-style = "bg:peach fg:crust"
 disabled = false
 
 [directory]
-# Use yellow background and crust (darkest) foreground for contrast
-style = "fg:crust bg:yellow"
+# Use yellow background and standard 'text' foreground
+style = "bg:yellow fg:text"
 format = "[ $path ]($style)"
 truncation_length = 3
 truncate_to_repo = true
@@ -88,91 +90,97 @@ truncation_symbol = "…/"
 
 [git_branch]
 symbol = ""
-# Use teal background
-style = "bg:teal"
-# Use crust (darkest) foreground for contrast on teal background
-format = '[[ $symbol $branch ](fg:crust bg:teal)]($style)'
+# Use teal background and standard 'text' foreground
+style = "bg:teal fg:text"
+format = '[ $symbol $branch ]($style)' # Simplified format, style handles colors
 
 [git_status]
-# Use teal background
-style = "bg:teal"
-# Use crust (darkest) foreground for contrast on teal background
-format = '[[($all_status$ahead_behind )](fg:crust bg:teal)]($style)'
+# Use teal background and standard 'text' foreground
+style = "bg:teal fg:text"
+format = '[($all_status$ahead_behind )]($style)' # Simplified format
 
 [nodejs]
 symbol = ""
-# Use blue background
-style = "bg:blue"
-# Use crust (darkest) foreground for contrast on blue background
-format = '[[ $symbol( $version) ](fg:crust bg:blue)]($style)'
+# Use blue background and standard 'text' foreground
+style = "bg:blue fg:text"
+format = '[ $symbol( $version) ]($style)' # Simplified format
 
 [c]
 symbol = " "
-style = "bg:blue"
-format = '[[ $symbol( $version) ](fg:crust bg:blue)]($style)'
+# Use blue background and standard 'text' foreground
+style = "bg:blue fg:text"
+format = '[ $symbol( $version) ]($style)' # Simplified format
 
 [rust]
 symbol = ""
-style = "bg:blue"
-format = '[[ $symbol( $version) ](fg:crust bg:blue)]($style)'
+# Use blue background and standard 'text' foreground
+style = "bg:blue fg:text"
+format = '[ $symbol( $version) ]($style)' # Simplified format
 
 [golang]
 symbol = ""
-style = "bg:blue"
-format = '[[ $symbol( $version) ](fg:crust bg:blue)]($style)'
+# Use blue background and standard 'text' foreground
+style = "bg:blue fg:text"
+format = '[ $symbol( $version) ]($style)' # Simplified format
 
 [php]
 symbol = ""
-style = "bg:blue"
-format = '[[ $symbol( $version) ](fg:crust bg:blue)]($style)'
+# Use blue background and standard 'text' foreground
+style = "bg:blue fg:text"
+format = '[ $symbol( $version) ]($style)' # Simplified format
 
 [java]
 symbol = " "
-style = "bg:blue"
-format = '[[ $symbol( $version) ](fg:crust bg:blue)]($style)'
+# Use blue background and standard 'text' foreground
+style = "bg:blue fg:text"
+format = '[ $symbol( $version) ]($style)' # Simplified format
 
 [kotlin]
 symbol = ""
-style = "bg:blue"
-format = '[[ $symbol( $version) ](fg:crust bg:blue)]($style)'
+# Use blue background and standard 'text' foreground
+style = "bg:blue fg:text"
+format = '[ $symbol( $version) ]($style)' # Simplified format
 
 [haskell]
 symbol = ""
-style = "bg:blue"
-format = '[[ $symbol( $version) ](fg:crust bg:blue)]($style)'
+# Use blue background and standard 'text' foreground
+style = "bg:blue fg:text"
+format = '[ $symbol( $version) ]($style)' # Simplified format
 
 [python]
 symbol = ""
-style = "bg:blue"
-format = '[[ $symbol( $version) ](fg:crust bg:blue)]($style)'
+# Use blue background and standard 'text' foreground
+style = "bg:blue fg:text"
+format = '[ $symbol( $version) ]($style)' # Simplified format
 
 [docker_context]
 symbol = ""
-# Use surface0 background (a muted dark grey)
-style = "bg:surface0"
-# Use teal foreground for visibility on surface0 background
-format = '[[ $symbol( $context) ](fg:teal bg:surface0)]($style)'
+# Use surface0 background (muted dark grey)
+# Use teal foreground for good visibility and a touch of color here
+style = "bg:surface0 fg:teal"
+format = '[ $symbol( $context) ]($style)' # Simplified format
 
 [conda]
+symbol = "" # Using a different symbol, feel free to change back if you prefer the default
 # Use surface0 background
-style = "bg:surface0"
-# Use teal foreground for visibility on surface0 background
-format = '[[ $symbol( $environment) ](fg:teal bg:surface0)]($style)'
+# Use teal foreground to match Docker segment and provide visibility
+style = "bg:surface0 fg:teal"
+format = '[ $symbol( $environment) ]($style)' # Simplified format
 
 [time]
 disabled = false
-time_format = "%R"
+time_format = "%R" # 24-hour format HH:MM
 # Use base background (main dark background)
-style = "bg:base"
+style = "bg:base fg:text"
 # Use text (main light foreground) on base background
-format = '[[  $time ](fg:text bg:base)]($style)'
+format = '[  $time ]($style)' # Simplified format
 
 [line_break]
 disabled = false
 
 [character]
 disabled = false
-# Use Catppuccin accent colors for status symbols
+# Use Catppuccin accent colors for status symbols - this aligns well already
 success_symbol = '[](bold fg:green)'
 error_symbol = '[](bold fg:red)'
 vimcmd_symbol = '[](bold fg:green)'

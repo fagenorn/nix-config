@@ -8,11 +8,15 @@ let
   inherit (inputs) nixpkgs nixpkgs-unstable;
 in
 {
+  catppuccin = {
+    enable = true;
+    flavor = "macchiato";
+  };
+
   nixpkgs.config.allowUnfree = true;
   environment.systemPackages = with pkgs; [
     # === Core System & File Utilities ===
     coreutils # Standard GNU utilities (ls, cp, mv, rm, etc.)
-    mc # Midnight Commander - Text-based visual file manager
     tree # Display directory contents as a tree
     unzip # Utility for extracting ZIP archives
 

@@ -6,6 +6,12 @@ alias ......='cd ../../../../..'
 alias .......='cd ../../../../../..'
 alias ........='cd ../../../../../../..'
 
+alias -- ls=lsd
+alias -- l='ls -l'
+alias -- la='ls -a'
+alias -- lla='ls -la'
+alias -- lt='ls --tree'
+
 , () {
   nix run nixpkgs#comma -- "$@"
 }
