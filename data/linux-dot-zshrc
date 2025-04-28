@@ -16,6 +16,9 @@ alias -- lt='ls --tree'
   nix run nixpkgs#comma -- "$@"
 }
 
+export EDITOR=hx
+export VISUAL=hx
+
 alias clip='powershell.exe -noprofile -command "chcp 65001 >\$null; clip.exe"'
 alias paste='powershell.exe -noprofile -command Get-Clipboard'
 

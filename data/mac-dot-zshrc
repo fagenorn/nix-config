@@ -16,4 +16,7 @@ alias -- lt='ls --tree'
   nix run nixpkgs#comma -- "$@"
 }
 
+export EDITOR=hx
+export VISUAL=hx
+
 figurine -f "Roman.flf" "Que?"
