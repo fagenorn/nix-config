@@ -1,19 +1,17 @@
 "$schema" = 'https://starship.rs/config-schema.json'
 
-# Define the prompt format using Catppuccin colors
-# Note: `fg:<color>` in the separator (``) refers to the *background* color of the *previous* segment.
-# Note: `bg:<color>` in the separator (``) refers to the *background* color of the *current* segment.
-# Using 'Text' foreground on accent backgrounds for a softer, more harmonious Catppuccin feel.
+command_timeout = 10000
+
 format = """
-[](peach)\
+[](red)\
 $os\
-$username$hostname\
-[](bg:yellow fg:peach)\
+$username\
+[](bg:peach fg:red)\
 $directory\
-[](fg:yellow bg:teal)\
+[](bg:yellow fg:peach)\
 $git_branch\
 $git_status\
-[](fg:teal bg:blue)\
+[](fg:yellow bg:green)\
 $c\
 $rust\
 $golang\
@@ -23,167 +21,209 @@ $java\
 $kotlin\
 $haskell\
 $python\
-[](fg:blue bg:surface0)\
-$docker_context\
+[](fg:green bg:sapphire)\
 $conda\
-[](fg:surface0 bg:base)\
+[](fg:sapphire bg:lavender)\
 $time\
-[ ](fg:base)\
-$line_break$character"""
-
-[os]
-disabled = false
-# Use peach background and standard 'text' foreground for better harmony
-style = "bg:peach fg:text"
-format = '[ $symbol ]($style)' # Simplified format slightly
-
-[os.symbols]
-Windows = "󰍲"
-Ubuntu = "󰕈"
-SUSE = ""
-Raspbian = "󰐿"
-Mint = "󰣭"
-Macos = "󰀵"
-Manjaro = ""
-Linux = "󰌽"
-Gentoo = "󰣨"
-Fedora = "󰣛"
-Alpine = ""
-Amazon = ""
-Android = ""
-Arch = "󰣇"
-Artix = "󰣇"
-EndeavourOS = ""
-CentOS = ""
-Debian = "󰣚"
-Redhat = "󱄛"
-RedHatEnterprise = "󱄛"
-
-[username]
-show_always = true
-# Use peach background and standard 'text' foreground
-style_user = "bg:peach fg:text"
-style_root = "bg:peach fg:maroon" # Maybe use a different color for root for distinction? Or keep text.
-format = '[$user]($style)' # Removed leading space
-
-[hostname]
-ssh_only = false
-# Use peach background and standard 'text' foreground
-style = "bg:peach fg:text"
-format = "[@$hostname ]($style)"
-disabled = false
-
-[directory]
-# Use yellow background and standard 'text' foreground
-style = "bg:yellow fg:text"
-format = "[ $path ]($style)"
-truncation_length = 3
-truncate_to_repo = true
-truncation_symbol = "…/"
-
-[directory.substitutions]
-"Documents" = "󰈙 "
-"Downloads" = " "
-"Music" = "󰝚 "
-"Pictures" = " "
-"Developer" = "󰲋 "
-
-[git_branch]
-symbol = ""
-# Use teal background and standard 'text' foreground
-style = "bg:teal fg:text"
-format = '[ $symbol $branch ]($style)' # Simplified format, style handles colors
-
-[git_status]
-# Use teal background and standard 'text' foreground
-style = "bg:teal fg:text"
-format = '[($all_status$ahead_behind )]($style)' # Simplified format
-
-[nodejs]
-symbol = ""
-# Use blue background and standard 'text' foreground
-style = "bg:blue fg:text"
-format = '[ $symbol( $version) ]($style)' # Simplified format
-
-[c]
-symbol = " "
-# Use blue background and standard 'text' foreground
-style = "bg:blue fg:text"
-format = '[ $symbol( $version) ]($style)' # Simplified format
-
-[rust]
-symbol = ""
-# Use blue background and standard 'text' foreground
-style = "bg:blue fg:text"
-format = '[ $symbol( $version) ]($style)' # Simplified format
-
-[golang]
-symbol = ""
-# Use blue background and standard 'text' foreground
-style = "bg:blue fg:text"
-format = '[ $symbol( $version) ]($style)' # Simplified format
-
-[php]
-symbol = ""
-# Use blue background and standard 'text' foreground
-style = "bg:blue fg:text"
-format = '[ $symbol( $version) ]($style)' # Simplified format
-
-[java]
-symbol = " "
-# Use blue background and standard 'text' foreground
-style = "bg:blue fg:text"
-format = '[ $symbol( $version) ]($style)' # Simplified format
-
-[kotlin]
-symbol = ""
-# Use blue background and standard 'text' foreground
-style = "bg:blue fg:text"
-format = '[ $symbol( $version) ]($style)' # Simplified format
-
-[haskell]
-symbol = ""
-# Use blue background and standard 'text' foreground
-style = "bg:blue fg:text"
-format = '[ $symbol( $version) ]($style)' # Simplified format
-
-[python]
-symbol = ""
-# Use blue background and standard 'text' foreground
-style = "bg:blue fg:text"
-format = '[ $symbol( $version) ]($style)' # Simplified format
-
-[docker_context]
-symbol = ""
-# Use surface0 background (muted dark grey)
-# Use teal foreground for good visibility and a touch of color here
-style = "bg:surface0 fg:teal"
-format = '[ $symbol( $context) ]($style)' # Simplified format
-
-[conda]
-symbol = "" # Using a different symbol, feel free to change back if you prefer the default
-# Use surface0 background
-# Use teal foreground to match Docker segment and provide visibility
-style = "bg:surface0 fg:teal"
-format = '[ $symbol( $environment) ]($style)' # Simplified format
-
-[time]
-disabled = false
-time_format = "%R" # 24-hour format HH:MM
-# Use base background (main dark background)
-style = "bg:base fg:text"
-# Use text (main light foreground) on base background
-format = '[  $time ]($style)' # Simplified format
+[ ](fg:lavender)\
+$cmd_duration\
+$line_break\
+$character"""
 
 [line_break]
 disabled = false
 
 [character]
 disabled = false
-# Use Catppuccin accent colors for status symbols - this aligns well already
-success_symbol = '[](bold fg:green)'
-error_symbol = '[](bold fg:red)'
-vimcmd_symbol = '[](bold fg:green)'
-vimcmd_replace_one_symbol = '[](bold fg:mauve)'
-vimcmd_replace_symbol = '[](bold fg:mauve)'
-vimcmd_visual_symbol = '[](bold fg:yellow)'
+success_symbol = '[❯](bold fg:green)'
+error_symbol = '[❯](bold fg:red)'
+vimcmd_symbol = '[❮](bold fg:green)'
+vimcmd_replace_one_symbol = '[❮](bold fg:lavender)'
+vimcmd_replace_symbol = '[❮](bold fg:lavender)'
+vimcmd_visual_symbol = '[❮](bold fg:yellow)'
+
+[cmd_duration]
+show_milliseconds = true
+format = " in $duration "
+style = "bg:lavender"
+disabled = false
+show_notifications = true
+min_time_to_notify = 45000
+
+[time]
+disabled = false
+time_format = "%R"
+style = "bg:lavender"
+format = '[[  $time ](fg:crust bg:lavender)]($style)'
+
+
+[os]
+disabled = false
+style = "bg:red fg:crust"
+
+[gcloud]
+disabled = true
+
+[directory]
+read_only = " 󰌾"
+disabled = false
+truncate_to_repo = false
+style = "bg:peach fg:crust"
+format = "[ $path ]($style)"
+
+[directory.substitutions]
+"Documents" = "󰈙 "
+"Downloads" = " "
+"Music" = "󰝚 "
+"Pictures" = " "
+"Projects" = "󰲋 "
+
+[package]
+symbol = "󰏗 "
+disabled = true
+
+[username]
+show_always = true
+style_user = "bg:red fg:crust"
+style_root = "bg:red fg:crust"
+format = '[ $user]($style)'
+
+[hostname]
+ssh_symbol = " "
+disabled = false
+style = "bg:overlay0 fg:red"
+format = "[ $hostname]($style)[$ssh_symbol](bg:overlay0 fg:maroon)"
+ssh_only = false
+
+[git_branch]
+symbol = " "
+style = "bg:yellow"
+format = '[[ $symbol $branch ](fg:crust bg:yellow)]($style)'
+
+[git_commit]
+disabled = false
+
+[git_state]
+disabled = false
+rebase = "rebasing"
+merge = "  merging"
+revert = " 󰕍 reverting"
+cherry_pick = "  picking"
+bisect = "bisecting"
+am = "am'ing"
+am_or_rebase = "am/rebase"
+
+[git_metrics]
+disabled = false
+
+[git_status]
+disabled = false
+stashed = "   ${count}"
+ahead = " 󰞙  ${count}"
+behind = " 󰞖  ${count}"
+diverged = " 󰓢 ${ahead_count} ${behind_count}"
+conflicted = "   ${count}"
+deleted = "   ${count}"
+renamed = " 󰗧 ${count}"
+modified = "   ${count}"
+staged = "   ${count}"
+untracked = " 󰧮 ${count}"
+style = "bg:yellow"
+format = '[[($all_status$ahead_behind )](fg:crust bg:yellow)]($style)'
+
+[nodejs]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[c]
+symbol = " "
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[rust]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[golang]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[php]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[java]
+symbol = " "
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[kotlin]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[haskell]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[python]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version)(\(#$virtualenv\)) ](fg:crust bg:green)]($style)'
+
+[docker_context]
+symbol = ""
+style = "bg:sapphire"
+format = '[[ $symbol( $context) ](fg:crust bg:sapphire)]($style)'
+
+[conda]
+symbol = "  "
+style = "fg:crust bg:sapphire"
+format = '[$symbol$environment ]($style)'
+ignore_base = false
+
+[os.symbols]
+Alpaquita = " "
+Alpine = " "
+Amazon = " "
+Android = " "
+Arch = " "
+Artix = " "
+CentOS = " "
+Debian = " "
+DragonFly = " "
+Emscripten = " "
+EndeavourOS = " "
+Fedora = " "
+FreeBSD = " "
+Garuda = "󰛓 "
+Gentoo = " "
+HardenedBSD = "󰞌 "
+Illumos = "󰈸 "
+Linux = " "
+Mabox = " "
+Macos = " "
+Manjaro = " "
+Mariner = " "
+MidnightBSD = " "
+Mint = " "
+NetBSD = " "
+NixOS = " "
+OpenBSD = "󰈺 "
+openSUSE = " "
+OracleLinux = "󰌷 "
+Pop = " "
+Raspbian = " "
+Redhat = " "
+RedHatEnterprise = " "
+Redox = "󰀘 "
+Solus = "󰠳 "
+SUSE = " "
+Ubuntu = " "
+Unknown = " "
+Windows = "󰍲 "
