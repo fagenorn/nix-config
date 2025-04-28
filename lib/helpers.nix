@@ -56,7 +56,6 @@ in
       modules = [
         ../hosts/common/common-packages.nix
         ../hosts/common/darwin-common.nix
-        inputs.catppuccin.nixosModules.catppuccin
         customConf
         inputs.home-manager.darwinModules.home-manager
         {
@@ -144,8 +143,6 @@ in
 
         # === Common Packages ===
         ./../hosts/common/common-packages.nix
-
-        inputs.catppuccin.nixosModules.catppuccin
 
         # === Home Manager Setup ===
         inputs.home-manager.nixosModules.home-manager

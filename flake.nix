@@ -2,7 +2,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
-    
+
     nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-24.11-darwin";
     nix-darwin.url = "github:lnl7/nix-darwin/nix-darwin-24.11";
     nix-darwin.inputs.nixpkgs.follows = "nixpkgs-darwin";
@@ -37,6 +37,8 @@
     nixos-wsl.url = "github:nix-community/nixos-wsl";
     nixos-wsl.inputs.flake-compat.follows = "";
     nixos-wsl.inputs.nixpkgs.follows = "nixpkgs";
+
+    ghostty.url = "github:ghostty-org/ghostty";
   };
 
   outputs =
@@ -47,7 +49,14 @@
 
       myvars = import ./vars;
       stateVersion = "24.05";
-      libx = import ./lib { inherit inputs outputs stateVersion myvars; };
+      libx = import ./lib {
+        inherit
+          inputs
+          outputs
+          stateVersion
+          myvars
+          ;
+      };
     in
     {
 
@@ -59,7 +68,6 @@
           inherit libx myvars;
         };
       };
-
 
       nixosConfigurations = {
         anis-desktop = libx.mkNixos {

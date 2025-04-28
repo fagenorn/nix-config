@@ -8,11 +8,6 @@ let
   inherit (inputs) nixpkgs nixpkgs-unstable;
 in
 {
-  catppuccin = {
-    enable = true;
-    flavor = "macchiato";
-  };
-
   nixpkgs.config.allowUnfree = true;
   environment.systemPackages = with pkgs; [
     # === Core System & File Utilities ===
