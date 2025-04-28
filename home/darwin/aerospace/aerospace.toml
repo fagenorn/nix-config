@@ -217,17 +217,5 @@ alt-shift-k = ['join-with up', 'mode main']
 alt-shift-l = ['join-with right', 'mode main']
 
 [[on-window-detected]]
-if.app-id = 'com.mitchellh.ghostty'
-run = 'move-node-to-workspace T'
-
-[[on-window-detected]]
 if.app-id = 'com.spotify.client'
 run = 'move-node-to-workspace M'
-
-[[on-window-detected]]
-if.app-id = 'com.microsoft.VSCode'
-run = 'move-node-to-workspace C'
-
-[[on-window-detected]]
-if.app-id = 'com.microsoft.edgemac'
-run = 'move-node-to-workspace B'
