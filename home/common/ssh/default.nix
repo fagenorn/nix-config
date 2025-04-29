@@ -18,7 +18,7 @@
       };
 
       "anis-desktop" = lib.hm.dag.entryBefore [ "*" ] {
-        hostname = "fagenorn.com";
+        hostname = "anis-desktop.mink-fort.ts.net";
         user = "anis";
         port = 48521;
         identityFile = "~/.ssh/id_ed25519";
