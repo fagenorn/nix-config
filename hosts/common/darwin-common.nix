@@ -164,6 +164,8 @@ in
       #"balenaetcher",      # Tool to flash OS images to SD cards/USB drives
 
       "jetbrains-toolbox"
+      "steam"
+      "tailscale"
     ];
     masApps = {
       # === Productivity & Utilities ===
