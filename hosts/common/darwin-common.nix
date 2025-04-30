@@ -172,7 +172,7 @@ in
       # "Amphetamine" = 937984704;        # Keep your Mac awake
       # "AutoMounter" = 1160435653;       # Automatically mount network shares
       # "Bitwarden" = 1352778147;         # Password manager
-      "Fantastical" = 975937182; # Calendar application
+      # "Fantastical" = 975937182; # Calendar application
       # "Perplexity" = 6714467650;        # AI Search / Assistant app
       # "Resize Master" = 102530679;      # Batch image resizing tool
       # "rCmd" = 1596283165;              # Use Right Command for app switching/shortcuts
