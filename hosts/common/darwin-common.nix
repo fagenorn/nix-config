@@ -30,6 +30,10 @@ in
       warn-dirty = false;
     };
     channel.enable = false;
+
+    extraOptions = ''
+      trusted-users = root anis
+    '';
   };
 
   services.nix-daemon.enable = true;

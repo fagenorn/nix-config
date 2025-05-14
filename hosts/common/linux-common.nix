@@ -38,6 +38,10 @@ in
       options = "--delete-older-than 7d";
     };
 
+    extraOptions = ''
+      trusted-users = root anis
+    '';
+
     optimise.automatic = true;
     channel.enable = false;
   };
