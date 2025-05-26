@@ -128,6 +128,7 @@ in
       # "flameshot"          # Powerful screenshot tool (often used on Linux)
 
       # === Productivity & Utilities ===
+      "microsoft-word"
       # Launchers & Automation
       # "popclip",            # Context menu utility appearing on text selection (Paid)
       # "raycast",            # Extensible launcher and workflow tool (Spotlight replacement)
