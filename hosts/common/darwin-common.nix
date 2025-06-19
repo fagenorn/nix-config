@@ -171,6 +171,7 @@ in
       "jetbrains-toolbox"
       "steam"
       "tailscale"
+      "moonlight"
     ];
     masApps = {
       # === Productivity & Utilities ===
