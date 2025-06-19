@@ -66,6 +66,7 @@ in
     ffmpeg # Command-line multimedia framework (convert, stream, record)
     figurine # Utility for creating FIGlet-style text banners/ASCII art
     # television        # Application for watching TV streams (e.g., IPTV) - Verify exact function
+    immich-go
 
     # === Fonts ===
     # Install specific fonts you use. NerdFonts provides patched fonts with icons.
