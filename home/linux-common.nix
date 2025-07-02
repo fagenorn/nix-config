@@ -11,7 +11,7 @@
 {
   home.homeDirectory = "/home/${myvars.username}";
 
-  programs.zsh.initExtra = (builtins.readFile ../data/linux-dot-zshrc);
+  programs.zsh.initContent = (builtins.readFile ../data/linux-dot-zshrc);
 
   imports = (libx.scanPaths ./linux) ++ [ ];
 }

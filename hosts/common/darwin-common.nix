@@ -36,7 +36,7 @@ in
     '';
   };
 
-  services.nix-daemon.enable = true;
+  system.primaryUser = "anis";
   system.stateVersion = 5;
 
   nixpkgs = {
@@ -61,7 +61,7 @@ in
 
   fonts.packages = [
     pkgs.fira-code
-    pkgs.fira-code-nerdfont
+    pkgs.nerd-fonts.fira-code
   ];
 
   homebrew = {
@@ -225,13 +225,13 @@ in
   system.keyboard.remapCapsLockToEscape = false;
 
   # Add ability to used TouchID for sudo authentication
-  security.pam.enableSudoTouchIdAuth = true;
+  security.pam.services.sudo_local.touchIdAuth = true;
 
   # macOS configuration
-  system.activationScripts.postUserActivation.text = ''
-    # Following line should allow us to avoid a logout/login cycle
-    /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u
-  '';
+  # system.activationScripts.postUserActivation.text = ''
+  #   # Following line should allow us to avoid a logout/login cycle
+  #   /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u
+  # '';
   system.defaults = {
     NSGlobalDomain.AppleShowAllExtensions = true;
     NSGlobalDomain.AppleShowScrollBars = "Always";

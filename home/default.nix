@@ -9,7 +9,7 @@
   ...
 }:
 {
-  home.stateVersion = lib.mkDefault "24.11";
+  home.stateVersion = lib.mkDefault "25.05";
 
   programs.gpg.enable = true;
 
@@ -85,7 +85,7 @@
     enableCompletion = true;
     autosuggestion.enable = true;
     syntaxHighlighting.enable = true;
-    initExtra = ''
+    initContent = ''
       source ${pkgs.zsh-vi-mode}/share/zsh-vi-mode/zsh-vi-mode.plugin.zsh
     '';
   };

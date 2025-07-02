@@ -71,7 +71,7 @@ in
     # === Fonts ===
     # Install specific fonts you use. NerdFonts provides patched fonts with icons.
     fira-code # Monospaced font with programming ligatures
-    fira-code-nerdfont # Fira Code patched with Nerd Font icons
+    nerd-fonts.fira-code # Fira Code patched with Nerd Font icons
     fira-mono # Standard Fira monospaced font
 
     nixfmt-rfc-style

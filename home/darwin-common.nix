@@ -11,7 +11,7 @@
 {
   home.homeDirectory = "/Users/${myvars.username}";
 
-  programs.zsh.initExtra = ''
+  programs.zsh.initContent = ''
     ${(builtins.readFile ../data/mac-dot-zshrc)}
   '';
 

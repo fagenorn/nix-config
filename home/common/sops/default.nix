@@ -21,7 +21,7 @@
     };
   };
 
-  programs.zsh.initExtra = ''
+  programs.zsh.initContent = ''
     export GITHUB_TOKEN="$(cat ${config.sops.secrets.github_token.path})"
   '';
 }
