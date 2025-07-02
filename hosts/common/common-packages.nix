@@ -76,7 +76,7 @@ in
 
     nixfmt-rfc-style
     nil
-    devenv
+    (devenv.override { nix = nix; })
     sops
 
     # === Packages from nixpkgs-unstable ===
