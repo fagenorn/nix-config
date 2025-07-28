@@ -154,7 +154,8 @@ in
       # "displaylink",        # Driver for DisplayLink USB graphics adapters/docks
 
       # === Networking ===
-      # "tailscale",          # Mesh VPN client
+      "tailscale-app" # Mesh VPN client
+      "tailscale" # Mesh VPN client
       # "viscosity",          # Feature-rich OpenVPN client (Paid)
 
       # === Gaming ===
@@ -170,8 +171,9 @@ in
 
       "jetbrains-toolbox"
       "steam"
-      "tailscale"
       "moonlight"
+      "inkscape"
+      "silhouette-studio"
     ];
     masApps = {
       # === Productivity & Utilities ===
