@@ -74,6 +74,7 @@ in
     global.autoUpdate = true;
 
     brews = [
+      "libmsquic"
       #"bitwarden-cli"
       #"borders"
     ];
@@ -155,7 +156,6 @@ in
 
       # === Networking ===
       "tailscale-app" # Mesh VPN client
-      "tailscale" # Mesh VPN client
       # "viscosity",          # Feature-rich OpenVPN client (Paid)
 
       # === Gaming ===
