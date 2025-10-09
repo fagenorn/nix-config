@@ -20,7 +20,7 @@ alias -- yolo='git add -A && git commit -m "$(curl --silent --fail https://whatt
 
 # Copies all tracked project files (respecting .gitignore) to the clipboard
 clipcode() {
-  rg --files | while read -r file; do
+  rg -l . | while read -r file; do
     echo "--- FILE: ${file} ---"
     cat "${file}"
   done | pbcopy
