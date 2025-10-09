@@ -18,10 +18,18 @@ alias -- yolo='git add -A && git commit -m "$(curl --silent --fail https://whatt
   nix run nixpkgs#comma -- "$@"
 }
 
-export EDITOR=hx
-export VISUAL=hx
-
 alias clip='powershell.exe -noprofile -command "chcp 65001 >\$null; clip.exe"'
 alias paste='powershell.exe -noprofile -command Get-Clipboard'
+
+# Copies all tracked project files (respecting .gitignore) to the clipboard
+clipcode() {
+  rg --files | while read -r file; do
+    echo "--- FILE: ${file} ---"
+    cat "${file}"
+  done | clip
+}
+
+export EDITOR=hx
+export VISUAL=hx
 
 figurine -f "Roman.flf" "Que?"
