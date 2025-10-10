@@ -24,6 +24,12 @@
         identityFile = "~/.ssh/id_ed25519";
       };
 
+      "vibes" = lib.hm.dag.entryBefore [ "*" ] {
+        hostname = "209.195.17.17";
+        user = "vibes";
+        identityFile = "~/.ssh/svs_ed25519";
+      };
+
       # # jb
       # "core" = {
       #   hostname = "demo.selfhosted.show";

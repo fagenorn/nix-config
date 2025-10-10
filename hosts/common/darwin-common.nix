@@ -174,6 +174,7 @@ in
       "moonlight"
       "inkscape"
       "silhouette-studio"
+      "ishare"
     ];
     masApps = {
       # === Productivity & Utilities ===
