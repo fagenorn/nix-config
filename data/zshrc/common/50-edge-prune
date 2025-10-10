@@ -1,53 +1,94 @@
-# Delete Edge history only for domains listed in ~/.edge-history-whitelist (or a file you pass as $1)
 edgeprune() {
-  set -euo pipefail
+  set -o errexit
+  set -o nounset
 
-  # Whitelist path
-  WL_FILE="${1:-$HOME/.edge-history-whitelist}"
-  [ -f "$WL_FILE" ] || { echo "Whitelist file not found: $WL_FILE"; return 2; }
+  # --- defaults
+  PREVIEW="${EDGE_PREVIEW:-}"
+  WL_FILE_DEFAULT="$HOME/.edge-history-whitelist"
 
-  # Detect default Edge profile per OS; override with EDGE_PROFILE if you want a different profile
+  # Detect default Edge profile per OS; override with EDGE_PROFILE or --profile
   case "$(uname -s)" in
     Darwin) PROFILE_DEFAULT="$HOME/Library/Application Support/Microsoft Edge/Default" ;;
     Linux)  PROFILE_DEFAULT="$HOME/.config/microsoft-edge/Default" ;;
-    *) echo "Unsupported OS"; return 3 ;;
+    *) echo "Unsupported OS"; return 1 ;;
   esac
   PROFILE="${EDGE_PROFILE:-$PROFILE_DEFAULT}"
 
+  # --- arg parsing: edgeprune [--preview] [--profile=<path>|--profile <path>] [whitelist_file]
+  WL_FILE=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --preview) PREVIEW=1 ;;
+      --profile)
+        shift
+        PROFILE="${1:-$PROFILE}"
+        ;;
+      --profile=*)
+        PROFILE="${1#*=}"
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: edgeprune [--preview] [--profile=PATH] [WHITELIST_FILE]
+
+Deletes Edge history ONLY for domains listed in WHITELIST_FILE (default: ~/.edge-history-whitelist).
+--preview   : Show what would be deleted without changing anything.
+--profile   : Override Edge profile directory (default is auto-detected).
+Env vars    : EDGE_PREVIEW, EDGE_PROFILE also respected.
+EOF
+        return 0
+        ;;
+      *)
+        # First non-flag arg = whitelist file
+        WL_FILE="$1"
+        ;;
+    esac
+    shift
+  done
+
+  WL_FILE="${WL_FILE:-$WL_FILE_DEFAULT}"
+
+  # --- validations
+  command -v sqlite3 >/dev/null 2>&1 || { echo "sqlite3 not found in PATH"; return 1; }
+  [ -f "$WL_FILE" ] || { echo "Whitelist file not found: $WL_FILE"; return 1; }
+
   DB="$PROFILE/History"
-  [ -f "$DB" ] || { echo "History DB not found: $DB"; return 4; }
+  [ -f "$DB" ] || { echo "History DB not found: $DB"; return 1; }
 
-  # Preview mode? (just shows what would be deleted)
-  PREVIEW="${EDGE_PREVIEW:-}"
-  if [ "${1:-}" = "--preview" ]; then PREVIEW=1; WL_FILE="${2:-$HOME/.edge-history-whitelist}"; fi
+  # --- ensure Edge isn’t locking the DB
+  for name in "Microsoft Edge" microsoft-edge microsoft-edge-stable microsoft-edge-beta microsoft-edge-dev; do
+    pkill -x "$name" 2>/dev/null || true
+  done
 
-  # Ensure Edge isn’t locking the DB
-  pkill -x "Microsoft Edge" microsoft-edge microsoft-edge-stable microsoft-edge-beta microsoft-edge-dev 2>/dev/null || true
-
-  # Quick backup
+  # --- quick backup
   cp -a -- "$DB" "$DB.$(date +%Y%m%d%H%M%S).bak"
 
-  # If WAL in use, checkpoint it
-  if [ -f "$DB-wal" ] || [ -f "$DB-shm" ]; then sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null; fi
+  # --- if WAL in use, checkpoint it
+  if [ -f "$DB-wal" ] || [ -f "$DB-shm" ]; then
+    sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
+  fi
 
-  # Build SQL batch
+  # --- build SQL batch
   TMP_SQL="$(mktemp)"
   {
     echo "BEGIN IMMEDIATE;"
-    while IFS= read -r domain; do
-      # Skip blanks/comments; only allow sane domain chars
-      domain="${domain%%#*}"; domain="${domain//[[:space:]]/}"
+
+    while IFS= read -r domain || [ -n "${domain:-}" ]; do
+      # strip comments & whitespace
+      domain="${domain%%#*}"
+      domain="${domain//[[:space:]]/}"
       [ -z "$domain" ] && continue
+
+      # only allow sane domain chars
       if ! [[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
         echo "-- skipping suspicious line: $domain" >&2
         continue
       fi
 
-      # Match http/https, exact domain and any subdomain
+      # match http/https, exact domain and any subdomain
       like_exact="http%://$domain/%"
       like_sub="http%://%.$domain/%"
 
-      if [ -n "$PREVIEW" ]; then
+      if [ -n "${PREVIEW:-}" ]; then
         echo "SELECT '== '||quote('$domain')||' matches ==';"
         echo "SELECT COUNT(*)||' urls' FROM urls WHERE url LIKE '$like_exact' OR url LIKE '$like_sub';"
         echo "SELECT COUNT(*)||' visits' FROM visits WHERE url IN (SELECT id FROM urls WHERE url LIKE '$like_exact' OR url LIKE '$like_sub');"
@@ -64,18 +105,18 @@ edgeprune() {
       fi
     done < "$WL_FILE"
 
-    if [ -n "$PREVIEW" ]; then
+    if [ -n "${PREVIEW:-}" ]; then
       echo "ROLLBACK;"
     else
-      echo "COMMIT; VACUUM;";
+      echo "COMMIT; VACUUM;"
     fi
-  } > "$TMP_SQL"
+  } >"$TMP_SQL"
 
-  sqlite3 "$DB" < "$TMP_SQL"
-  rm -f "$TMP_SQL"
+  sqlite3 "$DB" <"$TMP_SQL"
+  rm -f -- "$TMP_SQL"
 
-  if [ -n "$PREVIEW" ]; then
-    echo "Preview complete. Set EDGE_PREVIEW= (or omit --preview) to actually delete."
+  if [ -n "${PREVIEW:-}" ]; then
+    echo "Preview complete. Run without --preview (or unset EDGE_PREVIEW) to actually delete."
   else
     echo "Done. History pruned for domains in $WL_FILE"
   fi

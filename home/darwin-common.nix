@@ -12,13 +12,10 @@
   home.homeDirectory = "/Users/${myvars.username}";
 
   programs.zsh.initContent = ''
-    ${libx.mergeFilesOrdered {
-      dirs = [
-        ../data/zshrc/darwin
-        ../data/zshrc/common
-      ];
-      sep = "\n";
-    }}
+    ${libx.mergeFilesOrdered [
+      ../data/zshrc/darwin
+      ../data/zshrc/common
+    ]}
   '';
 
   imports = (libx.scanPaths ./darwin) ++ [ ];

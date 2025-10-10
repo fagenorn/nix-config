@@ -22,29 +22,27 @@ let
         ) (builtins.readDir path)
       )
     );
-in
-{
-  inherit scanPaths;
 
   mergeFilesOrdered =
-    {
-      dirs,
-      sep ? "\n",
-    }:
+    dirs:
     let
       filesInDir =
-        { dir }:
+        dir:
         let
           entries = builtins.readDir dir;
           regulars = lib.filterAttrs (_: t: t == "regular") entries;
           names = builtins.sort (a: b: a < b) (builtins.attrNames regulars);
         in
         map (n: "${toString dir}/${n}") names;
-
       allFiles = builtins.concatLists (map filesInDir dirs);
       contents = map builtins.readFile allFiles;
     in
-    builtins.concatStringsSep sep contents;
+    builtins.concatStringsSep "\n" contents;
+in
+{
+  inherit scanPaths;
+
+  inherit mergeFilesOrdered;
 
   mkDarwin =
     {

@@ -80,6 +80,7 @@ in
       nixfmt-rfc-style
       nil
       sops
+      devenv
 
       # === Packages from nixpkgs-unstable ===
       # Ensure 'nixpkgs-unstable' is defined as an input (e.g., in your flake.nix)
@@ -89,6 +90,6 @@ in
     ]
     ++ [
       # Add the working devenv from nixpkgs-unstable
-      unstablePkgs.devenv
+      # unstablePkgs.devenv
     ];
 }

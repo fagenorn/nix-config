@@ -12,13 +12,10 @@
   home.homeDirectory = "/home/${myvars.username}";
 
   programs.zsh.initContent = ''
-    ${libx.mergeFilesOrdered {
-      dirs = [
-        ../data/zshrc/linux
-        ../data/zshrc/common
-      ];
-      sep = "\n";
-    }}
+    ${libx.mergeFilesOrdered [
+      ../data/zshrc/linux
+      ../data/zshrc/common
+    ]}
   '';
 
   imports = (libx.scanPaths ./linux) ++ [ ];

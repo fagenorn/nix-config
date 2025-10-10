@@ -19,6 +19,7 @@ in
   inherit (helpers)
     mkDarwin
     scanPaths
+    mergeFilesOrdered
     mkNixos
     ;
 }
