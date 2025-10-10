@@ -1,10 +1,9 @@
 edgeprune() {
-  set -o errexit
   set -o nounset
 
   # --- defaults
   PREVIEW="${EDGE_PREVIEW:-}"
-  WL_FILE_DEFAULT="$HOME/.edge-history-whitelist"
+  WL_FILE_DEFAULT="$HOME/.config/.edge-history-whitelist"
 
   # Detect default Edge profile per OS; override with EDGE_PROFILE or --profile
   case "$(uname -s)" in
@@ -30,7 +29,7 @@ edgeprune() {
         cat <<'EOF'
 Usage: edgeprune [--preview] [--profile=PATH] [WHITELIST_FILE]
 
-Deletes Edge history ONLY for domains listed in WHITELIST_FILE (default: ~/.edge-history-whitelist).
+Deletes Edge history ONLY for domains listed in WHITELIST_FILE (default: ~/.config/.edge-history-whitelist).
 --preview   : Show what would be deleted without changing anything.
 --profile   : Override Edge profile directory (default is auto-detected).
 Env vars    : EDGE_PREVIEW, EDGE_PROFILE also respected.

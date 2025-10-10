@@ -1,1 +1,1 @@
-export ZSH_COMPDUMP=$ZSH/cache/.zcompdump-$HOST
+export ZSH_COMPDUMP=$HOME/.cache/.zcompdump-$HOST
