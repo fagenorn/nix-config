@@ -11,7 +11,15 @@
 {
   home.homeDirectory = "/home/${myvars.username}";
 
-  programs.zsh.initContent = (builtins.readFile ../data/linux-dot-zshrc);
+  programs.zsh.initContent = ''
+    ${libx.mergeFilesOrdered {
+      dirs = [
+        ../data/zshrc/linux
+        ../data/zshrc/common
+      ];
+      sep = "\n";
+    }}
+  '';
 
   imports = (libx.scanPaths ./linux) ++ [ ];
 }
