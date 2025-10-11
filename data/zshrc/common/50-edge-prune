@@ -1,6 +1,4 @@
-edgeprune() {
-  set -o nounset
-
+edgeprune() (
   # --- defaults
   PREVIEW="${EDGE_PREVIEW:-}"
   WL_FILE_DEFAULT="$HOME/.config/.edge-history-whitelist"
@@ -9,7 +7,7 @@ edgeprune() {
   case "$(uname -s)" in
     Darwin) PROFILE_DEFAULT="$HOME/Library/Application Support/Microsoft Edge/Default" ;;
     Linux)  PROFILE_DEFAULT="$HOME/.config/microsoft-edge/Default" ;;
-    *) echo "Unsupported OS"; return 1 ;;
+    *) echo "Unsupported OS" >&2; exit 1 ;;
   esac
   PROFILE="${EDGE_PROFILE:-$PROFILE_DEFAULT}"
 
@@ -18,13 +16,8 @@ edgeprune() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --preview) PREVIEW=1 ;;
-      --profile)
-        shift
-        PROFILE="${1:-$PROFILE}"
-        ;;
-      --profile=*)
-        PROFILE="${1#*=}"
-        ;;
+      --profile) shift; PROFILE="${1:-$PROFILE}" ;;
+      --profile=*) PROFILE="${1#*=}" ;;
       -h|--help)
         cat <<'EOF'
 Usage: edgeprune [--preview] [--profile=PATH] [WHITELIST_FILE]
@@ -34,12 +27,9 @@ Deletes Edge history ONLY for domains listed in WHITELIST_FILE (default: ~/.conf
 --profile   : Override Edge profile directory (default is auto-detected).
 Env vars    : EDGE_PREVIEW, EDGE_PROFILE also respected.
 EOF
-        return 0
+        exit 0
         ;;
-      *)
-        # First non-flag arg = whitelist file
-        WL_FILE="$1"
-        ;;
+      *) WL_FILE="$1" ;;
     esac
     shift
   done
@@ -47,13 +37,13 @@ EOF
   WL_FILE="${WL_FILE:-$WL_FILE_DEFAULT}"
 
   # --- validations
-  command -v sqlite3 >/dev/null 2>&1 || { echo "sqlite3 not found in PATH"; return 1; }
-  [ -f "$WL_FILE" ] || { echo "Whitelist file not found: $WL_FILE"; return 1; }
+  command -v sqlite3 >/dev/null 2>&1 || { echo "sqlite3 not found in PATH" >&2; exit 1; }
+  [ -f "$WL_FILE" ] || { echo "Whitelist file not found: $WL_FILE" >&2; exit 1; }
 
   DB="$PROFILE/History"
-  [ -f "$DB" ] || { echo "History DB not found: $DB"; return 1; }
+  [ -f "$DB" ] || { echo "History DB not found: $DB" >&2; exit 1; }
 
-  # --- ensure Edge isn’t locking the DB
+  # --- ensure Edge isn’t locking the DB (best-effort)
   for name in "Microsoft Edge" microsoft-edge microsoft-edge-stable microsoft-edge-beta microsoft-edge-dev; do
     pkill -x "$name" 2>/dev/null || true
   done
@@ -63,27 +53,26 @@ EOF
 
   # --- if WAL in use, checkpoint it
   if [ -f "$DB-wal" ] || [ -f "$DB-shm" ]; then
-    sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
+    sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null || true
   fi
+
+  # Feature-detect optional table that may not exist on all Edge builds
+  HAS_EDGE_VISITS="$(sqlite3 "$DB" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='edge_visits' LIMIT 1;")"
 
   # --- build SQL batch
   TMP_SQL="$(mktemp)"
   {
     echo "BEGIN IMMEDIATE;"
-
     while IFS= read -r domain || [ -n "${domain:-}" ]; do
-      # strip comments & whitespace
       domain="${domain%%#*}"
       domain="${domain//[[:space:]]/}"
       [ -z "$domain" ] && continue
 
-      # only allow sane domain chars
       if ! [[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
         echo "-- skipping suspicious line: $domain" >&2
         continue
       fi
 
-      # match http/https, exact domain and any subdomain
       like_exact="http%://$domain/%"
       like_sub="http%://%.$domain/%"
 
@@ -93,25 +82,26 @@ EOF
         echo "SELECT COUNT(*)||' visits' FROM visits WHERE url IN (SELECT id FROM urls WHERE url LIKE '$like_exact' OR url LIKE '$like_sub');"
         echo "SELECT COUNT(*)||' keyword terms' FROM keyword_search_terms WHERE url_id IN (SELECT id FROM urls WHERE url LIKE '$like_exact' OR url LIKE '$like_sub');"
         echo "SELECT COUNT(*)||' visit_source rows' FROM visit_source WHERE id IN (SELECT v.id FROM visits v JOIN urls u ON v.url=u.id WHERE u.url LIKE '$like_exact' OR u.url LIKE '$like_sub');"
-        echo "SELECT COUNT(*)||' edge_visits rows' FROM edge_visits WHERE visit_id IN (SELECT v.id FROM visits v JOIN urls u ON v.url=u.id WHERE u.url LIKE '$like_exact' OR u.url LIKE '$like_sub');"
+        [ "$HAS_EDGE_VISITS" = "1" ] && \
+          echo "SELECT COUNT(*)||' edge_visits rows' FROM edge_visits WHERE visit_id IN (SELECT v.id FROM visits v JOIN urls u ON v.url=u.id WHERE u.url LIKE '$like_exact' OR u.url LIKE '$like_sub');"
       else
-        # Clean auxiliary tables first, then visits, then urls
         echo "DELETE FROM visit_source WHERE id IN (SELECT v.id FROM visits v JOIN urls u ON v.url=u.id WHERE u.url LIKE '$like_exact' OR u.url LIKE '$like_sub');"
-        echo "DELETE FROM edge_visits WHERE visit_id IN (SELECT v.id FROM visits v JOIN urls u ON v.url=u.id WHERE u.url LIKE '$like_exact' OR u.url LIKE '$like_sub');"
+        [ "$HAS_EDGE_VISITS" = "1" ] && \
+          echo "DELETE FROM edge_visits WHERE visit_id IN (SELECT v.id FROM visits v JOIN urls u ON v.url=u.id WHERE u.url LIKE '$like_exact' OR u.url LIKE '$like_sub');"
         echo "DELETE FROM keyword_search_terms WHERE url_id IN (SELECT id FROM urls WHERE url LIKE '$like_exact' OR url LIKE '$like_sub');"
         echo "DELETE FROM visits WHERE url IN (SELECT id FROM urls WHERE url LIKE '$like_exact' OR url LIKE '$like_sub');"
         echo "DELETE FROM urls WHERE url LIKE '$like_exact' OR url LIKE '$like_sub';"
       fi
     done < "$WL_FILE"
 
-    if [ -n "${PREVIEW:-}" ]; then
-      echo "ROLLBACK;"
-    else
-      echo "COMMIT; VACUUM;"
-    fi
+    [ -n "${PREVIEW:-}" ] && echo "ROLLBACK;" || echo "COMMIT; VACUUM;"
   } >"$TMP_SQL"
 
-  sqlite3 "$DB" <"$TMP_SQL"
+  if ! sqlite3 "$DB" <"$TMP_SQL"; then
+    echo "sqlite3 reported an error. Backup kept as ${DB}.*.bak" >&2
+    rm -f -- "$TMP_SQL"
+    exit 1
+  fi
   rm -f -- "$TMP_SQL"
 
   if [ -n "${PREVIEW:-}" ]; then
@@ -119,4 +109,4 @@ EOF
   else
     echo "Done. History pruned for domains in $WL_FILE"
   fi
-}
+)

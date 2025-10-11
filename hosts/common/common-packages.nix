@@ -69,7 +69,6 @@ in
       figurine # Utility for creating FIGlet-style text banners/ASCII art
       # television        # Application for watching TV streams (e.g., IPTV) - Verify exact function
       immich-go
-      spicetify-cli
 
       # === Fonts ===
       # Install specific fonts you use. NerdFonts provides patched fonts with icons.
@@ -91,5 +90,6 @@ in
     ++ [
       # Add the working devenv from nixpkgs-unstable
       # unstablePkgs.devenv
+      unstablePkgs.spicetify-cli
     ];
 }
