@@ -18,10 +18,12 @@
         path = "${config.home.homeDirectory}/.ssh/id_ed25519.pub";
       };
       "github_token" = { };
+      "hf_token" = { };
     };
   };
 
   programs.zsh.initContent = ''
     export GITHUB_TOKEN="$(cat ${config.sops.secrets.github_token.path})"
+    export HF_TOKEN="$(cat ${config.sops.secrets.hf_token.path})"
   '';
 }
