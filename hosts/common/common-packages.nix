@@ -83,8 +83,6 @@ in
 
       android-tools
 
-      vllm
-
       # === Packages from nixpkgs-unstable ===
       # Ensure 'nixpkgs-unstable' is defined as an input (e.g., in your flake.nix)
       # Using legacyPackages as per your original example
