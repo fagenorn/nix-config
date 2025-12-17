@@ -173,8 +173,9 @@ in
       "steam"
       "moonlight"
       "inkscape"
-      "silhouette-studio"
       "ishare"
+
+      "android-studio"
     ];
     masApps = {
       # === Productivity & Utilities ===
