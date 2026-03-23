@@ -84,6 +84,7 @@ in
     casks = [
       # === Browsers ===
       "microsoft-edge"
+      "google-chrome"
 
       # === Communication ===
       "discord" # Chat and VoIP platform
@@ -109,6 +110,7 @@ in
       # Audio Production & Playback
       # "audacity"           # Free audio editor and recorder
       # "plexamp"            # Headless Plex music player
+      "plex" # Media server and player
       "spotify" # Music streaming service client
       # Rogue Amoeba Audio Tools (Specialized Audio Routing/Recording)
       # "audio-hijack"       # Record audio from any application
@@ -176,6 +178,7 @@ in
       "ishare"
 
       "android-studio"
+      "raspberry-pi-imager"
     ];
     masApps = {
       # === Productivity & Utilities ===
@@ -194,6 +197,7 @@ in
       # "Disk Speed Test" = 425264550;    # Blackmagic Disk Speed Test utility
       # "Microsoft Remote Desktop" = 1295203466; # RDP client
       # "UTM" = 1538878817;             # Virtual machine host (QEMU frontend)
+      "Xcode" = 497799835; # Apple's IDE for macOS/iOS development
 
       # === Communication ===
       # "Ivory for Mastodon by Tapbots" = 6444602274; # Mastodon client
