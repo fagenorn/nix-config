@@ -1,1 +1,2 @@
 export ZSH_COMPDUMP=$HOME/.cache/.zcompdump-$HOST
+eval "$(devenv hook zsh)"
