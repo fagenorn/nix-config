@@ -197,7 +197,7 @@ in
       # "Disk Speed Test" = 425264550;    # Blackmagic Disk Speed Test utility
       # "Microsoft Remote Desktop" = 1295203466; # RDP client
       # "UTM" = 1538878817;             # Virtual machine host (QEMU frontend)
-      "Xcode" = 497799835; # Apple's IDE for macOS/iOS development
+      # "Xcode" = 497799835; # Apple's IDE for macOS/iOS development
 
       # === Communication ===
       # "Ivory for Mastodon by Tapbots" = 6444602274; # Mastodon client
