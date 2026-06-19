@@ -39,6 +39,13 @@
     nixos-wsl.inputs.nixpkgs.follows = "nixpkgs";
 
     ghostty.url = "github:ghostty-org/ghostty";
+
+    # Latest Claude Code, auto-tracked hourly (within ~30 min of the npm release),
+    # official native binary with the autoupdater pre-disabled for the read-only store.
+    # Advances on `just update` (nix flake update) + rebuild; binary served from its
+    # Cachix cache (configured in hosts/common/darwin-common.nix) so nothing compiles.
+    claude-code.url = "github:sadjow/claude-code-nix";
+    claude-code.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =

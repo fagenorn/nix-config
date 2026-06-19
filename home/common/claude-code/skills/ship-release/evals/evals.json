@@ -1,0 +1,27 @@
+{
+  "skill_name": "ship-release",
+  "notes": "Project-agnostic ship-release. Eval prompts assume a two-branch repo (integrationBranch -> defaultBranch, e.g. dev -> main) with a deploy adapter configured (deploy.adapter != none). The bundled concrete adapter is Railway, so the deploy-watch expectations reference `railway deployment list --service <name> --json`; on a project whose config sets a different adapter or `none`, the deploy-watch expectations would shift to that platform's verbs (or be skipped entirely). Branch names and CLI verbs resolve from `.claude/skills.config.json`.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "casual-trigger-with-deploy-emphasis",
+      "prompt": "Time to cut a release — get the integration branch onto the default branch and make sure the deploy platform picks it up cleanly. About 50 PRs queued up since last time. **Don't actually open the PR or merge anything.** Instead, walk me through the exact sequence of commands you would run at each phase, with the actual values you'd compute from the current repo state (changelog, PR title, etc.), and call out anything you'd want me to double-check before I let you run it for real.",
+      "expected_output": "A structured plan covering all 6 phases of the release skill: pre-flight checks, mined changelog from origin/<default>..origin/<integration> merges, draft PR title + body, CI wait strategy, merge command (with --merge, no --delete-branch, no --no-ff), and per-service deploy monitoring strategy (skipped only if deploy.adapter is none). Should resolve branch names from config (gate `unset GITHUB_TOKEN` on the unsetGithubToken setting, not unconditional), include explicit handling of the silent-rollback case (verify the running commit equals the merge SHA at a SUCCESS status — a health-200 is not proof), and poll per service with the configured deploy adapter's deployment-list command (e.g. `railway deployment list --service <name> --json`) rather than a status summary.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "verbose-step-by-step-request",
+      "prompt": "I want to ship the accumulated integration-branch work to prod. Please walk me through the release: changelog, PR, CI, then watch the deploy. **Dry-run only** — narrate the commands and their expected outputs without actually creating or merging a PR. I want to see the changelog you'd write before you commit to any of this.",
+      "expected_output": "A complete dry-run plan with: (a) the actual generated changelog text — themed summary at top, included-merges bulleted list with full PR URLs built from repoSlug (not bare #N) and per-merge SHAs, deploy-expectations section per service when a deploy adapter is configured; (b) the planned PR creation command with --base <default> --head <integration>; (c) the merge command; (d) the per-service deploy-watch loop with the silent-rollback failure mode called out explicitly (running commit must match the merge SHA at a SUCCESS status; a health-200 is never proof).",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "specific-gotcha-emphasized",
+      "prompt": "Let's release. Should be ~50 PRs since last time. Make sure the primary service actually redeploys — I keep getting bitten by the platform showing a health-200 when it silently rolled back. **Plan-only mode for now**: tell me exactly how you'd detect a silent rollback in your monitoring step, what commands you'd run, and what success vs failure looks like in the JSON output. Also confirm you won't pass --delete-branch to gh pr merge (that would nuke the integration branch).",
+      "expected_output": "Specific, technical answer focused on silent-rollback detection: must reference the configured deploy adapter's deployment-list command (e.g. `railway deployment list --service <name> --json`), must check both that the status is the platform's terminal SUCCESS value AND that the running commit matches the merge SHA (with `startswith` since platforms may store a short SHA), must explicitly call out the stale-FAILED-notification trap (the latest could be SUCCESS even when a FAILED appears prominently), must state the generic invariant that a health-200 is never proof the merge SHA is live, and must explicitly confirm `gh pr merge --merge` without `--delete-branch` (and without `--no-ff` which gh rejects).",
+      "files": []
+    }
+  ]
+}

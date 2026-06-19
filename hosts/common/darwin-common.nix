@@ -28,6 +28,13 @@ in
         "flakes"
       ];
       warn-dirty = false;
+      # Cachix cache for sadjow/claude-code-nix so the latest Claude Code binary is
+      # substituted pre-built instead of compiled locally. `extra-` appends, leaving
+      # the default cache.nixos.org substituter intact.
+      extra-substituters = [ "https://claude-code.cachix.org" ];
+      extra-trusted-public-keys = [
+        "claude-code.cachix.org-1:YeXf2aNu7UTX8Vwrze0za1WEDS+4DuI2kVeWEE4fsRk="
+      ];
     };
     channel.enable = false;
 
@@ -118,7 +125,6 @@ in
       # "loopback"           # Cable-free audio routing between apps
       # "soundsource"        # System-wide audio control and effects
       # Video Production & Playback
-      "iina" # Modern, powerful video player for macOS
       "obs" # Open Broadcaster Software (Streaming/Recording)
       # "screenflow"         # Screen recording and video editing (Paid)
       # "vlc"                # Versatile cross-platform media player
@@ -175,10 +181,23 @@ in
       "steam"
       "moonlight"
       "inkscape"
-      "ishare"
 
       "android-studio"
-      "raspberry-pi-imager"
+
+      # palmier-pro (AI video editor, macOS 26 / Tahoe only). greedy => every `brew upgrade`
+      # (run on each `sudo just` activation) re-pulls the latest PalmierPro.dmg from the
+      # self-authored fagenorn/palmier tap. Its embedded MCP server is wired into Claude Code
+      # in home/common/claude-code/default.nix.
+      {
+        name = "fagenorn/palmier/palmier-pro";
+        greedy = true;
+        # App is notarized; skip quarantine so the greedy per-switch reinstall doesn't
+        # re-add the "downloaded from the Internet" Gatekeeper prompt every time. Consistent
+        # with the system-wide LSQuarantine = false preference.
+        args = {
+          no_quarantine = true;
+        };
+      }
     ];
     masApps = {
       # === Productivity & Utilities ===
