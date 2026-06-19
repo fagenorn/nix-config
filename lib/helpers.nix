@@ -109,6 +109,12 @@ in
               "homebrew/homebrew-bundle" = homebrew-bundle;
               "nikitabobko/tap" = nikitabobko-tap;
             };
+            # Homebrew 6.0 defaults HOMEBREW_REQUIRE_TAP_TRUST on, and nix-homebrew
+            # forces HOMEBREW_NO_INSTALL_FROM_API=1 (casks load from on-disk tap Ruby),
+            # so third-party taps must be explicitly trusted or `brew bundle` refuses
+            # to load them during activation. `trust` runs `brew trust` (writing
+            # ~/.homebrew/trust.json) before the bundle. See https://docs.brew.sh/Tap-Trust.
+            trust.casks = [ "nikitabobko/tap/aerospace" ];
           };
         }
 

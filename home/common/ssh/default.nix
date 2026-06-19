@@ -2,7 +2,11 @@
 {
   programs.ssh = {
     enable = true;
-    addKeysToAgent = "yes";
+    # home-manager 25.11 moved the per-host settings into matchBlocks and
+    # deprecated the implicit "*" defaults. Opt out and declare the one we
+    # actually want (addKeysToAgent) under matchBlocks."*"; the rest of the old
+    # defaults just restated OpenSSH's own defaults, so dropping them is a no-op.
+    enableDefaultConfig = false;
     extraConfig = ''
       StrictHostKeyChecking no
     '';
@@ -10,6 +14,7 @@
       "*" = {
         user = "root";
         identityFile = "~/.ssh/id_ed25519";
+        addKeysToAgent = "yes";
       };
 
       "github.com" = lib.hm.dag.entryBefore [ "*" ] {

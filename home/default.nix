@@ -47,11 +47,14 @@
 
   programs.git = {
     enable = true;
-    userEmail = "anisanissakkaf@gmail.com";
-    userName = "Anis Sakkaf";
-    diff-so-fancy.enable = true;
     lfs.enable = true;
-    extraConfig = {
+    # home-manager 25.11 unified userName/userEmail/extraConfig into `settings`,
+    # which mirrors the git-config section structure directly.
+    settings = {
+      user = {
+        email = "anisanissakkaf@gmail.com";
+        name = "Anis Sakkaf";
+      };
       init = {
         defaultBranch = "main";
       };
@@ -73,6 +76,13 @@
       signByDefault = true;
       key = "${config.home.homeDirectory}/.ssh/id_ed25519";
     };
+  };
+
+  # diff-so-fancy is now a standalone module; enableGitIntegration must be
+  # set explicitly (its automatic enablement via programs.git is deprecated).
+  programs.diff-so-fancy = {
+    enable = true;
+    enableGitIntegration = true;
   };
 
   programs.htop = {
