@@ -90,8 +90,8 @@ in
     ];
     casks = [
       # === Browsers ===
-      "microsoft-edge"
       "google-chrome"
+      "helium-browser" # imputnet privacy Chromium browser -> /Applications/Helium.app (bundle net.imput.helium); replaced microsoft-edge
 
       # === Communication ===
       "discord" # Chat and VoIP platform
