@@ -86,6 +86,16 @@ in
       #"borders"
     ];
     taps = [
+      # Every tap nix-homebrew lays on disk MUST also be declared here so it lands in
+      # the generated Brewfile: since Homebrew 6, `brew bundle` cleanup UNTAPS any tap
+      # missing from the Brewfile, and `brew untap` now UNINSTALLS every cask installed
+      # from that tap first (one y/n keystroke on a TTY). An undeclared homebrew/cask
+      # is exactly how all casks got wiped on 2026-08-02.
+      "homebrew/bundle"
+      "homebrew/cask"
+      "homebrew/core"
+      "nikitabobko/tap"
+      "fagenorn/palmier"
       #"FelixKratz/formulae" #sketchybar
     ];
     casks = [
@@ -191,12 +201,10 @@ in
       {
         name = "fagenorn/palmier/palmier-pro";
         greedy = true;
-        # App is notarized; skip quarantine so the greedy per-switch reinstall doesn't
-        # re-add the "downloaded from the Internet" Gatekeeper prompt every time. Consistent
-        # with the system-wide LSQuarantine = false preference.
-        args = {
-          no_quarantine = true;
-        };
+        # No `no_quarantine` arg: Homebrew 6 removed `--no-quarantine` entirely
+        # (Homebrew/brew#23363), and bundle passes unknown args through verbatim, so the
+        # install dies with "invalid option". Quarantine suppression already comes from
+        # the system-wide LSQuarantine = false preference.
       }
     ];
     masApps = {
