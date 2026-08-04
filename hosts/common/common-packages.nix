@@ -9,6 +9,15 @@ let
 in
 {
   nixpkgs.config.allowUnfree = true;
+
+  # Pre-built native Codex CLI binaries for Linux and macOS.
+  nix.settings = {
+    extra-substituters = [ "https://codex-cli.cachix.org" ];
+    extra-trusted-public-keys = [
+      "codex-cli.cachix.org-1:1Br3H1hHoRYG22n//cGKJOk3cQXgYobUel6O8DgSing="
+    ];
+  };
+
   environment.systemPackages =
     with pkgs;
     [

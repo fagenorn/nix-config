@@ -46,9 +46,6 @@ let
     enabledPlugins = {
       "skill-creator@claude-plugins-official" = true;
       "superpowers@superpowers-marketplace" = true;
-      "ui-ux-pro-max@ui-ux-pro-max-skill" = true;
-      "typescript-lsp@claude-plugins-official" = true;
-      "supabase@claude-plugins-official" = true;
     };
     extraKnownMarketplaces = {
       claude-plugins-official.source = {
@@ -58,18 +55,6 @@ let
       superpowers-marketplace.source = {
         source = "github";
         repo = "obra/superpowers-marketplace";
-      };
-      ui-ux-pro-max-skill.source = {
-        source = "github";
-        repo = "nextlevelbuilder/ui-ux-pro-max-skill";
-      };
-      dotnet-agent-skills.source = {
-        source = "github";
-        repo = "dotnet/skills";
-      };
-      nelson-marketplace.source = {
-        source = "github";
-        repo = "harrymunro/nelson";
       };
     };
   };
@@ -86,11 +71,11 @@ in
     package = inputs.claude-code.packages.${pkgs.system}.default;
 
     # ~/.claude/CLAUDE.md — global user instructions (read-only store symlink is safe; static).
-    memory.source = ./CLAUDE.md;
+    memory.source = ../agent-guidance/AGENTS.md;
 
     # ~/.claude/skills/<name>/ — the 8 global skills, recursively symlinked (multi-file skills
     # like prototype/ keep SKILL.md + UI.md + LOGIC.md). ~/.claude/skills stays a real dir.
-    skillsDir = ./skills;
+    skillsDir = ../agent-skills/skills;
 
     # NOTE: MCP servers are intentionally NOT set here. The 25.11 module injects them via a
     # `--mcp-config` flag on a wrapper binary, but in Claude Code 2.1.183 that flag is variadic

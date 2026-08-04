@@ -46,6 +46,22 @@
     # Cachix cache (configured in hosts/common/darwin-common.nix) so nothing compiles.
     claude-code.url = "github:sadjow/claude-code-nix";
     claude-code.inputs.nixpkgs.follows = "nixpkgs";
+
+    # Latest stable Codex CLI, auto-tracked hourly from OpenAI's native releases.
+    # Advances on `just update` + rebuild and is available for both configured hosts.
+    codex-cli.url = "github:sadjow/codex-cli-nix";
+    codex-cli.inputs.nixpkgs.follows = "nixpkgs";
+
+    # Cross-agent skill sources. These remain pinned by flake.lock and are
+    # exposed through each agent's native discovery mechanism.
+    superpowers = {
+      url = "github:obra/superpowers";
+      flake = false;
+    };
+    ui-ux-pro-max = {
+      url = "github:nextlevelbuilder/ui-ux-pro-max-skill";
+      flake = false;
+    };
   };
 
   outputs =
