@@ -66,6 +66,13 @@
       url = "github:nextlevelbuilder/ui-ux-pro-max-skill";
       flake = false;
     };
+
+    # macOS Spotify patch source. Homebrew still owns the Spotify app itself;
+    # this non-flake input only supplies the pinned SpotX-Bash script.
+    spotx-bash = {
+      url = "github:SpotX-Official/SpotX-Bash";
+      flake = false;
+    };
   };
 
   outputs =

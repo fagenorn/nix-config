@@ -432,6 +432,7 @@
         "nixpkgs-darwin": "nixpkgs-darwin",
         "nixpkgs-unstable": "nixpkgs-unstable",
         "sops-nix": "sops-nix",
+        "spotx-bash": "spotx-bash",
         "superpowers": "superpowers",
         "ui-ux-pro-max": "ui-ux-pro-max"
       }
@@ -453,6 +454,22 @@
       "original": {
         "owner": "Mic92",
         "repo": "sops-nix",
+        "type": "github"
+      }
+    },
+    "spotx-bash": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1785864602,
+        "narHash": "sha256-zo7pP1kQmNKNWFVZKN7vK6nWMOp5YBgvItYgXjPDbUE=",
+        "owner": "SpotX-Official",
+        "repo": "SpotX-Bash",
+        "rev": "307db7769d256767d1d0e24fa0dc0f4023f89c54",
+        "type": "github"
+      },
+      "original": {
+        "owner": "SpotX-Official",
+        "repo": "SpotX-Bash",
         "type": "github"
       }
     },
