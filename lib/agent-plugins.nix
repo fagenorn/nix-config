@@ -8,13 +8,15 @@ let
 
   superpowersRevision = inputs.superpowers.rev or "44c9b2d6e889982ac18c27d05a19fefe335194e1";
   superpowersUpstreamVersion =
-    (builtins.fromJSON (builtins.readFile (inputs.superpowers + "/.claude-plugin/plugin.json"))).version;
-  superpowersVersion =
-    "${superpowersUpstreamVersion}-nix.${shortRevision superpowersRevision}.p${toString patchRevision}";
+    (builtins.fromJSON (builtins.readFile (inputs.superpowers + "/.claude-plugin/plugin.json")))
+    .version;
+  superpowersVersion = "${superpowersUpstreamVersion}-nix.${shortRevision superpowersRevision}.p${toString patchRevision}";
 
   codexRevision = inputs.codex-plugin-cc.rev or "db52e28f4d9ded852ab3942cea316258ae4ef346";
   codexUpstreamVersion =
-    (builtins.fromJSON (builtins.readFile (inputs.codex-plugin-cc + "/plugins/codex/.claude-plugin/plugin.json"))).version;
+    (builtins.fromJSON (
+      builtins.readFile (inputs.codex-plugin-cc + "/plugins/codex/.claude-plugin/plugin.json")
+    )).version;
   codexVersion = "${codexUpstreamVersion}-nix.${shortRevision codexRevision}.p${toString patchRevision}";
 
   buildMarketplace =
@@ -50,9 +52,6 @@ let
         jq --arg version "${version}" '.version = $version' ${pluginManifest} > "$tmp"
         mv "$tmp" ${pluginManifest}
       '';
-in
-{
-  inherit patchRevision;
 
   superpowers = buildMarketplace {
     name = "superpowers-plugin-${superpowersVersion}";
@@ -62,6 +61,30 @@ in
     marketplaceName = "nix-superpowers";
     pluginManifest = ".claude-plugin/plugin.json";
   };
+
+  # Codex installs plugins into a mutable cache, so give it the smallest
+  # possible source bundle. In particular, omit Superpowers' Claude-only
+  # SessionStart hook: Codex auto-discovers hooks/hooks.json when it is present.
+  superpowersCodex =
+    pkgs.runCommand "superpowers-codex-plugin-${superpowersVersion}"
+      {
+        nativeBuildInputs = [ pkgs.jq ];
+      }
+      ''
+        mkdir -p "$out/.codex-plugin"
+        cp -R ${superpowers}/skills "$out/skills"
+        cp -R ${superpowers}/assets "$out/assets"
+
+        jq --arg version "${superpowersVersion}" \
+          '.version = $version | del(.hooks)' \
+          ${superpowers}/.codex-plugin/plugin.json \
+          > "$out/.codex-plugin/plugin.json"
+      '';
+in
+{
+  inherit patchRevision;
+
+  inherit superpowers superpowersCodex;
   superpowersMetadata = {
     revision = superpowersRevision;
     upstreamVersion = superpowersUpstreamVersion;

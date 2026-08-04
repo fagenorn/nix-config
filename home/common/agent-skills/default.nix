@@ -1,11 +1,10 @@
 {
   inputs,
+  lib,
   pkgs,
   ...
 }:
 let
-  agentPlugins = import ../../../lib/agent-plugins.nix { inherit inputs pkgs; };
-
   uiUxSkill = pkgs.runCommand "ui-ux-pro-max-skill" { } ''
     mkdir -p "$out"
     {
@@ -25,34 +24,74 @@ let
     cp -R ${inputs.ui-ux-pro-max}/cli/assets/data "$out/data"
     cp -R ${inputs.ui-ux-pro-max}/cli/assets/scripts "$out/scripts"
   '';
+
+  # Home Manager's recursive directory mode creates real directories whose
+  # individual files are store symlinks. Codex ignores a skill when SKILL.md
+  # itself is a symlink, but supports a symlink to the whole skill directory.
+  localSkillSources = lib.filterAttrs (_: type: type == "directory") (builtins.readDir ./skills);
+  localSkillNames = builtins.attrNames localSkillSources;
+  localSkillFiles = lib.mapAttrs' (
+    name: _:
+    lib.nameValuePair ".agents/skills/${name}" {
+      source = ./skills + "/${name}";
+    }
+  ) localSkillSources;
 in
 {
-  # Canonical cross-agent skill library. Claude Code consumes the same source
-  # via programs.claude-code.skillsDir; Codex discovers global skills here.
-  # `recursive` keeps ~/.agents/skills as a real directory containing links,
-  # rather than making the whole directory an immutable store symlink.
-  home.file.".agents/skills" = {
-    source = ./skills;
-    recursive = true;
+  # Keep ~/.agents/skills writable while linking each complete skill directory.
+  # Claude Code consumes the same authored sources through skillsDir below.
+  home.file = localSkillFiles // {
+    ".agents/skills/ui-ux-pro-max".source = uiUxSkill;
+
+    # Claude accepts Home Manager's recursive file links, so its generated
+    # multi-file skill can continue to use that layout.
+    ".claude/skills/ui-ux-pro-max" = {
+      source = uiUxSkill;
+      recursive = true;
+    };
   };
 
-  # Claude's local Superpowers plugin and Codex both consume this exact patched
-  # skill tree, so the two agents cannot drift in workflow composition.
-  home.file.".agents/skills/superpowers" = {
-    source = agentPlugins.superpowers + "/skills";
-    recursive = true;
-  };
+  # One-time migration from the previous `recursive = true` layout. Those
+  # generations leave a real directory at each target, which would collide
+  # with the new whole-directory link before Home Manager gets to old-link
+  # cleanup. Remove a directory only when every leaf is demonstrably one of
+  # Home Manager's old store links; refuse to touch user-authored content.
+  home.activation.migrateCodexSkillLinks = lib.hm.dag.entryBefore [ "checkLinkTargets" ] ''
+    migrateCodexSkillLink() {
+      skillName="$1"
+      target="$HOME/.agents/skills/$skillName"
 
-  # UI/UX Pro Max uses one generated universal skill for both agents. This
-  # replaces its Claude-only marketplace plugin and avoids maintaining copies.
-  home.file.".agents/skills/ui-ux-pro-max" = {
-    source = uiUxSkill;
-    recursive = true;
-  };
-  home.file.".claude/skills/ui-ux-pro-max" = {
-    source = uiUxSkill;
-    recursive = true;
-  };
+      if [ ! -d "$target" ] || [ -L "$target" ]; then
+        return 0
+      fi
+
+      while IFS= read -r -d "" entry; do
+        if [ -d "$entry" ] && [ ! -L "$entry" ]; then
+          continue
+        fi
+
+        if [ -L "$entry" ]; then
+          linkTarget=$(${pkgs.coreutils}/bin/readlink "$entry")
+          case "$linkTarget" in
+            /nix/store/*-home-manager-files/.agents/skills/"$skillName"/*)
+              continue
+              ;;
+          esac
+        fi
+
+        errorEcho "Refusing to replace $target because it contains content not owned by the previous Home Manager skill layout: $entry"
+        return 1
+      done < <(${pkgs.findutils}/bin/find "$target" -mindepth 1 -print0)
+
+      verboseEcho "Replacing legacy recursive skill directory $target"
+      run ${pkgs.coreutils}/bin/rm -rf -- "$target"
+    }
+
+    for skillName in ${lib.escapeShellArgs (localSkillNames ++ [ "ui-ux-pro-max" ])}; do
+      migrateCodexSkillLink "$skillName" || exit 1
+    done
+    unset -f migrateCodexSkillLink
+  '';
 
   home.packages = [ pkgs.python3 ];
 }
