@@ -1,0 +1,1504 @@
+diff --git a/README.md b/README.md
+index 937a303..f418e48 100644
+--- a/README.md
++++ b/README.md
+@@ -225,3 +225,3 @@ If Codex is missing and npm is available, it can offer to install Codex for you.
+-You can also use `/codex:setup` to manage the optional review gate.
+-
+-#### Enabling review gate
++The locally patched distribution does not register the automatic `Stop` review
++gate. Explicit `/codex:review`, `/codex:adversarial-review`, and isolated plan
++reviews remain available. A legacy enabled setting can be cleared with:
+@@ -230 +229,0 @@ You can also use `/codex:setup` to manage the optional review gate.
+-/codex:setup --enable-review-gate
+@@ -234,5 +232,0 @@ You can also use `/codex:setup` to manage the optional review gate.
+-When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Codex review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
+-
+-> [!WARNING]
+-> The review gate can create a long-running Claude/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
+-
+diff --git a/plugins/codex/agents/codex-reviewer.md b/plugins/codex/agents/codex-reviewer.md
+new file mode 100644
+index 0000000..ab0aa35
+--- /dev/null
++++ b/plugins/codex/agents/codex-reviewer.md
+@@ -0,0 +1,17 @@
++---
++name: codex-reviewer
++description: Internal foreground bridge for fresh, isolated, read-only Codex plan reviews requested by the codex-collaboration skill
++model: sonnet
++tools: Bash
++---
++
++Act only as a transport for one Codex plan-review job.
++
++- Forward the complete delegation prompt, unchanged, to one foreground command:
++  `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --fresh --reviewer --timeout-ms 840000 <prompt>`.
++- Use exactly one Bash tool call and set its tool timeout to 900000 milliseconds.
++- Keep the prompt in one safely quoted argument or a temporary file outside the repository.
++- Do not inspect the repository, interpret the request, edit files, run Git, retry,
++  fall back to Claude analysis, or add commentary.
++- Return the command's stdout exactly. If the command fails, return a single line
++  beginning `CODEX_REVIEW_FAILURE:` followed by its stderr or exit status.
+diff --git a/plugins/codex/commands/setup.md b/plugins/codex/commands/setup.md
+index fb33a15..4d8c409 100644
+--- a/plugins/codex/commands/setup.md
++++ b/plugins/codex/commands/setup.md
+@@ -2,2 +2,2 @@
+-description: Check whether the local Codex CLI is ready and optionally toggle the stop-time review gate
+-argument-hint: '[--enable-review-gate|--disable-review-gate]'
++description: Check whether the local Codex CLI is ready; the automatic stop-time review gate remains disabled
++argument-hint: '[--disable-review-gate]'
+diff --git a/plugins/codex/hooks/hooks.json b/plugins/codex/hooks/hooks.json
+index 19e33b8..08cb4e9 100644
+--- a/plugins/codex/hooks/hooks.json
++++ b/plugins/codex/hooks/hooks.json
+@@ -2 +2 @@
+-  "description": "Optional stop-time review gate for Codex Companion.",
++  "description": "Codex Companion session lifecycle and runtime cleanup.",
+@@ -25,11 +24,0 @@
+-    ],
+-    "Stop": [
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.mjs\"",
+-            "timeout": 900
+-          }
+-        ]
+-      }
+diff --git a/plugins/codex/scripts/app-server-broker.mjs b/plugins/codex/scripts/app-server-broker.mjs
+index 1954274..a40434e 100644
+--- a/plugins/codex/scripts/app-server-broker.mjs
++++ b/plugins/codex/scripts/app-server-broker.mjs
+@@ -9 +9 @@ import { parseArgs } from "./lib/args.mjs";
+-import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
++import { CodexAppServerClient } from "./lib/app-server.mjs";
+@@ -12 +12,3 @@ import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
+-const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
++const EXTERNAL_AGENT_IMPORT = "externalAgentConfig/import";
++const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
++const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start", EXTERNAL_AGENT_IMPORT]);
+@@ -71,0 +74,2 @@ async function main() {
++  let activeStreamMethod = null;
++  const requestQueue = [];
+@@ -80,0 +85 @@ async function main() {
++      activeStreamMethod = null;
+@@ -81,0 +87,47 @@ async function main() {
++    drainQueue();
++  }
++
++  async function runQueuedRequest(socket, message) {
++    if (socket.destroyed) {
++      drainQueue();
++      return;
++    }
++    const isStreaming = STREAMING_METHODS.has(message.method);
++    activeRequestSocket = socket;
++    try {
++      const result = await appClient.request(message.method, message.params ?? {});
++      send(socket, { id: message.id, result });
++      if (isStreaming) {
++        activeStreamSocket = socket;
++        activeStreamThreadIds = buildStreamThreadIds(message.method, message.params ?? {}, result);
++        activeStreamMethod = message.method;
++      }
++    } catch (error) {
++      send(socket, {
++        id: message.id,
++        error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
++      });
++      if (activeStreamSocket === socket && !isStreaming) {
++        activeStreamSocket = null;
++        activeStreamThreadIds = null;
++        activeStreamMethod = null;
++      }
++    } finally {
++      if (activeRequestSocket === socket) {
++        activeRequestSocket = null;
++      }
++      if (!activeStreamSocket) {
++        drainQueue();
++      }
++    }
++  }
++
++  function drainQueue() {
++    if (activeRequestSocket || activeStreamSocket) {
++      return;
++    }
++    const next = requestQueue.shift();
++    if (!next) {
++      return;
++    }
++    void runQueuedRequest(next.socket, next.message);
+@@ -90 +142,4 @@ async function main() {
+-    if (message.method === "turn/completed" && activeStreamSocket === target) {
++    const turnCompleted = message.method === "turn/completed" && activeStreamMethod !== EXTERNAL_AGENT_IMPORT;
++    const importCompleted =
++      message.method === EXTERNAL_AGENT_IMPORT_COMPLETED && activeStreamMethod === EXTERNAL_AGENT_IMPORT;
++    if ((turnCompleted || importCompleted) && activeStreamSocket === target) {
+@@ -92 +147 @@ async function main() {
+-      if (!threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
++      if (importCompleted || !threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
+@@ -94,0 +150 @@ async function main() {
++        activeStreamMethod = null;
+@@ -97,0 +154 @@ async function main() {
++        drainQueue();
+@@ -170,13 +227 @@ async function main() {
+-        const allowInterruptDuringActiveStream =
+-          isInterruptRequest(message) && activeStreamSocket && activeStreamSocket !== socket && !activeRequestSocket;
+-
+-        if (
+-          ((activeRequestSocket && activeRequestSocket !== socket) || (activeStreamSocket && activeStreamSocket !== socket)) &&
+-          !allowInterruptDuringActiveStream
+-        ) {
+-          send(socket, {
+-            id: message.id,
+-            error: buildJsonRpcError(BROKER_BUSY_RPC_CODE, "Shared Codex broker is busy.")
+-          });
+-          continue;
+-        }
++        const allowInterruptDuringActiveStream = isInterruptRequest(message) && activeStreamSocket;
+@@ -197,25 +242,2 @@ async function main() {
+-        const isStreaming = STREAMING_METHODS.has(message.method);
+-        activeRequestSocket = socket;
+-
+-        try {
+-          const result = await appClient.request(message.method, message.params ?? {});
+-          send(socket, { id: message.id, result });
+-          if (isStreaming) {
+-            activeStreamSocket = socket;
+-            activeStreamThreadIds = buildStreamThreadIds(message.method, message.params ?? {}, result);
+-          }
+-          if (activeRequestSocket === socket) {
+-            activeRequestSocket = null;
+-          }
+-        } catch (error) {
+-          send(socket, {
+-            id: message.id,
+-            error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
+-          });
+-          if (activeRequestSocket === socket) {
+-            activeRequestSocket = null;
+-          }
+-          if (activeStreamSocket === socket && !isStreaming) {
+-            activeStreamSocket = null;
+-          }
+-        }
++        requestQueue.push({ socket, message });
++        drainQueue();
+diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
+index 83df468..b69371d 100644
+--- a/plugins/codex/scripts/codex-companion.mjs
++++ b/plugins/codex/scripts/codex-companion.mjs
+@@ -54,0 +55 @@ import {
++import { cleanupReviewerRuntime } from "./lib/runtime-home.mjs";
+@@ -79 +80 @@ function printUsage() {
+-      "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
++      "  node scripts/codex-companion.mjs setup [--disable-review-gate] [--json]",
+@@ -82 +83 @@ function printUsage() {
+-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
++      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--reviewer] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+@@ -198,4 +198,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
+-  if (!config.stopReviewGate) {
+-    nextSteps.push("Optional: run `/codex:setup --enable-review-gate` to require a fresh review before stop.");
+-  }
+-
+@@ -230,3 +227,3 @@ async function handleSetup(argv) {
+-    setConfig(workspaceRoot, "stopReviewGate", true);
+-    actionsTaken.push(`Enabled the stop-time review gate for ${workspaceRoot}.`);
+-  } else if (options["disable-review-gate"]) {
++    throw new Error("The automatic Stop review gate is disabled by this locally patched plugin.");
++  }
++  if (getConfig(workspaceRoot).stopReviewGate || options["disable-review-gate"]) {
+@@ -467 +464,2 @@ async function executeTaskRun(request) {
+-    resumeLast: request.resumeLast
++    resumeLast: request.resumeLast,
++    reviewer: request.reviewer
+@@ -493,2 +491,4 @@ async function executeTaskRun(request) {
+-    persistThread: true,
+-    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
++    persistThread: !request.reviewer,
++    threadName: request.reviewer || resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
++    reviewerJobId: request.reviewer ? request.jobId : null,
++    timeoutMs: request.timeoutMs
+@@ -496,0 +497,4 @@ async function executeTaskRun(request) {
++  if (request.reviewer && result.touchedFiles.length > 0) {
++    throw new Error(`Read-only Codex reviewer reported file changes: ${result.touchedFiles.join(", ")}`);
++  }
++
+@@ -540 +544,7 @@ function buildReviewJobMetadata(reviewName, target) {
+-function buildTaskRunMetadata({ prompt, resumeLast = false }) {
++function buildTaskRunMetadata({ prompt, resumeLast = false, reviewer = false }) {
++  if (reviewer) {
++    return {
++      title: "Codex Plan Reviewer",
++      summary: shorten(prompt || "Read-only plan review")
++    };
++  }
+@@ -592 +602 @@ function createTrackedProgress(job, options = {}) {
+-function buildTaskJob(workspaceRoot, taskMetadata, write) {
++function buildTaskJob(workspaceRoot, taskMetadata, write, reviewer = false) {
+@@ -594,2 +604,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+-    prefix: "task",
+-    kind: "task",
++    prefix: reviewer ? "reviewer" : "task",
++    kind: reviewer ? "plan-review" : "task",
+@@ -598 +608 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+-    jobClass: "task",
++    jobClass: reviewer ? "review" : "task",
+@@ -604 +614 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
++function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, reviewer, timeoutMs, jobId }) {
+@@ -611,0 +622,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
++    reviewer,
++    timeoutMs,
+@@ -764,2 +776,2 @@ async function handleTask(argv) {
+-    valueOptions: ["model", "effort", "cwd", "prompt-file"],
+-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
++    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms"],
++    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "reviewer"],
+@@ -782,0 +795,8 @@ async function handleTask(argv) {
++  const reviewer = Boolean(options.reviewer);
++  if (reviewer && (write || resumeLast || options.background)) {
++    throw new Error("Reviewer jobs must be fresh, foreground, and read-only.");
++  }
++  const timeoutMs = options["timeout-ms"] == null ? (reviewer ? 840000 : null) : Number(options["timeout-ms"]);
++  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
++    throw new Error("--timeout-ms must be a positive number.");
++  }
+@@ -785 +805,2 @@ async function handleTask(argv) {
+-    resumeLast
++    resumeLast,
++    reviewer
+@@ -792 +813 @@ async function handleTask(argv) {
+-    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
++    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
+@@ -799,0 +821,2 @@ async function handleTask(argv) {
++      reviewer,
++      timeoutMs,
+@@ -807 +830 @@ async function handleTask(argv) {
+-  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
++  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
+@@ -817,0 +841,2 @@ async function handleTask(argv) {
++        reviewer,
++        timeoutMs,
+@@ -976 +1001,4 @@ async function handleCancel(argv) {
+-  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
++  const interrupt =
++    job.kind === "plan-review"
++      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
++      : await interruptAppServerTurn(cwd, { threadId, turnId });
+@@ -986,0 +1015,3 @@ async function handleCancel(argv) {
++  if (job.kind === "plan-review") {
++    cleanupReviewerRuntime(workspaceRoot, job.id);
++  }
+diff --git a/plugins/codex/scripts/lib/app-server.mjs b/plugins/codex/scripts/lib/app-server.mjs
+index 72b30a7..3e78ae9 100644
+--- a/plugins/codex/scripts/lib/app-server.mjs
++++ b/plugins/codex/scripts/lib/app-server.mjs
+@@ -341,0 +342,3 @@ export class CodexAppServerClient {
++        if (!brokerEndpoint) {
++          throw new Error("No shared Codex broker is active for this workspace.");
++        }
+@@ -345,0 +349,3 @@ export class CodexAppServerClient {
++        if (!brokerEndpoint) {
++          throw new Error("Failed to start the isolated Codex broker for this workspace.");
++        }
+diff --git a/plugins/codex/scripts/lib/broker-lifecycle.mjs b/plugins/codex/scripts/lib/broker-lifecycle.mjs
+index ef76381..9324404 100644
+--- a/plugins/codex/scripts/lib/broker-lifecycle.mjs
++++ b/plugins/codex/scripts/lib/broker-lifecycle.mjs
+@@ -9 +9,2 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs
+-import { resolveStateDir } from "./state.mjs";
++import { createWorkspaceRuntime } from "./runtime-home.mjs";
++import { listStateDirs, resolveStateDir } from "./state.mjs";
+@@ -13,0 +15,54 @@ const BROKER_STATE_FILE = "broker.json";
++const BROKER_LOCK_DIR = "broker.lock";
++const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
++const LOCK_STALE_MS = 30000;
++
++async function withBrokerLock(stateDir, operation, timeoutMs = 5000) {
++  const lockDir = path.join(stateDir, BROKER_LOCK_DIR);
++  fs.mkdirSync(stateDir, { recursive: true });
++  const deadline = Date.now() + timeoutMs;
++  while (true) {
++    try {
++      fs.mkdirSync(lockDir);
++      break;
++    } catch (error) {
++      if (error?.code !== "EEXIST") {
++        throw error;
++      }
++      try {
++        if (Date.now() - fs.statSync(lockDir).mtimeMs > LOCK_STALE_MS) {
++          fs.rmSync(lockDir, { recursive: true, force: true });
++          continue;
++        }
++      } catch {
++        continue;
++      }
++      if (Date.now() >= deadline) {
++        throw new Error(`Timed out acquiring broker metadata lock for ${stateDir}.`);
++      }
++      await new Promise((resolve) => setTimeout(resolve, 25));
++    }
++  }
++
++  try {
++    return await operation();
++  } finally {
++    fs.rmSync(lockDir, { recursive: true, force: true });
++  }
++}
++
++function atomicWriteJson(filePath, value) {
++  const temporary = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
++  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
++  fs.renameSync(temporary, filePath);
++}
++
++function addOwner(session, env = process.env) {
++  const owner = env[SESSION_ID_ENV];
++  if (!owner) {
++    return session;
++  }
++  return {
++    ...session,
++    owners: [...new Set([...(session.owners ?? []), owner])]
++  };
++}
+@@ -72 +127 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
+-function resolveBrokerStateFile(cwd) {
++export function resolveBrokerStateFile(cwd) {
+@@ -76,2 +131 @@ function resolveBrokerStateFile(cwd) {
+-export function loadBrokerSession(cwd) {
+-  const stateFile = resolveBrokerStateFile(cwd);
++function loadBrokerSessionFile(stateFile) {
+@@ -81 +134,0 @@ export function loadBrokerSession(cwd) {
+-
+@@ -88,0 +142,4 @@ export function loadBrokerSession(cwd) {
++export function loadBrokerSession(cwd) {
++  return loadBrokerSessionFile(resolveBrokerStateFile(cwd));
++}
++
+@@ -92 +149 @@ export function saveBrokerSession(cwd, session) {
+-  fs.writeFileSync(resolveBrokerStateFile(cwd), `${JSON.stringify(session, null, 2)}\n`, "utf8");
++  atomicWriteJson(resolveBrokerStateFile(cwd), session);
+@@ -114,4 +171,8 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-  const existing = loadBrokerSession(cwd);
+-  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
+-    return existing;
+-  }
++  const stateDir = resolveStateDir(cwd);
++  return withBrokerLock(stateDir, async () => {
++    const existing = loadBrokerSession(cwd);
++    if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
++      const owned = addOwner(existing, options.env ?? process.env);
++      saveBrokerSession(cwd, owned);
++      return owned;
++    }
+@@ -119,8 +180,29 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-  if (existing) {
+-    teardownBrokerSession({
+-      endpoint: existing.endpoint ?? null,
+-      pidFile: existing.pidFile ?? null,
+-      logFile: existing.logFile ?? null,
+-      sessionDir: existing.sessionDir ?? null,
+-      pid: existing.pid ?? null,
+-      killProcess: options.killProcess ?? null
++    if (existing) {
++      teardownBrokerSession({
++        endpoint: existing.endpoint ?? null,
++        pidFile: existing.pidFile ?? null,
++        logFile: existing.logFile ?? null,
++        sessionDir: existing.sessionDir ?? null,
++        pid: existing.pid ?? null,
++        killProcess: options.killProcess ?? null
++      });
++      clearBrokerSession(cwd);
++    }
++
++    const sessionDir = createBrokerSessionDir();
++    const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
++    const endpoint = endpointFactory(sessionDir, options.platform);
++    const pidFile = path.join(sessionDir, "broker.pid");
++    const logFile = path.join(sessionDir, "broker.log");
++    const scriptPath =
++      options.scriptPath ??
++      fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
++    const runtime = createWorkspaceRuntime(cwd, { env: options.env ?? process.env });
++
++    const child = spawnBrokerProcess({
++      scriptPath,
++      cwd,
++      endpoint,
++      pidFile,
++      logFile,
++      env: runtime.env
+@@ -128,2 +209,0 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-    clearBrokerSession(cwd);
+-  }
+@@ -131,17 +211,12 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-  const sessionDir = createBrokerSessionDir();
+-  const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
+-  const endpoint = endpointFactory(sessionDir, options.platform);
+-  const pidFile = path.join(sessionDir, "broker.pid");
+-  const logFile = path.join(sessionDir, "broker.log");
+-  const scriptPath =
+-    options.scriptPath ??
+-    fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
+-
+-  const child = spawnBrokerProcess({
+-    scriptPath,
+-    cwd,
+-    endpoint,
+-    pidFile,
+-    logFile,
+-    env: options.env ?? process.env
+-  });
++    const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
++    if (!ready) {
++      teardownBrokerSession({
++        endpoint,
++        pidFile,
++        logFile,
++        sessionDir,
++        pid: child.pid ?? null,
++        killProcess: options.killProcess ?? null
++      });
++      return null;
++    }
+@@ -149,3 +224 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
+-  if (!ready) {
+-    teardownBrokerSession({
++    const session = addOwner({
+@@ -157 +230,40 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-      killProcess: options.killProcess ?? null
++      stateDir,
++      workspaceRoot: cwd,
++      codexHome: runtime.runtimeHome,
++      owners: []
++    }, options.env ?? process.env);
++    saveBrokerSession(cwd, session);
++    return session;
++  }, options.lockTimeoutMs ?? 5000);
++}
++
++export function listBrokerSessions() {
++  return listStateDirs()
++    .map((stateDir) => ({ stateDir, stateFile: path.join(stateDir, BROKER_STATE_FILE) }))
++    .map(({ stateDir, stateFile }) => ({ stateDir, stateFile, session: loadBrokerSessionFile(stateFile) }))
++    .filter(({ session }) => session !== null);
++}
++
++export async function releaseBrokerOwner(owner, options = {}) {
++  if (!owner) {
++    return [];
++  }
++  const released = [];
++  for (const record of listBrokerSessions()) {
++    if (!(record.session.owners ?? []).includes(owner)) {
++      continue;
++    }
++    const action = await withBrokerLock(record.stateDir, async () => {
++      const current = loadBrokerSessionFile(record.stateFile);
++      if (!current || !(current.owners ?? []).includes(owner)) {
++        return null;
++      }
++      const owners = current.owners.filter((candidate) => candidate !== owner);
++      if (owners.length > 0) {
++        atomicWriteJson(record.stateFile, { ...current, owners });
++        return { stop: false, session: { ...current, owners } };
++      }
++      if (fs.existsSync(record.stateFile)) {
++        fs.unlinkSync(record.stateFile);
++      }
++      return { stop: true, session: current };
+@@ -159 +271,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-    return null;
++    if (!action) {
++      continue;
++    }
++    if (action.stop) {
++      await sendBrokerShutdown(action.session.endpoint).catch(() => {});
++      teardownBrokerSession({
++        endpoint: action.session.endpoint ?? null,
++        pidFile: action.session.pidFile ?? null,
++        logFile: action.session.logFile ?? null,
++        sessionDir: action.session.sessionDir ?? null,
++        pid: action.session.pid ?? null,
++        killProcess: options.killProcess ?? null
++      });
++    }
++    released.push(action);
+@@ -161,10 +287 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-
+-  const session = {
+-    endpoint,
+-    pidFile,
+-    logFile,
+-    sessionDir,
+-    pid: child.pid ?? null
+-  };
+-  saveBrokerSession(cwd, session);
+-  return session;
++  return released;
+diff --git a/plugins/codex/scripts/lib/codex.mjs b/plugins/codex/scripts/lib/codex.mjs
+index fead00c..aee30f2 100644
+--- a/plugins/codex/scripts/lib/codex.mjs
++++ b/plugins/codex/scripts/lib/codex.mjs
+@@ -43 +43 @@ import { readJsonFile } from "./fs.mjs";
+-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
++import { BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
+@@ -45,0 +46 @@ import { binaryAvailable } from "./process.mjs";
++import { cleanupReviewerRuntime, createReviewerRuntime } from "./runtime-home.mjs";
+@@ -561,0 +563 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
++  let hardTimeout = null;
+@@ -605,0 +608,8 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
++    if (Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
++      const timeout = new Promise((_, reject) => {
++        hardTimeout = setTimeout(() => {
++          reject(new Error(`Codex job timed out after ${options.timeoutMs}ms.`));
++        }, options.timeoutMs);
++      });
++      return await Promise.race([state.completion, timeout]);
++    }
+@@ -607,0 +618,3 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
++    if (hardTimeout) {
++      clearTimeout(hardTimeout);
++    }
+@@ -613,23 +626,4 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
+-async function withAppServer(cwd, fn) {
+-  let client = null;
+-  try {
+-    client = await CodexAppServerClient.connect(cwd);
+-    const result = await fn(client);
+-    await client.close();
+-    return result;
+-  } catch (error) {
+-    const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
+-    const shouldRetryDirect =
+-      (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
+-      (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
+-
+-    if (client) {
+-      await client.close().catch(() => {});
+-      client = null;
+-    }
+-
+-    if (!shouldRetryDirect) {
+-      throw error;
+-    }
+-
+-    const directClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
++async function withAppServer(cwd, fn, options = {}) {
++  if (options.reviewerJobId) {
++    const runtime = createReviewerRuntime(cwd, options.reviewerJobId, { env: options.env });
++    let client = null;
+@@ -637 +631,5 @@ async function withAppServer(cwd, fn) {
+-      return await fn(directClient);
++      client = await CodexAppServerClient.connect(cwd, {
++        disableBroker: true,
++        env: runtime.env
++      });
++      return await fn(client);
+@@ -639 +637,2 @@ async function withAppServer(cwd, fn) {
+-      await directClient.close();
++      await client?.close().catch(() => {});
++      cleanupReviewerRuntime(cwd, options.reviewerJobId);
+@@ -642 +640,0 @@ async function withAppServer(cwd, fn) {
+-}
+@@ -644,2 +642 @@ async function withAppServer(cwd, fn) {
+-async function withDirectAppServer(cwd, fn) {
+-  const client = await CodexAppServerClient.connect(cwd, { disableBroker: true });
++  let client = null;
+@@ -646,0 +644 @@ async function withDirectAppServer(cwd, fn) {
++    client = await CodexAppServerClient.connect(cwd, { env: options.env });
+@@ -649 +647 @@ async function withDirectAppServer(cwd, fn) {
+-    await client.close();
++    await client?.close().catch(() => {});
+@@ -661,2 +659,2 @@ function sourceContentSha256(sourcePath) {
+-function importedThreadIdForSource(sourcePath) {
+-  const ledgerPath = path.join(resolveCodexHome(), "external_agent_session_imports.json");
++function importedThreadIdForSource(sourcePath, codexHome = resolveCodexHome()) {
++  const ledgerPath = path.join(codexHome, "external_agent_session_imports.json");
+@@ -942,4 +940 @@ export async function getCodexAuthStatus(cwd, options = {}) {
+-    client = await CodexAppServerClient.connect(cwd, {
+-      env: options.env,
+-      reuseExistingBroker: true
+-    });
++    client = await CodexAppServerClient.connect(cwd, { env: options.env });
+@@ -1055 +1050 @@ export async function runAppServerReview(cwd, options = {}) {
+-  });
++  }, { reviewerJobId: options.reviewerJobId, env: options.env });
+@@ -1067 +1062 @@ export async function importExternalAgentSession(cwd, options = {}) {
+-  return withDirectAppServer(cwd, async (client) => {
++  return withAppServer(cwd, async (client) => {
+@@ -1080 +1075,4 @@ export async function importExternalAgentSession(cwd, options = {}) {
+-    const threadId = importedThreadIdForSource(options.sourcePath);
++    const threadId = importedThreadIdForSource(
++      options.sourcePath,
++      loadBrokerSession(cwd)?.codexHome ?? resolveCodexHome()
++    );
+@@ -1143 +1141 @@ export async function runAppServerTurn(cwd, options = {}) {
+-      { onProgress: options.onProgress }
++      { onProgress: options.onProgress, timeoutMs: options.timeoutMs }
+@@ -1159 +1157 @@ export async function runAppServerTurn(cwd, options = {}) {
+-  });
++  }, { reviewerJobId: options.reviewerJobId, env: options.env });
+diff --git a/plugins/codex/scripts/lib/runtime-home.mjs b/plugins/codex/scripts/lib/runtime-home.mjs
+new file mode 100644
+index 0000000..00ae521
+--- /dev/null
++++ b/plugins/codex/scripts/lib/runtime-home.mjs
+@@ -0,0 +1,102 @@
++import fs from "node:fs";
++import os from "node:os";
++import path from "node:path";
++
++import { resolveStateDir } from "./state.mjs";
++
++export const CANONICAL_CODEX_HOME_ENV = "CODEX_COMPANION_CANONICAL_CODEX_HOME";
++const REVIEWER_RUNTIMES_DIR = "reviewer-runtimes";
++const WORKSPACE_RUNTIME_DIR = "codex-home";
++const RUNTIME_MANIFEST = ".codex-companion-runtime.json";
++const MUTABLE_CONFIG_FILES = ["config.toml", "hooks.json"];
++const STATIC_ASSETS = ["AGENTS.md", "rules", "policy", "policies", "profiles"];
++
++function atomicWriteJson(filePath, value) {
++  const temporary = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
++  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
++  fs.renameSync(temporary, filePath);
++}
++
++export function resolveCanonicalCodexHome(env = process.env) {
++  return path.resolve(env[CANONICAL_CODEX_HOME_ENV] || env.CODEX_HOME || path.join(os.homedir(), ".codex"));
++}
++
++function linkIfPresent(source, destination) {
++  if (!fs.existsSync(source) || fs.existsSync(destination)) {
++    return;
++  }
++  const type = fs.statSync(source).isDirectory() && process.platform === "win32" ? "junction" : undefined;
++  fs.symlinkSync(source, destination, type);
++}
++
++function copyPrivateIfPresent(source, destination) {
++  if (!fs.existsSync(source) || fs.existsSync(destination)) {
++    return;
++  }
++  fs.copyFileSync(source, destination);
++  fs.chmodSync(destination, 0o600);
++}
++
++function seedRuntimeHome(runtimeHome, canonicalHome, kind) {
++  fs.mkdirSync(runtimeHome, { recursive: true, mode: 0o700 });
++
++  linkIfPresent(path.join(canonicalHome, "auth.json"), path.join(runtimeHome, "auth.json"));
++  for (const name of MUTABLE_CONFIG_FILES) {
++    copyPrivateIfPresent(path.join(canonicalHome, name), path.join(runtimeHome, name));
++  }
++  for (const name of STATIC_ASSETS) {
++    linkIfPresent(path.join(canonicalHome, name), path.join(runtimeHome, name));
++  }
++
++  atomicWriteJson(path.join(runtimeHome, RUNTIME_MANIFEST), {
++    version: 1,
++    kind,
++    canonicalHome,
++    runtimeHome
++  });
++  return runtimeHome;
++}
++
++function buildRuntimeEnv(runtimeHome, canonicalHome, env) {
++  return {
++    ...env,
++    CODEX_HOME: runtimeHome,
++    [CANONICAL_CODEX_HOME_ENV]: canonicalHome
++  };
++}
++
++export function createWorkspaceRuntime(cwd, options = {}) {
++  const env = options.env ?? process.env;
++  const canonicalHome = resolveCanonicalCodexHome(env);
++  const runtimeHome = path.join(resolveStateDir(cwd), WORKSPACE_RUNTIME_DIR);
++  seedRuntimeHome(runtimeHome, canonicalHome, "workspace");
++  return { canonicalHome, runtimeHome, env: buildRuntimeEnv(runtimeHome, canonicalHome, env) };
++}
++
++export function resolveReviewerRuntimeHome(cwd, jobId) {
++  if (!jobId || !/^[a-zA-Z0-9._-]+$/.test(jobId)) {
++    throw new Error("A safe reviewer job id is required for an isolated Codex runtime.");
++  }
++  return path.join(resolveStateDir(cwd), REVIEWER_RUNTIMES_DIR, jobId);
++}
++
++export function createReviewerRuntime(cwd, jobId, options = {}) {
++  const env = options.env ?? process.env;
++  const canonicalHome = resolveCanonicalCodexHome(env);
++  const runtimeHome = resolveReviewerRuntimeHome(cwd, jobId);
++  if (fs.existsSync(runtimeHome)) {
++    fs.rmSync(runtimeHome, { recursive: true, force: true });
++  }
++  seedRuntimeHome(runtimeHome, canonicalHome, "reviewer");
++  return { canonicalHome, runtimeHome, env: buildRuntimeEnv(runtimeHome, canonicalHome, env) };
++}
++
++export function cleanupReviewerRuntime(cwd, jobId) {
++  const runtimeHome = resolveReviewerRuntimeHome(cwd, jobId);
++  const runtimeRoot = path.join(resolveStateDir(cwd), REVIEWER_RUNTIMES_DIR);
++  const relative = path.relative(runtimeRoot, runtimeHome);
++  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
++    throw new Error("Refusing to remove a reviewer runtime outside its owned root.");
++  }
++  fs.rmSync(runtimeHome, { recursive: true, force: true });
++}
+diff --git a/plugins/codex/scripts/lib/state.mjs b/plugins/codex/scripts/lib/state.mjs
+index 2da2349..aeced17 100644
+--- a/plugins/codex/scripts/lib/state.mjs
++++ b/plugins/codex/scripts/lib/state.mjs
+@@ -13,0 +14,4 @@ const MAX_JOBS = 50;
++const LOCK_WAIT_MS = 10;
++const LOCK_TIMEOUT_MS = 5000;
++const LOCK_STALE_MS = 30000;
++const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
+@@ -28,0 +33,39 @@ function defaultState() {
++function atomicWriteFile(filePath, contents, mode = 0o600) {
++  const temporary = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
++  fs.writeFileSync(temporary, contents, { encoding: "utf8", mode });
++  fs.renameSync(temporary, filePath);
++}
++
++function withMetadataLock(lockDir, operation) {
++  fs.mkdirSync(path.dirname(lockDir), { recursive: true });
++  const deadline = Date.now() + LOCK_TIMEOUT_MS;
++  while (true) {
++    try {
++      fs.mkdirSync(lockDir);
++      break;
++    } catch (error) {
++      if (error?.code !== "EEXIST") {
++        throw error;
++      }
++      try {
++        if (Date.now() - fs.statSync(lockDir).mtimeMs > LOCK_STALE_MS) {
++          fs.rmSync(lockDir, { recursive: true, force: true });
++          continue;
++        }
++      } catch {
++        continue;
++      }
++      if (Date.now() >= deadline) {
++        throw new Error(`Timed out acquiring metadata lock ${lockDir}.`);
++      }
++      Atomics.wait(lockWaiter, 0, 0, LOCK_WAIT_MS);
++    }
++  }
++
++  try {
++    return operation();
++  } finally {
++    fs.rmSync(lockDir, { recursive: true, force: true });
++  }
++}
++
+@@ -40,0 +84,4 @@ export function resolveStateDir(cwd) {
++  return path.join(resolveStateRoot(), `${slug}-${hash}`);
++}
++
++export function resolveStateRoot() {
+@@ -42,2 +89,12 @@ export function resolveStateDir(cwd) {
+-  const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
+-  return path.join(stateRoot, `${slug}-${hash}`);
++  return pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
++}
++
++export function listStateDirs() {
++  const stateRoot = resolveStateRoot();
++  if (!fs.existsSync(stateRoot)) {
++    return [];
++  }
++  return fs
++    .readdirSync(stateRoot, { withFileTypes: true })
++    .filter((entry) => entry.isDirectory())
++    .map((entry) => path.join(stateRoot, entry.name));
+@@ -57,0 +115,52 @@ export function ensureStateDir(cwd) {
++export function migrateLegacyJobIndexInStateDir(stateDir, options = {}) {
++  const stateFile = path.join(stateDir, STATE_FILE_NAME);
++  if (!fs.existsSync(stateFile)) {
++    return;
++  }
++  let parsed;
++  try {
++    parsed = JSON.parse(fs.readFileSync(stateFile, "utf8"));
++  } catch {
++    return;
++  }
++  if (!Array.isArray(parsed.jobs)) {
++    return;
++  }
++  const jobsDir = path.join(stateDir, JOBS_DIR_NAME);
++  fs.mkdirSync(jobsDir, { recursive: true });
++  for (const job of parsed.jobs) {
++    if (job?.id) {
++      // Preserve richer payloads already stored in the per-job record while
++      // importing the legacy index metadata. Newer fields from the index win,
++      // but result/rendered data unique to the job file is never discarded.
++      const jobFile = path.join(jobsDir, `${job.id}.json`);
++      withMetadataLock(`${jobFile}.lock`, () => {
++        let existing = {};
++        if (fs.existsSync(jobFile)) {
++          try {
++            existing = readJobFile(jobFile);
++          } catch {
++            existing = {};
++          }
++        }
++        const migrated = {
++          ...existing,
++          ...job,
++          ...(job.workspaceRoot || options.workspaceRoot ? { workspaceRoot: job.workspaceRoot ?? options.workspaceRoot } : {})
++        };
++        atomicWriteFile(jobFile, `${JSON.stringify(migrated, null, 2)}\n`);
++      });
++    }
++  }
++  const { jobs: _legacyJobs, ...stateWithoutIndex } = parsed;
++  withMetadataLock(`${stateFile}.lock`, () => {
++    atomicWriteFile(stateFile, `${JSON.stringify(stateWithoutIndex, null, 2)}\n`);
++  });
++}
++
++function migrateLegacyJobIndex(cwd) {
++  migrateLegacyJobIndexInStateDir(resolveStateDir(cwd), {
++    workspaceRoot: resolveWorkspaceRoot(cwd)
++  });
++}
++
+@@ -61 +170 @@ export function loadState(cwd) {
+-    return defaultState();
++    return { ...defaultState(), jobs: listJobs(cwd) };
+@@ -64,0 +174 @@ export function loadState(cwd) {
++    migrateLegacyJobIndex(cwd);
+@@ -73 +183 @@ export function loadState(cwd) {
+-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : []
++      jobs: listJobs(cwd)
+@@ -76 +186 @@ export function loadState(cwd) {
+-    return defaultState();
++    return { ...defaultState(), jobs: listJobs(cwd) };
+@@ -93 +202,0 @@ export function saveState(cwd, state) {
+-  const previousJobs = loadState(cwd).jobs;
+@@ -101,2 +210 @@ export function saveState(cwd, state) {
+-    },
+-    jobs: nextJobs
++    }
+@@ -105,7 +213,5 @@ export function saveState(cwd, state) {
+-  const retainedIds = new Set(nextJobs.map((job) => job.id));
+-  for (const job of previousJobs) {
+-    if (retainedIds.has(job.id)) {
+-      continue;
+-    }
+-    removeJobFile(resolveJobFile(cwd, job.id));
+-    removeFileIfExists(job.logFile);
++  withMetadataLock(`${resolveStateFile(cwd)}.lock`, () => {
++    atomicWriteFile(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`);
++  });
++  for (const job of nextJobs) {
++    writeJobFile(cwd, job.id, job);
+@@ -113,3 +219,2 @@ export function saveState(cwd, state) {
+-
+-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+-  return nextState;
++  pruneJobRecords(cwd);
++  return { ...nextState, jobs: listJobs(cwd) };
+@@ -130 +235,5 @@ export function upsertJob(cwd, jobPatch) {
+-  return updateState(cwd, (state) => {
++  if (!jobPatch?.id) {
++    throw new Error("A job id is required.");
++  }
++  const jobFile = resolveJobFile(cwd, jobPatch.id);
++  return withMetadataLock(`${jobFile}.lock`, () => {
+@@ -132,8 +241,7 @@ export function upsertJob(cwd, jobPatch) {
+-    const existingIndex = state.jobs.findIndex((job) => job.id === jobPatch.id);
+-    if (existingIndex === -1) {
+-      state.jobs.unshift({
+-        createdAt: timestamp,
+-        updatedAt: timestamp,
+-        ...jobPatch
+-      });
+-      return;
++    let existing = {};
++    if (fs.existsSync(jobFile)) {
++      try {
++        existing = readJobFile(jobFile);
++      } catch {
++        existing = {};
++      }
+@@ -141,2 +249,3 @@ export function upsertJob(cwd, jobPatch) {
+-    state.jobs[existingIndex] = {
+-      ...state.jobs[existingIndex],
++    const next = {
++      createdAt: existing.createdAt ?? timestamp,
++      ...existing,
+@@ -145,0 +255,2 @@ export function upsertJob(cwd, jobPatch) {
++    atomicWriteFile(jobFile, `${JSON.stringify(next, null, 2)}\n`);
++    return next;
+@@ -150 +261,14 @@ export function listJobs(cwd) {
+-  return loadState(cwd).jobs;
++  ensureStateDir(cwd);
++  migrateLegacyJobIndex(cwd);
++  const jobs = [];
++  for (const name of fs.readdirSync(resolveJobsDir(cwd))) {
++    if (!name.endsWith(".json")) {
++      continue;
++    }
++    try {
++      jobs.push(readJobFile(path.join(resolveJobsDir(cwd), name)));
++    } catch {
++      // A crashed writer cannot poison the remaining independent job records.
++    }
++  }
++  return pruneJobs(jobs);
+@@ -169 +293,3 @@ export function writeJobFile(cwd, jobId, payload) {
+-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
++  withMetadataLock(`${jobFile}.lock`, () => {
++    atomicWriteFile(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
++  });
+@@ -182,0 +309,36 @@ function removeJobFile(jobFile) {
++export function removeJob(cwd, jobId) {
++  return removeJobFromStateDir(resolveStateDir(cwd), jobId);
++}
++
++export function removeJobFromStateDir(stateDir, jobId) {
++  const jobsDir = path.join(stateDir, JOBS_DIR_NAME);
++  fs.mkdirSync(jobsDir, { recursive: true });
++  const jobFile = path.join(jobsDir, `${jobId}.json`);
++  withMetadataLock(`${jobFile}.lock`, () => {
++    let job = null;
++    if (fs.existsSync(jobFile)) {
++      try {
++        job = readJobFile(jobFile);
++      } catch {
++        job = null;
++      }
++    }
++    removeJobFile(jobFile);
++    removeFileIfExists(job?.logFile ?? path.join(jobsDir, `${jobId}.log`));
++  });
++}
++
++function pruneJobRecords(cwd) {
++  const jobs = listJobs(cwd);
++  const retainedIds = new Set(jobs.map((job) => job.id));
++  for (const name of fs.readdirSync(resolveJobsDir(cwd))) {
++    if (!name.endsWith(".json")) {
++      continue;
++    }
++    const jobId = name.slice(0, -".json".length);
++    if (!retainedIds.has(jobId)) {
++      removeJob(cwd, jobId);
++    }
++  }
++}
++
+diff --git a/plugins/codex/scripts/lib/tracked-jobs.mjs b/plugins/codex/scripts/lib/tracked-jobs.mjs
+index 9028690..2cfd3be 100644
+--- a/plugins/codex/scripts/lib/tracked-jobs.mjs
++++ b/plugins/codex/scripts/lib/tracked-jobs.mjs
+@@ -103,11 +102,0 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
+-
+-    const jobFile = resolveJobFile(workspaceRoot, jobId);
+-    if (!fs.existsSync(jobFile)) {
+-      return;
+-    }
+-
+-    const storedJob = readJobFile(jobFile);
+-    writeJobFile(workspaceRoot, jobId, {
+-      ...storedJob,
+-      ...patch
+-    });
+diff --git a/plugins/codex/scripts/session-lifecycle-hook.mjs b/plugins/codex/scripts/session-lifecycle-hook.mjs
+index 778571e..e601a80 100644
+--- a/plugins/codex/scripts/session-lifecycle-hook.mjs
++++ b/plugins/codex/scripts/session-lifecycle-hook.mjs
+@@ -3,0 +4 @@ import fs from "node:fs";
++import path from "node:path";
+@@ -7,10 +8,3 @@ import { terminateProcessTree } from "./lib/process.mjs";
+-import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
+-import {
+-  clearBrokerSession,
+-  LOG_FILE_ENV,
+-  loadBrokerSession,
+-  PID_FILE_ENV,
+-  sendBrokerShutdown,
+-  teardownBrokerSession
+-} from "./lib/broker-lifecycle.mjs";
+-import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
++import { releaseBrokerOwner } from "./lib/broker-lifecycle.mjs";
++import { listStateDirs, migrateLegacyJobIndexInStateDir, removeJobFromStateDir } from "./lib/state.mjs";
++import { cleanupReviewerRuntime } from "./lib/runtime-home.mjs";
+@@ -18 +11,0 @@ import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
+-import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+@@ -42,2 +35,2 @@ function appendEnvVar(name, value) {
+-function cleanupSessionJobs(cwd, sessionId) {
+-  if (!cwd || !sessionId) {
++function cleanupSessionJobs(sessionId) {
++  if (!sessionId) {
+@@ -46,16 +39,4 @@ function cleanupSessionJobs(cwd, sessionId) {
+-
+-  const workspaceRoot = resolveWorkspaceRoot(cwd);
+-  const stateFile = resolveStateFile(workspaceRoot);
+-  if (!fs.existsSync(stateFile)) {
+-    return;
+-  }
+-
+-  const state = loadState(workspaceRoot);
+-  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
+-  if (removedJobs.length === 0) {
+-    return;
+-  }
+-
+-  for (const job of removedJobs) {
+-    const stillRunning = job.status === "queued" || job.status === "running";
+-    if (!stillRunning) {
++  for (const stateDir of listStateDirs()) {
++    migrateLegacyJobIndexInStateDir(stateDir);
++    const jobsDir = path.join(stateDir, "jobs");
++    if (!fs.existsSync(jobsDir)) {
+@@ -64,4 +45,24 @@ function cleanupSessionJobs(cwd, sessionId) {
+-    try {
+-      terminateProcessTree(job.pid ?? Number.NaN);
+-    } catch {
+-      // Ignore teardown failures during session shutdown.
++    for (const name of fs.readdirSync(jobsDir)) {
++      if (!name.endsWith(".json")) {
++        continue;
++      }
++      let job;
++      try {
++        job = JSON.parse(fs.readFileSync(path.join(jobsDir, name), "utf8"));
++      } catch {
++        continue;
++      }
++      if (job.sessionId !== sessionId) {
++        continue;
++      }
++      if (job.status === "queued" || job.status === "running") {
++        try {
++          terminateProcessTree(job.pid ?? Number.NaN);
++        } catch {
++          // Ignore teardown failures during session shutdown.
++        }
++      }
++      if (job.kind === "plan-review" && job.workspaceRoot) {
++        cleanupReviewerRuntime(job.workspaceRoot, job.id);
++      }
++      removeJobFromStateDir(stateDir, job.id);
+@@ -70,5 +70,0 @@ function cleanupSessionJobs(cwd, sessionId) {
+-
+-  saveState(workspaceRoot, {
+-    ...state,
+-    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
+-  });
+@@ -84,30 +80,3 @@ async function handleSessionEnd(input) {
+-  const cwd = input.cwd || process.cwd();
+-  const brokerSession =
+-    loadBrokerSession(cwd) ??
+-    (process.env[BROKER_ENDPOINT_ENV]
+-      ? {
+-          endpoint: process.env[BROKER_ENDPOINT_ENV],
+-          pidFile: process.env[PID_FILE_ENV] ?? null,
+-          logFile: process.env[LOG_FILE_ENV] ?? null
+-        }
+-      : null);
+-  const brokerEndpoint = brokerSession?.endpoint ?? null;
+-  const pidFile = brokerSession?.pidFile ?? null;
+-  const logFile = brokerSession?.logFile ?? null;
+-  const sessionDir = brokerSession?.sessionDir ?? null;
+-  const pid = brokerSession?.pid ?? null;
+-
+-  if (brokerEndpoint) {
+-    await sendBrokerShutdown(brokerEndpoint);
+-  }
+-
+-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+-  teardownBrokerSession({
+-    endpoint: brokerEndpoint,
+-    pidFile,
+-    logFile,
+-    sessionDir,
+-    pid,
+-    killProcess: terminateProcessTree
+-  });
+-  clearBrokerSession(cwd);
++  const sessionId = input.session_id || process.env[SESSION_ID_ENV];
++  cleanupSessionJobs(sessionId);
++  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
+diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
+index c34b060..9787be0 100644
+--- a/tests/commands.test.mjs
++++ b/tests/commands.test.mjs
+@@ -205 +205 @@ test("internal docs use task terminology for rescue runs", () => {
+-test("hooks keep session-end cleanup and stop gating enabled", () => {
++test("hooks keep session lifecycle cleanup without a Stop review gate", () => {
+@@ -209 +209,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
+-  assert.match(source, /stop-review-gate-hook\.mjs/);
++  assert.doesNotMatch(source, /stop-review-gate-hook\.mjs/);
++  assert.doesNotMatch(source, /"Stop"/);
+@@ -217 +218 @@ test("setup command can offer Codex install and still points users to codex logi
+-  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]'/);
++  assert.match(setup, /argument-hint:\s*'\[--disable-review-gate\]'/);
+@@ -223 +223,0 @@ test("setup command can offer Codex install and still points users to codex logi
+-  assert.match(readme, /\/codex:setup --enable-review-gate/);
+diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
+index f83c96a..fdfb12c 100644
+--- a/tests/fake-codex-fixture.mjs
++++ b/tests/fake-codex-fixture.mjs
+@@ -274,0 +275 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
++bootState.lastCodexHome = process.env.CODEX_HOME || null;
+@@ -314,0 +316,2 @@ rl.on("line", (line) => {
++        state.lastThreadStart = message.params;
++        saveState(state);
+diff --git a/tests/isolation.test.mjs b/tests/isolation.test.mjs
+new file mode 100644
+index 0000000..3d8b555
+--- /dev/null
++++ b/tests/isolation.test.mjs
+@@ -0,0 +1,111 @@
++import fs from "node:fs";
++import path from "node:path";
++import test from "node:test";
++import assert from "node:assert/strict";
++import { spawn } from "node:child_process";
++
++import { initGitRepo, makeTempDir } from "./helpers.mjs";
++import {
++  cleanupReviewerRuntime,
++  createReviewerRuntime,
++  createWorkspaceRuntime
++} from "../plugins/codex/scripts/lib/runtime-home.mjs";
++import { listJobs, resolveStateFile } from "../plugins/codex/scripts/lib/state.mjs";
++
++async function withPluginEnvironment(operation) {
++  const previous = {
++    CODEX_HOME: process.env.CODEX_HOME,
++    CLAUDE_PLUGIN_DATA: process.env.CLAUDE_PLUGIN_DATA,
++    CODEX_COMPANION_CANONICAL_CODEX_HOME: process.env.CODEX_COMPANION_CANONICAL_CODEX_HOME
++  };
++  const canonicalHome = makeTempDir();
++  const pluginData = makeTempDir();
++  process.env.CODEX_HOME = canonicalHome;
++  process.env.CLAUDE_PLUGIN_DATA = pluginData;
++  delete process.env.CODEX_COMPANION_CANONICAL_CODEX_HOME;
++  try {
++    return await operation({ canonicalHome, pluginData });
++  } finally {
++    for (const [name, value] of Object.entries(previous)) {
++      if (value == null) {
++        delete process.env[name];
++      } else {
++        process.env[name] = value;
++      }
++    }
++  }
++}
++
++function waitForChild(child) {
++  return new Promise((resolve, reject) => {
++    let stderr = "";
++    child.stderr.on("data", (chunk) => {
++      stderr += chunk;
++    });
++    child.on("error", reject);
++    child.on("exit", (code) => {
++      if (code === 0) {
++        resolve();
++      } else {
++        reject(new Error(stderr || `child exited ${code}`));
++      }
++    });
++  });
++}
++
++test("workspace and reviewer runtimes isolate every mutable Codex path", async () => {
++  await withPluginEnvironment(({ canonicalHome }) => {
++    const workspace = makeTempDir();
++    initGitRepo(workspace);
++    fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{\"token\":\"shared\"}\n");
++    fs.writeFileSync(path.join(canonicalHome, "config.toml"), "model = \"canonical\"\n");
++    fs.writeFileSync(path.join(canonicalHome, "hooks.json"), "{}\n");
++    fs.mkdirSync(path.join(canonicalHome, "rules"));
++
++    const persistent = createWorkspaceRuntime(workspace);
++    const persistentAgain = createWorkspaceRuntime(workspace);
++    assert.equal(persistent.runtimeHome, persistentAgain.runtimeHome);
++    assert.equal(fs.lstatSync(path.join(persistent.runtimeHome, "auth.json")).isSymbolicLink(), true);
++    assert.equal(fs.lstatSync(path.join(persistent.runtimeHome, "rules")).isSymbolicLink(), true);
++    assert.equal(fs.lstatSync(path.join(persistent.runtimeHome, "config.toml")).isSymbolicLink(), false);
++
++    const first = createReviewerRuntime(workspace, "review-one");
++    const second = createReviewerRuntime(workspace, "review-two");
++    assert.notEqual(first.runtimeHome, second.runtimeHome);
++    assert.notEqual(first.runtimeHome, persistent.runtimeHome);
++    fs.writeFileSync(path.join(first.runtimeHome, "config.toml"), "model = \"reviewer\"\n");
++    assert.equal(fs.readFileSync(path.join(canonicalHome, "config.toml"), "utf8"), "model = \"canonical\"\n");
++    assert.equal(fs.readFileSync(path.join(second.runtimeHome, "config.toml"), "utf8"), "model = \"canonical\"\n");
++
++    cleanupReviewerRuntime(workspace, "review-one");
++    cleanupReviewerRuntime(workspace, "review-two");
++    assert.equal(fs.existsSync(first.runtimeHome), false);
++    assert.equal(fs.existsSync(second.runtimeHome), false);
++    assert.equal(fs.existsSync(persistent.runtimeHome), true);
++  });
++});
++
++test("concurrent jobs use independent atomic records without a shared job index", async () => {
++  await withPluginEnvironment(async ({ pluginData }) => {
++    const workspace = makeTempDir();
++    initGitRepo(workspace);
++    const stateModule = new URL("../plugins/codex/scripts/lib/state.mjs", import.meta.url).href;
++    const children = Array.from({ length: 24 }, (_, index) => {
++      const id = `parallel-${index}`;
++      const source = `import { upsertJob } from ${JSON.stringify(stateModule)}; upsertJob(${JSON.stringify(workspace)}, { id: ${JSON.stringify(id)}, status: \"running\", workspaceRoot: ${JSON.stringify(workspace)} });`;
++      return waitForChild(
++        spawn(process.execPath, ["--input-type=module", "--eval", source], {
++          env: { ...process.env, CLAUDE_PLUGIN_DATA: pluginData },
++          stdio: ["ignore", "ignore", "pipe"]
++        })
++      );
++    });
++
++    await Promise.all(children);
++    const jobs = listJobs(workspace);
++    assert.equal(jobs.length, 24);
++    assert.equal(new Set(jobs.map((job) => job.id)).size, 24);
++    const stateFile = resolveStateFile(workspace);
++    assert.equal(fs.existsSync(stateFile), false);
++  });
++});
+diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
+index 8f27683..b0a4ff8 100644
+--- a/tests/runtime.test.mjs
++++ b/tests/runtime.test.mjs
+@@ -11 +11,2 @@ import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/l
+-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
++import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
++import { listJobs, resolveJobFile, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+@@ -30,0 +32,20 @@ async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
++function runChild(command, args, options = {}) {
++  return new Promise((resolve, reject) => {
++    const child = spawn(command, args, {
++      cwd: options.cwd,
++      env: options.env,
++      stdio: ["ignore", "pipe", "pipe"]
++    });
++    let stdout = "";
++    let stderr = "";
++    child.stdout.on("data", (chunk) => {
++      stdout += chunk;
++    });
++    child.stderr.on("data", (chunk) => {
++      stderr += chunk;
++    });
++    child.on("error", reject);
++    child.on("exit", (status) => resolve({ status, stdout, stderr }));
++  });
++}
++
+@@ -32,0 +54 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
++  const workspace = makeTempDir();
+@@ -36 +58 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
+-    cwd: ROOT,
++    cwd: workspace,
+@@ -44 +66 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
+-  assert.equal(payload.sessionRuntime.mode, "direct");
++  assert.equal(payload.sessionRuntime.mode, "shared");
+@@ -48,0 +71 @@ test("setup is ready without npm when Codex is already installed and authenticat
++  const workspace = makeTempDir();
+@@ -53 +76 @@ test("setup is ready without npm when Codex is already installed and authenticat
+-    cwd: ROOT,
++    cwd: workspace,
+@@ -69,0 +93 @@ test("setup trusts app-server API key auth even when login status alone would fa
++  const workspace = makeTempDir();
+@@ -73 +97 @@ test("setup trusts app-server API key auth even when login status alone would fa
+-    cwd: ROOT,
++    cwd: workspace,
+@@ -87,0 +112 @@ test("setup is ready when the active provider does not require OpenAI login", ()
++  const workspace = makeTempDir();
+@@ -91 +116 @@ test("setup is ready when the active provider does not require OpenAI login", ()
+-    cwd: ROOT,
++    cwd: workspace,
+@@ -105,0 +131 @@ test("setup treats custom providers with app-server-ready config as ready", () =
++  const workspace = makeTempDir();
+@@ -109 +135 @@ test("setup treats custom providers with app-server-ready config as ready", () =
+-    cwd: ROOT,
++    cwd: workspace,
+@@ -123,0 +150 @@ test("setup reports not ready when app-server config read fails", () => {
++  const workspace = makeTempDir();
+@@ -127 +154 @@ test("setup reports not ready when app-server config read fails", () => {
+-    cwd: ROOT,
++    cwd: workspace,
+@@ -473,3 +500,2 @@ test("review logs reasoning summaries and review output to the job log", () => {
+-  const stateDir = resolveStateDir(repo);
+-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+-  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
++  const [job] = listJobs(repo);
++  const log = fs.readFileSync(job.logFile, "utf8");
+@@ -765,0 +792,74 @@ test("task --fresh is treated as routing control and does not leak into the prom
++test("reviewer tasks run foreground in a fresh read-only runtime and clean it up", () => {
++  const repo = makeTempDir();
++  const binDir = makeTempDir();
++  const canonicalHome = makeTempDir();
++  const statePath = path.join(binDir, "fake-codex-state.json");
++  installFakeCodex(binDir);
++  initGitRepo(repo);
++  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
++  run("git", ["add", "README.md"], { cwd: repo });
++  run("git", ["commit", "-m", "init"], { cwd: repo });
++  fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{}\n");
++  fs.writeFileSync(path.join(canonicalHome, "config.toml"), "model = \"canonical\"\n");
++
++  const result = run(
++    "node",
++    [SCRIPT, "task", "--fresh", "--reviewer", "--timeout-ms", "5000", "--json", "review the plan"],
++    {
++      cwd: repo,
++      env: { ...buildEnv(binDir), CODEX_HOME: canonicalHome }
++    }
++  );
++
++  assert.equal(result.status, 0, result.stderr);
++  const [job] = listJobs(repo);
++  assert.equal(job.kind, "plan-review");
++  assert.equal(job.status, "completed");
++  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
++  assert.equal(fakeState.lastThreadStart.approvalPolicy, "never");
++  assert.equal(fakeState.lastThreadStart.sandbox, "read-only");
++  assert.equal(fakeState.lastThreadStart.ephemeral, true);
++  assert.equal(fakeState.lastCodexHome, resolveReviewerRuntimeHome(repo, job.id));
++  assert.notEqual(fakeState.lastCodexHome, canonicalHome);
++  assert.equal(fs.existsSync(fakeState.lastCodexHome), false);
++  assert.equal(fs.readFileSync(path.join(canonicalHome, "config.toml"), "utf8"), "model = \"canonical\"\n");
++});
++
++test("parallel reviewers in one worktree receive distinct mutable runtimes", async () => {
++  const repo = makeTempDir();
++  const firstBin = makeTempDir();
++  const secondBin = makeTempDir();
++  const canonicalHome = makeTempDir();
++  installFakeCodex(firstBin);
++  installFakeCodex(secondBin);
++  initGitRepo(repo);
++  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
++  run("git", ["add", "README.md"], { cwd: repo });
++  run("git", ["commit", "-m", "init"], { cwd: repo });
++  fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{}\n");
++  fs.writeFileSync(path.join(canonicalHome, "config.toml"), "model = \"canonical\"\n");
++
++  const args = [SCRIPT, "task", "--fresh", "--reviewer", "--timeout-ms", "5000", "--json", "review the plan"];
++  const [first, second] = await Promise.all([
++    runChild(process.execPath, args, {
++      cwd: repo,
++      env: { ...buildEnv(firstBin), CODEX_HOME: canonicalHome }
++    }),
++    runChild(process.execPath, args, {
++      cwd: repo,
++      env: { ...buildEnv(secondBin), CODEX_HOME: canonicalHome }
++    })
++  ]);
++
++  assert.equal(first.status, 0, first.stderr);
++  assert.equal(second.status, 0, second.stderr);
++  const jobs = listJobs(repo).filter((job) => job.kind === "plan-review");
++  assert.equal(jobs.length, 2);
++  const firstState = JSON.parse(fs.readFileSync(path.join(firstBin, "fake-codex-state.json"), "utf8"));
++  const secondState = JSON.parse(fs.readFileSync(path.join(secondBin, "fake-codex-state.json"), "utf8"));
++  assert.notEqual(firstState.lastCodexHome, secondState.lastCodexHome);
++  assert.equal(fs.existsSync(firstState.lastCodexHome), false);
++  assert.equal(fs.existsSync(secondState.lastCodexHome), false);
++  assert.equal(loadBrokerSession(repo), null);
++});
++
+@@ -802,3 +902,2 @@ test("task logs reasoning summaries and assistant messages to the job log", () =
+-  const stateDir = resolveStateDir(repo);
+-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+-  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
++  const [job] = listJobs(repo);
++  const log = fs.readFileSync(job.logFile, "utf8");
+@@ -826,3 +925,2 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
+-  const stateDir = resolveStateDir(repo);
+-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+-  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
++  const [job] = listJobs(repo);
++  const log = fs.readFileSync(job.logFile, "utf8");
+@@ -1627,2 +1725 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
+-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+-  const cancelled = state.jobs.find((job) => job.id === "task-live");
++  const cancelled = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+@@ -1688,2 +1785,2 @@ test("cancel without a job id ignores active jobs from other Claude sessions", (
+-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+-  assert.equal(state.jobs[0].status, "running");
++  const stored = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-other"), "utf8"));
++  assert.equal(stored.status, "running");
+@@ -1736,2 +1833,2 @@ test("cancel with a job id can still target an active job from another Claude se
+-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+-  assert.equal(state.jobs[0].status, "cancelled");
++  const stored = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-other"), "utf8"));
++  assert.equal(stored.status, "cancelled");
+@@ -1761 +1857,0 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+-  const stateDir = resolveStateDir(repo);
+@@ -1763,2 +1859 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+-    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+-    const job = state.jobs.find((candidate) => candidate.id === jobId);
++    const job = JSON.parse(fs.readFileSync(resolveJobFile(repo, jobId), "utf8"));
+@@ -1920,3 +2015,2 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+-  assert.deepEqual(state.jobs.map((job) => job.id), ["review-other"]);
+-  const otherJob = state.jobs[0];
++  const [otherJob] = listJobs(repo);
++  assert.deepEqual(listJobs(repo).map((job) => job.id), ["review-other"]);
+@@ -1926 +2020 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+-test("stop hook runs a stop-time review task and blocks on findings when the review gate is enabled", () => {
++test.skip("upstream-only: stop hook blocks on findings when the review gate is enabled", () => {
+@@ -2039 +2133,11 @@ test("stop hook logs running tasks to stderr without blocking when the review ga
+-test("stop hook allows the stop when the review gate is enabled and the stop-time review task is clean", () => {
++test("setup refuses to enable the automatic Stop review gate", () => {
++  const workspace = makeTempDir();
++  const result = run(process.execPath, [SCRIPT, "setup", "--enable-review-gate", "--json"], {
++    cwd: workspace
++  });
++
++  assert.equal(result.status, 1);
++  assert.match(result.stderr, /automatic Stop review gate is disabled/i);
++});
++
++test.skip("upstream-only: stop hook allows a clean result when the review gate is enabled", () => {
+@@ -2064 +2168 @@ test("stop hook allows the stop when the review gate is enabled and the stop-tim
+-test("stop hook does not block when Codex is unavailable even if the review gate is enabled", () => {
++test.skip("upstream-only: stop hook tolerates unavailable Codex when the review gate is enabled", () => {
+@@ -2091 +2195 @@ test("stop hook does not block when Codex is unavailable even if the review gate
+-test("stop hook runs the actual task when auth status looks stale", () => {
++test.skip("upstream-only: stop hook refreshes stale authentication", () => {
+@@ -2258 +2362 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
+-  assert.equal(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
++  assert.notEqual(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
+diff --git a/tests/state.test.mjs b/tests/state.test.mjs
+index 0f8f57c..f4c286c 100644
+--- a/tests/state.test.mjs
++++ b/tests/state.test.mjs
+@@ -8 +8 @@ import { makeTempDir } from "./helpers.mjs";
+-import { resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
++import { listJobs, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
+@@ -94 +94,3 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
+-  assert.equal(savedState.jobs.length, 50);
++  assert.equal("jobs" in savedState, false);
++  const savedJobs = listJobs(workspace);
++  assert.equal(savedJobs.length, 50);
+@@ -96 +98 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
+-    savedState.jobs.map((job) => job.id),
++    savedJobs.map((job) => job.id),

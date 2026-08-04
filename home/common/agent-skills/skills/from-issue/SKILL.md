@@ -17,7 +17,9 @@ This skill is project-agnostic. Before acting, resolve project-specific values:
 3. Defaults when neither config nor detection yields a value: integrationBranch=main, defaultBranch=main, commit.coAuthoredBy=true, unsetGithubToken=false, specDir=.claude/specs, planDir=.claude/plans.
 4. Degrade gracefully: any configured-but-absent doc path, sibling skill, or hints file is skipped silently — never read a file that does not exist, never hard-fail on a missing optional binding.
 
-Keys this skill uses: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,adrDir,standards,architecture,gitWorktrees}`, `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`.
+Keys this skill uses: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,adrDir,standards,architecture,gitWorktrees}`, `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`, `codex.planReview{enabled,focus}`.
+
+`codex.planReview.enabled` defaults to `true` when absent. Set it to `false` to restore the fresh native reviewer for Phase 5. `codex.planReview.focus` defaults to `null`; when set, pass its project-specific emphasis to the reviewer in addition to `projectHints`. Existing project configurations require no migration.
 
 Throughout this skill, `<tracker-cli>` means the resolved `issueTracker.cli` (default `gh`), `<integration-branch>` the resolved `integrationBranch` (default `main`), and `<default-branch>` the resolved `defaultBranch` (default `main`). When `issueTracker.kind=none`, skip every issue/PR-linkage step and operate on the branch alone (a "tracker URL" the user gives you is just a label).
 
@@ -29,7 +31,7 @@ Throughout this skill, `<tracker-cli>` means the resolved `issueTracker.cli` (de
 2. Brainstorm (skill)    → <specDir>/<date>-<topic>-design.md
 3. Grill (skill)         → spec refinements + context-doc / ADR updates
 4. Plan (skill)          → <planDir>/<date>-<feature>.md
-5. Standards review      → fresh subagent grades plan vs. the project's coding bar
+5. Standards review      → independent Codex plan review, native fallback, or mechanical self-grade
 6. Execute (skill)       → subagent-driven-development
 7. Ship (skill)          → ship-issue: merge integration branch, PR, review, CI, merge, cleanup
 ```
@@ -46,7 +48,7 @@ The reason is failure cost: a wrong spec wastes one revision; a wrong plan waste
 
 ## Doc-grounded questions
 
-During Phase 1 and Phase 2, ground in the project's docs before asking the user clarifying questions or presenting option sets. If the `doc-grounded-questions` skill is available, invoke it (via the Skill tool) — it forces the agent to read the context doc (`docPaths.context`), the relevant ADRs (`docPaths.adrDir`), and the coding-standards doc (`docPaths.standards`) first, so questions surface real unknowns instead of relitigating documented decisions. **If that skill is not available, fall back inline:** read whichever of those configured doc paths exist (skip any that don't), then form the question. Either way the grounding happens before the question.
+During Phase 2 and Phase 3, ground in the project's docs before asking the user clarifying questions or presenting option sets. If the `doc-grounded-questions` skill is available, invoke it (via the Skill tool) — it forces the agent to read the context doc (`docPaths.context`), the relevant ADRs (`docPaths.adrDir`), and the coding-standards doc (`docPaths.standards`) first, so questions surface real unknowns instead of relitigating documented decisions. **If that skill is not available, fall back inline:** read whichever of those configured doc paths exist (skip any that don't), then form the question. Either way the grounding happens before the question.
 
 In autonomous mode, the same procedure drives the self-answer step — you ground in the docs first, then answer the question yourself rather than passing it to the user.
 
@@ -56,7 +58,7 @@ If `unsetGithubToken` is true (config), `unset GITHUB_TOKEN` (or `env -u GITHUB_
 
 ## Skill tool invocations
 
-Every sub-skill referenced in this flow — `superpowers:using-git-worktrees`, `superpowers:brainstorming`, `grill-with-docs`, `superpowers:writing-plans`, `doc-grounded-questions`, `superpowers:subagent-driven-development`, `ship-issue` — goes through the `Skill` tool when available, not paraphrased inline. The Skill tool fires the loader and the harness records the invocation; reading procedures from memory skips both, and the skill's progressive-disclosure resources never get pulled in. **When a referenced sibling skill is not installed**, fall back to the inline behavior named in that phase (folding grill into the brainstorm, clarifying without the doc-grounding skill, delivering via plain git/PR steps); don't hard-fail on a missing sibling.
+Every sub-skill referenced in this flow — `superpowers:using-git-worktrees`, `superpowers:brainstorming`, `grill-with-docs`, `superpowers:writing-plans`, `doc-grounded-questions`, `codex-collaboration`, `superpowers:subagent-driven-development`, `ship-issue` — goes through the `Skill` tool when available, not paraphrased inline. The Skill tool fires the loader and the harness records the invocation; reading procedures from memory skips both, and the skill's progressive-disclosure resources never get pulled in. `codex-collaboration` is intentionally Claude-only and non-user-invocable; native Codex sessions therefore use the Phase-5 native reviewer fallback. **When a referenced sibling skill is not installed**, fall back to the inline behavior named in that phase (folding grill into the brainstorm, clarifying without the doc-grounding skill, reviewing with a fresh native agent, delivering via plain git/PR steps); don't hard-fail on a missing sibling.
 
 `doc-grounded-questions` in particular is a hard gate when present: every decision point that would normally surface a clarifying question to the user (or self-answer one in `--auto`) requires a Skill-tool firing this turn. Don't skip because "you already read it" — re-invoke per decision so the body re-injects up-to-date pointers and binds the *specific* decision in front of you. If the skill is absent, re-read the configured doc paths per decision instead.
 
@@ -95,9 +97,9 @@ Whenever a phase or sub-skill would normally ask the user a clarifying question,
 Autonomous mode is "trust the agent end-to-end" — there are no checkpoint gates. But two content-level stops from the existing flow still apply, because they are judgments about the issue itself, not user-approval gates:
 
 - **Phase 0 wrong-issue-type stop.** If the issue is multiple issues bundled, a duplicate, a pure question, or otherwise not implementable, surface that finding and stop. Auto-mode means "decide without asking," not "implement something incoherent."
-- **Phase 4 blocking standards findings.** Apply blocking fixes to the plan inline (as the interactive flow already does). If a blocker can't be fixed by editing the plan — it indicates the spec or the issue scope is wrong — back up the relevant phase, redo it, and log the loop in `Auto-resolved decisions`.
+- **Phase 5 blocking standards findings.** Apply blocking fixes to the plan inline (as the interactive flow already does). If a blocker can't be fixed by editing the plan — it indicates the spec or the issue scope is wrong — back up the relevant phase, redo it, and log the loop in `Auto-resolved decisions`.
 
-Phase 4 should-fix findings in `--auto`: apply inline by default and log them in `Auto-resolved decisions` with the reviewer's rationale. Exception: should-fixes implying a scope change (e.g. "the plan covers feature A but the spec promised A+B") — back up to the relevant phase rather than scope-creep the plan.
+Phase 5 should-fix findings in `--auto`: apply inline by default and log them in `Auto-resolved decisions` with the reviewer's rationale. Exception: should-fixes implying a scope change (e.g. "the plan covers feature A but the spec promised A+B") — back up to the relevant phase rather than scope-creep the plan.
 
 Everything else — option choices, scope boundary calls, ADR phrasing, plan task granularity — you decide and log.
 
@@ -139,17 +141,17 @@ This check is cheap (one tracker call, one `git` call) and prevents the most exp
    - **Documented constraints** — context-doc terms, ADRs, coding-standards sections that bind the work
    - **Open questions** for the user
    - **Suggested scope boundary** — what's in, what's deliberately out
-   - **Scope-size estimate** — rough file count + lines touched (see "Tiny-scope branch" below)
+   - **Scope-size estimate** — rough file count + lines touched, and whether the mechanical-only shortcut below applies
 
 If the issue is actually multiple issues bundled, stop and suggest `to-issues` to break it up first. If it's a question or a duplicate, report that and stop.
 
-**The Open questions section is mandatory even in `--auto`.** Self-answering happens in the spec's `## Auto-resolved decisions`, *not* by silently dropping the section from the Phase-0 note. The Phase-0 enumeration is the audit point: the spec's resolutions are downstream of it. If you can't think of any open questions, write "None — Phase 1 will surface anything missed" rather than omitting the bullet. Reviewers reading the transcript later look for this section to verify the agent actually thought about what was unknown.
+**The Open questions section is mandatory even in `--auto`.** Self-answering happens in the spec's `## Auto-resolved decisions`, *not* by silently dropping the section from the Phase-0 note. The Phase-0 enumeration is the audit point: the spec's resolutions are downstream of it. If you can't think of any open questions, write "None — Phase 2 will surface anything missed" rather than omitting the bullet. Reviewers reading the transcript later look for this section to verify the agent actually thought about what was unknown.
 
-### Tiny-scope branch
+### Mechanical-only shortcut
 
-If the scope-size estimate is **≤2 files OR pure deletion OR <50 lines net**, declare the issue as "tiny-scope" in the investigation note. Downstream phases lean: Phase 4 (standards review) is a self-grade against the coding bar rather than a subagent dispatch; Phase 6 dispatches a single implementer+reviewer rather than per-task chains. The full pipeline still runs — brainstorm, grill, plan, ship — just without the per-task ceremony that adds no signal for trivial diffs. Mechanical-deletion plans don't need TDD framing; say so in the plan and skip the manufactured RED step.
+Declare the issue `mechanical-only` only when the entire planned change is deletion or renaming and has **no** behavioral, configuration, interface, generated-output, or semantic-documentation effect. File count and line count alone never qualify a change. Downstream phases lean: Phase 5 self-grades the plan against the same review contract; Phase 6 dispatches one implementer+reviewer pair for the whole change. The full pipeline still runs — brainstorm, grill, plan, ship. A mechanical plan does not need manufactured TDD framing; state why the shortcut applies and use direct verification instead.
 
-**CHECKPOINT** — Confirm restatement + scope before brainstorming. For each open question in the investigation note, require explicit per-question disposition from the user: an answer, "defer to brainstorm" (resolve in Phase 1), or "agent-choose" (auto-resolve and log per the doc-grounding pattern). A bare "proceed" without dispositions means: re-prompt — the questions don't vanish on the way to Phase 1.
+**CHECKPOINT** — Confirm restatement + scope before brainstorming. For each open question in the investigation note, require explicit per-question disposition from the user: an answer, "defer to brainstorm" (resolve in Phase 2), or "agent-choose" (auto-resolve and log per the doc-grounding pattern). A bare "proceed" without dispositions means: re-prompt — the questions don't vanish on the way to Phase 2.
 
 ## Phase 1 — Worktree
 
@@ -194,7 +196,13 @@ Invoke `superpowers:writing-plans` to produce an implementation plan under `plan
 
 ## Phase 5 — Standards review
 
-A plan reviewed only by the author risks blind spots — and the agent who just wrote the plan is the author. Dispatch a fresh subagent (`Agent` tool, `general-purpose`) with no inherited context. Give it everything it needs in the prompt:
+A plan reviewed only by the author risks blind spots — and the agent who just wrote the plan is the author. Unless Phase 0 marked the plan `mechanical-only`, choose the reviewer as follows:
+
+1. Resolve `codex.planReview.enabled` (default `true`) and `codex.planReview.focus` (default `null`).
+2. When enabled and the Claude-only `codex-collaboration` skill is available, invoke its `plan-review` operation. Pass the issue and acceptance criteria, Phase-0 investigation and open questions, the worktree base SHA, spec and plan paths, relevant `AGENTS.md`/`CLAUDE.md`, optional skills configuration, manifests, `projectHints`, configured documentation paths, detected verification commands, the optional review focus, and the review contract below. The skill owns foreground execution, isolation, read-only enforcement, result validation, and its one-time native-Claude fallback on a real Codex failure. A busy or concurrent reviewer is never a fallback condition.
+3. When Codex review is disabled or `codex-collaboration` is unavailable (including when this skill runs natively in Codex), dispatch one fresh native reviewer (`Agent` tool, `general-purpose`) with no inherited context and give it the same inputs and review contract.
+
+The review contract for either path is:
 
 > Review the implementation plan at `<plan-path>` against the project's coding bar.
 >
@@ -234,13 +242,9 @@ A plan reviewed only by the author risks blind spots — and the agent who just 
 >
 > Don't propose new features. Don't second-guess scope. Grade only against the bar.
 
-**Tiny-scope shortcut.** If Phase 0 declared the issue tiny-scope, replace the subagent dispatch with a self-grade: read the spec, the plan, the coding-standards section bearing on the diff, and grade against the same Blocking/Should-fix/Discussion buckets. Subagent dispatch on a 5-line deletion produces zero signal and burns ~30k tokens.
+**Mechanical-only shortcut.** If Phase 0 declared the plan `mechanical-only`, replace reviewer dispatch with a self-grade: read the issue, spec, plan, relevant live files, and coding standards, then grade against the same Blocking/Should-fix/Discussion buckets. Any behavioral, configuration, interface, generated-output, or semantic-documentation consequence disqualifies the shortcut, regardless of file count or diff size.
 
-**The shortcut applies to:** backend code changes, migrations, config files, docs, mechanical deletions — anything with zero footprint in the project's frontend/UI tree.
-
-**The shortcut does *not* apply** to any diff touching the project's frontend dir or files importing UI-component primitives (e.g. a configured component library / design-system import path), regardless of line count. Frame-rate, focus management, escape-key handling, keyboard navigation, and UI-primitive state quirks don't surface in static self-grade. The decision rule is mechanical — `git diff --name-only HEAD` against the planned diff and check whether any path lands under the frontend/UI dir or imports a UI primitive — so the agent doesn't have to interpret "UI-heavy" qualitatively. A 3-line style tweak in the frontend dir still dispatches; a 60-line backend change with no UI touch self-grades.
-
-The asymmetry with Phase 6 (which uses a single implementer+reviewer pair on tiny-scope regardless of file mix) is deliberate: Phase 5 is a *plan* review where self-grade has a self-review blind spot, while Phase 6 is *execution* where the pair-review of the actual diff catches what plan-reading can't.
+For a Codex review, verify every actionable finding against the live worktree before changing the plan; stale or unsupported findings are recorded as rejected, not silently applied. Record concise provenance (Codex version, review job identifier, base SHA, and whether native fallback was used) plus the disposition of each finding in the plan or Phase-5 audit note. Never copy the raw Codex transcript into project artifacts.
 
 Apply blocking fixes inline to the plan file (this falls under the standing local-commit authorization). Bring should-fix items to the user; in `--auto`, apply them inline too. **Extend the plan's `## Auto-resolved decisions` section** (create it if Phase 4 didn't) with one entry per applied finding:
 
@@ -264,7 +268,7 @@ When Phase 5 *reverses* the Phase 4 choice, the new entry's `Alternative conside
 
 Invoke `superpowers:subagent-driven-development`. It reads the plan, dispatches implementer subagents per task, and reviews each output. (If that skill is absent, execute the plan task-by-task yourself, running the verify commands and reviewing each task's diff before moving on.)
 
-If Phase 0 declared tiny-scope, dispatch a single implementer+reviewer pair for the whole change rather than per-task chains — the per-task ceremony adds no signal when there's only one meaningful task.
+If Phase 0 declared the plan `mechanical-only`, dispatch a single implementer+reviewer pair for the whole change rather than per-task chains — the per-task ceremony adds no signal when there is only one mechanical task.
 
 **CHECKPOINT** — Confirm the implementation is committed on the feature branch.
 
@@ -277,7 +281,9 @@ Dispatch `ship-issue` as a fresh subagent via the `Agent` tool (subagent_type `g
 Subagent prompt (the handoff goes in the prompt, not a file — the subagent's starting context *is* the prompt):
 
 ```
-You are running ship-issue for issue #<num> in autonomous mode.
+You are running ship-issue for issue #<num> in <autonomous|interactive> mode. Use
+"autonomous" only when the from-issue invocation included `--auto`; otherwise use
+"interactive".
 
 Handoff from from-issue:
   issue_number:   <num>
@@ -298,10 +304,11 @@ Your task:
      Nested Agent calls are supported.
   3. In Phase 6, block on `<tracker-cli> pr checks --watch` per ship-issue's
      instructions.
-  4. Auto-mode rules from this prompt apply throughout: apply Blocking and Should-fix
-     items inline rather than surfacing; only Discussion items and genuinely-blocked
-     situations should surface back to me. ship-issue's auto-mode section handles
-     the specifics.
+  4. If auto is true, apply ship-issue's auto-mode rules throughout: apply Blocking
+     and Should-fix items inline rather than surfacing; only Discussion items and
+     genuinely blocked situations should return to me. If auto is false, honor every
+     ship-issue checkpoint and confirmation; return anything requiring a user decision
+     instead of treating it as autonomous.
 
 Return to me, in your final message:
   - PR URL

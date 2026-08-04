@@ -58,6 +58,10 @@
       url = "github:obra/superpowers";
       flake = false;
     };
+    codex-plugin-cc = {
+      url = "github:openai/codex-plugin-cc/db52e28f4d9ded852ab3942cea316258ae4ef346";
+      flake = false;
+    };
     ui-ux-pro-max = {
       url = "github:nextlevelbuilder/ui-ux-pro-max-skill";
       flake = false;

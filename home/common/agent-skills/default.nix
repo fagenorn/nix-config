@@ -4,6 +4,8 @@
   ...
 }:
 let
+  agentPlugins = import ../../../lib/agent-plugins.nix { inherit inputs pkgs; };
+
   uiUxSkill = pkgs.runCommand "ui-ux-pro-max-skill" { } ''
     mkdir -p "$out"
     {
@@ -34,10 +36,10 @@ in
     recursive = true;
   };
 
-  # Superpowers provides agent-specific integrations upstream. Claude uses its
-  # native plugin; Codex discovers the upstream Codex-compatible skill set here.
+  # Claude's local Superpowers plugin and Codex both consume this exact patched
+  # skill tree, so the two agents cannot drift in workflow composition.
   home.file.".agents/skills/superpowers" = {
-    source = inputs.superpowers + "/skills";
+    source = agentPlugins.superpowers + "/skills";
     recursive = true;
   };
 

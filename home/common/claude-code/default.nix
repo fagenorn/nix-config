@@ -6,6 +6,8 @@
   ...
 }:
 let
+  agentPlugins = import ../../../lib/agent-plugins.nix { inherit inputs pkgs; };
+
   # Durable, user-authored Claude Code settings (ported from the existing ~/.claude/settings.json).
   # Runtime-mutable noise — the accumulated project-specific permissions.allow list, OAuth,
   # project history, statsig caches — is intentionally NOT frozen here.
@@ -41,20 +43,25 @@ let
     };
 
     # Plugins + their marketplaces, declared so the setup is portable to a fresh machine.
-    # Claude Code clones/installs the plugins at runtime from these gate-keys; the install
-    # state under ~/.claude/plugins stays mutable (never nix-owned).
+    # The patched plugin sources are Nix store paths; Claude's install/cache state under
+    # ~/.claude/plugins stays mutable (never Nix-owned).
     enabledPlugins = {
       "skill-creator@claude-plugins-official" = true;
-      "superpowers@superpowers-marketplace" = true;
+      "superpowers@nix-superpowers" = true;
+      "codex@nix-codex" = true;
     };
     extraKnownMarketplaces = {
       claude-plugins-official.source = {
         source = "github";
         repo = "anthropics/claude-plugins-official";
       };
-      superpowers-marketplace.source = {
-        source = "github";
-        repo = "obra/superpowers-marketplace";
+      nix-superpowers.source = {
+        source = "directory";
+        path = "${agentPlugins.superpowers}";
+      };
+      nix-codex.source = {
+        source = "directory";
+        path = "${agentPlugins.codex}";
       };
     };
   };
@@ -87,6 +94,17 @@ in
     # NOTE: `settings` is deliberately left unset. The module writes ~/.claude/settings.json
     # as a READ-ONLY store symlink, which breaks Claude Code's in-app /config flow and the
     # sandbox (both rewrite the file). It is materialised as a writable copy below instead.
+  };
+
+  # codex-plugin-cc is implemented in Node and shells out to the separately
+  # managed native Codex CLI.
+  home.packages = [ pkgs.nodejs ];
+
+  # Claude-only bridge orchestration. Keeping this outside the shared
+  # ~/.agents/skills tree prevents Codex from recursively invoking itself.
+  home.file.".claude/skills/codex-collaboration" = {
+    source = ./skills/codex-collaboration;
+    recursive = true;
   };
 
   # Copy settings.json to a writable location on each activation. Nix is the source of truth

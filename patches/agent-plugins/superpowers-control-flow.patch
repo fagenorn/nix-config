@@ -1,0 +1,87 @@
+diff --git a/skills/brainstorming/SKILL.md b/skills/brainstorming/SKILL.md
+index 789c3a1..109d403 100644
+--- a/skills/brainstorming/SKILL.md
++++ b/skills/brainstorming/SKILL.md
+@@ -32 +32 @@ You MUST create a task for each of these items and complete them in order:
+-9. **Transition to implementation** — invoke writing-plans skill to create implementation plan
++9. **Return control** — report the approved spec to the calling workflow
+@@ -46 +46 @@ digraph brainstorming {
+-    "Invoke writing-plans skill" [shape=doublecircle];
++    "Return to caller" [shape=doublecircle];
+@@ -57 +57 @@ digraph brainstorming {
+-    "User reviews spec?" -> "Invoke writing-plans skill" [label="approved"];
++    "User reviews spec?" -> "Return to caller" [label="approved"];
+@@ -61 +61 @@ digraph brainstorming {
+-**The terminal state is invoking writing-plans.** Do NOT invoke frontend-design, mcp-builder, or any other implementation skill. The ONLY skill you invoke after brainstorming is writing-plans.
++**The terminal state is returning control to the caller.** Do NOT invoke writing-plans, frontend-design, mcp-builder, or any implementation skill. The calling workflow owns the next phase.
+@@ -129 +129 @@ Wait for the user's response. If they request changes, make them and re-run the
+-**Implementation:**
++**Handoff:**
+@@ -131,2 +131,2 @@ Wait for the user's response. If they request changes, make them and re-run the
+-- Invoke the writing-plans skill to create a detailed implementation plan
+-- Do NOT invoke any other skill. writing-plans is the next step.
++- Report the approved spec path and any unresolved discussion items to the caller.
++- Do NOT invoke another skill or begin implementation. The calling workflow owns planning and execution.
+diff --git a/skills/executing-plans/SKILL.md b/skills/executing-plans/SKILL.md
+index b51d97d..517fe69 100644
+--- a/skills/executing-plans/SKILL.md
++++ b/skills/executing-plans/SKILL.md
+@@ -36,3 +36,3 @@ After all tasks complete and verified:
+-- Announce: "I'm using the finishing-a-development-branch skill to complete this work."
+-- **REQUIRED SUB-SKILL:** Use superpowers:finishing-a-development-branch
+-- Follow that skill to verify tests, present options, execute choice
++- Report the completed tasks, verification results, and commit range to the
++  calling workflow.
++- Do not invoke finishing-a-development-branch. The caller owns shipping.
+diff --git a/skills/subagent-driven-development/SKILL.md b/skills/subagent-driven-development/SKILL.md
+index 6c0b834..0060807 100644
+--- a/skills/subagent-driven-development/SKILL.md
++++ b/skills/subagent-driven-development/SKILL.md
+@@ -77 +77 @@ digraph process {
+-    "Use superpowers:finishing-a-development-branch" [shape=box style=filled fillcolor=lightgreen];
++    "Return to calling workflow" [shape=box style=filled fillcolor=lightgreen];
+@@ -106 +106 @@ digraph process {
+-    "Final review clean: delete this plan's workspace" -> "Use superpowers:finishing-a-development-branch";
++    "Final review clean: delete this plan's workspace" -> "Return to calling workflow";
+@@ -413,2 +413,2 @@ rulings, or stop on load-bearing ones. There is no second fix wave —
+-residual load-bearing findings surface to your human partner when
+-finishing-a-development-branch presents the options.
++residual load-bearing findings surface to your human partner through the
++calling workflow.
+@@ -423 +423,3 @@ alone.
+-Use superpowers:finishing-a-development-branch.
++Report the final review result, commit range, parked findings, and verification
++status to the calling workflow. Do not invoke finishing-a-development-branch;
++the caller owns shipping.
+@@ -502 +504 @@ Final reviewer: All requirements met. Deferred minors triaged: none block merge.
+-Done! Using superpowers:finishing-a-development-branch.
++Done! Returning the verified implementation to the calling workflow.
+diff --git a/skills/writing-plans/SKILL.md b/skills/writing-plans/SKILL.md
+index dd2702b..ec8e36a 100644
+--- a/skills/writing-plans/SKILL.md
++++ b/skills/writing-plans/SKILL.md
+@@ -150 +150 @@ If you find issues, fix them inline. No need to re-review — just fix and move
+-## Execution Handoff
++## Return Control
+@@ -152,17 +152,4 @@ If you find issues, fix them inline. No need to re-review — just fix and move
+-After saving the plan, offer execution choice:
+-
+-**"Plan complete and saved to `docs/superpowers/plans/<filename>.md`. Two execution options:**
+-
+-**1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
+-
+-**2. Inline Execution** - Execute tasks in this session using executing-plans, batch execution with checkpoints
+-
+-**Which approach?"**
+-
+-**If Subagent-Driven chosen:**
+-- **REQUIRED SUB-SKILL:** Use superpowers:subagent-driven-development
+-- Fresh subagent per task + two-stage review
+-
+-**If Inline Execution chosen:**
+-- **REQUIRED SUB-SKILL:** Use superpowers:executing-plans
+-- Batch execution with checkpoints for review
++After saving and self-reviewing the plan, report its path and any unresolved
++questions to the calling workflow. Do not offer an execution choice, invoke an
++execution skill, or begin implementation. The caller owns standards review and
++execution sequencing.
