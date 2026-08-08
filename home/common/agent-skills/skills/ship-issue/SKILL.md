@@ -245,6 +245,8 @@ timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30
 
 `--fail-fast` exits on the first check that flips to a failing bucket, so failures surface immediately rather than waiting on parallel checks.
 
+**No improvised polling — the blocking watch above is the only sanctioned wait shape.** Transcript mining found one session that ran a bare `gh pr checks <n> | grep <check>` 244 times, plus sessions burning dozens of `gh run view` re-runs and `true`/`:`/`date` no-op keep-alive turns — every such poll is a full model turn that re-reads the entire session prefix. Never run `gh pr checks` without `--watch` more than once per phase; never re-run `gh run view`/`tail` on a loop; never emit no-op commands to pass time. If you only care about one named check, still run the blocking watch, then read that check's row from its final output (or one `--json name,bucket` call after it returns).
+
 Exit codes:
 
 - **`0`** → all checks pass; continue to Phase 7.
