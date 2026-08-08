@@ -64,6 +64,20 @@ Every sub-skill referenced in this flow — `superpowers:using-git-worktrees`, `
 
 The phases below assume these rules and don't restate them for each sub-skill.
 
+## Dispatch and budget rules
+
+**Structured report-backs (every dispatch).** A subagent's final message is re-read by its caller on every later turn — mining measured ~87 re-reads per report. Every `Agent` dispatch in this flow (standards reviewers, SDD implementers/reviewers, the Phase-7 ship-issue subagent) must state a fixed return schema in its prompt: artifact paths produced, a one-word verdict/state, and ≤500 characters of notes. Details go in files in the worktree, never in the report. Where the task fits, dispatch the tiered agent types (`implementer`, `reviewer`, `mechanic`) instead of `general-purpose`.
+
+**Turn/context budget (every phase boundary).** Cost is quadratic in session length — every turn re-reads the whole prefix. At each phase boundary, check against a budget of ~100–120 assistant turns / ~150k context, and decide with this ladder (first yes wins):
+
+1. **Continue** — the next phase needs this conversation as a primary source and budget remains. Costs nothing, loses nothing.
+2. **Fresh start** (`/clear`) — everything above is disposable because the artifacts are already on disk.
+3. **Handoff** — something must travel that isn't in an artifact: invoke the `handoff` skill. Interactive: give the user the handoff path to resume fresh. `--auto`: finish the current phase, write the handoff, and stop, reporting the handoff path to your caller as `blocked_reason`.
+4. **Subagent** — the remaining work is self-contained enough to dispatch out entirely.
+5. **Compact** (`/compact`) — the default last resort, never the first reach.
+
+Never let a session cross ~150 turns; past that point every remaining phase pays the full accumulated prefix on every single turn.
+
 ## Autonomous mode (`--auto`)
 
 Detect by scanning the invocation arguments for the literal token `--auto` (e.g. `/from-issue 62 --auto`, `from-issue #62 --auto`). If present, run the whole flow end-to-end with no user checkpoints. If absent — including when the user just says "work on issue #62" — stay in interactive mode and use the per-phase checkpoints above. Default is off.
@@ -312,12 +326,15 @@ Your task:
      ship-issue checkpoint and confirmation; return anything requiring a user decision
      instead of treating it as autonomous.
 
-Return to me, in your final message:
-  - PR URL
-  - merge commit SHA on the integration branch
-  - issue close state
-  - any Discussion items the reviewer raised
-  - anything that needed manual intervention
+Return to me, as your final message, exactly this report — details live in the
+PR and the worktree, not the report:
+  issue:            <num>
+  state:            merged | stopped | failed
+  pr_url:           <url>
+  merge_sha:        <sha on the integration branch>
+  issue_closed:     true | false
+  discussion_items: <reviewer's Discussion items, verbatim; [] if none>
+  notes:            <≤500 chars: anything that needed manual intervention>
 ```
 
 **Phase-number namespace.** `ship-issue` has its own Phase 0–8 sequence (pre-flight, sync, verify, consolidate, PR, review, CI, merge, cleanup). When narrating progress in transcripts (and when the subagent reports back), prefix with `ship-Phase-N` to distinguish from `from-issue` phases; otherwise a reader sees `Phase 6 done → Phase 0 pre-flight → Phase 6 CI` and can't tell which `Phase 6` is which.

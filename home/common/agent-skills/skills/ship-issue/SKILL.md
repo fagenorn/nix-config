@@ -210,6 +210,8 @@ The reviewer prompt has two layers. The **generic rubric is fixed** (use it verb
 > [PROJECT-SPECIFIC, only if `projectHints` exists] Pay particular attention to the recurring review hazards documented in the project hints (e.g. known refactor traps, nullability-lift equivalence in predicate-to-`Contains` translations over nullable surfaces, domain-specific invariants) — fold those concrete examples in here.
 >
 > Don't propose new features. Don't second-guess scope. Grade only against the bar and the delivered-vs-spec gap.
+>
+> Return findings ranked most-severe first, each anchored to a file:line, with a one-line verdict (approve | fix-first) at the top. Cap the whole report at ~400 words — your reply is re-read by the caller on every later turn; detail beyond the cap belongs in the finding's file:line anchor, not the report.
 
 Apply Blocking fixes inline to the branch — but `apply` and `push` are separate steps, not one verb. The failure mode is "edited files, ran tests, forgot to commit, advanced to Phase 6 polling CI on the stale tip." Follow this order:
 
