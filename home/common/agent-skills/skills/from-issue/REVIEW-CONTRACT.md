@@ -1,7 +1,7 @@
 # Phase-5 plan review contract
 
 Reviewer-facing text for `from-issue` Phase 5. The dispatcher hands this file's **path** to the
-reviewer (or to `codex-collaboration`, which reads it into the review packet) and supplies concrete
+reviewer (or to `codex-collaboration`, which passes it by path in the review packet) and supplies concrete
 values for every `<placeholder>` and binding named below — plan path, spec path, issue number,
 `<tracker-cli>`, `unsetGithubToken`, `docPaths.*`, `projectHints`, and the optional review focus.
 The orchestrator never inlines this text into its own context.
@@ -10,9 +10,13 @@ The orchestrator never inlines this text into its own context.
 
 Review the implementation plan at `<plan-path>` against the project's coding bar.
 
-First ground in the project's docs: invoke `doc-grounded-questions` if available, else read whichever
-of these exist — the context doc (`docPaths.context`), the relevant ADRs (`docPaths.adrDir`), the
-coding-standards doc (`docPaths.standards`), and the architecture doc (`docPaths.architecture`). Then
+First ground in the project's docs: invoke `doc-grounded-questions` if available, else ground
+map-first — read the context map (`docPaths.contextMap`, else root `CONTEXT-MAP.md`) and open only
+the area `CONTEXT.md` files whose `governs:` globs intersect the plan's touched paths or whose terms
+appear in the issue; ADRs (`docPaths.adrDir`) only when cited; the standards layers that apply
+(`~/.agents/standards/the-bar.md`, its `stacks/` shards matching the diff's file types, and the
+project's `docs/standards/` shards whose globs intersect). Only when the project has no map, fall
+back to reading `docPaths.{context,standards,architecture}` whole. Then
 read the issue body (`<tracker-cli> issue view <num>` — prefix with `unset GITHUB_TOKEN &&` only if
 `unsetGithubToken` is true), the spec at `<spec-path>`, and the plan.
 
@@ -23,7 +27,7 @@ false-positive should-fixes.
 For each plan task, flag anything that violates the grounded constraints. Pay particular attention to:
 framework-first (custom executors/state machines where a framework primitive already exists),
 production-grade-by-default (half-finished branches, missing error paths at boundaries), DI rules, and
-the test-fixture conventions in the coding-standards doc.
+the test-fixture conventions in the project's standards shards (or legacy coding-standards doc).
 
 If `projectHints` is configured and the file exists, read it for project-specific review
 hints/examples and fold those into this pass (e.g. recurring repo-specific plan bugs that have escaped

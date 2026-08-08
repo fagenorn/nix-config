@@ -37,12 +37,22 @@ workspace/worktree root. Build one self-contained delegation prompt containing:
 3. Absolute paths to the approved specification and implementation plan.
 4. Every applicable `AGENTS.md` and `CLAUDE.md` from the invocation directory up
    through the worktree root.
-5. `.claude/skills.config.json`, configured documentation paths, standards,
-   architecture, relevant ADRs, and `projectHints`, skipping absent optional
-   files.
+5. `.claude/skills.config.json` and `projectHints` when present, plus domain
+   docs selected map-first, all by path, skipping absent files: the context map
+   (`docPaths.contextMap`, else root `CONTEXT-MAP.md`) and only the area
+   `CONTEXT.md` files whose `governs:` globs intersect the plan's touched paths
+   or whose terms appear in the issue; ADRs only when cited by the issue, spec,
+   plan, or a selected area file; the standards layers that apply —
+   `~/.agents/standards/the-bar.md`, its `stacks/` shards matching the diff's
+   file types, and the project's `docs/standards/` shards whose globs
+   intersect. A worktree `GROUNDING.md` is a routing hint for this selection,
+   never a substitute for it. Only when the project has no map, fall back to
+   the `docPaths.{context,standards,architecture}` whole-doc paths.
 6. Relevant manifests and inferred verification commands.
 7. The configured `codex.planReview.focus`, when non-empty.
-8. The caller's complete common-miss checklist and project coding bar.
+8. The absolute path to the caller's review contract (`REVIEW-CONTRACT.md`) —
+   the common-miss checklist and coding bar travel by path, with concrete
+   values supplied for every placeholder the contract names.
 
 Tell the reviewer to inspect the live files at HEAD. Paths and summaries are
 routing context, never substitutes for reading the worktree.
