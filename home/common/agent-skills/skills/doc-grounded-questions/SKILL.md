@@ -116,16 +116,16 @@ If, after grounding, the question turns out to be fully answered by the docs, do
 Invoke at the start of and during:
 
 - A brainstorm / spec phase, a grilling/stress-test phase, and a standards-review phase (if the sibling skills
-  `from-issue`, `grill-with-docs`, or `superpowers:brainstorming` exist, this fires inside each of their
+  `from-issue`, `grill-with-docs`, or `design` exist, this fires inside each of their
   question-asking phases)
 - Delivery escalations — every mid-flow escalation (merge conflict, lint/test failure, CI failure, review-blocker,
   cleanup) and the reviewer-dispatch step (if a sibling `ship-issue` skill exists, this fires at each of its
   escalation points)
-- `superpowers:writing-plans` when you're about to ask the user to choose between approaches
+- `writing-plans` when you're about to ask the user to choose between approaches
 - Reviewer / audit subagents grading a diff or plan against the project's standards doc and decision log
 - Any ad-hoc design conversation where you'd otherwise just ask
 
-The named sibling skills (`from-issue`, `ship-issue`, `grill-with-docs`, `superpowers:*`) are referenced opportunistically — if a given one is not installed, ignore that bullet and apply the same grounding pass to whatever flow you are actually in.
+The named sibling skills (`from-issue`, `ship-issue`, `grill-with-docs`, `design`, `writing-plans`) are referenced opportunistically — if a given one is not installed, ignore that bullet and apply the same grounding pass to whatever flow you are actually in.
 
 ## When to skip
 

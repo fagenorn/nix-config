@@ -72,8 +72,8 @@ beyond the exceptions named below):
 
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally
 installed skills its phase names — `grill-with-docs` and `doc-grounded-questions` for the design
-subagent, `superpowers:writing-plans` and `doc-grounded-questions` for the plan subagent, plus
-`superpowers:brainstorming` if present. Those load in the subagent's context, not yours. If one isn't
+subagent, `writing-plans` and `doc-grounded-questions` for the plan subagent, plus
+`design` if present. Those load in the subagent's context, not yours. If one isn't
 installed, it uses the inline fallback named in the corresponding `SKILL.md` phase.
 
 ### Design subagent — Phases 2 + 3

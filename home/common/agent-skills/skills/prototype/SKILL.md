@@ -9,7 +9,7 @@ A prototype is **throwaway code that answers a question**. The question decides 
 
 ## Always start in a fresh worktree
 
-Prototypes are throwaway by definition — they don't belong on the current working branch. Before doing anything else (before picking a branch, before reading code, before asking clarifying questions), set up an isolated worktree by invoking the `superpowers:using-git-worktrees` skill — or, if that skill isn't available, run `git worktree add` directly. Name the worktree after the prototype's question (e.g. `prototype-settings-layout`, `prototype-billing-state-machine`) so it's obvious what's inside it and that it's disposable.
+Prototypes are throwaway by definition — they don't belong on the current working branch. Before doing anything else (before picking a branch, before reading code, before asking clarifying questions), set up an isolated worktree by invoking the `worktrees` skill — or, if that skill isn't available, run `git worktree add` directly. Name the worktree after the prototype's question (e.g. `prototype-settings-layout`, `prototype-billing-state-machine`) so it's obvious what's inside it and that it's disposable.
 
 If the project isn't a git repo, work in a clearly-named scratch directory instead (e.g. `prototype-settings-layout/` outside the source tree, or a clearly-marked subfolder) so the throwaway code stays equally easy to spot and delete.
 

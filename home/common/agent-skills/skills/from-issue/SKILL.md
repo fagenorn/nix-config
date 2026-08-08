@@ -67,7 +67,7 @@ Phases 2–5 ground in the project's docs before their first clarifying question
 
 ## Skill-tool invocations
 
-Sub-skills named here — `superpowers:using-git-worktrees`, `superpowers:brainstorming`, `grill-with-docs`, `superpowers:writing-plans`, `doc-grounded-questions`, `codex-collaboration`, `superpowers:subagent-driven-development`, `ship-issue` — go through the `Skill` tool, never paraphrased from memory; the tool fires the loader and pulls in the skill's progressive-disclosure resources. `grill-with-docs` is the bare name (`superpowers:grill-with-docs` doesn't exist). `codex-collaboration` is Claude-only and non-user-invocable, so native Codex sessions take the Phase-5 native-reviewer path.
+Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-plans`, `doc-grounded-questions`, `codex-collaboration`, `sdd`, `ship-issue` — go through the `Skill` tool, never paraphrased from memory; the tool fires the loader and pulls in the skill's progressive-disclosure resources. `codex-collaboration` is Claude-only and non-user-invocable, so native Codex sessions take the Phase-5 native-reviewer path.
 
 **Never hard-fail on a missing sibling** — run the phase inline instead: brainstorm as intent + requirements + ≥2 design options; grill by re-reading `docPaths.context`/`adrDir`, challenging the spec's terminology against the project's vocabulary, and recording ADR-worthy decisions in `docPaths.adrDir` (or in the spec if there's no ADR convention); plan as a numbered task list with a verification gate per task; execute task-by-task, running the verify commands and reviewing each diff; ship per the Phase-7 fallback.
 
@@ -126,7 +126,7 @@ Declare `mechanical-only` only when the entire change is deletion or renaming wi
 Create the workspace before any spec/plan/grill commit lands; those commits go *in the worktree*, never on the integration branch.
 
 1. `git fetch origin`.
-2. Invoke `superpowers:using-git-worktrees` (it encodes the destructive-ops carve-out and the prefix contract). Branch follows `branchNaming.pattern` (default `issue-<num>-<slug>`); `EnterWorktree` prepends `branchNaming.worktreePrefix` (default `worktree-`), so the on-disk branch is `<worktreePrefix>issue-<num>-<short-slug>`. Both forms are accepted downstream — don't strip the prefix. Skill absent → `git worktree add -b <branch> <path> origin/<integration-branch>`.
+2. Invoke `worktrees` (it encodes the destructive-ops carve-out and the prefix contract). Branch follows `branchNaming.pattern` (default `issue-<num>-<slug>`); `EnterWorktree` prepends `branchNaming.worktreePrefix` (default `worktree-`), so the on-disk branch is `<worktreePrefix>issue-<num>-<short-slug>`. Both forms are accepted downstream — don't strip the prefix. Skill absent → `git worktree add -b <branch> <path> origin/<integration-branch>`.
 
    **Check position before calling the worktree tools.** ~43% of `EnterWorktree`/`ExitWorktree` failures are calls made while already positioned; the harness pins one worktree per session and refuses redundant or cross-pinned entries. Before `EnterWorktree`, compare `pwd` with the intended path: already there → skip the call; pinned elsewhere → `ExitWorktree` with `action: "keep"` first. Don't discover the pin state by letting the call fail.
 3. **Base on `origin/<integration-branch>`**, never the local branch, which may carry other agents' in-flight commits; branching off the remote ref before any commit lands is what stops parallel runs cross-contaminating each other. The merge with the integration branch happens later, in `ship-issue`.
@@ -136,7 +136,7 @@ Create the workspace before any spec/plan/grill commit lands; those commits go *
 
 ## Phase 2 — Brainstorm
 
-Invoke `superpowers:brainstorming` for a design doc under `specDir`, committed in the worktree.
+Invoke `design` for a design doc under `specDir`, committed in the worktree.
 
 Resolve every Phase-0 carryover before opening a new question — answer it from the user's disposition, lift it into the brainstorm, or auto-resolve it. Don't restart the question list while earlier questions sit unanswered. Ground before the first clarifying question.
 
@@ -150,7 +150,7 @@ Invoke `grill-with-docs`. It sharpens the spec against the context doc, surfaces
 
 ## Phase 4 — Plan
 
-Invoke `superpowers:writing-plans` for a plan under `planDir`, committed in the worktree, carrying its own `## Auto-resolved decisions` section.
+Invoke `writing-plans` for a plan under `planDir`, committed in the worktree, carrying its own `## Auto-resolved decisions` section.
 
 **Plan-prose ≠ code-prose.** Anything the plan dictates that the implementer copies verbatim into the codebase — docstring, comment, context-doc sentence, ADR clause — must describe how the live code *will actually behave*, not how the plan hypothesises it. Otherwise the code lands slightly different and the prose becomes a lie (a recurring post-PR fix-up). If you can't describe the behavior precisely yet, write a TODO with the open question; the execute phase rewrites it from the implemented code.
 
@@ -176,7 +176,7 @@ Apply blocking fixes inline to the plan (standing local-commit authorization). B
 
 ## Phase 6 — Execute
 
-Invoke `superpowers:subagent-driven-development`: it reads the plan, dispatches an implementer per task, and reviews each output.
+Invoke `sdd`: it reads the plan, dispatches an implementer per task, and reviews each output.
 
 If the plan is `mechanical-only`, dispatch a single implementer+reviewer pair for the whole change; per-task ceremony adds no signal for one mechanical task.
 

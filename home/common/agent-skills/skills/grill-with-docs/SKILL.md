@@ -5,11 +5,11 @@ description: Stress-test a plan against the project's domain docs — challenges
 
 <what-to-do>
 
-Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
+Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Model the design as a tree of decisions; the **frontier** is every question whose prerequisites are already settled.
 
-Ask the questions one at a time, waiting for feedback on each question before continuing.
+Ask the whole frontier as one numbered round of `❓ question / ➡️ recommended answer` pairs. A question whose answer depends on another question still open in this round belongs to a later round. The round's answers reshape the tree — recompute the frontier and ask the next round; done when it's empty.
 
-If a question can be answered by exploring the codebase, explore the codebase instead.
+If a question can be answered by exploring the codebase or docs, explore instead of asking — dispatch the lookup without blocking the round (only the questions downstream of it wait). The decisions are mine; the facts are yours.
 
 </what-to-do>
 

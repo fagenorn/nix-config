@@ -260,4 +260,4 @@ Report final state: PR URL, merge commit SHA, issue closed.
 
 - Merge commits, learning-doc updates, and blocker fixes fall under standing local-commit authorization. Don't re-confirm each. The `Co-Authored-By` trailer follows `commit.coAuthoredBy`.
 - If a phase reveals an earlier one was wrong (review surfaces a misaligned spec, say), back up to the appropriate `from-issue` phase. Don't paper over.
-- Absent sibling skills (`from-issue`, `superpowers:*`) degrade to no-ops; this skill still runs.
+- Absent sibling skills (`from-issue`, `sdd`, `worktrees`) degrade to no-ops; this skill still runs.
