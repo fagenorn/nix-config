@@ -73,7 +73,7 @@ Resolving a ticket clears fog: graduate what became phrasable into fresh tickets
 2. Choose: the user's named ticket, else the first frontier ticket. **Claim it.**
 3. Resolve it, zooming into related/closed ticket bodies on demand; use the skills the ticket type and the map's Notes name. Never resolve more than one ticket per session (research dispatches excepted).
 4. Record: answer as a resolution comment, close the ticket, append its one-line gist to Decisions so far.
-5. Maintain: create-then-wire newly surfaced tickets, graduate fog, rule out-of-scope discoveries out, update or delete tickets the decision invalidated. Expect concurrent sessions on other tickets.
+5. Maintain — part of resolving, not optional cleanup: graduate the fog this answer made phrasable (create-then-wire the fresh tickets, delete the graduated entry), rule out-of-scope discoveries out, update or delete tickets the decision invalidated. One-ticket-per-session bounds what you *resolve*, never this bookkeeping — closing a ticket without clearing the fog it lifted leaves the map worse than you found it. Expect concurrent sessions on other tickets.
 
 ## Inflow from the fog gate
 
