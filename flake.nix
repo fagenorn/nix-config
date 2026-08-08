@@ -54,10 +54,6 @@
 
     # Cross-agent skill sources. These remain pinned by flake.lock and are
     # exposed through each agent's native discovery mechanism.
-    superpowers = {
-      url = "github:obra/superpowers";
-      flake = false;
-    };
     codex-plugin-cc = {
       url = "github:openai/codex-plugin-cc/db52e28f4d9ded852ab3942cea316258ae4ef346";
       flake = false;

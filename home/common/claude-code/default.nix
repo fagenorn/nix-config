@@ -47,17 +47,12 @@ let
     # ~/.claude/plugins stays mutable (never Nix-owned).
     enabledPlugins = {
       "skill-creator@claude-plugins-official" = true;
-      "superpowers@nix-superpowers" = true;
       "codex@nix-codex" = true;
     };
     extraKnownMarketplaces = {
       claude-plugins-official.source = {
         source = "github";
         repo = "anthropics/claude-plugins-official";
-      };
-      nix-superpowers.source = {
-        source = "directory";
-        path = "${agentPlugins.superpowers}";
       };
       nix-codex.source = {
         source = "directory";

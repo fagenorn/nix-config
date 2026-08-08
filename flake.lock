@@ -433,7 +433,6 @@
         "nixpkgs-unstable": "nixpkgs-unstable",
         "sops-nix": "sops-nix",
         "spotx-bash": "spotx-bash",
-        "superpowers": "superpowers",
         "ui-ux-pro-max": "ui-ux-pro-max"
       }
     },
@@ -470,22 +469,6 @@
       "original": {
         "owner": "SpotX-Official",
         "repo": "SpotX-Bash",
-        "type": "github"
-      }
-    },
-    "superpowers": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1785266736,
-        "narHash": "sha256-fnl+HbPL2qD5Zgz8a1NctjFJSqu6UsyHJAhQMLQNXXc=",
-        "owner": "obra",
-        "repo": "superpowers",
-        "rev": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-        "type": "github"
-      },
-      "original": {
-        "owner": "obra",
-        "repo": "superpowers",
         "type": "github"
       }
     },
