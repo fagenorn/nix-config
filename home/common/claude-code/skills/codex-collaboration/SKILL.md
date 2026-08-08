@@ -1,6 +1,6 @@
 ---
 name: codex-collaboration
-description: Run a private, independent Codex plan review for Phase 5 of from-issue, then verify and disposition its findings in the live worktree. Use only when from-issue requests the plan-review operation and Codex plan review is enabled.
+description: Run a private, isolated Codex plan review for from-issue Phase 5 and disposition its findings. Only when from-issue requests it and Codex review is enabled.
 user-invocable: false
 ---
 

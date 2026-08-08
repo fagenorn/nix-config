@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Compact the current conversation into a handoff document so another agent (or a fresh session after a context-window reset) can pick up the work.
+description: Compact the current conversation into a handoff document so a fresh session or another agent can continue the work.
 argument-hint: "What will the next session be used for?"
 ---
 

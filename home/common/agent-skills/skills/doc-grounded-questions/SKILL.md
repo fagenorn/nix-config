@@ -1,6 +1,6 @@
 ---
 name: doc-grounded-questions
-description: Use before asking the user a clarifying question, presenting design options, recommending an approach, or evaluating code against the documented bar (PR review, audit, standards review). Forces grounding in the project's domain docs (context/glossary, ADRs, coding standards, architecture) and existing code first so questions surface real unknowns and reviews cite the actual rules — instead of relitigating documented decisions, proposing options the standards already rule out, or grading against a remembered version of the bar. Invoke even mid-conversation, every time you are about to ask a design question or open a review pass.
+description: Invoke before asking a design question, presenting options, or opening a review pass — grounds questions and reviews in the project's docs (CONTEXT, ADRs, standards) first.
 ---
 
 # Doc-Grounded Questions

@@ -1,6 +1,6 @@
 ---
 name: ship-issue
-description: Drive a feature-branch worktree to merged-on-integration-branch — sync the latest integration branch with a hybrid conflict policy, consolidate any session learnings, open a PR, review it with a fresh subagent, wait for CI, merge with a true merge commit, close the issue, and clean up the worktree. Phase 7 of the `from-issue` flow. Use when the user says "ship #X", "ship this", "open and merge", "handle the PR", "do the PR", "land it", "finish the issue", or otherwise indicates the implementation is complete and they want it delivered. Replaces `superpowers:finishing-a-development-branch` for issue-driven work.
+description: Deliver a finished feature-branch worktree — sync integration branch, PR, review, CI, merge, close issue, clean up. Phase 7 of from-issue. Use for "ship #X", "land it".
 argument-hint: "[issue number — optional; inferred from branch name]"
 ---
 

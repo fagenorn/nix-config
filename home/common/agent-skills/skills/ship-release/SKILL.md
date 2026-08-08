@@ -1,6 +1,6 @@
 ---
 name: ship-release
-description: Drive an integration-branch → default-branch release end-to-end — generate a changelog from the merges that have accumulated on the integration branch, open the release PR, wait for CI, merge with a true merge commit, decide the next semver version (MAJOR / MINOR / PATCH) from the change categorisation, tag the merge commit and publish a GitHub Release, then (when a deploy adapter is configured) watch the platform until every affected service has the merge SHA running at a SUCCESS status. Use whenever the user says "release", "cut a release", "ship to prod", "push to main", "dev to main", "roll out", "deploy", "go to prod", "bump the version", or otherwise indicates that the work accumulated on the integration branch should land on the default branch and reach production. Covers the silent-rollback trap so a failed deploy can't masquerade as a successful one, and the version bookkeeping so each release has a stable named anchor.
+description: Release the integration branch to the default branch — changelog, release PR, CI, merge, semver tag + GitHub Release, deploy watch. Use for "release", "ship to prod", "deploy".
 argument-hint: "[scope hint — optional one-line summary phrase to seed the merge subject]"
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: from-issue
-description: Drive a single tracker issue through the canonical issue-to-merge flow — investigate, brainstorm a spec, grill it against the project's domain docs, write a plan, standards-review the plan, then execute in a worktree with subagent-driven-development. The delivery phase (sync, PR, review, CI, merge, cleanup) is handled by `ship-issue`. Use whenever the user says "work on issue #X", "let's tackle issue #X", "pick up #X", references a tracker issue URL and asks to implement it, or otherwise indicates they want to start implementation work driven by a tracker issue. Pass `--auto` for end-to-end autonomous mode (no user checkpoints; agent self-answers clarifying questions from the docs). Don't skip phases.
+description: Drive one tracker issue through investigate → spec → plan → review → execute in a worktree. Use for "work on issue #X"; pass --auto for autonomous mode.
 argument-hint: "<issue number or URL> [--auto]"
 ---
 
