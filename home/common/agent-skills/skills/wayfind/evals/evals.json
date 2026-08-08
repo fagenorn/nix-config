@@ -1,0 +1,106 @@
+{
+  "skill_name": "wayfind",
+  "notes": "Pipeline evals, all in the markdown-tracker mode: the fixture's `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the map and its decision tickets are files under `.claude/wayfind/<effort>/` rather than issues. The fixture ships one pre-charted effort, `concurrent-shells` (a map, an unblocked `wayfinder:task` ticket, a `wayfinder:grilling` ticket blocked by it, and two fog entries), which eval 2 works and evals 1 and 3 must leave alone — the chart-mode asserts therefore ignore that directory and grade whatever new effort dir appears beside it. Asserts read file content rather than `git diff HEAD`, so they hold whether or not the run commits; where a diff is needed the ref is `origin/main`, which the harness pushed before the run and the session has no reason to move.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "chart-a-foggy-effort",
+      "mode": "pipeline",
+      "prompt": "/wayfind tinytask should be able to keep one backlog in sync across my laptop and my desktop\n\nContext you need before you start:\n\n- This project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so whatever you chart is markdown in this repo.\n- `docs/areas/backlog/CONTEXT.md` lists sync between machines under \"Deliberately out of scope\" and says proposals in that direction need an ADR before code. Working out what that ADR would have to settle is the point of this session.\n- An unrelated effort is already charted under `.claude/wayfind/concurrent-shells/` — two shells racing on one machine. Leave it where it is.\n\nIn your final message say where you put the map and list what you created.",
+      "expected_output": "A new effort directory beside `concurrent-shells/` holding a map with a destination, a sketched fog section and an out-of-scope section, plus a handful of typed decision tickets — transport, conflict resolution, task identity across machines, whether the single-file store survives — wired into a frontier and a blocked set. Nothing is resolved: charting is one session's work and it answers none of its own questions. No source file is touched.",
+      "asserts": [
+        {
+          "name": "a map was charted under .claude/wayfind/",
+          "shell": "d=$(ls -d .claude/wayfind/*/ 2>/dev/null | grep -v concurrent-shells | head -1); [ -n \"$d\" ] && [ -f \"$d/map.md\" ] || fail \"no new effort map at .claude/wayfind/<effort>/map.md (dirs present: $(ls .claude/wayfind/ 2>/dev/null | tr '\\n' ' '))\""
+        },
+        {
+          "name": "the map carries Destination, Not yet specified and Out of scope",
+          "shell": "d=$(ls -d .claude/wayfind/*/ 2>/dev/null | grep -v concurrent-shells | head -1); m=\"$d/map.md\"; [ -f \"$m\" ] || { fail \"no map to grade\"; exit 1; }; miss=\"\"; for h in \"Destination\" \"Not yet specified\" \"Out of scope\"; do grep -qi \"^#\\\\+ *$h\" \"$m\" || miss=\"$miss '$h'\"; done; [ -z \"$miss\" ] || fail \"map is missing section(s):$miss\""
+        },
+        {
+          "name": "at least two decision tickets with a Question body",
+          "shell": "d=$(ls -d .claude/wayfind/*/ 2>/dev/null | grep -v concurrent-shells | head -1); n=$(grep -rl '^## *Question' \"$d\" 2>/dev/null | wc -l | tr -d ' '); [ \"${n:-0}\" -ge 2 ] || fail \"expected >=2 tickets with a '## Question' body, found ${n:-0} under $d\""
+        },
+        {
+          "name": "every ticket declares a wayfinder:<type>",
+          "shell": "d=$(ls -d .claude/wayfind/*/ 2>/dev/null | grep -v concurrent-shells | head -1); tickets=$(grep -rl '^## *Question' \"$d\" 2>/dev/null); [ -n \"$tickets\" ] || { fail \"no tickets to type-check\"; exit 1; }; bad=\"\"; for f in $tickets; do grep -Eq 'wayfinder:(research|prototype|grilling|task)' \"$f\" || bad=\"$bad $f\"; done; [ -z \"$bad\" ] || fail \"ticket(s) with no wayfinder:<type>:$bad\""
+        },
+        {
+          "name": "charting resolved nothing",
+          "shell": "d=$(ls -d .claude/wayfind/*/ 2>/dev/null | grep -v concurrent-shells | head -1); r=$(grep -rlEi -e '^#+ *(resolution|answer)' -e '^state: *(closed|resolved|done)' \"$d\" 2>/dev/null); [ -z \"$r\" ] || fail \"charting resolved a ticket by hand: $(echo $r)\""
+        },
+        {
+          "name": "fog was recorded, or enough tickets to stand in for it",
+          "shell": "d=$(ls -d .claude/wayfind/*/ 2>/dev/null | grep -v concurrent-shells | head -1); m=\"$d/map.md\"; fog=$(awk 'tolower($0) ~ /^#+ *not yet specified/ {i=1; next} i && /^#+ / {i=0} i && NF && $0 !~ /^<!--/' \"$m\" 2>/dev/null | tr -d '[:space:]'); n=$(grep -rl '^## *Question' \"$d\" 2>/dev/null | wc -l | tr -d ' '); [ -n \"$fog\" ] || [ \"${n:-0}\" -ge 3 ] || fail \"'Not yet specified' is empty and only ${n:-0} tickets — the map claims to see the whole way already\""
+        },
+        {
+          "name": "the pre-existing effort was left alone",
+          "shell": "path_unchanged_since \"$REPO\" origin/main .claude/wayfind/concurrent-shells"
+        },
+        {
+          "name": "planning, not doing — no source touched",
+          "shell": "path_unchanged_since \"$REPO\" origin/main tinytask tests"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "work-one-ticket-off-the-frontier",
+      "mode": "pipeline",
+      "prompt": "/wayfind work the map at `.claude/wayfind/concurrent-shells/map.md`\n\nThis project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the markdown files under `.claude/wayfind/concurrent-shells/` are the whole tracker for this effort.\n\nIn your final message name the ticket you took and how you resolved it.",
+      "expected_output": "The session takes the one frontier ticket — `001-name-the-failure-mode`, an AFK `wayfinder:task` — claims it, drives two mutations at one task file to observe the lost update, records the facts as its resolution and closes it, then appends a one-line gist to the map's Decisions so far and clears the fog entry that resolution answered. `002` stays open and unresolved: it is blocked, it is HITL, and one session resolves one ticket. `tinytask/` is not modified — the ticket asks for facts, not a fix.",
+      "asserts": [
+        {
+          "name": "exactly one ticket was closed",
+          "shell": "n=$(grep -lE '^state: *(closed|resolved|done)' .claude/wayfind/concurrent-shells/tickets/*.md 2>/dev/null | wc -l | tr -d ' '); [ \"${n:-0}\" -eq 1 ] || fail \"expected exactly 1 closed ticket, found ${n:-0}: $(grep -lE '^state: *(closed|resolved|done)' .claude/wayfind/concurrent-shells/tickets/*.md 2>/dev/null | tr '\\n' ' ')\""
+        },
+        {
+          "name": "the frontier ticket is the one that was resolved",
+          "shell": "f=.claude/wayfind/concurrent-shells/tickets/001-name-the-failure-mode.md; grep -Eq '^state: *(closed|resolved|done)' \"$f\" && grep -Eqi '^#+ *(resolution|answer)' \"$f\" || fail \"the unblocked frontier ticket was not resolved and closed\""
+        },
+        {
+          "name": "its gist landed under Decisions so far",
+          "shell": "awk 'tolower($0) ~ /^#+ *decisions so far/ {i=1; next} i && /^#+ / {i=0} i && /^[-*] / {n++} END {exit !(n>0)}' .claude/wayfind/concurrent-shells/map.md || fail \"'Decisions so far' has no entry — the map was not updated\""
+        },
+        {
+          "name": "the blocked ticket was not resolved too",
+          "shell": "f=.claude/wayfind/concurrent-shells/tickets/002-detect-prevent-or-accept.md; [ -f \"$f\" ] || { fail \"the blocked ticket is gone\"; exit 1; }; grep -Eq '^state: *open' \"$f\" && ! grep -Eqi '^#+ *(resolution|answer)' \"$f\" || fail \"the blocked HITL ticket was resolved as well — one ticket per session\""
+        },
+        {
+          "name": "the map was maintained: fog graduated or a ticket wired",
+          "shell": "n=$(ls .claude/wayfind/concurrent-shells/tickets/*.md 2>/dev/null | wc -l | tr -d ' '); [ \"${n:-0}\" -gt 2 ] || ! grep -q 'unknown until we can see the failure mode' .claude/wayfind/concurrent-shells/map.md || fail \"the fog entry this resolution answers is untouched and no new ticket was wired — nothing was maintained\""
+        },
+        {
+          "name": "planning, not doing — the store was not changed",
+          "shell": "path_unchanged_since \"$REPO\" origin/main tinytask"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "no-fog-declines-to-chart",
+      "mode": "pipeline",
+      "note": "guards step 2 of Chart the map: no fog surfaced means no map, route onward",
+      "prompt": "/wayfind tinytask's `list` output should end with a line saying how many tasks it printed\n\nThis project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`. An unrelated effort is already charted under `.claude/wayfind/concurrent-shells/`; this idea has nothing to do with it.\n\nIn your final message say whether this needs a map, and what you would do next.",
+      "expected_output": "No map. The change is one session's work against a documented output contract, so the breadth-first pass surfaces no fog and the skill says so and routes the idea to `design` or `to-issues` instead of charting it. The existing effort is untouched and no source file changes.",
+      "asserts": [
+        {
+          "name": "no map was charted for a one-session change",
+          "shell": "d=$(ls -d .claude/wayfind/*/ 2>/dev/null | grep -v concurrent-shells | head -1); [ -z \"$d\" ] || fail \"charted a map for work that fits one session: $d\""
+        },
+        {
+          "name": "the unrelated effort was not co-opted",
+          "shell": "path_unchanged_since \"$REPO\" origin/main .claude/wayfind"
+        },
+        {
+          "name": "the run routes the idea onward instead",
+          "shell": "out_matches 'to-issues|design skill|/design|one session|no map|does not need a map|already clear|no fog'"
+        },
+        {
+          "name": "nothing was built",
+          "shell": "path_unchanged_since \"$REPO\" origin/main tinytask tests"
+        }
+      ]
+    }
+  ]
+}

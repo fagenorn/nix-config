@@ -32,7 +32,18 @@ by reading code yourself; overlap risk is the edges' job.
 
 ## 3. Dispatch
 
-For each issue: `TaskCreate` a ledger entry, then spawn one **background
+**Fog pre-check first — one query for the whole set.** List the repo's open
+`wayfinder:*` decision tickets once (GitHub: `gh issue list --state open
+--search 'label:wayfinder:grilling,wayfinder:research,wayfinder:prototype,wayfinder:task'
+--json number,url`) and intersect them with the `blocked_by` numbers §2 already
+read. An issue blocked by any of them is **fogged**: a human has to decide
+before an agent can spec it. Record it `fogged` in the ledger with the count
+and links of the open decisions, dispatch nothing for it, and carry that link
+list into the final report. from-issue's Phase-0 fog gate stays the deep check
+for fog nobody has charted yet; this only avoids paying a whole agent run to
+rediscover fog already declared on a map.
+
+For each remaining issue: `TaskCreate` a ledger entry, then spawn one **background
 agent** (fresh context, `run_in_background: true`) whose entire prompt is:
 
 > Invoke the `from-issue` skill via the Skill tool with arguments
@@ -63,6 +74,8 @@ silently wait forever, and don't kill it on your own.
 - **Content-level stops are verdicts, not errors** — wrong issue type,
   existing PR/worktree found in pre-flight, fog-gate abort. Record the
   child's stated reason verbatim in the ledger and never retry.
+- **`fogged` is a verdict too** — never retried in this run; it clears when
+  the decision tickets blocking it close.
 - **Transient failures** (CI flake, network, harness death) → retry the
   issue once with a fresh agent; then record `failed`.
 - A failed issue never blocks unrelated issues.

@@ -42,7 +42,11 @@ order of magnitude more and is reserved for risky landings.
   `UNEXPECTED-PASS` telling you to drop the flag.
 - `fixture-repo/` is `tinytask`, a stdlib-only python3 CLI with docs, an ADR, a
   `.claude/skills.config.json`, and three issue fixtures under `issues/` (well-specified,
-  fuzzy, mechanical). Verify it with `python3 -m unittest discover` from its root.
+  fuzzy, mechanical). It also ships one pre-charted decision map,
+  `.claude/wayfind/concurrent-shells/` — the markdown-tracker shape `wayfind` falls back to
+  when `issueTracker.kind` is `none`: a map, an unblocked ticket, a ticket blocked by it, and
+  fog. The wayfind evals work it; every other eval must leave it untouched. Verify the fixture
+  with `python3 -m unittest discover` from its root.
 - Env: `EVAL_MODEL` (default `sonnet`), `EVAL_TIMEOUT` seconds (default 2700),
   `EVAL_MAX_USD` (optional ceiling).
 - Sandboxes are kept after the run and their path is printed, so you can inspect the spec

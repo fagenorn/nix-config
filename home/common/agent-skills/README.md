@@ -12,7 +12,7 @@ and a map skeleton; nothing in this tree changes.
 | **Decisions** | `docs/areas/<slug>/adr/` — every area's own, including the reserved `system` area for decisions no single area owns | 1–3 sentence records, gated on hard-to-reverse AND surprising AND real-trade-off. Ids are `ADR-<slug>-NNN`, numbered per directory from `001`; no global sequence. Format: `skills/grill-with-docs/ADR-FORMAT.md`. |
 | **Standards, Layer 2** | `docs/standards/` + ≤40-line README index with `governs:` globs | Project deltas only. Layers 0–1 are machine-global: `~/.agents/standards/the-bar.md` (universal) and `~/.agents/standards/stacks/*.md` (per-stack trap libraries) — a new project inherits both for free. Precedence: direct instruction > project > stack > bar > convention. |
 | **Rejection KB** | `.out-of-scope/*.md` | One file per consciously-rejected direction; `to-issues` checks it before proposing slices. |
-| **Decision maps** (optional) | tracker issues labelled `wayfinder:*` | Big fuzzy efforts charted by the `wayfind` skill; `from-issue --auto`'s fog gate emits decision tickets into them. |
+| **Decision maps** (optional) | tracker issues labelled `wayfinder:*`; no tracker → `.claude/wayfind/<effort>/` | Big fuzzy efforts charted by the `wayfind` skill; `from-issue --auto`'s fog gate emits decision tickets into them. The markdown fallback lives under `.claude/` because the docs root is reserved (see the linter's layout rules). |
 
 ## The `projectHints` binding
 
