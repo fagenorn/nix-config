@@ -6,22 +6,25 @@ argument-hint: "<issue number or URL> [--auto]"
 
 # From Issue
 
-Counterpart to `to-issues`. Take a single tracker issue from triage to merged code by chaining the canonical skills, with a human checkpoint at every phase.
+Counterpart to `to-issues`. Take one tracker issue from triage to merged code by chaining the canonical skills, with a human checkpoint at every phase.
+
+## Files beside this one
+
+- **`AUTO.md`** — autonomous-mode rules. Read it *once*, now, if the invocation arguments contain the literal token `--auto` (`/from-issue 62 --auto`, `from-issue #62 --auto`). Otherwise never read it.
+- **`REVIEW-CONTRACT.md`** — the Phase-5 reviewer contract. Reviewer text: hand it over **by absolute path**, never read it into this conversation.
 
 ## Project bindings (resolve first)
 
-This skill is project-agnostic. Before acting, resolve project-specific values:
+1. Read `.claude/skills.config.json` at the project root if it exists.
+2. Auto-detect what it doesn't set: issue tracker = `gh` if the remote is github.com, else `glab`/none; verify commands from the manifest (npm scripts, dotnet, cargo, go, make); branches from the repo default.
+3. Defaults when neither yields a value: integrationBranch=main, defaultBranch=main, commit.coAuthoredBy=true, unsetGithubToken=false, specDir=.claude/specs, planDir=.claude/plans, codex.planReview.enabled=true, codex.planReview.focus=null.
+4. Degrade gracefully: a configured-but-absent doc path, sibling skill, or hints file is skipped silently. Never read a file that doesn't exist; never hard-fail on a missing optional binding.
 
-1. If `.claude/skills.config.json` exists at the project root, read it for the bindings below.
-2. For any absent key (or no config file), auto-detect: issue tracker = `gh` if the git remote is github.com (else `glab`/none); verify commands from the manifest (package.json scripts, *.slnx/*.sln → dotnet test, Cargo.toml → cargo test, go.mod → go test, Makefile → make test); branches from the repo default.
-3. Defaults when neither config nor detection yields a value: integrationBranch=main, defaultBranch=main, commit.coAuthoredBy=true, unsetGithubToken=false, specDir=.claude/specs, planDir=.claude/plans.
-4. Degrade gracefully: any configured-but-absent doc path, sibling skill, or hints file is skipped silently — never read a file that does not exist, never hard-fail on a missing optional binding.
+Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,contextMap,adrDir,standards,architecture,gitWorktrees}`, `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`, `codex.planReview{enabled,focus}`.
 
-Keys this skill uses: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,adrDir,standards,architecture,gitWorktrees}`, `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`, `codex.planReview{enabled,focus}`.
+`<tracker-cli>` = resolved `issueTracker.cli`; `<integration-branch>`, `<default-branch>` likewise. When `issueTracker.kind=none`, skip every issue/PR-linkage step and operate on the branch alone (a "tracker URL" the user gives you is just a label).
 
-`codex.planReview.enabled` defaults to `true` when absent. Set it to `false` to restore the fresh native reviewer for Phase 5. `codex.planReview.focus` defaults to `null`; when set, pass its project-specific emphasis to the reviewer in addition to `projectHints`. Existing project configurations require no migration.
-
-Throughout this skill, `<tracker-cli>` means the resolved `issueTracker.cli` (default `gh`), `<integration-branch>` the resolved `integrationBranch` (default `main`), and `<default-branch>` the resolved `defaultBranch` (default `main`). When `issueTracker.kind=none`, skip every issue/PR-linkage step and operate on the branch alone (a "tracker URL" the user gives you is just a label).
+**tracker-cli hygiene.** When `unsetGithubToken` is true, prefix *every* `<tracker-cli>` call — including ones you add ad-hoc — with `unset GITHUB_TOKEN &&`; some harnesses export a token without the target org's access. When false (default), use the ambient credential.
 
 ## The flow
 
@@ -36,263 +39,154 @@ Throughout this skill, `<tracker-cli>` means the resolved `issueTracker.cli` (de
 7. Ship (skill)          → ship-issue: merge integration branch, PR, review, CI, merge, cleanup
 ```
 
-Worktree-first is deliberate. Earlier versions of this flow ran brainstorm/grill/plan on the integration branch directly and only created the worktree before execute. Under parallel `--auto` runs that pattern caused two failure modes: (a) spec/plan commits made on the integration branch got cross-contaminated when another agent's index landed under your commit, and (b) when the worktree was finally created mid-flow it inherited local integration-branch state, which carried foreign in-flight commits from other agents. Branching off `origin/<integration-branch>` *before* any commits land eliminates both.
-
 ## Checkpoints
 
-Checkpoint between every phase. Don't auto-chain. After each phase, state the artifact produced (file path or short summary) and wait for the user to confirm before invoking the next sub-skill.
+Checkpoint between every phase; don't auto-chain. State the artifact produced (path or short summary) and wait for the user before invoking the next sub-skill. A wrong spec costs one revision; a wrong plan costs a worktree of execution.
 
-The reason is failure cost: a wrong spec wastes one revision; a wrong plan wastes a worktree of execution. The earlier you catch a misalignment, the cheaper it is.
+**Override:** with `--auto`, checkpoints become self-resolved decisions logged inline — see `AUTO.md`. Two content-level stops survive there: the Phase-0 wrong-issue-type and pre-flight stops, and Phase-5 blocking findings that editing the plan can't fix.
 
-**Override:** if the invocation includes `--auto`, see "Autonomous mode" below — checkpoints become self-resolved decisions logged inline.
+## Auto-resolved decisions (artifact discipline)
 
-## Doc-grounded questions
+Every artifact this flow produces — spec, plan, ADR — carries a section named exactly `## Auto-resolved decisions` listing each question the agent answered instead of the user. Mandatory under `--auto`; expected interactively too, since the author still calls task granularity, test framing, verification gates, and commit boundaries. One entry per decision:
 
-During Phase 2 and Phase 3, ground in the project's docs before asking the user clarifying questions or presenting option sets. If the `doc-grounded-questions` skill is available, invoke it (via the Skill tool) — it forces the agent to read the context doc (`docPaths.context`), the relevant ADRs (`docPaths.adrDir`), and the coding-standards doc (`docPaths.standards`) first, so questions surface real unknowns instead of relitigating documented decisions. **If that skill is not available, fall back inline:** read whichever of those configured doc paths exist (skip any that don't), then form the question. Either way the grounding happens before the question.
+```markdown
+### <short question / decision title>
+- **Question:** what would have been asked
+- **Choice:** what you picked
+- **Grounding:** the docs / code / issue references that justify it (link or quote)
+- **Alternative considered:** what you rejected and why
+```
 
-In autonomous mode, the same procedure drives the self-answer step — you ground in the docs first, then answer the question yourself rather than passing it to the user.
+**Never consolidate entries.** Phase-5 findings *extend* the plan's section instead of amending Phase-4 entries, so a reader can trace the design chronologically. When a Phase-5 entry reverses a Phase-4 choice, its `Alternative considered` describes what *the reviewer* rejected.
 
-## tracker-cli hygiene
+## Doc grounding
 
-If `unsetGithubToken` is true (config), `unset GITHUB_TOKEN` (or `env -u GITHUB_TOKEN`) before every `<tracker-cli>` call — some harnesses export a token without the target org's access, and the explicit literal commands in the phases below include this. If `unsetGithubToken` is false (the default), do **not** strip the token; the ambient credential is the one to use. Whichever applies, the rule extends uniformly to any `<tracker-cli>` call you add ad-hoc. If `docPaths.gitWorktrees` is configured and exists, it may document the project's specific stance on this.
+Phases 2–5 ground in the project's docs before their first clarifying question, option set, or review pass. Invoke `doc-grounded-questions`: it reads the context map / context doc, the ADRs under `docPaths.adrDir`, and `docPaths.standards`, then caches the result in a worktree-local `GROUNDING.md`.
 
-## Skill tool invocations
+**Ground once per phase, not once per decision.** After the phase's first pass, read `GROUNDING.md` instead of re-running it; re-invoke only when a decision reaches an area the cache doesn't cover, then append that area. Each new phase starts a new cache. Without the skill, do the same by hand: read whichever configured doc paths exist, write the same `GROUNDING.md`, reuse it for the rest of the phase.
 
-Every sub-skill referenced in this flow — `superpowers:using-git-worktrees`, `superpowers:brainstorming`, `grill-with-docs`, `superpowers:writing-plans`, `doc-grounded-questions`, `codex-collaboration`, `superpowers:subagent-driven-development`, `ship-issue` — goes through the `Skill` tool when available, not paraphrased inline. The Skill tool fires the loader and the harness records the invocation; reading procedures from memory skips both, and the skill's progressive-disclosure resources never get pulled in. `codex-collaboration` is intentionally Claude-only and non-user-invocable; native Codex sessions therefore use the Phase-5 native reviewer fallback. **When a referenced sibling skill is not installed**, fall back to the inline behavior named in that phase (folding grill into the brainstorm, clarifying without the doc-grounding skill, reviewing with a fresh native agent, delivering via plain git/PR steps); don't hard-fail on a missing sibling.
+## Skill-tool invocations
 
-`doc-grounded-questions` in particular is a hard gate when present: every decision point that would normally surface a clarifying question to the user (or self-answer one in `--auto`) requires a Skill-tool firing this turn. Don't skip because "you already read it" — re-invoke per decision so the body re-injects up-to-date pointers and binds the *specific* decision in front of you. If the skill is absent, re-read the configured doc paths per decision instead.
+Sub-skills named here — `superpowers:using-git-worktrees`, `superpowers:brainstorming`, `grill-with-docs`, `superpowers:writing-plans`, `doc-grounded-questions`, `codex-collaboration`, `superpowers:subagent-driven-development`, `ship-issue` — go through the `Skill` tool, never paraphrased from memory; the tool fires the loader and pulls in the skill's progressive-disclosure resources. `grill-with-docs` is the bare name (`superpowers:grill-with-docs` doesn't exist). `codex-collaboration` is Claude-only and non-user-invocable, so native Codex sessions take the Phase-5 native-reviewer path.
 
-The phases below assume these rules and don't restate them for each sub-skill.
+**Never hard-fail on a missing sibling** — run the phase inline instead: brainstorm as intent + requirements + ≥2 design options; grill by re-reading `docPaths.context`/`adrDir`, challenging the spec's terminology against the project's vocabulary, and recording ADR-worthy decisions in `docPaths.adrDir` (or in the spec if there's no ADR convention); plan as a numbered task list with a verification gate per task; execute task-by-task, running the verify commands and reviewing each diff; ship per the Phase-7 fallback.
 
 ## Dispatch and budget rules
 
-**Structured report-backs (every dispatch).** A subagent's final message is re-read by its caller on every later turn — mining measured ~87 re-reads per report. Every `Agent` dispatch in this flow (standards reviewers, SDD implementers/reviewers, the Phase-7 ship-issue subagent) must state a fixed return schema in its prompt: artifact paths produced, a one-word verdict/state, and ≤500 characters of notes. Details go in files in the worktree, never in the report. Where the task fits, dispatch the tiered agent types (`implementer`, `reviewer`, `mechanic`) instead of `general-purpose`.
+**Structured report-backs.** A subagent's final message is re-read by its caller on every later turn (~87 re-reads per report, measured). Every `Agent` dispatch here states a fixed return schema in its prompt: artifact paths, a one-word verdict/state, ≤500 characters of notes. Details go in worktree files, never in the report. Use the tiered agent types where the task fits — `implementer`, `reviewer`, `mechanic` — over `general-purpose`.
 
-**Turn/context budget (every phase boundary).** Cost is quadratic in session length — every turn re-reads the whole prefix. At each phase boundary, check against a budget of ~100–120 assistant turns / ~150k context, and decide with this ladder (first yes wins):
+**Turn/context budget.** Cost is quadratic: every turn re-reads the whole prefix. At each phase boundary, measure against ~100–120 assistant turns / ~150k context and take the first branch that applies:
 
-1. **Continue** — the next phase needs this conversation as a primary source and budget remains. Costs nothing, loses nothing.
-2. **Fresh start** (`/clear`) — everything above is disposable because the artifacts are already on disk.
-3. **Handoff** — something must travel that isn't in an artifact: invoke the `handoff` skill. Interactive: give the user the handoff path to resume fresh. `--auto`: finish the current phase, write the handoff, and stop, reporting the handoff path to your caller as `blocked_reason`.
-4. **Subagent** — the remaining work is self-contained enough to dispatch out entirely.
-5. **Compact** (`/compact`) — the default last resort, never the first reach.
+1. **Continue** — the next phase needs this conversation and budget remains.
+2. **Fresh start** (`/clear`) — everything above is disposable; the artifacts are on disk.
+3. **Handoff** — something must travel that isn't in an artifact: invoke `handoff`. Interactive: give the user the path. `--auto`: finish the phase, write the handoff, stop, report the path as `blocked_reason`.
+4. **Subagent** — the rest is self-contained enough to dispatch out entirely.
+5. **Compact** (`/compact`) — last resort, never the first reach.
 
-Never let a session cross ~150 turns; past that point every remaining phase pays the full accumulated prefix on every single turn.
-
-## Autonomous mode (`--auto`)
-
-Detect by scanning the invocation arguments for the literal token `--auto` (e.g. `/from-issue 62 --auto`, `from-issue #62 --auto`). If present, run the whole flow end-to-end with no user checkpoints. If absent — including when the user just says "work on issue #62" — stay in interactive mode and use the per-phase checkpoints above. Default is off.
-
-The shift is *what you do at a decision point*, not *what work gets done*. Every phase still produces the same artifact at the same quality bar. Brainstorm still happens. Grill still happens. Standards review still happens. You don't get to skip thinking — you only stop waiting for the user.
-
-### The self-answer pattern
-
-Whenever a phase or sub-skill would normally ask the user a clarifying question, present option sets, or pause at a `**CHECKPOINT**`:
-
-1. **Ground first.** Invoke `doc-grounded-questions` if available (per the Skill-tool rule above), else re-read the configured doc paths. Re-read the sections that bind *this specific* decision; "I already read it earlier in the flow" doesn't substitute.
-
-2. **Pick the most defensible default.** The choice that (a) aligns with documented invariants and ADRs, (b) matches existing precedent in the codebase, (c) honors the issue author's stated intent, and (d) keeps scope tight. When two options are both defensible, prefer the one that's smaller, more reversible, and more idiomatic to the surrounding code.
-
-3. **Log the decision inline in the artifact.** Each artifact you produce (spec, plan, ADR) must include an `## Auto-resolved decisions` section listing every self-answered question. One entry per decision:
-
-   ```markdown
-   ### <short question / decision title>
-   - **Question:** what would have been asked
-   - **Choice:** what you picked
-   - **Grounding:** the docs / code / issue references that justify it (link or quote)
-   - **Alternative considered:** what you rejected and why
-   ```
-
-   This is the audit trail. A human reviewing the PR can read this section and challenge any choice without re-deriving it. The plan in Phase 4 carries the same section — same template, same fields. Standards-review fixes in Phase 5 extend (not replace) the plan's section. The discipline drops between Phase 2 and Phase 4 if you let the plan feel "mechanical"; it isn't.
-
-4. **Continue.** Don't post the question to the user. Don't wait. Move to the next step.
-
-### When *not* to auto-resolve
-
-Autonomous mode is "trust the agent end-to-end" — there are no checkpoint gates. But two content-level stops from the existing flow still apply, because they are judgments about the issue itself, not user-approval gates:
-
-- **Phase 0 wrong-issue-type stop.** If the issue is multiple issues bundled, a duplicate, a pure question, or otherwise not implementable, surface that finding and stop. Auto-mode means "decide without asking," not "implement something incoherent."
-- **Phase 5 blocking standards findings.** Apply blocking fixes to the plan inline (as the interactive flow already does). If a blocker can't be fixed by editing the plan — it indicates the spec or the issue scope is wrong — back up the relevant phase, redo it, and log the loop in `Auto-resolved decisions`.
-
-Phase 5 should-fix findings in `--auto`: apply inline by default and log them in `Auto-resolved decisions` with the reviewer's rationale. Exception: should-fixes implying a scope change (e.g. "the plan covers feature A but the spec promised A+B") — back up to the relevant phase rather than scope-creep the plan.
-
-Everything else — option choices, scope boundary calls, ADR phrasing, plan task granularity — you decide and log.
-
-### Sub-skill behavior
-
-Sub-skills (`brainstorming`, `grill-with-docs`, `writing-plans`, `subagent-driven-development`, `ship-issue`) don't know about `--auto`. *You* are the agent invoking them, and *you* carry the autonomous-mode context. When a sub-skill instructs you to ask the user a clarifying question or wait for confirmation, run the self-answer pattern instead. The sub-skill's output still lands in the same file at the same quality bar.
+Never cross ~150 turns.
 
 ## Phase 0 — Investigate
 
-Build a shared mental model of what the issue is asking for *before* opening the brainstorm. Light touch — no files yet.
-
-(When `issueTracker.kind=none`, skip the issue-fetch and PR pre-flight steps below; treat the user's description as the issue, and base the investigation on the named scope plus a codebase grep.)
+Build a shared mental model *before* opening the brainstorm. No files yet. (When `issueTracker.kind=none`, skip the fetch and PR pre-flight: the user's description is the issue.)
 
 ### Pre-flight: existing PR / worktree check
 
-Before fetching the issue, confirm nothing is already shipping it. A real incident burned ~4 hours when two parallel `--auto` sessions raced on the same issue and the second had no idea the first was already mid-flow.
+Confirm nothing is already shipping this issue — two sessions racing on one issue is the most expensive failure this flow produces, and the check costs one tracker call plus one `git` call.
 
-1. `<tracker-cli> pr list --state all --search "issue-<num>" --json number,title,headRefName,state` (prefix with `unset GITHUB_TOKEN &&` only if `unsetGithubToken` is true) — default search hits PR titles, bodies, *and* branch names, so it catches PRs whose branch is `<worktreePrefix>issue-<num>-...` even if the title doesn't include the issue number. Don't narrow with `in:title,body` — that skips the branch-name match, which is exactly how the incident PR was nameable.
-2. **Open PR** matching this issue: stop. Surface the PR URL and recommend `/ship-issue <num>` to resume the existing flow (CI poll, review fixes, merge), or that the user close the PR before retrying.
-3. **Merged PR**: stop. The issue has already landed on the integration branch; surface the merge commit and ask whether the user meant a different issue or a follow-up.
-4. **Closed-without-merge**: check the close reason first — `<tracker-cli> pr view <pr>` for body + comments. If marked duplicate / superseded / replaced by another PR, surface that and stop (don't re-implement work that landed under a different number). Otherwise the PR was likely abandoned; continue and Phase 1 creates a fresh branch. In `--auto`, log this as an Auto-resolved decision rather than asking the user.
-5. `git worktree list | grep <worktreePrefix>issue-<num>-` — collect every match.
-   - Zero matches: continue.
-   - One match, no uncommitted work: clean up (`git worktree remove <path>` + `git branch -D <branch>`). This handles orphans from a prior run that exited mid-flow.
-   - One match with uncommitted work: stop and ask the user — their in-progress state isn't yours to discard.
-   - Multiple matches: stop and ask the user which to resume or discard. Steady-state shouldn't produce this, but it can accumulate after repeated aborts and the resolution depends on which run was most recent.
-
-This check is cheap (one tracker call, one `git` call) and prevents the most expensive failure mode the flow has produced.
+1. `<tracker-cli> pr list --state all --search "issue-<num>" --json number,title,headRefName,state`. The default search hits titles, bodies *and* branch names, catching PRs whose branch is `<worktreePrefix>issue-<num>-...` even when the title omits the number; don't narrow with `in:title,body`.
+2. **Open PR** for this issue: stop. Surface the URL and recommend `/ship-issue <num>` to resume it, or that the user close it first.
+3. **Merged PR**: stop. Surface the merge commit; ask whether they meant a different issue or a follow-up.
+4. **Closed unmerged**: check why (`<tracker-cli> pr view <pr>` for body + comments). Duplicate/superseded/replaced → surface and stop. Otherwise it was abandoned: continue, and Phase 1 makes a fresh branch. In `--auto`, log this as an Auto-resolved decision.
+5. `git worktree list | grep <worktreePrefix>issue-<num>-`:
+   - none → continue;
+   - one, clean → remove it (`git worktree remove <path>` + `git branch -D <branch>`), an orphan from a run that exited mid-flow;
+   - one with uncommitted work → **stop and ask the user**; their in-progress state isn't yours to discard;
+   - several → stop and ask which to resume or discard.
 
 ### Investigate
 
-1. Fetch the issue: `<tracker-cli> issue view <num> --json title,body,labels,comments,url,assignees,milestone` (prefix with `unset GITHUB_TOKEN &&` only if `unsetGithubToken` is true).
-2. Read references in the body (file paths, ADR numbers, commit SHAs, linked issues).
-3. Skim the context doc (`docPaths.context`) and the ADR dir (`docPaths.adrDir`) for terms or decisions the issue touches — skip either if not configured/present.
-4. Grep the codebase for the central concepts named in the issue.
-5. Post a short investigation note in the conversation covering:
-   - **Restatement** in your own words
-   - **Relevant existing code** — paths + a one-line role each
-   - **Documented constraints** — context-doc terms, ADRs, coding-standards sections that bind the work
-   - **Open questions** for the user
-   - **Suggested scope boundary** — what's in, what's deliberately out
-   - **Scope-size estimate** — rough file count + lines touched, and whether the mechanical-only shortcut below applies
+1. `<tracker-cli> issue view <num> --json title,body,labels,comments,url,assignees,milestone`.
+2. Read the references in the body: file paths, ADR numbers, commit SHAs, linked issues.
+3. Skim `docPaths.context` and `docPaths.adrDir` for terms and decisions the issue touches.
+4. Grep the codebase for the concepts it names.
+5. Post a short investigation note covering: **Restatement** in your own words; **Relevant existing code** (paths + one-line role each); **Documented constraints** (context terms, ADRs, standards that bind the work); **Open questions**; **Suggested scope boundary** (in vs. deliberately out); **Scope-size estimate** (rough files + lines, and whether the mechanical-only shortcut applies).
 
-If the issue is actually multiple issues bundled, stop and suggest `to-issues` to break it up first. If it's a question or a duplicate, report that and stop.
+If the issue is several issues bundled, stop and suggest `to-issues`. If it's a question or duplicate, report that and stop.
 
-**The Open questions section is mandatory even in `--auto`.** Self-answering happens in the spec's `## Auto-resolved decisions`, *not* by silently dropping the section from the Phase-0 note. The Phase-0 enumeration is the audit point: the spec's resolutions are downstream of it. If you can't think of any open questions, write "None — Phase 2 will surface anything missed" rather than omitting the bullet. Reviewers reading the transcript later look for this section to verify the agent actually thought about what was unknown.
+**Open questions is mandatory even in `--auto`** — self-answering happens in the spec's `## Auto-resolved decisions`, not by dropping the section, which is the audit point the resolutions hang off. With nothing open, write "None — Phase 2 will surface anything missed".
 
 ### Mechanical-only shortcut
 
-Declare the issue `mechanical-only` only when the entire planned change is deletion or renaming and has **no** behavioral, configuration, interface, generated-output, or semantic-documentation effect. File count and line count alone never qualify a change. Downstream phases lean: Phase 5 self-grades the plan against the same review contract; Phase 6 dispatches one implementer+reviewer pair for the whole change. The full pipeline still runs — brainstorm, grill, plan, ship. A mechanical plan does not need manufactured TDD framing; state why the shortcut applies and use direct verification instead.
+Declare `mechanical-only` only when the entire change is deletion or renaming with **no** behavioral, configuration, interface, generated-output, or semantic-documentation effect; file and line counts never qualify a change on their own. Then Phase 5 self-grades against `REVIEW-CONTRACT.md` and Phase 6 dispatches one implementer+reviewer pair for the whole change. Every phase still runs. Skip manufactured TDD framing: state why the shortcut applies and verify directly.
 
-**CHECKPOINT** — Confirm restatement + scope before brainstorming. For each open question in the investigation note, require explicit per-question disposition from the user: an answer, "defer to brainstorm" (resolve in Phase 2), or "agent-choose" (auto-resolve and log per the doc-grounding pattern). A bare "proceed" without dispositions means: re-prompt — the questions don't vanish on the way to Phase 2.
+**CHECKPOINT** — Confirm restatement + scope. Require a per-question disposition for each open question: an answer, "defer to brainstorm", or "agent-choose" (auto-resolve and log). A bare "proceed" means re-prompt — the questions don't vanish on the way to Phase 2.
 
 ## Phase 1 — Worktree
 
-Create the isolated workspace before any spec/plan/grill commits land — those commits go *in the worktree*, not on the integration branch. This is the structural fix for parallel-`--auto` cross-contamination (see "Worktree-first is deliberate" above).
+Create the workspace before any spec/plan/grill commit lands; those commits go *in the worktree*, never on the integration branch.
 
-1. `git fetch origin` (prefix with `unset GITHUB_TOKEN &&` only if `unsetGithubToken` is true) — get latest remote refs.
-2. Invoke `superpowers:using-git-worktrees` (the skill encodes the destructive-ops carve-out and the worktree-prefix contract). Branch name follows `branchNaming.pattern` (default `issue-<num>-<slug>`) → `issue-<num>-<short-slug>`. The harness's `EnterWorktree` prepends `branchNaming.worktreePrefix` (default `worktree-`), so the on-disk branch becomes `<worktreePrefix>issue-<num>-<short-slug>`. Both forms are accepted downstream; don't strip the prefix manually. (If the worktree skill is absent, create the worktree with plain git: `git worktree add -b <branch> <path> origin/<integration-branch>`.)
+1. `git fetch origin`.
+2. Invoke `superpowers:using-git-worktrees` (it encodes the destructive-ops carve-out and the prefix contract). Branch follows `branchNaming.pattern` (default `issue-<num>-<slug>`); `EnterWorktree` prepends `branchNaming.worktreePrefix` (default `worktree-`), so the on-disk branch is `<worktreePrefix>issue-<num>-<short-slug>`. Both forms are accepted downstream — don't strip the prefix. Skill absent → `git worktree add -b <branch> <path> origin/<integration-branch>`.
 
-   **Check position before calling the worktree tools.** A transcript audit found ~43% of all `EnterWorktree`/`ExitWorktree` failures are calls made while already positioned — the harness pins one worktree per session and refuses redundant or cross-pinned entries. Before `EnterWorktree`: compare `pwd` with the intended worktree path — already there → skip the call; pinned to a *different* worktree → `ExitWorktree` with `action: "keep"` first, then enter. Don't discover the pin state by letting the call fail.
-3. **Base the worktree on `origin/<integration-branch>`**, not local integration branch. Local integration branch may carry foreign in-flight commits from parallel agents (other `/from-issue --auto` runs, or unrelated WIP). Branching off `origin/<integration-branch>` guarantees a clean base; the merge-with-integration-branch happens later via `ship-issue` Phase 1.
-4. `cd` into the worktree. All subsequent phases (Brainstorm/Grill/Plan/StandardsReview/Execute) operate inside the worktree. Verify with `git rev-parse --git-common-dir ≠ git rev-parse --git-dir`.
+   **Check position before calling the worktree tools.** ~43% of `EnterWorktree`/`ExitWorktree` failures are calls made while already positioned; the harness pins one worktree per session and refuses redundant or cross-pinned entries. Before `EnterWorktree`, compare `pwd` with the intended path: already there → skip the call; pinned elsewhere → `ExitWorktree` with `action: "keep"` first. Don't discover the pin state by letting the call fail.
+3. **Base on `origin/<integration-branch>`**, never the local branch, which may carry other agents' in-flight commits; branching off the remote ref before any commit lands is what stops parallel runs cross-contaminating each other. The merge with the integration branch happens later, in `ship-issue`.
+4. `cd` into the worktree; every later phase runs inside it. Verify `git rev-parse --git-common-dir` ≠ `git rev-parse --git-dir`.
 
-**CHECKPOINT** — Confirm worktree path and base before brainstorming. In `--auto`, the base check is automatic but log the resulting commit SHA in the investigation note for the audit trail.
+**CHECKPOINT** — Confirm worktree path and base. In `--auto` the base check is automatic, but log the resulting SHA in the investigation note.
 
 ## Phase 2 — Brainstorm
 
-Invoke `superpowers:brainstorming` to produce a design doc under `specDir` (default `.claude/specs`), committed in the worktree. (If that skill is absent, run the brainstorm inline: explore intent, requirements, and at least two design options before writing the spec.)
+Invoke `superpowers:brainstorming` for a design doc under `specDir`, committed in the worktree.
 
-Before opening any new question, resolve every Phase 0 carryover — answer it from the user's Phase 0 disposition, lift it explicitly into the brainstorm, or auto-resolve it. Don't restart the question list with a fresh first question while earlier questions sit unanswered.
-
-Before asking the first clarifying question, run the doc-grounding step (hard gate, per the Skill-tool rule above).
+Resolve every Phase-0 carryover before opening a new question — answer it from the user's disposition, lift it into the brainstorm, or auto-resolve it. Don't restart the question list while earlier questions sit unanswered. Ground before the first clarifying question.
 
 **CHECKPOINT** — User approves the spec file in writing.
 
 ## Phase 3 — Grill
 
-Invoke `grill-with-docs` (project-local skill — use the bare name `grill-with-docs`, not `superpowers:grill-with-docs`; the latter doesn't exist and invoking both wastes context). It sharpens the spec against the context doc, surfaces glossary conflicts, and may produce new ADRs. ADRs and context-doc updates commit in the worktree alongside the spec; they ship to the integration branch when the PR merges, same as everything else.
+Invoke `grill-with-docs`. It sharpens the spec against the context doc, surfaces glossary conflicts, and may produce ADRs; those and any context-doc edits commit in the worktree alongside the spec and ship when the PR merges.
 
-**If `grill-with-docs` is not installed**, fold the grill into the brainstorm inline: re-read `docPaths.context` and `docPaths.adrDir` (whichever exist), challenge the spec's terminology against the project's existing vocabulary, and record any decisions that warrant an ADR directly in `docPaths.adrDir` (or note the absence of an ADR convention and capture the decision in the spec).
-
-The doc-grounding step applies here too.
-
-**CHECKPOINT** — Confirm all doc updates (context-doc edits, new ADRs) and the refined spec.
+**CHECKPOINT** — Confirm all doc updates and the refined spec.
 
 ## Phase 4 — Plan
 
-Invoke `superpowers:writing-plans` to produce an implementation plan under `planDir` (default `.claude/plans`), committed in the worktree. (If that skill is absent, write the plan inline as a numbered task list with explicit verification gates per task.)
+Invoke `superpowers:writing-plans` for a plan under `planDir`, committed in the worktree, carrying its own `## Auto-resolved decisions` section.
 
-**The plan file must include an `## Auto-resolved decisions` section** when `--auto` is on, and *should* include one when interactive — even there, the plan author makes judgment calls about task granularity, test framing, verification gates, and commit boundaries that warrant a record. Same Question / Choice / Grounding / Alternative-considered template as the spec.
-
-**Plan-prose ≠ code-prose.** Anything the plan dictates that the implementer will copy verbatim into the codebase — a docstring, a `// ...` comment, a context-doc sentence, an ADR clause — must be phrased as the *live code will actually behave*, not as the plan hypothesises it will. Recurrent post-PR-review fix-up category: implementer copies plan-prose into a comment, code lands slightly different, prose becomes a lie. If you can't yet describe what the code *will* do precisely, write the prose as a TODO with the open question, not as a definitive statement — execute-phase rewrites it from the implemented code.
+**Plan-prose ≠ code-prose.** Anything the plan dictates that the implementer copies verbatim into the codebase — docstring, comment, context-doc sentence, ADR clause — must describe how the live code *will actually behave*, not how the plan hypothesises it. Otherwise the code lands slightly different and the prose becomes a lie (a recurring post-PR fix-up). If you can't describe the behavior precisely yet, write a TODO with the open question; the execute phase rewrites it from the implemented code.
 
 **CHECKPOINT** — User reviews the plan file.
 
 ## Phase 5 — Standards review
 
-A plan reviewed only by the author risks blind spots — and the agent who just wrote the plan is the author. Unless Phase 0 marked the plan `mechanical-only`, choose the reviewer as follows:
+A plan reviewed only by its author risks blind spots, and you are the author. Unless Phase 0 marked it `mechanical-only`:
 
-1. Resolve `codex.planReview.enabled` (default `true`) and `codex.planReview.focus` (default `null`).
-2. When enabled and the Claude-only `codex-collaboration` skill is available, invoke its `plan-review` operation. Pass the issue and acceptance criteria, Phase-0 investigation and open questions, the worktree base SHA, spec and plan paths, relevant `AGENTS.md`/`CLAUDE.md`, optional skills configuration, manifests, `projectHints`, configured documentation paths, detected verification commands, the optional review focus, and the review contract below. The skill owns foreground execution, isolation, read-only enforcement, result validation, and its one-time native-Claude fallback on a real Codex failure. A busy or concurrent reviewer is never a fallback condition.
-3. When Codex review is disabled or `codex-collaboration` is unavailable (including when this skill runs natively in Codex), dispatch one fresh native reviewer (`Agent` tool, `general-purpose`) with no inherited context and give it the same inputs and review contract.
+1. Resolve `codex.planReview.enabled` (default `true`) and `.focus` (default `null`; when set, pass its emphasis alongside `projectHints`).
+2. **Enabled and `codex-collaboration` available** → invoke its `plan-review` operation. It assembles the packet itself (its SKILL.md enumerates the contents) and owns foreground execution, isolation, read-only enforcement, validation, and a one-time native fallback on a real Codex failure — a busy or concurrent reviewer is never a fallback condition. Supply the issue and acceptance criteria, the Phase-0 investigation and open questions, the worktree base SHA, the spec and plan paths, the optional focus, and — as the review contract — **the absolute path to `REVIEW-CONTRACT.md` beside this file**, which it reads into the packet.
+3. **Disabled or unavailable** (including when this skill runs natively in Codex) → dispatch one fresh `reviewer` agent, no inherited context, same inputs, same `REVIEW-CONTRACT.md` path, told to read that file first.
 
-The review contract for either path is:
+**The contract travels by path, never inlined** — pasting reviewer text here costs the orchestrator its full length for the rest of the session.
 
-> Review the implementation plan at `<plan-path>` against the project's coding bar.
->
-> First ground in the project's docs: invoke `doc-grounded-questions` if available, else read whichever of these exist — the context doc (`docPaths.context`), the relevant ADRs (`docPaths.adrDir`), the coding-standards doc (`docPaths.standards`), and the architecture doc (`docPaths.architecture`). Then read the issue body (`<tracker-cli> issue view <num>` — prefix with `unset GITHUB_TOKEN &&` only if `unsetGithubToken` is true), the spec at `<spec-path>`, and the plan.
->
-> When checking specific findings, **read the live file at HEAD** rather than relying on snapshot/diff views — code may have been edited since the plan was written, and stale snapshots produce false-positive should-fixes.
->
-> For each plan task, flag anything that violates the grounded constraints. Pay particular attention to: framework-first (custom executors/state machines where a framework primitive already exists), production-grade-by-default (half-finished branches, missing error paths at boundaries), DI rules, and the test-fixture conventions in the coding-standards doc.
->
-> If `projectHints` is configured and the file exists, read it for project-specific review hints/examples and fold those into this pass (e.g. recurring repo-specific plan bugs that have escaped review before).
->
-> Additionally, scan against this **common-miss checklist** — categories that have repeatedly slipped past plan review and surfaced only at PR review:
-> - **UX alternate-dismiss paths.** Modal/dialog/typed-confirmation/destructive-action surfaces must specify state-reset behavior for every *user-reachable* dismiss path. Your finding for this category must include an itemized checklist — one line per path, marked with what the plan says (or "not specified") for each:
->   ```
->   - [ ] X button: <plan's behavior or "not specified">
->   - [ ] Cancel button: <…>
->   - [ ] Esc key: <…>
->   - [ ] Overlay click: <…>
->   - [ ] Browser back / navigation away: <…>
->   - [ ] Programmatic close (e.g. on success): <…>
->   ```
->   The checklist forces the *act* of checking; relying on the reviewer to mentally enumerate is how an Esc-key gap once leaked. Any **user-reachable** path the plan doesn't address is a Blocker. A path that's not user-reachable on this surface (e.g., no programmatic close because there's no success state) is fine — say so explicitly in the checklist, don't omit the row.
-> - **Boundary-error fallbacks at unfamiliar-principal / missing-entity points.** Auth user that doesn't exist, admin not yet seeded, feature flag missing, downstream table empty. Does the plan name the failure mode and the graceful path, or does it assume the happy path? "Production-grade by default" fires here.
-> - **Defensive guards against future refactor.** When the plan introduces a `switch` on an enum, a polymorphic dispatch, a base-class extension, or a new arm of an exception hierarchy — does it specify what *fails loudly* when the type/enum/hierarchy is extended later, so the next contributor doesn't silently fall into a default branch?
-> - **Plan-prose / live-code parity.** Any docstring, comment, context-doc sentence, or ADR clause the plan tells the implementer to write — does the wording match what the code will *actually* do? Drift here is a PR-review fix-up commit waiting to happen.
-> - **Stale prose audit.** Distinct from "plan-prose / live-code parity" above: that bullet checks prose the plan *dictates the implementer write*; this one checks prose that *already exists* in files adjacent to the diff. For every context-doc sentence, ADR clause, docstring, or comment near the PR's footprint, re-read the live file. Terminology the PR retires (renamed concepts, deprecated class names, removed fields) must be purged in *all* adjacent comments and doc references — not just the diff's immediate footprint. This is one of the most common post-PR-review fix-up categories.
-> - **Dead branches after iteration.** If Phase 4 → Phase 5 revisions changed the design (e.g., "use the framework's collapsible primitive" replacing hand-rolled state, "switch from an explicit field to a derived value"), walk every code path the plan still describes and confirm each is reachable. Pivoted plans leave stranded `else` branches, unused props, and `if (legacyFlag)` arms that the implementer dutifully writes and the PR reviewer dutifully flags.
-> - **Test-assertion specificity, not just scenarios.** Where the plan says "add a test that returns 400" or "asserts the array shape", grade whether the named assertion will *pin the documented contract* — error-body shape and content-type, ordering with discriminating rows, specific error-message format, role/aria attributes for UI. Tests that pass under any 400 emitter, against any non-null array, or by matching a substring of a transformed value aren't pinning anything; flag as Should-fix.
-> - **Spec ↔ implementation message-format parity.** Operator-facing error messages, fallback strings, audit-trail formats, and UI status labels that the spec promises must match the implementation byte-for-byte (or the implementation must explain why its actual format is equivalent/better). A spec-promised exact string that falls through to a generic default is a real gap caught only at PR review when missed here.
-> - **DRY against existing helpers.** For any new helper, hook, or utility the plan introduces, grep for similar prior patterns. If a near-duplicate exists, the plan should either reuse it or justify why a new one is needed. Duplicate helpers fixed only at PR review are a recurring waste.
->
-> Output a structured review:
->
-> - **Blocking** — must fix before execution
-> - **Should-fix** — strong recommendation, justify if you skip
-> - **Discussion** — judgment calls worth raising with the user
->
-> Don't propose new features. Don't second-guess scope. Grade only against the bar.
+**Mechanical-only:** replace the dispatch with a self-grade — read the issue, spec, plan, live files, and `REVIEW-CONTRACT.md`, then grade against the same Blocking / Should-fix / Discussion buckets. Any behavioral, configuration, interface, generated-output, or semantic-documentation consequence disqualifies the shortcut.
 
-**Mechanical-only shortcut.** If Phase 0 declared the plan `mechanical-only`, replace reviewer dispatch with a self-grade: read the issue, spec, plan, relevant live files, and coding standards, then grade against the same Blocking/Should-fix/Discussion buckets. Any behavioral, configuration, interface, generated-output, or semantic-documentation consequence disqualifies the shortcut, regardless of file count or diff size.
+Verify every actionable finding against the live worktree before touching the plan; stale or unsupported ones are recorded as rejected, not silently applied. Record provenance in the plan (reviewer, job id, base SHA, whether fallback was used) plus each disposition, and never copy a raw reviewer transcript into project artifacts.
 
-For a Codex review, verify every actionable finding against the live worktree before changing the plan; stale or unsupported findings are recorded as rejected, not silently applied. Record concise provenance (Codex version, review job identifier, base SHA, and whether native fallback was used) plus the disposition of each finding in the plan or Phase-5 audit note. Never copy the raw Codex transcript into project artifacts.
-
-Apply blocking fixes inline to the plan file (this falls under the standing local-commit authorization). Bring should-fix items to the user; in `--auto`, apply them inline too. **Extend the plan's `## Auto-resolved decisions` section** (create it if Phase 4 didn't) with one entry per applied finding:
-
-```markdown
-### <short title — e.g. "B1: test-fixture isolation">
-- **Question:** <the reviewer's note, verbatim or condensed>
-- **Choice:** <what you edited>
-- **Grounding:** <reviewer's rationale + doc cite if any>
-- **Alternative considered:** <if you considered keeping the original; otherwise "Reviewer's call accepted as-is.">
-```
-
-This is the in-file audit trail the commit-message scope (`plan(issue-N): apply standards-review blockers`) doesn't carry — useful when a future reviewer is reading the plan stand-alone.
-
-**One entry per finding, not consolidated.** When a Phase-5 finding *bears on* a question Phase 4 already self-answered — confirming it, refining it, or reversing it — append a *new* entry (`### S2: <reviewer's framing>`) rather than amending the original. The original entry stays verbatim; the reviewer's entry stands alongside, so a future reader can trace the design's evolution chronologically (Phase 4's choice first, Phase 5's pushback second).
-
-When Phase 5 *reverses* the Phase 4 choice, the new entry's `Alternative considered` field describes what *the reviewer* rejected (typically the Phase 4 choice the reviewer found insufficient, with their grounding) — not what Phase 4 originally considered. The Phase 4 entry above already records that.
+Apply blocking fixes inline to the plan (standing local-commit authorization). Bring should-fix items to the user; in `--auto`, apply them too. Extend the plan's `## Auto-resolved decisions` with one entry per applied finding, titled by finding ID (`### B1: test-fixture isolation`): **Question** = the reviewer's note, **Choice** = what you edited, **Grounding** = their rationale plus any doc cite, **Alternative considered** = what you weighed, or "Reviewer's call accepted as-is."
 
 **CHECKPOINT** — Confirm standards review is clean.
 
 ## Phase 6 — Execute
 
-Invoke `superpowers:subagent-driven-development`. It reads the plan, dispatches implementer subagents per task, and reviews each output. (If that skill is absent, execute the plan task-by-task yourself, running the verify commands and reviewing each task's diff before moving on.)
+Invoke `superpowers:subagent-driven-development`: it reads the plan, dispatches an implementer per task, and reviews each output.
 
-If Phase 0 declared the plan `mechanical-only`, dispatch a single implementer+reviewer pair for the whole change rather than per-task chains — the per-task ceremony adds no signal when there is only one mechanical task.
+If the plan is `mechanical-only`, dispatch a single implementer+reviewer pair for the whole change; per-task ceremony adds no signal for one mechanical task.
 
 **CHECKPOINT** — Confirm the implementation is committed on the feature branch.
 
 ## Phase 7 — Ship
 
-Dispatch `ship-issue` as a fresh subagent via the `Agent` tool (subagent_type `general-purpose`). Don't invoke it inline via the `Skill` tool — by Phase 7 this conversation already carries every `from-issue` artifact (investigate notes, brainstorm, grill, plan, standards-review, execute-phase implementer outputs). Continuing in-context means `ship-issue` does its full 100+ model turns over a ~200-300k accumulated context. A subagent gets a fresh ~10k-token context with only what we hand it, and returns one summary message — cuts ~1-3M weighted tokens per run versus same-context invocation.
+Dispatch `ship-issue` as a fresh subagent via the `Agent` tool (`general-purpose`) — not inline via `Skill`. By now this conversation carries every artifact of the flow, and ship-issue's ~100 turns over that 200–300k prefix costs ~1–3M weighted tokens versus a fresh ~10k subagent that returns one summary.
 
-**If `ship-issue` is not installed**, run the delivery inline with plain git/tracker steps: push the branch, open a PR against `<integration-branch>` (`<tracker-cli> pr create --base <integration-branch>`, prefixed with `unset GITHUB_TOKEN &&` only if `unsetGithubToken` is true), dispatch a fresh reviewer subagent over the diff, wait for CI (`<tracker-cli> pr checks --watch`), merge with a true merge commit (`--no-ff`), link/close the issue if `issueTracker.kind != none`, and clean up the worktree + branch. Honor `commit.coAuthoredBy` on any commit you create (see Notes). When `issueTracker.kind=none`, just merge the branch into `<integration-branch>` locally and clean up.
+Absent → deliver inline: push the branch, open a PR against `<integration-branch>`, dispatch a fresh reviewer subagent over the diff, wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, close the issue, clean up worktree + branch. With `issueTracker.kind=none`, merge locally and clean up.
 
 Subagent prompt (the handoff goes in the prompt, not a file — the subagent's starting context *is* the prompt):
 
@@ -337,13 +231,12 @@ PR and the worktree, not the report:
   notes:            <≤500 chars: anything that needed manual intervention>
 ```
 
-**Phase-number namespace.** `ship-issue` has its own Phase 0–8 sequence (pre-flight, sync, verify, consolidate, PR, review, CI, merge, cleanup). When narrating progress in transcripts (and when the subagent reports back), prefix with `ship-Phase-N` to distinguish from `from-issue` phases; otherwise a reader sees `Phase 6 done → Phase 0 pre-flight → Phase 6 CI` and can't tell which `Phase 6` is which.
+**Phase-number namespace.** `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating or reporting so the two sequences stay distinguishable.
 
 ## Notes
 
-- Standing local-commit authorization covers spec, plan, doc updates, and fix commits during this flow — don't re-confirm each commit (when the project documents such an authorization; otherwise follow the user's commit policy).
-- **`Co-Authored-By` trailer follows `commit.coAuthoredBy` (default: include).** Append it on every commit produced by this flow (spec, plan, ADR, standards-fix, execute-phase work) unless `commit.coAuthoredBy` is false in the project config. The matching note in `ship-issue/SKILL.md` resolves the same way.
-- Per-action confirmation still required for push, PR open/merge, force-push, hook bypass — these stay gated even mid-flow.
-- **Don't disable GPG signing defensively** (no `-c commit.gpgsign=false`, no `--no-gpg-sign`). Signing failures aren't yours to work around — surface them. Standards review flags signing bypasses as blockers anyway, so the "defensive" disable costs you a recovery loop. The standing local-commit authorization does not extend to bypassing signing. (Respect `commit.gpgSign` from config when set: `inherit` = don't override the repo's signing config.)
-- **PR bodies and comments use full URLs, not bare `#N`.** Writing `#107` in a PR body backlinks to whatever issue/PR has number 107 in the forge's resolution context, which can land on unrelated refs (cross-repo, archived issues, etc.). Use the full issue/PR URL (derive the repo slug from `repoSlug` if configured, else `git remote get-url origin`). This also applies to standards-review subagent prompts where you summarize references.
-- If a phase reveals the previous phase was wrong (e.g., grill exposes a spec assumption that breaks the design), back up to that phase and redo. Don't paper over it.
+- Standing local-commit authorization covers spec, plan, doc, and fix commits in this flow — don't re-confirm each one (where the project documents such an authorization; otherwise follow the user's commit policy). Push, PR open/merge, force-push, and hook bypass stay per-action gated.
+- Append `Co-Authored-By` to every commit this flow produces unless `commit.coAuthoredBy` is false.
+- **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`. Surface signing failures; the local-commit authorization doesn't extend to bypassing them, and standards review flags bypasses as blockers. Respect `commit.gpgSign` when set (`inherit` = don't override the repo).
+- **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`** — a bare number resolves against the forge's context and can land on an unrelated cross-repo or archived ref. Derive the slug from `repoSlug` if configured, else `git remote get-url origin`.
+- If a phase reveals the previous one was wrong (the grill exposes a spec assumption that breaks the design), back up to that phase and redo it. Don't paper over it.
