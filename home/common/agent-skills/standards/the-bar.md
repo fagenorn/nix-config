@@ -34,6 +34,10 @@ If the design starts with "we'll write a custom X that…", the framework probab
 
 Name for intent, not implementation. Keep units short enough to read without scrolling. Comments say *why*; the code already says what.
 
+### Moves keep their history
+
+Relocate and rename through the VCS's own move so `--follow` still works, and re-point every *living* document in the same commit. Point-in-time records — accepted decisions, past plans, published reports — keep their original paths: a citation into an accepted record is part of that record, and rewriting it invalidates the thing it was evidence for.
+
 ### Truthful terminal states
 
 A run that did no work is Failed, not Completed — status surfaces are truth, not progress bars, and a swallowed inner failure must not present as success. Log the original error object before any swallow, translate or rethrow, especially across a framework seam where the framework will reshape or absorb it.
@@ -48,7 +52,7 @@ At a closed-set dispatch site — an enum switch, a discriminated union, a regis
 
 ### Token economy
 
-The agent-facing surface is scarce: design it like it. Few tools and few parameters, because each is a failure site and not merely tokens; short stable handles rather than raw identifiers in anything a model reads or writes; standing instructions paid once in a prompt, never re-injected per turn. When a surface grows, check what fraction of it is signal rather than plumbing.
+The agent-facing surface is scarce: design it like it. Few tools and few parameters, because each is a failure site and not merely tokens; short stable handles rather than raw identifiers in anything a model reads or writes; standing instructions paid once in a prompt, never re-injected per turn. Prefer input forms a model emits reliably — a short relative form over a precise absolute one — and let defaults absorb the common case so it need emit nothing at all. When a surface grows, check what fraction of it is signal rather than plumbing.
 
 ### Tests that can fail
 
