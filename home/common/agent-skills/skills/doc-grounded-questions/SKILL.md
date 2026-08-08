@@ -20,9 +20,9 @@ This skill is project-agnostic. Before acting, resolve project-specific values:
 4. Degrade gracefully: any configured-but-absent doc path, sibling skill, or hints file is skipped silently —
    never read a file that does not exist, never hard-fail on a missing optional binding.
 
-**Keys this skill uses:** `docPaths.{context,adrDir,standards,architecture}` (to know where the grounding sources
-live), and `projectHints` (optional path to a project-specific vocab / review-hints appendix). All optional — if
-none are configured, fall back to discovery (below).
+**Keys this skill uses:** `docPaths.{contextMap,context,adrDir,standards,architecture}` (to know where the grounding
+sources live), and `projectHints` (optional path to a project-specific vocab / review-hints appendix). All optional —
+if none are configured, fall back to discovery (below).
 
 ## Why this matters
 
@@ -38,19 +38,30 @@ Worse: proposing options where one of them violates the coding bar is asking the
 
 For every clarifying question or option set you're about to surface, do this pass first. Ground **discovery-first**: read whichever sources actually exist; skip absent ones silently.
 
-1. **Find and read the context/glossary doc.** Use `docPaths.context` if configured; otherwise look for the common
-   locations (`CONTEXT.md`, `GLOSSARY.md`, `CONTEXT-MAP.md`, or a top-of-`README` domain section). If a term in
-   your question is defined there, use the canonical term and don't ask the user to disambiguate it again.
+1. **Read the context map, then only the areas you need.** Use `docPaths.contextMap` if configured, otherwise
+   `CONTEXT-MAP.md` at the repo root. Always read the map in full — it is capped at 150 lines and tells you what
+   exists. Then open an area's `CONTEXT.md` **only** when one of these holds:
+   - its `governs:` globs intersect the paths the issue touches, or
+   - one of its terms (per the map's term table) appears in the issue or in the question you are about to ask.
+
+   Opening every area file defeats the point; the map exists so you can skip the ones that don't apply. If a term
+   in your question is defined in an area you opened, use the canonical term and don't ask the user to
+   disambiguate it again.
+
+   **No map?** Fall back to the legacy layout: read whichever of `docPaths.context`, `CONTEXT.md`, `GLOSSARY.md`,
+   `DOMAIN.md` or a top-of-`README` domain section exists, in full. Read it once, not per question.
 
 2. **Find and scan the decision log.** Use `docPaths.adrDir` if configured; otherwise look for the common ADR
    directories (`docs/adr/`, `docs/adrs/`, `docs/decisions/`, `adr/`). List the directory, read the titles, and
    open any that look relevant. If a decision is already settled, state the existing decision and ask only whether
    anything has *changed* since.
 
-3. **Find and read the coding-standards / contributing doc.** Use `docPaths.standards` if configured; otherwise
-   look for the common locations (`CONTRIBUTING.md`, `docs/coding-standards.md`, `docs/style.md`, a "Code style"
-   section in the README). If one of your proposed options violates whatever the project's standards doc states,
-   drop it from the option set or call out why you're surfacing it anyway.
+3. **Read the standards that apply to this change.** The universal bar is `~/.agents/standards/the-bar.md` and the
+   stack shards are `~/.agents/standards/stacks/*.md` — load a shard only when the change's file extensions match
+   it. Project deltas live at `docPaths.standards` (a `docs/standards/` directory with a README index carrying
+   `governs:` globs, or a single `CONTRIBUTING.md` / `docs/coding-standards.md` in older repos). See
+   `~/.agents/standards/README.md` for the precedence ladder. If one of your proposed options violates a rule you
+   found, drop it from the option set or say why you're surfacing it anyway.
 
 4. **Find and read the architecture doc** if the question touches more than one component. Use `docPaths.architecture`
    if configured; otherwise look for `ARCHITECTURE.md`, `docs/architecture.md`, or a "Architecture" README section.
@@ -61,6 +72,31 @@ For every clarifying question or option set you're about to surface, do this pas
 
 If a `projectHints` file is configured and present, read it too — it carries project-specific vocab and review hints
 that sharpen the grounding.
+
+## Ground once per phase, cache the result
+
+The pass above runs **once per phase**, not once per question. Write what it found to `GROUNDING.md` in the working
+directory (the worktree, or `specDir` if one is configured) and read that file instead of re-running the pass:
+
+```md
+# Grounding — <phase>
+
+## Areas loaded
+- Billing (`src/billing/**`) — Invoice, Dunning, Settlement
+- Ordering (`src/ordering/**`) — Order, Customer
+
+## Constraints found
+- ADR-0007: Ordering and Billing communicate by domain event, never synchronous HTTP.
+- the-bar.md: fail-loud at closed-set dispatch sites.
+- docs/standards/testing.md: endpoint tests share the API factory fixture.
+
+## Areas deliberately not loaded
+- Fulfilment, Identity — no path or term overlap with this issue.
+```
+
+Re-invoke the pass only when a decision reaches into an area **not** in the cache — then load that one area, append
+it, and continue. A new phase starts a new cache. This is the single grounding read per phase that the pipeline
+expects; do not re-read the map or an area file you have already cached in this phase.
 
 ## How to phrase the question
 
@@ -95,8 +131,8 @@ The named sibling skills (`from-issue`, `ship-issue`, `grill-with-docs`, `superp
 
 - Pure preference questions ("do you want feature A or feature B?") — the docs can't answer these
 - Questions about user intent or goals — the docs describe the system, not what the user wants next
-- Within the same conversation you've already grounded a closely related question — don't re-grep for every follow-up
+- Anything already in this phase's `GROUNDING.md` — read the cache, don't re-run the pass
 
 ## Cost note
 
-Grounding takes seconds, not minutes — you're reading short markdown files and a handful of grep results, not the whole repo. If you're tempted to skip it because "it'll take too long," that's a sign you're about to ask a question that doesn't deserve to be asked.
+A grounded pass is the map (≤150 lines) plus the one or two area files that actually apply, plus a handful of greps — seconds, not minutes, and bounded no matter how large the project's docs have grown. If you're tempted to skip it because "it'll take too long," you're either about to ask a question that doesn't deserve to be asked, or you're loading area files the `governs:` globs told you to skip.
