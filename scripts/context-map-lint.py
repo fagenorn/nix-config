@@ -34,8 +34,10 @@ def find_map(root: Path) -> Path | None:
             configured = None
         if configured:
             return root / configured
-    candidate = root / "CONTEXT-MAP.md"
-    return candidate if candidate.is_file() else None
+    for candidate in (root / "docs" / "CONTEXT-MAP.md", root / "CONTEXT-MAP.md"):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def section(text: str, heading: str) -> str | None:

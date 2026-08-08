@@ -39,8 +39,8 @@ Worse: proposing options where one of them violates the coding bar is asking the
 For every clarifying question or option set you're about to surface, do this pass first. Ground **discovery-first**: read whichever sources actually exist; skip absent ones silently.
 
 1. **Read the context map, then only the areas you need.** Use `docPaths.contextMap` if configured, otherwise
-   `CONTEXT-MAP.md` at the repo root. Always read the map in full — it is capped at 150 lines and tells you what
-   exists. Then open an area's `CONTEXT.md` **only** when one of these holds:
+   `docs/CONTEXT-MAP.md` (or legacy root `CONTEXT-MAP.md`). Always read the map in full — it is capped at 150
+   lines and tells you what exists. Then open an area's `CONTEXT.md` **only** when one of these holds:
    - its `governs:` globs intersect the paths the issue touches, or
    - one of its terms (per the map's term table) appears in the issue or in the question you are about to ask.
 

@@ -8,8 +8,8 @@ and a map skeleton; nothing in this tree changes.
 |---|---|---|
 | **Values** | `.claude/skills.config.json` | Tracker, branches, verify commands, doc paths, naming, deploy adapter — every binding the skills resolve. See the per-skill "Keys used" lines. |
 | **Prose hints** | `.claude/hints/` (via the `projectHints` binding) | Project-specific prose the generic skills defer to: `review.md` (Phase-5 reviewers), `merge.md` (ship-issue merge phase), `deploy.md` + `changelog.md` (ship-release). |
-| **Domain language** | `CONTEXT-MAP.md` + per-area `CONTEXT.md` files | The map is an index (≤150 lines): areas, term → area table, `governs:` globs. Area files are budgeted glossaries. Format: `skills/grill-with-docs/CONTEXT-FORMAT.md`; linter: `~/.agents/bin/context-map-lint`. |
-| **Decisions** | `docs/adr/` | 1–3 sentence records, gated on hard-to-reverse AND surprising AND real-trade-off. |
+| **Domain language** | `docs/CONTEXT-MAP.md` + `docs/<area>/CONTEXT.md` | The map is an index (≤150 lines): areas, term → area table, `governs:` globs (root-relative). Area files are budgeted glossaries. Format: `skills/grill-with-docs/CONTEXT-FORMAT.md`; linter: `~/.agents/bin/context-map-lint`. |
+| **Decisions** | `docs/adr/` (system-wide) + `docs/<area>/adr/` (area-specific) | 1–3 sentence records, gated on hard-to-reverse AND surprising AND real-trade-off; one numbering sequence across all ADR dirs. |
 | **Standards, Layer 2** | `docs/standards/` + ≤40-line README index with `governs:` globs | Project deltas only. Layers 0–1 are machine-global: `~/.agents/standards/the-bar.md` (universal) and `~/.agents/standards/stacks/*.md` (per-stack trap libraries) — a new project inherits both for free. Precedence: direct instruction > project > stack > bar > convention. |
 | **Rejection KB** | `.out-of-scope/*.md` | One file per consciously-rejected direction; `to-issues` checks it before proposing slices. |
 | **Decision maps** (optional) | tracker issues labelled `wayfinder:*` | Big fuzzy efforts charted by the `wayfind` skill; `from-issue --auto`'s fog gate emits decision tickets into them. |
@@ -28,7 +28,7 @@ orchestrator context.
 ## Onboarding a new project
 
 1. `cp` a sibling project's `.claude/skills.config.json` and edit the values.
-2. Write the map skeleton: a root `CONTEXT-MAP.md` with one area (or run a `grill-with-docs` session
+2. Write the map skeleton: `docs/CONTEXT-MAP.md` with one area (or run a `grill-with-docs` session
    and let the first terms create it).
 3. Optionally seed `docs/standards/README.md` (empty index) and `.claude/hints/`.
 4. Everything else is machine-global via nix (`home/common/agent-skills/`): the skills, the

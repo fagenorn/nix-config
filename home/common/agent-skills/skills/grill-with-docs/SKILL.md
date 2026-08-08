@@ -28,18 +28,22 @@ If `.claude/skills.config.json` exists at the project root, it may name these ex
 
 ### File structure
 
-The steady state is a root map plus one glossary per area:
+The steady state is contained in `docs/`: a map plus one directory per area:
 
 ```
 /
-├── CONTEXT-MAP.md                    ← index: areas, governs globs, term → area
-├── docs/adr/                         ← system-wide decisions
-└── src/
-    ├── ordering/CONTEXT.md           ← glossary for this area only
-    └── billing/CONTEXT.md
+└── docs/
+    ├── CONTEXT-MAP.md                ← index: areas, governs globs, term → area
+    ├── adr/                          ← system-wide decisions
+    ├── ordering/
+    │   ├── CONTEXT.md                ← glossary for this area only
+    │   └── adr/                      ← this area's decisions
+    └── billing/
+        ├── CONTEXT.md
+        └── adr/
 ```
 
-A young repo may still be a single root `CONTEXT.md` with no map; that is fine, and the first split creates the map. Some repos also keep area-scoped `src/<area>/docs/adr/` — follow that if it exists, otherwise keep ADRs central.
+A young repo may still be a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md`) with no map; that is fine, and the first split creates the map. All ADR directories share one numbering sequence. A repo still on the legacy layout (root map, area files beside the code) keeps working — follow what exists.
 
 Create files lazily — only when you have something to write. If no glossary exists, create one when the first term resolves (named to match the project's convention, `CONTEXT.md` by default). If no decision-record directory exists, create it when the first ADR is needed.
 

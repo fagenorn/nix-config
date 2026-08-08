@@ -40,7 +40,8 @@ workspace/worktree root. Build one self-contained delegation prompt containing:
    through the worktree root.
 5. `.claude/skills.config.json` and `projectHints` when present, plus domain
    docs selected map-first, all by path, skipping absent files: the context map
-   (`docPaths.contextMap`, else root `CONTEXT-MAP.md`) and only the area
+   (`docPaths.contextMap`, else `docs/CONTEXT-MAP.md`, else legacy root
+   `CONTEXT-MAP.md`) and only the area
    `CONTEXT.md` files whose `governs:` globs intersect the plan's touched paths
    or whose terms appear in the issue; ADRs only when cited by the issue, spec,
    plan, or a selected area file; the standards layers that apply —

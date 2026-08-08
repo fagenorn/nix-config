@@ -2,11 +2,11 @@
 
 Domain knowledge lives as a **map plus area glossaries**. The map is an index, never a store: it names the areas, the paths each one governs, and which area owns each term. The definitions live in the area files. Readers load the map every time (cheap) and open only the area files whose `governs:` globs intersect the paths they are touching.
 
-**Location is adaptive.** Prefer `.claude/skills.config.json`'s `docPaths.contextMap` / `docPaths.context` when set; otherwise `CONTEXT-MAP.md` at the repo root with per-area `CONTEXT.md` files beside the code they describe (`src/billing/CONTEXT.md`). Follow whatever convention the repo already uses.
+**Location: contained in `docs/`.** Prefer `.claude/skills.config.json`'s `docPaths.contextMap` / `docPaths.context` when set; otherwise `docs/CONTEXT-MAP.md`, with one directory per area — `docs/<area-slug>/CONTEXT.md` for the glossary and `docs/<area-slug>/adr/` for that area's decisions. System-wide decisions stay in `docs/adr/`; all ADR directories share one numbering sequence, and a record keeps its filename if it ever moves. (A root `CONTEXT-MAP.md` with code-colocated area files is the legacy layout — follow it where a repo still uses it.)
 
 > The Order / Invoice / Customer names below are illustrative DDD samples — substitute the project's real terms.
 
-## Root `CONTEXT-MAP.md` — the index
+## `docs/CONTEXT-MAP.md` — the index
 
 **Hard budget: 150 lines.** Three tables and nothing else.
 
@@ -17,8 +17,8 @@ Domain knowledge lives as a **map plus area glossaries**. The map is an index, n
 
 | Area | Context file | Gist | governs |
 |---|---|---|---|
-| Ordering | [CONTEXT](./src/ordering/CONTEXT.md) | Receives and tracks customer orders | `src/ordering/**` |
-| Billing | [CONTEXT](./src/billing/CONTEXT.md) | Raises invoices and settles payments | `src/billing/**`, `src/api/invoices/**` |
+| Ordering | [CONTEXT](./ordering/CONTEXT.md) | Receives and tracks customer orders | `src/ordering/**` |
+| Billing | [CONTEXT](./billing/CONTEXT.md) | Raises invoices and settles payments | `src/billing/**`, `src/api/invoices/**` |
 
 ## Terms
 
@@ -37,7 +37,8 @@ Domain knowledge lives as a **map plus area glossaries**. The map is an index, n
 Rules for the map:
 
 - **The gist is one line, twelve words or fewer.** It exists so a reader can decide whether to open the file, not so they can skip opening it.
-- **`governs:` globs are the load trigger.** Every glob must match at least one real path. They live here and only here — an area file does not restate its own globs.
+- **`governs:` globs are the load trigger.** Every glob must match at least one real path, resolved from the repo root (the map lives in `docs/`, but the globs point at code). They live here and only here — an area file does not restate its own globs.
+- **Context-file links are map-relative**: `./<area-slug>/CONTEXT.md`, a sibling directory of the map.
 - **Every term defined in an area file appears exactly once in the Terms table**, sorted alphabetically. The table carries the term and its owning area, never a definition — a term with two homes is a modelling bug to resolve, not a row to duplicate.
 - **`## Relationships` carries cross-area edges only.** Cardinality and event flow between areas; anything internal to one area belongs in that area's file.
 
@@ -73,6 +74,10 @@ Rules for area files:
 - **Group under `###` subheadings** when natural clusters emerge; a flat list is fine for a cohesive area.
 - **Example dialogue is optional, at most one per area, at most ten lines.** Write one only when the boundary between two terms is genuinely hard to state as definitions.
 
+## Decisions ride with their area
+
+An ADR that concerns exactly one area lives in that area's `docs/<area-slug>/adr/`; a decision spanning areas (or the whole system) lives in `docs/adr/`. One numbering sequence covers every ADR directory, so an id is unambiguous without its path. When an accepted record moves, it keeps its filename, moves through the VCS's own move, and every *living* reference is re-pointed in the same commit — historical citations inside other accepted records are part of those records and stay as written.
+
 ## Delete on resolve
 
 An ambiguity is flagged *while it is open* and removed the moment it closes — the resolution lives in the winning term's definition (and its `_Avoid_:` line) or in an ADR, never in a permanent log. There is no "Flagged ambiguities" section: a list that only grows is a second, worse copy of the glossary.
@@ -92,7 +97,7 @@ This is what keeps grounding cost flat as the project ages: every issue adds ter
 
 ## Repos without a map yet
 
-A new repo may begin with a single root `CONTEXT.md` in the area-file format above; create it lazily, when the first term resolves. The first split creates the map. Readers fall back to reading the whole file when no `CONTEXT-MAP.md` exists, so a repo mid-migration always works.
+A new repo may begin with a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md`) in the area-file format above; create it lazily, when the first term resolves. The first split creates the map. Readers fall back to reading the whole file when no `CONTEXT-MAP.md` exists, so a repo mid-migration always works.
 
 ## Linting
 
