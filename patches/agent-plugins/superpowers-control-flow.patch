@@ -85,3 +85,24 @@ index dd2702b..ec8e36a 100644
 +questions to the calling workflow. Do not offer an execution choice, invoke an
 +execution skill, or begin implementation. The caller owns standards review and
 +execution sequencing.
+--- a/hooks/hooks.json
++++ b/hooks/hooks.json
+@@ -1,17 +1,3 @@
+ {
+-  "hooks": {
+-    "SessionStart": [
+-      {
+-        "matcher": "startup|clear|compact",
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start",
+-            "shell": "bash",
+-            "async": false
+-          }
+-        ]
+-      }
+-    ]
+-  }
++  "hooks": {}
+ }

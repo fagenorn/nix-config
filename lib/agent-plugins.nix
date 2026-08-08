@@ -3,7 +3,7 @@
   pkgs,
 }:
 let
-  patchRevision = 1;
+  patchRevision = 2;
   shortRevision = revision: builtins.substring 0 8 revision;
 
   superpowersRevision = inputs.superpowers.rev or "44c9b2d6e889982ac18c27d05a19fefe335194e1";
