@@ -10,4 +10,6 @@ Suggest the skills to be used, if any, by the next session.
 
 Do not duplicate content already captured in other artifacts (specs, plans, design docs, issues, commits, diffs). Reference them by path or URL instead.
 
+Redact anything sensitive on the way in — API keys, tokens, passwords, personally identifiable information. Command output sitting in context is the usual source, and the handoff doc outlives the session that wrote it.
+
 If the user passed arguments, treat them as a description of what the next session will focus on and tailor the doc accordingly.
