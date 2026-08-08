@@ -38,6 +38,10 @@ Name for intent, not implementation. Keep units short enough to read without scr
 
 A run that did no work is Failed, not Completed — status surfaces are truth, not progress bars, and a swallowed inner failure must not present as success. Log the original error object before any swallow, translate or rethrow, especially across a framework seam where the framework will reshape or absorb it.
 
+### The log stream is the debugger
+
+If diagnosing a failure needed a temporary print statement or an attached debugger, the missing log line *is* the bug — add the error or warning call that should have been there and leave it in; probes never ship. Structured named fields beat interpolated prose, and every call to an external service logs its response body on the failure path: a provider's 4xx body is the pointer to the request you got wrong.
+
 ### Fail loud
 
 At a closed-set dispatch site — an enum switch, a discriminated union, a registry lookup, a parsed variant — the default branch throws. A silent fallback there turns a near-compile-time bug into a runtime mystery; exhaustiveness is the point of the closed set.
@@ -45,6 +49,10 @@ At a closed-set dispatch site — an enum switch, a discriminated union, a regis
 ### Token economy
 
 The agent-facing surface is scarce: design it like it. Few tools and few parameters, because each is a failure site and not merely tokens; short stable handles rather than raw identifiers in anything a model reads or writes; standing instructions paid once in a prompt, never re-injected per turn. When a surface grows, check what fraction of it is signal rather than plumbing.
+
+### Tests that can fail
+
+A test earns its place by failing for exactly one reason. Assert observable behaviour — the row written, the response returned — never that a particular method was called; a call-count assertion against a mock survives every implementation that keeps the call. Shape fixtures like the values production actually carries rather than the shortest string that parses, or a bug in the consumer and a matching shortcut in the assertion cancel out and both stay green. When a guard's boundary is redundant with a filter upstream of it, delete the guard and ask which test turns red; if none does, the guard is untested.
 
 ### Verify before claiming done
 

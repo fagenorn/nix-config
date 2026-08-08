@@ -2,7 +2,7 @@
 Layer 1 — stack shard. Project-independent TypeScript/React idioms and traps:
 true for any project on this stack, so nothing here may name a repo, a route,
 or a component. Loaded only when the diff touches *.ts / *.tsx. Every entry is
-version-stamped. Seed set — E4 harvests the full trap library later.
+version-stamped, because a framework trap that got fixed is a trap no longer.
 -->
 
 # TypeScript + React
@@ -26,12 +26,16 @@ Auth and redirect guards run in the route's `beforeLoad` and `throw redirect(...
 
 ### Read typed search params through the route API
 
-Take the route handle once at module scope (`const route = getRouteApi('/path')`) and call `route.useSearch()` inside the component, rather than passing the route id as a string literal to a bare `useSearch({ from })` at every call site. The handle survives a route move; the literals do not. Tests stub the route handle, not the hook.
+Take the route handle once at module scope (`const route = getRouteApi('/path')`) and call `route.useSearch()` inside the component, rather than passing the route id as a string literal to a bare `useSearch({ from })` at every call site. The handle survives a route move; the literals do not. Tests stub the route handle, not the hook — mock `getRouteApi` to return `{ useSearch: vi.fn() }`.
 
 ### `assertUnreachable` at every closed-set dispatch
 
-Exhaustive `switch` over a union ends in a default that takes the value as `never` and throws. This is the Layer-0 fail-loud rule with a compiler attached: the type error appears the moment a variant is added, and the throw catches whatever reached runtime anyway.
+Exhaustive `switch` over a union ends in a default that takes the value as `never` and throws — a file-private `function assertUnreachable(x: never): never { throw new Error(...) }`. This is the Layer-0 fail-loud rule with a compiler attached: the type error appears the moment a variant is added, and the throw catches whatever reached runtime anyway (a value cast from an untyped `string`, say). It applies to closed sets only — a discriminator that arrives from the network as an arbitrary string is an open domain and gets validation, not a throw.
 
 ### Zod: `.optional()` alone still admits the empty string (zod 3.x)
 
-`z.string().optional()` accepts `""`, which is almost never what a form means. Write `z.string().min(1).optional()` for "absent or meaningful". The same applies to `.nullish()`.
+`z.string().optional()` accepts `""`, which is almost never what a form means, and matters most when the value is forwarded to a CLI argument, a selector, or a downstream API that treats `""` as nonsense rather than absence. Write `z.string().min(1).optional()` for "absent or meaningful". The same applies to `.nullish()`.
+
+### Redirect targets are relative-only, checked on both sides
+
+A `?redirect=` (or `next=`, `returnTo=`) parameter is attacker-controlled. Before navigating, require `startsWith('/')` and reject protocol-relative `//host` forms; any server-produced redirect URL is separately validated against an allowlist. This is the Layer-0 defense-in-depth rule at the one boundary where skipping the client half is an open redirect rather than a worse error message.
