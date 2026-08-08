@@ -1,0 +1,100 @@
+{
+  "skill_name": "from-issue",
+  "notes": "Pipeline evals. Each runs against a fresh copy of home/common/agent-skills/evals/fixture-repo (a stdlib-only python3 CLI with a bare `origin` remote, three issue fixtures, and a .claude/skills.config.json setting issueTracker.kind=none, specDir=docs/specs, planDir=docs/plans). Cheap-first: the standard run stops after Phase 5 and grades the artifacts — spec, plan, worktree placement — instead of executing the implementation. The fixture disables codex.planReview so Phase 5 takes the native-reviewer path and the eval stays hermetic and cheap; a Codex-reviewer eval would be a separate, more expensive fixture. Because issueTracker.kind=none the issue arrives as a file path in the prompt, not a tracker number, and the prompt states the issue number the branch should use.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "well-specified-through-phase-5",
+      "mode": "pipeline",
+      "prompt": "/from-issue issues/001-well-specified.md --auto\n\nContext you need before you start:\n\n- This project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`. There is nothing to fetch: the file `issues/001-well-specified.md` **is** the issue. Treat it as issue number 1 for branch naming and commit scopes.\n- Autonomous mode: no checkpoints, self-answer the decisions and log them where the skill says to.\n\n**Stop after Phase 5.** Run phases 0 through 5 only — investigate, worktree, brainstorm, grill, plan, standards review. Do not run Phase 6 (execute) and do not run Phase 7 (ship). Do not create, edit, or delete anything under `tinytask/` or `tests/`; this run produces documents only.\n\nIn your final message report the worktree path, the spec path, the plan path, and the standards-review outcome.",
+      "expected_output": "A worktree branched off origin/main holding a spec and a plan, both committed there and not on main, with the self-answered decisions logged in each artifact and every plan task carrying a falsifiable verification step. No source file touched.",
+      "asserts": [
+        {
+          "name": "a worktree was created",
+          "shell": "[ -n \"$WT\" ] || fail \"no worktree beyond the base checkout\""
+        },
+        {
+          "name": "spec file exists under specDir",
+          "shell": "has_file \"$WT/$SPEC_DIR\"/*.md"
+        },
+        {
+          "name": "spec logs at least one auto-resolved decision",
+          "shell": "section_has_entries \"$(first_file \"$WT/$SPEC_DIR\"/*.md)\" '## Auto-resolved decisions'"
+        },
+        {
+          "name": "plan file exists under planDir",
+          "shell": "has_file \"$WT/$PLAN_DIR\"/*.md"
+        },
+        {
+          "name": "every plan task has a falsifiable verification line",
+          "shell": "plan_tasks_verifiable \"$(first_file \"$WT/$PLAN_DIR\"/*.md)\""
+        },
+        {
+          "name": "spec and plan commits landed in the worktree",
+          "shell": "commits_touch \"$WT\" \"$SPEC_DIR\" \"$PLAN_DIR\""
+        },
+        {
+          "name": "the base branch carries no spec or plan commits",
+          "shell": "[ -z \"$(git -C \"$REPO\" log --oneline main -- \"$SPEC_DIR\" \"$PLAN_DIR\")\" ] || fail \"spec/plan commits landed on main instead of the worktree branch\""
+        },
+        {
+          "name": "the implementation was not executed",
+          "shell": "path_unchanged_since \"$WT\" main tinytask tests"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "fuzzy-issue-should-abort",
+      "mode": "pipeline",
+      "expected_today": "fail",
+      "note": "passes once the F2 fog-gate lands",
+      "prompt": "/from-issue issues/002-fuzzy.md --auto\n\nThis project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the file `issues/002-fuzzy.md` **is** the issue. Treat it as issue number 2. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
+      "expected_output": "The run stops in Phase 0 and says why: the issue has no acceptance criteria, bundles several unrelated directions, and leans on terms the project has not defined (importance score, grouping, sync) that docs/CONTEXT.md explicitly lists as out of scope pending an ADR. No worktree, no spec, no plan — auto mode means deciding without asking, not implementing something incoherent.",
+      "asserts": [
+        {
+          "name": "the run reports an abort rather than proceeding",
+          "shell": "out_matches 'too (vague|fuzzy|broad|ambiguous)|under.?specified|not implementable|cannot proceed|needs? (clarification|scoping|to be split)|fog|stopping (here|before)|abort'"
+        },
+        {
+          "name": "no worktree was created",
+          "shell": "[ \"$WT_COUNT\" -eq 0 ] || fail \"created $WT_COUNT worktree(s), first: $WT\""
+        },
+        {
+          "name": "no spec or plan was written",
+          "shell": "[ -z \"$(ls -A \"$REPO/$SPEC_DIR\" \"$REPO/$PLAN_DIR\" 2>/dev/null)\" ] || fail \"artifacts written despite the abort\""
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "preflight-existing-work-stop",
+      "mode": "pipeline",
+      "setup": { "kind": "dirty-worktree", "branch": "worktree-issue-3-rename-flag" },
+      "prompt": "/from-issue issues/003-mechanical.md --auto\n\nNo issue tracker here — `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the file `issues/003-mechanical.md` **is** the issue. Treat it as issue number 3. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
+      "expected_output": "Phase 0 pre-flight finds one worktree matching `worktree-issue-3-` that has uncommitted work, and stops there. The documented one-match-dirty behavior is to surface the situation rather than discard someone else's in-progress state, and it holds under --auto — that stop is a judgment about the workspace, not a user-approval checkpoint. Nothing new is created and the dirty worktree is left exactly as found.",
+      "asserts": [
+        {
+          "name": "the pre-existing worktree still exists",
+          "shell": "[ -d \"$PRE_WT\" ] || fail \"pre-existing worktree $PRE_WT was removed\""
+        },
+        {
+          "name": "the uncommitted work was not discarded",
+          "shell": "grep -q 'scratch notes from the interrupted run' \"$PRE_WT/NOTES.wip\" && [ -n \"$(git -C \"$PRE_WT\" status --porcelain)\" ] || fail \"the dirty state in $PRE_WT is gone\""
+        },
+        {
+          "name": "no second worktree was created",
+          "shell": "[ \"$WT_COUNT\" -eq 1 ] || fail \"expected only the pre-existing worktree, found $WT_COUNT\""
+        },
+        {
+          "name": "the run names the uncommitted work as the reason it stopped",
+          "shell": "out_matches 'uncommitted|in.?progress|work.in.progress|unstaged|dirty|existing worktree'"
+        },
+        {
+          "name": "no spec or plan was written",
+          "shell": "[ -z \"$(ls -A \"$REPO/$SPEC_DIR\" \"$REPO/$PLAN_DIR\" \"$PRE_WT/$SPEC_DIR\" \"$PRE_WT/$PLAN_DIR\" 2>/dev/null)\" ] || fail \"artifacts written despite the pre-flight stop\""
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "integrationBranch": "main",
+  "defaultBranch": "main",
+  "issueTracker": { "kind": "none" },
+  "unsetGithubToken": false,
+  "specDir": "docs/specs",
+  "planDir": "docs/plans",
+  "branchNaming": { "pattern": "issue-<num>-<slug>", "worktreePrefix": "worktree-" },
+  "docPaths": {
+    "context": "docs/CONTEXT.md",
+    "adrDir": "docs/adr",
+    "standards": "docs/coding-standards.md"
+  },
+  "verify": { "test": "python3 -m unittest discover" },
+  "codex": { "planReview": { "enabled": false } }
+}
