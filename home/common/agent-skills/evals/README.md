@@ -20,6 +20,15 @@ sourced) and prints PASS/FAIL per assert plus a verdict. Non-zero exit on failur
 existing file still works) — the runner prints the prompt and the `expected_output`. Grade
 by pasting the prompt into a session and reading the transcript against it.
 
+## Evals exercise the DEPLOYED skills
+
+The sandboxed `claude -p` reads skills from `~/.claude/skills` — the store links
+from the last `just switch`, not this working tree (user-level skills shadow
+project-level copies of the same name, so injecting the working tree into the
+sandbox does not work). Editing a skill therefore means: commit, `just switch`,
+then run the eval. A failed parity run is one `git revert` + re-switch away from
+the previous behavior.
+
 ## Cheap-first
 
 Pipeline prompts stop the flow after Phase 5 and grade the artifacts — spec, plan, worktree
