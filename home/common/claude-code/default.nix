@@ -107,6 +107,14 @@ in
     recursive = true;
   };
 
+  # Claude-only dispatcher: fans issues out to independent background
+  # `/from-issue --auto` agents (background agents + task notifications are
+  # Claude-harness features Codex lacks).
+  home.file.".claude/skills/orchestrate-issues" = {
+    source = ./skills/orchestrate-issues;
+    recursive = true;
+  };
+
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
   # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
   # subagents dispatch as these types instead (implementer/reviewer = high,
