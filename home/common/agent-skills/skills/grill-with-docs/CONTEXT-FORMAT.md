@@ -1,81 +1,99 @@
-# Glossary / CONTEXT.md Format
+# Context Map & Area Glossary Format
 
-This describes the glossary/context file the grilling session maintains. Name and location follow the project's existing convention (detect a `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md`, or the path named in `.claude/skills.config.json`'s `docPaths.context`); default to `CONTEXT.md` at the repo root when none exists.
+Domain knowledge lives as a **map plus area glossaries**. The map is an index, never a store: it names the areas, the paths each one governs, and which area owns each term. The definitions live in the area files. Readers load the map every time (cheap) and open only the area files whose `governs:` globs intersect the paths they are touching.
 
-> The Order / Invoice / Customer / Fulfillment / User names below are illustrative DDD samples — replace them with your project's real domain terms.
+**Location is adaptive.** Prefer `.claude/skills.config.json`'s `docPaths.contextMap` / `docPaths.context` when set; otherwise `CONTEXT-MAP.md` at the repo root with per-area `CONTEXT.md` files beside the code they describe (`src/billing/CONTEXT.md`). Follow whatever convention the repo already uses.
 
-## Structure
+> The Order / Invoice / Customer names below are illustrative DDD samples — substitute the project's real terms.
 
-```md
-# {Context Name}
+## Root `CONTEXT-MAP.md` — the index
 
-{One or two sentence description of what this context is and why it exists.}
-
-## Language
-
-**Order**:
-{A concise description of the term}
-_Avoid_: Purchase, transaction
-
-**Invoice**:
-A request for payment sent to a customer after delivery.
-_Avoid_: Bill, payment request
-
-**Customer**:
-A person or organization that places orders.
-_Avoid_: Client, buyer, account
-
-## Relationships
-
-- An **Order** produces one or more **Invoices**
-- An **Invoice** belongs to exactly one **Customer**
-
-## Example dialogue
-
-> **Dev:** "When a **Customer** places an **Order**, do we create the **Invoice** immediately?"
-> **Domain expert:** "No — an **Invoice** is only generated once a **Fulfillment** is confirmed."
-
-## Flagged ambiguities
-
-- "account" was used to mean both **Customer** and **User** — resolved: these are distinct concepts.
-```
-
-## Rules
-
-- **Be opinionated.** When multiple words exist for the same concept, pick the best one and list the others as aliases to avoid.
-- **Flag conflicts explicitly.** If a term is used ambiguously, call it out in "Flagged ambiguities" with a clear resolution.
-- **Keep definitions tight.** One sentence max. Define what it IS, not what it does.
-- **Show relationships.** Use bold term names and express cardinality where obvious.
-- **Only include terms specific to this project's context.** General programming concepts (timeouts, error types, utility patterns) don't belong even if the project uses them extensively. Before adding a term, ask: is this a concept unique to this context, or a general programming concept? Only the former belongs.
-- **Group terms under subheadings** when natural clusters emerge. If all terms belong to a single cohesive area, a flat list is fine.
-- **Write an example dialogue.** A conversation between a dev and a domain expert that demonstrates how the terms interact naturally and clarifies boundaries between related concepts.
-
-## Single vs multi-context repos
-
-**Single context (most repos):** One glossary/context file at the repo root.
-
-**Multiple contexts:** A `CONTEXT-MAP.md` at the repo root lists the contexts, where they live, and how they relate to each other:
+**Hard budget: 150 lines.** Three tables and nothing else.
 
 ```md
 # Context Map
 
-## Contexts
+## Areas
 
-- [Ordering](./src/ordering/CONTEXT.md) — receives and tracks customer orders
-- [Billing](./src/billing/CONTEXT.md) — generates invoices and processes payments
-- [Fulfillment](./src/fulfillment/CONTEXT.md) — manages warehouse picking and shipping
+| Area | Context file | Gist | governs |
+|---|---|---|---|
+| Ordering | [CONTEXT](./src/ordering/CONTEXT.md) | Receives and tracks customer orders | `src/ordering/**` |
+| Billing | [CONTEXT](./src/billing/CONTEXT.md) | Raises invoices and settles payments | `src/billing/**`, `src/api/invoices/**` |
+
+## Terms
+
+| Term | Area |
+|---|---|
+| Customer | Ordering |
+| Invoice | Billing |
+| Order | Ordering |
 
 ## Relationships
 
-- **Ordering → Fulfillment**: Ordering emits `OrderPlaced` events; Fulfillment consumes them to start picking
-- **Fulfillment → Billing**: Fulfillment emits `ShipmentDispatched` events; Billing consumes them to generate invoices
-- **Ordering ↔ Billing**: Shared types for `CustomerId` and `Money`
+- **Ordering → Billing**: Ordering emits `OrderPlaced`; Billing consumes it to raise an **Invoice**.
+- **Ordering ↔ Billing**: shared `CustomerId` and `Money` types.
 ```
 
-The skill infers which structure applies:
+Rules for the map:
 
-- If `CONTEXT-MAP.md` exists, read it to find contexts
-- If only a root glossary/context file exists, single context
-- If neither exists, create a root context file lazily when the first term is resolved
+- **The gist is one line, twelve words or fewer.** It exists so a reader can decide whether to open the file, not so they can skip opening it.
+- **`governs:` globs are the load trigger.** Every glob must match at least one real path. They live here and only here — an area file does not restate its own globs.
+- **Every term defined in an area file appears exactly once in the Terms table**, sorted alphabetically. The table carries the term and its owning area, never a definition — a term with two homes is a modelling bug to resolve, not a row to duplicate.
+- **`## Relationships` carries cross-area edges only.** Cardinality and event flow between areas; anything internal to one area belongs in that area's file.
 
-When multiple contexts exist, infer which one the current topic relates to. If unclear, ask.
+## Per-area `CONTEXT.md` — glossary only
+
+```md
+---
+area: Ordering
+budget: 200 lines
+---
+
+# Ordering
+
+One or two sentences on what this area is and why it exists.
+
+## Language
+
+**Order**:
+A confirmed, priced request to buy, owned by exactly one Customer.
+_Avoid_: Purchase, transaction
+
+**Customer**:
+A person or organisation that places Orders and is billed for them.
+_Avoid_: Client, buyer, account
+```
+
+Rules for area files:
+
+- **Glossary and nothing else.** No implementation details, no spec, no scratch notes, no decision log. If it would go stale when the code changes, it does not belong here.
+- **Definitions are one to two sentences.** Define what the term *is*, not what it does.
+- **`_Avoid_:` is mandatory whenever rival names circulate.** Picking the winner and naming the losers is what stops the vocabulary drifting; be opinionated.
+- **Admission test:** is this concept unique to this project's domain, or a general programming concept? Only the former belongs — timeouts, retries, error types and utility patterns stay out however heavily the project uses them.
+- **Group under `###` subheadings** when natural clusters emerge; a flat list is fine for a cohesive area.
+- **Example dialogue is optional, at most one per area, at most ten lines.** Write one only when the boundary between two terms is genuinely hard to state as definitions.
+
+## Delete on resolve
+
+An ambiguity is flagged *while it is open* and removed the moment it closes — the resolution lives in the winning term's definition (and its `_Avoid_:` line) or in an ADR, never in a permanent log. There is no "Flagged ambiguities" section: a list that only grows is a second, worse copy of the glossary.
+
+Mark an open ambiguity inline on the disputed term and delete the marker in the same commit that settles it:
+
+```md
+**Account**:
+_Ambiguous_: used for both **Customer** and **User**. Unresolved.
+```
+
+## Net-neutral writes
+
+Both files carry a hard budget (150 lines for the map, the front-matter `budget:` for each area). **A writer that pushes a file past its budget consolidates or splits in the same commit** — never "just this once", never a follow-up TODO. In practice a glossary at budget means either several entries have grown past two sentences and should be tightened, or the area covers two things and should become two areas. The split procedure lives in [SKILL.md](./SKILL.md).
+
+This is what keeps grounding cost flat as the project ages: every issue adds terms, so every issue must also pay down.
+
+## Repos without a map yet
+
+A new repo may begin with a single root `CONTEXT.md` in the area-file format above; create it lazily, when the first term resolves. The first split creates the map. Readers fall back to reading the whole file when no `CONTEXT-MAP.md` exists, so a repo mid-migration always works.
+
+## Linting
+
+`~/.agents/bin/context-map-lint <repo-root>` checks every term resolves to an area file that defines it, every file is within budget, every `governs:` glob matches something, and every relative link in the map resolves. Wire it into CI — a citation linter is the only anti-drift measure that has been observed to hold.

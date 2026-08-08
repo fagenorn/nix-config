@@ -28,35 +28,20 @@ If `.claude/skills.config.json` exists at the project root, it may name these ex
 
 ### File structure
 
-Most repos have a single context:
+The steady state is a root map plus one glossary per area:
 
 ```
 /
-├── CONTEXT.md
-├── docs/
-│   └── adr/
-│       ├── 0001-event-sourced-orders.md
-│       └── 0002-postgres-for-write-model.md
+├── CONTEXT-MAP.md                    ← index: areas, governs globs, term → area
+├── docs/adr/                         ← system-wide decisions
 └── src/
+    ├── ordering/CONTEXT.md           ← glossary for this area only
+    └── billing/CONTEXT.md
 ```
 
-If a `CONTEXT-MAP.md` exists at the root, the repo has multiple contexts. The map points to where each one lives:
+A young repo may still be a single root `CONTEXT.md` with no map; that is fine, and the first split creates the map. Some repos also keep area-scoped `src/<area>/docs/adr/` — follow that if it exists, otherwise keep ADRs central.
 
-```
-/
-├── CONTEXT-MAP.md
-├── docs/
-│   └── adr/                          ← system-wide decisions
-├── src/
-│   ├── ordering/
-│   │   ├── CONTEXT.md
-│   │   └── docs/adr/                 ← context-specific decisions
-│   └── billing/
-│       ├── CONTEXT.md
-│       └── docs/adr/
-```
-
-Create files lazily — only when you have something to write. If no glossary/context file exists, create one when the first term is resolved (named to match the project's convention, or `CONTEXT.md` by default). If no decision-record directory exists, create it when the first ADR is needed (matching the project's convention, or `docs/adr/` by default).
+Create files lazily — only when you have something to write. If no glossary exists, create one when the first term resolves (named to match the project's convention, `CONTEXT.md` by default). If no decision-record directory exists, create it when the first ADR is needed.
 
 > The Order / Invoice / Customer / Fulfillment names used throughout these docs are illustrative DDD samples — substitute your project's actual domain terms.
 
@@ -78,11 +63,24 @@ When domain relationships are being discussed, stress-test them with specific sc
 
 When the user states how something works, check whether the code agrees. If you find a contradiction, surface it: "Your code cancels entire Orders, but you just said partial cancellation is possible — which is right?"
 
-### Update the glossary inline
+### Update the glossary inline, net-neutral
 
-When a term is resolved, update the glossary/context file right there. Don't batch these up — capture them as they happen. Use the format in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md).
+When a term resolves, write it into the owning area's glossary right there, and add its row to the map's term table. Use the format in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md). Only terms meaningful to a domain expert; never implementation details.
 
-Don't couple the glossary to implementation details. Only include terms that are meaningful to domain experts.
+Two disciplines make this sustainable — both are same-commit obligations, never follow-ups:
+
+**Delete on resolve.** An ambiguity marker is removed the moment the ambiguity closes; the resolution lives in the winning term's definition and its `_Avoid_:` line, or in an ADR. Never leave a growing log of settled questions.
+
+**Net-neutral writes.** If your addition pushes a file past its budget (150 lines for the map, the front-matter `budget:` for an area file), consolidate or split before you finish. Consolidate first: entries that grew past two sentences, near-duplicate terms that should be one term with aliases, an example dialogue the definitions have made redundant. Split only when the area genuinely covers two things.
+
+**Splitting an area** — four edits, one commit:
+
+1. Create the new area file with front-matter (`area:`, `budget: 200 lines`), its one-or-two-sentence purpose, and the terms moving out — moved verbatim, not rewritten, so nothing is silently lost.
+2. Delete those terms from the old file.
+3. Add a row to the map's `## Areas` table: name, link, one-line gist, and `governs:` globs. Narrow the old area's globs to match what it still owns.
+4. Repoint the moved terms' rows in the map's `## Terms` table, and add any new cross-area edge to `## Relationships`.
+
+Then run `~/.agents/bin/context-map-lint .` — it catches a term left pointing at the old area, a glob matching nothing, and a file still over budget.
 
 ### Offer ADRs sparingly
 
