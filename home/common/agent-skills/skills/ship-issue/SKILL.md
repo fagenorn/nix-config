@@ -201,6 +201,14 @@ In `--auto`, apply Should-fix items inline through the same five steps and log e
 
 ## Phase 6 — Wait for CI
 
+**Docs-only changes never wait for CI.** Before anything else, take the extensions the branch touched:
+
+```
+git diff --name-only <base>..HEAD | sed 's/.*\.//' | sort -u
+```
+
+If every line is `md`, skip this phase entirely and go to Phase 7. No `gh pr checks`, no watch, no polling — a markdown-only diff cannot break a build, and the wait is pure latency. Every other merge gate (review applied and pushed, the Phase-7 verifications) is unchanged. Anything other than `md` in that list — a workflow file, a config, one source line — means the branch is not docs-only and this phase runs normally.
+
 Before blocking, verify CI is running on the right tip: `gh pr view <pr-num> --json headRefOid` must equal `git rev-parse HEAD`. Diverged → the Phase 5 push didn't land; re-push, otherwise CI runs on the unfixed code.
 
 Then block with `gh`'s built-in watch — one Bash call, **300s timeout**:
