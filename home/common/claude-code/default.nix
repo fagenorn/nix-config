@@ -107,6 +107,15 @@ in
     recursive = true;
   };
 
+  # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
+  # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
+  # subagents dispatch as these types instead (implementer/reviewer = high,
+  # mechanic = medium on sonnet). Skills' dispatch specs reference them by name.
+  home.file.".claude/agents" = {
+    source = ./agents;
+    recursive = true;
+  };
+
   # Copy settings.json to a writable location on each activation. Nix is the source of truth
   # (re-asserted every `sudo just`), but Claude Code can still rewrite it at runtime — your
   # live edits persist until the next switch, which resets it to the declared content.
