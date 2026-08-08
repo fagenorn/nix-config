@@ -13,7 +13,8 @@ Review the implementation plan at `<plan-path>` against the project's coding bar
 First ground in the project's docs: invoke `doc-grounded-questions` if available, else ground
 map-first — read the context map (`docPaths.contextMap`, else `docs/CONTEXT-MAP.md`, else legacy root `CONTEXT-MAP.md`) and open only
 the area `CONTEXT.md` files whose `governs:` globs intersect the plan's touched paths or whose terms
-appear in the issue; ADRs (`docPaths.adrDir`) only when cited; the standards layers that apply
+appear in the issue; ADRs (the loaded areas' `adr/` dirs, plus `system`; `docPaths.adrDir` only in legacy
+repos) only when cited; the standards layers that apply
 (`~/.agents/standards/the-bar.md`, its `stacks/` shards matching the diff's file types, and the
 project's `docs/standards/` shards whose globs intersect). Only when the project has no map, fall
 back to reading `docPaths.{context,standards,architecture}` whole. Then

@@ -1,6 +1,7 @@
-# ADR 0001 — The backlog is one JSON file
+# ADR-backlog-001 — The backlog is one JSON file
 
-**Status:** accepted
+- **Status:** accepted
+- **Formerly:** ADR-0001
 
 ## Context
 

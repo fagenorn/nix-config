@@ -20,7 +20,7 @@ This skill is project-agnostic. Before acting, resolve project-specific values:
 4. Degrade gracefully: any configured-but-absent doc path, sibling skill, or hints file is skipped silently —
    never read a file that does not exist, never hard-fail on a missing optional binding.
 
-Keys this skill uses: `issueTracker{kind,cli}`, `docPaths{context,adrDir}` (both optional, used only for grounding).
+Keys this skill uses: `issueTracker{kind,cli}`, `docPaths{context,contextMap}` (optional, used only for grounding; `docPaths.adrDir` is a legacy override where a repo still has a central ADR directory).
 
 ### Resolve the issue tracker
 
@@ -41,7 +41,7 @@ Work from whatever is already in the conversation context. If the user passes an
 
 ### 2. Explore the codebase (optional)
 
-If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use the project's domain vocabulary. If the project documents a domain glossary (e.g. `docPaths.context`) or architectural decision records (e.g. `docPaths.adrDir`), read the relevant parts so titles and descriptions use the project's terminology and respect existing decisions in the area you're touching. If those docs are absent, skip this grounding step silently.
+If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use the project's domain vocabulary. If the project documents a domain glossary (the map's area files, else `docPaths.context`) or architectural decision records (each area's `docs/areas/<slug>/adr/`, plus `system`; legacy repos: `docPaths.adrDir`), read the relevant parts so titles and descriptions use the project's terminology and respect existing decisions in the area you're touching. If those docs are absent, skip this grounding step silently.
 
 Look for opportunities to prefactor the code to make the implementation easier — "make the change easy, then make the easy change." Prefactoring is its own leading slice, not a preamble folded into the first feature slice.
 

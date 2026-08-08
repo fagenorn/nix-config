@@ -173,7 +173,7 @@ The **generic rubric below is fixed — use it verbatim**. The project-specific 
 
 > Review the diff from `<BASE_SHA>` to `<HEAD_SHA>` against the project's coding bar.
 >
-> First invoke `doc-grounded-questions` **via the Skill tool** (not inline — its body re-injects current pointers to the project's domain/ADR/standards/architecture docs); if unavailable, read whichever of `docPaths.context`, `docPaths.adrDir`, `docPaths.standards`, `docPaths.architecture` exist. Then read the issue body (`gh issue view <num>`), the spec at `<spec-path>`, and the plan at `<plan-path>` for what the diff was supposed to deliver.
+> First invoke `doc-grounded-questions` **via the Skill tool** (not inline — its body re-injects current pointers to the project's domain/ADR/standards/architecture docs); if unavailable, read whichever of `docPaths.context`, `docPaths.standards`, `docPaths.architecture` and the `adr/` dirs of the areas the diff touches (`docs/areas/<slug>/adr/`, plus `system`; legacy repos: `docPaths.adrDir`) exist. Then read the issue body (`gh issue view <num>`), the spec at `<spec-path>`, and the plan at `<plan-path>` for what the diff was supposed to deliver.
 >
 > **Read the live file at HEAD when checking a finding**, not a diff or snapshot view — reviews have produced false-positive Should-fixes by quoting stale snapshots after the spec/plan were edited mid-flow.
 >

@@ -60,7 +60,7 @@ examples (entry rewrites, synthesis, bump calls) live in the project hints (`pro
 - Lead with the *change*, not the issue number.
 - Use the words an operator would search for — feature names, endpoint paths, env var names, table names. Not internal class names unless they're the user-facing surface.
 - Link the PR inline with the **full URL**, never a bare `#N` — many forges auto-link a bare `#N` against the wrong repo under cross-references.
-- Link ADRs when relevant via `docPaths.adrDir`: `[ADR-NNNN](<adrDir>/NNNN-<slug>.md)`. Skip when no ADR dir is configured.
+- Link ADRs when relevant: `[ADR-<slug>-NNN](docs/areas/<slug>/adr/NNN-<kebab>.md)`, cited by full id. In a legacy repo with a central ADR directory, use `docPaths.adrDir` and that repo's own id form instead. Skip when the repo keeps no ADRs.
 - Don't include the SHA; the PR link is enough.
 - One PR that shipped two distinct operator-visible changes gets two entries linking the same PR.
 

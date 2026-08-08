@@ -30,7 +30,7 @@ A surviving candidate maps to exactly one **existing** doc. If the mapped path i
 | Type of learning | Destination (config key) |
 |---|---|
 | New domain term, clarified invariant | `docPaths.context` |
-| Hard-to-reverse decision with real alternatives | New entry under `docPaths.adrDir` — must pass the three-part test: hard-to-reverse + surprising-without-context + result-of-a-real-trade-off |
+| Hard-to-reverse decision with real alternatives | New record in the owning area's `adr/` (`docs/areas/<slug>/adr/`, or `system` when it spans areas; legacy repos: `docPaths.adrDir`) — must pass the three-part test: hard-to-reverse + surprising-without-context + result-of-a-real-trade-off |
 | Tooling, CI, or operations quirk | `docPaths.gitWorktrees`, `docPaths.operationsDir`, or `docPaths.devenvTooling` — whichever covers the surface |
 | Codebase-wide rule | `docPaths.standards` |
 | Skill workflow issue (a phase failed predictably, a prompt was unclear, a step got skipped wrongly) | The relevant `.claude/skills/<name>/SKILL.md` |

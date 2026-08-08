@@ -15,4 +15,5 @@ Run the tests from the repo root:
 python3 -m unittest discover
 ```
 
-Start with `docs/CONTEXT.md` for the vocabulary and `docs/coding-standards.md` for the bar.
+Start with `docs/README.md` — it routes to the context map, the area glossaries and their
+decision records, and the coding standards.

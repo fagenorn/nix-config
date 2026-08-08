@@ -19,31 +19,36 @@ If a question can be answered by exploring the codebase or docs, explore instead
 
 During codebase exploration, also look for existing documentation.
 
-**Doc locations are adaptive.** Don't impose `docs/adr/` or `CONTEXT.md` on a repo that already has its own conventions. Detect what the project already uses and follow it:
+**Detect the layout before writing anything**, in this order:
 
-- **Glossary / context file** — look for `CONTEXT.md` first, then common alternatives at the repo root (`GLOSSARY.md`, `DOMAIN.md`, `docs/CONTEXT.md`, `docs/glossary.md`). Use whatever exists.
-- **Decision records** — look for `docs/adr/`, then `docs/decisions/`, `doc/adr/`, `adr/`, or an `RFCs/` directory. Use whatever exists. If a project keeps decisions in some other documented place, follow that.
-
-If `.claude/skills.config.json` exists at the project root, it may name these explicitly under `docPaths` (e.g. `docPaths.context`, `docPaths.adrDir`) — prefer those when present. Only fall back to the default layout below when neither config nor detection yields a location.
+1. **The standard** — `docs/CONTEXT-MAP.md` plus `docs/areas/`. Areas and their decisions live under `docs/areas/<slug>/`; that is the tree below and the one to create in a repo that has nothing yet.
+2. **Legacy conventions** — a root `CONTEXT-MAP.md` with area files beside the code, or flat `docs/<slug>/` areas beside a central `docs/adr/`. For a glossary: `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md`, `docs/CONTEXT.md`, `docs/glossary.md`. For decisions: `docs/adr/`, `docs/decisions/`, `doc/adr/`, `adr/`, `RFCs/`. Follow what the repo has; don't impose the standard tree on it mid-flight.
+3. **`.claude/skills.config.json`** may name paths explicitly under `docPaths` (e.g. `docPaths.context`, `docPaths.contextMap`) — prefer those when present. `docPaths.adrDir` is a legacy override: where the map has areas, each area owns its own `adr/`.
 
 ### File structure
 
-The steady state is contained in `docs/`: a map plus one directory per area:
+The steady state is contained in `docs/`: a map plus one directory per area under `areas/`:
 
 ```
 /
 └── docs/
+    ├── README.md                     ← routing index for everything in docs/
     ├── CONTEXT-MAP.md                ← index: areas, governs globs, term → area
-    ├── adr/                          ← system-wide decisions
-    ├── ordering/
-    │   ├── CONTEXT.md                ← glossary for this area only
-    │   └── adr/                      ← this area's decisions
-    └── billing/
-        ├── CONTEXT.md
-        └── adr/
+    └── areas/
+        ├── system/                   ← decisions no single area owns
+        │   ├── CONTEXT.md            ←   a stub; its map row governs `*`
+        │   └── adr/
+        ├── ordering/
+        │   ├── CONTEXT.md            ← glossary for this area only
+        │   └── adr/                  ← this area's decisions, NNN-kebab.md
+        └── billing/
+            ├── CONTEXT.md
+            └── adr/
 ```
 
-A young repo may still be a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md`) with no map; that is fine, and the first split creates the map. All ADR directories share one numbering sequence. A repo still on the legacy layout (root map, area files beside the code) keeps working — follow what exists.
+`standards/`, `operations/`, `guides/` and `archive/` are the other reserved directories — see [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md) for the full tree. ADR numbering is **per directory** (`ADR-<slug>-NNN`), so an area's records never collide with another's.
+
+A young repo may still be a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md`) with no map; that is fine, and the first split creates the map.
 
 Create files lazily — only when you have something to write. If no glossary exists, create one when the first term resolves (named to match the project's convention, `CONTEXT.md` by default). If no decision-record directory exists, create it when the first ADR is needed.
 

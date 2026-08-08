@@ -20,7 +20,7 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
 3. Defaults when neither yields a value: integrationBranch=main, defaultBranch=main, commit.coAuthoredBy=true, unsetGithubToken=false, specDir=.claude/specs, planDir=.claude/plans, codex.planReview.enabled=true, codex.planReview.focus=null.
 4. Degrade gracefully: a configured-but-absent doc path, sibling skill, or hints file is skipped silently. Never read a file that doesn't exist; never hard-fail on a missing optional binding.
 
-Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,contextMap,adrDir,standards,architecture,gitWorktrees}`, `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`, `codex.planReview{enabled,focus}`, `codex.decisionReview` (default false).
+Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,contextMap,standards,architecture,gitWorktrees}` (`docPaths.adrDir` is a legacy override; ADR homes normally come from the map's areas), `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`, `codex.planReview{enabled,focus}`, `codex.decisionReview` (default false).
 
 `<tracker-cli>` = resolved `issueTracker.cli`; `<integration-branch>`, `<default-branch>` likewise. When `issueTracker.kind=none`, skip every issue/PR-linkage step and operate on the branch alone (a "tracker URL" the user gives you is just a label).
 
@@ -61,7 +61,7 @@ Every artifact this flow produces — spec, plan, ADR — carries a section name
 
 ## Doc grounding
 
-Phases 2–5 ground in the project's docs before their first clarifying question, option set, or review pass. Invoke `doc-grounded-questions`: it reads the context map / context doc, the ADRs under `docPaths.adrDir`, and `docPaths.standards`, then caches the result in a worktree-local `GROUNDING.md`.
+Phases 2–5 ground in the project's docs before their first clarifying question, option set, or review pass. Invoke `doc-grounded-questions`: it reads the context map / context doc, the ADRs owned by the areas it loaded (`docs/areas/<slug>/adr/`, plus `system`), and `docPaths.standards`, then caches the result in a worktree-local `GROUNDING.md`.
 
 **Ground once per phase, not once per decision.** After the phase's first pass, read `GROUNDING.md` instead of re-running it; re-invoke only when a decision reaches an area the cache doesn't cover, then append that area. Each new phase starts a new cache. Without the skill, do the same by hand: read whichever configured doc paths exist, write the same `GROUNDING.md`, reuse it for the rest of the phase.
 
@@ -69,7 +69,7 @@ Phases 2–5 ground in the project's docs before their first clarifying question
 
 Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-plans`, `doc-grounded-questions`, `codex-collaboration`, `sdd`, `ship-issue` — go through the `Skill` tool, never paraphrased from memory; the tool fires the loader and pulls in the skill's progressive-disclosure resources. `codex-collaboration` is Claude-only and non-user-invocable, so native Codex sessions take the Phase-5 native-reviewer path.
 
-**Never hard-fail on a missing sibling** — run the phase inline instead: brainstorm as intent + requirements + ≥2 design options; grill by re-reading `docPaths.context`/`adrDir`, challenging the spec's terminology against the project's vocabulary, and recording ADR-worthy decisions in `docPaths.adrDir` (or in the spec if there's no ADR convention); plan as a numbered task list with a verification gate per task; execute task-by-task, running the verify commands and reviewing each diff; ship per the Phase-7 fallback.
+**Never hard-fail on a missing sibling** — run the phase inline instead: brainstorm as intent + requirements + ≥2 design options; grill by re-reading the map's areas and their `adr/` dirs, challenging the spec's terminology against the project's vocabulary, and recording ADR-worthy decisions in the owning area's `adr/` (or in the spec if there's no ADR convention); plan as a numbered task list with a verification gate per task; execute task-by-task, running the verify commands and reviewing each diff; ship per the Phase-7 fallback.
 
 ## Dispatch and budget rules
 
@@ -107,7 +107,7 @@ Confirm nothing is already shipping this issue — two sessions racing on one is
 
 1. `<tracker-cli> issue view <num> --json title,body,labels,comments,url,assignees,milestone`.
 2. Read the references in the body: file paths, ADR numbers, commit SHAs, linked issues.
-3. Skim `docPaths.context` and `docPaths.adrDir` for terms and decisions the issue touches.
+3. Skim the map's area files and their `adr/` dirs for terms and decisions the issue touches.
 4. Grep the codebase for the concepts it names.
 5. Post a short investigation note covering: **Restatement** in your own words; **Relevant existing code** (paths + one-line role each); **Documented constraints** (context terms, ADRs, standards that bind the work); **Open questions**; **Suggested scope boundary** (in vs. deliberately out); **Scope-size estimate** (rough files + lines, and whether the mechanical-only shortcut applies).
 

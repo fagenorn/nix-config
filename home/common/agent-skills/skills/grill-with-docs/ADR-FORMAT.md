@@ -1,18 +1,24 @@
 # ADR Format
 
-ADRs live in the project's decision-record directory, sequentially numbered `0001-slug.md`. Scan the directory for the highest number and increment.
+ADRs live in the area they concern: `docs/areas/<slug>/adr/`, named `NNN-kebab-title.md`. **Each directory numbers its own records** — three digits, starting at `001`. Writing one means listing that directory and taking its next free number at merge time; what other areas have numbered is irrelevant.
 
-**Adaptive location.** Prefer `.claude/skills.config.json`'s `docPaths.adrDir`; otherwise follow whichever of `docs/adr/`, `docs/decisions/`, `doc/adr/`, `adr/` or `RFCs/` the repo already has. Default to `docs/adr/` only when neither tells you otherwise, and create the directory lazily with the first ADR.
+**Which directory.** The area whose `governs:` globs cover the code the decision constrains, or `docs/areas/system/` when it spans areas or belongs to none. The map's Areas table is the list to choose from — ADR homes are derived from the map, not configured. (`docPaths.adrDir` is a legacy override, honoured only in repos still on a single central ADR directory.) Create the `adr/` directory lazily, with the first record that needs it.
+
+**The id is `ADR-<slug>-NNN`** and the header line restates it: `# ADR-<slug>-NNN — Title`, where `<slug>` equals the containing area directory's name and `NNN` equals the filename's number. Both are linted. That full id is the only citation form anywhere in the repo — never a bare number, not even from inside the record's own area.
+
+**Parallel sessions** can now only collide inside one area, and the rule is first-to-land: the branch that reaches the integration branch first keeps the number; the later branch renumbers itself — file, header, and its own citations — before merging.
+
+**A record that was migrated or moved** carries a `- **Formerly:** ADR-<old-id>` line — immediately after its `- **Status:**` line where the repo carries one, otherwise directly under the header — whether the old id is a four-digit leftover from a migration or another area's `ADR-<slug>-NNN`. That line is the grep path from any historical citation to where the record now lives; living references are re-pointed at the same time, but citations inside other accepted records stay as they were written.
 
 ## Template
 
 ```md
-# {Short title of the decision}
+# ADR-<slug>-NNN — {Short title of the decision}
 
 {1-3 sentences: the context, what was decided, and why.}
 ```
 
-An ADR is a paragraph. The value is recording *that* a decision was made and *why* — not filling out sections. Add `Status` front-matter (`proposed | accepted | deprecated | superseded by ADR-NNNN`) only in repos that actually revisit decisions, `Considered Options` only when a rejected alternative will otherwise be re-proposed, and `Consequences` only for downstream effects a reader would not derive.
+An ADR is a paragraph. The value is recording *that* a decision was made and *why* — not filling out sections. Add `Status` (`proposed | accepted | deprecated | superseded by ADR-<slug>-NNN`) only in repos that actually revisit decisions, `Considered Options` only when a rejected alternative will otherwise be re-proposed, and `Consequences` only for downstream effects a reader would not derive.
 
 ## The gate
 

@@ -1,6 +1,7 @@
 """Single-file JSON backing store for the backlog.
 
-See docs/adr/0001-json-file-store.md for why this is a file and not a database.
+See ADR-backlog-001 (docs/areas/backlog/adr/001-json-file-store.md) for why this is a
+file and not a database.
 """
 
 import json

@@ -1,6 +1,6 @@
 {
   "skill_name": "from-issue",
-  "notes": "Pipeline evals. Each runs against a fresh copy of home/common/agent-skills/evals/fixture-repo (a stdlib-only python3 CLI with a bare `origin` remote, three issue fixtures, and a .claude/skills.config.json setting issueTracker.kind=none, specDir=docs/specs, planDir=docs/plans). Cheap-first: the standard run stops after Phase 5 and grades the artifacts — spec, plan, worktree placement — instead of executing the implementation. The fixture disables codex.planReview so Phase 5 takes the native-reviewer path and the eval stays hermetic and cheap; a Codex-reviewer eval would be a separate, more expensive fixture. Because issueTracker.kind=none the issue arrives as a file path in the prompt, not a tracker number, and the prompt states the issue number the branch should use.",
+  "notes": "Pipeline evals. Each runs against a fresh copy of home/common/agent-skills/evals/fixture-repo (a stdlib-only python3 CLI with a bare `origin` remote, three issue fixtures, and a .claude/skills.config.json setting issueTracker.kind=none and leaving specDir/planDir unset so the defaults .claude/specs and .claude/plans apply). Cheap-first: the standard run stops after Phase 5 and grades the artifacts — spec, plan, worktree placement — instead of executing the implementation. The fixture disables codex.planReview so Phase 5 takes the native-reviewer path and the eval stays hermetic and cheap; a Codex-reviewer eval would be a separate, more expensive fixture. Because issueTracker.kind=none the issue arrives as a file path in the prompt, not a tracker number, and the prompt states the issue number the branch should use.",
   "evals": [
     {
       "id": 1,
@@ -49,7 +49,7 @@
       "mode": "pipeline",
       "note": "guards the F2 fog-gate in AUTO.md Phase 0",
       "prompt": "/from-issue issues/002-fuzzy.md --auto\n\nThis project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the file `issues/002-fuzzy.md` **is** the issue. Treat it as issue number 2. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
-      "expected_output": "The run stops in Phase 0 and says why: the issue has no acceptance criteria, bundles several unrelated directions, and leans on terms the project has not defined (importance score, grouping, sync) that docs/CONTEXT.md explicitly lists as out of scope pending an ADR. No worktree, no spec, no plan — auto mode means deciding without asking, not implementing something incoherent.",
+      "expected_output": "The run stops in Phase 0 and says why: the issue has no acceptance criteria, bundles several unrelated directions, and leans on terms the project has not defined (importance score, grouping, sync) that docs/areas/backlog/CONTEXT.md explicitly lists as out of scope pending an ADR. No worktree, no spec, no plan — auto mode means deciding without asking, not implementing something incoherent.",
       "asserts": [
         {
           "name": "the run reports an abort rather than proceeding",

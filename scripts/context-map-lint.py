@@ -5,6 +5,13 @@ Checks that every term in the map's term table resolves to an area file that
 actually defines it, that every file is inside its budget, that every governs:
 glob matches something real, and that every relative link in the map resolves.
 
+Where the repo has a docs/areas/ directory it also enforces the standard docs
+layout: area directories and map rows agree in both directions, ADR records are
+NNN-kebab-title.md with a matching `# ADR-<slug>-NNN — Title` header and a number
+unique in their directory, every ADR citation under docs/ resolves, no retired
+four-digit id survives, and the docs root stays clean. Repos on a legacy layout
+have no docs/areas/, so none of that applies to them.
+
 Usage: context-map-lint [REPO_ROOT]   (default: cwd)
 Exits 0 when clean or when the repo has no map yet, 1 on findings, 2 on misuse.
 """
@@ -19,10 +26,18 @@ from pathlib import Path
 MAP_BUDGET = 150
 AREA_BUDGET_DEFAULT = 200
 
+RESERVED_DIRS = {"areas", "standards", "operations", "guides", "archive"}
+ROOT_FILES = {"README.md", "CONTEXT-MAP.md"}
+FORMERLY = "**Formerly:**"
+
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 CODE_RE = re.compile(r"`([^`]+)`")
 TERM_DEF_RE = re.compile(r"^\*\*([^*]+)\*\*\s*:", re.M)
 FRONT_MATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+ADR_FILE_RE = re.compile(r"\A(\d{3})-[a-z0-9][a-z0-9-]*\.md\Z")
+ADR_HEADER_RE = re.compile(r"\A#\s+ADR-([a-z0-9][a-z0-9-]*)-(\d{3})\s+—\s+\S")
+CITATION_RE = re.compile(r"\bADR-([a-z0-9][a-z0-9-]*)-(\d{3})\b")
+RETIRED_ID_RE = re.compile(r"\bADR-\d{4}\b")
 
 
 def find_map(root: Path) -> Path | None:
@@ -72,6 +87,110 @@ def line_count(text: str) -> int:
     return len(text.splitlines())
 
 
+def subdirs(parent: Path) -> list[Path]:
+    return sorted(path for path in parent.iterdir() if path.is_dir() and not path.name.startswith("."))
+
+
+def area_dirs_agree(areas_dir: Path, areas: dict, rel_map: str, rel) -> list[str]:
+    """Every area directory owns a map row, and every map row lands in areas/."""
+    errors: list[str] = []
+    claimed: set[str] = set()
+    for name, (area_file, _globs) in sorted(areas.items()):
+        if area_file is None:
+            continue
+        try:
+            claimed.add(area_file.relative_to(areas_dir).parts[0])
+        except (ValueError, IndexError):
+            errors.append(
+                f"{rel_map}: area '{name}' points at {rel(area_file)}, outside docs/areas/ "
+                f"— every area lives at docs/areas/<slug>/CONTEXT.md"
+            )
+    for area_dir in subdirs(areas_dir):
+        if area_dir.name not in claimed:
+            errors.append(f"{rel(area_dir)}: area directory has no row in {rel_map}'s Areas table")
+    return errors
+
+
+def index_records(areas_dir: Path, rel) -> tuple[dict[tuple[str, str], Path], list[str]]:
+    """Index docs/areas/*/adr/ by (slug, number), checking each record's shape."""
+    index: dict[tuple[str, str], Path] = {}
+    errors: list[str] = []
+    for area_dir in subdirs(areas_dir):
+        adr_dir = area_dir / "adr"
+        if not adr_dir.is_dir():
+            continue
+        slug = area_dir.name
+        taken: dict[str, Path] = {}
+        for record in sorted(adr_dir.glob("*.md")):
+            rel_record = rel(record)
+            name_match = ADR_FILE_RE.match(record.name)
+            if not name_match:
+                errors.append(
+                    f"{rel_record}: ADR filename must be NNN-kebab-title.md "
+                    f"— an adr/ directory holds records and nothing else, it indexes itself"
+                )
+                continue
+            number = name_match.group(1)
+            if number in taken:
+                errors.append(f"{rel_record}: number {number} is already {rel(taken[number])} — numbers are unique per directory")
+            taken.setdefault(number, record)
+            index[(slug, number)] = record
+
+            header = next(iter(record.read_text().splitlines()), "")
+            header_match = ADR_HEADER_RE.match(header)
+            if not header_match:
+                errors.append(f"{rel_record}: first line must be `# ADR-{slug}-{number} — Title`, found `{header[:60]}`")
+            elif header_match.group(1) != slug:
+                errors.append(f"{rel_record}: header claims area '{header_match.group(1)}' but the record lives in '{slug}'")
+            elif header_match.group(2) != number:
+                errors.append(f"{rel_record}: header number {header_match.group(2)} does not match the filename's {number}")
+    return index, errors
+
+
+def check_citations(docs: Path, index: dict[tuple[str, str], Path], rel) -> list[str]:
+    """Every ADR citation under docs/ resolves; no retired four-digit id survives."""
+    errors: list[str] = []
+    for doc in sorted(docs.rglob("*.md")):
+        try:
+            text = doc.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        archived = doc.relative_to(docs).parts[0] == "archive"
+        rel_doc = rel(doc)
+        for number, line in enumerate(text.splitlines(), 1):
+            if FORMERLY in line:
+                continue  # a Formerly line points at where a record used to be, by design
+            for slug, serial in CITATION_RE.findall(line):
+                if (slug, serial) not in index:
+                    errors.append(f"{rel_doc}:{number}: cites ADR-{slug}-{serial}, which has no record under docs/areas/{slug}/adr/")
+            if archived:
+                continue  # docs/archive/ records what happened; its citations are history
+            for retired in RETIRED_ID_RE.findall(line):
+                errors.append(f"{rel_doc}:{number}: {retired} is a retired four-digit id — cite the record's current ADR-<slug>-NNN")
+    return errors
+
+
+def check_docs_root(docs: Path, rel) -> list[str]:
+    """The docs root holds two files and the reserved directories, plus whatever README routes."""
+    errors: list[str] = []
+    readme = docs / "README.md"
+    routed = readme.read_text() if readme.is_file() else ""
+    for entry in sorted(docs.iterdir()):
+        if entry.name.startswith("."):
+            continue
+        if entry.is_file() and entry.name not in ROOT_FILES:
+            errors.append(
+                f"{rel(entry)}: the docs root holds only README.md and CONTEXT-MAP.md "
+                f"— move this under areas/, standards/, operations/, guides/ or archive/"
+            )
+        elif entry.is_dir() and entry.name not in RESERVED_DIRS and f"{entry.name}/" not in routed:
+            errors.append(
+                f"{rel(entry)}: not a reserved docs directory "
+                f"— give it a row in docs/README.md's routing table, or fold it into a reserved one"
+            )
+    return errors
+
+
 def check(root: Path) -> list[str]:
     def rel(path: Path) -> str:
         try:
@@ -80,8 +199,11 @@ def check(root: Path) -> list[str]:
             return str(path)
 
     errors: list[str] = []
+    areas_dir = (root / "docs" / "areas").resolve()
     map_path = find_map(root)
     if map_path is None:
+        if areas_dir.is_dir():
+            return ["docs/areas/: areas exist but no context map was found — the map is what names them"]
         return []
     if not map_path.is_file():
         return [f"{rel(map_path)}: configured context map does not exist"]
@@ -169,6 +291,14 @@ def check(root: Path) -> list[str]:
     for area_file, terms in defined.items():
         for term in sorted(terms - listed):
             errors.append(f"{rel(area_file)}: term '{term}' is defined but missing from the map's term table")
+
+    # The standard docs layout — only where the repo has adopted it.
+    if areas_dir.is_dir():
+        errors += area_dirs_agree(areas_dir, areas, rel_map, rel)
+        records, record_errors = index_records(areas_dir, rel)
+        errors += record_errors
+        errors += check_citations(areas_dir.parent, records, rel)
+        errors += check_docs_root(areas_dir.parent, rel)
 
     return errors
 

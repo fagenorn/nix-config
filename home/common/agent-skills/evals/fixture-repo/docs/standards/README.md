@@ -1,7 +1,7 @@
 # Coding standards
 
-- **Standard library only.** No third-party runtime or test dependencies, ever. If a
-  change needs a package, it needs an ADR first.
+- **Standard library only.** No third-party runtime or test dependencies, ever
+  (ADR-system-001). If a change needs a package, it needs an ADR first.
 - **Tests are `unittest`,** discovered by `python3 -m unittest discover` from the repo
   root. Every behaviour change lands with a test in the same commit.
 - **Assertions pin the contract.** Assert the exact line the CLI prints, not that output

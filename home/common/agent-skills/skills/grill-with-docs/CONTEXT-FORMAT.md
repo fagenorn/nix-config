@@ -2,7 +2,33 @@
 
 Domain knowledge lives as a **map plus area glossaries**. The map is an index, never a store: it names the areas, the paths each one governs, and which area owns each term. The definitions live in the area files. Readers load the map every time (cheap) and open only the area files whose `governs:` globs intersect the paths they are touching.
 
-**Location: contained in `docs/`.** Prefer `.claude/skills.config.json`'s `docPaths.contextMap` / `docPaths.context` when set; otherwise `docs/CONTEXT-MAP.md`, with one directory per area — `docs/<area-slug>/CONTEXT.md` for the glossary and `docs/<area-slug>/adr/` for that area's decisions. System-wide decisions stay in `docs/adr/`; all ADR directories share one numbering sequence, and a record keeps its filename if it ever moves. (A root `CONTEXT-MAP.md` with code-colocated area files is the legacy layout — follow it where a repo still uses it.)
+**Location: contained in `docs/`.** The docs root holds exactly two loose files — `README.md`, the routing index, and `CONTEXT-MAP.md`, the map. Everything else lives in a reserved directory:
+
+```
+docs/
+├── README.md            ← routing index: every entry + where new knowledge goes
+├── CONTEXT-MAP.md       ← the map (≤150 lines); links ./areas/<slug>/CONTEXT.md
+├── areas/
+│   ├── system/          ← reserved pseudo-area: decisions no single area owns
+│   │   ├── CONTEXT.md   ←   a stub; its map row carries governs `*`
+│   │   └── adr/
+│   └── <slug>/
+│       ├── CONTEXT.md   ← budgeted glossary for this area only
+│       └── adr/
+│           └── NNN-kebab-title.md
+├── standards/           ← Layer-2 project deltas + ≤40-line README index
+├── operations/          ← runbooks
+├── guides/              ← architecture.md and the rest of the how-to prose
+└── archive/             ← dormant or superseded material
+```
+
+`areas/`, `standards/`, `operations/`, `guides/` and `archive/` are **reserved, not required** — create one when you have something to put in it. A directory under `areas/` *is* an area, so every area directory needs a row in the map's Areas table and every Areas row must point into `areas/`. A project-specific extra directory at the docs root is allowed only when `docs/README.md`'s routing table carries a row for it.
+
+`docs/areas/system/` is the reserved pseudo-area for decisions that belong to no single area. Its map row is real — gist "decisions spanning areas", `governs:` glob `*` — and its `CONTEXT.md` is a stub of a few lines, because every grounding pass loads it. **There is no central `docs/adr/`**: every ADR lives in exactly one `docs/areas/<slug>/adr/`, so tooling has one shape and no special cases.
+
+Prefer `.claude/skills.config.json`'s `docPaths.contextMap` / `docPaths.context` when set. (Two legacy layouts survive where a repo still uses them — a root `CONTEXT-MAP.md` with code-colocated area files, and flat `docs/<slug>/` areas beside a central `docs/adr/`. Follow what a repo actually has rather than imposing this tree on it mid-migration.)
+
+Skill output is not documentation and does not live here: specs, plans, handoffs and notes go to `.claude/specs/`, `.claude/plans/`, `.claude/handoffs/`, `.claude/notes/`.
 
 > The Order / Invoice / Customer names below are illustrative DDD samples — substitute the project's real terms.
 
@@ -17,8 +43,9 @@ Domain knowledge lives as a **map plus area glossaries**. The map is an index, n
 
 | Area | Context file | Gist | governs |
 |---|---|---|---|
-| Ordering | [CONTEXT](./ordering/CONTEXT.md) | Receives and tracks customer orders | `src/ordering/**` |
-| Billing | [CONTEXT](./billing/CONTEXT.md) | Raises invoices and settles payments | `src/billing/**`, `src/api/invoices/**` |
+| Ordering | [CONTEXT](./areas/ordering/CONTEXT.md) | Receives and tracks customer orders | `src/ordering/**` |
+| Billing | [CONTEXT](./areas/billing/CONTEXT.md) | Raises invoices and settles payments | `src/billing/**`, `src/api/invoices/**` |
+| System | [CONTEXT](./areas/system/CONTEXT.md) | Decisions spanning areas | `*` |
 
 ## Terms
 
@@ -38,7 +65,7 @@ Rules for the map:
 
 - **The gist is one line, twelve words or fewer.** It exists so a reader can decide whether to open the file, not so they can skip opening it.
 - **`governs:` globs are the load trigger.** Every glob must match at least one real path, resolved from the repo root (the map lives in `docs/`, but the globs point at code). They live here and only here — an area file does not restate its own globs.
-- **Context-file links are map-relative**: `./<area-slug>/CONTEXT.md`, a sibling directory of the map.
+- **Context-file links are map-relative**: `./areas/<area-slug>/CONTEXT.md`.
 - **Every term defined in an area file appears exactly once in the Terms table**, sorted alphabetically. The table carries the term and its owning area, never a definition — a term with two homes is a modelling bug to resolve, not a row to duplicate.
 - **`## Relationships` carries cross-area edges only.** Cardinality and event flow between areas; anything internal to one area belongs in that area's file.
 
@@ -76,7 +103,13 @@ Rules for area files:
 
 ## Decisions ride with their area
 
-An ADR that concerns exactly one area lives in that area's `docs/<area-slug>/adr/`; a decision spanning areas (or the whole system) lives in `docs/adr/`. One numbering sequence covers every ADR directory, so an id is unambiguous without its path. When an accepted record moves, it keeps its filename, moves through the VCS's own move, and every *living* reference is re-pointed in the same commit — historical citations inside other accepted records are part of those records and stay as written.
+Every ADR lives in exactly one `docs/areas/<slug>/adr/` — the area it concerns, or `system` when it spans areas or belongs to none. Numbering is **per directory**: `NNN-kebab-title.md`, three digits, each directory running its own sequence from `001`. A new record takes the next free number in its directory at merge time.
+
+The id is `ADR-<area-slug>-NNN`: the slug of the containing directory plus the filename's number, and the header line restates it. **The full id is the only citation form, everywhere** — no bare short forms, not even inside the record's own area. It is a single grep token, and it is lexically disjoint from the old four-digit `ADR-NNNN` form, so ids left behind by a migration stay mechanically detectable. There is no global sequence and no cross-directory uniqueness to maintain.
+
+When an accepted record moves to another area, it takes the destination directory's next free number and gains a `- **Formerly:** ADR-<old-slug>-NNN` line; the move goes through the VCS's own move, and every *living* reference is re-pointed in the same commit. Historical citations inside other accepted records are part of those records and stay as written — the `Formerly` line is what carries identity across the move.
+
+Nobody hand-maintains an ADR index: a sorted `ls` of an `adr/` directory indexes itself, and the map's Areas table is the directory of directories. Record mechanics — the shape of a record, the admission gate, the parallel-session collision rule — live in [ADR-FORMAT.md](./ADR-FORMAT.md).
 
 ## Delete on resolve
 
@@ -101,4 +134,14 @@ A new repo may begin with a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md
 
 ## Linting
 
-`~/.agents/bin/context-map-lint <repo-root>` checks every term resolves to an area file that defines it, every file is within budget, every `governs:` glob matches something, and every relative link in the map resolves. Wire it into CI — a citation linter is the only anti-drift measure that has been observed to hold.
+`~/.agents/bin/context-map-lint <repo-root>` checks that every term resolves to an area file that defines it, every file is within budget, every `governs:` glob matches something, and every relative link in the map resolves.
+
+Once `docs/areas/` exists it also enforces the layout above:
+
+- every directory under `docs/areas/` is the target of an Areas row, and every Areas row resolves under `docs/areas/`;
+- ADR filenames are `NNN-kebab-title.md`, the number is unique within its directory, and the header is `# ADR-<slug>-NNN — Title` with the slug and number matching the file's home;
+- every `ADR-<slug>-NNN` cited anywhere under `docs/` resolves to a record that exists;
+- no four-digit `ADR-NNNN` survives under `docs/`, except on a `- **Formerly:**` line or inside `docs/archive/`;
+- the docs root carries nothing but `README.md`, `CONTEXT-MAP.md`, the reserved directories, and whatever `docs/README.md` routes.
+
+A repo still on a legacy layout keeps passing exactly as before — these checks activate only where `docs/areas/` is present. Wire it into CI — a citation linter is the only anti-drift measure that has been observed to hold.

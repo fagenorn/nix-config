@@ -20,8 +20,8 @@ This skill is project-agnostic. Before acting, resolve project-specific values:
 4. Degrade gracefully: any configured-but-absent doc path, sibling skill, or hints file is skipped silently —
    never read a file that does not exist, never hard-fail on a missing optional binding.
 
-**Keys this skill uses:** `docPaths.{contextMap,context,adrDir,standards,architecture}` (to know where the grounding
-sources live), and `projectHints` (optional path to a project-specific vocab / review-hints appendix). All optional —
+**Keys this skill uses:** `docPaths.{contextMap,context,standards,architecture}` (to know where the grounding
+sources live), `docPaths.adrDir` (legacy override only — ADR homes normally come from the map), and `projectHints` (optional path to a project-specific vocab / review-hints appendix). All optional —
 if none are configured, fall back to discovery (below).
 
 ## Why this matters
@@ -51,10 +51,13 @@ For every clarifying question or option set you're about to surface, do this pas
    **No map?** Fall back to the legacy layout: read whichever of `docPaths.context`, `CONTEXT.md`, `GLOSSARY.md`,
    `DOMAIN.md` or a top-of-`README` domain section exists, in full. Read it once, not per question.
 
-2. **Find and scan the decision log.** Use `docPaths.adrDir` if configured; otherwise look for the common ADR
-   directories (`docs/adr/`, `docs/adrs/`, `docs/decisions/`, `adr/`). List the directory, read the titles, and
-   open any that look relevant. If a decision is already settled, state the existing decision and ask only whether
-   anything has *changed* since.
+2. **Find and scan the decision log.** Areas own their decisions: each area in the map has an `adr/` directory
+   beside its `CONTEXT.md` (`docs/areas/<slug>/adr/`), plus the reserved `docs/areas/system/adr/` for decisions
+   spanning areas. Scan the `adr/` dirs of the areas you opened in step 1, and `system/` always. Legacy fallback,
+   for repos with no `docs/areas/`: `docPaths.adrDir` if configured, else whichever of `docs/adr/`, `docs/adrs/`,
+   `docs/decisions/`, `adr/` exists. Either way: list the directory, read the titles, and open any that look
+   relevant. If a decision is already settled, state the existing decision and ask only whether anything has
+   *changed* since.
 
 3. **Read the standards that apply to this change.** The universal bar is `~/.agents/standards/the-bar.md` and the
    stack shards are `~/.agents/standards/stacks/*.md` — load a shard only when the change's file extensions match
@@ -86,7 +89,7 @@ directory (the worktree, or `specDir` if one is configured) and read that file i
 - Ordering (`src/ordering/**`) — Order, Customer
 
 ## Constraints found
-- ADR-0007: Ordering and Billing communicate by domain event, never synchronous HTTP.
+- ADR-system-007: Ordering and Billing communicate by domain event, never synchronous HTTP.
 - the-bar.md: fail-loud at closed-set dispatch sites.
 - docs/standards/testing.md: endpoint tests share the API factory fixture.
 
