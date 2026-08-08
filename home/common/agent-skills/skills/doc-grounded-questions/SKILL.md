@@ -70,7 +70,7 @@ For every clarifying question or option set you're about to surface, do this pas
 5. **Grep the codebase** for the central concept. If the codebase already commits to a pattern, the default option
    should be "match the existing pattern" and you must justify any divergence.
 
-If a `projectHints` file is configured and present, read it too — it carries project-specific vocab and review hints
+If `projectHints` is configured and present (a directory → its `review.md`; a single file → itself), read it too — it carries project-specific vocab and review hints
 that sharpen the grounding.
 
 ## Ground once per phase, cache the result

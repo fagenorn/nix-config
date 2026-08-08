@@ -236,7 +236,7 @@ Otherwise this phase enforces the load-bearing invariant of the whole skill:
 
 > **Verify the production service is actually running the merge SHA at a SUCCESS status. A health-200 is never proof.** A platform can report a deploy `FAILED` and silently keep serving an older build; a health probe against that older build still returns 200. Match the *running commit* to `MERGE_SHA` **and** require a terminal SUCCESS status before declaring the release live.
 
-Read `deploy.watchDoc` (or `docPaths.deploy`) for the platform's commands and gotchas before polling. The adapter contract below is the generic shape; the doc has the specifics.
+Read `deploy.watchDoc` (or `docPaths.deploy`) for the platform's commands and gotchas before polling; the project hints (`projectHints` directory → its `deploy.md`) carry the concrete verbs when present. The adapter contract below is the generic shape; the docs have the specifics.
 
 ### 5a. Enumerate services
 

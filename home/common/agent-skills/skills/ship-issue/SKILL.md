@@ -74,7 +74,7 @@ Auto-mode rule: `--auto` proceeds on the first case and still pauses on the seco
 - **Retirement** — modify/delete conflicts on files the integration branch removed wholesale, and/or cleanly-merged *new* files still referencing the retired symbol. Extend scope: sweep those files and clean them in the same merge commit, rather than eating a downstream typecheck failure plus a fix-up commit.
 - **Addition** (symmetric) — the merge is clean, but a newly-landed sibling axis on the same surface now fires inside tests asserting "X is idle when X is unchanged". Seed the sibling axes at their intended values in the test setup so the test isolates its own invariant. Phase 2 catches this; the merge doesn't.
 
-Concrete instances of both live in `projectHints` when the project declares one.
+Concrete instances of both live in the project hints (`projectHints`; a directory → its `merge.md`) when the project declares them.
 
 Otherwise `git merge origin/<integrationBranch>`. Clean → continue. Conflicts → hybrid policy.
 
@@ -169,7 +169,7 @@ HEAD_SHA=$(git rev-parse HEAD)
 
 Dispatch a fresh subagent via the `Agent` tool (`general-purpose`, no inherited context). Nested dispatch works even when this skill is itself inside an `Agent` subagent, but the schema is sometimes deferred — if `Agent` isn't in your tool surface, call `ToolSearch` with `query: "select:Agent"` first. Don't fall back to inlining the review; that deprecated path re-loads the spec/plan into your already-large context.
 
-The **generic rubric below is fixed — use it verbatim**. The project-specific paragraph comes from `projectHints`; omit it silently when that file is absent.
+The **generic rubric below is fixed — use it verbatim**. The project-specific paragraph comes from `projectHints` (a directory → its `review.md`; a file → itself); omit it silently when absent.
 
 > Review the diff from `<BASE_SHA>` to `<HEAD_SHA>` against the project's coding bar.
 >

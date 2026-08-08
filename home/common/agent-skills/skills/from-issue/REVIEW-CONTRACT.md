@@ -29,7 +29,7 @@ framework-first (custom executors/state machines where a framework primitive alr
 production-grade-by-default (half-finished branches, missing error paths at boundaries), DI rules, and
 the test-fixture conventions in the project's standards shards (or legacy coding-standards doc).
 
-If `projectHints` is configured and the file exists, read it for project-specific review
+If `projectHints` is configured and present (a directory → its `review.md`; a single file → itself), read it for project-specific review
 hints/examples and fold those into this pass (e.g. recurring repo-specific plan bugs that have escaped
 review before).
 

@@ -1,13 +1,14 @@
 ---
 name: codex-collaboration
-description: Run a private, isolated Codex plan review for from-issue Phase 5 and disposition its findings. Only when from-issue requests it and Codex review is enabled.
+description: Run a private, isolated Codex pass — plan-review (from-issue Phase 5) or decision-check (gated --auto cross-check) — and disposition its findings.
 user-invocable: false
 ---
 
 # Codex Collaboration
 
-Support one operation: `plan-review`. Keep Codex review-only and keep the parent
-Claude agent responsible for every plan edit and disposition.
+Support two operations: `plan-review` and `decision-check`. Keep Codex
+review-only and keep the parent Claude agent responsible for every plan edit
+and disposition.
 
 ## Resolve policy
 
@@ -124,3 +125,26 @@ The parent Claude agent owns the result:
 
 Return control only after all accepted findings have explicit dispositions and
 the plan is clean enough for the caller's Phase-5 checkpoint.
+
+## Operation: `decision-check`
+
+Gated behind `codex.decisionReview` in `.claude/skills.config.json` — **default
+off**; when absent or false, callers never invoke this operation. A one-shot
+"refute this recommendation" pass for the high-stakes class of `--auto`
+self-answered decisions (the caller decides eligibility).
+
+- Packet: the question as it would have been asked, the `➡️` recommendation
+  with its grounding, and the grounding paths selected by the same map-first
+  protocol as `plan-review` item 5. Paths, never contents.
+- Brief, included in substance: "Try to refute this recommendation against the
+  cited grounding and the live repo. Read-only. Return exactly: `Verdict:
+  concur | refute`, then ≤200 words of rationale citing `path:line` evidence."
+- Dispatch `codex:codex-reviewer` once, foreground, fresh and isolated — same
+  runtime contract as `plan-review`.
+- The caller appends a `Cross-check:` field to the decision's
+  `Auto-resolved decisions` entry: the verdict plus a one-line gist. On
+  `refute`, the caller re-grounds once and decides, logging both views — the
+  cross-check advises, it never overrules.
+- **No Claude fallback for this operation.** On any Codex failure, record
+  `Cross-check: unavailable (<failure class>)` and continue — this is an
+  optional de-correlation pass, not a gate.

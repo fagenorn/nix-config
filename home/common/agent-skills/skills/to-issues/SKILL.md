@@ -47,6 +47,10 @@ Look for opportunities to prefactor the code to make the implementation easier �
 
 ### 3. Draft vertical slices
 
+**Check the rejection KB first.** If `.out-of-scope/` exists at the repo root, read its files (one per
+consciously-rejected idea) before drafting. Never propose a slice that re-litigates a rejected
+direction — mention the rejection file instead; only the user can revive one.
+
 Break the plan into **tracer bullet** issues. Each issue is a thin vertical slice that cuts through ALL integration layers end-to-end, NOT a horizontal slice of one layer.
 
 Slices may be human-required or autonomous/agent-executable. Human-required slices need a person in the loop — an architectural decision, a design review, a credential or approval only a human can grant. Autonomous slices can be implemented and merged without human interaction. Prefer autonomous over human-required where possible.
@@ -79,6 +83,12 @@ Ask the user:
 
 Iterate until the user approves the breakdown.
 
+**Record conscious rejections.** When the user rules a proposed direction out during this quiz (not
+merely deferring it), write one short file per rejection to `.out-of-scope/<slug>.md` — the idea in a
+line, why it was rejected, the date, and any link (spec section, wayfind ticket) — and commit them
+with the breakdown. This is the KB step 3 checks; it stops future sessions from re-proposing settled
+rejections for near-zero cost.
+
 ### 5. Publish the issues to the issue tracker
 
 For each approved slice, publish a new issue to the resolved issue tracker. Use the issue body template below. These issues are considered ready for autonomous agents.
@@ -107,6 +117,14 @@ A concise description of this vertical slice. Describe the end-to-end behavior, 
 
 Avoid specific file paths or code snippets — they go stale fast. Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it here and note briefly that it came from a prototype. Trim to the decision-rich parts — not a working demo, just the important bits.
 
+**Demo:** one line — what a reviewer can run, see, or click when this slice lands.
+
+## Decisions
+
+Links to the decisions this slice depends on — ADRs, wayfind decision tickets, spec sections — one
+line each with the answer's gist. This is pre-resolved uncertainty: an implementing agent grounds in
+these instead of re-deriving (or re-asking) them. Omit the section when nothing applies.
+
 ## Acceptance criteria
 
 - [ ] Criterion 1
@@ -120,6 +138,11 @@ Avoid specific file paths or code snippets — they go stale fast. Exception: if
 Or "None - can start immediately" if no blockers.
 
 </issue-template>
+
+**The body is the contract; the discussion is context.** Issue bodies are read weeks later in fresh
+contexts: state behavior and outcomes, not procedures; no file paths, no line numbers, no "as
+discussed above". Anything an implementer must know goes in the body or a linked durable artifact,
+never only in a comment thread.
 
 **Every acceptance criterion must be falsifiable.** For each one, name the observation that would show it false, and confirm that observation actually fails at the commit the implementer starts from. A criterion already true at the base commit grades nothing — it is how an implementer "completes" an issue as a no-op. Vertical slicing prevents most of this by construction (a slice delivering behaviour that did not exist before is red at base), but check by hand. Reject two other recurring shapes: a criterion that can only be satisfied by work another slice owns, and one that restates the request instead of deriving from the artifact.
 

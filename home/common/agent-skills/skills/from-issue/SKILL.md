@@ -20,7 +20,7 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
 3. Defaults when neither yields a value: integrationBranch=main, defaultBranch=main, commit.coAuthoredBy=true, unsetGithubToken=false, specDir=.claude/specs, planDir=.claude/plans, codex.planReview.enabled=true, codex.planReview.focus=null.
 4. Degrade gracefully: a configured-but-absent doc path, sibling skill, or hints file is skipped silently. Never read a file that doesn't exist; never hard-fail on a missing optional binding.
 
-Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,contextMap,adrDir,standards,architecture,gitWorktrees}`, `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`, `codex.planReview{enabled,focus}`.
+Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,contextMap,adrDir,standards,architecture,gitWorktrees}`, `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`, `codex.planReview{enabled,focus}`, `codex.decisionReview` (default false).
 
 `<tracker-cli>` = resolved `issueTracker.cli`; `<integration-branch>`, `<default-branch>` likewise. When `issueTracker.kind=none`, skip every issue/PR-linkage step and operate on the branch alone (a "tracker URL" the user gives you is just a label).
 

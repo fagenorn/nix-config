@@ -48,7 +48,9 @@ Judgment notes:
 
 ## Step 3 — Write each entry
 
-**One short sentence, imperative voice, operator-facing meaning, PR link.**
+**One short sentence, imperative voice, operator-facing meaning, PR link.** The project's worked
+examples (entry rewrites, synthesis, bump calls) live in the project hints (`projectHints` directory
+→ its `changelog.md`); read them now if present.
 
 | Bad | Good |
 |---|---|
