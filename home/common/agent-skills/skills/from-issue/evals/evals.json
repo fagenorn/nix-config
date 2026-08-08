@@ -47,8 +47,7 @@
       "id": 2,
       "name": "fuzzy-issue-should-abort",
       "mode": "pipeline",
-      "expected_today": "fail",
-      "note": "passes once the F2 fog-gate lands",
+      "note": "guards the F2 fog-gate in AUTO.md Phase 0",
       "prompt": "/from-issue issues/002-fuzzy.md --auto\n\nThis project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the file `issues/002-fuzzy.md` **is** the issue. Treat it as issue number 2. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
       "expected_output": "The run stops in Phase 0 and says why: the issue has no acceptance criteria, bundles several unrelated directions, and leans on terms the project has not defined (importance score, grouping, sync) that docs/CONTEXT.md explicitly lists as out of scope pending an ADR. No worktree, no spec, no plan — auto mode means deciding without asking, not implementing something incoherent.",
       "asserts": [
@@ -70,7 +69,10 @@
       "id": 3,
       "name": "preflight-existing-work-stop",
       "mode": "pipeline",
-      "setup": { "kind": "dirty-worktree", "branch": "worktree-issue-3-rename-flag" },
+      "setup": {
+        "kind": "dirty-worktree",
+        "branch": "worktree-issue-3-rename-flag"
+      },
       "prompt": "/from-issue issues/003-mechanical.md --auto\n\nNo issue tracker here — `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the file `issues/003-mechanical.md` **is** the issue. Treat it as issue number 3. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
       "expected_output": "Phase 0 pre-flight finds one worktree matching `worktree-issue-3-` that has uncommitted work, and stops there. The documented one-match-dirty behavior is to surface the situation rather than discard someone else's in-progress state, and it holds under --auto — that stop is a judgment about the workspace, not a user-approval checkpoint. Nothing new is created and the dirty worktree is left exactly as found.",
       "asserts": [

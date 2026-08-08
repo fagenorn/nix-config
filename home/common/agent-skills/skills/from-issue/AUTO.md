@@ -21,9 +21,14 @@ at a `**CHECKPOINT**`:
 3. **Log it** in the artifact's `## Auto-resolved decisions` section, one entry per decision, using
    the template in `SKILL.md`. This is the audit trail: a human reviewing the PR can challenge any
    choice without re-deriving it.
-4. **Continue.** Don't post the question. Don't wait.
+4. **Cross-check the high-stakes ones** — only when `codex.decisionReview` is `true` (default off)
+   AND the decision creates or modifies an ADR or reverses a prior phase's choice: run
+   `codex-collaboration`'s `decision-check` and append its `Cross-check:` verdict to the entry. A
+   `refute` means re-ground once and decide with both views logged; the cross-check advises, never
+   overrules. Unavailable → `Cross-check: unavailable`, continue.
+5. **Continue.** Don't post the question. Don't wait.
 
-Sub-skills (`brainstorming`, `grill-with-docs`, `writing-plans`, `subagent-driven-development`,
+Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`,
 `ship-issue`) don't know about `--auto`. *You* carry the autonomous-mode context — when one tells you
 to ask or wait, run the self-answer pattern instead.
 
@@ -36,6 +41,15 @@ about the work itself rather than user-approval gates:
   question, or otherwise not implementable, surface that and stop. Auto-mode means "decide without
   asking", not "implement something incoherent". The same holds for the Phase-0 pre-flight stops
   (open/merged PR, dirty or multiple matching worktrees).
+- **Phase 0 fog gate.** Before any worktree exists, test the grounded issue: can every open question
+  be *phrased precisely* and answered from the docs, codebase precedent, or the issue itself with a
+  defensible default? Vague-but-phraseable questions are normal `--auto` work — self-answer them.
+  **Fog** is different: a question you cannot state sharply, a load-bearing term the docs mark
+  undefined or out-of-scope, no acceptance criterion that would make any answer falsifiable. Fog is
+  an abort — stop before creating anything, name each foggy question in the stop report, and emit a
+  `wayfind` decision ticket per question (when that skill and a tracker are available; otherwise the
+  stop report carries the list). Abort conservatively: fog is the exception, autonomy stays the
+  default posture.
 - **Phase 5 blocking findings.** Apply blocking fixes to the plan inline. If a blocker can't be fixed
   by editing the plan — it means the spec or the issue scope is wrong — back up to that phase, redo
   it, and log the loop in `Auto-resolved decisions`.
