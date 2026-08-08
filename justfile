@@ -48,6 +48,13 @@ capply:
 update:
   nix flake update
 
+## agent skills
+# Run one skill eval. Pipeline evals sandbox the fixture repo and grade the artifacts;
+# plan-only evals print the prompt + expected output for manual grading.
+# See home/common/agent-skills/evals/README.md
+evals skill id:
+  ./home/common/agent-skills/evals/run-eval.sh {{skill}} {{id}}
+
 ## remote nix vm installation
 install IP:
   ssh -o "StrictHostKeyChecking no" nixos@{{IP}} "sudo bash -c '\
@@ -59,6 +66,10 @@ install IP:
     cd nix-config/lib/install && \
     sh install-nix.sh\"'"
 
+
+# Report agent token spend per issue from the local Claude Code transcripts
+agent-costs *args:
+  python3 scripts/agent-costs.py {{args}}
 
 # Garbage collect old OS generations and remove stale packages from the nix store
 gc generations="5":
