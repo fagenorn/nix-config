@@ -43,6 +43,17 @@ in
   home.file = localSkillFiles // {
     ".agents/skills/ui-ux-pro-max".source = uiUxSkill;
 
+    # Layers 0 and 1 of the standards architecture, machine-global so every
+    # project inherits the bar and its stack's trap library. Layer 2 (project
+    # deltas) stays in each repo under docs/standards/.
+    ".agents/standards".source = ./standards;
+
+    # Stable path project CIs can call without vendoring the script.
+    ".agents/bin/context-map-lint" = {
+      source = ../../../scripts/context-map-lint.py;
+      executable = true;
+    };
+
     # Claude accepts Home Manager's recursive file links, so its generated
     # multi-file skill can continue to use that layout.
     ".claude/skills/ui-ux-pro-max" = {
