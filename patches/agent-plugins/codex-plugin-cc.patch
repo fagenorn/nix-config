@@ -22,24 +22,34 @@ new file mode 100644
 index 0000000..ab0aa35
 --- /dev/null
 +++ b/plugins/codex/agents/codex-reviewer.md
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,27 @@
 +---
 +name: codex-reviewer
-+description: Internal foreground bridge for fresh, isolated, read-only Codex plan reviews requested by the codex-collaboration skill
++description: Internal bridge for fresh, isolated, read-only Codex plan reviews requested by the codex-collaboration skill
 +model: sonnet
-+tools: Bash
++tools: Bash, Read
 +---
 +
 +Act only as a transport for one Codex plan-review job.
 +
-+- Forward the complete delegation prompt, unchanged, to one foreground command:
-+  `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --fresh --reviewer --timeout-ms 840000 <prompt>`.
-+- Use exactly one Bash tool call and set its tool timeout to 900000 milliseconds.
-+- Keep the prompt in one safely quoted argument or a temporary file outside the repository.
++- The dispatch message's first line is `WORKTREE_ROOT: <absolute path>`; everything
++  after that line is the delegation prompt. If the line is absent, use the
++  invocation directory as the root.
++- Pre-flight with one fast foreground Bash call: `command -v codex-companion`. If
++  the command is missing, immediately return
++  `CODEX_REVIEW_FAILURE: codex-companion not on PATH` without running anything else.
++- Write the delegation prompt, unchanged, to a temporary file outside the repository.
++- Launch exactly one review as a background Bash call (`run_in_background: true`):
++  `cd "<worktree-root>" && codex-companion task --fresh --reviewer --timeout-ms 840000 < "<tmpfile>"`.
++  The `cd` keys the runtime's job state to the reviewed worktree. Background
++  execution is required: reviews legitimately run up to 14 minutes, and a foreground
++  Bash call is killed at the 600000 ms harness cap before the runtime's own timeout
++  can fire.
++- Do not poll the task; wait for its completion notification, then Read the output
++  file and return the command's stdout exactly. If the command failed, return a
++  single line beginning `CODEX_REVIEW_FAILURE:` followed by its stderr or exit status.
 +- Do not inspect the repository, interpret the request, edit files, run Git, retry,
 +  fall back to Claude analysis, or add commentary.
-+- Return the command's stdout exactly. If the command fails, return a single line
-+  beginning `CODEX_REVIEW_FAILURE:` followed by its stderr or exit status.
 diff --git a/plugins/codex/commands/setup.md b/plugins/codex/commands/setup.md
 index fb33a15..4d8c409 100644
 --- a/plugins/codex/commands/setup.md

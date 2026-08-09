@@ -8,6 +8,14 @@
 let
   agentPlugins = import ../../../lib/agent-plugins.nix { inherit inputs pkgs; };
 
+  # Bare `codex-companion` on PATH. The codex-collaboration bridge (and its
+  # `command -v` pre-flight) invokes it by name; without this every spawned
+  # session gets exit 127 (observed: nodo evidence run, 2026-08-09). The
+  # runtime is self-contained (node built-ins + relative lib imports only).
+  codexCompanionBin = pkgs.writeShellScriptBin "codex-companion" ''
+    exec ${pkgs.nodejs}/bin/node ${agentPlugins.codex}/plugins/codex/scripts/codex-companion.mjs "$@"
+  '';
+
   # Durable, user-authored Claude Code settings (ported from the existing ~/.claude/settings.json).
   # Runtime-mutable noise — the accumulated project-specific permissions.allow list, OAuth,
   # project history, statsig caches — is intentionally NOT frozen here.
@@ -93,7 +101,10 @@ in
 
   # codex-plugin-cc is implemented in Node and shells out to the separately
   # managed native Codex CLI.
-  home.packages = [ pkgs.nodejs ];
+  home.packages = [
+    pkgs.nodejs
+    codexCompanionBin
+  ];
 
   # Claude-only bridge orchestration. Keeping this outside the shared
   # ~/.agents/skills tree prevents Codex from recursively invoking itself.
@@ -118,6 +129,28 @@ in
     source = ./agents;
     recursive = true;
   };
+
+  # Repair Claude's mutable plugin-install record when it drifts from the
+  # Nix-declared marketplace. After a rebuild the recorded codex installPath
+  # can dangle (old store path GC'd, cache copy wiped) or point at a stale
+  # patch revision — spawned sessions then resolve stale or broken agent
+  # definitions (observed: p1 record while the marketplace served p2, exit-127
+  # bridge behavior in the nodo evidence run). Idempotent: rewrites only when
+  # installPath differs from the current store plugin.
+  home.activation.repairCodexPluginInstall = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    installed="$HOME/.claude/plugins/installed_plugins.json"
+    target="${agentPlugins.codex}/plugins/codex"
+    if [ -f "$installed" ]; then
+      current=$(${pkgs.jq}/bin/jq -r '.plugins["codex@nix-codex"][0].installPath // empty' "$installed")
+      if [ -n "$current" ] && [ "$current" != "$target" ]; then
+        tmp=$(mktemp)
+        ${pkgs.jq}/bin/jq --arg p "$target" --arg v "${agentPlugins.codexMetadata.version}" \
+          '.plugins["codex@nix-codex"] |= map(.installPath = $p | .version = $v)' \
+          "$installed" > "$tmp"
+        run mv "$tmp" "$installed"
+      fi
+    fi
+  '';
 
   # Copy settings.json to a writable location on each activation. Nix is the source of truth
   # (re-asserted every `sudo just`), but Claude Code can still rewrite it at runtime — your

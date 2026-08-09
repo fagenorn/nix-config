@@ -81,10 +81,19 @@ Include these rules verbatim in substance:
 
 ## Launch
 
+Pre-flight first, one sub-second call: `command -v codex-companion`. If the
+command is missing, take the capability fallback above — use the native
+reviewer flow immediately and record it as such. Never convert a missing
+runtime into a timed-out Codex attempt.
+
 Dispatch the plugin agent `codex:codex-reviewer` once with the complete packet.
-Run it in the foreground. The agent forwards the packet to
-`codex-companion task --fresh --reviewer --timeout-ms 840000`, which guarantees a
-fresh isolated `CODEX_HOME`, approval policy `never`, and sandbox `read-only`.
+Run it in the foreground, with the first line of the dispatch exactly
+`WORKTREE_ROOT: <absolute worktree root>` so the bridge keys runtime job state
+to the reviewed worktree. The bridge launches
+`codex-companion task --fresh --reviewer --timeout-ms 840000` as a background
+Bash task — the 840 s runtime budget exceeds the 600 s foreground Bash cap, so
+expect up to ~15 minutes wall-clock — which guarantees a fresh isolated
+`CODEX_HOME`, approval policy `never`, and sandbox `read-only`.
 
 Parallel reviews are valid. A queued or active review is never a reason to use a
 Claude fallback. Wait for the requested job. The patched reviewer runtime does
@@ -100,8 +109,9 @@ with evidence, confidence, and unknowns. Treat only these as Codex failures:
 - the agent returns `CODEX_REVIEW_FAILURE:`;
 - the result is empty or malformed after one completed fresh run.
 
-On a real failure, dispatch exactly one fresh Claude `general-purpose` standards
-reviewer with the same packet and the same read-only/output contract. Do not ask
+On a real failure, dispatch exactly one fresh Claude `reviewer`-type standards
+reviewer (read-only toolset, matching from-issue Phase 5 step 3) with the same
+packet and the same read-only/output contract. Do not ask
 that fallback reviewer to imitate Codex. Record the concrete failure class and
 that Claude fallback was used. Do not retry Codex and do not fall back because of
 concurrency.
