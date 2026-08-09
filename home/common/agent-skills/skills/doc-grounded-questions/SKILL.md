@@ -78,8 +78,11 @@ that sharpen the grounding.
 
 ## Ground once per phase, cache the result
 
-The pass above runs **once per phase**, not once per question. Write what it found to `GROUNDING.md` in the working
-directory (the worktree, or `specDir` if one is configured) and read that file instead of re-running the pass:
+The pass above runs **once per phase**, not once per question. Write what it found to
+`"$(git rev-parse --git-dir)/GROUNDING.md"` — per-worktree and outside the working tree, so it can never be
+committed — and read that file instead of re-running the pass. Never write the cache inside the working tree:
+a committed cache collides across parallel runs (observed: two `--auto` branches add/add-conflicted on
+`.claude/specs/GROUNDING.md` at merge). Outside a git repo, fall back to the platform temp dir:
 
 ```md
 # Grounding — <phase>
