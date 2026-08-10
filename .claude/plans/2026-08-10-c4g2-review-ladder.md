@@ -125,6 +125,24 @@
 - **Grounding:** Falsifiability is this plan's own bar (Global Constraints); prose commands must be executable.
 - **Alternative considered:** A helper script — process code for a two-command decision.
 
+### F1 (final review, Critical): all-parked must report `clean`
+- **Question (reviewer):** sdd's Finish emitted `residuals` for any parked-with-ruling finding while ship and spec D8 put all-parked in the degrading set — one parked minor would permanently disable the degradation path.
+- **Choice:** sdd's Clean bullet now includes "every remaining finding parked-with-ruling" (workspace deleted, parked list travels in the report); Residuals is reserved for breaker-surfaced load-bearing residuals. Producer, consumer, and spec now agree.
+- **Grounding:** Spec D8's SDD-clean definition; the plan's B5-era dictated text introduced the mismatch.
+- **Alternative considered:** Loosening ship's gate to accept `residuals` — pushes an undefined state class to every consumer instead of fixing the producer.
+
+### F2 (final review, Important): ship-fillable axis templates
+- **Question (reviewer):** ship's full path (and any dispatcher without sdd's scripts/ledger) could not fill `[DIFF_FILE]` and `[DEFERRED_AND_PARKED_LINES]` — a literal placeholder would land in a dispatched prompt.
+- **Choice:** Both templates gained a fetch-the-range-yourself body fallback; both Placeholders paragraphs document omission; the conformance Ledger Triage section carries an omit parenthetical; ship's full-path text states the omissions explicitly.
+- **Grounding:** The old final template had exactly this fetch fallback; spec D8's one-definition rule requires the shared templates to serve both sites.
+- **Alternative considered:** Ship building its own diff package — duplicates sdd's script contract for no gain.
+
+### F3 (final review, Minors): stale one-path flow descriptions
+- **Question (reviewer):** ship's flow-summary line and from-issue's Phase-7 prompt item 2 still described the old single-reviewer Phase 5.
+- **Choice:** Flow line now reads "merge-delta check or full two-axis review"; the Phase-7 prompt says ship may dispatch zero (empty merge-delta), one, or two reviewers.
+- **Grounding:** Final reviewer's file:line evidence; both were missed sweep surfaces, not dictated text.
+- **Alternative considered:** Deferring both — rejected; the fix wave was already running and both are one-line.
+
 ## Standards review provenance
 
 Reviewer: Codex (direct runtime — `codex-companion task --fresh --reviewer`, isolated
@@ -132,6 +150,13 @@ fresh thread, read-only sandbox; the stale-process p2 bridge agent was deliberat
 bypassed, see the evidence spec's process-snapshot rule). Base SHA: 9a4c53a. Focus:
 none configured. Result: 9 Blocking + 3 Should-fix + 0 Discussion; all 12 verified
 against the live worktree and applied; 0 rejected; native fallback not used.
+
+Execution reviews (sdd, deployed single-final-reviewer machinery): per-task reviews
+Tasks 1–5 approved (Task 5 after one fix round), Task 6 diffless (claims re-verified
+by controller); final whole-branch review over 4c04b28..59a7441 returned 1 Critical +
+1 Important + 2 Minor, all fixed in one wave (f49f851) and verified ADDRESSED by the
+scoped re-review; 7 ledger minors triaged defer. The plan's embedded template text
+was synced to the landed fixes post-wave.
 
 ---
 
@@ -474,6 +499,8 @@ most capable model):
     **Diff file:** [DIFF_FILE]
 
     Read the diff file once — commit list, stat summary, full diff with context.
+    If no diff file was supplied, fetch the range yourself: `git diff --stat
+    [MERGE_BASE_SHA]..[HEAD_SHA]` then `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`.
     When checking a finding, read the live file at HEAD, not a snapshot. Your
     review is read-only on this checkout: do not mutate the working tree, the
     index, HEAD, or branch state in any way.
@@ -514,6 +541,7 @@ most capable model):
     promised-but-missing scope, ADR violations — are Critical.
 
     ### Ledger Triage
+    (omit this section when the dispatch supplied no ledger lines)
     Per deferred/parked line: must-fix | defer, one-line reason.
 ```
 
@@ -563,7 +591,9 @@ Subagent (reviewer):
     **Diff file:** [DIFF_FILE]
 
     Read the diff file once; when checking a finding, read the live file at HEAD,
-    not a snapshot. Inspect code outside the diff only to evaluate a concrete
+    not a snapshot. If no diff file was supplied, fetch the range yourself:
+    `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`. Inspect code outside the diff only to evaluate a concrete
     risk you can name — cross-task contract drift, changed lock ordering, shared
     mutable state — one focused check per named risk, named in your report. Your
     review is read-only on this checkout: do not mutate the working tree, the
@@ -603,7 +633,8 @@ Subagent (reviewer):
 
 **Placeholders:** `[PLAN_FILE]`, `[VERIFY_COMMANDS]` (from the project bindings /
 manifest detection), `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[DIFF_FILE]` (from
-`scripts/review-package`). When this file rides as the Codex rubric, the
+`scripts/review-package`; a dispatcher without the sdd scripts omits it, and the
+reviewer fetches the range itself per the body's fallback). When this file rides as the Codex rubric, the
 `diff-review` packet supplies the same values.
 ````
 
