@@ -47,7 +47,9 @@ Copied from the spec and the issue; every task's requirements implicitly include
   rationale-bearing)." This is already true of the spec's AFTER text — it is a reason to copy verbatim,
   not a licence to rewrite.
 - **Commits:** one per task, conventional-commits style, `fix(agents): …`, ending with the trailer
-  `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>` (matching `git log`).
+  `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>` (matching this flow's prior
+  commits; repo history before this issue used a different model trailer — see D1 in Auto-resolved
+  decisions).
 
 ## Test seams
 
@@ -65,6 +67,15 @@ bug, not an implementer's call:
 3. **Position** — `grep`/`awk` ordering checks, because presence and size alone cannot catch a block
    inserted in the wrong place.
 4. **Build** — `just build`, once, in Task 4.
+
+## Standards review provenance
+
+- **Reviewer:** Codex (`codex:codex-reviewer` bridge), fresh isolated `CODEX_HOME`, read-only sandbox.
+- **Base SHA:** 8cee250; plan reviewed at commit 6cf672d.
+- **Focus:** none configured.
+- **Findings:** 0 blocking, 0 should-fix, 3 discussion — D1 applied (parenthetical reworded, trailer kept, logged), D2 reviewer-confirmation of an existing spec decision (no change), D3 no change (reviewer's own low-confidence assessment). 0 rejected, 0 deferred.
+- **Independent reproduction by reviewer:** re-applied all 14 BEFORE→AFTER edits to fresh copies (byte counts land at exactly 10,852 / 7,765 / 10,193), ran the plan's verification script red at base (0/14) and green on edited copies (14/14), and reproduced the auxiliary grep/awk gates.
+- **Fallback:** not used.
 
 ## Auto-resolved decisions
 
@@ -121,6 +132,24 @@ bug, not an implementer's call:
 - **Choice:** Exact equality, for all three files.
 - **Grounding:** I reproduced all three figures to the byte by re-running the spec's dry-run from the spec's own fenced blocks (7,236→10,852, 6,845→7,765, 9,631→10,193, +5,098 total), so the exact number is known-reachable rather than an estimate. Under verbatim application there is no legitimate source of variance, and exactness makes the gate catch a dropped blank line — which the presence check alone would miss.
 - **Alternative considered:** A ±2% band, per the spec's softer "materially past its figure" phrasing. Rejected: a band tolerates exactly the whitespace slippage this gate exists to catch, and the spec's phrasing is guidance to a human reviewer, not a looser contract for a machine check.
+
+### D1: commit-trailer precedent overstated
+- **Question:** (Phase-5 reviewer) "(matching `git log`)" is true only of this issue's own three prior commits; repository history before this issue uses `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- **Choice:** Keep the `Claude Opus 5 (1M context)` trailer; reword the parenthetical to say it matches this flow's prior commits rather than implying a repo-wide convention.
+- **Grounding:** The executing session's harness mandates this exact trailer for commits it produces, and the issue's own commit chain (9f72280, f8f1789, 6cf672d) already carries it; consistency within one PR chain outweighs continuity with pre-issue history.
+- **Alternative considered:** Reverting to the repo-wide `Claude Fable 5` trailer — rejected: it would misattribute the commits this flow actually produces and mix two trailers inside the same PR.
+
+### D2: P4b scope addition — reviewer confirmation
+- **Question:** (Phase-5 reviewer) Is P4b justified coherence work or scope creep beyond the issue's edit list?
+- **Choice:** Accepted as part of P4, unchanged. This entry records the reviewer's independent confirmation of the spec's own "Amending step 1's legacy fallback (P4b)" decision.
+- **Grounding:** Reviewer verified live `doc-grounded-questions/SKILL.md:51-52` says to read the legacy glossary fallback "in full", contradicting P4a's cap for the same document class; the amendment is nine words and preserves the map's exempted "read in full" instruction.
+- **Alternative considered:** Treating P4b as out-of-band and deferring it — rejected by reviewer and author alike: landing P4a alone ships a self-contradicting file.
+
+### D3: P9b step 6 leaves the GitHub close mechanism implicit
+- **Question:** (Phase-5 reviewer, low confidence) Should step 6 spell out the GitHub-tracker close action rather than only disambiguating the `kind: none` case?
+- **Choice:** No change.
+- **Grounding:** The reviewer's own assessment: the file's existing register says "close the ticket" without spelling out `gh` invocations, and the tracker-bindings paragraph already establishes how generic actions map onto both tracker kinds.
+- **Alternative considered:** Adding tracker-explicit close text — rejected: it would break the file's abstraction level to service a low-confidence nit, and the spec records the rationale for readers who need it.
 
 ---
 
