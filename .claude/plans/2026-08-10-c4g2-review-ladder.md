@@ -53,6 +53,86 @@
 - **Grounding:** sdd SKILL.md is caller-agnostic today (final template already says "Spec (when distinct)").
 - **Alternative considered:** Requiring a spec — would break standalone sdd, out of this design's scope.
 
+### B1: Task-1 anchors quoted as single lines
+- **Question (reviewer):** Two replacement anchors have zero exact matches — the live sentences wrap across lines.
+- **Choice:** Steps 2 and 3 now quote the live two-line blocks verbatim, continuation indent included.
+- **Grounding:** Verified live: both anchors wrap in codex-collaboration/SKILL.md; an exact-match edit would strand the implementer.
+- **Alternative considered:** Line-number anchors — rot faster than quoted text.
+
+### B2: Shared plan-review sections would govern diff-review
+- **Question (reviewer):** The surviving Reviewer-contract (B/S/D) and Verify-and-disposition sections contradict diff-review's C/I/M return-unmodified contract.
+- **Choice:** Step 3 adds explicit scoping lead-ins under both headings; read-only rules stay shared.
+- **Grounding:** Reviewer's rationale accepted — an unscoped generic section is a contradiction, not context.
+- **Alternative considered:** Restructuring the whole file into per-operation halves — more churn for the same effect.
+
+### B3: diff-review packet read as plan-review-plus-tweaks
+- **Question (reviewer):** Only map-first selection was excluded; spec, focus, and REVIEW-CONTRACT would ride into the "light" packet.
+- **Choice:** The packet list is now exhaustive and exclusive, with a "nothing else rides along" clause naming the exclusions.
+- **Grounding:** Spec D4's light-packet requirement; the ambiguity was real in the dictated prose.
+- **Alternative considered:** Reviewer's call accepted as-is.
+
+### B4: Axis templates broke the three-section contract
+- **Question (reviewer):** Conformance put three severities on one physical heading line; correctness added a fourth top-level Verdict section, contradicting "exactly three top-level sections".
+- **Choice:** Both templates (and the diff-review output contract) now lead with a one-line axis verdict, then proper per-line severity headings; correctness has exactly three top-level sections.
+- **Grounding:** The correctness template doubles as the Codex rubric — it must satisfy the validation headings byte-for-byte.
+- **Alternative considered:** Relaxing validation to four sections — weaker than fixing the templates.
+
+### B5: residuals outcome could never report review_state
+- **Question (reviewer):** Only the report clause was replaced; the surviving "when the final review is clean" lead-in gates the whole report, and `unknown` was undefined.
+- **Choice:** Task 3 Step 4 now replaces the entire Finish body with Clean/Residuals terminal states (workspace kept on residuals) and defines the full three-value vocabulary (sdd never emits `unknown`).
+- **Grounding:** Verified live: the Finish paragraph's conditional lead-in.
+- **Alternative considered:** Reviewer's call accepted as-is.
+
+### B6: missing-template fallback merged the axes
+- **Question (reviewer):** The ship fallback dispatched one combined reviewer, violating the axes-never-merged principle (spec D5/D8).
+- **Choice:** Fallback is now two isolated native reviewers with pasted one-paragraph axis rubrics, reports separate. Supersedes the earlier "Ship's fallback when sdd templates are absent" entry above.
+- **Grounding:** Spec D5 (both axes native when Codex unavailable) and D8 (same machinery at ship) — the single-reviewer fallback was this plan's invention, not the spec's.
+- **Alternative considered:** What the reviewer rejected: one combined reviewer as "good enough degradation".
+
+### B7: full-path C/I/M had no disposition in the surviving flow
+- **Question (reviewer):** ship's apply/push flow and from-issue's return schema speak Blocking/Should-fix/Discussion only.
+- **Choice:** Task 5 adds the per-axis severity mapping (Critical≙Blocking, Important≙Should-fix, Minor≙Discussion-grade) bound to the five-step discipline; Task 2 relabels `discussion_items` as axis-labeled when the two-axis path ran.
+- **Grounding:** Verified live: ship-issue's surviving flow vocabulary.
+- **Alternative considered:** Rewriting ship's whole apply flow in C/I/M — touches the eval-2-covered five-step text for no behavioral gain.
+
+### B8: scoped axis re-review had no executable brief
+- **Question (reviewer):** "One scoped re-review per axis" named no rubric, findings hand-off, or verdict shape; the only scoped template is task-scoped.
+- **Choice:** The Final-review replacement now specifies the dispatch: same axis rubric + findings verbatim + fix-range package + ADDRESSED/NOT-ADDRESSED verdicts + new-breakage-in-fix-diff-only, ≤400 words.
+- **Grounding:** Mirrors the task-loop re-review semantics already proven in sdd.
+- **Alternative considered:** A third template file — more surface for a dispatch describable in three lines.
+
+### B9: conformance grounding inverted the configured-first precedence
+- **Question (reviewer):** The template preferred the conventional map path over `docPaths.contextMap` and opened area ADR dirs wholesale.
+- **Choice:** Template now resolves configured map first with legacy fallbacks, and reads ADRs only when cited (matching REVIEW-CONTRACT's rule).
+- **Grounding:** Spec D4 and the live REVIEW-CONTRACT precedence.
+- **Alternative considered:** Reviewer's call accepted as-is.
+
+### S1: false base-commit reference count
+- **Question (reviewer):** The plan claimed two `final-reviewer-prompt` references at base; HEAD has one.
+- **Choice:** Expectation corrected to one referencing line.
+- **Grounding:** Verified live with grep.
+- **Alternative considered:** Reviewer's call accepted as-is.
+
+### S2: eval text omitted failed-prerequisite triggers
+- **Question (reviewer):** The dictated eval phrase named risky/criticalPaths/unknown but not residuals, manual conflicts, or oversized diffs.
+- **Choice:** The replacement phrase now states the full path runs whenever any degradation prerequisite fails, plus the risk signals.
+- **Grounding:** Must match the Phase-5 rules the same task dictates.
+- **Alternative considered:** Reviewer's call accepted as-is.
+
+### S3: degradation mechanics under-specified
+- **Question (reviewer):** `--stat` counting, an unnamed generated-file classifier, no label query, no glob semantics.
+- **Choice:** Mechanics now dictated: `--numstat` add+del summing, Phase-1 allowlist + generated-header classification, `issue view --json labels` (kind=none passes), git-pathspec globs against `--name-only`.
+- **Grounding:** Falsifiability is this plan's own bar (Global Constraints); prose commands must be executable.
+- **Alternative considered:** A helper script — process code for a two-command decision.
+
+## Standards review provenance
+
+Reviewer: Codex (direct runtime — `codex-companion task --fresh --reviewer`, isolated
+fresh thread, read-only sandbox; the stale-process p2 bridge agent was deliberately
+bypassed, see the evidence spec's process-snapshot rule). Base SHA: 9a4c53a. Focus:
+none configured. Result: 9 Blocking + 3 Should-fix + 0 Discussion; all 12 verified
+against the live worktree and applied; 0 rejected; native fallback not used.
+
 ---
 
 ### Task 1: codex-collaboration — delete `decision-check`, add `diff-review`
@@ -76,7 +156,14 @@ Replace the intro sentence `Support two operations: \`plan-review\` and \`decisi
 
 - [ ] **Step 2: Generalize the kill-switch**
 
-In `## Resolve policy`, replace the bullet `- \`enabled: false\` means return control so \`from-issue\` can use its fresh native reviewer flow. Do not launch Codex.` with:
+In `## Resolve policy`, replace these two live lines (the bullet wraps — match both lines exactly, including the two-space continuation indent):
+
+```markdown
+- `enabled: false` means return control so `from-issue` can use its fresh native
+  reviewer flow. Do not launch Codex.
+```
+
+with:
 
 ```markdown
 - `enabled: false` means the project has opted out of Codex review passes entirely:
@@ -84,14 +171,38 @@ In `## Resolve policy`, replace the bullet `- \`enabled: false\` means return co
   Do not launch Codex.
 ```
 
-- [ ] **Step 3: Per-operation validation headings**
+- [ ] **Step 3: Per-operation validation headings + scope the shared plan-review sections**
 
-In `## Validate and fall back`, replace the sentence `A valid result has all three required headings and either \`None.\` or findings with evidence, confidence, and unknowns.` with:
+In `## Validate and fall back`, replace these two live lines (the sentence wraps — match both lines exactly):
 
 ```markdown
-A valid result has the operation's three required headings (`Blocking` / `Should fix` /
-`Discussion` for `plan-review`; `Critical` / `Important` / `Minor` for `diff-review`)
-and either `None.` or findings with evidence, confidence, and unknowns.
+A valid result has all three required headings and either `None.` or findings
+with evidence, confidence, and unknowns.
+```
+
+with:
+
+```markdown
+A valid result has the operation's required headings — a one-line axis verdict then
+`Critical` / `Important` / `Minor` for `diff-review`; `Blocking` / `Should fix` /
+`Discussion` for `plan-review` — and either `None.` or findings with evidence,
+confidence, and unknowns.
+```
+
+Then scope the two shared sections to rung 1 so they cannot be read as governing `diff-review`:
+
+1. Insert directly under the `## Reviewer contract` heading line:
+
+```markdown
+(These rules are the `plan-review` reviewer contract; `diff-review` defines its own
+output contract in its operation section below — the read-only rules apply to both.)
+```
+
+2. Insert directly under the `## Verify and disposition` heading line:
+
+```markdown
+(Applies to `plan-review`. For `diff-review`, verification and disposition live with
+the calling controller — see that operation's section.)
 ```
 
 - [ ] **Step 4: Delete the `## Operation: decision-check` section entirely** (heading through the final `- **No Claude fallback for this operation.** …` bullet), and append in its place:
@@ -107,28 +218,36 @@ dispatch with background launch inside the bridge, validation, one-time native
 `reviewer` fallback on a real Codex failure, never a retry, concurrency never a
 fallback reason. The axis is never skipped.
 
-Packet differences from `plan-review`:
+**The `diff-review` packet replaces `## Build the review packet`'s list wholesale** —
+it is not that packet plus tweaks. It contains exactly:
 
-- Scope line: review the diff `<base-sha>..<head-sha>` in the worktree for code
-  correctness — bugs, boundary error handling, dead branches, assertions that fail to
-  pin the documented contract, DRY against existing helpers, cross-task integration.
-  Conformance to issue/spec/docs is the parallel axis's job; instruct the reviewer
-  not to grade it.
-- The caller's correctness rubric travels by absolute path (sdd's
-  `correctness-reviewer-prompt.md`), with concrete values supplied for every
-  placeholder it names.
-- Include: worktree root, base and head SHAs, the diff-package path when the caller
-  built one, the plan path (routing context for what the tasks were), inferred verify
-  commands, every applicable `AGENTS.md`/`CLAUDE.md`, and the standards layers
-  matching the diff's file types (`~/.agents/standards/the-bar.md`, its `stacks/`
-  shards, project `docs/standards/` shards whose globs intersect). **Skip the
-  map-first domain-doc selection** — domain conformance belongs to the other axis,
-  and the light packet is what keeps Codex inside its runtime budget.
-- Reviewer output contract: exactly three top-level sections `Critical` /
-  `Important` / `Minor` (must-fix-before-merge / should-fix / nice-to-have),
-  ≤400 words total, every finding with a stable ID, live `path:line` evidence,
-  confidence (`high` / `medium` / `low`), and unknowns (`none` when empty); `None.`
-  under an empty section; unreadable artifacts reported explicitly.
+1. The operation name, invocation directory, worktree root, current branch, and the
+   base and head SHAs of the diff under review.
+2. Scope line: review the diff `<base-sha>..<head-sha>` in the worktree for code
+   correctness — bugs, boundary error handling, dead branches, assertions that fail
+   to pin the documented contract, DRY against existing helpers, cross-task
+   integration. Conformance to issue/spec/docs is the parallel axis's job; instruct
+   the reviewer not to grade it.
+3. The caller's correctness rubric by absolute path (sdd's
+   `correctness-reviewer-prompt.md`), with concrete values supplied for every
+   placeholder it names.
+4. The diff-package path when the caller built one, and the plan path (routing
+   context for what the tasks were).
+5. Inferred verify commands and every applicable `AGENTS.md`/`CLAUDE.md`.
+6. The standards layers matching the diff's file types
+   (`~/.agents/standards/the-bar.md`, its `stacks/` shards, project
+   `docs/standards/` shards whose globs intersect).
+
+Nothing else rides along: no issue investigation, no spec, no domain docs, no
+`codex.planReview.focus`, no `REVIEW-CONTRACT.md`. The light packet is what keeps
+Codex inside its runtime budget; domain conformance belongs to the other axis.
+
+Reviewer output contract: first line is the axis verdict (`**Correctness:** Clean |
+Findings — 1–2 sentences`), then exactly three top-level sections `Critical` /
+`Important` / `Minor` (must-fix-before-merge / should-fix / nice-to-have), ≤400
+words total, every finding with a stable ID, live `path:line` evidence, confidence
+(`high` / `medium` / `low`), and unknowns (`none` when empty); `None.` under an
+empty section; unreadable artifacts reported explicitly.
 
 Verify-and-disposition stays with the calling controller and its own fix-flow rules:
 return the validated three-section result (or the fallback reviewer's) unmodified,
@@ -176,12 +295,19 @@ final review; carry it verbatim into the Phase-7 handoff — ship-issue's Phase-
 degradation decision reads it.
 ```
 
-- [ ] **Step 3: SKILL.md Phase 7 handoff template**
+- [ ] **Step 3: SKILL.md Phase 7 handoff template + return schema**
 
 In the Phase 7 subagent prompt block, insert a new line directly under `  head_sha:       <SHA at end of Phase 6 execute>`:
 
 ```
   review_state:   <clean | residuals | unknown — from sdd's report>
+```
+
+In the same block's return schema, replace the line `  discussion_items: <reviewer's Discussion items, verbatim; [] if none>` with:
+
+```
+  discussion_items: <reviewer's Discussion/Minor items, verbatim, labeled by axis
+                     when the two-axis path ran; [] if none>
 ```
 
 - [ ] **Step 4: AUTO.md — remove the cross-check step**
@@ -267,20 +393,39 @@ rejected by you, in the ledger), then dispatch ONE fixer with the complete list
 labeled by axis — where both axes flag the same lines, dedupe at dispatch and credit
 both axes in the ledger (per-finding fixers each rebuild context and re-run suites; a
 real session's per-finding fix wave cost more than all its tasks combined). Then
-exactly one scoped re-review per axis that had findings, over the fix range.
-Adjudicate residuals like the task-loop breaker. There is no second fix wave —
-residual load-bearing findings surface to the caller.
+exactly one scoped re-review per axis that had findings: re-dispatch that axis's own
+rubric with (1) the axis's findings list verbatim, (2) a fix-range package from
+`scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head that axis's
+first pass reviewed), and (3) the instruction to verdict each finding ADDRESSED /
+NOT ADDRESSED and flag new breakage in the fix diff only — out-of-scope observations
+go to the ledger as deferred minors; ≤400 words. Adjudicate residuals like the
+task-loop breaker. There is no second fix wave — residual load-bearing findings
+surface to the caller.
 ````
 
-- [ ] **Step 4: SKILL.md `## Finish` report contract**
+- [ ] **Step 4: SKILL.md `## Finish` — replace the whole section body**
 
-Replace `Report to the calling workflow: final review result, commit range \`<base7>..<head7>\`, parked findings with rulings, verification status, ≤500 characters of notes.` with:
+The live `## Finish` body is a single paragraph beginning `When the final review is
+clean and its fixes are in,` and ending `the caller owns delivery.` — its lead-in
+conditions the entire report on the clean case, so a residual outcome would never
+produce a report. Replace that whole paragraph with:
 
 ```markdown
-Report to the calling workflow: per-axis final-review verdicts, `review_state`
-(`clean` when both axes are clean or every residual is parked-with-ruling, else
-`residuals`), commit range `<base7>..<head7>`, parked findings with rulings,
-verification status, ≤500 characters of notes.
+Terminal states:
+
+- **Clean** — both axes clean (or clean after the fix wave) and the fixes are in:
+  delete this plan's workspace (`rm -rf <workspace>`; sibling directories belong to
+  other plans) and report `review_state: clean`.
+- **Residuals** — parked-with-ruling findings remain, or the breaker surfaced a
+  load-bearing residual: keep the workspace and ledger for the caller's inspection
+  and report `review_state: residuals` with the parked/surfaced list.
+
+Report to the calling workflow: `review_state` (`clean | residuals` — sdd never
+reports `unknown`; that third value exists for downstream callers describing a
+branch with no evidence of a completed sdd review), per-axis final-review verdicts,
+commit range `<base7>..<head7>`, parked findings with rulings, verification status,
+≤500 characters of notes. Do not ship, merge, or open PRs — the caller owns
+delivery.
 ```
 
 - [ ] **Step 5: Create `conformance-reviewer-prompt.md`**
@@ -307,12 +452,14 @@ most capable model):
     ## Ground first
 
     Invoke `doc-grounded-questions` via the Skill tool if available; otherwise
-    ground map-first yourself: read the context map (`docs/CONTEXT-MAP.md`, or the
-    configured `docPaths.contextMap`), open only the area `CONTEXT.md` files whose
-    `governs:` globs intersect the diff's paths or whose terms appear in the
-    issue, their `adr/` dirs plus `system`, and the standards shards whose globs
-    intersect the diff. No map → read whichever of `docPaths.{context,standards}`
-    exist.
+    ground map-first yourself: read the context map (the configured
+    `docPaths.contextMap`, else `docs/CONTEXT-MAP.md`, else legacy root
+    `CONTEXT-MAP.md`), open only the area `CONTEXT.md` files whose `governs:`
+    globs intersect the diff's paths or whose terms appear in the issue; ADRs
+    (from the loaded areas' `adr/` dirs, plus `system`) only when cited by the
+    issue, spec, plan, or a selected area file; and the standards shards whose
+    globs intersect the diff. No map → read whichever of
+    `docPaths.{context,standards}` exist.
 
     ## Requirements
 
@@ -350,22 +497,23 @@ most capable model):
 
     ## Output Format
 
-    ≤400 words total. Begin directly with the coverage verdict — every line a
-    verdict, a finding with file:line, or a check you ran; no preamble, no
-    closing summary.
+    ≤400 words total. Your FIRST line is the axis verdict:
+    `**Conformance:** Clean | Findings — 1–2 sentence assessment.`
+    Then the three sections below — every line a verdict, a finding with
+    file:line, or a check you ran; no preamble, no closing summary.
 
     ### Coverage
     ✅ | ❌ per spec requirement / plan task, one line each.
 
     ### Issues
-    #### Critical (Must Fix)  #### Important (Should Fix)  #### Minor
-    Conformance gaps — promised-but-missing scope, ADR violations — are Critical.
+    #### Critical (Must Fix)
+    #### Important (Should Fix)
+    #### Minor
+    Write `None.` under an empty severity. Conformance gaps —
+    promised-but-missing scope, ADR violations — are Critical.
 
     ### Ledger Triage
     Per deferred/parked line: must-fix | defer, one-line reason.
-
-    ### Verdict
-    **Conformance:** [Clean | Findings] — 1–2 sentence assessment.
 ```
 
 **Placeholders:** `[ISSUE_REF]` (issue number/URL, or the caller's one-line intent
@@ -435,18 +583,17 @@ Subagent (reviewer):
 
     ## Output Format
 
-    ≤400 words total. Begin directly with the first section — every line a
-    finding or a check you ran; no preamble, no closing summary. Every finding
-    carries a stable ID, live `path:line` evidence, confidence
-    (`high` / `medium` / `low`), and unknowns (`none` when empty). Write `None.`
-    under an empty section. Report unreadable artifacts explicitly.
+    ≤400 words total. Your FIRST line is the axis verdict:
+    `**Correctness:** Clean | Findings — 1–2 sentence assessment.`
+    Then exactly three top-level sections — every line a finding or a check you
+    ran; no preamble, no closing summary. Every finding carries a stable ID,
+    live `path:line` evidence, confidence (`high` / `medium` / `low`), and
+    unknowns (`none` when empty). Write `None.` under an empty section. Report
+    unreadable artifacts explicitly.
 
     ### Critical (Must Fix)
     ### Important (Should Fix)
     ### Minor
-
-    ### Verdict
-    **Correctness:** [Clean | Findings] — 1–2 sentence assessment.
 ```
 
 **Placeholders:** `[PLAN_FILE]`, `[VERIFY_COMMANDS]` (from the project bindings /
@@ -464,7 +611,7 @@ git rm home/common/agent-skills/skills/sdd/final-reviewer-prompt.md
 - [ ] **Step 8: Verify**
 
 Run: `grep -rn "final-reviewer-prompt" home/common/`
-Expected: no output (exit 1). (Two references at the base commit — SKILL.md §Agent tiers and §Final review.)
+Expected: no output (exit 1). (One referencing line at the base commit — §Final review's template link; §Agent tiers names the review but not the template file.)
 Run: `grep -n "review_state" home/common/agent-skills/skills/sdd/SKILL.md`
 Expected: exactly one hit, in §Finish.
 Run: `ls home/common/agent-skills/skills/sdd/*reviewer-prompt.md`
@@ -561,10 +708,15 @@ otherwise run the full two-axis review:
   residual parked-with-ruling). `unknown` never degrades.
 - The Phase-1 sync needed no manual conflict escalation (allowlist auto-resolves
   count as clean).
-- The branch diff is small: ≤400 changed lines AND ≤20 files, counted over
-  `git diff --stat $BASE_SHA..$HEAD_SHA` excluding lockfiles and generated files.
-- The issue does NOT carry the `risky` label, and the diff does NOT intersect the
-  `review.criticalPaths` globs.
+- The branch diff is small: ≤400 changed lines AND ≤20 files. Mechanics: count
+  with `git diff --numstat $BASE_SHA..$HEAD_SHA` (lines = additions + deletions
+  summed, files = row count), after dropping rows whose path matches Phase 1's
+  lockfile allowlist patterns or whose file carries a generated header
+  (`<auto-generated>` / `// Code generated by`).
+- The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num>
+  --json labels`; with `issueTracker.kind=none` there are no labels — condition
+  passes), and no path from `git diff --name-only $BASE_SHA..$HEAD_SHA` matches a
+  `review.criticalPaths` glob (git-pathspec-style globs, e.g. `src/auth/**`).
 
 **Merge-delta check (degraded path).** The reviewable delta is the sync-merge
 commit's combined diff (`git show --cc <merge-commit>` — conflict resolutions and
@@ -582,17 +734,27 @@ post-sync range `$BASE_SHA..$HEAD_SHA`: dispatch the native conformance reviewer
 (sdd's `conformance-reviewer-prompt.md`, deployed beside its SKILL.md) in parallel
 with the correctness axis via `codex-collaboration`'s `diff-review` when available,
 else a native reviewer on sdd's `correctness-reviewer-prompt.md`. Verdicts ≤400
-words each, Critical/Important/Minor, never merged; Critical findings gate the merge
-the way Blocking findings do below. sdd templates unavailable → one fresh `reviewer`
-over the same range grading delivered-vs-promised AND code correctness,
-Blocking / Should-fix / Discussion, ≤400 words.
+words each, Critical/Important/Minor, never merged. sdd templates unavailable →
+still TWO isolated native `reviewer` subagents, never one combined: one briefed with
+a pasted one-paragraph conformance rubric (delivered-vs-promised against
+issue/spec/plan, doc conformance, stale-prose audit, message-format parity), one
+with a pasted one-paragraph correctness rubric (bugs, boundary error handling, dead
+branches, assertions-that-pin, DRY, cross-task integration); same output contract,
+reports kept separate.
+
+**Severity handling for the full path.** The surviving apply/push flow below speaks
+Blocking / Should-fix; map per axis, never merging reports: Critical ≙ Blocking
+(apply inline via the five steps), Important ≙ Should-fix (same five steps in
+`--auto`, surfaced otherwise), Minor ≙ Discussion-grade (record; surface only when
+user-facing). PR comments and the caller's `discussion_items` return carry Minor and
+Discussion items labeled by their axis.
 ````
 
 Keep everything after the old rubric block — from `Apply Blocking fixes inline — but \`apply\` and \`push\` are separate steps, not one verb.` onward — unchanged.
 
 - [ ] **Step 4: Eval 1 expected text**
 
-In `evals/evals.json`, eval id 1's `expected_output` contains the phrase `Phase 5 a fresh reviewer subagent`. Replace exactly that phrase with `Phase 5 the degradation decision — merge-delta-only check when review_state is clean, the sync was conflict-free, and the diff is small (≤400 lines/20 files); full two-axis review (conformance ∥ correctness, never merged) for the risky label, criticalPaths hits, or review_state unknown`.
+In `evals/evals.json`, eval id 1's `expected_output` contains the phrase `Phase 5 a fresh reviewer subagent`. Replace exactly that phrase with `Phase 5 the degradation decision — merge-delta-only check when review_state is clean, the sync was conflict-free, and the diff is small (≤400 lines/20 files); the full two-axis review (conformance ∥ correctness, never merged) whenever any degradation prerequisite fails (review_state residuals or unknown, manual conflict escalations, oversized diff) or on the risky label / criticalPaths hits`.
 
 - [ ] **Step 5: Verify**
 
