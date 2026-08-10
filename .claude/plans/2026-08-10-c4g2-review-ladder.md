@@ -726,7 +726,8 @@ Phase 6. Non-empty → dispatch one fresh `reviewer` subagent over exactly that 
 (nested dispatch works even inside an `Agent` subagent; if `Agent` isn't in your
 tool surface, `ToolSearch` `select:Agent` first — never inline the review), with
 Phase 1's scope-creep categories (retirement / addition) as its checklist plus the
-project-hints review paragraph when `projectHints` exists. Findings come back
+project-hints review paragraph when `projectHints` exists (a directory → its
+`review.md`; a single file → itself; omit silently when absent). Findings come back
 Blocking / Should-fix / Discussion, ≤400 words, file:line anchors.
 
 **Full two-axis review.** Same machinery and rubrics as sdd's final review, over the
