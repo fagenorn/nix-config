@@ -38,6 +38,9 @@ most capable model):
     **Diff file:** [DIFF_FILE]
 
     Read the diff file once — commit list, stat summary, full diff with context.
+    If no diff file was supplied, fetch the range yourself:
+    `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`.
     When checking a finding, read the live file at HEAD, not a snapshot. Your
     review is read-only on this checkout: do not mutate the working tree, the
     index, HEAD, or branch state in any way.
@@ -77,7 +80,7 @@ most capable model):
     Write `None.` under an empty severity. Conformance gaps —
     promised-but-missing scope, ADR violations — are Critical.
 
-    ### Ledger Triage
+    ### Ledger Triage (omit this section when the dispatch supplied no ledger lines)
     Per deferred/parked line: must-fix | defer, one-line reason.
 ```
 
@@ -85,5 +88,8 @@ most capable model):
 statement when there is no tracker; omit the line when neither exists),
 `[SPEC_FILE]` (omit when no spec exists — standalone plans are graded against the
 plan alone), `[PLAN_FILE]`, `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[DIFF_FILE]` (from
-`scripts/review-package`), `[DEFERRED_AND_PARKED_LINES]` (copied verbatim from the
-ledger).
+`scripts/review-package`; a dispatcher without the sdd scripts — e.g. ship-issue's
+full path — omits it, and the reviewer fetches the range itself per the body's
+fallback), `[DEFERRED_AND_PARKED_LINES]` (copied verbatim from the ledger; when the
+dispatch supplies no ledger lines — no ledger exists at ship — omit the line AND the
+Ledger Triage section).

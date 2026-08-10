@@ -27,13 +27,15 @@ Subagent (reviewer):
     **Diff file:** [DIFF_FILE]
 
     Read the diff file once; when checking a finding, read the live file at HEAD,
-    not a snapshot. Inspect code outside the diff only to evaluate a concrete
-    risk you can name — cross-task contract drift, changed lock ordering, shared
-    mutable state — one focused check per named risk, named in your report. Your
-    review is read-only on this checkout: do not mutate the working tree, the
-    index, HEAD, or branch state in any way. Do not re-run the full test suite —
-    the implementers' reported runs are the evidence; run at most one focused
-    test to resolve a specific doubt reading the code raised.
+    not a snapshot. If no diff file was supplied, fetch the range yourself:
+    `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`. Inspect code outside the diff only to
+    evaluate a concrete risk you can name — cross-task contract drift, changed lock
+    ordering, shared mutable state — one focused check per named risk, named in your
+    report. Your review is read-only on this checkout: do not mutate the working
+    tree, the index, HEAD, or branch state in any way. Do not re-run the full test
+    suite — the implementers' reported runs are the evidence; run at most one
+    focused test to resolve a specific doubt reading the code raised.
 
     ## What to Check
 
@@ -67,5 +69,6 @@ Subagent (reviewer):
 
 **Placeholders:** `[PLAN_FILE]`, `[VERIFY_COMMANDS]` (from the project bindings /
 manifest detection), `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[DIFF_FILE]` (from
-`scripts/review-package`). When this file rides as the Codex rubric, the
-`diff-review` packet supplies the same values.
+`scripts/review-package`; a dispatcher without the sdd scripts omits it, and the
+reviewer fetches the range itself per the body's fallback). When this file rides as
+the Codex rubric, the `diff-review` packet supplies the same values.

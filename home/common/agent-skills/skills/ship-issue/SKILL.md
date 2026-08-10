@@ -31,7 +31,7 @@ supplies evidence of a completed sdd two-axis review. Standalone (`/ship-issue <
 2. Verify locally          → lint + tests inside the worktree
 3. Consolidate learnings   → see CONSOLIDATE.md; drop most candidates
 4. Open PR                 → push -u origin <branch>; gh pr create with "Closes #<num>"
-5. Review the PR           → dispatch reviewer subagent; apply Blocking items inline
+5. Review the PR           → merge-delta check or full two-axis review; apply Blocking items inline
 6. Wait for CI             → gh pr checks --watch (one blocking call, no wakeup loop)
 7. Merge                   → gh pr merge --merge with proper subject (true merge commit)
 8. Cleanup                 → verify issue closed; remove worktree; delete branches
@@ -212,8 +212,10 @@ Blocking / Should-fix / Discussion, ≤400 words, file:line anchors.
 post-sync range `$BASE_SHA..$HEAD_SHA`: dispatch the native conformance reviewer
 (sdd's `conformance-reviewer-prompt.md`, deployed beside its SKILL.md) in parallel
 with the correctness axis via `codex-collaboration`'s `diff-review` when available,
-else a native reviewer on sdd's `correctness-reviewer-prompt.md`. Verdicts ≤400
-words each, Critical/Important/Minor, never merged. sdd templates unavailable →
+else a native reviewer on sdd's `correctness-reviewer-prompt.md`. At ship there is
+no sdd ledger or diff package: omit the ledger-triage placeholder and let each
+reviewer fetch the range per its template's fallback. Verdicts ≤400 words each,
+Critical/Important/Minor, never merged. sdd templates unavailable →
 still TWO isolated native `reviewer` subagents, never one combined: one briefed with
 a pasted one-paragraph conformance rubric (delivered-vs-promised against
 issue/spec/plan, doc conformance, stale-prose audit, message-format parity), one

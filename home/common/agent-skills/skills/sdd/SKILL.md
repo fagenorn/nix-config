@@ -117,8 +117,13 @@ Findings → verify each against the live worktree first (stale or unsupported o
 
 Terminal states:
 
-- **Clean** — both axes clean (or clean after the fix wave) and the fixes are in: delete this plan's workspace (`rm -rf <workspace>`; sibling directories belong to other plans) and report `review_state: clean`.
-- **Residuals** — parked-with-ruling findings remain, or the breaker surfaced a load-bearing residual: keep the workspace and ledger for the caller's inspection and report `review_state: residuals` with the parked/surfaced list.
+- **Clean** — both axes clean (or clean after the fix wave), or every remaining
+  finding parked-with-ruling: delete this plan's workspace (`rm -rf <workspace>`;
+  sibling directories belong to other plans) and report `review_state: clean` —
+  parked findings still travel in the report's parked-findings field.
+- **Residuals** — the breaker surfaced a load-bearing residual the caller must
+  decide on: keep the workspace and ledger for the caller's inspection and report
+  `review_state: residuals` with the surfaced list.
 
 Report to the calling workflow: `review_state` (`clean | residuals` — sdd never reports `unknown`; that third value exists for downstream callers describing a branch with no evidence of a completed sdd review), per-axis final-review verdicts, commit range `<base7>..<head7>`, parked findings with rulings, verification status, ≤500 characters of notes. Do not ship, merge, or open PRs — the caller owns delivery.
 
