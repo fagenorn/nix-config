@@ -2,6 +2,9 @@
 
 Design for issue [fagenorn/nix-config#1](https://github.com/fagenorn/nix-config/issues/1). Date 2026-08-10.
 Ran `--auto`: every question below was self-answered and logged in `## Auto-resolved decisions`.
+Covers the issue's original edit set (P1–P5, P7, P8) **and P9**, added by the owner as an addendum
+during this phase. P9 is an owner decision, not an auto-resolved one — only its placement and phrasing
+were mine, and those are logged like the rest.
 
 Grounding (per `doc-grounded-questions`): this repo has no `docs/`, no `CONTEXT-MAP.md`, and no ADR
 directory — `CLAUDE.md` is the project doc and it is the authority on how the skills tree is managed
@@ -31,14 +34,19 @@ is concentrated and measurable:
 Also observed: grill rounds of 5–14 recommendation-carrying questions answered ~90% "yes" — a
 round-trip of pure assent.
 
+A fifth gap, raised by the owner during this phase and not a waste pattern at all: **the map has no
+terminal state.** Nothing in the skill says when an effort is finished or what to do at that moment.
+nabeel-debiel's last session hit the end, recognised it, and wrote the missing step itself — evidence
+both that the gap is real and that the fix shape is already field-tested. P9 addresses it.
+
 The through-line: **the one-line rule already existed and was violated in both efforts because it
 carried no checkable number.** Every edit below therefore lands a number an agent can check itself
 against, or names a concrete artifact shape to refuse.
 
 ## Solution
 
-Instruction text only, three files, no mechanism changes. Seven edit groups (P1–P5, P7, P8; P6 was the
-batching escape hatch, reviewed and rejected — see Out of scope), landing as twelve string
+Instruction text only, three files, no mechanism changes. Eight edit groups (P1–P5, P7–P9; P6 was the
+batching escape hatch, reviewed and rejected — see Out of scope), landing as fourteen string
 replacements.
 
 | ID | File | Change |
@@ -50,15 +58,24 @@ replacements.
 | P5 | `grill-with-docs/SKILL.md` | Reply-by-exception for fully-recommended rounds, with a three-way carve-out |
 | P7 | `wayfind/SKILL.md` | Cross-ticket references are link + one line, never a pasted resolution |
 | P8 | `wayfind/SKILL.md` | One sitting per ticket; park state in the ticket before pausing |
+| P9 | `wayfind/SKILL.md` | Explicit completion state: frontier-empty trigger, close the map, name the next command, announce only (owner addendum) |
 
-Cost of the fix, measured by dry-run (below): +4,312 bytes across the three files. A wayfind grilling
-session can load all three, so worst case is ~1.1k extra tokens per session, against 90k+ tokens of
+Cost of the fix, measured by dry-run (below): +5,098 bytes across the three files. A wayfind grilling
+session can load all three, so worst case is ~1.3k extra tokens per session, against 90k+ tokens of
 measured waste across two efforts. The trade is not close.
+
+**The gap P9 closes is different in kind from P1–P8.** Those cut waste inside a running effort; P9
+gives the effort a defined end. Without it a map has no terminal state — the fog section empties, the
+frontier drains, and nothing in the skill says *stop*, so the effort either drifts on in sessions that
+find nothing to do or ends by silent abandonment with no handoff. The field evidence is that a session
+reaching that point invented the missing step by itself (see P9b).
 
 ## The edits
 
 Anchors are section names plus the exact string to match — line numbers rot. Every BEFORE below is
-verbatim from the current file.
+verbatim from the current file. The fourteen anchors are mutually independent: none appears inside
+another edit's replacement text, so they can be applied in any order. The order below is by
+acceptance-criterion ID, not file position.
 
 ---
 
@@ -219,10 +236,10 @@ used; keeping both would be the duplication this issue is about.
 
 ### P8 — `wayfind/SKILL.md`, section `## Work the map`: sitting discipline
 
-Anchor: insert as a new paragraph immediately after step 5 (`5. Maintain — part of resolving…`),
-before `## Inflow from the fog gate`.
+Anchor: the section heading line `## Work the map (later invocations, with the map's URL or number)`.
+Insert as a lead-in paragraph between that heading and step 1.
 
-**BEFORE** — nothing between step 5 and the next heading.
+**BEFORE** — nothing between the heading and `1. Load the map low-res`.
 
 **AFTER** — new text inserted there:
 
@@ -234,9 +251,86 @@ still open, what you were about to do next — so the next sitting resumes from 
 from a transcript it no longer has.
 ```
 
-Placed after the step list rather than inside it: it governs the whole of *resolving*, and a session
-pauses during step 3, not at a step boundary. It reinforces one-decision-per-session (finish the one
-you took) rather than competing with it.
+A lead-in rather than a step, for two reasons. "Take the ticket you can finish now" is guidance that
+has to land *before* step 2 chooses one, and P9 now ends the list on step 6 — closing the map is the
+right last word for the section, where a trailing discipline paragraph would bury it. It reinforces
+one-decision-per-session (finish the one you took) rather than competing with it.
+
+---
+
+### P9a — `wayfind/SKILL.md`, tracker-bindings paragraph: map front-matter for `kind: none`
+
+Anchor: the `kind: none` binding sentence near the top of the file — **not** the map-body template.
+
+**BEFORE**
+
+```markdown
+the map at `map.md`, each ticket a
+```
+
+**AFTER**
+
+```markdown
+the map at `map.md` carrying `state: open|complete` in its front-matter, each ticket a
+```
+
+The addendum asks for `state` "in the map template". It lands here rather than in the `## The map`
+code fence because that fence is the **body**, shared by both tracker modes — a GitHub map issue has
+no front-matter, and a `state:` line in the shared template would inject YAML into an issue body. This
+sentence is already where markdown-mode structure is defined, ticket front-matter included, so the map
+now sits beside the tickets it parents. On GitHub the native closed state carries the same meaning and
+needs no field.
+
+`complete`, not `closed`, and deliberately asymmetric with the tickets' `open|closed`: a ticket is
+closed when its question is answered; a map is complete when the way is clear. See the Verification
+note — this asymmetry is intentional and must not be normalized.
+
+---
+
+### P9b — `wayfind/SKILL.md`, section `## Work the map`: step 6, complete the map
+
+Anchor: the tail of step 5, `Expect concurrent sessions on other tickets.` Append step 6 after it, so
+the list runs 1–6 and ends on completion.
+
+**BEFORE** — step 5 is the last step; the list simply ends.
+
+**AFTER** — new step appended:
+
+```markdown
+6. **Complete the map** when the decision frontier is empty — no open ticket whose resolution is a decision — and **Not yet specified** is empty. Anything still open is re-dispositioned explicitly: resolved, ruled out of scope, or named a **standing verification hook** that outlives the effort, its reopen condition written down. Then close the map (`kind: none`: front-matter `state: open` → `complete`) with a closing note under **Destination** — what was reached, a link to the spec it produced or to Decisions so far when there is none, and the next command by name: `/to-issues` for a multi-slice spec, `/from-issue` for a build that fits one session. Announce it, run nothing: the spec and the handoff are the human's.
+```
+
+**Field grounding.** nabeel-debiel's final session improvised this step unprompted. Its
+`map.md` line 6, directly under `## Destination`, reads:
+
+> **Reached 2026-08-09**: [Decision document — earliest retirement on 4,000 EUR net/month](…)
+> (household sign-off pending, recorded in the doc). The decision frontier is empty;
+> [014](…) and [018](…) stay open as standing verification hooks whose bad-case outcomes reopen the
+> doc via a fresh ticket, never silently.
+
+Three things follow from that, and the step above encodes all three:
+
+- **The trigger is frontier-empty, not zero-open-tickets.** That effort finished with two tickets
+  still open on purpose. A zero-open-tickets trigger would have forced them closed and thrown away the
+  reopen conditions, or blocked completion forever. Hence the explicit re-disposition clause, and
+  hence **standing verification hook** as a named third disposition beside resolved and out-of-scope.
+- **The closing note belongs under `## Destination`.** The field put it there without being told, and
+  the template already says every session orients on Destination first — so a session loading the map
+  low-res learns the effort is over in its first paragraph, before it looks for a ticket to take.
+- **What the field did *not* invent** is what the addendum adds: a `state:` field making completion
+  machine-visible rather than prose-only, and the next command named explicitly. That session left the
+  reader to infer the handoff.
+
+**Against the existing handoff prose.** The intro's "Then the effort leaves this skill: specs go to
+`to-issues`, builds go to `from-issue`" says where the effort goes; step 6 says *when* you have
+arrived and what to type. The "pull to just do the work is usually the signal the map is done" line
+stays the felt signal; step 6 is the checkable test that confirms it. Neither line is edited and
+neither becomes redundant — step 6 is the operational form of both, which is why it names the same two
+destinations rather than inventing new ones.
+
+**Announce only.** The last clause is load-bearing against this skill's own gravity: an agent that has
+just been told the way is clear is one step from writing the spec itself. Spec authorship and the
+handoff stay with the human, which is the same boundary `## Tickets` draws with HITL types.
 
 ---
 
@@ -341,7 +435,8 @@ act on is a cross-reference it will skip.
 |-----------|----------|
 | **index-not-store** | Strengthened. P7 extends it from map→ticket to ticket→ticket; P1b names the gist as an index entry ("never enough to stand in for it"); P2 does the same for Notes. |
 | **one-decision-per-session** | Untouched and reinforced. P8 says *finish the one you took*, which is the same rule read from the other end. No edit adds a batching path. |
-| **HITL decision ownership** | Preserved. P5 is the only edit near it, and it is a delegation the human is *offered once, in the open*, overridable by naming any number, with an explicit carve-out for the three question classes where silence must not stand. The agent still never answers the human's side — it records an answer the human chose to give by not objecting. |
+| **HITL decision ownership** | Preserved, and extended by P9. P5 is a delegation the human is *offered once, in the open*, overridable by naming any number, with an explicit carve-out for the three question classes where silence must not stand — the agent still never answers the human's side, it records an answer the human chose to give by not objecting. P9's "announce it, run nothing" draws the same line at the effort's exit: the agent declares arrival, the human authors the spec and takes the handoff. |
+| **planning, not doing** | Reinforced by P9. A completion step is the moment an agent is most tempted to keep going into the build; the step exists partly to name that boundary at exactly the point the intro's "pull to just do the work" predicts it. |
 | **fog discipline** | Untouched. No edit touches `## Fog of war`, the ticket/fog test, or step 5's graduate-and-clear obligation. P1b's compression menu deliberately avoids fog so it can't be read as a licence to delete Not-yet-specified entries. |
 
 ## Eval consistency
@@ -357,6 +452,20 @@ contradicts any new rule, and none needs changing.**
 - Eval 2 runs in `kind: none`, where P3b removes the pre-update re-read. Every assert reads final file
   state, never process, so the removed read is invisible to grading.
 - P5, P7, P8 have no assert surface at all.
+- **P9 cannot fire in any eval, and no assert can catch it firing wrongly.** Eval 1 and eval 3 are
+  charting sessions, where step 6 is unreachable. Eval 2 works the fixture, which ends with ticket
+  `002` still open (blocked, HITL) and at least one `Not yet specified` entry surviving — both
+  completion conditions fail, so the correct behavior is to *not* complete, which is what every eval-2
+  assert already requires (`the blocked ticket was not resolved too` greps `^state: *open` on `002`).
+  A session that wrongly completed the map would have to close `002` first, and that assert fails.
+- P9a's `state:` line is map front-matter; eval 2's closed-ticket count greps
+  `tickets/*.md` only, and `complete` is not in its `(closed|resolved|done)` alternation either way.
+  No collision on either axis.
+
+The fixture's `map.md` has no front-matter and so gains no `state: open` line from this change. Adding
+one would be harmless but is out of scope (the issue names three skill files), and nothing grades it.
+Worth knowing for whoever next touches the fixture: a map charted under the new template *will* carry
+`state: open`, so the fixture is now marginally behind the skill it exercises.
 
 Fixture check: `concurrent-shells/map.md` has an empty `Decisions so far` (a comment reading `one line
 per closed ticket: the gist, then the link for the detail` — already consistent with P1). Its Notes
@@ -386,17 +495,20 @@ needs a change.**
 There is no test suite for skills, and none is added — the issue says so explicitly. Verification is by
 review.
 
-**Every edit above was dry-run against copies before this spec was committed.** All twelve BEFORE
+**Every edit above was dry-run against copies before this spec was committed.** All fourteen BEFORE
 anchors matched exactly once each in the live files, so the implementer can apply them as literal
-string replacements without re-deriving anchors. Two facts came out of that run and are binding on
+string replacements without re-deriving anchors. Three facts came out of that run and are binding on
 the plan:
 
-1. **Measured sizes.** `wayfind/SKILL.md` 7,236 → 10,066 bytes (+2,830, +39%);
+1. **Measured sizes.** `wayfind/SKILL.md` 7,236 → 10,852 bytes (+3,616, +50%);
    `grill-with-docs/SKILL.md` 6,845 → 7,765 (+920, +13%); `doc-grounded-questions/SKILL.md`
    9,631 → 10,193 (+562, +6%). These are the numbers the `wc -c` sanity check should reproduce;
    a file materially past its figure means prose was padded beyond this spec.
 2. **`4. Record:` is not bolded** in `wayfind`'s Work-the-map list, unlike step 2's `**Claim it.**`.
    The P1c edit preserves the unbolded form. Do not "fix" it.
+3. **The map's `state: open|complete` is deliberately not the tickets' `state: open|closed`.** Both
+   values appear in the same sentence after P9a. Normalizing them to one vocabulary would erase the
+   distinction the addendum draws: tickets close, maps complete. Do not "fix" that either.
 
 The rest of the review checklist:
 
@@ -425,7 +537,13 @@ asks for.
   Verification section rules the test surface out, and expanding it would make an instruction-only
   change a harness change.
 - **Any mechanism change** — no new config key, no new file, no change to tracker bindings, ticket
-  types, blocking, or the fog gate.
+  types, blocking, or the fog gate. P9's `state:` field is a documented convention in an existing
+  front-matter block, read by humans and agents, not by code.
+- **Updating the eval fixture's `map.md`** to carry `state: open` under the new convention. Nothing
+  grades it and the issue names three skill files; noted in Eval consistency for whoever touches the
+  fixture next.
+- **Automating the P9 handoff** — explicitly ruled out by the addendum. Step 6 announces the next
+  command; it never runs it, and no follow-on skill is invoked from wayfind.
 
 ## Auto-resolved decisions
 
@@ -435,11 +553,35 @@ asks for.
 - **Grounding:** Eval 2's gist assert is `awk … i && /^[-*] / {n++} END {exit !(n>0)}` — a bullet-count, indifferent to length. No assert reads body size or read-counts. The issue's own Verification section: "No test suite exists for skills. Verify by review."
 - **Alternative considered:** Adding a `≤160 chars` assert to eval 2. Rejected: it turns an instruction-text issue into a harness change, and the fixture's `Decisions so far` starts empty, so the assert would only grade the agent's one new line — thin signal for the scope it adds.
 
-### P8 landing spot
-- **Question:** Does sitting discipline belong in the `## Work the map` step list or the `## Tickets` section?
-- **Choice:** A bolded paragraph after `Work the map`'s step 5, before `## Inflow from the fog gate`.
-- **Grounding:** A session pauses mid-*resolution* — inside step 3 — not at a step boundary, so it isn't a step. `Work the map` is what a resuming session reads; `## Tickets` is read when *creating* one. The file already uses trailing bolded paragraphs for cross-cutting discipline (`**Claim before work**` in `## Tickets`).
-- **Alternative considered:** A sixth numbered step. Rejected: it would read as "do this after maintaining", when it actually governs when you start.
+### P8 landing spot (revised after the P9 addendum)
+- **Question:** Does sitting discipline belong in the `## Work the map` step list or the `## Tickets` section — and where in the section?
+- **Choice:** A bolded lead-in paragraph between the `## Work the map` heading and step 1. This reverses an earlier call in this same spec, which had it trailing the list.
+- **Grounding:** It isn't a step — a session pauses mid-*resolution*, inside step 3, not at a step boundary — and `Work the map` is what a resuming session reads, where `## Tickets` is read when *creating* one. The file already uses bolded paragraphs for cross-cutting discipline (`**Claim before work**`). The trailing position was fine until P9 added step 6: "take the ticket you can finish now" has to land before step 2 chooses one, and completing the map is the right last word for the section — a discipline paragraph after step 6 would bury the effort's exit.
+- **Alternative considered:** Keeping it after the list. Rejected once P9 landed: it puts a note about pausing *after* the instruction for finishing forever.
+
+### P9 closing note: which map section
+- **Question:** Where does the completion note go in the map body — a new `## Complete` section, or an existing one?
+- **Choice:** Under `## Destination`. No new section, and no change to the map template.
+- **Grounding:** The field map wrote it there unprompted (`map.md` line 6, immediately under `## Destination`), and the template already says of Destination "every session orients here first" — so a session loading the map low-res learns the effort is over in its first paragraph, before it starts hunting for a ticket. Destination is also the thing that was *reached*, so the note answers the section's own question.
+- **Alternative considered:** A `## Complete` section in the template. Rejected: it would sit empty for the entire life of every map but the last, which is exactly the standing bloat P1 is fighting.
+
+### P9 `state:` field: template fence or bindings sentence
+- **Question:** The addendum says add `state` "to the map template". Does that mean the `## The map` body fence or the `kind: none` bindings sentence?
+- **Choice:** The bindings sentence, where ticket front-matter is already defined. The body fence is untouched.
+- **Grounding:** The fence is the map **body**, shared by both tracker modes. A GitHub map issue has no front-matter, so a `state:` line there would tell an agent to paste YAML into an issue body — the addendum's own text scopes the field to `kind: none`. The bindings sentence already defines markdown-mode front-matter for tickets, so the map now sits beside the tickets it parents.
+- **Alternative considered:** Putting it in the fence with a "markdown mode only" caveat. Rejected: a caveat inside a copy-paste template is a caveat that gets copy-pasted.
+
+### P9 `complete` vs `closed`
+- **Question:** Should the map's terminal state be `complete` (asymmetric with tickets' `open|closed`) or `closed` (symmetric)?
+- **Choice:** `complete`, as the addendum specifies, and flagged in Verification as intentional so review doesn't normalize it.
+- **Grounding:** Owner decision in the issue addendum. It also carries meaning the symmetric form loses: a ticket is closed when its question is answered; a map is complete when the way is clear. The two words appear one clause apart after P9a, so the asymmetry is visible and needs the note.
+- **Alternative considered:** Normalizing to `closed`. Rejected — it is not mine to overturn, and the distinction is real.
+
+### Leaving the intro handoff prose untouched
+- **Question:** P9 names `/to-issues` and `/from-issue`, which the intro (line 8) already names. Edit the intro to point at step 6, or leave it?
+- **Choice:** Leave both intro lines exactly as they are.
+- **Grounding:** The owner's constraint is that P9 make them operational, not redundant, and they already do different jobs: line 8 says where the effort goes, step 6 says when you have arrived and what to type; line 10's "pull to just do the work" is the felt signal, step 6 is the checkable test. Adding a cross-reference costs bytes in a file already +50% and would make three places say one thing.
+- **Alternative considered:** A pointer clause on line 10. Rejected on both counts above.
 
 ### P1 placement — template comment, step 4, or both
 - **Question:** Does the gist cap go in the map template's placeholder, in `Work the map` step 4, or both?
@@ -519,11 +661,11 @@ asks for.
 - **Grounding:** The issue's Scope section names three files and says "Instruction-text only". `design` already carries an autonomous-mode clause, so the `--auto` half of the waste is covered there; only its interactive rounds are exposed.
 - **Alternative considered:** A fourth file in this change. Rejected: scope creep on an issue that already survived a reviewer pass at three files.
 
-### Accepting +39% on `wayfind/SKILL.md`
-- **Question:** The dry-run puts `wayfind/SKILL.md` at 10,066 bytes, +39%. An issue about token waste that grows the file every session loads deserves an answer. Trim the prose to hit a smaller number?
-- **Choice:** No. Ship the measured +2,830 bytes and publish the real figures rather than shaving rationale to reach a prettier percentage.
-- **Grounding:** The rationale clauses are the mechanism: "the one-line rule already existed and was violated in BOTH field efforts because it lacked a checkable cap." An imperative with no reason attached is what already failed here twice. +2,830 bytes is ~710 tokens per session against ~36k (map bloat) plus ~54k (fan-in) measured in one effort. The file also lands at 10,066 bytes — within a byte of `doc-grounded-questions`' pre-existing 9,631, so it is not an outlier among these skills.
-- **Alternative considered:** Cutting the four rationale sentences (~600 bytes, ~8 points of growth). Rejected: it saves a rounding error and removes the exact property that distinguishes these edits from the rule that already failed.
+### Accepting +50% on `wayfind/SKILL.md`
+- **Question:** The dry-run puts `wayfind/SKILL.md` at 10,852 bytes, +50% — half of that growth from P9 alone. An issue about token waste that grows the file every session loads deserves an answer. Trim the prose to hit a smaller number?
+- **Choice:** No. Ship the measured +3,616 bytes and publish the real figures rather than shaving rationale to reach a prettier percentage.
+- **Grounding:** The rationale clauses are the mechanism: "the one-line rule already existed and was violated in BOTH field efforts because it lacked a checkable cap." An imperative with no reason attached is what already failed here twice. +3,616 bytes is ~900 tokens per session against ~36k (map bloat) plus ~54k (fan-in) measured in a single effort, and P9's ~700 bytes buy the effort a defined end — a map with no terminal state costs unbounded sessions, not tokens. The file lands at 10,852, close to `doc-grounded-questions`' pre-existing 9,631, so it is not an outlier among these skills.
+- **Alternative considered:** Cutting the rationale sentences (~600 bytes, ~8 points of growth). Rejected: it saves a rounding error and removes the exact property that distinguishes these edits from the rule that already failed.
 
 ### No ADR
 - **Question:** Do these decisions warrant an ADR?
