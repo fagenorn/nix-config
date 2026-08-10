@@ -20,7 +20,7 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
 3. Defaults when neither yields a value: integrationBranch=main, defaultBranch=main, commit.coAuthoredBy=true, unsetGithubToken=false, specDir=.claude/specs, planDir=.claude/plans, codex.planReview.enabled=true, codex.planReview.focus=null.
 4. Degrade gracefully: a configured-but-absent doc path, sibling skill, or hints file is skipped silently. Never read a file that doesn't exist; never hard-fail on a missing optional binding.
 
-Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,contextMap,standards,architecture,gitWorktrees}` (`docPaths.adrDir` is a legacy override; ADR homes normally come from the map's areas), `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`, `codex.planReview{enabled,focus}`, `codex.decisionReview` (default false).
+Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unsetGithubToken`, `commit.coAuthoredBy`, `docPaths{context,contextMap,standards,architecture,gitWorktrees}` (`docPaths.adrDir` is a legacy override; ADR homes normally come from the map's areas), `specDir`, `planDir`, `branchNaming{pattern,worktreePrefix}`, `projectHints`, `codex.planReview{enabled,focus}`.
 
 `<tracker-cli>` = resolved `issueTracker.cli`; `<integration-branch>`, `<default-branch>` likewise. When `issueTracker.kind=none`, skip every issue/PR-linkage step and operate on the branch alone (a "tracker URL" the user gives you is just a label).
 
@@ -182,6 +182,10 @@ If the plan is `mechanical-only`, dispatch a single implementer+reviewer pair fo
 
 **CHECKPOINT** — Confirm the implementation is committed on the feature branch.
 
+sdd's report includes `review_state` (`clean | residuals | unknown`) from its two-axis
+final review; carry it verbatim into the Phase-7 handoff — ship-issue's Phase-5
+degradation decision reads it.
+
 ## Phase 7 — Ship
 
 Dispatch `ship-issue` as a fresh subagent via the `Agent` tool (`general-purpose`) — not inline via `Skill`. By now this conversation carries every artifact of the flow, and ship-issue's ~100 turns over that 200–300k prefix costs ~1–3M weighted tokens versus a fresh ~10k subagent that returns one summary.
@@ -202,6 +206,7 @@ Handoff from from-issue:
   spec_path:      <relative-from-repo-root>
   plan_path:      <relative-from-repo-root>
   head_sha:       <SHA at end of Phase 6 execute>
+  review_state:   <clean | residuals | unknown — from sdd's report>
   auto:           true|false  (from --auto flag)
   summary:        <one paragraph: what shipped, key deltas the PR reviewer subagent
                    should weight heavily, anything non-obvious about scope>
@@ -227,7 +232,8 @@ PR and the worktree, not the report:
   pr_url:           <url>
   merge_sha:        <sha on the integration branch>
   issue_closed:     true | false
-  discussion_items: <reviewer's Discussion items, verbatim; [] if none>
+  discussion_items: <reviewer's Discussion/Minor items, verbatim, labeled by axis
+                     when the two-axis path ran; [] if none>
   notes:            <≤500 chars: anything that needed manual intervention>
 ```
 

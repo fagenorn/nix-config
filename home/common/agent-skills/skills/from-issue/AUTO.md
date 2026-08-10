@@ -21,12 +21,7 @@ at a `**CHECKPOINT**`:
 3. **Log it** in the artifact's `## Auto-resolved decisions` section, one entry per decision, using
    the template in `SKILL.md`. This is the audit trail: a human reviewing the PR can challenge any
    choice without re-deriving it.
-4. **Cross-check the high-stakes ones** — only when `codex.decisionReview` is `true` (default off)
-   AND the decision creates or modifies an ADR or reverses a prior phase's choice: run
-   `codex-collaboration`'s `decision-check` and append its `Cross-check:` verdict to the entry. A
-   `refute` means re-ground once and decide with both views logged; the cross-check advises, never
-   overrules. Unavailable → `Cross-check: unavailable`, continue.
-5. **Continue.** Don't post the question. Don't wait.
+4. **Continue.** Don't post the question. Don't wait.
 
 Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`,
 `ship-issue`) don't know about `--auto`. *You* carry the autonomous-mode context — when one tells you
