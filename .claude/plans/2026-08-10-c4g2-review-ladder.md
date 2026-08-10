@@ -613,9 +613,9 @@ git rm home/common/agent-skills/skills/sdd/final-reviewer-prompt.md
 Run: `grep -rn "final-reviewer-prompt" home/common/`
 Expected: no output (exit 1). (One referencing line at the base commit — §Final review's template link; §Agent tiers names the review but not the template file.)
 Run: `grep -n "review_state" home/common/agent-skills/skills/sdd/SKILL.md`
-Expected: exactly one hit, in §Finish.
+Expected: exactly three hits, all in §Finish (the two terminal-state bullets and the report contract).
 Run: `ls home/common/agent-skills/skills/sdd/*reviewer-prompt.md`
-Expected: `conformance-reviewer-prompt.md`, `correctness-reviewer-prompt.md`, `re-review-prompt.md`, `task-reviewer-prompt.md`.
+Expected: `conformance-reviewer-prompt.md`, `correctness-reviewer-prompt.md`, `task-reviewer-prompt.md` (`re-review-prompt.md` does not match this glob; verify it still exists separately).
 
 - [ ] **Step 9: Commit**
 
