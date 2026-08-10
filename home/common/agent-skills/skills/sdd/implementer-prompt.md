@@ -94,7 +94,11 @@ code — per SKILL.md Agent tiers):
     (RED: command + failing output + why expected; GREEN: command + passing
     output), files changed, self-review findings, concerns.
 
-    Then report back with ONLY (under 15 lines — detail lives in the file):
+    Then report back with ONLY (under 15 lines — detail lives in the file). Reporting
+    back means ending your turn with this as your final message — the controller reads
+    your final message directly. Never deliver it via SendMessage: you were not given a
+    recipient name, and agent-type names like `general-purpose` are not addressable
+    recipients. Do not wait for an acknowledgment.
     - **Status:** DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT
     - Commits created (short SHA + subject)
     - One-line test summary (e.g. "14/14 passing, output pristine")
