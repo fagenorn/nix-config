@@ -413,12 +413,13 @@ produce a report. Replace that whole paragraph with:
 ```markdown
 Terminal states:
 
-- **Clean** — both axes clean (or clean after the fix wave) and the fixes are in:
-  delete this plan's workspace (`rm -rf <workspace>`; sibling directories belong to
-  other plans) and report `review_state: clean`.
-- **Residuals** — parked-with-ruling findings remain, or the breaker surfaced a
-  load-bearing residual: keep the workspace and ledger for the caller's inspection
-  and report `review_state: residuals` with the parked/surfaced list.
+- **Clean** — both axes clean (or clean after the fix wave), or every remaining
+  finding parked-with-ruling: delete this plan's workspace (`rm -rf <workspace>`;
+  sibling directories belong to other plans) and report `review_state: clean` —
+  parked findings still travel in the report's parked-findings field.
+- **Residuals** — the breaker surfaced a load-bearing residual the caller must
+  decide on: keep the workspace and ledger for the caller's inspection and report
+  `review_state: residuals` with the surfaced list.
 
 Report to the calling workflow: `review_state` (`clean | residuals` — sdd never
 reports `unknown`; that third value exists for downstream callers describing a
@@ -520,8 +521,12 @@ most capable model):
 statement when there is no tracker; omit the line when neither exists),
 `[SPEC_FILE]` (omit when no spec exists — standalone plans are graded against the
 plan alone), `[PLAN_FILE]`, `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[DIFF_FILE]` (from
-`scripts/review-package`), `[DEFERRED_AND_PARKED_LINES]` (copied verbatim from the
-ledger).
+`scripts/review-package`; a dispatcher without the sdd scripts — e.g. ship-issue's
+full path — omits it, and the reviewer fetches the range itself with
+`git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` and `git diff` per the body's
+fallback), `[DEFERRED_AND_PARKED_LINES]` (copied verbatim from the ledger; when the
+dispatch supplies no ledger lines — no ledger exists at ship — omit the line AND the
+Ledger Triage section).
 ````
 
 - [ ] **Step 6: Create `correctness-reviewer-prompt.md`**
@@ -801,7 +806,7 @@ Any hit is a missed edit: fix it in the style of the owning task and note it in 
 grep -rn "review_state" home/common/ | grep -v Binary
 ```
 
-Expected: hits in exactly three skills — from-issue (2), sdd (1), ship-issue (≥2) — all using the `clean | residuals | unknown` vocabulary. A fourth skill or a divergent vocabulary is a defect.
+Expected: hits in exactly three skills — from-issue (2), sdd (3, all in §Finish), ship-issue (≥2) — all using the `clean | residuals | unknown` vocabulary. A fourth skill or a divergent vocabulary is a defect.
 
 - [ ] **Step 3: Build gate**
 
