@@ -1,12 +1,12 @@
 ---
 name: codex-collaboration
-description: Run a private, isolated Codex pass — plan-review (from-issue Phase 5) or decision-check (gated --auto cross-check) — and disposition its findings.
+description: Run a private, isolated Codex pass — plan-review (from-issue Phase 5) or diff-review (the diff review's correctness axis) — and disposition its findings.
 user-invocable: false
 ---
 
 # Codex Collaboration
 
-Support two operations: `plan-review` and `decision-check`. Keep Codex
+Support two operations: `plan-review` and `diff-review`. Keep Codex
 review-only and keep the parent Claude agent responsible for every plan edit
 and disposition.
 
@@ -16,8 +16,9 @@ Read `<repo-root>/.claude/skills.config.json` when present. Resolve
 `codex.planReview` as follows:
 
 - Missing `enabled` means `true`.
-- `enabled: false` means return control so `from-issue` can use its fresh native
-  reviewer flow. Do not launch Codex.
+- `enabled: false` means the project has opted out of Codex review passes entirely:
+  return control so the caller uses its native reviewer flow — for either operation.
+  Do not launch Codex.
 - A non-empty `focus` adds project-specific emphasis without replacing the
   standard review bar.
 - Continue to apply the existing `projectHints` binding when its file exists.
@@ -61,6 +62,9 @@ routing context, never substitutes for reading the worktree.
 
 ## Reviewer contract
 
+(These rules are the `plan-review` reviewer contract; `diff-review` defines its own
+output contract in its operation section below — the read-only rules apply to both.)
+
 Include these rules verbatim in substance:
 
 - Remain read-only. Do not edit files; mutate Git; create commits, branches, or
@@ -101,8 +105,10 @@ not share a broker with interactive commands or with another reviewer.
 
 ## Validate and fall back
 
-A valid result has all three required headings and either `None.` or findings
-with evidence, confidence, and unknowns. Treat only these as Codex failures:
+A valid result has the operation's required headings — a one-line axis verdict then
+`Critical` / `Important` / `Minor` for `diff-review`; `Blocking` / `Should fix` /
+`Discussion` for `plan-review` — and either `None.` or findings with evidence,
+confidence, and unknowns. Treat only these as Codex failures:
 
 - the executable is missing or authentication is unavailable;
 - the process crashes or reaches its hard timeout;
@@ -117,6 +123,9 @@ that Claude fallback was used. Do not retry Codex and do not fall back because o
 concurrency.
 
 ## Verify and disposition
+
+(Applies to `plan-review`. For `diff-review`, verification and disposition live with
+the calling controller — see that operation's section.)
 
 The parent Claude agent owns the result:
 
@@ -137,25 +146,48 @@ The parent Claude agent owns the result:
 Return control only after all accepted findings have explicit dispositions and
 the plan is clean enough for the caller's Phase-5 checkpoint.
 
-## Operation: `decision-check`
+## Operation: `diff-review`
 
-Gated behind `codex.decisionReview` in `.claude/skills.config.json` — **default
-off**; when absent or false, callers never invoke this operation. A one-shot
-"refute this recommendation" pass for the high-stakes class of `--auto`
-self-answered decisions (the caller decides eligibility).
+The correctness axis of the two-axis diff review (the sdd skill defines the axes and
+owns dispatching the parallel native conformance axis — that axis never comes through
+this skill). Same runtime contract as `plan-review`: resolve policy, pre-flight,
+packet by paths, `WORKTREE_ROOT:` first line, one foreground `codex:codex-reviewer`
+dispatch with background launch inside the bridge, validation, one-time native
+`reviewer` fallback on a real Codex failure, never a retry, concurrency never a
+fallback reason. The axis is never skipped.
 
-- Packet: the question as it would have been asked, the `➡️` recommendation
-  with its grounding, and the grounding paths selected by the same map-first
-  protocol as `plan-review` item 5. Paths, never contents.
-- Brief, included in substance: "Try to refute this recommendation against the
-  cited grounding and the live repo. Read-only. Return exactly: `Verdict:
-  concur | refute`, then ≤200 words of rationale citing `path:line` evidence."
-- Dispatch `codex:codex-reviewer` once, foreground, fresh and isolated — same
-  runtime contract as `plan-review`.
-- The caller appends a `Cross-check:` field to the decision's
-  `Auto-resolved decisions` entry: the verdict plus a one-line gist. On
-  `refute`, the caller re-grounds once and decides, logging both views — the
-  cross-check advises, it never overrules.
-- **No Claude fallback for this operation.** On any Codex failure, record
-  `Cross-check: unavailable (<failure class>)` and continue — this is an
-  optional de-correlation pass, not a gate.
+**The `diff-review` packet replaces `## Build the review packet`'s list wholesale** —
+it is not that packet plus tweaks. It contains exactly:
+
+1. The operation name, invocation directory, worktree root, current branch, and the
+   base and head SHAs of the diff under review.
+2. Scope line: review the diff `<base-sha>..<head-sha>` in the worktree for code
+   correctness — bugs, boundary error handling, dead branches, assertions that fail
+   to pin the documented contract, DRY against existing helpers, cross-task
+   integration. Conformance to issue/spec/docs is the parallel axis's job; instruct
+   the reviewer not to grade it.
+3. The caller's correctness rubric by absolute path (sdd's
+   `correctness-reviewer-prompt.md`), with concrete values supplied for every
+   placeholder it names.
+4. The diff-package path when the caller built one, and the plan path (routing
+   context for what the tasks were).
+5. Inferred verify commands and every applicable `AGENTS.md`/`CLAUDE.md`.
+6. The standards layers matching the diff's file types
+   (`~/.agents/standards/the-bar.md`, its `stacks/` shards, project
+   `docs/standards/` shards whose globs intersect).
+
+Nothing else rides along: no issue investigation, no spec, no domain docs, no
+`codex.planReview.focus`, no `REVIEW-CONTRACT.md`. The light packet is what keeps
+Codex inside its runtime budget; domain conformance belongs to the other axis.
+
+Reviewer output contract: first line is the axis verdict (`**Correctness:** Clean |
+Findings — 1–2 sentences`), then exactly three top-level sections `Critical` /
+`Important` / `Minor` (must-fix-before-merge / should-fix / nice-to-have), ≤400
+words total, every finding with a stable ID, live `path:line` evidence, confidence
+(`high` / `medium` / `low`), and unknowns (`none` when empty); `None.` under an
+empty section; unreadable artifacts reported explicitly.
+
+Verify-and-disposition stays with the calling controller and its own fix-flow rules:
+return the validated three-section result (or the fallback reviewer's) unmodified,
+plus the reviewer identity (`Codex` | `Claude fallback` + failure class) for the
+caller's ledger.
