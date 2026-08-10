@@ -5,7 +5,7 @@ description: Execute an implementation plan with a fresh subagent per task, revi
 
 # Subagent-Driven Development
 
-Execute a plan by dispatching a fresh implementer per task, a task review (spec compliance + code quality) after each, and one whole-branch review at the end. Subagents never inherit your session's history — you construct exactly what each needs, which is also what keeps your own context flat for coordination.
+Execute a plan by dispatching a fresh implementer per task, a task review (spec compliance + code quality) after each, and one two-axis whole-branch review (conformance ∥ correctness) at the end. Subagents never inherit your session's history — you construct exactly what each needs, which is also what keeps your own context flat for coordination.
 
 **Continuous execution:** don't pause to check in between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, or all-tasks-complete. Narrate at most one short line between tool calls — the ledger and tool results carry the record.
 
@@ -29,7 +29,7 @@ Dispatch by agent type — the definitions carry the model and effort tier; neve
 - **`mechanic`** — implementation that is transcription plus testing: the plan text contains the complete code, or the change is single-file mechanical. Also inventories and bulk sweeps.
 - **`implementer`** — every other implementation task: prose-specified work, multi-file integration, anything needing judgment inside a fixed scope.
 - **`reviewer`** — all task reviews and scoped re-reviews.
-- The **final whole-branch review** dispatches as `reviewer`; it reviews the union of every task, so if any single task warranted your most capable model, this does too — override the model upward rather than down.
+- The **final review's two axes** dispatch per §Final review — the conformance axis as `reviewer` (it reviews the union of every task, so if any single task warranted your most capable model, this does too — override the model upward rather than down), the correctness axis via `codex-collaboration`'s `diff-review` when that skill is available, else as `reviewer`.
 - **Stuck tasks escalate across models, not just tiers** — see the fix loop's round 4.
 
 Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi-step work and costs more overall. When unsure between mechanic and implementer, pick implementer.
@@ -102,15 +102,25 @@ Adjudicate only at the cap — earlier is pre-judging with a different name. Eve
 
 Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, move on. Never advance past open Critical/Important findings that are neither fixed nor parked.
 
-## Final review
+## Final review — two axes
 
-Run `scripts/review-package PLAN_FILE MERGE_BASE HEAD` (MERGE_BASE = `git merge-base <integration-branch> HEAD`) and dispatch one `reviewer` — model per Agent tiers — with the printed path and the template [final-reviewer-prompt.md](final-reviewer-prompt.md). Point it at the ledger's deferred-minor and parked lines so it triages what must be fixed before merge.
+Run `scripts/review-package PLAN_FILE MERGE_BASE HEAD` (MERGE_BASE = `git merge-base <integration-branch> HEAD`) once, then review the branch on two axes **in parallel, as isolated subagents** over that same package:
 
-Findings → dispatch ONE fixer with the complete list (per-finding fixers each rebuild context and re-run suites; a real session's per-finding fix wave cost more than all its tasks combined), then exactly one scoped re-review over the fix range. Adjudicate residuals like the task-loop breaker. There is no second fix wave — residual load-bearing findings surface to the caller.
+- **Conformance axis** — did the diff deliver what issue + spec + plan promised, honoring the project's ADRs, context docs, and standards. Native `reviewer`, model per Agent tiers, template [conformance-reviewer-prompt.md](conformance-reviewer-prompt.md).
+- **Correctness axis** — is it built right: bugs, boundary error handling, dead branches, assertions that pin the documented contract, DRY, cross-task integration. When the `codex-collaboration` skill is available, invoke its `diff-review` operation for this axis — it owns the Codex launch and performs its own one-time native fallback on a real Codex failure. Unavailable → dispatch a native `reviewer` with [correctness-reviewer-prompt.md](correctness-reviewer-prompt.md). Either way the axis is never skipped.
+
+Point the conformance dispatch at the ledger's deferred-minor and parked lines so it triages what must be fixed before merge. Verdicts come back ≤400 words each, findings Critical/Important/Minor anchored to file:line. **Never merge the two reports** into one narrative — they are independent signals; disposition each on its own, and record both verdicts plus the correctness axis's reviewer identity (`Codex` | `native` | `fallback` + failure class) in the ledger.
+
+Findings → verify each against the live worktree first (stale or unsupported ones are rejected by you, in the ledger), then dispatch ONE fixer with the complete list labeled by axis — where both axes flag the same lines, dedupe at dispatch and credit both axes in the ledger (per-finding fixers each rebuild context and re-run suites; a real session's per-finding fix wave cost more than all its tasks combined). Then exactly one scoped re-review per axis that had findings: re-dispatch that axis's own rubric with (1) the axis's findings list verbatim, (2) a fix-range package from `scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head that axis's first pass reviewed), and (3) the instruction to verdict each finding ADDRESSED / NOT ADDRESSED and flag new breakage in the fix diff only — out-of-scope observations go to the ledger as deferred minors; ≤400 words. Adjudicate residuals like the task-loop breaker. There is no second fix wave — residual load-bearing findings surface to the caller.
 
 ## Finish
 
-When the final review is clean and its fixes are in, delete this plan's workspace (`rm -rf <workspace>`; sibling directories belong to other plans). Report to the calling workflow: final review result, commit range `<base7>..<head7>`, parked findings with rulings, verification status, ≤500 characters of notes. Do not ship, merge, or open PRs — the caller owns delivery.
+Terminal states:
+
+- **Clean** — both axes clean (or clean after the fix wave) and the fixes are in: delete this plan's workspace (`rm -rf <workspace>`; sibling directories belong to other plans) and report `review_state: clean`.
+- **Residuals** — parked-with-ruling findings remain, or the breaker surfaced a load-bearing residual: keep the workspace and ledger for the caller's inspection and report `review_state: residuals` with the parked/surfaced list.
+
+Report to the calling workflow: `review_state` (`clean | residuals` — sdd never reports `unknown`; that third value exists for downstream callers describing a branch with no evidence of a completed sdd review), per-axis final-review verdicts, commit range `<base7>..<head7>`, parked findings with rulings, verification status, ≤500 characters of notes. Do not ship, merge, or open PRs — the caller owns delivery.
 
 ## Common rationalizations
 
