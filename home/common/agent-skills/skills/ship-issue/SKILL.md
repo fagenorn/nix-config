@@ -14,7 +14,14 @@ Read `.claude/skills.config.json` at the project root. Auto-detect absent keys: 
 
 Degrade gracefully: never read a configured doc/hints path that doesn't exist, never hard-fail on a missing optional binding. `issueTracker.kind=none` skips every issue/PR/CI step; the sync/verify/consolidate/merge machinery still applies. `defaultBranch` matters because it controls GitHub auto-close-on-merge (Phase 4).
 
-**Invocation paths.** From `from-issue` (dispatched as an `Agent` subagent), the bootstrapping prompt carries `issue_number`, `branch`, `worktree_path`, `spec_path`, `plan_path`, `head_sha`, `auto`, `summary` — use those instead of re-deriving. Standalone (`/ship-issue <num>`), derive them: issue number from the branch name, spec/plan from `ls <specDir>/ | grep "issue-<num>"` and the same in `<planDir>` (filenames `YYYY-MM-DD-issue-<num>-<topic>-design.md` and `…-<topic>.md`; latest date prefix wins). Either way, the worktree state — not the handoff — is ground truth.
+Optional `review.criticalPaths` (array of globs): diffs intersecting any of them
+always get Phase 5's full two-axis review. Absent = the `risky` label is the only
+always-full trigger.
+
+**Invocation paths.** From `from-issue` (dispatched as an `Agent` subagent), the bootstrapping prompt carries `issue_number`, `branch`, `worktree_path`,
+`spec_path`, `plan_path`, `head_sha`, `review_state`, `auto`, `summary` — use those
+instead of re-deriving. Standalone, `review_state` is `unknown` unless the user
+supplies evidence of a completed sdd two-axis review. Standalone (`/ship-issue <num>`), derive them: issue number from the branch name, spec/plan from `ls <specDir>/ | grep "issue-<num>"` and the same in `<planDir>` (filenames `YYYY-MM-DD-issue-<num>-<topic>-design.md` and `…-<topic>.md`; latest date prefix wins). Either way, the worktree state — not the handoff — is ground truth.
 
 ## The flow
 
@@ -167,27 +174,58 @@ BASE_SHA=$(git merge-base HEAD origin/<integrationBranch>)
 HEAD_SHA=$(git rev-parse HEAD)
 ```
 
-Dispatch a fresh subagent via the `Agent` tool (`general-purpose`, no inherited context). Nested dispatch works even when this skill is itself inside an `Agent` subagent, but the schema is sometimes deferred — if `Agent` isn't in your tool surface, call `ToolSearch` with `query: "select:Agent"` first. Don't fall back to inlining the review; that deprecated path re-loads the spec/plan into your already-large context.
+The branch normally arrives already reviewed on two axes by sdd's final review
+(conformance ∥ correctness — the sdd skill owns that machinery and its templates).
+This phase reviews only what that review could not have seen — unless a risk signal
+calls for the full ladder.
 
-The **generic rubric below is fixed — use it verbatim**. The project-specific paragraph comes from `projectHints` (a directory → its `review.md`; a file → itself); omit it silently when absent.
+**Pick the path first.** Degrade to the merge-delta check when ALL of these hold;
+otherwise run the full two-axis review:
 
-> Review the diff from `<BASE_SHA>` to `<HEAD_SHA>` against the project's coding bar.
->
-> First invoke `doc-grounded-questions` **via the Skill tool** (not inline — its body re-injects current pointers to the project's domain/ADR/standards/architecture docs); if unavailable, read whichever of `docPaths.context`, `docPaths.standards`, `docPaths.architecture` and the `adr/` dirs of the areas the diff touches (`docs/areas/<slug>/adr/`, plus `system`; legacy repos: `docPaths.adrDir`) exist. Then read the issue body (`gh issue view <num>`), the spec at `<spec-path>`, and the plan at `<plan-path>` for what the diff was supposed to deliver.
->
-> **Read the live file at HEAD when checking a finding**, not a diff or snapshot view — reviews have produced false-positive Should-fixes by quoting stale snapshots after the spec/plan were edited mid-flow.
->
-> Evaluate the diff against the grounded constraints. Output:
->
-> - **Blocking** — must fix before merge
-> - **Should-fix** — strong recommendation; justify if you skip
-> - **Discussion** — judgment calls worth raising with the user
->
-> [PROJECT-SPECIFIC, only when `projectHints` exists] Pay particular attention to the recurring review hazards documented in the project hints — the refactor traps and domain invariants reviews on this codebase keep missing. Fold those concrete examples in here.
->
-> Don't propose new features. Don't second-guess scope. Grade only against the bar and the delivered-vs-spec gap.
->
-> Return findings ranked most-severe first, each anchored to a file:line, with a one-line verdict (approve | fix-first) at the top. Cap the whole report at ~400 words — your reply is re-read by the caller on every later turn; detail beyond the cap belongs in the finding's file:line anchor, not the report.
+- `review_state` is `clean` (handoff / sdd report: both axis verdicts clean, or every
+  residual parked-with-ruling). `unknown` never degrades.
+- The Phase-1 sync needed no manual conflict escalation (allowlist auto-resolves
+  count as clean).
+- The branch diff is small: ≤400 changed lines AND ≤20 files. Mechanics: count
+  with `git diff --numstat $BASE_SHA..$HEAD_SHA` (lines = additions + deletions
+  summed, files = row count), after dropping rows whose path matches Phase 1's
+  lockfile allowlist patterns or whose file carries a generated header
+  (`<auto-generated>` / `// Code generated by`).
+- The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num>
+  --json labels`; with `issueTracker.kind=none` there are no labels — condition
+  passes), and no path from `git diff --name-only $BASE_SHA..$HEAD_SHA` matches a
+  `review.criticalPaths` glob (git-pathspec-style globs, e.g. `src/auth/**`).
+
+**Merge-delta check (degraded path).** The reviewable delta is the sync-merge
+commit's combined diff (`git show --cc <merge-commit>` — conflict resolutions and
+scope-creep sweeps) plus any commits made after the head sdd reviewed. Empty →
+record "merge-delta empty, nothing to review" in the PR body and continue to
+Phase 6. Non-empty → dispatch one fresh `reviewer` subagent over exactly that delta
+(nested dispatch works even inside an `Agent` subagent; if `Agent` isn't in your
+tool surface, `ToolSearch` `select:Agent` first — never inline the review), with
+Phase 1's scope-creep categories (retirement / addition) as its checklist plus the
+project-hints review paragraph when `projectHints` exists. Findings come back
+Blocking / Should-fix / Discussion, ≤400 words, file:line anchors.
+
+**Full two-axis review.** Same machinery and rubrics as sdd's final review, over the
+post-sync range `$BASE_SHA..$HEAD_SHA`: dispatch the native conformance reviewer
+(sdd's `conformance-reviewer-prompt.md`, deployed beside its SKILL.md) in parallel
+with the correctness axis via `codex-collaboration`'s `diff-review` when available,
+else a native reviewer on sdd's `correctness-reviewer-prompt.md`. Verdicts ≤400
+words each, Critical/Important/Minor, never merged. sdd templates unavailable →
+still TWO isolated native `reviewer` subagents, never one combined: one briefed with
+a pasted one-paragraph conformance rubric (delivered-vs-promised against
+issue/spec/plan, doc conformance, stale-prose audit, message-format parity), one
+with a pasted one-paragraph correctness rubric (bugs, boundary error handling, dead
+branches, assertions-that-pin, DRY, cross-task integration); same output contract,
+reports kept separate.
+
+**Severity handling for the full path.** The surviving apply/push flow below speaks
+Blocking / Should-fix; map per axis, never merging reports: Critical ≙ Blocking
+(apply inline via the five steps), Important ≙ Should-fix (same five steps in
+`--auto`, surfaced otherwise), Minor ≙ Discussion-grade (record; surface only when
+user-facing). PR comments and the caller's `discussion_items` return carry Minor and
+Discussion items labeled by their axis.
 
 Apply Blocking fixes inline — but `apply` and `push` are separate steps, not one verb. The failure mode is "edited files, ran tests, forgot to commit, advanced to Phase 6 polling CI on the stale tip." Follow this order:
 
