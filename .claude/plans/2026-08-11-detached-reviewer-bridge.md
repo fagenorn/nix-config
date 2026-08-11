@@ -197,18 +197,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
 const GUARD_MESSAGE = "Reviewer jobs must be fresh and read-only.";
 
-async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const value = await predicate();
-    if (value) {
-      return value;
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error("Timed out waiting for condition.");
-}
-
 function makeReviewRepo() {
   const repo = makeTempDir();
   initGitRepo(repo);
@@ -256,13 +244,11 @@ test("a background reviewer run survives its launcher and lands a verbatim durab
   assert.equal(waited.status, 0, waited.stderr);
   assert.equal(JSON.parse(waited.stdout).job.status, "completed");
 
-  const resultPayload = await waitFor(() => {
-    const collected = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], { cwd: repo, env });
-    if (collected.status !== 0) {
-      return null;
-    }
-    return JSON.parse(collected.stdout);
-  });
+  // status --wait reported `completed`, so the record is terminal: one direct
+  // `result` call must succeed — no retry loop.
+  const collected = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], { cwd: repo, env });
+  assert.equal(collected.status, 0, collected.stderr);
+  const resultPayload = JSON.parse(collected.stdout);
   assert.equal(resultPayload.job.status, "completed");
   assert.equal(resultPayload.storedJob.kind, "plan-review");
   // Byte-for-byte: rawOutput is the reviewer's final message with no rendering,
@@ -379,7 +365,12 @@ Expected: `# tests 106 / # pass 102 / # fail 0 / # skipped 4`. In particular `re
 Run the *Regeneration* block from the plan header. Then in the worktree edit `lib/agent-plugins.nix`: `patchRevision = 4;` → `patchRevision = 5;`.
 
 Run: `git -C "$WORKTREE" diff --stat -- patches/agent-plugins/codex-plugin-cc.patch lib/agent-plugins.nix`
-Expected: both files modified; the patch diff includes the new `tests/reviewer-detach.test.mjs` hunks and the one-predicate change in `plugins/codex/scripts/codex-companion.mjs`.
+Expected: a summary line only — exactly these two files modified, with nearly all the changed lines landing in the patch. `--stat` counts changed lines; it cannot show which hunks the regenerated patch gained or what they contain, so the three content checks below carry those claims.
+
+Run: `grep -A5 "^diff --git a/tests/reviewer-detach\.test\.mjs" "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
+Expected: one match, showing `new file mode 100644` and, five lines below the `diff --git` line, the whole-file hunk header `@@ -0,0 +1,150 @@` — the new test enters the patch as a single added-file hunk of exactly the 150-line block Step 2 dictates. `-A5` rather than two separate counts because the patch carries five `new file mode` headers: the claim is that *these two lines belong to the same file*, which only adjacency shows.
+
+The one-predicate change in `plugins/codex/scripts/codex-companion.mjs` is what the next two greps prove — the old guard message gone from the patch entirely, the new one present exactly twice:
 
 Run: `grep -c "Reviewer jobs must be fresh, foreground" "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
 Expected: no matches (grep exits 1). The reviewer guard is patch-added — upstream at the pin has no reviewer guard at all, so the committed p4 patch carried the old message on a `+` line; after the edit and regeneration the old message vanishes from the patch (and thus from the patched tree) entirely.
@@ -645,8 +636,16 @@ Touch nothing else in the file: the packet lists, reviewer contract, verify-and-
 
 - [ ] **Step 4: Verify the edits are exactly the three regions**
 
+R6's three prohibitions, one case-insensitive grep each — match on exit status, not on printed output:
+
 Run: `grep -in "background" "$WORKTREE/home/common/claude-code/skills/codex-collaboration/SKILL.md"`
 Expected: no output (exit 1). At this task's starting commit the same grep matches in the Launch paragraph ("as a background / Bash task") and the diff-review paragraph ("with background launch inside the bridge") — this gate fails until both edits land.
+
+Run: `grep -in "codex-companion task" "$WORKTREE/home/common/claude-code/skills/codex-collaboration/SKILL.md"`
+Expected: no output (exit 1). This gate also fails until Step 1's edit lands: at the starting commit the old Launch paragraph names the launch command itself, `codex-companion task --fresh --reviewer --timeout-ms 840000`. Matched on the two-word form deliberately — the bare word must survive in the pre-flight `command -v codex-companion`, which this task does not touch.
+
+Run: `grep -in "completion notification" "$WORKTREE/home/common/claude-code/skills/codex-collaboration/SKILL.md"`
+Expected: no output (exit 1). Unlike the other two this one already passes at the starting commit — the wording has never been in this file, and the gate is here so the rewrite cannot introduce it. The bridge reports by returning its output, never by notifying.
 
 Run: `grep -n "the process crashes or reaches its hard timeout" "$WORKTREE/home/common/claude-code/skills/codex-collaboration/SKILL.md"`
 Expected: no output (exit 1) — the process-level failure class is gone.
@@ -655,7 +654,13 @@ Run: `grep -c "Launch mechanics live solely" "$WORKTREE/home/common/claude-code/
 Expected: `1`.
 
 Run: `git -C "$WORKTREE" diff --stat -- home/common/claude-code/skills/codex-collaboration/SKILL.md`
-Expected: exactly one file changed; the hunks touch only the Launch paragraph, the failure-class bullets, and the diff-review paragraph.
+Expected: a summary line only — one file changed, a handful of lines (11 insertions, 8 deletions). `--stat` cannot show *which* regions moved; the two checks below carry that claim.
+
+Run: `git -C "$WORKTREE" diff -U0 -- home/common/claude-code/skills/codex-collaboration/SKILL.md | grep '^@@'`
+Expected: exactly three hunk headers, at old lines 96, 114 and 155 — respectively the `## Launch` second paragraph, the `## Validate and fall back` bullet list, and the diff-review mechanics clause (section names are read off the file; the command prints only the line numbers). `-U0` so the ranges point at the changed lines themselves and `^@@` provably matches headers only. A fourth header means a stray edit landed: revert it.
+
+Run: `git -C "$WORKTREE" diff -- home/common/claude-code/skills/codex-collaboration/SKILL.md`
+Expected: read all three hunks. Each removes exactly the Old text and adds exactly the New text dictated in Steps 1–3; no other line in the file differs.
 
 - [ ] **Step 5: Final whole-issue verification — patch determinism, revision, closure**
 
@@ -718,7 +723,7 @@ Activation (`just switch`) and the live end-to-end demo are the ship phase's cal
 - R3/AC3 (agent def: fixed bounded foreground sequence, no harness backgrounding, no unbounded wait): Task 2 (binding body + docs-contract test).
 - R4/AC4 (launcher termination doesn't stop the review; result durable): Task 1 (test 1 — synchronous launcher provably exited before completion; result collected from the job record afterwards). SessionEnd boundary documented in the spec, no code change.
 - R5/AC5 (failed/timed-out job → one `CODEX_REVIEW_FAILURE:` line with the recorded error, within the wait budget): error source pinned by Task 1 test 4 (`Codex job timed out after 1000ms.` in the job record via `status --wait`); the bridge's line format and budget prescribed by Task 2's binding body (failed/cancelled, expiry-without-cancel, and command-failure clauses).
-- R6/AC6 (skill states contract only; no background tasks / completion notifications / launch command): Task 3 (three edits + greps).
+- R6/AC6 (skill states contract only; no background tasks / completion notifications / launch command): Task 3 — the three edits, plus Step 4's one case-insensitive negative grep per prohibition (`background`, `codex-companion task`, `completion notification`, each exiting 1 against the edited file) and the positive `Launch mechanics live solely` pin.
 - R7/AC7 (suite green env-scrubbed; reviewer-background coverage flips refused→enqueued as new tests failing at p4): Tasks 1–2 suite gates; final count `# tests 107 / # pass 103 / # fail 0 / # skipped 4`.
 - R8/AC8 (patchRevision 4→5, `just build` green, live demo evidenced): Task 1 (bump + build), Task 3 Step 5 (determinism + `.p5` closure content checks); live demo deferred to ship phase with its evidence home fixed above.
 
