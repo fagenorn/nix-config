@@ -19,10 +19,10 @@ index 937a303..f418e48 100644
 -
 diff --git a/plugins/codex/agents/codex-reviewer.md b/plugins/codex/agents/codex-reviewer.md
 new file mode 100644
-index 0000000..ce1552b
+index 0000000..7cd5eb5
 --- /dev/null
 +++ b/plugins/codex/agents/codex-reviewer.md
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,51 @@
 +---
 +name: codex-reviewer
 +description: Internal bridge for fresh, isolated, read-only Codex plan reviews requested by the codex-collaboration skill
@@ -34,20 +34,44 @@ index 0000000..ce1552b
 +
 +- The dispatch message's first line is `WORKTREE_ROOT: <absolute path>`; everything
 +  after that line is the delegation prompt. If the line is absent, use the
-+  invocation directory as the root.
++  invocation directory as the root. Every Bash call below is foreground and
++  bounded — the two wait calls set the Bash tool's `timeout` to 600000
++  explicitly; every other call is sub-second and stays under the tool's default
++  bound. Never pass `run_in_background`, never sleep, never write a polling loop.
 +- Pre-flight with one fast foreground Bash call: `command -v codex-companion`. If
 +  the command is missing, immediately return
 +  `CODEX_REVIEW_FAILURE: codex-companion not on PATH` without running anything else.
 +- Write the delegation prompt, unchanged, to a temporary file outside the repository.
-+- Launch exactly one review as a background Bash call (`run_in_background: true`):
-+  `cd "<worktree-root>" && codex-companion task --fresh --reviewer --timeout-ms 840000 < "<tmpfile>"`.
-+  The `cd` keys the runtime's job state to the reviewed worktree. Background
-+  execution is required: reviews legitimately run up to 14 minutes, and a foreground
-+  Bash call is killed at the 600000 ms harness cap before the runtime's own timeout
-+  can fire.
-+- Do not poll the task; wait for its completion notification, then Read the output
-+  file and return the command's stdout exactly. If the command failed, return a
-+  single line beginning `CODEX_REVIEW_FAILURE:` followed by its stderr or exit status.
++- Enqueue exactly one review with one sub-second foreground call:
++  `cd "<worktree-root>" && codex-companion task --fresh --reviewer --background --json < "<tmpfile>"`.
++  The `cd` keys the runtime's job state to the reviewed worktree. Note the `jobId`
++  from the printed JSON. From this moment a detached worker owns the review with
++  its own 840 s budget; nothing that happens to you can stop it, and its result
++  is durable in the job record.
++- Wait with at most two foreground calls, run one after the other only while the
++  job is still `queued` or `running`:
++  `cd "<worktree-root>" && codex-companion status <jobId> --wait --timeout-ms 540000 --json`
++  — each with the Bash tool's `timeout` parameter set to 600000. Read
++  `job.status` from the printed JSON (the command exits 0 either way). Two
++  540 s waits cover the worker's 840 s budget plus startup with margin.
++- If `job.status` is `completed`, collect the result with one foreground call
++  (temp paths beside the prompt file):
++  `cd "<worktree-root>" && codex-companion result <jobId> --json > "<tmpdir>/result.json" && node -e 'const fs=require("node:fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))?.storedJob?.result?.rawOutput;if(typeof o!=="string"||!o)process.exit(3);fs.writeFileSync(process.argv[2],o)' "<tmpdir>/result.json" "<tmpdir>/review.md"`,
++  then Read `<tmpdir>/review.md` and return its contents exactly. If the
++  extraction exits non-zero, return
++  `CODEX_REVIEW_FAILURE: job <jobId> completed without recorded reviewer output`.
++- If `job.status` is `failed` or `cancelled`, return one line:
++  `CODEX_REVIEW_FAILURE: ` followed by the job's `errorMessage`, else its
++  `summary`, else `job <jobId> ended <status>`.
++- If the job is still `queued` or `running` after the second wait, return one line:
++  `CODEX_REVIEW_FAILURE: job <jobId> still <status> after 1080s of bounded waits
++  (worker budget is 840s); check codex-companion status <jobId>`. Do not cancel
++  the job — the worker's own timeout is the correctness bound.
++- If any prescribed command itself fails, return a single line beginning
++  `CODEX_REVIEW_FAILURE:` followed by its stderr or exit status.
++- Run the whole sequence in this one turn without pausing; stopping early only
++  delays the caller — it cannot harm the review, which is already detached with
++  a durable result.
 +- Do not inspect the repository, interpret the request, edit files, run Git, retry,
 +  fall back to Claude analysis, or add commentary.
 diff --git a/plugins/codex/commands/setup.md b/plugins/codex/commands/setup.md
@@ -1262,20 +1286,37 @@ index 778571e..e601a80 100644
 +  cleanupSessionJobs(sessionId);
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
-index c34b060..9787be0 100644
+index c34b060..b013de8 100644
 --- a/tests/commands.test.mjs
 +++ b/tests/commands.test.mjs
-@@ -205 +205 @@ test("internal docs use task terminology for rescue runs", () => {
+@@ -205 +205,18 @@ test("internal docs use task terminology for rescue runs", () => {
 -test("hooks keep session-end cleanup and stop gating enabled", () => {
++test("the reviewer bridge agent prescribes only bounded foreground calls", () => {
++  const agent = read("agents/codex-reviewer.md");
++
++  // The fixed sequence: enqueue on the runtime's detached background path,
++  // bounded waits, failure marker.
++  assert.match(agent, /task --fresh --reviewer --background --json/);
++  assert.match(agent, /--wait --timeout-ms 540000/);
++  assert.match(agent, /CODEX_REVIEW_FAILURE:/);
++
++  // The twice-observed regression, pinned in both directions: the definition
++  // must state the prohibition and must never re-prescribe harness
++  // backgrounding or a completion-notification wait.
++  assert.match(agent, /Never pass `run_in_background`/);
++  assert.doesNotMatch(agent, /run_in_background:\s*true/);
++  assert.doesNotMatch(agent, /completion notification/i);
++});
++
 +test("hooks keep session lifecycle cleanup without a Stop review gate", () => {
-@@ -209 +209,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
+@@ -209 +226,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
 -  assert.match(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /"Stop"/);
-@@ -217 +218 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -217 +235 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]'/);
 +  assert.match(setup, /argument-hint:\s*'\[--disable-review-gate\]'/);
-@@ -223 +223,0 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -223 +240,0 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(readme, /\/codex:setup --enable-review-gate/);
 diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
 index f83c96a..fdfb12c 100644
