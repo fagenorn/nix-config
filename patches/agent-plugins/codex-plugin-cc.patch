@@ -200,7 +200,7 @@ index 1954274..a40434e 100644
 +        requestQueue.push({ socket, message });
 +        drainQueue();
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..b69371d 100644
+index 83df468..3c1a437 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
 @@ -54,0 +55 @@ import {
@@ -272,8 +272,8 @@ index 83df468..b69371d 100644
 +    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "reviewer"],
 @@ -782,0 +795,8 @@ async function handleTask(argv) {
 +  const reviewer = Boolean(options.reviewer);
-+  if (reviewer && (write || resumeLast || options.background)) {
-+    throw new Error("Reviewer jobs must be fresh, foreground, and read-only.");
++  if (reviewer && (write || resumeLast)) {
++    throw new Error("Reviewer jobs must be fresh and read-only.");
 +  }
 +  const timeoutMs = options["timeout-ms"] == null ? (reviewer ? 840000 : null) : Number(options["timeout-ms"]);
 +  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
@@ -1652,6 +1652,162 @@ index 0000000..60fefea
 +  assert.equal(JSON.parse(result.stdout).job.status, "failed");
 +  assert.equal(JSON.parse(fs.readFileSync(jobFile, "utf8")).status, "failed");
 +  assert.equal(fs.existsSync(runtimeHome), false);
++});
+diff --git a/tests/reviewer-detach.test.mjs b/tests/reviewer-detach.test.mjs
+new file mode 100644
+index 0000000..e29047b
+--- /dev/null
++++ b/tests/reviewer-detach.test.mjs
+@@ -0,0 +1,150 @@
++import fs from "node:fs";
++import path from "node:path";
++import test from "node:test";
++import assert from "node:assert/strict";
++import { fileURLToPath } from "node:url";
++
++import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
++import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
++import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
++
++// State resolvers read these variables at call time, and spawned CLI children
++// inherit process.env (via buildEnv), so pinning them here keeps every test in
++// this file hermetic even when the suite runs inside a live Claude Code session.
++// node --test runs each file in its own process; nothing leaks across files.
++process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-reviewer-detach-data-");
++delete process.env.CODEX_COMPANION_SESSION_ID;
++delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
++const GUARD_MESSAGE = "Reviewer jobs must be fresh and read-only.";
++
++function makeReviewRepo() {
++  const repo = makeTempDir();
++  initGitRepo(repo);
++  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
++  run("git", ["add", "README.md"], { cwd: repo });
++  run("git", ["commit", "-m", "init"], { cwd: repo });
++  return repo;
++}
++
++function makeCanonicalHome() {
++  const canonicalHome = makeTempDir();
++  fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{}\n");
++  fs.writeFileSync(path.join(canonicalHome, "config.toml"), 'model = "canonical"\n');
++  return canonicalHome;
++}
++
++test("a background reviewer run survives its launcher and lands a verbatim durable result", async () => {
++  const repo = makeReviewRepo();
++  const binDir = makeTempDir();
++  const canonicalHome = makeCanonicalHome();
++  installFakeCodex(binDir, "slow-task");
++  const env = { ...buildEnv(binDir), CODEX_HOME: canonicalHome };
++
++  // Synchronous spawn: by the time `run` returns, the launcher process has
++  // fully exited. Everything asserted after this line therefore happened under
++  // the detached worker alone — completion is itself the survival proof, and
++  // the queued (not completed) payload proves the enqueue returned before the
++  // review ran. No stopwatch, no process-tree assertions.
++  const launched = run("node", [SCRIPT, "task", "--fresh", "--reviewer", "--background", "--json"], {
++    cwd: repo,
++    env,
++    input: "review the plan"
++  });
++
++  assert.equal(launched.status, 0, launched.stderr);
++  const launchPayload = JSON.parse(launched.stdout);
++  assert.equal(launchPayload.status, "queued");
++  assert.match(launchPayload.jobId, /^reviewer-/);
++
++  const waited = run(
++    "node",
++    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
++    { cwd: repo, env }
++  );
++  assert.equal(waited.status, 0, waited.stderr);
++  assert.equal(JSON.parse(waited.stdout).job.status, "completed");
++
++  // status --wait reported `completed`, so the record is terminal: one direct
++  // `result` call must succeed — no retry loop.
++  const collected = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], { cwd: repo, env });
++  assert.equal(collected.status, 0, collected.stderr);
++  const resultPayload = JSON.parse(collected.stdout);
++  assert.equal(resultPayload.job.status, "completed");
++  assert.equal(resultPayload.storedJob.kind, "plan-review");
++  // Byte-for-byte: rawOutput is the reviewer's final message with no rendering,
++  // no trailers — the field the bridge extracts and returns verbatim.
++  assert.equal(resultPayload.storedJob.result.rawOutput, "Handled the requested task.\nTask prompt accepted.");
++
++  // Isolation held on the background path: the worker ran Codex in the per-job
++  // reviewer runtime, read-only, and removed it on completion; the canonical
++  // home was never touched.
++  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
++  assert.equal(fakeState.lastThreadStart.sandbox, "read-only");
++  assert.equal(fakeState.lastCodexHome, resolveReviewerRuntimeHome(repo, launchPayload.jobId));
++  assert.equal(fs.existsSync(fakeState.lastCodexHome), false);
++  assert.equal(fs.readFileSync(path.join(canonicalHome, "config.toml"), "utf8"), 'model = "canonical"\n');
++});
++
++test("reviewer + write is still refused on the background path", () => {
++  const repo = makeReviewRepo();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++
++  const result = run("node", [SCRIPT, "task", "--reviewer", "--write", "--background", "--json"], {
++    cwd: repo,
++    env: buildEnv(binDir),
++    input: "review the plan"
++  });
++
++  assert.notEqual(result.status, 0);
++  assert.ok(result.stderr.includes(GUARD_MESSAGE), result.stderr);
++});
++
++test("reviewer + resume is still refused on the background path", () => {
++  const repo = makeReviewRepo();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++
++  const result = run("node", [SCRIPT, "task", "--reviewer", "--resume-last", "--background", "--json"], {
++    cwd: repo,
++    env: buildEnv(binDir),
++    input: "review the plan"
++  });
++
++  assert.notEqual(result.status, 0);
++  assert.ok(result.stderr.includes(GUARD_MESSAGE), result.stderr);
++});
++
++test("the worker's internal timeout fails a background reviewer job and cleans its runtime", async () => {
++  const repo = makeReviewRepo();
++  const binDir = makeTempDir();
++  const canonicalHome = makeCanonicalHome();
++  // 5 s turn against a 1 s budget: the worker's own Promise.race timeout must
++  // fire, land the recorded error in the job file, and clean the runtime —
++  // with no bridge watching. Defense-in-depth's inner bound, tested alone.
++  installFakeCodex(binDir, "interruptible-slow-task");
++  const env = { ...buildEnv(binDir), CODEX_HOME: canonicalHome };
++
++  const launched = run(
++    "node",
++    [SCRIPT, "task", "--fresh", "--reviewer", "--background", "--timeout-ms", "1000", "--json"],
++    { cwd: repo, env, input: "review the plan" }
++  );
++  assert.equal(launched.status, 0, launched.stderr);
++  const launchPayload = JSON.parse(launched.stdout);
++  assert.match(launchPayload.jobId, /^reviewer-/);
++
++  const waited = run(
++    "node",
++    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
++    { cwd: repo, env }
++  );
++  assert.equal(waited.status, 0, waited.stderr);
++  const waitedPayload = JSON.parse(waited.stdout);
++  assert.equal(waitedPayload.job.status, "failed");
++  assert.match(waitedPayload.job.errorMessage, /Codex job timed out after 1000ms\./);
++  assert.equal(fs.existsSync(resolveReviewerRuntimeHome(repo, launchPayload.jobId)), false);
 +});
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
 index 8f27683..b0a4ff8 100644
