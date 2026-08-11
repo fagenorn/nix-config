@@ -721,3 +721,13 @@ Activation (`just switch`) and the live end-to-end demo are the ship phase's cal
 - R6/AC6 (skill states contract only; no background tasks / completion notifications / launch command): Task 3 (three edits + greps).
 - R7/AC7 (suite green env-scrubbed; reviewer-background coverage flips refused→enqueued as new tests failing at p4): Tasks 1–2 suite gates; final count `# tests 107 / # pass 103 / # fail 0 / # skipped 4`.
 - R8/AC8 (patchRevision 4→5, `just build` green, live demo evidenced): Task 1 (bump + build), Task 3 Step 5 (determinism + `.p5` closure content checks); live demo deferred to ship phase with its evidence home fixed above.
+
+---
+
+## Standards review (Phase 5)
+
+- **Reviewer:** native Claude `reviewer` agent (fresh context, read-only), dispatched directly — the Codex plan-review leg was not attempted; it is the mechanism this branch fixes and remains deterministically broken until this branch ships (same pre-decision as issue #2's Phase 5, grounded in the 2026-08-10 forensics of session `581dbb6b` / job `reviewer-msn70svo-bgjxnw`).
+- **Base SHA:** cafcf6f. **Plan commit reviewed:** a9b7732.
+- **Verdict:** approve. Blocking: none. Should fix: none. Discussion: D1, D2. All factual claims verified against live files (guard patch-added with exact message; enqueue payload shape; `status --wait` flags; `storedJob.result.rawOutput` persistence; no reviewer+background test at p4; SKILL.md edit targets; suite arithmetic 102→107).
+- **D1 (dead `waitFor` retry around `result` in Task 1 test 1):** disposition — accepted; Task 1's implementer calls `result` once and asserts exit 0 with stderr in the assertion message instead of the retry loop (better diagnostics, no behavior change).
+- **D2 (`grep -c` prints `0`, not "no matches"):** disposition — accepted as cosmetic; the exit-1 expectation in the gate is already correct, implementers should match on exit code.
