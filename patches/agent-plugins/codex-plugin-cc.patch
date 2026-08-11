@@ -661,13 +661,25 @@ index fead00c..aee30f2 100644
 -  });
 +  }, { reviewerJobId: options.reviewerJobId, env: options.env });
 diff --git a/plugins/codex/scripts/lib/job-control.mjs b/plugins/codex/scripts/lib/job-control.mjs
-index ad152c1..33034e4 100644
+index ad152c1..0850f47 100644
 --- a/plugins/codex/scripts/lib/job-control.mjs
 +++ b/plugins/codex/scripts/lib/job-control.mjs
 @@ -5 +5 @@ import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
 -import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 +import { reconcileWorkerLiveness, SESSION_ID_ENV } from "./tracked-jobs.mjs";
-@@ -252 +252 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
+@@ -216 +216,10 @@ export function buildStatusSnapshot(cwd, options = {}) {
+-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
++  // Reconcile before sorting: the flip stamps a fresh updatedAt, so sorting
++  // afterwards is what makes the flipped job the newest finished record
++  // (latestFinished) in the same read. The map runs after the session filter,
++  // so the listing only ever rewrites records it surfaces; jobs of other
++  // sessions are healed by their own session's listing or any single-job read.
++  const jobs = sortJobsNewestFirst(
++    filterJobsForCurrentSession(listJobs(workspaceRoot), options).map((job) =>
++      reconcileWorkerLiveness(workspaceRoot, job)
++    )
++  );
+@@ -252 +261 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 -    job: enrichJob(selected, { maxProgressLines: options.maxProgressLines })
 +    job: enrichJob(reconcileWorkerLiveness(workspaceRoot, selected), { maxProgressLines: options.maxProgressLines })
 diff --git a/plugins/codex/scripts/lib/process.mjs b/plugins/codex/scripts/lib/process.mjs
@@ -1384,10 +1396,10 @@ index 0000000..3d8b555
 +});
 diff --git a/tests/liveness.test.mjs b/tests/liveness.test.mjs
 new file mode 100644
-index 0000000..154b929
+index 0000000..a85af76
 --- /dev/null
 +++ b/tests/liveness.test.mjs
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,211 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1550,6 +1562,54 @@ index 0000000..154b929
 +  assert.equal(payload.job.status, "running");
 +  assert.equal(payload.job.errorMessage, undefined);
 +  assert.equal(fs.readFileSync(jobFile, "utf8"), seededBytes);
++});
++
++test("the status listing surfaces a dead-worker job as the failed latest-finished job", async (t) => {
++  const workspace = makeTempDir();
++  const pid = await deadPid(t, workspace);
++  seedJob(workspace, runningTaskRecord(workspace, "task-listed-dead", pid));
++
++  const result = run("node", [SCRIPT, "status", "--json"], { cwd: workspace });
++
++  assert.equal(result.status, 0, result.stderr);
++  const payload = JSON.parse(result.stdout);
++  assert.equal(payload.running.length, 0);
++  assert.equal(payload.latestFinished?.id, "task-listed-dead");
++  assert.equal(payload.latestFinished?.status, "failed");
++  assert.equal(payload.latestFinished?.errorMessage, DEAD_WORKER_MESSAGE(pid));
++});
++
++test("status --wait returns the failed state promptly when the worker dies mid-wait", async (t) => {
++  const workspace = makeTempDir();
++  const sleeper = spawnSleeper(t, workspace);
++  seedJob(workspace, runningTaskRecord(workspace, "task-wait-dead", sleeper.pid));
++
++  const child = spawn(
++    "node",
++    [SCRIPT, "status", "task-wait-dead", "--wait", "--timeout-ms", "15000", "--poll-interval-ms", "100", "--json"],
++    { cwd: workspace, stdio: ["ignore", "pipe", "pipe"] }
++  );
++  let stdout = "";
++  let stderr = "";
++  child.stdout.on("data", (chunk) => {
++    stdout += chunk;
++  });
++  child.stderr.on("data", (chunk) => {
++    stderr += chunk;
++  });
++  const exited = new Promise((resolve, reject) => {
++    child.on("error", reject);
++    child.on("exit", (status) => resolve(status));
++  });
++
++  process.kill(sleeper.pid, "SIGKILL");
++
++  const status = await exited;
++  assert.equal(status, 0, stderr);
++  const payload = JSON.parse(stdout);
++  assert.equal(payload.job.status, "failed");
++  assert.equal(payload.job.errorMessage, DEAD_WORKER_MESSAGE(sleeper.pid));
++  assert.equal(payload.waitTimedOut, false);
 +});
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
 index 8f27683..b0a4ff8 100644
