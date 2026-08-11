@@ -93,11 +93,13 @@ runtime into a timed-out Codex attempt.
 Dispatch the plugin agent `codex:codex-reviewer` once with the complete packet.
 Run it in the foreground, with the first line of the dispatch exactly
 `WORKTREE_ROOT: <absolute worktree root>` so the bridge keys runtime job state
-to the reviewed worktree. The bridge launches
-`codex-companion task --fresh --reviewer --timeout-ms 840000` as a background
-Bash task — the 840 s runtime budget exceeds the 600 s foreground Bash cap, so
-expect up to ~15 minutes wall-clock — which guarantees a fresh isolated
-`CODEX_HOME`, approval policy `never`, and sandbox `read-only`.
+to the reviewed worktree. Launch mechanics live solely in that agent's
+definition. The contract: the review runs fresh in an isolated read-only
+Codex runtime (fresh `CODEX_HOME`, approval policy `never`, sandbox
+`read-only`), survives the bridge's own lifetime, and is bounded by the
+runtime's internal ~14 min budget — expect up to ~15 minutes wall clock. The
+bridge returns the reviewer's output verbatim, or a single
+`CODEX_REVIEW_FAILURE:` line carrying the review job's recorded error.
 
 Parallel reviews are valid. A queued or active review is never a reason to use a
 Claude fallback. Wait for the requested job. The patched reviewer runtime does
@@ -111,8 +113,9 @@ A valid result has the operation's required headings — a one-line axis verdict
 confidence, and unknowns. Treat only these as Codex failures:
 
 - the executable is missing or authentication is unavailable;
-- the process crashes or reaches its hard timeout;
-- the agent returns `CODEX_REVIEW_FAILURE:`;
+- the agent returns `CODEX_REVIEW_FAILURE:` — the review job ended failed,
+  cancelled, or timed out (including the runtime's hard timeout and
+  dead-worker detection), with the job's recorded error on the line;
 - the result is empty or malformed after one completed fresh run.
 
 On a real failure, dispatch exactly one fresh Claude `reviewer`-type standards
@@ -152,7 +155,7 @@ The correctness axis of the two-axis diff review (the sdd skill defines the axes
 owns dispatching the parallel native conformance axis — that axis never comes through
 this skill). Same runtime contract as `plan-review`: resolve policy, pre-flight,
 packet by paths, `WORKTREE_ROOT:` first line, one foreground `codex:codex-reviewer`
-dispatch with background launch inside the bridge, validation, one-time native
+dispatch, validation, one-time native
 `reviewer` fallback on a real Codex failure, never a retry, concurrency never a
 fallback reason. The axis is never skipped.
 
