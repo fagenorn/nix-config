@@ -49,7 +49,8 @@ For every clarifying question or option set you're about to surface, do this pas
    disambiguate it again.
 
    **No map?** Fall back to the legacy layout: read whichever of `docPaths.context`, `CONTEXT.md`, `GLOSSARY.md`,
-   `DOMAIN.md` or a top-of-`README` domain section exists, in full. Read it once, not per question.
+   `DOMAIN.md` or a top-of-`README` domain section exists — whole when it is short, by governing section when it is
+   not (step 4). Read it once, not per question.
 
 2. **Find and scan the decision log.** Areas own their decisions: each area in the map has an `adr/` directory
    beside its `CONTEXT.md` (`docs/areas/<slug>/adr/`), plus the reserved `docs/areas/system/adr/` for decisions
@@ -68,7 +69,11 @@ For every clarifying question or option set you're about to surface, do this pas
 
 4. **Find and read the architecture doc** if the question touches more than one component. Use `docPaths.architecture`
    if configured; otherwise look for `ARCHITECTURE.md`, `docs/architecture.md`, or a "Architecture" README section.
-   Read it for cross-tier invariants.
+   Read it for cross-tier invariants — and past ~400 lines, read it by governing section rather than whole: grep its
+   headings first, then open only the sections covering the components in play. The same cap governs any other long
+   doc this pass sends you to; the context map is the exception, and only because it is capped at 150 lines by design.
+   A large architecture doc read end-to-end can cost more than every other step of this pass combined, and its two or
+   three relevant sections answer the question just as well.
 
 5. **Grep the codebase** for the central concept. If the codebase already commits to a pattern, the default option
    should be "match the existing pattern" and you must justify any divergence.
