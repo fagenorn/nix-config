@@ -139,8 +139,9 @@ Note that `$PLAN` is the **file being amended**, not this file.
   next `- [ ] **Step …` heading, then grep inside the extract; and locate edits by unique quoted anchor
   text. No gate in this plan asserts a line number in the amended file.
 - **Grounding:** Measured in this worktree: `awk '/^- \[ \] \*\*Step 4: Verify the edits are exactly the
-  three regions\*\*/{f=1} f&&/^- \[ \] \*\*Step 5:/{exit} f' "$PLAN"` returns exactly that step's 13
-  lines. Every anchor this plan quotes was confirmed to occur exactly once in the file (`grep -c`:
+  three regions\*\*/{f=1} f&&/^- \[ \] \*\*Step 5:/{exit} f' "$PLAN"` returns exactly that step's 14
+  lines — its 13 content lines plus the trailing blank separator before Step 5, which is what `wc -l`
+  counts. Every anchor this plan quotes was confirmed to occur exactly once in the file (`grep -c`:
   `const GUARD_MESSAGE = …` → 1, `const resultPayload = await waitFor` → 1, the Step 4 heading → 1, the
   R6 line → 1). Scoping matters: bare `grep -c "codex-companion task" "$PLAN"` returns **4** and
   `grep -ic "completion notification" "$PLAN"` returns **5** at base, from unrelated passages — an
@@ -214,6 +215,46 @@ Note that `$PLAN` is the **file being amended**, not this file.
   explicitly.
 - **Alternative considered:** Leaving the map implicit in task titles — a fresh implementer reading one
   task in isolation would not know which criterion it discharges.
+
+### F1: Task 3 Step 1's extract length stated as 13, measured 14
+
+- **Question:** The reviewer measured the `awk` extract that Task 3 Step 1 gates on and found `wc -l`
+  prints `14`, not the `13` this plan states in two places. Correct the number, and how?
+- **Choice:** Applied. Both sites now read 14, each naming what the extra line is: the "Gate design"
+  grounding says "returns exactly that step's 14 lines — its 13 content lines plus the trailing blank
+  separator before Step 5, which is what `wc -l` counts", and Task 3 Step 1's `Expected:` reads "the
+  extract is 14 lines (13 content lines plus the trailing blank separator before Step 5)".
+- **Grounding:** Re-measured independently before applying: the extract spans
+  `.claude/plans/2026-08-11-detached-reviewer-bridge.md:646-659` — 13 content lines (646–658) plus the
+  blank at 659 before `Step 5` at 660 — and `wc -l` prints `14`, `grep -c .` prints `9`. The reviewer's
+  cited evidence is exact. Effect is cosmetic (Step 1's real assertions are the two `grep -c` counts,
+  both of which print `0` as stated), but this plan's entire subject is documents whose stated numbers
+  were never measured, so its own numbers must measure.
+- **Alternative considered:** Writing a bare `14` without explaining the trailing blank — a later reader
+  counting the visible gate lines would get 13, re-derive the same confusion, and have no way to tell
+  which count was intended. Stating both numbers makes the gate self-checking.
+
+### D1: Task 2's `grep -A5` hunk-header gate was not itself run during PR #5
+
+- **Question:** The reviewer notes that Task 2's replacement gate
+  `grep -A5 "^diff --git a/tests/reviewer-detach\.test\.mjs"` is newly written, whereas the two
+  guard-message greps it sits beside were literally in the executed step. In an *executed* plan a
+  `Run:`/`Expected:` pair reads as a record that it was run. Should the amended text carry a clause
+  marking this gate as added post-hoc?
+- **Choice:** No edit. Disposition recorded here instead.
+- **Grounding:** The issue's own S2 instruction names the target as "the content-level checks that were
+  actually run (patch-content greps, **hunk inspection**)" — hunk inspection is explicitly among the
+  checks it attests were performed, and this gate is that check written in runnable form. The spec
+  dispositioned the same point (D-2) and the reviewer independently confirmed the command holds against
+  the shipped patch at `f99d7b9` (prints the `diff --git` / `new file mode 100644` / `@@ -0,0 +1,150 @@`
+  block, exit 0). Confidence on the finding was `medium` and the reviewer marked the suggestion optional
+  with no rework required.
+- **Alternative considered:** Adding the hedging clause. Rejected on two grounds: it would attach a
+  provenance caveat to one reworded gate while the neighbouring reworded gates carry none, which is
+  less truthful than uniform treatment, not more; and AC2 asks each gate to "name a content-level
+  check", not to annotate its own history. The amendment's provenance already lives in the issue, this
+  plan, and the `docs(plans):` commit — the precedent amendments `8cee250` and `59f3303` likewise add
+  no in-line meta-commentary.
 
 ---
 
@@ -521,7 +562,8 @@ cat /tmp/step4.txt
 grep -c 'codex-companion task' /tmp/step4.txt; grep -ci 'completion notification' /tmp/step4.txt
 ```
 
-Expected: FAIL — the extract is 13 lines carrying only **three** gates (`background`, the
+Expected: FAIL — the extract is 14 lines (13 content lines plus the trailing blank separator before
+Step 5) carrying only **three** gates (`background`, the
 process-failure-class negative, `Launch mechanics live solely`) plus a `--stat` gate whose `Expected:`
 line reads "exactly one file changed; the hunks touch only the Launch paragraph, the failure-class
 bullets, and the diff-review paragraph". Both counts print `0`: the two R6 prohibition greps are absent.
@@ -815,3 +857,33 @@ Expected: exactly one stat line, naming
   gates that now exist.
 - **Spec D-5 (what does not change)** → Global Constraints, plus Task 4 Step 5's explicit gate that no
   diff line touches D1, D2, `## Standards review (Phase 5)`, or `## Auto-resolved decisions`.
+
+---
+
+## Standards review provenance
+
+- **Reviewer:** Claude fallback (fresh `reviewer` agent, no inherited context, read-only toolset,
+  scratch simulation performed outside the worktree).
+- **Codex attempted first, and failed.** `codex.planReview.enabled` defaults to `true` and the
+  `codex-collaboration` `plan-review` leg ran: `codex-companion` was present at pre-flight, one
+  `codex:codex-reviewer` job was dispatched with the full packet, and it returned a single
+  `CODEX_REVIEW_FAILURE:` line. **Failure class:** dead worker — the task process exited without
+  producing any output and without recording an exit code, past its 840 000 ms budget; stderr held only
+  the thread-start/thread-ready/turn-started lines, stdout was empty, and the process was gone on
+  re-check, leaving an orphaned `app-server-broker` child. Not a concurrency or capability condition.
+  Per the skill's rule, Codex was **not** retried and exactly one native fallback reviewer was
+  dispatched with the same packet and the same read-only/output contract.
+- **Base SHA:** f99d7b9c45e336edebd60b88c63c7febfd7f1d96. **Plan commit reviewed:** a6a4b40.
+- **Focus:** none configured. **Standards layer:** `~/.agents/standards/the-bar.md`; no `stacks/` shard
+  applies to a Markdown-only change.
+- **Verdict:** approve. Blocking: none. Should fix: 1 (F1). Discussion: 2 (D1, D2).
+- **Counts:** accepted and applied 1 (F1 — extract length 13 → 14, corrected at both sites); accepted
+  without edit 1 (D1 — disposition recorded in `## Auto-resolved decisions`); confirmed, no action 1
+  (D2 — `just build` correctly recorded as a deliberate non-gate, since the amendment touches only
+  Markdown under `.claude/plans/` and nothing in the Nix eval graph reads it); rejected 0; deferred 0.
+- **Independently re-verified before dispositioning:** F1's line count, re-measured from the live
+  `.claude/plans/2026-08-11-detached-reviewer-bridge.md` at HEAD rather than taken from the report.
+- The reviewer additionally confirmed, and recorded as findings-free, the amendment's byte-level shape
+  (27 insertions / 22 deletions, all seven `-U0` hunk headers), Task 1's 150-line result diffing empty
+  against the patch's `tests/reviewer-detach.test.mjs`, the base failure of all five acceptance
+  criteria, the live SKILL.md grep exit statuses, and AC5's single-file scope.
