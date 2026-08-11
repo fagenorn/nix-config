@@ -133,6 +133,12 @@ bug, not an implementer's call:
 - **Grounding:** I reproduced all three figures to the byte by re-running the spec's dry-run from the spec's own fenced blocks (7,236→10,852, 6,845→7,765, 9,631→10,193, +5,098 total), so the exact number is known-reachable rather than an estimate. Under verbatim application there is no legitimate source of variance, and exactness makes the gate catch a dropped blank line — which the presence check alone would miss.
 - **Alternative considered:** A ±2% band, per the spec's softer "materially past its figure" phrasing. Rejected: a band tolerates exactly the whitespace slippage this gate exists to catch, and the spec's phrasing is guidance to a human reviewer, not a looser contract for a machine check.
 
+### Task-4 gate staleness: the Phase-5 provenance commit sits inside the verification range
+- **Question:** (Task 4 implementer, BLOCKED) Step 2's diffstat found four files (the fourth being this plan) and Step 5 found one non-`fix(agents):` commit (`73e955b`, the Phase-5 review-provenance amendment) — both literal expectations written before Phase 5 ran. Exempt the flow's own process commit, or rewrite history?
+- **Choice:** Amend both expectations to exempt flow-artifact commits (`docs(plans):`/`docs(specs):` touching only `.claude/plans/`/`.claude/specs/`, trailer still required); adjudicate Task 4 as passing on its already-recorded outputs, which satisfy the amended expectation (fourth file = this plan only; `73e955b` carries the trailer; the three task commits are well-formed).
+- **Grounding:** from-issue Phase 5 mandates recording provenance in the plan as a commit ("standing local-commit authorization"), and spec/plan commits ship with the branch by design (Phase 1). The gate's intent — no scope creep into non-skill files, no malformed task commits — is fully satisfied; the evals files the check exists to protect are untouched.
+- **Alternative considered:** Rewording/relocating `73e955b` via history rewrite — rejected: rewriting a legitimate process record to satisfy a stale literal expectation inverts the relationship between the gate and its intent.
+
 ### D1: commit-trailer precedent overstated
 - **Question:** (Phase-5 reviewer) "(matching `git log`)" is true only of this issue's own three prior commits; repository history before this issue uses `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 - **Choice:** Keep the `Claude Opus 5 (1M context)` trailer; reword the parenthetical to say it matches this flow's prior commits rather than implying a repo-wide convention.
@@ -530,9 +536,11 @@ git diff --stat "$BASE"..HEAD
 
 Expected: `10852`, `7765`, `10193`, total `28810`. `$BASE` resolves to this plan's own commit (derived
 by message rather than a fixed SHA, so review fixups between tasks cannot invalidate it). The diffstat
-lists **exactly three files**, all under `home/common/agent-skills/skills/`. Any fourth file — in
-particular `wayfind/evals/evals.json` or anything under `evals/fixture-repo/` — is out of scope and
-must be reverted.
+lists **exactly three files under `home/common/agent-skills/skills/`**, plus at most flow-artifact
+paths under `.claude/plans/` or `.claude/specs/` from the from-issue flow's own process commits (the
+Phase-5 provenance amendment lands in this range by construction). Any other file — in particular
+`wayfind/evals/evals.json` or anything under `evals/fixture-repo/` — is out of scope and must be
+reverted.
 
 - [ ] **Step 3: Invariants survive**
 
@@ -582,5 +590,7 @@ git log "$BASE"..HEAD --format='%s%n%(trailers:key=Co-Authored-By)'
 
 Expected: three `fix(agents): …` commits, one per target file (plus any review fixups from the
 between-task gates), every one of them carrying
-`Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`. A commit with no trailer, or a
-subject outside the `fix(agents):` type, is a finding.
+`Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`. Flow-artifact commits
+(`docs(plans):` / `docs(specs):` subjects touching only `.claude/plans/` or `.claude/specs/`) are
+exempt from the `fix(agents):` subject rule but still require the trailer. Any other commit with no
+trailer, or a subject outside these types, is a finding.
