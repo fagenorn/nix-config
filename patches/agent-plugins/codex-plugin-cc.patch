@@ -1080,14 +1080,15 @@ index 2da2349..ea3acd7 100644
 +}
 +
 diff --git a/plugins/codex/scripts/lib/tracked-jobs.mjs b/plugins/codex/scripts/lib/tracked-jobs.mjs
-index 9028690..8657b4a 100644
+index 9028690..4808c3f 100644
 --- a/plugins/codex/scripts/lib/tracked-jobs.mjs
 +++ b/plugins/codex/scripts/lib/tracked-jobs.mjs
-@@ -4 +4,2 @@ import process from "node:process";
+@@ -4 +4,3 @@ import process from "node:process";
 -import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 +import { readJobFile, resolveJobFile, resolveJobLogFile, updateJobRecord, upsertJob, writeJobFile } from "./state.mjs";
 +import { isProcessAlive } from "./process.mjs";
-@@ -103,11 +103,0 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
++import { cleanupReviewerRuntime } from "./runtime-home.mjs";
+@@ -103,11 +104,0 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
 -
 -    const jobFile = resolveJobFile(workspaceRoot, jobId);
 -    if (!fs.existsSync(jobFile)) {
@@ -1099,7 +1100,7 @@ index 9028690..8657b4a 100644
 -      ...storedJob,
 -      ...patch
 -    });
-@@ -204,0 +195,35 @@ export async function runTrackedJob(job, runner, options = {}) {
+@@ -204,0 +196,43 @@ export async function runTrackedJob(job, runner, options = {}) {
 +
 +function isWorkerProbeEligible(job) {
 +  return (job?.status === "queued" || job?.status === "running") && Number.isFinite(job?.pid);
@@ -1118,6 +1119,14 @@ index 9028690..8657b4a 100644
 +      // A concurrent writer (worker completion, cancel, another reader's
 +      // flip) reached the record first; keep what it wrote.
 +      return null;
++    }
++    if (current.kind === "plan-review") {
++      // Cleanup precedes the terminal write: if this process dies between the
++      // two, the record is still active and the next status read retries both.
++      // The reverse order would leave a terminal record with a permanent leak
++      // no reader would ever revisit. cleanupReviewerRuntime is idempotent, so
++      // a racing double-cleanup is harmless.
++      cleanupReviewerRuntime(workspaceRoot, current.id);
 +    }
 +    flipped = true;
 +    return {
@@ -1396,10 +1405,10 @@ index 0000000..3d8b555
 +});
 diff --git a/tests/liveness.test.mjs b/tests/liveness.test.mjs
 new file mode 100644
-index 0000000..a85af76
+index 0000000..60fefea
 --- /dev/null
 +++ b/tests/liveness.test.mjs
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,244 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1409,6 +1418,7 @@ index 0000000..a85af76
 +
 +import { makeTempDir, run } from "./helpers.mjs";
 +import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
++import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env, so pinning them here keeps every test in this file
@@ -1610,6 +1620,38 @@ index 0000000..a85af76
 +  assert.equal(payload.job.status, "failed");
 +  assert.equal(payload.job.errorMessage, DEAD_WORKER_MESSAGE(sleeper.pid));
 +  assert.equal(payload.waitTimedOut, false);
++});
++
++test("the dead-worker flip removes the reviewer runtime directory", async (t) => {
++  const workspace = makeTempDir();
++  const pid = await deadPid(t, workspace);
++  const jobId = "reviewer-dead";
++  const { jobFile } = seedJob(workspace, {
++    id: jobId,
++    kind: "plan-review",
++    kindLabel: "review",
++    title: "Isolated Plan Review",
++    workspaceRoot: workspace,
++    jobClass: "review",
++    summary: "Review the proposed plan",
++    write: false,
++    createdAt: "2026-08-01T10:00:00.000Z",
++    status: "running",
++    startedAt: "2026-08-01T10:00:01.000Z",
++    phase: "starting",
++    pid,
++    updatedAt: "2026-08-01T10:00:02.000Z"
++  });
++  const runtimeHome = resolveReviewerRuntimeHome(workspace, jobId);
++  fs.mkdirSync(runtimeHome, { recursive: true });
++  fs.writeFileSync(path.join(runtimeHome, "config.toml"), 'model = "reviewer"\n', "utf8");
++
++  const result = run("node", [SCRIPT, "status", jobId, "--json"], { cwd: workspace });
++
++  assert.equal(result.status, 0, result.stderr);
++  assert.equal(JSON.parse(result.stdout).job.status, "failed");
++  assert.equal(JSON.parse(fs.readFileSync(jobFile, "utf8")).status, "failed");
++  assert.equal(fs.existsSync(runtimeHome), false);
 +});
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
 index 8f27683..b0a4ff8 100644
