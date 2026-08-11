@@ -766,3 +766,20 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - R3/AC3 (no reviewer runtime after any terminal state): Task 3 (dead-worker path; success/timeout and cancel paths unchanged and pinned by existing tests).
 - R4/AC4 (full suite green incl. new behavior tests, no call-count assertions): every task's suite gate; final count 102/98/0/4.
 - R5/AC5 (patch regenerated, patchRevision 3→4, `just build` green): Task 1 (bump + build), every task (regen + build), Task 3 Step 6 (final determinism + closure check).
+
+---
+
+## Standards review (Phase 5)
+
+- **Reviewer:** native Claude `reviewer` agent (fresh context, read-only), dispatched directly — the Codex plan-review leg was not attempted (see Auto-resolved decision below). Fallback used: native, by pre-decision rather than after a timed-out Codex run.
+- **Base SHA:** 8cee250. **Plan commit reviewed:** 5318ac6.
+- **Verdict:** approve. Blocking: none. Should fix: none. Discussion: D1, D2.
+- **D1 (null-skip in `updateJobRecord` is silent):** disposition — accepted as advisory. The null case is a benign delete race (unparseable records are already dropped by `listJobs` upstream of selection); Task 1's implementer adds the one-line comment the reviewer suggested explaining why the null-skip is safe.
+- **D2 (`--wait` test does not pin `errorMessage`):** disposition — accepted; Task 2's implementer adds the single `errorMessage` assertion to the wait test. Same builder path is already pinned by Task 1; the assertion is corroboration, not new coverage.
+
+### Phase 5: Codex plan-review leg not attempted
+
+- **Question:** `codex.planReview` resolves enabled and `codex-collaboration` is available — should the Codex plan-review run first, with native fallback only after a real failure?
+- **Choice:** Dispatch the native fallback reviewer directly; do not launch the Codex leg.
+- **Grounding:** The Codex reviewer bridge is deterministically broken under its current instructions — every compliant run backgrounds `codex-companion` and ends its turn, and the harness kills the subagent's background process tree at completion (forensics: session `581dbb6b`, job `reviewer-msn70svo-bgjxnw`, killed 42 s in on 2026-08-10; the defect is the subject of issues #2/#3, and this very plan). codex-collaboration's own contract says "Never convert a missing runtime into a timed-out Codex attempt"; a known-defective runtime warrants the same treatment as a missing one.
+- **Alternative considered:** Run the Codex leg anyway and let the documented one-time native fallback fire after `CODEX_REVIEW_FAILURE` — rejected: ~35 minutes of wall-clock spent reproducing a failure this branch exists to fix, with an identical resulting reviewer.
