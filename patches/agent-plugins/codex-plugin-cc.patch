@@ -19,7 +19,7 @@ index 937a303..f418e48 100644
 -
 diff --git a/plugins/codex/agents/codex-reviewer.md b/plugins/codex/agents/codex-reviewer.md
 new file mode 100644
-index 0000000..ab0aa35
+index 0000000..ce1552b
 --- /dev/null
 +++ b/plugins/codex/agents/codex-reviewer.md
 @@ -0,0 +1,27 @@
@@ -660,6 +660,33 @@ index fead00c..aee30f2 100644
 @@ -1159 +1157 @@ export async function runAppServerTurn(cwd, options = {}) {
 -  });
 +  }, { reviewerJobId: options.reviewerJobId, env: options.env });
+diff --git a/plugins/codex/scripts/lib/job-control.mjs b/plugins/codex/scripts/lib/job-control.mjs
+index ad152c1..33034e4 100644
+--- a/plugins/codex/scripts/lib/job-control.mjs
++++ b/plugins/codex/scripts/lib/job-control.mjs
+@@ -5 +5 @@ import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+-import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
++import { reconcileWorkerLiveness, SESSION_ID_ENV } from "./tracked-jobs.mjs";
+@@ -252 +252 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
+-    job: enrichJob(selected, { maxProgressLines: options.maxProgressLines })
++    job: enrichJob(reconcileWorkerLiveness(workspaceRoot, selected), { maxProgressLines: options.maxProgressLines })
+diff --git a/plugins/codex/scripts/lib/process.mjs b/plugins/codex/scripts/lib/process.mjs
+index dd8fc37..365f856 100644
+--- a/plugins/codex/scripts/lib/process.mjs
++++ b/plugins/codex/scripts/lib/process.mjs
+@@ -135,0 +136,12 @@ export function formatCommandFailure(result) {
++
++export function isProcessAlive(pid) {
++  // Only ESRCH proves absence. Success or EPERM (a live process we may not
++  // signal) or any other error counts as alive: a wrong "alive" degrades to
++  // the pre-probe behavior, a wrong "dead" would fabricate a failure.
++  try {
++    process.kill(pid, 0);
++    return true;
++  } catch (error) {
++    return error?.code !== "ESRCH";
++  }
++}
 diff --git a/plugins/codex/scripts/lib/runtime-home.mjs b/plugins/codex/scripts/lib/runtime-home.mjs
 new file mode 100644
 index 0000000..00ae521
@@ -769,7 +796,7 @@ index 0000000..00ae521
 +  fs.rmSync(runtimeHome, { recursive: true, force: true });
 +}
 diff --git a/plugins/codex/scripts/lib/state.mjs b/plugins/codex/scripts/lib/state.mjs
-index 2da2349..aeced17 100644
+index 2da2349..ea3acd7 100644
 --- a/plugins/codex/scripts/lib/state.mjs
 +++ b/plugins/codex/scripts/lib/state.mjs
 @@ -13,0 +14,4 @@ const MAX_JOBS = 50;
@@ -955,10 +982,34 @@ index 2da2349..aeced17 100644
 +    const next = {
 +      createdAt: existing.createdAt ?? timestamp,
 +      ...existing,
-@@ -145,0 +255,2 @@ export function upsertJob(cwd, jobPatch) {
+@@ -145,0 +255,26 @@ export function upsertJob(cwd, jobPatch) {
 +    atomicWriteFile(jobFile, `${JSON.stringify(next, null, 2)}\n`);
 +    return next;
-@@ -150 +261,14 @@ export function listJobs(cwd) {
++  });
++}
++
++export function updateJobRecord(cwd, jobId, mutate) {
++  const jobFile = resolveJobFile(cwd, jobId);
++  return withMetadataLock(`${jobFile}.lock`, () => {
++    let current = null;
++    if (fs.existsSync(jobFile)) {
++      try {
++        // Null on parse failure is safe: listJobs already drops unparseable
++        // records before selection, so null here only means a benign delete
++        // race, where returning the in-memory job is correct.
++        current = readJobFile(jobFile);
++      } catch {
++        current = null;
++      }
++    }
++    const next = mutate(current);
++    if (next == null) {
++      return current;
++    }
++    const written = { ...next, updatedAt: nowIso() };
++    atomicWriteFile(jobFile, `${JSON.stringify(written, null, 2)}\n`);
++    return written;
+@@ -150 +285,14 @@ export function listJobs(cwd) {
 -  return loadState(cwd).jobs;
 +  ensureStateDir(cwd);
 +  migrateLegacyJobIndex(cwd);
@@ -974,12 +1025,12 @@ index 2da2349..aeced17 100644
 +    }
 +  }
 +  return pruneJobs(jobs);
-@@ -169 +293,3 @@ export function writeJobFile(cwd, jobId, payload) {
+@@ -169 +317,3 @@ export function writeJobFile(cwd, jobId, payload) {
 -  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 +  withMetadataLock(`${jobFile}.lock`, () => {
 +    atomicWriteFile(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
 +  });
-@@ -182,0 +309,36 @@ function removeJobFile(jobFile) {
+@@ -182,0 +333,36 @@ function removeJobFile(jobFile) {
 +export function removeJob(cwd, jobId) {
 +  return removeJobFromStateDir(resolveStateDir(cwd), jobId);
 +}
@@ -1017,10 +1068,14 @@ index 2da2349..aeced17 100644
 +}
 +
 diff --git a/plugins/codex/scripts/lib/tracked-jobs.mjs b/plugins/codex/scripts/lib/tracked-jobs.mjs
-index 9028690..2cfd3be 100644
+index 9028690..8657b4a 100644
 --- a/plugins/codex/scripts/lib/tracked-jobs.mjs
 +++ b/plugins/codex/scripts/lib/tracked-jobs.mjs
-@@ -103,11 +102,0 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
+@@ -4 +4,2 @@ import process from "node:process";
+-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
++import { readJobFile, resolveJobFile, resolveJobLogFile, updateJobRecord, upsertJob, writeJobFile } from "./state.mjs";
++import { isProcessAlive } from "./process.mjs";
+@@ -103,11 +103,0 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
 -
 -    const jobFile = resolveJobFile(workspaceRoot, jobId);
 -    if (!fs.existsSync(jobFile)) {
@@ -1032,6 +1087,42 @@ index 9028690..2cfd3be 100644
 -      ...storedJob,
 -      ...patch
 -    });
+@@ -204,0 +195,35 @@ export async function runTrackedJob(job, runner, options = {}) {
++
++function isWorkerProbeEligible(job) {
++  return (job?.status === "queued" || job?.status === "running") && Number.isFinite(job?.pid);
++}
++
++export function reconcileWorkerLiveness(workspaceRoot, job) {
++  if (!isWorkerProbeEligible(job) || isProcessAlive(job.pid)) {
++    return job;
++  }
++
++  const probedPid = job.pid;
++  const errorMessage = `Worker process ${probedPid} exited without recording a result.`;
++  let flipped = false;
++  const reconciled = updateJobRecord(workspaceRoot, job.id, (current) => {
++    if (!isWorkerProbeEligible(current) || current.pid !== probedPid) {
++      // A concurrent writer (worker completion, cancel, another reader's
++      // flip) reached the record first; keep what it wrote.
++      return null;
++    }
++    flipped = true;
++    return {
++      ...current,
++      status: "failed",
++      phase: "failed",
++      errorMessage,
++      pid: null,
++      completedAt: nowIso()
++    };
++  });
++
++  if (flipped) {
++    appendLogLine(reconciled.logFile ?? job.logFile ?? null, errorMessage);
++  }
++  return reconciled ?? job;
++}
 diff --git a/plugins/codex/scripts/session-lifecycle-hook.mjs b/plugins/codex/scripts/session-lifecycle-hook.mjs
 index 778571e..e601a80 100644
 --- a/plugins/codex/scripts/session-lifecycle-hook.mjs
@@ -1290,6 +1381,175 @@ index 0000000..3d8b555
 +    const stateFile = resolveStateFile(workspace);
 +    assert.equal(fs.existsSync(stateFile), false);
 +  });
++});
+diff --git a/tests/liveness.test.mjs b/tests/liveness.test.mjs
+new file mode 100644
+index 0000000..154b929
+--- /dev/null
++++ b/tests/liveness.test.mjs
+@@ -0,0 +1,163 @@
++import fs from "node:fs";
++import path from "node:path";
++import test from "node:test";
++import assert from "node:assert/strict";
++import { spawn } from "node:child_process";
++import { fileURLToPath } from "node:url";
++
++import { makeTempDir, run } from "./helpers.mjs";
++import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
++
++// State resolvers read these variables at call time, and spawned CLI children
++// inherit process.env, so pinning them here keeps every test in this file
++// hermetic even when the suite runs inside a live Claude Code session.
++// node --test runs each file in its own process; nothing leaks across files.
++process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-liveness-data-");
++delete process.env.CODEX_COMPANION_SESSION_ID;
++delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
++const DEAD_WORKER_MESSAGE = (pid) => `Worker process ${pid} exited without recording a result.`;
++
++function spawnSleeper(t, cwd) {
++  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
++    cwd,
++    detached: true,
++    stdio: "ignore"
++  });
++  sleeper.unref();
++  t.after(() => {
++    try {
++      process.kill(-sleeper.pid, "SIGKILL");
++    } catch {
++      try {
++        process.kill(sleeper.pid, "SIGKILL");
++      } catch {
++        // Already gone.
++      }
++    }
++  });
++  return sleeper;
++}
++
++function isPidGone(pid) {
++  try {
++    process.kill(pid, 0);
++    return false;
++  } catch (error) {
++    return error?.code === "ESRCH";
++  }
++}
++
++async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 25 } = {}) {
++  const start = Date.now();
++  while (Date.now() - start < timeoutMs) {
++    if (await predicate()) {
++      return;
++    }
++    await new Promise((resolve) => setTimeout(resolve, intervalMs));
++  }
++  throw new Error("Timed out waiting for condition.");
++}
++
++async function deadPid(t, cwd) {
++  const sleeper = spawnSleeper(t, cwd);
++  process.kill(sleeper.pid, "SIGKILL");
++  await waitFor(() => isPidGone(sleeper.pid));
++  return sleeper.pid;
++}
++
++function seedJob(workspace, record) {
++  const jobsDir = path.join(resolveStateDir(workspace), "jobs");
++  fs.mkdirSync(jobsDir, { recursive: true });
++  const logFile = path.join(jobsDir, `${record.id}.log`);
++  fs.writeFileSync(logFile, `[2026-08-01T10:00:00.000Z] Starting ${record.title}.\n`, "utf8");
++  const jobFile = path.join(jobsDir, `${record.id}.json`);
++  fs.writeFileSync(jobFile, `${JSON.stringify({ ...record, logFile }, null, 2)}\n`, "utf8");
++  return { jobFile, logFile };
++}
++
++function runningTaskRecord(workspace, id, pid) {
++  return {
++    id,
++    kind: "task",
++    kindLabel: "rescue",
++    title: "Codex Task",
++    workspaceRoot: workspace,
++    jobClass: "task",
++    summary: "Investigate flaky test",
++    write: false,
++    createdAt: "2026-08-01T10:00:00.000Z",
++    status: "running",
++    startedAt: "2026-08-01T10:00:01.000Z",
++    phase: "starting",
++    pid,
++    updatedAt: "2026-08-01T10:00:02.000Z"
++  };
++}
++
++test("a running job whose worker pid is dead is flipped to failed by one status read", async (t) => {
++  const workspace = makeTempDir();
++  const pid = await deadPid(t, workspace);
++  const { jobFile, logFile } = seedJob(workspace, runningTaskRecord(workspace, "task-dead", pid));
++
++  const result = run("node", [SCRIPT, "status", "task-dead", "--json"], { cwd: workspace });
++
++  assert.equal(result.status, 0, result.stderr);
++  const payload = JSON.parse(result.stdout);
++  assert.equal(payload.job.status, "failed");
++  assert.equal(payload.job.errorMessage, DEAD_WORKER_MESSAGE(pid));
++
++  const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
++  assert.equal(stored.status, "failed");
++  assert.equal(stored.phase, "failed");
++  assert.equal(stored.pid, null);
++  assert.ok(stored.completedAt);
++  assert.ok(fs.readFileSync(logFile, "utf8").includes(DEAD_WORKER_MESSAGE(pid)));
++});
++
++test("a queued job whose worker died before its first write is flipped to failed", async (t) => {
++  const workspace = makeTempDir();
++  const pid = await deadPid(t, workspace);
++  const { jobFile } = seedJob(workspace, {
++    id: "task-queued-dead",
++    kind: "task",
++    kindLabel: "rescue",
++    title: "Codex Task",
++    workspaceRoot: workspace,
++    jobClass: "task",
++    summary: "Investigate flaky test",
++    write: false,
++    createdAt: "2026-08-01T10:00:00.000Z",
++    status: "queued",
++    phase: "queued",
++    pid,
++    request: { cwd: workspace, prompt: "Investigate flaky test", write: false },
++    updatedAt: "2026-08-01T10:00:01.000Z"
++  });
++
++  const result = run("node", [SCRIPT, "status", "task-queued-dead", "--json"], { cwd: workspace });
++
++  assert.equal(result.status, 0, result.stderr);
++  const payload = JSON.parse(result.stdout);
++  assert.equal(payload.job.status, "failed");
++  assert.equal(payload.job.errorMessage, DEAD_WORKER_MESSAGE(pid));
++  assert.equal(JSON.parse(fs.readFileSync(jobFile, "utf8")).status, "failed");
++  assert.equal(JSON.parse(fs.readFileSync(jobFile, "utf8")).pid, null);
++});
++
++test("a running job with a live worker pid is left untouched", (t) => {
++  const workspace = makeTempDir();
++  const sleeper = spawnSleeper(t, workspace);
++  const { jobFile } = seedJob(workspace, runningTaskRecord(workspace, "task-alive", sleeper.pid));
++  const seededBytes = fs.readFileSync(jobFile, "utf8");
++
++  const result = run("node", [SCRIPT, "status", "task-alive", "--json"], { cwd: workspace });
++
++  assert.equal(result.status, 0, result.stderr);
++  const payload = JSON.parse(result.stdout);
++  assert.equal(payload.job.status, "running");
++  assert.equal(payload.job.errorMessage, undefined);
++  assert.equal(fs.readFileSync(jobFile, "utf8"), seededBytes);
 +});
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
 index 8f27683..b0a4ff8 100644
