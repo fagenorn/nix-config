@@ -123,6 +123,8 @@ git commit -m "feat: add specific feature"
 
 **Every task carries at least one verification line that could fail.** Name the command and the observation that would show the task incomplete, and confirm that observation holds at the commit the implementer starts from. A criterion already true at the base commit is how an implementer "completes" a no-op.
 
+**Scope every gate to the files the plan owns.** Give diffs a pathspec (`git diff --stat BASE..HEAD -- <the paths named in the plan's Files: blocks>`) or assert against file content directly; never write a raw commit-range expectation — "exactly three files changed", "every commit in the range is a `feat:`". The range is not the plan's to grade: the plan and spec files land in it, so do the caller's `docs(plans):`/`docs(specs):` artifact commits, and a ship-time sync merge pulls in everything the integration branch advanced by — the gate then reads another issue's shipped work as scope creep and demands reverting it. Where commit shape genuinely is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`; the sync merge is unreachable from the integration branch, so `^` alone leaves it in) and name the artifact and review-fixup subjects as exempt.
+
 ## No placeholders
 
 These are plan failures — never write them:
@@ -141,7 +143,7 @@ Read the finished plan against the spec with fresh eyes. This is your own checkl
 1. **Spec coverage** — for each requirement in the spec, name the task that implements it. List gaps and add tasks for them.
 2. **Placeholder scan** — search for the patterns above and fix what you find.
 3. **Type consistency** — do the signatures, method names and property names used in later tasks match what earlier tasks define? `clearLayers()` in Task 3 and `clearFullLayers()` in Task 7 is a bug.
-4. **Falsifiability** — every task has a verification line that can fail.
+4. **Falsifiability and gate scope** — every task has a verification line that can fail, and no gate asserts over an unscoped commit range.
 
 Fix inline and move on; no re-review pass.
 
