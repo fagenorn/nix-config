@@ -417,7 +417,9 @@ for name, got, want in checks:
 print('FAILURES:', bad)
 sys.exit(1 if bad else 0)
 PY
-echo "exit=$?"
+rc=$?
+echo "exit=$rc"
+[ "$rc" -eq 0 ]
 ```
 
 Expected: five `PASS` lines, `FAILURES: 0`, `exit=0`.
@@ -554,7 +556,9 @@ for name, got, want in checks:
 print('FAILURES:', bad)
 sys.exit(1 if bad else 0)
 PY
-echo "exit=$?"
+rc=$?
+echo "exit=$rc"
+[ "$rc" -eq 0 ]
 ```
 
 Expected: five `PASS` lines, `FAILURES: 0`, `exit=0`.
@@ -574,16 +578,19 @@ echo "-- sdd/SKILL.md: the verdict is 'no edit', so this must be empty --"
 git diff --stat origin/main...HEAD -- home/common/agent-skills/skills/sdd/SKILL.md
 echo "-- writing-plans/SKILL.md: this branch's own change --"
 git diff --stat origin/main...HEAD -- home/common/agent-skills/skills/writing-plans/SKILL.md
-echo "-- every skill file this branch touched --"
-git diff --name-only origin/main...HEAD -- home/common/agent-skills/skills/
+echo "-- anything changed outside the allowed set (must be empty) --"
+git diff --name-only origin/main...HEAD -- ':(exclude)home/common/agent-skills/skills/writing-plans/SKILL.md' ':(exclude).claude/plans' ':(exclude).claude/specs'
 echo "-- merge-base the three-dot form resolves to --"
 git merge-base origin/main HEAD
 ```
 
 Expected: the first command prints **nothing** — zero changed lines in `sdd/SKILL.md`, satisfying spec
 requirement **R8**'s recorded verdict. The second prints `1 file changed, 3 insertions(+), 1
-deletion(-)`. The third prints exactly one path,
-`home/common/agent-skills/skills/writing-plans/SKILL.md`, satisfying **R9**. The fourth prints a SHA
+deletion(-)`. The third prints **nothing** — the excluded pathspecs are the allowed set (the one file
+this plan owns, plus the flow's own plan and spec artifacts, which land in the range regardless of what
+this plan does), and the three-dot form already keeps the sync merge's commits out of the range by
+construction, so an empty result here means nothing else changed anywhere in the tree, satisfying **R9**
+honestly rather than by restricting the search to a directory first. The fourth prints a SHA
 (`165a3b0…` before any sync merge; the merged tip afterwards) — it is context for reading the three
 diffs, not a value to assert.
 
@@ -610,7 +617,9 @@ Run:
 
 ```bash
 just build
-echo "exit=$?"
+rc=$?
+echo "exit=$rc"
+[ "$rc" -eq 0 ]
 ```
 
 Expected: `exit=0`. The run takes several minutes. One pre-existing evaluation warning is normal and is
@@ -635,19 +644,20 @@ Read the landed text and confirm each of the spec's requirements maps to it. Rep
 | **R6** — register and layout preserved | Both blocks copied verbatim from the spec; proven by Step 1's exact substring match and the 152-line count |
 | **R7** — addition ≤ 1,000 bytes | 986 (6,203 → 7,189), proven by Step 1's byte check |
 | **R8** — recorded verdict on `sdd/SKILL.md` | The spec's verdict section; enforced by Step 2's empty diff |
-| **R9** — no other file edited | Step 2's `--name-only` output, one path |
+| **R9** — no other file edited | Step 2's exclusion diff over `origin/main...HEAD` (everything outside the owned file plus the plan/spec artifacts), empty output |
 
 Confirm the two claims that only reading can settle, and quote the evidence:
 
 ```bash
-sed -n '124,127p' home/common/agent-skills/skills/writing-plans/SKILL.md
+sed -n '124,128p' home/common/agent-skills/skills/writing-plans/SKILL.md
 sed -n '137,147p' home/common/agent-skills/skills/writing-plans/SKILL.md
 ```
 
 Expected: the first prints the falsifiability paragraph, an empty line, the new `**Scope every gate to
-the files the plan owns.**` paragraph as **one unwrapped line**, and an empty line before
-`## No placeholders` — confirming the rule sits at the end of `## Task structure` and did not get
-re-flowed. The second prints the `## Self-review` block with four numbered items, item 4 reading
+the files the plan owns.**` paragraph as **one unwrapped line**, an empty line, and the
+`## No placeholders` heading itself on line 128 — confirming the rule sits at the end of `## Task
+structure` and did not get re-flowed. The second prints the `## Self-review` block with four numbered
+items, item 4 reading
 `4. **Falsifiability and gate scope** — every task has a verification line that can fail, and no gate
 asserts over an unscoped commit range.` — confirming the checklist still has four items, not five.
 
