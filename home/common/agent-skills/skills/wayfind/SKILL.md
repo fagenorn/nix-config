@@ -100,7 +100,7 @@ If you have to stop mid-resolution, park state in the ticket before you go — w
 still open, what you were about to do next — so the next sitting resumes from the ticket instead of
 from a transcript it no longer has.
 
-1. Load the map low-res. Under `kind: none` that is the session's only read of it: record into the copy you already loaded rather than re-reading before you write, and anchor the edit under its section heading so a concurrent session's line survives yours. On a shared tracker, re-read the body just before updating it — other sessions do land there.
+1. Load the map low-res. Under `kind: none` that is the session's only read of it (compression excepted — a whole-body rewrite starts from a fresh read, per the body's ~6k budget): record into the copy you already loaded rather than re-reading before you write, and anchor the edit under its section heading so a concurrent session's line survives yours. On a shared tracker, re-read the body just before updating it — other sessions do land there.
 2. Choose: the user's named ticket, else the first frontier ticket. **Claim it.**
 3. Resolve it, zooming into related/closed ticket bodies on demand; use the skills the ticket type and the map's Notes name. Never resolve more than one ticket per session (research dispatches excepted).
 4. Record: answer as a resolution comment, close the ticket, append its gist to Decisions so far — one line, ≤160 characters, links exempt. If that push takes the body over its ~6k budget, compress it back under now, before you finish.

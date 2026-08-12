@@ -33,7 +33,7 @@ Copied from the spec and the issue; every task's requirements implicitly include
 
   | File | Before | After | Delta |
   |------|-------:|------:|------:|
-  | `wayfind/SKILL.md` | 7,236 | **11,083** | +3,847 |
+  | `wayfind/SKILL.md` | 7,236 | **11,183** | +3,947 |
   | `grill-with-docs/SKILL.md` | 6,845 | **7,770** | +925 |
   | `doc-grounded-questions/SKILL.md` | 9,631 | **10,193** | +562 |
 
@@ -94,7 +94,7 @@ bug, not an implementer's call:
 ### Verbatim application, including the spec's line wrapping
 - **Question:** The spec hard-wraps the AFTER text for P1b, P7, P8 and P5 at ~95 characters, but `wayfind/SKILL.md` and `grill-with-docs/SKILL.md` write every paragraph as one long unwrapped line. Copy the spec's wrapping, or re-flow to each file's house style?
 - **Choice:** Copy verbatim, wrapping included. Stated as a Global Constraint.
-- **Grounding:** The spec's Verification section makes verbatim application the contract: "the implementer can apply them as literal string replacements without re-deriving anchors." The difference is invisible — a single newline inside a Markdown paragraph renders identically to a space, and it is byte-neutral (one newline replaces one space), so the measured byte figures hold either way; I confirmed this by re-running the dry-run and reproducing 11,083 / 7,770 / 10,193 exactly. The issue's "read like the surrounding skill prose" constraint is about register (dense, imperative, rationale-bearing), not line width.
+- **Grounding:** The spec's Verification section makes verbatim application the contract: "the implementer can apply them as literal string replacements without re-deriving anchors." The difference is invisible — a single newline inside a Markdown paragraph renders identically to a space, and it is byte-neutral (one newline replaces one space), so the measured byte figures hold either way; I confirmed this by re-running the dry-run and reproducing 11,183 / 7,770 / 10,193 exactly. The issue's "read like the surrounding skill prose" constraint is about register (dense, imperative, rationale-bearing), not line width.
 - **Alternative considered:** Re-flowing the four inserted blocks to unwrapped single lines for house-style consistency. Rejected: it asks an implementer to transform text mid-copy, which is precisely where transcription drift enters, and it would break the `verify-edits.py` gate that makes this change checkable at all. If the mixed wrapping ever grates, it is a cosmetic follow-up on a file already committed.
 
 ### Gate design: derive checks from the spec, don't transcribe probes into the plan
@@ -128,9 +128,9 @@ bug, not an implementer's call:
 - **Alternative considered:** An empty `--allow-empty` marker commit. Rejected as noise in the history of a five-thousand-byte prose change.
 
 ### Byte counts asserted as exact equality
-- **Question:** Should the `wc -c` gate be exact (`= 11,083`) or a tolerance band?
+- **Question:** Should the `wc -c` gate be exact (`= 11,183`) or a tolerance band?
 - **Choice:** Exact equality, for all three files.
-- **Grounding:** I reproduced all three figures to the byte by re-running the spec's dry-run from the spec's own fenced blocks (7,236→11,083, 6,845→7,770, 9,631→10,193, +5,334 total), so the exact number is known-reachable rather than an estimate. Under verbatim application there is no legitimate source of variance, and exactness makes the gate catch a dropped blank line — which the presence check alone would miss.
+- **Grounding:** I reproduced all three figures to the byte by re-running the spec's dry-run from the spec's own fenced blocks (7,236→11,183, 6,845→7,770, 9,631→10,193, +5,434 total), so the exact number is known-reachable rather than an estimate. Under verbatim application there is no legitimate source of variance, and exactness makes the gate catch a dropped blank line — which the presence check alone would miss.
 - **Alternative considered:** A ±2% band, per the spec's softer "materially past its figure" phrasing. Rejected: a band tolerates exactly the whitespace slippage this gate exists to catch, and the spec's phrasing is guidance to a human reviewer, not a looser contract for a machine check.
 
 ### Task-4 gate staleness: the Phase-5 provenance commit sits inside the verification range
@@ -157,6 +157,12 @@ bug, not an implementer's call:
 - **Grounding:** The reviewer's own assessment: the file's existing register says "close the ticket" without spelling out `gh` invocations, and the tracker-bindings paragraph already establishes how generic actions map onto both tracker kinds.
 - **Alternative considered:** Adding tracker-explicit close text — rejected: it would break the file's abstraction level to service a low-confidence nit, and the spec records the rationale for readers who need it.
 
+### D4: step 1 read absolutely while P1b named compression an exception (ship-time)
+- **Question:** (ship-issue Phase-5 conformance reviewer, Important) `wayfind/SKILL.md` step 1 said `kind: none` gives "the session's only read of it" with no exception, while P1b's inserted paragraph names a whole-body compression rewrite as the one exception. Step 4 is where compression fires, so an agent reading step 1 literally would rewrite from the stale in-context copy — the concurrent-append loss P1b exists to prevent. The C1 fix wave amended P1b but not P3b.
+- **Choice:** Applied a parenthetical to step 1 in both the live file and the spec's P3b AFTER fence: `(compression excepted — a whole-body rewrite starts from a fresh read, per the body's ~6k budget)`. Byte figures re-measured and swept through spec and plan: `wayfind/SKILL.md` 11,083 → **11,183** (+3,947, +54%), three-file total 29,046 → **29,146**, dry-run delta +5,334 → **+5,434**.
+- **Grounding:** This is the same defect class C1 was raised for, one paragraph away and unfixed; the two clauses reconciled only if an agent recalled a paragraph fifty lines earlier at the exact moment it was overwriting the body. Editing the shipped text also obliged updating the spec's fence — the spec claims byte-exact application, so leaving the fence stale would have made that claim false and broken the plan's `wc -c` gate for anyone re-running it. The figure sweep subsumes parked residual NB1 (spec said "+50%" where the reproduced figure was +53%): correcting neighbouring numbers while leaving a known-wrong one adjacent is worse than the original parked ruling.
+- **Alternative considered:** Deferring to a follow-up issue, consistent with the reviewer's own `defer` verdict on the *spec-prose* halves (NB1/NB2). Rejected for the live-file half: the parked rulings covered prose that no agent executes, whereas this clause is the executed instruction, and the failure mode is silent data loss in a shared map rather than a cosmetic inconsistency.
+
 ---
 
 ### Task 1: `wayfind/SKILL.md` — ten edits (P1, P2, P3, P7, P8, P9)
@@ -173,7 +179,7 @@ bug, not an implementer's call:
   2, 3 and 4 — invoked as `python3 "$(git rev-parse --git-dir)/verify-edits.py" [skill-name …]`, where
   each argument is a skill directory name (`wayfind`, `grill-with-docs`, `doc-grounded-questions`) and
   no argument means all three. Exit 0 = every checked edit present verbatim. Also produces
-  `wayfind/SKILL.md` at exactly 11,083 bytes.
+  `wayfind/SKILL.md` at exactly 11,183 bytes.
 
 **The ten edits, and the spec section carrying each one.** Apply the BEFORE→AFTER blocks from these
 sections verbatim; this plan does not reproduce them.
@@ -294,7 +300,7 @@ echo "-- P1b sits between the map fence and ## Tickets (want 2) --"
 awk '/^## The map/,/^## Tickets/' $W | grep -cE '^(Every line of this body|The body.s budget)'
 ```
 
-Expected, in order: `10/10 edits present verbatim.`; `11083` bytes; four `1`s for the invariants; then
+Expected, in order: `10/10 edits present verbatim.`; `11183` bytes; four `1`s for the invariants; then
 `1`, `0`, `1`, `1` for the gotchas; then `**One sitting per ticket.**` followed by `1. ` through `6. `
 in ascending order; then `2`.
 
@@ -313,7 +319,7 @@ dropped (P3), one-sitting-per-ticket discipline (P8), and an explicit map
 completion state and step 6 (P9).
 
 Applied verbatim from .claude/specs/2026-08-10-wayfind-skill-hardening-design.md;
-7,236 -> 11,083 bytes as measured there. All four invariants unchanged.
+7,236 -> 11,183 bytes as measured there. All four invariants unchanged.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -534,7 +540,7 @@ echo "base = $BASE"
 git diff --stat "$BASE"..HEAD
 ```
 
-Expected: `11083`, `7770`, `10193`, total `29046`. `$BASE` resolves to this plan's own commit (derived
+Expected: `11183`, `7770`, `10193`, total `29146`. `$BASE` resolves to this plan's own commit (derived
 by message rather than a fixed SHA, so review fixups between tasks cannot invalidate it). The diffstat
 lists **exactly three files under `home/common/agent-skills/skills/`**, plus at most flow-artifact
 paths under `.claude/plans/` or `.claude/specs/` from the from-issue flow's own process commits (the
