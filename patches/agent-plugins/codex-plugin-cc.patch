@@ -224,7 +224,7 @@ index 1954274..a40434e 100644
 +        requestQueue.push({ socket, message });
 +        drainQueue();
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..1a14bbc 100644
+index 83df468..92725c9 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
 @@ -50,0 +51 @@ import {
@@ -315,15 +315,34 @@ index 83df468..1a14bbc 100644
 +    stdio: ["ignore", logFd, logFd],
 @@ -680,0 +700 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  fs.closeSync(logFd);
-@@ -688 +708 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -683,0 +704,15 @@ function spawnDetachedTaskWorker(cwd, jobId) {
++function resolveJobDeadline(createdAt, timeoutMs) {
++  // The issue's definition: enqueue time + timeout, and a deadline exists only
++  // when a timeout does. Measured from the record's own createdAt rather than a
++  // fresh Date.now(), so the field is verifiable from the record alone. The
++  // worker's internal Promise.race budget starts later (after spawn, runtime
++  // seeding and app-server connect), so a healthy job can read as overdue for
++  // that margin — bounded, self-correcting, and harmless because the signal is
++  // advisory and is defined as the deadline recorded in the record.
++  const createdMs = Date.parse(createdAt ?? "");
++  if (!Number.isFinite(createdMs) || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
++    return null;
++  }
++  return new Date(createdMs + timeoutMs).toISOString();
++}
++
+@@ -688 +723,2 @@ function enqueueBackgroundTask(cwd, job, request) {
 -  const child = spawnDetachedTaskWorker(cwd, job.id);
 +  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
-@@ -764,2 +784,2 @@ async function handleTask(argv) {
++  const deadlineAt = resolveJobDeadline(job.createdAt, request.timeoutMs);
+@@ -694,0 +731 @@ function enqueueBackgroundTask(cwd, job, request) {
++    ...(deadlineAt ? { deadlineAt } : {}),
+@@ -764,2 +801,2 @@ async function handleTask(argv) {
 -    valueOptions: ["model", "effort", "cwd", "prompt-file"],
 -    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
 +    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms"],
 +    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "reviewer"],
-@@ -782,0 +803,8 @@ async function handleTask(argv) {
+@@ -782,0 +820,8 @@ async function handleTask(argv) {
 +  const reviewer = Boolean(options.reviewer);
 +  if (reviewer && (write || resumeLast)) {
 +    throw new Error("Reviewer jobs must be fresh and read-only.");
@@ -332,29 +351,29 @@ index 83df468..1a14bbc 100644
 +  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
 +    throw new Error("--timeout-ms must be a positive number.");
 +  }
-@@ -785 +813,2 @@ async function handleTask(argv) {
+@@ -785 +830,2 @@ async function handleTask(argv) {
 -    resumeLast
 +    resumeLast,
 +    reviewer
-@@ -792 +821 @@ async function handleTask(argv) {
+@@ -792 +838 @@ async function handleTask(argv) {
 -    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
-@@ -799,0 +829,2 @@ async function handleTask(argv) {
+@@ -799,0 +846,2 @@ async function handleTask(argv) {
 +      reviewer,
 +      timeoutMs,
-@@ -807 +838 @@ async function handleTask(argv) {
+@@ -807 +855 @@ async function handleTask(argv) {
 -  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
-@@ -817,0 +849,2 @@ async function handleTask(argv) {
+@@ -817,0 +866,2 @@ async function handleTask(argv) {
 +        reviewer,
 +        timeoutMs,
-@@ -976 +1009,4 @@ async function handleCancel(argv) {
+@@ -976 +1026,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
 +    job.kind === "plan-review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1023,3 @@ async function handleCancel(argv) {
+@@ -986,0 +1040,3 @@ async function handleCancel(argv) {
 +  if (job.kind === "plan-review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
@@ -714,12 +733,12 @@ index fead00c..aee30f2 100644
 -  });
 +  }, { reviewerJobId: options.reviewerJobId, env: options.env });
 diff --git a/plugins/codex/scripts/lib/job-control.mjs b/plugins/codex/scripts/lib/job-control.mjs
-index ad152c1..57af9e3 100644
+index ad152c1..706183d 100644
 --- a/plugins/codex/scripts/lib/job-control.mjs
 +++ b/plugins/codex/scripts/lib/job-control.mjs
 @@ -5 +5 @@ import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
 -import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
-+import { reconcileWorkerLiveness, SESSION_ID_ENV } from "./tracked-jobs.mjs";
++import { isActiveJobStatus, isTerminalJobStatus, reconcileWorkerLiveness, SESSION_ID_ENV } from "./tracked-jobs.mjs";
 @@ -48,0 +49,9 @@ function getJobTypeLabel(job) {
 +// Only the runtime's own progress lines may reach the status surface. Every line
 +// appendLogLine/appendLogBlock writes starts with `[${nowIso()}] `, so a full
@@ -733,7 +752,26 @@ index ad152c1..57af9e3 100644
 @@ -71 +80 @@ export function readJobProgressPreview(logFile, maxLines = DEFAULT_MAX_PROGRESS_
 -    .filter((line) => line.startsWith("["))
 +    .filter((line) => LOG_LINE_PREFIX_PATTERN.test(line))
-@@ -216 +225,10 @@ export function buildStatusSnapshot(cwd, options = {}) {
+@@ -162,0 +172,8 @@ export function enrichJob(job, options = {}) {
++  // Read as deadline-to-now rather than start-to-now: the same end-minus-start
++  // computation, measured from the deadline. formatElapsedDuration returns null
++  // for an unparseable start and for an end earlier than the start, so a record
++  // with no deadlineAt and a deadline still in the future both fall out as "not
++  // overdue" with no extra branching. Only an active job can be overdue, and
++  // both snapshot builders reconcile liveness before enriching, so a dead
++  // worker is reported failed rather than overdue.
++  const overdueBy = isActiveJobStatus(job.status) ? formatElapsedDuration(job.deadlineAt, null) : null;
+@@ -171,4 +188,5 @@ export function enrichJob(job, options = {}) {
+-    duration:
+-      job.status === "completed" || job.status === "failed" || job.status === "cancelled"
+-        ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
+-        : null
++    duration: isTerminalJobStatus(job.status)
++      ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
++      : null,
++    overdue: overdueBy != null,
++    overdueBy
+@@ -216 +234,10 @@ export function buildStatusSnapshot(cwd, options = {}) {
 -  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
 +  // Reconcile before sorting: the flip stamps a fresh updatedAt, so sorting
 +  // afterwards is what makes the flipped job the newest finished record
@@ -745,7 +783,7 @@ index ad152c1..57af9e3 100644
 +      reconcileWorkerLiveness(workspaceRoot, job)
 +    )
 +  );
-@@ -252 +270 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
+@@ -252 +279 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 -    job: enrichJob(selected, { maxProgressLines: options.maxProgressLines })
 +    job: enrichJob(reconcileWorkerLiveness(workspaceRoot, selected), { maxProgressLines: options.maxProgressLines })
 diff --git a/plugins/codex/scripts/lib/process.mjs b/plugins/codex/scripts/lib/process.mjs
@@ -1180,7 +1218,7 @@ index 2da2349..832bc0f 100644
 +}
 +
 diff --git a/plugins/codex/scripts/lib/tracked-jobs.mjs b/plugins/codex/scripts/lib/tracked-jobs.mjs
-index 9028690..9be939f 100644
+index 9028690..29a17ea 100644
 --- a/plugins/codex/scripts/lib/tracked-jobs.mjs
 +++ b/plugins/codex/scripts/lib/tracked-jobs.mjs
 @@ -4 +4,3 @@ import process from "node:process";
@@ -1200,7 +1238,7 @@ index 9028690..9be939f 100644
 -      ...storedJob,
 -      ...patch
 -    });
-@@ -204,0 +196,52 @@ export async function runTrackedJob(job, runner, options = {}) {
+@@ -204,0 +196,56 @@ export async function runTrackedJob(job, runner, options = {}) {
 +
 +// Active = queued | running. The only other statuses any writer produces are the
 +// terminal three (completed | failed | cancelled), so "not active" and "terminal"
@@ -1209,6 +1247,10 @@ index 9028690..9be939f 100644
 +// that says so.
 +export function isActiveJobStatus(status) {
 +  return status === "queued" || status === "running";
++}
++
++export function isTerminalJobStatus(status) {
++  return status === "completed" || status === "failed" || status === "cancelled";
 +}
 +
 +function isWorkerProbeEligible(job) {
@@ -2262,10 +2304,10 @@ index 0f8f57c..f4c286c 100644
 +    savedJobs.map((job) => job.id),
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
-index 0000000..ae741a3
+index 0000000..922141c
 --- /dev/null
 +++ b/tests/worker-postmortem.test.mjs
-@@ -0,0 +1,477 @@
+@@ -0,0 +1,589 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -2742,4 +2784,116 @@ index 0000000..ae741a3
 +    assert.equal(fs.existsSync(jobFile), true, jobFile);
 +    assert.equal(fs.existsSync(logFile), true, logFile);
 +  }
++});
++
++test("a background enqueue stamps deadlineAt from the record's own createdAt", () => {
++  const repo = makeRepo();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir, "slow-task");
++  const env = buildEnv(binDir);
++  const jobsDir = path.join(resolveStateDir(repo), "jobs");
++  const readRecord = (jobId) => JSON.parse(fs.readFileSync(path.join(jobsDir, `${jobId}.json`), "utf8"));
++
++  const reviewer = run("node", [SCRIPT, "task", "--fresh", "--reviewer", "--background", "--json"], {
++    cwd: repo,
++    env,
++    input: "review the plan"
++  });
++  assert.equal(reviewer.status, 0, reviewer.stderr);
++  const reviewerRecord = readRecord(JSON.parse(reviewer.stdout).jobId);
++  // The reviewer default budget, exactly: enqueue time + 840000 ms. Basing the
++  // deadline on the record's own createdAt is what makes this an exact delta
++  // rather than a fuzzy window.
++  assert.equal(Date.parse(reviewerRecord.deadlineAt) - Date.parse(reviewerRecord.createdAt), 840000);
++
++  const explicit = run(
++    "node",
++    [SCRIPT, "task", "--background", "--timeout-ms", "60000", "--json", "investigate the failing test"],
++    { cwd: repo, env }
++  );
++  assert.equal(explicit.status, 0, explicit.stderr);
++  const explicitRecord = readRecord(JSON.parse(explicit.stdout).jobId);
++  // Driven by the request's timeoutMs, not by --reviewer.
++  assert.equal(Date.parse(explicitRecord.deadlineAt) - Date.parse(explicitRecord.createdAt), 60000);
++
++  const untimed = run("node", [SCRIPT, "task", "--background", "--json", "investigate the failing test"], {
++    cwd: repo,
++    env
++  });
++  assert.equal(untimed.status, 0, untimed.stderr);
++  const untimedRecord = readRecord(JSON.parse(untimed.stdout).jobId);
++  // A deadline exists only when a timeout does.
++  assert.equal(untimedRecord.request.timeoutMs, null);
++  assert.equal(untimedRecord.deadlineAt, undefined);
++});
++
++test("an alive job past its recorded deadline reports overdue without being flipped", (t) => {
++  const workspace = makeTempDir();
++  const sleeper = spawnSleeper(t, workspace);
++  const { jobFile } = seedJob(
++    workspace,
++    activeRecord(workspace, "task-overdue", sleeper.pid, null, {
++      createdAt: new Date(Date.now() - 600000).toISOString(),
++      startedAt: new Date(Date.now() - 600000).toISOString(),
++      deadlineAt: new Date(Date.now() - 300000).toISOString(),
++      updatedAt: new Date(Date.now() - 60000).toISOString()
++    })
++  );
++
++  const result = run("node", [SCRIPT, "status", "task-overdue", "--json"], { cwd: workspace });
++
++  assert.equal(result.status, 0, result.stderr);
++  const job = JSON.parse(result.stdout).job;
++  // Alive-but-overdue falls out of the composition: buildSingleJobSnapshot runs
++  // reconcileWorkerLiveness before enrichJob, so a job still active here has
++  // just been probed (or was never probe-eligible) — it was not flipped.
++  assert.equal(job.status, "running");
++  assert.equal(job.overdue, true);
++  assert.match(job.overdueBy, /^\d+m \d+s$/);
++  // Advisory only: no state change, no signal.
++  assert.equal(JSON.parse(fs.readFileSync(jobFile, "utf8")).status, "running");
++  assert.equal(isPidGone(sleeper.pid), false);
++});
++
++test("a future deadline and a missing deadline both report not overdue", (t) => {
++  const workspace = makeTempDir();
++  const sleeper = spawnSleeper(t, workspace);
++  seedJob(
++    workspace,
++    activeRecord(workspace, "task-future", sleeper.pid, null, {
++      deadlineAt: new Date(Date.now() + 600000).toISOString()
++    })
++  );
++  seedJob(workspace, activeRecord(workspace, "task-no-deadline", sleeper.pid, null));
++
++  for (const jobId of ["task-future", "task-no-deadline"]) {
++    const result = run("node", [SCRIPT, "status", jobId, "--json"], { cwd: workspace });
++    assert.equal(result.status, 0, result.stderr);
++    const job = JSON.parse(result.stdout).job;
++    assert.equal(job.status, "running", jobId);
++    assert.equal(job.overdue, false, jobId);
++    assert.equal(job.overdueBy, null, jobId);
++  }
++});
++
++test("a dead worker past its deadline is failed, never overdue", async (t) => {
++  const workspace = makeTempDir();
++  const pid = await deadPid(t, workspace);
++  seedJob(
++    workspace,
++    activeRecord(workspace, "task-dead-overdue", pid, null, {
++      deadlineAt: new Date(Date.now() - 300000).toISOString()
++    })
++  );
++
++  const result = run("node", [SCRIPT, "status", "task-dead-overdue", "--json"], { cwd: workspace });
++
++  assert.equal(result.status, 0, result.stderr);
++  const job = JSON.parse(result.stdout).job;
++  assert.equal(job.status, "failed");
++  assert.equal(job.errorMessage, DEAD_WORKER_MESSAGE(pid));
++  // Only an active job can be overdue, so the flip wins: a crash is reported as
++  // a crash, not as an overrun.
++  assert.equal(job.overdue, false);
++  assert.equal(job.overdueBy, null);
 +});
