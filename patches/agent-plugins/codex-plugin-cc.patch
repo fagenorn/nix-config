@@ -1360,10 +1360,10 @@ index 778571e..e601a80 100644
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
 diff --git a/tests/broker-reaping.test.mjs b/tests/broker-reaping.test.mjs
 new file mode 100644
-index 0000000..be22ad7
+index 0000000..bdce101
 --- /dev/null
 +++ b/tests/broker-reaping.test.mjs
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,324 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1543,7 +1543,12 @@ index 0000000..be22ad7
 +    stateDir: resolveStateDir(workspace),
 +    workspaceRoot: workspace,
 +    codexHome: path.join(staleDir, "codex-home"),
-+    owners: []
++    owners: [],
++    // Same-build on purpose: the reuse gate checks build identity before it
++    // probes readiness, so a record without this field would be retired as
++    // foreign and this test would observe that teardown instead of the stale
++    // one it exists to pin.
++    scriptPath: BROKER_SCRIPT
 +  });
 +
 +  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 5000 });
@@ -1613,7 +1618,10 @@ index 0000000..be22ad7
 +    workspaceRoot: workspace,
 +    codexHome: path.join(sessionDir, "codex-home"),
 +    owners: [],
-+    scriptPath
++    // Omit the key entirely when no scriptPath is given: that is what a
++    // broker.json written before the field existed looks like on disk, and it
++    // is a distinct input from a key holding a foreign path.
++    ...(scriptPath === undefined ? {} : { scriptPath })
 +  };
 +}
 +
@@ -1636,6 +1644,27 @@ index 0000000..be22ad7
 +  await waitFor(() => !isProcessAlive(stub.pid));
 +});
 +
++test("ensureBrokerSession retires a ready broker whose record predates scriptPath", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const legacyDir = createBrokerSessionDir();
++  const legacyEndpoint = createBrokerEndpoint(legacyDir);
++  const stub = startStubBroker(t, legacyEndpoint);
++  assert.equal(await waitForBrokerEndpoint(legacyEndpoint, 5000), true, "the stub broker never listened");
++  saveBrokerSession(workspace, stubRecord(workspace, legacyDir, legacyEndpoint, stub.pid));
++  // Pin the precondition through the production resolver: the subject is an
++  // absent key, not a foreign value, and no migration step may invent one.
++  assert.equal("scriptPath" in loadBrokerSession(workspace), false);
++
++  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 10000 });
++
++  assert.ok(session, "a fresh broker should have replaced the pre-change one");
++  assert.notEqual(session.endpoint, legacyEndpoint);
++  assert.equal(session.scriptPath, BROKER_SCRIPT);
++  await waitFor(() => !isProcessAlive(stub.pid));
++});
++
 +test("ensureBrokerSession reuses a ready broker recorded by this plugin build", async (t) => {
 +  const workspace = makeWorkspace();
 +  const binDir = makeTempDir();
@@ -1648,10 +1677,16 @@ index 0000000..be22ad7
 +
 +  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 10000 });
 +
-+  // Without this control, the test above passes trivially if reuse breaks
++  // Without this control, the tests above pass trivially if reuse breaks
 +  // entirely.
 +  assert.equal(session.endpoint, endpoint);
 +  assert.equal(isProcessAlive(stub.pid), true);
++  // The reuse path re-saves the record through addOwner, so read it back: a
++  // scriptPath dropped there is invisible in the return value and would make
++  // the very next ensureBrokerSession call retire this broker as foreign.
++  const record = loadBrokerSession(workspace);
++  assert.equal(record.endpoint, endpoint);
++  assert.equal(record.scriptPath, BROKER_SCRIPT);
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
 index c34b060..b013de8 100644
