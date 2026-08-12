@@ -1285,6 +1285,91 @@ index 778571e..e601a80 100644
 +  const sessionId = input.session_id || process.env[SESSION_ID_ENV];
 +  cleanupSessionJobs(sessionId);
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
+diff --git a/tests/broker-reaping.test.mjs b/tests/broker-reaping.test.mjs
+new file mode 100644
+index 0000000..0abc4ec
+--- /dev/null
++++ b/tests/broker-reaping.test.mjs
+@@ -0,0 +1,79 @@
++import fs from "node:fs";
++import path from "node:path";
++import test from "node:test";
++import assert from "node:assert/strict";
++import { fileURLToPath } from "node:url";
++
++import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
++import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
++import { loadBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
++import { isProcessAlive } from "../plugins/codex/scripts/lib/process.mjs";
++
++// State resolvers read CLAUDE_PLUGIN_DATA at call time and spawned CLI children
++// inherit process.env (via buildEnv), so this pin gives the whole file — and
++// every broker it starts — a private state root, and reaps every broker
++// recorded there when the file ends. node --test runs each file in its own
++// process; nothing leaks across files.
++const { reapBrokers } = pinHermeticStateRoot("broker-reaping");
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
++
++async function waitFor(predicate, { timeoutMs = 10000, intervalMs = 25 } = {}) {
++  const start = Date.now();
++  while (Date.now() - start < timeoutMs) {
++    if (await predicate()) {
++      return;
++    }
++    await new Promise((resolve) => setTimeout(resolve, intervalMs));
++  }
++  throw new Error("Timed out waiting for condition.");
++}
++
++function makeWorkspace() {
++  const workspace = makeTempDir();
++  initGitRepo(workspace);
++  fs.writeFileSync(path.join(workspace, "README.md"), "hello\n");
++  run("git", ["add", "README.md"], { cwd: workspace });
++  run("git", ["commit", "-m", "init"], { cwd: workspace });
++  fs.writeFileSync(path.join(workspace, "README.md"), "hello again\n");
++  return workspace;
++}
++
++test("the suite reaper stops every broker recorded under the hermetic state root", async () => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++
++  // ensureBrokerSession returns without saving a record when its 2 s readiness
++  // wait expires (broker-lifecycle.mjs:212-222). The live suite tolerates that
++  // with `if (!loadBrokerSession(repo)) return;` (runtime.test.mjs:1008, 2329),
++  // but returning early here would make the test vacuous — its whole subject is
++  // a real recorded broker. Retry instead, and fail loudly if none is ever
++  // recorded.
++  let record = null;
++  for (let attempt = 1; attempt <= 3 && record === null; attempt += 1) {
++    const review = run("node", [SCRIPT, "review"], { cwd: workspace, env: buildEnv(binDir) });
++    assert.equal(review.status, 0, review.stderr);
++    record = loadBrokerSession(workspace);
++  }
++  assert.ok(
++    record,
++    "no review recorded a broker in 3 attempts: the broker's 2 s readiness wait is expiring on this machine"
++  );
++  const brokerPid = record.pid;
++  const appServerPid = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8")).appServerPid;
++  assert.equal(Number.isFinite(brokerPid), true, "the broker record should carry a pid");
++  assert.equal(Number.isFinite(appServerPid), true, "the fake codex should have recorded its app-server pid");
++  assert.equal(isProcessAlive(brokerPid), true);
++
++  await reapBrokers();
++
++  // reapBrokers verifies the recorded pid itself before returning, so this is
++  // asserted directly; the app-server grandchild is reaped by the kernel a
++  // moment later, so that one gets a bounded poll.
++  assert.equal(isProcessAlive(brokerPid), false);
++  await waitFor(() => !isProcessAlive(appServerPid));
++  assert.equal(loadBrokerSession(workspace), null);
++  assert.equal(fs.existsSync(record.sessionDir), false);
++});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
 index c34b060..b013de8 100644
 --- a/tests/commands.test.mjs
@@ -1319,14 +1404,115 @@ index c34b060..b013de8 100644
 @@ -223 +240,0 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(readme, /\/codex:setup --enable-review-gate/);
 diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
-index f83c96a..fdfb12c 100644
+index f83c96a..6920c62 100644
 --- a/tests/fake-codex-fixture.mjs
 +++ b/tests/fake-codex-fixture.mjs
-@@ -274,0 +275 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
+@@ -274,0 +275,2 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
++bootState.appServerPid = process.pid;
 +bootState.lastCodexHome = process.env.CODEX_HOME || null;
-@@ -314,0 +316,2 @@ rl.on("line", (line) => {
+@@ -314,0 +317,2 @@ rl.on("line", (line) => {
 +        state.lastThreadStart = message.params;
 +        saveState(state);
+diff --git a/tests/helpers.mjs b/tests/helpers.mjs
+index d698119..c838968 100644
+--- a/tests/helpers.mjs
++++ b/tests/helpers.mjs
+@@ -5,0 +6,7 @@ import { spawnSync } from "node:child_process";
++import { after } from "node:test";
++
++import { listBrokerSessions, teardownBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
++import { isProcessAlive, terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
++
++const REAP_POLL_MS = 25;
++const REAP_TIMEOUT_MS = 2000;
+@@ -32,0 +40,87 @@ export function initGitRepo(cwd) {
++
++function killGroup(pid, signal) {
++  try {
++    process.kill(-pid, signal);
++  } catch {
++    try {
++      process.kill(pid, signal);
++    } catch {
++      // Already gone.
++    }
++  }
++}
++
++async function waitUntilGone(pid) {
++  const deadline = Date.now() + REAP_TIMEOUT_MS;
++  while (Date.now() < deadline && isProcessAlive(pid)) {
++    await new Promise((resolve) => setTimeout(resolve, REAP_POLL_MS));
++  }
++}
++
++// Gives the calling test file its own state root and leaves the process table
++// as it found it: every broker recorded under that root is stopped when the
++// file ends. Call once at module scope; the returned reapBrokers is what the
++// file-scoped `after` hook runs, exposed so a test can drive it directly.
++//
++// The root is a private temp dir, which is what keeps this reaper unable to
++// reach a real broker: under the documented scrubbed test command the shared
++// state root is os.tmpdir()/codex-companion, where a developer's own
++// plain-shell broker lives.
++export function pinHermeticStateRoot(label) {
++  const root = makeTempDir(`codex-plugin-${label}-data-`);
++  process.env.CLAUDE_PLUGIN_DATA = root;
++  delete process.env.CODEX_COMPANION_SESSION_ID;
++  delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++
++  async function reapBrokers() {
++    // listStateDirs() resolves the root at call time and tests do repoint this
++    // variable mid-file, so re-pin the captured root before walking it.
++    process.env.CLAUDE_PLUGIN_DATA = root;
++    const failures = [];
++    for (const { stateFile, session } of listBrokerSessions()) {
++      // One bad record must not strand the rest, and this runs in an `after`
++      // hook: a rejection here is reported as a test failure while the
++      // remaining brokers stay alive — the worst of both outcomes. At this
++      // task's base commit teardownBrokerSession still does existsSync-then-
++      // unlink, and the broker's own shutdown races it for the same paths, so
++      // ENOENT here is expected rather than exceptional until Task 3 lands.
++      try {
++        const pid = Number.isFinite(session.pid) ? session.pid : null;
++        // killProcess is the production instrument, not a test double: the same
++        // group SIGTERM session end uses. Each broker holds a codex app-server
++        // child, so a pid-only signal would strand one app-server per broker.
++        teardownBrokerSession({
++          endpoint: session.endpoint ?? null,
++          pidFile: session.pidFile ?? null,
++          logFile: session.logFile ?? null,
++          sessionDir: session.sessionDir ?? null,
++          pid,
++          killProcess: terminateProcessTree
++        });
++        if (pid !== null) {
++          await waitUntilGone(pid);
++          if (isProcessAlive(pid)) {
++            killGroup(pid, "SIGKILL");
++            await waitUntilGone(pid);
++          }
++          if (isProcessAlive(pid)) {
++            failures.push(`broker pid ${pid} survived SIGKILL`);
++          }
++        }
++      } catch (error) {
++        failures.push(`${stateFile}: ${error instanceof Error ? error.message : String(error)}`);
++      } finally {
++        fs.rmSync(stateFile, { force: true });
++      }
++    }
++    // Surfaced, not thrown: every record has already been attempted, so the
++    // caller learns about a broker that genuinely would not die without the
++    // reaper having abandoned its remaining work.
++    if (failures.length > 0) {
++      process.stderr.write(`reapBrokers: ${failures.join("; ")}\n`);
++    }
++  }
++
++  after(reapBrokers);
++  return { root, reapBrokers };
++}
 diff --git a/tests/isolation.test.mjs b/tests/isolation.test.mjs
 new file mode 100644
 index 0000000..3d8b555
@@ -1446,10 +1632,10 @@ index 0000000..3d8b555
 +});
 diff --git a/tests/liveness.test.mjs b/tests/liveness.test.mjs
 new file mode 100644
-index 0000000..60fefea
+index 0000000..beaa22c
 --- /dev/null
 +++ b/tests/liveness.test.mjs
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,243 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1457,17 +1643,16 @@ index 0000000..60fefea
 +import { spawn } from "node:child_process";
 +import { fileURLToPath } from "node:url";
 +
-+import { makeTempDir, run } from "./helpers.mjs";
++import { makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env, so pinning them here keeps every test in this file
-+// hermetic even when the suite runs inside a live Claude Code session.
++// hermetic even when the suite runs inside a live Claude Code session, and every
++// broker recorded under that private root is reaped when the file ends.
 +// node --test runs each file in its own process; nothing leaks across files.
-+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-liveness-data-");
-+delete process.env.CODEX_COMPANION_SESSION_ID;
-+delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++pinHermeticStateRoot("liveness");
 +
 +const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 +const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
@@ -1696,10 +1881,10 @@ index 0000000..60fefea
 +});
 diff --git a/tests/reviewer-detach.test.mjs b/tests/reviewer-detach.test.mjs
 new file mode 100644
-index 0000000..e29047b
+index 0000000..443512f
 --- /dev/null
 +++ b/tests/reviewer-detach.test.mjs
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,149 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1707,16 +1892,15 @@ index 0000000..e29047b
 +import { fileURLToPath } from "node:url";
 +
 +import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-+import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
++import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env (via buildEnv), so pinning them here keeps every test in
-+// this file hermetic even when the suite runs inside a live Claude Code session.
++// this file hermetic even when the suite runs inside a live Claude Code session,
++// and every broker recorded under that private root is reaped when the file ends.
 +// node --test runs each file in its own process; nothing leaks across files.
-+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-reviewer-detach-data-");
-+delete process.env.CODEX_COMPANION_SESSION_ID;
-+delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++pinHermeticStateRoot("reviewer-detach");
 +
 +const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 +const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
@@ -1851,14 +2035,23 @@ index 0000000..e29047b
 +  assert.equal(fs.existsSync(resolveReviewerRuntimeHome(repo, launchPayload.jobId)), false);
 +});
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
-index 8f27683..b0a4ff8 100644
+index 8f27683..5ed1649 100644
 --- a/tests/runtime.test.mjs
 +++ b/tests/runtime.test.mjs
-@@ -11 +11,2 @@ import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/l
+@@ -9 +9 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
+-import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
++import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
+@@ -11 +11,8 @@ import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/l
 -import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +import { listJobs, resolveJobFile, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
-@@ -30,0 +32,20 @@ async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
++
++// State resolvers read CLAUDE_PLUGIN_DATA at call time and spawned CLI children
++// inherit process.env (via buildEnv), so this pin keeps every test in this file
++// hermetic and reaps every broker the file starts. node --test runs each file in
++// its own process; nothing leaks across files.
++pinHermeticStateRoot("runtime");
+@@ -30,0 +38,20 @@ async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
 +function runChild(command, args, options = {}) {
 +  return new Promise((resolve, reject) => {
 +    const child = spawn(command, args, {
@@ -1879,46 +2072,46 @@ index 8f27683..b0a4ff8 100644
 +  });
 +}
 +
-@@ -32,0 +54 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
+@@ -32,0 +60 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 +  const workspace = makeTempDir();
-@@ -36 +58 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
+@@ -36 +64 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -44 +66 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
+@@ -44 +72 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 -  assert.equal(payload.sessionRuntime.mode, "direct");
 +  assert.equal(payload.sessionRuntime.mode, "shared");
-@@ -48,0 +71 @@ test("setup is ready without npm when Codex is already installed and authenticat
+@@ -48,0 +77 @@ test("setup is ready without npm when Codex is already installed and authenticat
 +  const workspace = makeTempDir();
-@@ -53 +76 @@ test("setup is ready without npm when Codex is already installed and authenticat
+@@ -53 +82 @@ test("setup is ready without npm when Codex is already installed and authenticat
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -69,0 +93 @@ test("setup trusts app-server API key auth even when login status alone would fa
+@@ -69,0 +99 @@ test("setup trusts app-server API key auth even when login status alone would fa
 +  const workspace = makeTempDir();
-@@ -73 +97 @@ test("setup trusts app-server API key auth even when login status alone would fa
+@@ -73 +103 @@ test("setup trusts app-server API key auth even when login status alone would fa
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -87,0 +112 @@ test("setup is ready when the active provider does not require OpenAI login", ()
+@@ -87,0 +118 @@ test("setup is ready when the active provider does not require OpenAI login", ()
 +  const workspace = makeTempDir();
-@@ -91 +116 @@ test("setup is ready when the active provider does not require OpenAI login", ()
+@@ -91 +122 @@ test("setup is ready when the active provider does not require OpenAI login", ()
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -105,0 +131 @@ test("setup treats custom providers with app-server-ready config as ready", () =
+@@ -105,0 +137 @@ test("setup treats custom providers with app-server-ready config as ready", () =
 +  const workspace = makeTempDir();
-@@ -109 +135 @@ test("setup treats custom providers with app-server-ready config as ready", () =
+@@ -109 +141 @@ test("setup treats custom providers with app-server-ready config as ready", () =
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -123,0 +150 @@ test("setup reports not ready when app-server config read fails", () => {
+@@ -123,0 +156 @@ test("setup reports not ready when app-server config read fails", () => {
 +  const workspace = makeTempDir();
-@@ -127 +154 @@ test("setup reports not ready when app-server config read fails", () => {
+@@ -127 +160 @@ test("setup reports not ready when app-server config read fails", () => {
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -473,3 +500,2 @@ test("review logs reasoning summaries and review output to the job log", () => {
+@@ -473,3 +506,2 @@ test("review logs reasoning summaries and review output to the job log", () => {
 -  const stateDir = resolveStateDir(repo);
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
-@@ -765,0 +792,74 @@ test("task --fresh is treated as routing control and does not leak into the prom
+@@ -765,0 +798,74 @@ test("task --fresh is treated as routing control and does not leak into the prom
 +test("reviewer tasks run foreground in a fresh read-only runtime and clean it up", () => {
 +  const repo = makeTempDir();
 +  const binDir = makeTempDir();
@@ -1993,48 +2186,48 @@ index 8f27683..b0a4ff8 100644
 +  assert.equal(loadBrokerSession(repo), null);
 +});
 +
-@@ -802,3 +902,2 @@ test("task logs reasoning summaries and assistant messages to the job log", () =
+@@ -802,3 +908,2 @@ test("task logs reasoning summaries and assistant messages to the job log", () =
 -  const stateDir = resolveStateDir(repo);
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
-@@ -826,3 +925,2 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
+@@ -826,3 +931,2 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
 -  const stateDir = resolveStateDir(repo);
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
-@@ -1627,2 +1725 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
+@@ -1627,2 +1731 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const cancelled = state.jobs.find((job) => job.id === "task-live");
 +  const cancelled = JSON.parse(fs.readFileSync(jobFile, "utf8"));
-@@ -1688,2 +1785,2 @@ test("cancel without a job id ignores active jobs from other Claude sessions", (
+@@ -1688,2 +1791,2 @@ test("cancel without a job id ignores active jobs from other Claude sessions", (
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  assert.equal(state.jobs[0].status, "running");
 +  const stored = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-other"), "utf8"));
 +  assert.equal(stored.status, "running");
-@@ -1736,2 +1833,2 @@ test("cancel with a job id can still target an active job from another Claude se
+@@ -1736,2 +1839,2 @@ test("cancel with a job id can still target an active job from another Claude se
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  assert.equal(state.jobs[0].status, "cancelled");
 +  const stored = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-other"), "utf8"));
 +  assert.equal(stored.status, "cancelled");
-@@ -1761 +1857,0 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+@@ -1761 +1863,0 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
 -  const stateDir = resolveStateDir(repo);
-@@ -1763,2 +1859 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+@@ -1763,2 +1865 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
 -    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -    const job = state.jobs.find((candidate) => candidate.id === jobId);
 +    const job = JSON.parse(fs.readFileSync(resolveJobFile(repo, jobId), "utf8"));
-@@ -1920,3 +2015,2 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1920,3 +2021,2 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  assert.deepEqual(state.jobs.map((job) => job.id), ["review-other"]);
 -  const otherJob = state.jobs[0];
 +  const [otherJob] = listJobs(repo);
 +  assert.deepEqual(listJobs(repo).map((job) => job.id), ["review-other"]);
-@@ -1926 +2020 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1926 +2026 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 -test("stop hook runs a stop-time review task and blocks on findings when the review gate is enabled", () => {
 +test.skip("upstream-only: stop hook blocks on findings when the review gate is enabled", () => {
-@@ -2039 +2133,11 @@ test("stop hook logs running tasks to stderr without blocking when the review ga
+@@ -2039 +2139,11 @@ test("stop hook logs running tasks to stderr without blocking when the review ga
 -test("stop hook allows the stop when the review gate is enabled and the stop-time review task is clean", () => {
 +test("setup refuses to enable the automatic Stop review gate", () => {
 +  const workspace = makeTempDir();
@@ -2047,27 +2240,35 @@ index 8f27683..b0a4ff8 100644
 +});
 +
 +test.skip("upstream-only: stop hook allows a clean result when the review gate is enabled", () => {
-@@ -2064 +2168 @@ test("stop hook allows the stop when the review gate is enabled and the stop-tim
+@@ -2064 +2174 @@ test("stop hook allows the stop when the review gate is enabled and the stop-tim
 -test("stop hook does not block when Codex is unavailable even if the review gate is enabled", () => {
 +test.skip("upstream-only: stop hook tolerates unavailable Codex when the review gate is enabled", () => {
-@@ -2091 +2195 @@ test("stop hook does not block when Codex is unavailable even if the review gate
+@@ -2091 +2201 @@ test("stop hook does not block when Codex is unavailable even if the review gate
 -test("stop hook runs the actual task when auth status looks stale", () => {
 +test.skip("upstream-only: stop hook refreshes stale authentication", () => {
-@@ -2258 +2362 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
+@@ -2258 +2368 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
 -  assert.equal(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
 +  assert.notEqual(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
 diff --git a/tests/state.test.mjs b/tests/state.test.mjs
-index 0f8f57c..f4c286c 100644
+index 0f8f57c..cafb91e 100644
 --- a/tests/state.test.mjs
 +++ b/tests/state.test.mjs
-@@ -8 +8 @@ import { makeTempDir } from "./helpers.mjs";
+@@ -7,2 +7,8 @@ import assert from "node:assert/strict";
+-import { makeTempDir } from "./helpers.mjs";
 -import { resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
++import { makeTempDir, pinHermeticStateRoot } from "./helpers.mjs";
 +import { listJobs, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
-@@ -94 +94,3 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
++
++// State resolvers read CLAUDE_PLUGIN_DATA at call time and spawned CLI children
++// inherit process.env (via buildEnv), so this pin keeps every test in this file
++// hermetic and reaps every broker the file starts. node --test runs each file in
++// its own process; nothing leaks across files.
++pinHermeticStateRoot("state");
+@@ -94 +100,3 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
 -  assert.equal(savedState.jobs.length, 50);
 +  assert.equal("jobs" in savedState, false);
 +  const savedJobs = listJobs(workspace);
 +  assert.equal(savedJobs.length, 50);
-@@ -96 +98 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
+@@ -96 +104 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
 -    savedState.jobs.map((job) => job.id),
 +    savedJobs.map((job) => job.id),
