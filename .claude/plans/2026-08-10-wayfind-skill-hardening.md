@@ -33,7 +33,7 @@ Copied from the spec and the issue; every task's requirements implicitly include
 
   | File | Before | After | Delta |
   |------|-------:|------:|------:|
-  | `wayfind/SKILL.md` | 7,236 | **11,183** | +3,947 |
+  | `wayfind/SKILL.md` | 7,236 | **11,178** | +3,942 |
   | `grill-with-docs/SKILL.md` | 6,845 | **7,770** | +925 |
   | `doc-grounded-questions/SKILL.md` | 9,631 | **10,193** | +562 |
 
@@ -94,7 +94,7 @@ bug, not an implementer's call:
 ### Verbatim application, including the spec's line wrapping
 - **Question:** The spec hard-wraps the AFTER text for P1b, P7, P8 and P5 at ~95 characters, but `wayfind/SKILL.md` and `grill-with-docs/SKILL.md` write every paragraph as one long unwrapped line. Copy the spec's wrapping, or re-flow to each file's house style?
 - **Choice:** Copy verbatim, wrapping included. Stated as a Global Constraint.
-- **Grounding:** The spec's Verification section makes verbatim application the contract: "the implementer can apply them as literal string replacements without re-deriving anchors." The difference is invisible — a single newline inside a Markdown paragraph renders identically to a space, and it is byte-neutral (one newline replaces one space), so the measured byte figures hold either way; I confirmed this by re-running the dry-run and reproducing 11,183 / 7,770 / 10,193 exactly. The issue's "read like the surrounding skill prose" constraint is about register (dense, imperative, rationale-bearing), not line width.
+- **Grounding:** The spec's Verification section makes verbatim application the contract: "the implementer can apply them as literal string replacements without re-deriving anchors." The difference is invisible — a single newline inside a Markdown paragraph renders identically to a space, and it is byte-neutral (one newline replaces one space), so the measured byte figures hold either way; I confirmed this by re-running the dry-run and reproducing 11,178 / 7,770 / 10,193 exactly. The issue's "read like the surrounding skill prose" constraint is about register (dense, imperative, rationale-bearing), not line width.
 - **Alternative considered:** Re-flowing the four inserted blocks to unwrapped single lines for house-style consistency. Rejected: it asks an implementer to transform text mid-copy, which is precisely where transcription drift enters, and it would break the `verify-edits.py` gate that makes this change checkable at all. If the mixed wrapping ever grates, it is a cosmetic follow-up on a file already committed.
 
 ### Gate design: derive checks from the spec, don't transcribe probes into the plan
@@ -128,9 +128,9 @@ bug, not an implementer's call:
 - **Alternative considered:** An empty `--allow-empty` marker commit. Rejected as noise in the history of a five-thousand-byte prose change.
 
 ### Byte counts asserted as exact equality
-- **Question:** Should the `wc -c` gate be exact (`= 11,183`) or a tolerance band?
+- **Question:** Should the `wc -c` gate be exact (`= 11,178`) or a tolerance band?
 - **Choice:** Exact equality, for all three files.
-- **Grounding:** I reproduced all three figures to the byte by re-running the spec's dry-run from the spec's own fenced blocks (7,236→11,183, 6,845→7,770, 9,631→10,193, +5,434 total), so the exact number is known-reachable rather than an estimate. Under verbatim application there is no legitimate source of variance, and exactness makes the gate catch a dropped blank line — which the presence check alone would miss.
+- **Grounding:** I reproduced all three figures to the byte by re-running the spec's dry-run from the spec's own fenced blocks (7,236→11,178, 6,845→7,770, 9,631→10,193, +5,429 total), so the exact number is known-reachable rather than an estimate. Under verbatim application there is no legitimate source of variance, and exactness makes the gate catch a dropped blank line — which the presence check alone would miss.
 - **Alternative considered:** A ±2% band, per the spec's softer "materially past its figure" phrasing. Rejected: a band tolerates exactly the whitespace slippage this gate exists to catch, and the spec's phrasing is guidance to a human reviewer, not a looser contract for a machine check.
 
 ### Task-4 gate staleness: the Phase-5 provenance commit sits inside the verification range
@@ -159,9 +159,15 @@ bug, not an implementer's call:
 
 ### D4: step 1 read absolutely while P1b named compression an exception (ship-time)
 - **Question:** (ship-issue Phase-5 conformance reviewer, Important) `wayfind/SKILL.md` step 1 said `kind: none` gives "the session's only read of it" with no exception, while P1b's inserted paragraph names a whole-body compression rewrite as the one exception. Step 4 is where compression fires, so an agent reading step 1 literally would rewrite from the stale in-context copy — the concurrent-append loss P1b exists to prevent. The C1 fix wave amended P1b but not P3b.
-- **Choice:** Applied a parenthetical to step 1 in both the live file and the spec's P3b AFTER fence: `(compression excepted — a whole-body rewrite starts from a fresh read, per the body's ~6k budget)`. Byte figures re-measured and swept through spec and plan: `wayfind/SKILL.md` 11,083 → **11,183** (+3,947, +54%), three-file total 29,046 → **29,146**, dry-run delta +5,334 → **+5,434**.
+- **Choice:** Applied a parenthetical to step 1 in both the live file and the spec's P3b AFTER fence: `(compression excepted — a whole-body rewrite starts from a fresh read, per the body's ~6k budget)`. Byte figures were re-measured and swept through spec and plan; the values now recorded everywhere are this ship-time review round's **final** ones, after D5 also edited the same paragraph: `wayfind/SKILL.md` 11,083 → **11,178** (+3,942, +54%), three-file total 29,046 → **29,141**, dry-run delta +5,334 → **+5,429**.
 - **Grounding:** This is the same defect class C1 was raised for, one paragraph away and unfixed; the two clauses reconciled only if an agent recalled a paragraph fifty lines earlier at the exact moment it was overwriting the body. Editing the shipped text also obliged updating the spec's fence — the spec claims byte-exact application, so leaving the fence stale would have made that claim false and broken the plan's `wc -c` gate for anyone re-running it. The figure sweep subsumes parked residual NB1 (spec said "+50%" where the reproduced figure was +53%): correcting neighbouring numbers while leaving a known-wrong one adjacent is worse than the original parked ruling.
 - **Alternative considered:** Deferring to a follow-up issue, consistent with the reviewer's own `defer` verdict on the *spec-prose* halves (NB1/NB2). Rejected for the live-file half: the parked rulings covered prose that no agent executes, whereas this clause is the executed instruction, and the failure mode is silent data loss in a shared map rather than a cosmetic inconsistency.
+
+### D5: correctness-axis findings on the P1b paragraph and the Task-4 gates (ship-time)
+- **Question:** (ship-issue Phase-5 correctness axis, three Important findings) C-1: P1b calls compression "the one exception" to the once-per-session low-res load, but step 1 also mandates a pre-update re-read on a shared tracker — so it is not the one exception in GitHub mode, only under `kind: none`. C-2: the same paragraph says to "fold gists a later decision subsumed into the one that superseded them" and then that compression "never deletes from it — every closed ticket keeps its line"; folding removes lines, so an agent over budget has no resolvable rule at the operation the paragraph governs. C-3: Task 4's range gates now fire on the commits and files the ship-time sync merge brought in from `main`, which the gate text says "must be reverted".
+- **Choice:** C-1 — "the one exception" → "an exception" (true in both tracker modes; the sentence's actual job is the fresh-read requirement, not exception-counting). C-2 — "keeps its line" → "keeps its link", the reading the paragraph already implies. C-3 — scoped both gate steps to the branch's own commits with `^origin/main`, and said so in the expectation text. Both prose fixes were applied to the live file and the spec's P1b AFTER fence in lockstep, byte figures re-swept (see D4).
+- **Grounding:** C-2's fix is the meaning the surrounding text already carries: the gist rule one paragraph earlier says "The ticket **links** it carries don't count against the cap" — plural, in a rule about a single entry, which only makes sense if a folded entry holds several tickets' links. So "keeps its link" restores the invariant the cap rule presumes, while "keeps its line" would forbid the folding the same sentence orders. C-1 is a one-word overclaim with a real cross-mode failure: an agent in GitHub mode reading "the one exception" may conclude the shared-tracker re-read step 1 mandates is disallowed. C-3 is the same class as the earlier Task-4 staleness entry — a literal range expectation outliving the range it was written against — and the integration-branch commits are by construction not this branch's work, so excluding them is what the gate always meant.
+- **Alternative considered:** Deferring all three as Minor, since none is a code defect and the skills are prose. Rejected for C-1/C-2 because these files *are* the executed contract — an unresolvable rule at the compression step is the field failure this whole issue exists to fix — and for C-3 because a verification gate that reports false failures is worse than no gate: the next reader either reverts `main`'s files or learns to ignore the gate.
 
 ---
 
@@ -179,7 +185,7 @@ bug, not an implementer's call:
   2, 3 and 4 — invoked as `python3 "$(git rev-parse --git-dir)/verify-edits.py" [skill-name …]`, where
   each argument is a skill directory name (`wayfind`, `grill-with-docs`, `doc-grounded-questions`) and
   no argument means all three. Exit 0 = every checked edit present verbatim. Also produces
-  `wayfind/SKILL.md` at exactly 11,183 bytes.
+  `wayfind/SKILL.md` at exactly 11,178 bytes.
 
 **The ten edits, and the spec section carrying each one.** Apply the BEFORE→AFTER blocks from these
 sections verbatim; this plan does not reproduce them.
@@ -300,7 +306,7 @@ echo "-- P1b sits between the map fence and ## Tickets (want 2) --"
 awk '/^## The map/,/^## Tickets/' $W | grep -cE '^(Every line of this body|The body.s budget)'
 ```
 
-Expected, in order: `10/10 edits present verbatim.`; `11183` bytes; four `1`s for the invariants; then
+Expected, in order: `10/10 edits present verbatim.`; `11178` bytes; four `1`s for the invariants; then
 `1`, `0`, `1`, `1` for the gotchas; then `**One sitting per ticket.**` followed by `1. ` through `6. `
 in ascending order; then `2`.
 
@@ -319,7 +325,7 @@ dropped (P3), one-sitting-per-ticket discipline (P8), and an explicit map
 completion state and step 6 (P9).
 
 Applied verbatim from .claude/specs/2026-08-10-wayfind-skill-hardening-design.md;
-7,236 -> 11,183 bytes as measured there. All four invariants unchanged.
+7,236 -> 11,178 bytes as measured there. All four invariants unchanged.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -537,16 +543,26 @@ BASE=$(git log --format='%H %s' \
        | grep -m1 'docs(plans): implementation plan for wayfind skill hardening' \
        | cut -d' ' -f1)
 echo "base = $BASE"
-git diff --stat "$BASE"..HEAD
+git diff --stat "$BASE"..HEAD -- home/common/agent-skills/skills/ \
+       '.claude/plans/*wayfind*' '.claude/specs/*wayfind*'
 ```
 
-Expected: `11183`, `7770`, `10193`, total `29146`. `$BASE` resolves to this plan's own commit (derived
+Expected: `11178`, `7770`, `10193`, total `29141`. `$BASE` resolves to this plan's own commit (derived
 by message rather than a fixed SHA, so review fixups between tasks cannot invalidate it). The diffstat
 lists **exactly three files under `home/common/agent-skills/skills/`**, plus at most flow-artifact
 paths under `.claude/plans/` or `.claude/specs/` from the from-issue flow's own process commits (the
 Phase-5 provenance amendment lands in this range by construction). Any other file — in particular
 `wayfind/evals/evals.json` or anything under `evals/fixture-repo/` — is out of scope and must be
 reverted.
+
+The pathspec is load-bearing once ship-issue's Phase-1 sync merge has run: that merge puts everything
+`origin/main` advanced into `$BASE..HEAD` by construction — here `CLAUDE.md`, `lib/agent-plugins.nix`,
+`patches/agent-plugins/`, `home/common/claude-code/skills/`, *and* the plan/spec pairs of issues #2,
+#3 and #6. Those are the integration branch's work, not this branch's, so they fall outside what this
+gate grades; without the pathspec the gate reads them as scope creep and demands reverting another
+issue's shipped commits. Hence the flow-artifact globs are `*wayfind*`, not the whole `.claude/plans/`
+and `.claude/specs/` directories. Post-merge the filtered diffstat is **exactly five** files: the three
+skill files, this plan, and its design doc.
 
 - [ ] **Step 3: Invariants survive**
 
@@ -590,8 +606,8 @@ P8 → P8; P9 → P9a + P9b. Then confirm the three commits are present and corr
 BASE=$(git log --format='%H %s' \
        | grep -m1 'docs(plans): implementation plan for wayfind skill hardening' \
        | cut -d' ' -f1)
-git log --oneline "$BASE"..HEAD
-git log "$BASE"..HEAD --format='%s%n%(trailers:key=Co-Authored-By)'
+git log --oneline --no-merges "$BASE"..HEAD ^origin/main
+git log --no-merges "$BASE"..HEAD ^origin/main --format='%s%n%(trailers:key=Co-Authored-By)'
 ```
 
 Expected: three `fix(agents): …` commits, one per target file (plus any review fixups from the
@@ -600,3 +616,12 @@ between-task gates), every one of them carrying
 (`docs(plans):` / `docs(specs):` subjects touching only `.claude/plans/` or `.claude/specs/`) are
 exempt from the `fix(agents):` subject rule but still require the trailer. Any other commit with no
 trailer, or a subject outside these types, is a finding.
+
+Ship-time PR-review fixes use ship-issue's own `fix(issue-1): …` subject rather than `fix(agents): …`;
+they are review fixups and are read under the same exemption, trailer still required.
+
+The `^origin/main --no-merges` filter is load-bearing for the same reason as step 2's pathspec: after
+the Phase-1 sync merge `$BASE..HEAD` also contains every commit `origin/main` advanced — none of which
+this branch authored — plus the sync merge itself, which is not reachable from `origin/main` and
+carries no trailer by design, so `^origin/main` alone does not exclude it. Grade only the non-merge
+commits this branch owns.

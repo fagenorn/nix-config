@@ -60,7 +60,7 @@ replacements.
 | P8 | `wayfind/SKILL.md` | One sitting per ticket; park state in the ticket before pausing |
 | P9 | `wayfind/SKILL.md` | Explicit completion state: frontier-empty trigger, close the map, name the next command, announce only (owner addendum) |
 
-Cost of the fix, measured by dry-run (below): +5,434 bytes across the three files. A wayfind grilling
+Cost of the fix, measured by dry-run (below): +5,429 bytes across the three files. A wayfind grilling
 session can load all three, so worst case is ~1.3k extra tokens per session, against 90k+ tokens of
 measured waste across two efforts. The trade is not close.
 
@@ -161,8 +161,8 @@ it again.
 The body's budget is **~6k characters**. A session that pushes it past that compresses back under
 before it finishes — same session, never a follow-up: fold gists a later decision subsumed into the
 one that superseded them, and cut back to its link any entry that has grown an explanation.
-Compression rewrites the index; it never deletes from it — every closed ticket keeps its line. It is
-also the one exception to the once-per-session low-res load: a whole-body rewrite starts from a fresh
+Compression rewrites the index; it never deletes from it — every closed ticket keeps its link. It is
+also an exception to the once-per-session low-res load: a whole-body rewrite starts from a fresh
 read, because rewriting from the copy already in context silently drops the lines a concurrent
 session appended meanwhile.
 ```
@@ -507,7 +507,7 @@ anchors matched exactly once each in the live files, so the implementer can appl
 string replacements without re-deriving anchors. Three facts came out of that run and are binding on
 the plan:
 
-1. **Measured sizes.** `wayfind/SKILL.md` 7,236 → 11,183 bytes (+3,947, +54%);
+1. **Measured sizes.** `wayfind/SKILL.md` 7,236 → 11,178 bytes (+3,942, +54%);
    `grill-with-docs/SKILL.md` 6,845 → 7,770 (+925, +13%); `doc-grounded-questions/SKILL.md`
    9,631 → 10,193 (+562, +6%). These are the numbers the `wc -c` sanity check should reproduce;
    a file materially past its figure means prose was padded beyond this spec.
@@ -669,9 +669,9 @@ asks for.
 - **Alternative considered:** A fourth file in this change. Rejected: scope creep on an issue that already survived a reviewer pass at three files.
 
 ### Accepting +54% on `wayfind/SKILL.md`
-- **Question:** The dry-run puts `wayfind/SKILL.md` at 11,183 bytes, +54% — half of that growth from P9 alone. An issue about token waste that grows the file every session loads deserves an answer. Trim the prose to hit a smaller number?
-- **Choice:** No. Ship the measured +3,947 bytes and publish the real figures rather than shaving rationale to reach a prettier percentage.
-- **Grounding:** The rationale clauses are the mechanism: "the one-line rule already existed and was violated in BOTH field efforts because it lacked a checkable cap." An imperative with no reason attached is what already failed here twice. +3,947 bytes is ~990 tokens per session against ~36k (map bloat) plus ~54k (fan-in) measured in a single effort, and P9's ~700 bytes buy the effort a defined end — a map with no terminal state costs unbounded sessions, not tokens. The file lands at 11,183, close to `doc-grounded-questions`' pre-existing 9,631, so it is not an outlier among these skills.
+- **Question:** The dry-run puts `wayfind/SKILL.md` at 11,178 bytes, +54% — half of that growth from P9 alone. An issue about token waste that grows the file every session loads deserves an answer. Trim the prose to hit a smaller number?
+- **Choice:** No. Ship the measured +3,942 bytes and publish the real figures rather than shaving rationale to reach a prettier percentage.
+- **Grounding:** The rationale clauses are the mechanism: "the one-line rule already existed and was violated in BOTH field efforts because it lacked a checkable cap." An imperative with no reason attached is what already failed here twice. +3,942 bytes is ~990 tokens per session against ~36k (map bloat) plus ~54k (fan-in) measured in a single effort, and P9's ~700 bytes buy the effort a defined end — a map with no terminal state costs unbounded sessions, not tokens. The file lands at 11,178, close to `doc-grounded-questions`' pre-existing 9,631, so it is not an outlier among these skills.
 - **Alternative considered:** Cutting the rationale sentences (~600 bytes, ~8 points of growth). Rejected: it saves a rounding error and removes the exact property that distinguishes these edits from the rule that already failed.
 
 ### No ADR

@@ -47,8 +47,8 @@ it again.
 The body's budget is **~6k characters**. A session that pushes it past that compresses back under
 before it finishes — same session, never a follow-up: fold gists a later decision subsumed into the
 one that superseded them, and cut back to its link any entry that has grown an explanation.
-Compression rewrites the index; it never deletes from it — every closed ticket keeps its line. It is
-also the one exception to the once-per-session low-res load: a whole-body rewrite starts from a fresh
+Compression rewrites the index; it never deletes from it — every closed ticket keeps its link. It is
+also an exception to the once-per-session low-res load: a whole-body rewrite starts from a fresh
 read, because rewriting from the copy already in context silently drops the lines a concurrent
 session appended meanwhile.
 
