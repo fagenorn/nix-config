@@ -74,7 +74,7 @@ Scratch clone (all paths relative to `$SCRATCH`):
 - `plugins/codex/scripts/session-lifecycle-hook.mjs` — `cleanupSessionJobs` terminalizes and retains instead of deleting, and prunes per state dir (Task 2).
 - `plugins/codex/scripts/lib/render.mjs` — the active-jobs table's `Elapsed` cell gains an overdue suffix; `pushJobDetails` gains one overdue line (Task 4).
 - `plugins/codex/commands/status.md` — the preserved-fields sentence keeps the overdue marker (Task 4).
-- `tests/worker-postmortem.test.mjs` — new behaviour-named file; created in Task 1 and appended to in Tasks 2–4 (12 tests total).
+- `tests/worker-postmortem.test.mjs` — new behaviour-named file; created in Task 1 and appended to in Tasks 2–4 (13 tests total).
 - `tests/runtime.test.mjs` — the existing `session end fully cleans up jobs for the ending session` test is deliberately rewritten and renamed (Task 2). This is an expected, designed change, not a regression.
 - `tests/commands.test.mjs` — one docs-contract test appended (Task 4).
 
@@ -93,6 +93,20 @@ Inherited from the design — implementers test at these and nowhere else. A tas
 4. **A narrow rendered-text seam** — assertions over the markdown `status` output (prior art: the active-jobs table assertions in `tests/runtime.test.mjs`) and over `plugins/codex/commands/status.md`'s text (prior art: the docs assertions in `tests/commands.test.mjs`).
 
 `spawnDetachedTaskWorker` stays module-private: AC1 is observable at seams 1 and 2 (run a background job through the CLI, read its log off disk). No call-count assertions, no wall-clock measurements, no process-tree/`ppid` assertions — every assertion is a printed payload, an on-disk record, a file's existence, or rendered text.
+
+## Standards review provenance
+
+- **Reviewer:** Claude fallback (fresh `reviewer` agent, no inherited context, read-only toolset).
+- **Codex attempt:** dispatched first, per policy — job `reviewer-msq7jtdg-rnq1tj`, isolated read-only runtime, 14-minute budget. It **failed**: the bridge returned `CODEX_REVIEW_FAILURE` with no `errorMessage`, so it fell back to reporting the job's `summary`, a mid-run progress line. The recorded state is `status: "failed"`, `phase: "failed"`, `pid: null`, 14:51:58Z → 15:01:22Z (~9.5 min). Failure class: **worker died without recording a result**. Not a retry candidate and not a concurrency fallback, so the one-time native fallback was taken.
+- **Note the irony, and the corroboration:** that failure is a live instance of the pathology this issue fixes — a dead worker whose only forensic trace is a stale progress line, with no captured stderr to say why. The evidence the plan asks for is exactly what was missing while diagnosing it.
+- **Base SHA reviewed:** `165a3b000c4945c1b79ddca69e25b88b388acf27` (branch point); plan reviewed at `a91147c`.
+- **Focus:** none configured (`codex.planReview.focus` unset; no `.claude/skills.config.json` in this repo).
+- **Findings:** 10 raised — 4 Blocking, 3 Should-fix, 3 Discussion. **All 10 verified against the live tree** (the pinned upstream at `db52e28f` plus the committed p5 patch); none rejected as stale.
+- **Dispositions:** 8 applied (B1, B2, B3, B4, S1, S2, S3, D3 — one `Auto-resolved decisions` entry each). 2 deferred to the human reviewer, both `low` confidence and both explicitly "conscious accept" requests rather than defects:
+  - **D1** — exactly at the deadline `formatElapsedDuration` returns `"0s"`, so the cell reads `(overdue by 0s)` for one second. Truthful; kept unbranched.
+  - **D2** — "active" now has a shared predicate plus the ~8 pre-existing open-coded copies in `job-control.mjs` and `render.mjs` that this plan deliberately does not churn.
+- **Consequence for the spec:** S1 falsified one sentence of the spec's retention-safety rationale. Corrected in place at `.claude/specs/2026-08-12-worker-post-mortem-design.md` rather than by re-running Phase 2 — no requirement, option or scope changed, only a wrong justification and the guard it failed to justify.
+- No reviewer transcript is stored in this repo, per the review contract.
 
 ## Auto-resolved decisions
 
@@ -140,7 +154,7 @@ Inherited from the design — implementers test at these and nowhere else. A tas
 
 ### Test-count budget and per-task suite expectations
 - **Question:** How do the design's 13 test-strategy items map onto test cases and files, and what count does each task's gate expect?
-- **Choice:** 12 tests in the new `tests/worker-postmortem.test.mjs` (3 in Task 1, 5 in Task 2, 3 in Task 3, 1 in Task 4), 1 test appended to `tests/commands.test.mjs` (Task 4), and 1 existing `runtime.test.mjs` test rewritten in place (count unchanged). Expected gates: after Task 1 `# tests 110 / # pass 106 / # fail 0 / # skipped 4`; after Task 2 `115 / 111 / 0 / 4`; after Task 3 `118 / 114 / 0 / 4`; after Task 4 `120 / 116 / 0 / 4`.
+- **Choice:** 13 tests in the new `tests/worker-postmortem.test.mjs` (3 in Task 1, 5 in Task 2, 4 in Task 3, 1 in Task 4), 1 test appended to `tests/commands.test.mjs` (Task 4), and 1 existing `runtime.test.mjs` test rewritten in place (count unchanged). Expected gates: after Task 1 `# tests 110 / # pass 106 / # fail 0 / # skipped 4`; after Task 2 `115 / 111 / 0 / 4`; after Task 3 `119 / 115 / 0 / 4`; after Task 4 `121 / 117 / 0 / 4`.
 - **Grounding:** Baseline 107/103/0/4 verified at p5 before any change; the 4 skips are unchanged upstream skips (`test.skip("upstream-only: …")`). The arithmetic is stated per task so an implementer that silently loses a test is caught by its own gate.
 - **Alternative considered:** Leaving counts to the implementer — rejected: a test that never registers (a typo'd `test(` name, an early `return`) is invisible without an expected total.
 
@@ -183,8 +197,9 @@ Inherited from the design — implementers test at these and nowhere else. A tas
 ### The retention prune runs once per state dir, unconditionally, after the per-job loop
 - **Question:** Where exactly does `pruneJobRecordsInStateDir` get called, and is it conditional on that state dir having contained jobs of the ending session?
 - **Choice:** Once per state dir, immediately after the per-job loop inside `cleanupSessionJobs`'s `for (const stateDir of listStateDirs())`, unconditionally. `cleanupSessionJobs` already returns early when there is no session id, so no prune happens outside a SessionEnd with a session.
-- **Grounding:** The design: "after the per-job loop, apply `MAX_JOBS` retention to each state dir the hook touched" — the hook touches every state dir (it migrates each one). Retention is state-dir-scoped today (`pruneJobRecords` → `listJobs` → `pruneJobs`), not session-scoped, so scoping the trigger by session would be a new policy. The pre-existing property that a long-idle *active* record could fall outside a 50-record cap is unchanged, not widened.
+- **Grounding:** The design: "after the per-job loop, apply `MAX_JOBS` retention to each state dir the hook touched" — the hook touches every state dir (it migrates each one). Retention is state-dir-scoped today (`pruneJobRecords` → `listJobs` → `pruneJobs`), not session-scoped, so scoping the trigger by session would be a new policy.
 - **Alternative considered:** Pruning only state dirs that yielded a matching job (leaves a worktree whose owning session never ends unpruned, for no gain); pruning once after the state-dir loop (needs a collected set for no behavioural difference).
+- **Amended at Phase 5 (finding S1):** the prune is called with `retain: (job) => isActiveJobStatus(job.status)`. An active record is exempt from the cap entirely. Two facts force this: `pruneJobs` (`state.mjs:190-194`) ranks purely by `updatedAt` and is status-blind, and `createJobProgressUpdater` (`tracked-jobs.mjs:77-105`) only writes when `phase`/`threadId`/`turnId` change, so a wedged worker's `updatedAt` goes stale and it sorts *oldest*. Since this hook iterates **every** state dir while retaining terminal records makes 50-record dirs the steady state, a status-blind cap would make one session's end delete a live record and log owned by a concurrent session. `MAX_JOBS` still bounds the dir; it now bounds the evictable (terminal) records, so a dir holds at most 50 terminal records plus its live ones.
 
 ### Test isolation: hermetic module-scope env, distinct session id per SessionEnd test, file-local helpers
 - **Question:** How do the new tests stay correct inside a live Claude Code session and independent of each other, given the SessionEnd hook iterates *every* state dir under the plugin data root?
@@ -215,6 +230,60 @@ Inherited from the design — implementers test at these and nowhere else. A tas
 - **Choice:** Resume. This commit is the plan's first commit; Phase 5 (standards review) runs against it next.
 - **Grounding:** from-issue's pre-flight treats a matching worktree with uncommitted work as a stop, but the state here is a dead agent's artifact rather than a human's in-progress edit — no process holds the worktree (`lsof -a -d cwd` finds none), no PR exists for the issue, the branch is based on `origin/main` at `165a3b0` as Phase 1 requires, and both artifacts are structurally complete (the plan ends with its full `## Spec coverage` section, so it was not truncated mid-write). Discarding would re-derive an approved 352-line design at no gain.
 - **Alternative considered:** `git worktree remove` + a fresh Phase 0–4 run — rejected: it throws away a complete design and plan whose quality Phase 5 is about to test anyway, and a second design pass could reach different decisions than the ones the spec commit already records.
+
+### Resuming a second time, after the reset between Phase 4 and Phase 5
+- **Question:** A second `--auto` run was reset, this time with the plan committed (`a91147c`) and Phase 5 never started. Resume again, or restart?
+- **Choice:** Resume at Phase 5. No plan content was re-derived; the standards review below is the first review of these artifacts.
+- **Grounding:** Same pre-flight evidence as the entry above, re-verified: the worktree is clean (`git status --porcelain` empty), it holds exactly the two doc commits above `origin/main` at `165a3b0`, and `gh pr list --state all --search "issue-10"` returns no PR for this issue (only the merged #4, #8, #5 for issues 2, 1 and 3). The plan ends with its complete `## Spec coverage` section, so it was not truncated mid-write.
+- **Alternative considered:** Discarding and restarting — rejected for the same reason as before, now with more to lose.
+
+### B1: the Task 1 patch gate expected a count that a correct implementation cannot produce
+- **Question:** The reviewer says `grep -c 'stdio: ["ignore", logFd, logFd]'` on the regenerated patch yields `1`, not the `2` the gate expects, because the broker's identical line is pristine upstream rather than patch-added.
+- **Choice:** Expected count `2` → `1`, the failure interpretation inverted to "if the count is 0", and the false claim that the broker line is "already patch-added at p5" removed.
+- **Grounding:** Verified directly: `git show db52e28f…:plugins/codex/scripts/lib/broker-lifecycle.mjs` carries `stdio: ["ignore", logFd, logFd]` at line 65 *at the pin*, and `grep -c` on the committed p5 patch returns `0`. The p5 patch does touch `broker-lifecycle.mjs`, which is what made the original claim plausible, but not that line. As written the gate failed on a correct implementation and passed on a broken one.
+- **Alternative considered:** Grepping the built store path instead — rejected: Step 8 already does exactly that, and the patch-level grep is the cheaper pre-build check.
+
+### B2: the hard-kill test's last-line assertion could never pass
+- **Question:** The reviewer says `` `${logLines.at(-1).slice(0, 27)} ${DEAD_WORKER_MESSAGE(pid)}` `` reconstructs the line with two spaces, so the assertion fails at both p5 and p6.
+- **Choice:** Replaced with `assert.ok(logLines.at(-1).endsWith(DEAD_WORKER_MESSAGE(workerPid)), logLines.join("\n"))`.
+- **Grounding:** `appendLogLine` writes `` `[${nowIso()}] ${normalized}\n` `` (`tracked-jobs.mjs:43`) and `nowIso()` is `toISOString()`, so the prefix is `[` + 24 chars + `]` = 26 characters and index 26 is the separating space. `slice(0, 27)` therefore already ends with that space and the template adds a second. This also repaired Step 3's gate: the test is declared green at p5, so the double space would have made it fail there and turned "2 of 3 fail" into 3. `endsWith` beats `slice(0, 26)` because it encodes no prefix width at all, and the existing `ISO_PREFIXED` filter assertion at the end of the test is what pins the prefix shape.
+- **Alternative considered:** `slice(0, 26)` — the reviewer's other suggestion, rejected: it still hard-codes a magic width that a change to the timestamp format would silently break.
+
+### B3: Task 3 adds four tests, so the Task 3 and Task 4 suite gates were off by one
+- **Question:** The reviewer says the test-count budget says "3 in Task 3" while Task 3's Step 2 appends four tests, making the `118` and `120` full-suite gates wrong.
+- **Choice:** Budget → "13 tests … (3 in Task 1, 5 in Task 2, 4 in Task 3, 1 in Task 4)"; Task 3's gate `118 / 114` → `119 / 115`; Task 4's gate `120 / 116` → `121 / 117`.
+- **Grounding:** Counted the `test(` declarations in the plan: Task 1 at 3, Task 2 at 5, Task 3 at 4 (`deadlineAt` stamping, alive-past-deadline, future-plus-missing deadline, dead-worker-past-deadline), Task 4 at 1 in `worker-postmortem` plus 1 in `commands`. From the verified 107 baseline: 110, 115, 119, 121, with `skipped` fixed at 4 so `pass` is always `tests - 4`. The per-file expectations ("12 tests" after Task 3, "13 tests" after Task 4) were already right and are unchanged — only the whole-suite arithmetic was wrong.
+- **Alternative considered:** Dropping one Task 3 test to match the budget — rejected: all four assert distinct behaviour, and the budget exists to catch a lost test, not to cap them.
+
+### B4: the Task 2 `removeJobFromStateDir` gate miscounted the surviving occurrences
+- **Question:** The reviewer says the gate expects `2` where a correct implementation leaves `3`.
+- **Choice:** Expected `2` → `3`, with all three enumerated, and the failure interpretation redirected to the store-path grep that scopes the check to the hook file.
+- **Grounding:** Verified: the committed p5 patch holds 4 occurrences (patch lines 1071, 1074, 1189, 1247). Task 2 deletes the hook's import and call and adds one use inside `pruneJobRecordsInStateDir`, leaving the definition, the `cwd`-variant delegation, and the prune use. The original text overlooked the delegation. A patch-wide grep also cannot tell which file an occurrence sits in, so the meaningful assertion is the existing `grep -c … session-lifecycle-hook.mjs # 0` against the built store path.
+- **Alternative considered:** Deleting the patch-level grep as redundant — rejected: it fails faster than a build, which is the point of a pre-build gate.
+
+### S1: the SessionEnd prune exempts active records from the cap
+- **Question:** The reviewer says the status-blind `MAX_JOBS` prune can delete a live record and log belonging to a *concurrent* session, and that the spec's safety rationale for this is false.
+- **Choice:** `pruneJobRecordsInStateDir(stateDir, { retain })` takes a caller-supplied predicate; the hook passes `(job) => isActiveJobStatus(job.status)`, so an active record is never an eviction candidate. `MAX_JOBS` still bounds the dir, now over the evictable (terminal) records. The spec's falsified sentence is corrected in place, and the existing retention test gains a falsifying assertion.
+- **Grounding:** Verified all three legs. `pruneJobs` (`state.mjs:190-194`) ranks purely by `updatedAt` and knows nothing about status. `createJobProgressUpdater` (`tracked-jobs.mjs:77-105`) returns early unless `phase`/`threadId`/`turnId` changed, so a wedged worker's `updatedAt` goes stale and it sorts *oldest* — the spec's claim that "its worker stamps `updatedAt` on every progress event, so it sorts newest" is simply wrong. And the hook walks **every** state dir, while retaining terminal records makes 50-record dirs the steady state, so the cap starts biting every session. Deleting a live record contradicts R3 and AC2 outright. The predicate lives with the caller because `tracked-jobs.mjs` already imports from `state.mjs`, so importing the status predicate back would create a cycle; `state.mjs` holds no status knowledge today and keeps none. `pruneJobRecords(cwd)` passes no predicate, so cwd-scoped pruning is bit-for-bit unchanged and `saveState prunes dropped job artifacts when indexed jobs exceed the cap` still passes — verified that it seeds all 51 records `status: "completed"`, so no active-record exemption applies to it.
+- **Alternative considered:** Hard-coding the active check inside `state.mjs` (duplicates the predicate the plan deliberately unified, and gives the state layer status semantics it has never had); importing `isActiveJobStatus` into `state.mjs` (circular import, load-order fragile even though ESM hoisting would mask it); leaving it and documenting the risk (rejected: the failure it invites is the exact data loss this issue exists to stop).
+
+### S2: terminal records keep the reviewer-runtime cleanup retry
+- **Question:** The reviewer says moving `cleanupReviewerRuntime` inside `terminalizeLiveSessionJob` silently drops the retry for already-terminal `plan-review` records.
+- **Choice:** The terminal branch calls `cleanupReviewerRuntime(current.workspaceRoot, current.id)` before `continue` when `current.kind === "plan-review" && current.workspaceRoot`. The live path keeps its existing terminate → cleanup → terminal-write order. The terminal-guard test gains a leaked-runtime-dir assertion.
+- **Grounding:** Verified at p5 (`session-lifecycle-hook.mjs:65-67`): the call sits in the per-job loop after the conditional terminate, so it runs for every job of the ending session regardless of status. The plan's rewrite reached it only for still-active jobs. `cleanupReviewerRuntime` is idempotent (it `rm -rf`s a path), so the retry is free, and it matters more now: a terminal record whose own cleanup never completed — `withAppServer`'s `finally` can throw — used to have its runtime dir collected as the record was deleted. Placing the retry in the terminal branch rather than before the reconcile preserves issue #2's ordering for live jobs, where cleanup must follow the terminate and precede the terminal write.
+- **Alternative considered:** Hoisting the cleanup above the reconcile for all jobs (would delete a live worker's runtime home out from under it — the reason p5 terminates first); recording the drop as deliberate (the reviewer's other option, rejected: it trades a leak that nothing revisits for nothing).
+
+### S3: reconcile only when the record's own state dir is the one being walked
+- **Question:** The reviewer says `reconcileWorkerLiveness(job.workspaceRoot, …)` can write to a different state dir than the loop is reading, leaving the real record active forever.
+- **Choice:** `const reconcilable = Boolean(job.workspaceRoot) && resolveStateDir(job.workspaceRoot) === stateDir;` gates the reconcile; when it is false the record takes the state-dir-only path that a record without a `workspaceRoot` already takes.
+- **Grounding:** Verified `resolveStateDir` (`state.mjs:72-84`) hashes `fs.realpathSync.native(workspaceRoot)` and falls back to the literal path when the realpath fails. For a worktree since moved or deleted the two hashes diverge, so reconcile would terminalize a phantom record in the other dir, this loop would read the untouched record, see "terminal" and `continue` — and now that SessionEnd deletes nothing, the stuck `running` record would never be cleaned up either. The gate reuses the escape hatch the plan already has, so it adds a condition rather than a code path.
+- **Alternative considered:** Passing `stateDir` into `reconcileWorkerLiveness` (a signature change to a function this plan deliberately leaves untouched, and issue #2's tests pin its behaviour); leaving it (rejected: it converts a rare-but-real condition into a permanently wrong record). No test accompanies this one: the reviewer notes the seams cannot reach it, because every test's seed workspace resolves to its own state dir. Recorded here rather than papered over with a test that would prove nothing.
+
+### D3: the store-path lookup tolerates more than one closure match
+- **Question:** The reviewer notes `STORE=$(nix-store -qR ./result | grep codex-plugin-cc)` assumes a single match.
+- **Choice:** All four sites become `grep 'codex-plugin-cc-1\.0\.6' | head -n1`.
+- **Grounding:** The closure contains the marketplace `runCommand` derivations alongside the plugin output, and any second match makes `$STORE` multi-line, breaking the `grep -c` that follows with a confusing error rather than a clear gate failure. Pinning the version narrows it to the p6 output and `head -n1` makes the command total. Applied rather than deferred because it is a two-token change that removes a spurious-failure mode from a gate every task runs.
+- **Alternative considered:** Leaving it and letting an implementer debug the multi-line expansion — rejected as false economy.
 
 ---
 
@@ -460,7 +529,12 @@ test("a hard-killed worker's trail is its progress lines plus the heal-on-read l
   assert.equal(job.errorMessage, DEAD_WORKER_MESSAGE(workerPid));
 
   const logLines = readLogLines(logFile);
-  assert.equal(logLines.at(-1), `${logLines.at(-1).slice(0, 27)} ${DEAD_WORKER_MESSAGE(workerPid)}`);
+  // endsWith, not a slice-based reconstruction of the prefix: appendLogLine
+  // writes `[${nowIso()}] ${message}`, and `[` + a 24-char ISO instant + `]`
+  // is 26 characters, so any slice wide enough to include the separating space
+  // makes the template add a second one. The ISO_PREFIXED assertion below is
+  // what pins the prefix shape.
+  assert.ok(logLines.at(-1).endsWith(DEAD_WORKER_MESSAGE(workerPid)), logLines.join("\n"));
   assert.ok(logLines.some((line) => line.includes("Starting Codex task thread.")), logLines.join("\n"));
   // The honest limit, pinned rather than papered over: a SIGKILLed process
   // contributes no captured output, so the trail is progress plus heal-on-read.
@@ -574,7 +648,7 @@ Run: `git -C "$WORKTREE" status --porcelain`
 Expected: exactly two modified paths — ` M lib/agent-plugins.nix` and ` M patches/agent-plugins/codex-plugin-cc.patch` (plus possibly `?? result`, untracked). Anything else means a stray edit landed.
 
 Run: `grep -c 'stdio: \["ignore", logFd, logFd\]' "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
-Expected: `2` — one `+` line in `plugins/codex/scripts/codex-companion.mjs` (added by this task) and one context-free `+` line in `plugins/codex/scripts/lib/broker-lifecycle.mjs` (the pre-existing broker spawn, already patch-added at p5). If the count is 1, the worker's spawn shape did not reach the patch.
+Expected: `1` — the single `+` line in `plugins/codex/scripts/codex-companion.mjs` added by this task. The broker's identical line is **pristine upstream** (`plugins/codex/scripts/lib/broker-lifecycle.mjs:65` at the pin), not patch-added, so the committed p5 patch matches this grep `0` times and p6 matches it once. If the count is 0, the worker's spawn shape did not reach the patch.
 
 Run: `grep -c 'LOG_LINE_PREFIX_PATTERN' "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
 Expected: `2` — the definition and its single use.
@@ -588,7 +662,7 @@ Run (from `$WORKTREE`): `just build`
 Expected: exits 0. Then:
 
 ```bash
-STORE=$(nix-store -qR ./result | grep codex-plugin-cc)
+STORE=$(nix-store -qR ./result | grep 'codex-plugin-cc-1\.0\.6' | head -n1)
 echo "$STORE"                                                                     # ...codex-plugin-cc-1.0.6-nix.db52e28f.p6
 grep -c 'stdio: \["ignore", logFd, logFd\]' "$STORE/plugins/codex/scripts/codex-companion.mjs"   # 1
 ```
@@ -636,7 +710,7 @@ Claude-Session: https://claude.ai/code/session_018ND9WQgzw7ccKYruN3pRaF"
 - Produces (later tasks rely on these):
   - `isActiveJobStatus(status): boolean` exported from `plugins/codex/scripts/lib/tracked-jobs.mjs` — `true` for `"queued"` and `"running"` only. Task 3 imports it into `job-control.mjs`.
   - `updateJobRecordInStateDir(stateDir, jobId, mutate)` exported from `state.mjs`; `updateJobRecord(cwd, jobId, mutate)` delegates to it with identical semantics (mutate returning `null` keeps the on-disk record and returns it).
-  - `pruneJobRecordsInStateDir(stateDir)` exported from `state.mjs`; the private `pruneJobRecords(cwd)` delegates to it.
+  - `pruneJobRecordsInStateDir(stateDir, { retain } = {})` exported from `state.mjs`, where `retain` is an optional predicate marking records that are exempt from the `MAX_JOBS` cap; the private `pruneJobRecords(cwd)` delegates to it and passes none.
   - `tests/worker-postmortem.test.mjs` additionally exports-by-convention the file-local helpers `spawnSleeper(t, cwd)`, `deadPid(t, cwd)`, `runSessionEndHook(repo, sessionId)` and the constant `SESSION_HOOK`, which Task 4 reuses (`spawnSleeper` only).
 
 - [ ] **Step 1: Rebuild the scratch clone**
@@ -713,7 +787,7 @@ function activeRecord(workspace, id, pid, sessionId, overrides = {}) {
 }
 ```
 
-Add `import { spawn } from "node:child_process";` to the file's import block (it is not there after Task 1).
+Add `import { spawn } from "node:child_process";` and `import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";` to the file's import block (neither is there after Task 1; `tests/liveness.test.mjs` and `tests/reviewer-detach.test.mjs` import the resolver the same way).
 
 Then the five tests:
 
@@ -824,6 +898,25 @@ test("session end never relabels or kills an already-terminal record", (t) => {
     })
   );
 
+  // A terminal plan-review record whose reviewer runtime dir outlived its own
+  // cleanup (withAppServer's `finally` can throw). Retaining the record must not
+  // also drop the hook's idempotent cleanup retry, which p5 ran for every job of
+  // the ending session regardless of status.
+  const reviewerRuntime = resolveReviewerRuntimeHome(workspace, "reviewer-terminal-leak");
+  fs.mkdirSync(reviewerRuntime, { recursive: true });
+  fs.writeFileSync(path.join(reviewerRuntime, "config.toml"), "", "utf8");
+  const { jobFile: reviewerJobFile } = seedJob(
+    workspace,
+    activeRecord(workspace, "reviewer-terminal-leak", null, sessionId, {
+      kind: "plan-review",
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      completedAt: "2026-08-01T10:00:09.000Z",
+      errorMessage: DEAD_WORKER_MESSAGE(4242)
+    })
+  );
+
   const result = runSessionEndHook(workspace, sessionId);
 
   assert.equal(result.status, 0, result.stderr);
@@ -832,6 +925,10 @@ test("session end never relabels or kills an already-terminal record", (t) => {
   assert.equal(stored.pid, sleeper.pid);
   assert.equal(stored.errorMessage, undefined);
   assert.equal(isPidGone(sleeper.pid), false);
+  // Retained, unrelabelled — and its leaked runtime dir collected.
+  assert.equal(fs.existsSync(reviewerJobFile), true, reviewerJobFile);
+  assert.equal(JSON.parse(fs.readFileSync(reviewerJobFile, "utf8")).status, "failed");
+  assert.equal(fs.existsSync(reviewerRuntime), false, reviewerRuntime);
 });
 
 test("session end applies the MAX_JOBS retention it used to get from deleting", () => {
@@ -854,11 +951,30 @@ test("session end applies the MAX_JOBS retention it used to get from deleting", 
     );
   }
 
+  // A *live* record owned by a different session, carrying the oldest updatedAt
+  // in the dir. The per-job loop skips it on the session check, so only the
+  // prune can touch it — and a status-blind cap would evict it, because
+  // createJobProgressUpdater stamps updatedAt only when a phase, thread or turn
+  // changes, so a wedged worker sorts oldest. Deleting it would destroy a
+  // concurrent session's live record and log.
+  const foreignLive = seedJob(
+    workspace,
+    activeRecord(workspace, "task-foreign-live", null, "sess-other-live", {
+      status: "running",
+      phase: "running",
+      updatedAt: "2026-08-01T09:00:00.000Z"
+    })
+  );
+
   const result = runSessionEndHook(workspace, sessionId);
 
   assert.equal(result.status, 0, result.stderr);
-  // MAX_JOBS is 50, newest-first by updatedAt: the five oldest lose both
-  // artifacts, the newest fifty keep theirs.
+  // The active record is exempt from the cap, so it survives untouched.
+  assert.equal(fs.existsSync(foreignLive.jobFile), true, foreignLive.jobFile);
+  assert.equal(fs.existsSync(foreignLive.logFile), true, foreignLive.logFile);
+  assert.equal(JSON.parse(fs.readFileSync(foreignLive.jobFile, "utf8")).status, "running");
+  // MAX_JOBS is 50 over the evictable (terminal) records, newest-first by
+  // updatedAt: the five oldest lose both artifacts, the newest fifty keep theirs.
   for (const { jobFile, logFile } of seeded.slice(0, 5)) {
     assert.equal(fs.existsSync(jobFile), false, jobFile);
     assert.equal(fs.existsSync(logFile), false, logFile);
@@ -972,7 +1088,7 @@ export function updateJobRecord(cwd, jobId, mutate) {
 And replace `pruneJobRecords` (currently lines 355-367) with:
 
 ```js
-export function pruneJobRecordsInStateDir(stateDir) {
+export function pruneJobRecordsInStateDir(stateDir, { retain = null } = {}) {
   const jobsDir = path.join(stateDir, JOBS_DIR_NAME);
   if (!fs.existsSync(jobsDir)) {
     return;
@@ -987,7 +1103,17 @@ export function pruneJobRecordsInStateDir(stateDir) {
       // outcome listJobs + the old pruneJobRecords produced together.
     }
   }
-  const retainedIds = new Set(pruneJobs(records).map((job) => job.id));
+  // MAX_JOBS bounds the records the caller is willing to evict, and `retain`
+  // says which are not evictable at all. It exists because pruneJobs ranks by
+  // updatedAt while a job's updatedAt only advances when its phase, thread or
+  // turn changes (createJobProgressUpdater in tracked-jobs.mjs returns early
+  // when nothing changed) — so a long-wedged worker sorts *oldest*, which is
+  // precisely the record this feature exists to preserve. state.mjs stays
+  // status-agnostic: the predicate comes from the caller, and pruneJobRecords
+  // passes none, so cwd-scoped pruning keeps its current semantics exactly.
+  const exempt = retain ? records.filter((job) => retain(job)) : [];
+  const evictable = retain ? records.filter((job) => !retain(job)) : records;
+  const retainedIds = new Set([...exempt, ...pruneJobs(evictable)].map((job) => job.id));
   for (const name of names) {
     const jobId = name.slice(0, -".json".length);
     if (!retainedIds.has(jobId)) {
@@ -1041,6 +1167,7 @@ import {
   listStateDirs,
   migrateLegacyJobIndexInStateDir,
   pruneJobRecordsInStateDir,
+  resolveStateDir,
   updateJobRecordInStateDir
 } from "./lib/state.mjs";
 import { appendLogLine, isActiveJobStatus, nowIso, reconcileWorkerLiveness } from "./lib/tracked-jobs.mjs";
@@ -1120,11 +1247,28 @@ function cleanupSessionJobs(sessionId) {
       // opportunity before a session's records go quiet. A record without a
       // workspaceRoot cannot be reconciled (that is what resolves both the job
       // file and the reviewer runtime), so it takes the state-dir-only path.
+      //
+      // Reconciliation also has to be writing to the record this loop is
+      // reading. reconcileWorkerLiveness resolves its own state dir by hashing
+      // the *realpath* of workspaceRoot (`state.mjs:72-84`), so for a worktree
+      // that has since been moved or deleted the hash diverges: it would
+      // terminalize a phantom record elsewhere, this loop would read "terminal"
+      // and skip, and the real record would stay active forever — and is now
+      // never deleted either. When the two disagree, take the state-dir-only
+      // path and let terminalizeLiveSessionJob write through `stateDir`.
+      const reconcilable = Boolean(job.workspaceRoot) && resolveStateDir(job.workspaceRoot) === stateDir;
       const current =
-        isActiveJobStatus(job.status) && job.workspaceRoot ? reconcileWorkerLiveness(job.workspaceRoot, job) : job;
+        isActiveJobStatus(job.status) && reconcilable ? reconcileWorkerLiveness(job.workspaceRoot, job) : job;
       if (!isActiveJobStatus(current.status)) {
         // Already terminal, or never active: retained with its log, never
-        // relabelled, never killed.
+        // relabelled, never killed. The reviewer-runtime cleanup still runs:
+        // it is idempotent, the p5 hook retried it for every job of the ending
+        // session regardless of status, and a terminal record whose own cleanup
+        // never completed (`withAppServer`'s `finally` can throw) would
+        // otherwise keep its runtime dir forever now that the record survives.
+        if (current.kind === "plan-review" && current.workspaceRoot) {
+          cleanupReviewerRuntime(current.workspaceRoot, current.id);
+        }
         continue;
       }
       terminalizeLiveSessionJob(stateDir, current);
@@ -1133,8 +1277,12 @@ function cleanupSessionJobs(sessionId) {
     // facto garbage collector of job artifacts. Retaining them means the state
     // layer's existing MAX_JOBS retention has to run at the same lifecycle
     // event, or .json/.log files — each carrying a full review payload —
-    // accumulate without bound. No new policy: the existing one, triggered.
-    pruneJobRecordsInStateDir(stateDir);
+    // accumulate without bound. No new policy: the existing one, triggered —
+    // except that an *active* record is never an eviction candidate. This hook
+    // walks every state dir, not just this session's, so a status-blind cap
+    // would let one session's end delete a live record and log belonging to a
+    // concurrent session, which is the opposite of what the issue asks for.
+    pruneJobRecordsInStateDir(stateDir, { retain: (job) => isActiveJobStatus(job.status) });
   }
 }
 ```
@@ -1158,7 +1306,7 @@ Run: `git -C "$WORKTREE" status --porcelain`
 Expected: exactly one modified tracked path — ` M patches/agent-plugins/codex-plugin-cc.patch` (plus possibly `?? result`).
 
 Run: `grep -c "removeJobFromStateDir" "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
-Expected: `2` — the two occurrences inside `state.mjs` (the exported definition and its use in `pruneJobRecordsInStateDir`). The hook's call and import are gone, so if this prints 3 or more the hook still deletes records.
+Expected: `3` — the three occurrences inside `state.mjs`: the exported definition, the `cwd`-variant delegation (`return removeJobFromStateDir(resolveStateDir(cwd), jobId);`), and the use inside `pruneJobRecordsInStateDir`. The committed p5 patch has `4` — those same three minus the prune use, plus the hook's import and call, both of which this task removes. Because this grep cannot say *which* file each occurrence sits in, the authoritative check that the hook deletes nothing is the store-path grep in the next step, which must print `0` for `session-lifecycle-hook.mjs`.
 
 Run: `grep -c "Session ended while the job was still" "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
 Expected: `4` — one in the hook, three in the tests (two in `tests/worker-postmortem.test.mjs`, one in the rewritten `tests/runtime.test.mjs` assertion).
@@ -1167,7 +1315,7 @@ Run (from `$WORKTREE`): `just build`
 Expected: exits 0. Then:
 
 ```bash
-STORE=$(nix-store -qR ./result | grep codex-plugin-cc)
+STORE=$(nix-store -qR ./result | grep 'codex-plugin-cc-1\.0\.6' | head -n1)
 grep -c "pruneJobRecordsInStateDir" "$STORE/plugins/codex/scripts/session-lifecycle-hook.mjs"   # 1
 grep -c "removeJobFromStateDir" "$STORE/plugins/codex/scripts/session-lifecycle-hook.mjs" || true  # 0 (grep exits 1)
 ```
@@ -1442,7 +1590,7 @@ Run (from `$SCRATCH`): `env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID 
 Expected: PASS — 12 tests, 0 fail.
 
 Run (from `$SCRATCH`): `env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH node --test tests/*.test.mjs`
-Expected: `# tests 118 / # pass 114 / # fail 0 / # skipped 4`. In particular `status shows phases, hints, and the latest finished job` must still pass with `Duration: 1m 5s` — the `isTerminalJobStatus` substitution in the `duration` branch is semantics-preserving.
+Expected: `# tests 119 / # pass 115 / # fail 0 / # skipped 4`. In particular `status shows phases, hints, and the latest finished job` must still pass with `Duration: 1m 5s` — the `isTerminalJobStatus` substitution in the `duration` branch is semantics-preserving.
 
 - [ ] **Step 7: Regenerate the patch, verify, `just build`**
 
@@ -1461,7 +1609,7 @@ Run (from `$WORKTREE`): `just build`
 Expected: exits 0. Then:
 
 ```bash
-STORE=$(nix-store -qR ./result | grep codex-plugin-cc)
+STORE=$(nix-store -qR ./result | grep 'codex-plugin-cc-1\.0\.6' | head -n1)
 grep -c "resolveJobDeadline" "$STORE/plugins/codex/scripts/codex-companion.mjs"   # 2
 grep -c "overdueBy" "$STORE/plugins/codex/scripts/lib/job-control.mjs"            # 3
 ```
@@ -1625,7 +1773,7 @@ Run (from `$SCRATCH`): `env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID 
 Expected: PASS — 0 fail (13 tests in `worker-postmortem`, the full `commands` file including the new test).
 
 Run (from `$SCRATCH`): `env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH node --test tests/*.test.mjs`
-Expected: `# tests 120 / # pass 116 / # fail 0 / # skipped 4`. In particular the existing table assertion in `status shows phases, hints, and the latest finished job` must still pass — it matches the `Elapsed` cell with `.*`, and that job has no `deadlineAt`, so the cell is a bare duration.
+Expected: `# tests 121 / # pass 117 / # fail 0 / # skipped 4`. In particular the existing table assertion in `status shows phases, hints, and the latest finished job` must still pass — it matches the `Elapsed` cell with `.*`, and that job has no `deadlineAt`, so the cell is a bare duration.
 
 - [ ] **Step 7: Regenerate the patch and run the whole-issue verification**
 
@@ -1659,7 +1807,7 @@ Run (from `$WORKTREE`): `just build`
 Expected: exits 0. Then:
 
 ```bash
-STORE=$(nix-store -qR ./result | grep codex-plugin-cc)
+STORE=$(nix-store -qR ./result | grep 'codex-plugin-cc-1\.0\.6' | head -n1)
 echo "$STORE"                                                                                     # ...codex-plugin-cc-1.0.6-nix.db52e28f.p6
 grep -c 'stdio: \["ignore", logFd, logFd\]' "$STORE/plugins/codex/scripts/codex-companion.mjs"     # 1
 grep -c "pruneJobRecordsInStateDir" "$STORE/plugins/codex/scripts/session-lifecycle-hook.mjs"      # 1
@@ -1707,4 +1855,4 @@ Activation (`just switch`) and the live demo are the ship phase's call. After th
 - **R5 / AC2** (retained records stay bounded by the existing `MAX_JOBS`, triggered at SessionEnd): Task 2 Steps 5 and 7, pinned by `session end applies the MAX_JOBS retention it used to get from deleting`; the delegation's semantics are pinned by the untouched `tests/state.test.mjs` prune test.
 - **R6 / AC3** (`deadlineAt` = creation + timeout, stamped once at enqueue, absent without a timeout): Task 3 Step 4, pinned by `a background enqueue stamps deadlineAt from the record's own createdAt`.
 - **R7 / AC3** (a read derives overdue without writing, reports it on the table and the detail block beside `/codex:cancel`, never flips): Task 3 Step 5 and Task 4 Steps 4-5, pinned by `an alive job past its recorded deadline reports overdue without being flipped`, `a future deadline and a missing deadline both report not overdue`, `a dead worker past its deadline is failed, never overdue`, `the status report marks an overdue job in the active-jobs table and its detail block`, and `the status command preserves the overdue marker when it re-renders the table`.
-- **R8 / AC4** (suite green env-scrubbed; `patchRevision` 5→6 with `just build` green): every task's suite gate (110 → 115 → 118 → 120 tests, `# fail 0`, `# skipped 4` throughout), Task 1 Steps 7-8 (bump + build), Task 4 Steps 7-8 (determinism, `patchRevision = 6`, `.p6` closure content checks).
+- **R8 / AC4** (suite green env-scrubbed; `patchRevision` 5→6 with `just build` green): every task's suite gate (110 → 115 → 119 → 121 tests, `# fail 0`, `# skipped 4` throughout), Task 1 Steps 7-8 (bump + build), Task 4 Steps 7-8 (determinism, `patchRevision = 6`, `.p6` closure content checks).
