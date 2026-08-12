@@ -256,6 +256,55 @@ bug, not an implementer's call:
 - **Alternative considered:** A stub section with the field names and empty values. Rejected by the
   no-placeholders rule, and because an unfilled stub reads as a review that happened and found nothing.
 
+### B1: the plan's four edit fences held unsubstituted template tokens (Phase-5 review)
+- **Question:** (fallback reviewer, Blocking, high confidence) The fences in Task 1 Steps 2–3 contained
+  the literal strings `@@W1_BEFORE@@`, `@@W1_AFTER@@`, `@@W2_BEFORE@@`, `@@W2_AFTER@@` instead of the
+  spec's text — the implementer's Edit calls would hard-fail (`old_string` absent from the target),
+  contradicting the plan's own "reproduced verbatim" claims and the `## No placeholders` rule of the
+  very file under edit.
+- **Choice:** Substituted the spec's fence bodies verbatim into all four fences, then re-verified:
+  every spec fence now occurs byte-identically in the plan, and a whole-file placeholder scan is clean
+  (the one `TBD` hit is a decision entry quoting the rule).
+- **Grounding:** Reviewer evidence at the committed plan's lines 310/317/330/336 (f0b17c2), confirmed
+  by grep before fixing. Root cause: the Phase-4 author hit its session limit after writing the
+  template pass and before substitution; the file ended structurally complete, so the gap was
+  invisible to an outline check.
+- **Alternative considered:** Reviewer's call accepted as-is.
+
+### S1: recovery replay was not deterministic over a mistyped W1 (Phase-5 review)
+- **Question:** (fallback reviewer, Should-fix, medium confidence) W1's AFTER restates its BEFORE
+  unchanged, so replaying `text.replace(before, after)` over a mistyped W1 appends a second, correct
+  paragraph while leaving the typo'd one in place — the plan called this path "deterministic".
+- **Choice:** The recovery block now restores the pristine file first
+  (`git checkout HEAD -- home/common/agent-skills/skills/writing-plans/SKILL.md` — nothing is
+  committed until Step 5) before replaying from the spec; the prose states why.
+- **Grounding:** Reviewer's failure scenario verified against the fence text: after a mistyped W1,
+  `count(after) == 0` and `count(before) == 1` still hold, so the replay silently double-applies.
+- **Alternative considered:** Reviewer's call accepted as-is.
+
+### D1: the duplicated Python heredoc is intentional, not DRY debt (Phase-5 review)
+- **Question:** (fallback reviewer, Discussion) The ~25-line fence-extraction heredoc appears in both
+  Task 1 Step 4 and Task 2 Step 1; flag it so a later fixup doesn't "simplify" the duplication away.
+- **Choice:** No edit; recorded here as the durable note the reviewer asked for.
+- **Grounding:** `writing-plans/SKILL.md` makes "Similar to Task N" a plan failure — tasks are read in
+  isolation, so each carries its own copy.
+- **Alternative considered:** Extracting a shared script file — rejected; this plan already decided
+  the verification script is never committed.
+
+---
+
+## Standards review provenance
+
+- **Reviewer:** Claude fallback (`reviewer` agent, fresh context, read-only toolset) — not Codex.
+- **Codex failure class:** silent runtime crash — the bridge agent idled twice with no output, no
+  `codex-companion` process was alive, and no job-state directory was ever created for this worktree;
+  no Codex job id exists. One-time native fallback per the codex-collaboration contract; no Codex retry.
+- **Reviewed at:** plan commit `f0b17c2` on branch base `165a3b0` (= origin/main). Focus: none configured.
+- **Dispositions:** B1 (Blocking) accepted and applied; S1 (Should-fix) accepted and applied (auto
+  mode); D1 (Discussion) recorded, no edit. Rejected: none. The reviewer's own dry-run reproduced every
+  figure in the plan (7,189 bytes / 152 lines / +3 −1) and confirmed no gate asserts over an unscoped
+  commit range.
+
 ---
 
 ### Task 1: Land W1 and W2 in `writing-plans/SKILL.md`
@@ -307,14 +356,16 @@ above the `## No placeholders` heading.
 `old_string` — copy verbatim, one line:
 
 ```markdown
-@@W1_BEFORE@@
+**Every task carries at least one verification line that could fail.** Name the command and the observation that would show the task incomplete, and confirm that observation holds at the commit the implementer starts from. A criterion already true at the base commit is how an implementer "completes" a no-op.
 ```
 
 `new_string` — copy verbatim, three lines (paragraph, empty line, paragraph). The second paragraph is
 a single unwrapped line; do not re-wrap it, and do not lose the empty line between the two:
 
 ```markdown
-@@W1_AFTER@@
+**Every task carries at least one verification line that could fail.** Name the command and the observation that would show the task incomplete, and confirm that observation holds at the commit the implementer starts from. A criterion already true at the base commit is how an implementer "completes" a no-op.
+
+**Scope every gate to the files the plan owns.** Give diffs a pathspec (`git diff --stat BASE..HEAD -- <the paths named in the plan's Files: blocks>`) or assert against file content directly; never write a raw commit-range expectation — "exactly three files changed", "every commit in the range is a `feat:`". The range is not the plan's to grade: the plan and spec files land in it, so do the caller's `docs(plans):`/`docs(specs):` artifact commits, and a ship-time sync merge pulls in everything the integration branch advanced by — the gate then reads another issue's shipped work as scope creep and demands reverting it. Where commit shape genuinely is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`; the sync merge is unreachable from the integration branch, so `^` alone leaves it in) and name the artifact and review-fixup subjects as exempt.
 ```
 
 - [ ] **Step 3: Apply W2 — Self-review item 4 gains the gate-scope check**
@@ -327,13 +378,13 @@ unaffected by Step 2 having run.
 `old_string` — copy verbatim:
 
 ```markdown
-@@W2_BEFORE@@
+4. **Falsifiability** — every task has a verification line that can fail.
 ```
 
 `new_string` — copy verbatim, still one line:
 
 ```markdown
-@@W2_AFTER@@
+4. **Falsifiability and gate scope** — every task has a verification line that can fail, and no gate asserts over an unscoped commit range.
 ```
 
 - [ ] **Step 4: Verify both edits landed byte-for-byte**
@@ -379,10 +430,13 @@ than passing vacuously.
 **If `byte size` or `line count` fails but the presence checks pass**, the surrounding file changed,
 not your edit. Report it; do not adjust the AFTER text to hit the number.
 
-**If a presence check fails**, the block was transcribed rather than copied. Recover deterministically
-by replaying the replacement from the spec, then re-run the check above:
+**If a presence check fails**, the block was transcribed rather than copied. Recover deterministically:
+restore the pristine file first — nothing is committed until Step 5, and W1's AFTER restates its
+BEFORE, so replaying over a mistyped edit would append a correct paragraph while leaving the bad one
+in place — then replay the replacement from the spec and re-run the check above:
 
 ```bash
+git checkout HEAD -- home/common/agent-skills/skills/writing-plans/SKILL.md
 python3 - <<'PY'
 import pathlib
 SPEC = pathlib.Path('.claude/specs/2026-08-12-range-scoped-gates-design.md').read_text()
