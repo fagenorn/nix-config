@@ -306,6 +306,13 @@ Inherited from the design — implementers test at these and nowhere else. A tas
 - **Grounding:** `grep -c` counts matching *lines*, and Step 7's prescribed `./lib/state.mjs` import block puts `pruneJobRecordsInStateDir,` on a line of its own — so any implementation that follows the plan verbatim produces two matching lines (the import at hook line 12, the call at line 146). Verified in the committed patch: the symbol appears at patch lines 1144 (definition in `state.mjs`), 1179 (the `cwd` delegation), 1276 (the hook's import) and 1404 (the hook's call) — one call site in the hook, exactly as the gate intended. The neighbouring `removeJobFromStateDir` gate, which must print `0`, is the authoritative "the hook deletes nothing" check and passed as written.
 - **Alternative considered:** Collapsing the hook's import to one line so the bare grep returns `1` — rejected: it churns transcribed-verbatim plan code to satisfy a counting mistake, and the multi-line import matches the file's existing style. Deleting the gate as redundant — rejected: anchored on `(stateDir` it still pins "pruned exactly once per state dir", which is the S1 decision's whole point.
 
+### E3: Task 4's whole-issue file-list gate omitted the spec correction Phase 5 made
+
+- **Question:** Executing Task 4 found Step 7's `git diff --name-only 98d5377` gate enumerating three paths where the real list has four — it also carries `.claude/specs/2026-08-12-worker-post-mortem-design.md`. Did a task touch a file it should not have?
+- **Choice:** No — the gate text was stale; the fourth path is expected and the enumeration now names it. No code or commit changed.
+- **Grounding:** Verified: the spec edit is docs-only (10 insertions, 2 deletions) and landed in `bbc775d`, the standards-review commit, which is exactly where this plan's own *Standards review provenance* section says finding S1 corrected the spec's falsified retention-safety sentence in place. The gate was written in Task 4's text before Phase 5 ran, so it could not have anticipated a fourth path. Its substance — that no *unexpected* repo file changed across the issue — holds: the four paths are the plan, the spec, the `patchRevision` bump and the patch.
+- **Alternative considered:** Reverting the spec edit to make the gate literally true — rejected outright: the edit is a Phase-5 correction of a false statement, and the plan records it as deliberate. Loosening the gate to a path *prefix* check — rejected: enumerating the exact list is what makes it catch a stray file, which is the whole point.
+
 ---
 
 ### Task 1: AC1 — the worker's fds land in the job log, and the progress preview excludes them structurally
@@ -1833,7 +1840,7 @@ Run: `grep -n 'patchRevision = ' "$WORKTREE/lib/agent-plugins.nix"`
 Expected: `patchRevision = 6;` — bumped in Task 1, untouched since.
 
 Run: `git -C "$WORKTREE" diff --stat 98d5377 -- lib/agent-plugins.nix patches/agent-plugins/codex-plugin-cc.patch && git -C "$WORKTREE" diff --name-only 98d5377`
-Expected: the `--name-only` list is exactly `.claude/plans/2026-08-12-worker-post-mortem.md`, `lib/agent-plugins.nix`, `patches/agent-plugins/codex-plugin-cc.patch` — no other repo file changed across the whole issue.
+Expected: the `--name-only` list is exactly `.claude/plans/2026-08-12-worker-post-mortem.md`, `.claude/specs/2026-08-12-worker-post-mortem-design.md`, `lib/agent-plugins.nix`, `patches/agent-plugins/codex-plugin-cc.patch` — no other repo file changed across the whole issue. The spec appears because Phase 5's finding S1 corrected one falsified sentence in it in place (see *Standards review provenance* above); that edit landed in `bbc775d`, docs-only.
 
 - [ ] **Step 8: `just build` and closure content checks**
 
