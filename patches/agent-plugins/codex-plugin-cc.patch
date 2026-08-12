@@ -224,7 +224,7 @@ index 1954274..a40434e 100644
 +        requestQueue.push({ socket, message });
 +        drainQueue();
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..3c1a437 100644
+index 83df468..f77d091 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
 @@ -54,0 +55 @@ import {
@@ -289,12 +289,34 @@ index 83df468..3c1a437 100644
 @@ -611,0 +622,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
 +    reviewer,
 +    timeoutMs,
-@@ -764,2 +776,2 @@ async function handleTask(argv) {
+@@ -671 +683 @@ async function runForegroundCommand(job, runner, options = {}) {
+-function spawnDetachedTaskWorker(cwd, jobId) {
++function spawnDetachedTaskWorker(cwd, jobId, logFile) {
+@@ -672,0 +685,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
++  // Same shape as spawnBrokerProcess. The child inherits an O_APPEND fd on the
++  // job log, so everything it writes to fd 1/2 is appended to the file the job
++  // record already points at via logFile — including output no application code
++  // produced (node's uncaught-exception and unhandled-rejection reports, V8's
++  // "FATAL ERROR: Reached heap limit", an abort trace), which no catch can
++  // intercept. The parent's fd is closed straight after the spawn; the child
++  // keeps its own dup. The worker's own appendFileSync progress writes are
++  // O_APPEND on the same inode from the same process, so the two interleave
++  // chronologically: the last progress line, then the trail that ended it.
++  const logFd = fs.openSync(logFile, "a");
+@@ -677 +699 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+-    stdio: "ignore",
++    stdio: ["ignore", logFd, logFd],
+@@ -680,0 +703 @@ function spawnDetachedTaskWorker(cwd, jobId) {
++  fs.closeSync(logFd);
+@@ -688 +711 @@ function enqueueBackgroundTask(cwd, job, request) {
+-  const child = spawnDetachedTaskWorker(cwd, job.id);
++  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
+@@ -764,2 +787,2 @@ async function handleTask(argv) {
 -    valueOptions: ["model", "effort", "cwd", "prompt-file"],
 -    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
 +    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms"],
 +    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "reviewer"],
-@@ -782,0 +795,8 @@ async function handleTask(argv) {
+@@ -782,0 +806,8 @@ async function handleTask(argv) {
 +  const reviewer = Boolean(options.reviewer);
 +  if (reviewer && (write || resumeLast)) {
 +    throw new Error("Reviewer jobs must be fresh and read-only.");
@@ -303,29 +325,29 @@ index 83df468..3c1a437 100644
 +  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
 +    throw new Error("--timeout-ms must be a positive number.");
 +  }
-@@ -785 +805,2 @@ async function handleTask(argv) {
+@@ -785 +816,2 @@ async function handleTask(argv) {
 -    resumeLast
 +    resumeLast,
 +    reviewer
-@@ -792 +813 @@ async function handleTask(argv) {
+@@ -792 +824 @@ async function handleTask(argv) {
 -    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
-@@ -799,0 +821,2 @@ async function handleTask(argv) {
+@@ -799,0 +832,2 @@ async function handleTask(argv) {
 +      reviewer,
 +      timeoutMs,
-@@ -807 +830 @@ async function handleTask(argv) {
+@@ -807 +841 @@ async function handleTask(argv) {
 -  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
-@@ -817,0 +841,2 @@ async function handleTask(argv) {
+@@ -817,0 +852,2 @@ async function handleTask(argv) {
 +        reviewer,
 +        timeoutMs,
-@@ -976 +1001,4 @@ async function handleCancel(argv) {
+@@ -976 +1012,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
 +    job.kind === "plan-review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1015,3 @@ async function handleCancel(argv) {
+@@ -986,0 +1026,3 @@ async function handleCancel(argv) {
 +  if (job.kind === "plan-review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
@@ -685,13 +707,26 @@ index fead00c..aee30f2 100644
 -  });
 +  }, { reviewerJobId: options.reviewerJobId, env: options.env });
 diff --git a/plugins/codex/scripts/lib/job-control.mjs b/plugins/codex/scripts/lib/job-control.mjs
-index ad152c1..0850f47 100644
+index ad152c1..57af9e3 100644
 --- a/plugins/codex/scripts/lib/job-control.mjs
 +++ b/plugins/codex/scripts/lib/job-control.mjs
 @@ -5 +5 @@ import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
 -import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 +import { reconcileWorkerLiveness, SESSION_ID_ENV } from "./tracked-jobs.mjs";
-@@ -216 +216,10 @@ export function buildStatusSnapshot(cwd, options = {}) {
+@@ -48,0 +49,9 @@ function getJobTypeLabel(job) {
++// Only the runtime's own progress lines may reach the status surface. Every line
++// appendLogLine/appendLogBlock writes starts with `[${nowIso()}] `, so a full
++// ISO-8601 timestamp prefix admits all of them and nothing else: the worker's
++// captured stdout/stderr (redirected into this same log) and the bodies of
++// appended blocks are excluded structurally, not by what a crash happens to
++// print. This also keeps inferLegacyJobPhase, which reads the preview, from
++// being steered by text the runtime did not write.
++const LOG_LINE_PREFIX_PATTERN = /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\s/;
++
+@@ -71 +80 @@ export function readJobProgressPreview(logFile, maxLines = DEFAULT_MAX_PROGRESS_
+-    .filter((line) => line.startsWith("["))
++    .filter((line) => LOG_LINE_PREFIX_PATTERN.test(line))
+@@ -216 +225,10 @@ export function buildStatusSnapshot(cwd, options = {}) {
 -  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
 +  // Reconcile before sorting: the flip stamps a fresh updatedAt, so sorting
 +  // afterwards is what makes the flipped job the newest finished record
@@ -703,7 +738,7 @@ index ad152c1..0850f47 100644
 +      reconcileWorkerLiveness(workspaceRoot, job)
 +    )
 +  );
-@@ -252 +261 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
+@@ -252 +270 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 -    job: enrichJob(selected, { maxProgressLines: options.maxProgressLines })
 +    job: enrichJob(reconcileWorkerLiveness(workspaceRoot, selected), { maxProgressLines: options.maxProgressLines })
 diff --git a/plugins/codex/scripts/lib/process.mjs b/plugins/codex/scripts/lib/process.mjs
@@ -2071,3 +2106,233 @@ index 0f8f57c..f4c286c 100644
 @@ -96 +98 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
 -    savedState.jobs.map((job) => job.id),
 +    savedJobs.map((job) => job.id),
+diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
+new file mode 100644
+index 0000000..eb6135b
+--- /dev/null
++++ b/tests/worker-postmortem.test.mjs
+@@ -0,0 +1,224 @@
++import fs from "node:fs";
++import path from "node:path";
++import test from "node:test";
++import assert from "node:assert/strict";
++import { fileURLToPath } from "node:url";
++
++import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
++import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
++import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
++
++// State resolvers read these variables at call time, and spawned CLI children
++// inherit process.env (via buildEnv), so pinning them here keeps every test in
++// this file hermetic even when the suite runs inside a live Claude Code session.
++// node --test runs each file in its own process; nothing leaks across files.
++process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-postmortem-data-");
++delete process.env.CODEX_COMPANION_SESSION_ID;
++delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
++const AUTH_ERROR = "authentication expired; run codex login";
++const DEAD_WORKER_MESSAGE = (pid) => `Worker process ${pid} exited without recording a result.`;
++// The prefix appendLogLine/appendLogBlock put on every line the runtime writes.
++// A log line without it is either the worker's captured stdout/stderr or the
++// body of an appended block, and neither may reach the progress preview.
++const ISO_PREFIXED = /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\s/;
++
++function makeRepo() {
++  const repo = makeTempDir("codex-plugin-postmortem-repo-");
++  initGitRepo(repo);
++  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
++  run("git", ["add", "README.md"], { cwd: repo });
++  run("git", ["commit", "-m", "init"], { cwd: repo });
++  return repo;
++}
++
++function seedJob(workspace, record, logContents = null) {
++  const jobsDir = path.join(resolveStateDir(workspace), "jobs");
++  fs.mkdirSync(jobsDir, { recursive: true });
++  const logFile = path.join(jobsDir, `${record.id}.log`);
++  fs.writeFileSync(logFile, logContents ?? `[2026-08-01T10:00:00.000Z] Starting ${record.title}.\n`, "utf8");
++  const jobFile = path.join(jobsDir, `${record.id}.json`);
++  fs.writeFileSync(jobFile, `${JSON.stringify({ ...record, logFile }, null, 2)}\n`, "utf8");
++  return { jobFile, logFile };
++}
++
++function isPidGone(pid) {
++  try {
++    process.kill(pid, 0);
++    return false;
++  } catch (error) {
++    return error?.code === "ESRCH";
++  }
++}
++
++async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 25 } = {}) {
++  const start = Date.now();
++  while (Date.now() - start < timeoutMs) {
++    if (await predicate()) {
++      return;
++    }
++    await new Promise((resolve) => setTimeout(resolve, intervalMs));
++  }
++  throw new Error("Timed out waiting for condition.");
++}
++
++function readLogLines(logFile) {
++  return fs.readFileSync(logFile, "utf8").split(/\r?\n/).filter(Boolean);
++}
++
++test("a failing background worker's stderr is captured in the job log", async () => {
++  const repo = makeRepo();
++  const binDir = makeTempDir();
++  // The fake codex rejects thread/start, so executeTaskRun throws, runTrackedJob
++  // records the failure and rethrows, handleTaskWorker does not catch, and the
++  // worker's own main().catch writes the message to fd 2. No code path appends
++  // that text to the log, so an unprefixed copy there can only have arrived
++  // through the redirected fd — which is the whole mechanism under test.
++  installFakeCodex(binDir, "auth-run-fails");
++  const env = buildEnv(binDir);
++
++  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the failing test"], {
++    cwd: repo,
++    env
++  });
++  assert.equal(launched.status, 0, launched.stderr);
++  const launchPayload = JSON.parse(launched.stdout);
++
++  const waited = run("node", [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"], {
++    cwd: repo,
++    env
++  });
++  assert.equal(waited.status, 0, waited.stderr);
++  const job = JSON.parse(waited.stdout).job;
++  assert.equal(job.status, "failed");
++  assert.equal(job.errorMessage, AUTH_ERROR);
++
++  const logLines = readLogLines(launchPayload.logFile);
++  const captured = logLines.filter((line) => !ISO_PREFIXED.test(line));
++  assert.ok(
++    captured.some((line) => line.includes(AUTH_ERROR)),
++    `no captured stderr line in the job log:\n${logLines.join("\n")}`
++  );
++  // The runtime's own progress lines survive alongside it, chronologically: the
++  // last thing the worker managed to report, then the trail that ended it.
++  assert.ok(logLines.some((line) => ISO_PREFIXED.test(line) && line.includes("Starting Codex task thread.")));
++
++  // R2: captured output never reaches the status surface.
++  assert.ok(job.progressPreview.includes("Starting Codex task thread."), JSON.stringify(job.progressPreview));
++  for (const line of job.progressPreview) {
++    assert.equal(line.includes("authentication expired"), false, line);
++  }
++});
++
++test("the progress preview admits only timestamped runtime lines, not appended block bodies", () => {
++  const workspace = makeTempDir();
++  // A failed job's log as runTrackedJob actually leaves it: progress lines, then
++  // an appendLogBlock "Final output" block whose body is arbitrary review
++  // markdown, plus a line of captured worker output. Only the two progress
++  // lines are progress.
++  const { logFile } = seedJob(
++    workspace,
++    {
++      id: "task-preview",
++      kind: "task",
++      kindLabel: "rescue",
++      title: "Codex Task",
++      workspaceRoot: workspace,
++      jobClass: "task",
++      summary: "Investigate flaky test",
++      status: "failed",
++      phase: "failed",
++      createdAt: "2026-08-01T10:00:00.000Z",
++      startedAt: "2026-08-01T10:00:01.000Z",
++      completedAt: "2026-08-01T10:00:09.000Z",
++      updatedAt: "2026-08-01T10:00:09.000Z"
++    },
++    [
++      "[2026-08-01T10:00:00.000Z] Starting Codex Task.",
++      "[2026-08-01T10:00:01.000Z] Turn started (turn_1).",
++      "",
++      "[2026-08-01T10:00:08.000Z] Final output",
++      "[Blocking] The retry loop never terminates.",
++      "Fix the loop bound.",
++      "FATAL ERROR: Reached heap limit Allocation failed",
++      ""
++    ].join("\n")
++  );
++  assert.ok(fs.existsSync(logFile));
++
++  const result = run("node", [SCRIPT, "status", "task-preview", "--json"], { cwd: workspace });
++
++  assert.equal(result.status, 0, result.stderr);
++  assert.deepEqual(JSON.parse(result.stdout).job.progressPreview, [
++    "Starting Codex Task.",
++    "Turn started (turn_1)."
++  ]);
++});
++
++test("a hard-killed worker's trail is its progress lines plus the heal-on-read line", async (t) => {
++  const repo = makeRepo();
++  const binDir = makeTempDir();
++  // 5 s turn, so the worker is provably mid-run when it is killed.
++  installFakeCodex(binDir, "interruptible-slow-task");
++  const env = buildEnv(binDir);
++
++  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the failing test"], {
++    cwd: repo,
++    env
++  });
++  assert.equal(launched.status, 0, launched.stderr);
++  const { jobId, logFile } = JSON.parse(launched.stdout);
++  const jobFile = path.join(resolveStateDir(repo), "jobs", `${jobId}.json`);
++
++  // The log line, not just the record, is the mid-run signal: runTrackedJob
++  // writes `status: "running"` with its pid *before* it calls the runner, and
++  // "Starting Codex task thread." is emitted from inside the runner, so a
++  // record-only predicate is satisfied ~370 ms before the worker has logged
++  // anything of its own — and the SIGKILL below would then land in that window,
++  // leaving no progress line for the trail assertion to find.
++  await waitFor(() => {
++    const record = JSON.parse(fs.readFileSync(jobFile, "utf8"));
++    return (
++      record.status === "running" &&
++      Number.isFinite(record.pid) &&
++      fs.readFileSync(logFile, "utf8").includes("Starting Codex task thread.")
++    );
++  });
++  const workerPid = JSON.parse(fs.readFileSync(jobFile, "utf8")).pid;
++  t.after(() => {
++    try {
++      process.kill(-workerPid, "SIGKILL");
++    } catch {
++      // Already gone.
++    }
++  });
++
++  // SIGKILL the worker's whole process group (the worker plus the codex child it
++  // spawned). kill -9 is silent by construction: the process writes nothing.
++  try {
++    process.kill(-workerPid, "SIGKILL");
++  } catch {
++    process.kill(workerPid, "SIGKILL");
++  }
++  await waitFor(() => isPidGone(workerPid));
++
++  const read = run("node", [SCRIPT, "status", jobId, "--json"], { cwd: repo, env });
++  assert.equal(read.status, 0, read.stderr);
++  const job = JSON.parse(read.stdout).job;
++  assert.equal(job.status, "failed");
++  assert.equal(job.errorMessage, DEAD_WORKER_MESSAGE(workerPid));
++
++  const logLines = readLogLines(logFile);
++  // endsWith, not a slice-based reconstruction of the prefix: appendLogLine
++  // writes `[${nowIso()}] ${message}`, and `[` + a 24-char ISO instant + `]`
++  // is 26 characters, so any slice wide enough to include the separating space
++  // makes the template add a second one. The ISO_PREFIXED assertion below is
++  // what pins the prefix shape.
++  assert.ok(logLines.at(-1).endsWith(DEAD_WORKER_MESSAGE(workerPid)), logLines.join("\n"));
++  assert.ok(logLines.some((line) => line.includes("Starting Codex task thread.")), logLines.join("\n"));
++  // The honest limit, pinned rather than papered over: a SIGKILLed process
++  // contributes no captured output, so the trail is progress plus heal-on-read.
++  assert.deepEqual(logLines.filter((line) => !ISO_PREFIXED.test(line)), []);
++});
