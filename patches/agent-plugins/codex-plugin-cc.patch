@@ -342,7 +342,7 @@ index 72b30a7..3e78ae9 100644
 +          throw new Error("Failed to start the isolated Codex broker for this workspace.");
 +        }
 diff --git a/plugins/codex/scripts/lib/broker-lifecycle.mjs b/plugins/codex/scripts/lib/broker-lifecycle.mjs
-index ef76381..c26cdc6 100644
+index ef76381..1583562 100644
 --- a/plugins/codex/scripts/lib/broker-lifecycle.mjs
 +++ b/plugins/codex/scripts/lib/broker-lifecycle.mjs
 @@ -9 +9,3 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs
@@ -422,7 +422,7 @@ index ef76381..c26cdc6 100644
 @@ -92 +150 @@ export function saveBrokerSession(cwd, session) {
 -  fs.writeFileSync(resolveBrokerStateFile(cwd), `${JSON.stringify(session, null, 2)}\n`, "utf8");
 +  atomicWriteJson(resolveBrokerStateFile(cwd), session);
-@@ -114,16 +172,8 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -114,22 +172 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const existing = loadBrokerSession(cwd);
 -  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
 -    return existing;
@@ -439,23 +439,40 @@ index ef76381..c26cdc6 100644
 -    });
 -    clearBrokerSession(cwd);
 -  }
-+  const stateDir = resolveStateDir(cwd);
-+  return withBrokerLock(stateDir, async () => {
-+    const existing = loadBrokerSession(cwd);
-+    if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
-+      const owned = addOwner(existing, options.env ?? process.env);
-+      saveBrokerSession(cwd, owned);
-+      return owned;
-+    }
-@@ -131,8 +181,11 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-
 -  const sessionDir = createBrokerSessionDir();
 -  const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
 -  const endpoint = endpointFactory(sessionDir, options.platform);
 -  const pidFile = path.join(sessionDir, "broker.pid");
 -  const logFile = path.join(sessionDir, "broker.log");
--  const scriptPath =
++  const stateDir = resolveStateDir(cwd);
+@@ -137,2 +174,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -    options.scriptPath ??
 -    fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
++    options.scriptPath ?? fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
++  return withBrokerLock(stateDir, async () => {
++    const existing = loadBrokerSession(cwd);
++    // Under a Nix-managed install this path is a store path whose hash covers
++    // the whole patched tree and whose name embeds the patch revision, so path
++    // equality is build identity. A record written before this field existed
++    // has no scriptPath and is therefore foreign, which retires it on first
++    // contact with no migration code. Checked before the 150 ms readiness probe
++    // because it costs no IO.
++    const sameBuild = existing?.scriptPath === scriptPath;
++    if (existing && sameBuild && (await isBrokerEndpointReady(existing.endpoint))) {
++      const owned = addOwner(existing, options.env ?? process.env);
++      saveBrokerSession(cwd, owned);
++      return owned;
++    }
+@@ -140,8 +190,11 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-  const child = spawnBrokerProcess({
+-    scriptPath,
+-    cwd,
+-    endpoint,
+-    pidFile,
+-    logFile,
+-    env: options.env ?? process.env
+-  });
 +    if (existing) {
 +      teardownBrokerSession({
 +        endpoint: existing.endpoint ?? null,
@@ -467,28 +484,17 @@ index ef76381..c26cdc6 100644
 +      });
 +      clearBrokerSession(cwd);
 +    }
-@@ -140,8 +193,9 @@ export async function ensureBrokerSession(cwd, options = {}) {
--  const child = spawnBrokerProcess({
--    scriptPath,
--    cwd,
--    endpoint,
--    pidFile,
--    logFile,
--    env: options.env ?? process.env
--  });
+@@ -149,3 +202,30 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
+-  if (!ready) {
+-    teardownBrokerSession({
 +    const sessionDir = createBrokerSessionDir();
 +    const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
 +    const endpoint = endpointFactory(sessionDir, options.platform);
 +    const pidFile = path.join(sessionDir, "broker.pid");
 +    const logFile = path.join(sessionDir, "broker.log");
-+    const scriptPath =
-+      options.scriptPath ??
-+      fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
 +    const runtime = createWorkspaceRuntime(cwd, { env: options.env ?? process.env });
-@@ -149,3 +203,23 @@ export async function ensureBrokerSession(cwd, options = {}) {
--  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
--  if (!ready) {
--    teardownBrokerSession({
++
 +    const child = spawnBrokerProcess({
 +      scriptPath,
 +      cwd,
@@ -512,11 +518,12 @@ index ef76381..c26cdc6 100644
 +    }
 +
 +    const session = addOwner({
-@@ -157 +231,40 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -157 +237,41 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -      killProcess: options.killProcess ?? null
 +      stateDir,
 +      workspaceRoot: cwd,
 +      codexHome: runtime.runtimeHome,
++      scriptPath,
 +      owners: []
 +    }, options.env ?? process.env);
 +    saveBrokerSession(cwd, session);
@@ -554,7 +561,7 @@ index ef76381..c26cdc6 100644
 +        fs.unlinkSync(record.stateFile);
 +      }
 +      return { stop: true, session: current };
-@@ -159 +272,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -159 +279,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -    return null;
 +    if (!action) {
 +      continue;
@@ -571,10 +578,10 @@ index ef76381..c26cdc6 100644
 +      });
 +    }
 +    released.push(action);
-@@ -160,0 +288,2 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -160,0 +295,2 @@ export async function ensureBrokerSession(cwd, options = {}) {
 +  return released;
 +}
-@@ -162,9 +291,28 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -162,9 +298,28 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const session = {
 -    endpoint,
 -    pidFile,
@@ -612,7 +619,7 @@ index ef76381..c26cdc6 100644
 +    return true;
 +  }
 +  return !Number.isFinite(recorded) || recorded === pid;
-@@ -173,2 +321,14 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -173,2 +328,14 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = null }) {
 -  if (Number.isFinite(pid) && killProcess) {
 +// killProcess defaults to the production kill so that omitting it cannot mean
@@ -629,7 +636,7 @@ index ef76381..c26cdc6 100644
 +  killProcess = terminateProcessTree
 +}) {
 +  if (Number.isFinite(pid) && killProcess && pidFileNamesPid(pidFile, pid)) {
-@@ -182,2 +342,5 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+@@ -182,2 +349,5 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
 -  if (pidFile && fs.existsSync(pidFile)) {
 -    fs.unlinkSync(pidFile);
 +  // Force removals, not existsSync-then-unlink: a SIGTERM'd broker runs its own
@@ -637,12 +644,12 @@ index ef76381..c26cdc6 100644
 +  // window is real. The post-condition is "the file is absent".
 +  if (pidFile) {
 +    fs.rmSync(pidFile, { force: true });
-@@ -186,2 +349,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+@@ -186,2 +356,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
 -  if (logFile && fs.existsSync(logFile)) {
 -    fs.unlinkSync(logFile);
 +  if (logFile) {
 +    fs.rmSync(logFile, { force: true });
-@@ -193,2 +356,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+@@ -193,2 +363,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
 -      if (target.kind === "unix" && fs.existsSync(target.path)) {
 -        fs.unlinkSync(target.path);
 +      if (target.kind === "unix") {
@@ -1353,10 +1360,10 @@ index 778571e..e601a80 100644
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
 diff --git a/tests/broker-reaping.test.mjs b/tests/broker-reaping.test.mjs
 new file mode 100644
-index 0000000..0496358
+index 0000000..be22ad7
 --- /dev/null
 +++ b/tests/broker-reaping.test.mjs
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,289 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1366,12 +1373,14 @@ index 0000000..0496358
 +
 +import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 +import { initGitRepo, killGroup, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
++import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 +import {
 +  createBrokerSessionDir,
 +  ensureBrokerSession,
 +  loadBrokerSession,
 +  saveBrokerSession,
-+  teardownBrokerSession
++  teardownBrokerSession,
++  waitForBrokerEndpoint
 +} from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 +import { isProcessAlive } from "../plugins/codex/scripts/lib/process.mjs";
 +import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
@@ -1385,6 +1394,13 @@ index 0000000..0496358
 +
 +const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 +const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
++const BROKER_SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "app-server-broker.mjs");
++
++// A store path from an older patch revision: this is exactly the shape the
++// record carries under a Nix-managed install, where the hash covers the whole
++// patched tree and the name embeds the patch revision.
++const FOREIGN_SCRIPT_PATH =
++  "/nix/store/0000000000000000000000000000000000000000-codex-plugin-cc-1.0.6-nix.db52e28f.p4/plugins/codex/scripts/app-server-broker.mjs";
 +
 +async function waitFor(predicate, { timeoutMs = 10000, intervalMs = 25 } = {}) {
 +  const start = Date.now();
@@ -1567,6 +1583,75 @@ index 0000000..0496358
 +  // whether anything was signalled.
 +  assert.equal(fs.existsSync(pidFile), false);
 +  assert.equal(fs.existsSync(sessionDir), false);
++});
++
++// Answers the reuse gate's 150 ms connect probe and nothing else: the gate only
++// asks whether something is listening, so a bare accept-and-close server is a
++// faithful stand-in for a ready broker without a codex app-server behind it.
++function startStubBroker(t, endpoint) {
++  const target = parseBrokerEndpoint(endpoint);
++  const source = `import net from "node:net"; net.createServer((socket) => socket.end()).listen(${JSON.stringify(
++    target.path
++  )}); setInterval(() => {}, 1000);`;
++  const child = spawn(process.execPath, ["--input-type=module", "--eval", source], {
++    detached: true,
++    stdio: "ignore"
++  });
++  child.unref();
++  t.after(() => killGroup(child.pid, "SIGKILL"));
++  return child;
++}
++
++function stubRecord(workspace, sessionDir, endpoint, pid, scriptPath) {
++  return {
++    endpoint,
++    pidFile: path.join(sessionDir, "broker.pid"),
++    logFile: path.join(sessionDir, "broker.log"),
++    sessionDir,
++    pid,
++    stateDir: resolveStateDir(workspace),
++    workspaceRoot: workspace,
++    codexHome: path.join(sessionDir, "codex-home"),
++    owners: [],
++    scriptPath
++  };
++}
++
++test("ensureBrokerSession retires a ready broker recorded by a different plugin build", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const foreignDir = createBrokerSessionDir();
++  const foreignEndpoint = createBrokerEndpoint(foreignDir);
++  const stub = startStubBroker(t, foreignEndpoint);
++  assert.equal(await waitForBrokerEndpoint(foreignEndpoint, 5000), true, "the stub broker never listened");
++  saveBrokerSession(workspace, stubRecord(workspace, foreignDir, foreignEndpoint, stub.pid, FOREIGN_SCRIPT_PATH));
++
++  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 10000 });
++
++  assert.ok(session, "a fresh broker should have replaced the foreign-build one");
++  assert.notEqual(session.endpoint, foreignEndpoint);
++  assert.equal(session.scriptPath, BROKER_SCRIPT);
++  assert.deepEqual(session.owners, []);
++  await waitFor(() => !isProcessAlive(stub.pid));
++});
++
++test("ensureBrokerSession reuses a ready broker recorded by this plugin build", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const sessionDir = createBrokerSessionDir();
++  const endpoint = createBrokerEndpoint(sessionDir);
++  const stub = startStubBroker(t, endpoint);
++  assert.equal(await waitForBrokerEndpoint(endpoint, 5000), true, "the stub broker never listened");
++  saveBrokerSession(workspace, stubRecord(workspace, sessionDir, endpoint, stub.pid, BROKER_SCRIPT));
++
++  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 10000 });
++
++  // Without this control, the test above passes trivially if reuse breaks
++  // entirely.
++  assert.equal(session.endpoint, endpoint);
++  assert.equal(isProcessAlive(stub.pid), true);
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
 index c34b060..b013de8 100644
