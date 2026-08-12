@@ -240,7 +240,7 @@ Inherited from the design — implementers test at these and nowhere else. A tas
 ### B1: the Task 1 patch gate expected a count that a correct implementation cannot produce
 - **Question:** The reviewer says `grep -c 'stdio: ["ignore", logFd, logFd]'` on the regenerated patch yields `1`, not the `2` the gate expects, because the broker's identical line is pristine upstream rather than patch-added.
 - **Choice:** Expected count `2` → `1`, the failure interpretation inverted to "if the count is 0", and the false claim that the broker line is "already patch-added at p5" removed.
-- **Grounding:** Verified directly: `git show db52e28f…:plugins/codex/scripts/lib/broker-lifecycle.mjs` carries `stdio: ["ignore", logFd, logFd]` at line 65 *at the pin*, and `grep -c` on the committed p5 patch returns `0`. The p5 patch does touch `broker-lifecycle.mjs`, which is what made the original claim plausible, but not that line. As written the gate failed on a correct implementation and passed on a broken one.
+- **Grounding:** Verified directly: `git show db52e28f…:plugins/codex/scripts/lib/broker-lifecycle.mjs` carries `stdio: ["ignore", logFd, logFd]` at line 120 *at the pin* (the `:65` this entry first recorded was itself wrong — corrected during Task 1; the fd-lifecycle precedent this task copies is `broker-lifecycle.mjs:115-123`), and `grep -c` on the committed p5 patch returns `0`. The p5 patch does touch `broker-lifecycle.mjs`, which is what made the original claim plausible, but not that line. As written the gate failed on a correct implementation and passed on a broken one.
 - **Alternative considered:** Grepping the built store path instead — rejected: Step 8 already does exactly that, and the patch-level grep is the cheaper pre-build check.
 
 ### B2: the hard-kill test's last-line assertion could never pass
@@ -284,6 +284,14 @@ Inherited from the design — implementers test at these and nowhere else. A tas
 - **Choice:** All four sites become `grep 'codex-plugin-cc-1\.0\.6' | head -n1`.
 - **Grounding:** The closure contains the marketplace `runCommand` derivations alongside the plugin output, and any second match makes `$STORE` multi-line, breaking the `grep -c` that follows with a confusing error rather than a clear gate failure. Pinning the version narrows it to the p6 output and `head -n1` makes the command total. Applied rather than deferred because it is a two-token change that removes a spurious-failure mode from a gate every task runs.
 - **Alternative considered:** Leaving it and letting an implementer debug the multi-line expansion — rejected as false economy.
+
+### E1: Task 1's hard-kill test raced its own kill, so Step 3's "passes at p5" was false
+
+- **Question:** Executing Task 1 found that `a hard-killed worker's trail is its progress lines plus the heal-on-read line` failed 3/3 at p5, on `logLines.some((line) => line.includes("Starting Codex task thread."))` — not 2/3 as Step 3 predicted, and not for a reason any later step would fix. Is the test wrong, the code wrong, or the gate wrong?
+- **Choice:** The plan's test was wrong, in its synchronisation only. Step 2's `waitFor` predicate gains a third conjunct requiring the log to already contain `Starting Codex task thread.` before the SIGKILL; every assertion in the test stays byte-identical, and Step 3 now records that its "passes at p5" claim holds only with that conjunct. Step 7's `grep -A3` also becomes `-A6`, and B1's `broker-lifecycle.mjs:65` becomes `:120`.
+- **Grounding:** `runTrackedJob` (`tracked-jobs.mjs:134-146`) writes the `running` record with `pid: process.pid` *synchronously, before* `await runner()`, while `Starting Codex task thread.` is emitted from *inside* the runner (`codex.mjs:1111`) — measured ~370 ms later. So the record-only predicate was satisfied strictly before the worker had logged anything of its own, and with a 25 ms poll the kill landed in that window deterministically. The test's own stated intent is that the worker is "provably mid-run when it is killed"; the fake turn lasts 5000 ms (`tests/fake-codex-fixture.mjs`), so waiting for the line kills at ~430 ms into a 5 s turn — still provably mid-turn, and a strictly stronger precondition than "flagged running". Verified independently by the controller in the pinned source and again by the task reviewer before acceptance. The `-A3` correction has the same character: git emits `index`, `--- /dev/null`, `+++ b/…` between the mode line and the hunk header, so a 3-line window could not show the adjacency the gate asserts.
+- **Consequence:** `tests/worker-postmortem.test.mjs` is 224 lines after Task 1 (the `N` in Step 7's whole-file hunk header), and the assertion the predicate now guarantees is tautological — recorded as a deferred minor rather than removed, because the same test's `endsWith` and no-unprefixed-lines assertions are what carry its falsifiable content.
+- **Alternative considered:** Deleting or skipping the test to keep the plan text verbatim — rejected: it is the only pin on the honest kill -9 limit, and dropping it would have moved the suite gate to 109/105/0/4. Widening `waitFor`'s timeout — rejected: the failure is program order, not slowness, so no timeout fixes it.
 
 ---
 
@@ -500,9 +508,19 @@ test("a hard-killed worker's trail is its progress lines plus the heal-on-read l
   const { jobId, logFile } = JSON.parse(launched.stdout);
   const jobFile = path.join(resolveStateDir(repo), "jobs", `${jobId}.json`);
 
+  // The log line, not just the record, is the mid-run signal: runTrackedJob
+  // writes `status: "running"` with its pid *before* it calls the runner, and
+  // "Starting Codex task thread." is emitted from inside the runner, so a
+  // record-only predicate is satisfied ~370 ms before the worker has logged
+  // anything of its own — and the SIGKILL below would then land in that window,
+  // leaving no progress line for the trail assertion to find.
   await waitFor(() => {
     const record = JSON.parse(fs.readFileSync(jobFile, "utf8"));
-    return record.status === "running" && Number.isFinite(record.pid);
+    return (
+      record.status === "running" &&
+      Number.isFinite(record.pid) &&
+      fs.readFileSync(logFile, "utf8").includes("Starting Codex task thread.")
+    );
   });
   const workerPid = JSON.parse(fs.readFileSync(jobFile, "utf8")).pid;
   t.after(() => {
@@ -548,7 +566,7 @@ Run (from `$SCRATCH`): `env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID 
 Expected: FAIL — 3 tests, 2 fail.
 - `a failing background worker's stderr is captured in the job log` fails on `no captured stderr line in the job log:` — at p5 the worker is spawned `stdio: "ignore"`, so the log holds only the three `[iso]`-prefixed lines and the error text is nowhere.
 - `the progress preview admits only timestamped runtime lines, not appended block bodies` fails on the `deepEqual`: at p5 the filter is `line.startsWith("[")`, so `[Blocking] The retry loop never terminates.` passes it and `stripLogPrefix` eats its bracket group, producing a third preview entry `The retry loop never terminates.`
-- `a hard-killed worker's trail is its progress lines plus the heal-on-read line` **passes** at p5 — it pins the honest limit (kill -9 writes nothing) and issue #2's existing flip, so it is a regression pin rather than a falsifying gate. It must stay green after the change too.
+- `a hard-killed worker's trail is its progress lines plus the heal-on-read line` **passes** at p5 — it pins the honest limit (kill -9 writes nothing) and issue #2's existing flip, so it is a regression pin rather than a falsifying gate. It must stay green after the change too. **This holds only with the log-line conjunct in the Step 2 `waitFor` predicate** (see the E1 entry under `Auto-resolved decisions`); with a record-only predicate it fails at p5 too, making the count 3 of 3.
 
 - [ ] **Step 4: Redirect the worker's fds into the job log**
 
@@ -648,13 +666,13 @@ Run: `git -C "$WORKTREE" status --porcelain`
 Expected: exactly two modified paths — ` M lib/agent-plugins.nix` and ` M patches/agent-plugins/codex-plugin-cc.patch` (plus possibly `?? result`, untracked). Anything else means a stray edit landed.
 
 Run: `grep -c 'stdio: \["ignore", logFd, logFd\]' "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
-Expected: `1` — the single `+` line in `plugins/codex/scripts/codex-companion.mjs` added by this task. The broker's identical line is **pristine upstream** (`plugins/codex/scripts/lib/broker-lifecycle.mjs:65` at the pin), not patch-added, so the committed p5 patch matches this grep `0` times and p6 matches it once. If the count is 0, the worker's spawn shape did not reach the patch.
+Expected: `1` — the single `+` line in `plugins/codex/scripts/codex-companion.mjs` added by this task. The broker's identical line is **pristine upstream** (`plugins/codex/scripts/lib/broker-lifecycle.mjs:120` at the pin), not patch-added, so the committed p5 patch matches this grep `0` times and p6 matches it once. If the count is 0, the worker's spawn shape did not reach the patch.
 
 Run: `grep -c 'LOG_LINE_PREFIX_PATTERN' "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
 Expected: `2` — the definition and its single use.
 
-Run: `grep -A3 '^diff --git a/tests/worker-postmortem\.test\.mjs' "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
-Expected: one match showing `new file mode 100644` and, immediately below, the whole-file hunk header `@@ -0,0 +1,N @@` where `N` is the exact line count of the file created in Step 2. `-A3` rather than two independent greps because the claim is that these lines belong to the *same* file, which only adjacency shows.
+Run: `grep -A6 '^diff --git a/tests/worker-postmortem\.test\.mjs' "$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch"`
+Expected: one match showing `new file mode 100644` and, below it, the whole-file hunk header `@@ -0,0 +1,N @@` where `N` is the exact line count of the file created in Step 2. A context window rather than two independent greps because the claim is that these lines belong to the *same* file, which only adjacency shows. `-A6`, not `-A3`: git emits `index`, `--- /dev/null` and `+++ b/…` between the mode line and the hunk header, so a 3-line window stops one line short of the thing being asserted.
 
 - [ ] **Step 8: `just build`**
 
