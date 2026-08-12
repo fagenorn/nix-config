@@ -299,6 +299,13 @@ Inherited from the design — implementers test at these and nowhere else. A tas
 - **Consequence:** `tests/worker-postmortem.test.mjs` is 224 lines after Task 1 (the `N` in Step 7's whole-file hunk header), and the assertion the predicate now guarantees is tautological — recorded as a deferred minor rather than removed, because the same test's `endsWith` and no-unprefixed-lines assertions are what carry its falsifiable content.
 - **Alternative considered:** Deleting or skipping the test to keep the plan text verbatim — rejected: it is the only pin on the honest kill -9 limit, and dropping it would have moved the suite gate to 109/105/0/4. Widening `waitFor`'s timeout — rejected: the failure is program order, not slowness, so no timeout fixes it.
 
+### E2: the prune gate counted call sites but grepped lines, so a correct Task 2 printed 2
+
+- **Question:** Executing Task 2 found `grep -c "pruneJobRecordsInStateDir" <hook file>` returning `2` where Task 2 Step 9 and Task 4 Step 8 both expect `1`. Is the hook calling the prune twice, or is the gate wrong?
+- **Choice:** The gate was wrong; the code stands unchanged. Task 2's gate now expects `2` and gains a second, anchored grep (`pruneJobRecordsInStateDir(stateDir`) expecting `1`; Task 4's gate switches to the anchored form outright.
+- **Grounding:** `grep -c` counts matching *lines*, and Step 7's prescribed `./lib/state.mjs` import block puts `pruneJobRecordsInStateDir,` on a line of its own — so any implementation that follows the plan verbatim produces two matching lines (the import at hook line 12, the call at line 146). Verified in the committed patch: the symbol appears at patch lines 1144 (definition in `state.mjs`), 1179 (the `cwd` delegation), 1276 (the hook's import) and 1404 (the hook's call) — one call site in the hook, exactly as the gate intended. The neighbouring `removeJobFromStateDir` gate, which must print `0`, is the authoritative "the hook deletes nothing" check and passed as written.
+- **Alternative considered:** Collapsing the hook's import to one line so the bare grep returns `1` — rejected: it churns transcribed-verbatim plan code to satisfy a counting mistake, and the multi-line import matches the file's existing style. Deleting the gate as redundant — rejected: anchored on `(stateDir` it still pins "pruned exactly once per state dir", which is the S1 decision's whole point.
+
 ---
 
 ### Task 1: AC1 — the worker's fds land in the job log, and the progress preview excludes them structurally
@@ -1340,9 +1347,12 @@ Expected: exits 0. Then:
 
 ```bash
 STORE=$(nix-store -qR ./result | grep 'codex-plugin-cc-1\.0\.6' | head -n1)
-grep -c "pruneJobRecordsInStateDir" "$STORE/plugins/codex/scripts/session-lifecycle-hook.mjs"   # 1
+grep -c "pruneJobRecordsInStateDir" "$STORE/plugins/codex/scripts/session-lifecycle-hook.mjs"   # 2
+grep -c "pruneJobRecordsInStateDir(stateDir" "$STORE/plugins/codex/scripts/session-lifecycle-hook.mjs"  # 1
 grep -c "removeJobFromStateDir" "$STORE/plugins/codex/scripts/session-lifecycle-hook.mjs" || true  # 0 (grep exits 1)
 ```
+
+The first count is `2` because `grep -c` counts lines and Step 7's own import block gives `pruneJobRecordsInStateDir,` a line of its own; the second grep is the one that pins the gate's real intent — exactly one call site.
 
 - [ ] **Step 10: Commit**
 
@@ -1834,11 +1844,11 @@ Expected: exits 0. Then:
 STORE=$(nix-store -qR ./result | grep 'codex-plugin-cc-1\.0\.6' | head -n1)
 echo "$STORE"                                                                                     # ...codex-plugin-cc-1.0.6-nix.db52e28f.p6
 grep -c 'stdio: \["ignore", logFd, logFd\]' "$STORE/plugins/codex/scripts/codex-companion.mjs"     # 1
-grep -c "pruneJobRecordsInStateDir" "$STORE/plugins/codex/scripts/session-lifecycle-hook.mjs"      # 1
+grep -c "pruneJobRecordsInStateDir(stateDir" "$STORE/plugins/codex/scripts/session-lifecycle-hook.mjs"  # 1
 grep -c "overdue by" "$STORE/plugins/codex/scripts/lib/render.mjs"                                 # 1
 grep -c "overdue by" "$STORE/plugins/codex/commands/status.md"                                     # 1
 ```
-Expected: the `.p6` path and all four counts as annotated — proof the patch applies under nix's `patch -p1` and that the shipped closure carries all three acceptance criteria.
+Expected: the `.p6` path and all four counts as annotated — proof the patch applies under nix's `patch -p1` and that the shipped closure carries all three acceptance criteria. (The prune grep is anchored on `(stateDir` because the bare symbol also matches the hook's import line; see Task 2 Step 9.)
 
 - [ ] **Step 9: Commit**
 
