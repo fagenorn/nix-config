@@ -668,7 +668,6 @@ In `$SCRATCH/tests/reviewer-detach.test.mjs` — same replacement, `pinHermeticS
 
 - [ ] **Step 8: Full suite green, and the process table unchanged (AC1, AC2)**
 
-```sh
 Define `mine`, `count` and `reap_mine` from the plan header's *Process-table measurement protocol* — do not use a bare `pgrep | wc -l`, and never `pkill`.
 
 ```sh
