@@ -34,10 +34,13 @@
 The scratch clone lives at a fixed absolute path and is **rebuilt deterministically from the currently committed patch at the start of every patch-touching task**, so tasks are independent and a half-edited tree can never leak between implementers.
 
 ```sh
-SCRATCH=/private/tmp/claude-502/-Users-anis-tmp-nix-config/05daa2af-9530-4c37-81eb-20624884fead/scratchpad/upstream
+SCRATCHPAD=/private/tmp/claude-502/-Users-anis-tmp-nix-config/05daa2af-9530-4c37-81eb-20624884fead/scratchpad
+SCRATCH=$SCRATCHPAD/upstream
 PIN=db52e28f4d9ded852ab3942cea316258ae4ef346
 WORKTREE=/Users/anis/tmp/nix-config/.claude/worktrees/issue-9-broker-reaping
 ```
+
+Scratch logs and throwaway probes go under `$SCRATCHPAD`, never `/tmp` (which sibling agents share).
 
 **Rebuild block** (run as Step 1 of Tasks 2–6):
 
@@ -70,6 +73,45 @@ Paths inside the scratch clone used by this plan:
 - `$SCRATCH/tests/helpers.mjs`, `$SCRATCH/tests/fake-codex-fixture.mjs`
 - `$SCRATCH/tests/broker-reaping.test.mjs` (new)
 - `$SCRATCH/tests/runtime.test.mjs`, `state.test.mjs`, `liveness.test.mjs`, `reviewer-detach.test.mjs`
+
+## Process-table measurement protocol
+
+**Every process count in this plan uses `count` as defined here. A bare `pgrep -f … | wc -l` is not a valid instrument on this machine** — Task 1 measured both reasons:
+
+- **Sibling agents run this same suite from their own scratch clones.** During Task 1 a concurrent agent's tree (`/tmp/codex-plugin-cc-issue-10-scratch`) went from 7 to 85 live brokers. An unscoped count drifts with their work, so a before/after comparison measures them, not you.
+- **One unrelated `codex app-server` runs permanently** (a browser extension host, `~/.codex/plugins/.plugin-appserver/codex`, days of uptime). An unscoped app-server count therefore never reaches `0`, and any gate demanding it fails for that reason alone.
+
+Attribution is by the process's **inherited `PWD`**, which is the scratch clone the suite was launched from — unique per agent, and still correct for an app-server whose broker has already died, which is exactly the case AC1 exists to catch (a pid-only kill satisfies `pgrep -f app-server-broker` while stranding the app-servers).
+
+```sh
+# Requires $SCRATCH. `ps -ww` (double -w) is mandatory: macOS ps truncates
+# command lines to the terminal width, and these paths are ~200 chars, so a
+# single -w silently mis-attributes your own processes as foreign.
+mine() {   # mine <pgrep-pattern> -> pids whose PWD is this scratch clone
+  for p in $(pgrep -f "$1"); do
+    ps -Eww -o command= -p "$p" 2>/dev/null | tr ' ' '\n' \
+      | grep -qxF "PWD=$SCRATCH" && echo "$p"
+  done
+}
+
+count() { printf 'brokers=%s app-servers=%s\n' \
+  "$(mine 'app-server-broker\.mjs serve' | grep -c .)" \
+  "$(mine 'codex app-server' | grep -c .)"; }
+
+reap_mine() {   # scoped TERM->KILL of this clone's brokers, taking their groups
+  for p in $(mine 'app-server-broker\.mjs serve'); do
+    kill -TERM "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null
+  done
+  sleep 2
+  for p in $(mine 'app-server-broker\.mjs serve'); do
+    kill -KILL "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null
+  done
+}
+```
+
+**Never `pkill -f 'app-server-broker.mjs serve'` or `pkill -f 'codex app-server'`.** Both patterns match sibling agents' processes and the extension host. Use `reap_mine`.
+
+Because `count` is scoped, the gates below assert an **absolute `brokers=0 app-servers=0`** rather than a before/after equality — a stronger and simpler claim, and one that cannot be satisfied or broken by another agent's activity.
 
 ## File structure
 
@@ -266,6 +308,12 @@ Fixture rules: `makeTempDir` workspaces, `initGitRepo`, `installFakeCodex`, **pr
 - **Grounding:** Copying the upstream early-return guard would make the test vacuous — its entire subject is a real recorded broker, so a silent pass would assert nothing about the reaper. Retrying keeps it non-vacuous and removes the flake class, and it is the same root cause as B1, which is why both are fixed together rather than one masking the other.
 - **Alternative considered:** Raise the readiness timeout for this test — rejected: the test drives the CLI as a subprocess, so it cannot pass `options.timeoutMs`, and no environment variable exposes the bound.
 
+### Execution: the process count is scoped by inherited PWD, and `pkill` is banned
+- **Question:** Task 1 executed and found the plan's verification instrument invalid on this machine. A concurrent agent runs the same suite from its own scratch clone (`/tmp/codex-plugin-cc-issue-10-scratch`, which grew from 7 to 85 live brokers during Task 1), so an unscoped `pgrep -f … | wc -l` measures their work as well as yours; and one unrelated `codex app-server` (a browser extension host, days of uptime) means an unscoped app-server count can never reach `0`. The plan's `pkill -f 'app-server-broker.mjs serve'` would also have killed that sibling agent's brokers outright.
+- **Choice:** Added a *Process-table measurement protocol* to the plan header — `mine`, `count` and `reap_mine`, attributing every process by its inherited `PWD`, which is the scratch clone the suite was launched from. Banned `pkill` outright. Rewrote Task 1 Steps 2/5, Task 2 Step 8 and Task 7 Step 3 to use it, and turned their gates from a before/after equality into an absolute `brokers=0 app-servers=0`.
+- **Grounding:** Verified `ps -Eww` exposes the environment here and that `PWD` partitions the population exactly: all 85 live brokers and 85 of the 86 app-servers reported `PWD=/tmp/codex-plugin-cc-issue-10-scratch`, and the one remaining app-server had no `PWD` at all (the extension host). `PWD` also survives the case AC1 exists to catch — an app-server orphaned by a pid-only kill keeps its inherited environment after its broker dies, whereas parent-based attribution loses it. Task 1 additionally found that macOS `ps` truncates command lines to terminal width, which had already mis-attributed its own leaked broker as foreign, so `-ww` is mandatory and is now stated in the protocol.
+- **Alternative considered:** Attribute app-servers by parent pid — rejected: it cannot see a stranded app-server whose broker is gone, which is the precise failure the app-server count exists to detect. Also rejected: serialise against the sibling agent, which is not something this plan can enforce; and passing a unique `CLAUDE_PLUGIN_DATA` for the demo runs, which would change the very command the acceptance criteria name.
+
 ## Standards review provenance
 
 - **Reviewer:** Claude fallback (`reviewer` subagent, fresh context, read-only toolset).
@@ -319,19 +367,18 @@ Re-run the diff. If a fresh clone still does not reproduce the committed patch b
 
 At plan time this machine carried **79** leaked brokers and **79** leaked app-servers (the spec recorded 39 of each a few hours earlier). The before-count is not zero and must not be assumed.
 
-```sh
-count() { printf 'brokers=%s app-servers=%s\n' \
-  "$(pgrep -f 'app-server-broker.mjs serve' | wc -l | tr -d ' ')" \
-  "$(pgrep -f 'codex app-server' | wc -l | tr -d ' ')"; }
+Define `mine`, `count` and `reap_mine` from the plan header's *Process-table measurement protocol*. Record the **unscoped** totals once, for the record, then work scoped from here on:
 
-count                                  # record as BROKERS_BEFORE / APPSERVERS_BEFORE
-pkill -f 'app-server-broker.mjs serve' || true
-pkill -f 'codex app-server' || true
-sleep 2
+```sh
+pgrep -f 'app-server-broker\.mjs serve' | wc -l   # record as BROKERS_BEFORE
+pgrep -f 'codex app-server'             | wc -l   # record as APPSERVERS_BEFORE
+
+count                                  # this clone's share of the above
+reap_mine
 count
 ```
 
-Expected after the reap: `brokers=0 app-servers=0`.
+Expected after the reap: `brokers=0 app-servers=0` from the **scoped** `count`. The unscoped totals will *not* be zero and are not supposed to be — they include sibling agents' trees and the extension host, which you must not touch.
 
 - [ ] **Step 3: Show the broker-leak measurement can fail at p5**
 
@@ -358,13 +405,11 @@ Expected: **greater than zero** — this is R8's claim reproduced. If it is zero
 - [ ] **Step 5: Leave the process table clean**
 
 ```sh
-pkill -f 'app-server-broker.mjs serve' || true
-pkill -f 'codex app-server' || true
-sleep 2
+reap_mine
 count
 ```
 
-Expected: `brokers=0 app-servers=0`. Report all four recorded numbers. **No commit.**
+Expected: `brokers=0 app-servers=0` from the scoped `count`. Report all four recorded numbers. **No commit.**
 
 ---
 
@@ -624,36 +669,35 @@ In `$SCRATCH/tests/reviewer-detach.test.mjs` — same replacement, `pinHermeticS
 - [ ] **Step 8: Full suite green, and the process table unchanged (AC1, AC2)**
 
 ```sh
-count() { printf 'brokers=%s app-servers=%s\n' \
-  "$(pgrep -f 'app-server-broker.mjs serve' | wc -l | tr -d ' ')" \
-  "$(pgrep -f 'codex app-server' | wc -l | tr -d ' ')"; }
+Define `mine`, `count` and `reap_mine` from the plan header's *Process-table measurement protocol* — do not use a bare `pgrep | wc -l`, and never `pkill`.
 
-count                                   # before
+```sh
+reap_mine                               # start from a clean slate
+count                                   # must print brokers=0 app-servers=0
 
 # Keep the suite output: the residue rule below reads it.
 (cd "$SCRATCH" && env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH \
-   node --test tests/*.test.mjs) 2>&1 | tee /tmp/issue-9-task2-suite.log
-count                                   # AC1 target
+   node --test tests/*.test.mjs) 2>&1 | tee "$SCRATCHPAD/issue-9-task2-suite.log"
+count                                   # AC1
 
 (cd "$SCRATCH" && env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH \
    node --test --test-name-pattern 'shared broker' tests/*.test.mjs)
-count                                   # AC2: must equal before — strict
+count                                   # AC2 — strict
 ```
 
-Expected: suite green (0 failures). The **AC2 repro count must equal the before-count exactly** — one workspace, one broker, and Task 1 recorded `LEAK_AFTER_REPRO > 0` for that same command at p5, so this half of the gate can fail and is not negotiable.
+Expected: suite green (0 failures). The **AC2 repro must print `brokers=0 app-servers=0`** — one workspace, one broker, and Task 1 measured `LEAK_AFTER_REPRO = brokers=1 app-servers=1` for that same command at p5 (scoped the same way), so this half of the gate can fail and is not negotiable.
 
-The **AC1 full-suite count should equal the before-count too, but one residue class is not this task's to close.** If the AC1 count differs, classify the residue before proceeding — do not soften the gate and do not proceed on a hunch:
+The **AC1 full-suite count should be `0 0` too, but one residue class is not this task's to close.** If AC1 is non-zero, classify it before proceeding — do not soften the gate and do not proceed on a hunch. Because `count` is already scoped to this clone, every surviving process it reports is genuinely from your run:
 
 ```sh
-for p in $(pgrep -f 'app-server-broker.mjs serve'); do ps -o pid=,command= -p "$p"; done
-grep -c 'reapBrokers:' /tmp/issue-9-task2-suite.log || true
+for p in $(mine 'app-server-broker\.mjs serve'); do ps -ww -o pid=,command= -p "$p"; done
+grep -c 'reapBrokers:' "$SCRATCHPAD/issue-9-task2-suite.log" || true
 ```
 
-- Any surviving broker whose `--pid-file` argument is **not** under a `codex-plugin-*-data-*` temp root did not come from this suite (it is a real broker, most likely your own). Exclude it from the comparison and note it.
-- Otherwise, if `reapBrokers:` appears in the suite log, the reaper saw that broker and failed to kill it. **That is a Task 2 defect — fix it before committing.**
-- If no `reapBrokers:` line was emitted, the residue was never recorded, so no record-walking reaper could have found it: it is a broker `ensureBrokerSession` orphaned when its 2 s readiness wait expired before any record was saved (`broker-lifecycle.mjs:212-222`). **That is Task 3's hole, not Task 2's.** Record the count as `NOTREADY_ORPHANS`, report it, and proceed.
+- If `reapBrokers:` appears in the suite log, the reaper saw that broker and failed to kill it. **That is a Task 2 defect — fix it before committing.**
+- If no `reapBrokers:` line was emitted, the residue was never recorded, so no record-walking reaper could have found it: it is a broker `ensureBrokerSession` orphaned when its 2 s readiness wait expired before any record was saved (`broker-lifecycle.mjs:212-222`). **That is Task 3's hole, not Task 2's.** Record the count as `NOTREADY_ORPHANS`, report it, run `reap_mine`, and proceed.
 
-Task 7 Step 3 re-asserts strict equality on **both** commands once Task 3's kill-by-default teardown has landed, which is where `NOTREADY_ORPHANS` must be `0`.
+Task 7 Step 3 re-asserts `brokers=0 app-servers=0` on **both** commands once Task 3's kill-by-default teardown has landed, which is where `NOTREADY_ORPHANS` must be `0`.
 
 - [ ] **Step 9: R8 evidence — the probe root stays clean**
 
@@ -1972,22 +2016,21 @@ Expected: `patchRevision = 6;` exactly (not 5, not 7), a clean working tree, and
 
 - [ ] **Step 3: The AC1 / AC2 demo**
 
-```sh
-count() { printf 'brokers=%s app-servers=%s\n' \
-  "$(pgrep -f 'app-server-broker.mjs serve' | wc -l | tr -d ' ')" \
-  "$(pgrep -f 'codex app-server' | wc -l | tr -d ' ')"; }
+Define `mine`, `count` and `reap_mine` from the plan header's *Process-table measurement protocol*.
 
-count                                   # before
+```sh
+reap_mine                               # start from a clean slate
+count                                   # must print brokers=0 app-servers=0
 (cd "$SCRATCH" && env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH \
    node --test tests/*.test.mjs)
-count                                   # AC1: must equal before
+count                                   # AC1: must be brokers=0 app-servers=0
 
 (cd "$SCRATCH" && env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH \
    node --test --test-name-pattern 'shared broker' tests/*.test.mjs)
-count                                   # AC2: must still equal before
+count                                   # AC2: must still be brokers=0 app-servers=0
 ```
 
-Expected: the suite green (AC6), and both after-counts identical to the before-count on **both** process families. Report the three counts verbatim. Task 1 recorded a non-zero `LEAK_AFTER_REPRO` for the second command at p5, so this gate can fail.
+Expected: the suite green (AC6), and **both** after-counts `brokers=0 app-servers=0` on **both** process families — this is where `NOTREADY_ORPHANS` from Task 2 must have gone to zero. Report the three counts verbatim. Task 1 measured `LEAK_AFTER_REPRO = brokers=1 app-servers=1` for the second command at p5, scoped identically, so this gate can fail.
 
 - [ ] **Step 4: The R8 evidence**
 
