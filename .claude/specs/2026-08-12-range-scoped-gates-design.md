@@ -44,8 +44,11 @@ Two edits, both instruction text, both in `writing-plans/SKILL.md`, +986 bytes t
    direct content assertions), names the three expected residents of any range (the plan and spec
    files, the caller's `docs(plans):`/`docs(specs):` artifact commits, the ship-time sync merge), and
    gives the filtered command for the one case where commit shape genuinely is what is under test.
-2. **Self-review item 4** is relabelled `Falsifiability and scope` and gains the matching check, so
-   the rule is caught at the file's own review pass rather than only stated.
+2. **Self-review item 4** is relabelled `Falsifiability and gate scope` and gains the matching check,
+   so the rule is caught at the file's own review pass rather than only stated. (Decision G2 settled the
+   qualified label; this summary was corrected to match it at ship-time review. The superseded decision
+   entry that first proposed the bare `Falsifiability and scope` is left as logged — the decisions log
+   is append-only, this Solution summary is not part of it.)
 
 `sdd/SKILL.md` is **not** edited. The verdict and its reasoning are below.
 

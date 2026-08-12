@@ -220,13 +220,20 @@ bug, not an implementer's call:
   document is edited to hide it.
 - **Grounding:** The fence is the single source of truth for text the implementer copies, and this is a
   decisions-log ordering artifact rather than a real conflict: G2 explicitly supersedes the earlier
-  entry ("Label it `Falsifiability and gate scope`"), and the spec's `## Solution` section and its
-  Verification section both already use the qualified form. The spec's own instruction is that a later
-  entry extends the log rather than rewriting it, so the stale phrase in the superseded entry is the
-  format working as intended.
-- **Alternative considered:** Amending the spec's earlier entry for tidiness. Rejected: the spec is
-  committed at `a98fe6d` and its decisions log is deliberately append-only; rewriting history there to
-  remove a superseded choice destroys the traceability the format exists for.
+  entry ("Label it `Falsifiability and gate scope`"), and the W2 AFTER fence the implementer copies
+  from carries the qualified form verbatim. The spec's own instruction is that a later entry extends the
+  log rather than rewriting it, so the stale phrase in the superseded entry is the format working as
+  intended.
+- **Alternative considered:** Amending the spec's earlier decision entry for tidiness. Rejected: the
+  spec is committed at `a98fe6d` and its decisions log is deliberately append-only; rewriting history
+  there to remove a superseded choice destroys the traceability the format exists for.
+- **Amended at ship-time review:** this entry previously grounded the choice on "the spec's `##
+  Solution` section and its Verification section both already use the qualified form". Neither citation
+  held — `## Solution` carried the retired `Falsifiability and scope`, and the Verification section
+  never names the label at all. The false citation is removed above. `## Solution` is a summary of what
+  ships rather than part of the append-only log, so it was corrected to the shipped label; the
+  superseded decision entry at the spec's "Amend Self-review item 4 or add item 5?" is left untouched,
+  as the rejected alternative requires.
 
 ### `just build` runs once, in Task 2, and is not the falsifiable gate
 - **Question:** `CLAUDE.md` makes `just build` the repo's definition of verified. Does every task run
@@ -575,31 +582,49 @@ Run:
 
 ```bash
 echo "-- sdd/SKILL.md: the verdict is 'no edit', so this must be empty --"
-git diff --stat origin/main...HEAD -- home/common/agent-skills/skills/sdd/SKILL.md
+sdd_changed=$(git diff --stat origin/main...HEAD -- home/common/agent-skills/skills/sdd/SKILL.md)
+echo "$sdd_changed"
 echo "-- writing-plans/SKILL.md: this branch's own change --"
 git diff --stat origin/main...HEAD -- home/common/agent-skills/skills/writing-plans/SKILL.md
 echo "-- anything changed outside the allowed set (must be empty) --"
-git diff --name-only origin/main...HEAD -- ':(exclude)home/common/agent-skills/skills/writing-plans/SKILL.md' ':(exclude).claude/plans' ':(exclude).claude/specs'
+outside=$(git diff --name-only origin/main...HEAD \
+  -- ':(exclude)home/common/agent-skills/skills/writing-plans/SKILL.md' \
+     ':(exclude).claude/plans/2026-08-12-range-scoped-gates.md' \
+     ':(exclude).claude/specs/2026-08-12-range-scoped-gates-design.md')
+echo "$outside"
 echo "-- merge-base the three-dot form resolves to --"
 git merge-base origin/main HEAD
+fail=0
+if [ -n "$sdd_changed" ]; then echo "FAIL R8: sdd/SKILL.md changed"; fail=1; fi
+if [ -n "$outside" ]; then echo "FAIL R9: changed outside the allowed set"; fail=1; fi
+echo "exit=$fail"
+[ "$fail" -eq 0 ]
 ```
 
 Expected: the first command prints **nothing** — zero changed lines in `sdd/SKILL.md`, satisfying spec
 requirement **R8**'s recorded verdict. The second prints `1 file changed, 3 insertions(+), 1
-deletion(-)`. The third prints **nothing** — the excluded pathspecs are the allowed set (the one file
-this plan owns, plus the flow's own plan and spec artifacts, which land in the range regardless of what
-this plan does), and the three-dot form already keeps the sync merge's commits out of the range by
+deletion(-)`; it is context, since Step 1's exact byte, line, and substring assertions are what actually
+pin that file's contents. The third prints **nothing** — the excluded pathspecs are the allowed set,
+named one path at a time: the one file this plan owns, plus this flow's own plan and spec artifacts,
+which land in the range regardless of what this plan does. They are named individually rather than as
+`.claude/plans` and `.claude/specs` directories so that a stray edit to a *sibling* issue's plan or spec
+still fires the gate. The three-dot form already keeps the sync merge's commits out of the range by
 construction, so an empty result here means nothing else changed anywhere in the tree, satisfying **R9**
 honestly rather than by restricting the search to a directory first. The fourth prints a SHA
 (`165a3b0…` before any sync merge; the merged tip afterwards) — it is context for reading the three
-diffs, not a value to assert.
+diffs, not a value to assert. The two emptiness properties are then asserted rather than merely printed:
+`git diff` exits 0 whether or not it produced output, so without the trailing `fail` check this block
+would pass while displaying a violation, and **R8**/**R9** would rest on someone reading the output.
+`exit=0` with no `FAIL` line is the gate's pass signal.
 
 Two properties of these gates are the point of this change and must not be "simplified" away in a
 review fixup:
 
-- **Every diff carries a pathspec.** Without one the diffstat also lists this plan, the design spec,
-  and — after ship-issue's Phase-1 sync merge — every file `main` advanced by, and reports them as
-  scope creep.
+- **Every diff carries a pathspec.** Without one the diffstat also lists this plan and the design spec
+  and reports them as scope creep. Pair that omission with a two-dot range (`origin/main..HEAD`) or a
+  base SHA pinned before the sync merge and it additionally lists every file `main` advanced by — the
+  failure this issue exists to prevent. The three-dot form below is what keeps that second half out; the
+  pathspec is what keeps the first half out. Both are needed.
 - **Every diff uses the three-dot form.** `origin/main...HEAD` diffs from `merge-base(origin/main,
   HEAD)` to `HEAD`. A sync merge advances that merge-base to the merged tip, so the commits the merge
   brought in fall out of the range by construction; if `origin/main` advances again afterwards, the
@@ -643,8 +668,8 @@ Read the landed text and confirm each of the spec's requirements maps to it. Rep
 | **R5** — reachable from Self-review | W2, item 4 relabelled `Falsifiability and gate scope` |
 | **R6** — register and layout preserved | Both blocks copied verbatim from the spec; proven by Step 1's exact substring match and the 152-line count |
 | **R7** — addition ≤ 1,000 bytes | 986 (6,203 → 7,189), proven by Step 1's byte check |
-| **R8** — recorded verdict on `sdd/SKILL.md` | The spec's verdict section; enforced by Step 2's empty diff |
-| **R9** — no other file edited | Step 2's exclusion diff over `origin/main...HEAD` (everything outside the owned file plus the plan/spec artifacts), empty output |
+| **R8** — recorded verdict on `sdd/SKILL.md` | The spec's verdict section; enforced by Step 2's asserted-empty diff |
+| **R9** — no other file edited | Step 2's exclusion diff over `origin/main...HEAD` (everything outside the owned file plus this flow's two named plan/spec artifacts), asserted empty |
 
 Confirm the two claims that only reading can settle, and quote the evidence:
 
