@@ -80,7 +80,7 @@ Paths inside the scratch clone used by this plan:
 | `lib/broker-lifecycle.mjs` | Records and gates on `scriptPath`; passes `--log-file` in `spawnBrokerProcess`; exports the lock-guarded "delete the record iff it names this endpoint"; `teardownBrokerSession` defaults `killProcess`, guards against a recycled pid, and force-removes files. |
 | `tests/helpers.mjs` | Adds the hermetic-state-root-plus-reaper helper every state-writing test file calls once at module scope. |
 | `tests/fake-codex-fixture.mjs` | Records the fake `codex app-server`'s own pid in its state file so tests can observe the broker's grandchild dying. |
-| `tests/broker-reaping.test.mjs` (new) | All nine of the spec's tests, one behaviour-named file. |
+| `tests/broker-reaping.test.mjs` (new) | All nine of the spec's tests plus the recycled-pid positive control, one behaviour-named file. |
 | `patches/agent-plugins/codex-plugin-cc.patch` (worktree) | The only plugin-code artifact this repo carries. |
 | `lib/agent-plugins.nix` (worktree) | `patchRevision = 5` → `6`. |
 | `CLAUDE.md` (worktree) | R8: the one sentence claiming every test run leaks `codex-plugin-test-*` state dirs into the live plugin data dir. |
