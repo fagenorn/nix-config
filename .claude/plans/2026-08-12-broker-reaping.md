@@ -320,6 +320,12 @@ Fixture rules: `makeTempDir` workspaces, `initGitRepo`, `installFakeCodex`, **pr
 - **Grounding:** The pre-flight's remove rule targets orphans with no valuable state; the reason it can delete without asking is that a worktree at that point holds nothing a rerun would not reproduce. This one holds a reviewed plan and two verified implementation commits, so the rule's premise does not hold. Resumption was verified safe before any dispatch: the working tree is clean, `git log origin/main..HEAD` shows Tasks 2 and 3 only (`pinHermeticStateRoot` and `terminateProcessTree` present in the patch, `buildIdentity`/supervision absent), `patchRevision` is already at 6 as Task 2 requires, and the committed patch re-applies cleanly onto pin `db52e28f` — so the Task 4 rebuild block starts from exactly the state the plan expects.
 - **Alternative considered:** Follow the pre-flight literally — `git worktree remove` plus `git branch -D`, then redo Phases 1–5. Rejected: it destroys nine commits including a plan that already absorbed a full standards review with seven dispositioned findings, and the redone artifacts would not be identical, so the discarded review would have to be repurchased. Also rejected: cherry-pick the existing commits onto a fresh branch, which changes SHAs for no benefit when the branch is already based on `origin/main` and clean.
 
+### Execution: `killGroupQuietly` became the exported `killGroup`, and later task text follows
+- **Question:** Task 3's review found the `killGroupQuietly` this plan dictates for `tests/broker-reaping.test.mjs` (Task 3's code block) body-identical to the module-private `killGroup` in `tests/helpers.mjs` — verbatim duplication of a logic block, which the review rubric treats as a defect even when the plan mandates it. The fix exported `killGroup(pid, signal)` and deleted the duplicate. That left Tasks 4 and 6 dictating calls to a helper that no longer exists.
+- **Choice:** Accepted the deduplication, then corrected the *forward-looking* references: Task 6's three teardown lines now read `t.after(() => killGroup(broker.child.pid, "SIGKILL"))`. Tasks 3's and 4's already-executed code blocks keep their original `killGroupQuietly` text as the historical record of what those implementers were told; the divergence is recorded here and in the sdd ledger rather than by rewriting dispatched instructions.
+- **Grounding:** Task 4's implementer hit exactly this and flagged it — it substituted `killGroup(pid, "SIGKILL")` because writing a second group-kill helper was forbidden by its brief, and the review confirmed the substitution matched the file's existing teardown idiom. Since task briefs are extracted from this plan verbatim, leaving Task 6's text stale would hand its implementer a call to an undefined function and cost a review round to rediscover the same thing.
+- **Alternative considered:** Re-add a local `killGroupQuietly` wrapper so every task's dictated text stays literally true — rejected: it reintroduces the duplication the review removed. Also rejected: rewrite Tasks 3 and 4's blocks too, which would make the plan disagree with the briefs those implementers actually worked from.
+
 ## Standards review provenance
 
 - **Reviewer:** Claude fallback (`reviewer` subagent, fresh context, read-only toolset).
@@ -1616,7 +1622,7 @@ test("a live broker exits when its broker record disappears", async (t) => {
     idleTimeoutMs: 60000,
     superviseIntervalMs: 100
   });
-  t.after(() => killGroupQuietly(broker.child.pid));
+  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
 
   assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
   saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
@@ -1648,7 +1654,7 @@ test("a live broker exits when its broker record is replaced, leaving the replac
     idleTimeoutMs: 60000,
     superviseIntervalMs: 100
   });
-  t.after(() => killGroupQuietly(broker.child.pid));
+  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
 
   assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
   saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
@@ -1679,7 +1685,7 @@ test("a live broker exits when nothing connects for the idle bound", async (t) =
     idleTimeoutMs: 500,
     superviseIntervalMs: 100
   });
-  t.after(() => killGroupQuietly(broker.child.pid));
+  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
   saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
 
   await waitFor(() => !isProcessAlive(broker.child.pid), { timeoutMs: 15000 });
