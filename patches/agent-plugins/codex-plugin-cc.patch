@@ -342,7 +342,7 @@ index 72b30a7..3e78ae9 100644
 +          throw new Error("Failed to start the isolated Codex broker for this workspace.");
 +        }
 diff --git a/plugins/codex/scripts/lib/broker-lifecycle.mjs b/plugins/codex/scripts/lib/broker-lifecycle.mjs
-index ef76381..14580ee 100644
+index ef76381..c26cdc6 100644
 --- a/plugins/codex/scripts/lib/broker-lifecycle.mjs
 +++ b/plugins/codex/scripts/lib/broker-lifecycle.mjs
 @@ -9 +9,3 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs
@@ -574,7 +574,7 @@ index ef76381..14580ee 100644
 @@ -160,0 +288,2 @@ export async function ensureBrokerSession(cwd, options = {}) {
 +  return released;
 +}
-@@ -162,9 +291,21 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -162,9 +291,28 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const session = {
 -    endpoint,
 -    pidFile,
@@ -584,16 +584,23 @@ index ef76381..14580ee 100644
 -  };
 -  saveBrokerSession(cwd, session);
 -  return session;
-+// terminateProcessTree signals the whole process *group* (kill(-pid, ...)), so a
-+// recycled pid would take an unrelated group down with it. That risk is real
-+// only for a pid read from a record that may be days old -- exactly when the
-+// stale-record path fires -- and this is where a kill first appears on that
-+// path, so the identity check belongs here.
++// An ownership check on the pid file's path, nothing more: it returns false only
++// when a file exists there and names a *different* finite pid, i.e. evidence that
++// something other than this broker owns the path. sessionDir is mkdtemp-unique
++// per broker and only that broker writes its own pid file into it (unlinking it
++// on shutdown), so a foreign pid at that path means an external writer, and since
++// terminateProcessTree signals the whole process *group* (kill(-pid, ...)),
++// signalling on that evidence could take an unrelated group down.
++//
++// This does not detect a recycled pid, and cannot: a days-old record whose pid
++// has since been reused finds either no pid file (the broker unlinked it) or one
++// naming that same now-dead pid, so both cases return true and the group is
++// signalled anyway. Catching that would need liveness probing, which is out of
++// scope here.
 +//
 +// A missing pid file must NOT skip the kill: the broker writes it early in
 +// main() but after Node bootstrap, so the not-ready path can legitimately find
 +// no file for a child it definitely spawned, and R4 requires that child to die.
-+// Only a pid file that exists and names somebody else is evidence of recycling.
 +function pidFileNamesPid(pidFile, pid) {
 +  if (!pidFile) {
 +    return true;
@@ -605,7 +612,7 @@ index ef76381..14580ee 100644
 +    return true;
 +  }
 +  return !Number.isFinite(recorded) || recorded === pid;
-@@ -173,2 +314,14 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -173,2 +321,14 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = null }) {
 -  if (Number.isFinite(pid) && killProcess) {
 +// killProcess defaults to the production kill so that omitting it cannot mean
@@ -622,7 +629,7 @@ index ef76381..14580ee 100644
 +  killProcess = terminateProcessTree
 +}) {
 +  if (Number.isFinite(pid) && killProcess && pidFileNamesPid(pidFile, pid)) {
-@@ -182,2 +335,5 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+@@ -182,2 +342,5 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
 -  if (pidFile && fs.existsSync(pidFile)) {
 -    fs.unlinkSync(pidFile);
 +  // Force removals, not existsSync-then-unlink: a SIGTERM'd broker runs its own
@@ -630,12 +637,12 @@ index ef76381..14580ee 100644
 +  // window is real. The post-condition is "the file is absent".
 +  if (pidFile) {
 +    fs.rmSync(pidFile, { force: true });
-@@ -186,2 +342,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+@@ -186,2 +349,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
 -  if (logFile && fs.existsSync(logFile)) {
 -    fs.unlinkSync(logFile);
 +  if (logFile) {
 +    fs.rmSync(logFile, { force: true });
-@@ -193,2 +349,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+@@ -193,2 +356,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
 -      if (target.kind === "unix" && fs.existsSync(target.path)) {
 -        fs.unlinkSync(target.path);
 +      if (target.kind === "unix") {
@@ -1346,10 +1353,10 @@ index 778571e..e601a80 100644
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
 diff --git a/tests/broker-reaping.test.mjs b/tests/broker-reaping.test.mjs
 new file mode 100644
-index 0000000..2abaaf8
+index 0000000..0496358
 --- /dev/null
 +++ b/tests/broker-reaping.test.mjs
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,211 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1358,7 +1365,7 @@ index 0000000..2abaaf8
 +import { spawn } from "node:child_process";
 +
 +import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-+import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
++import { initGitRepo, killGroup, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import {
 +  createBrokerSessionDir,
 +  ensureBrokerSession,
@@ -1438,25 +1445,13 @@ index 0000000..2abaaf8
 +  assert.equal(fs.existsSync(record.sessionDir), false);
 +});
 +
-+function killGroupQuietly(pid) {
-+  try {
-+    process.kill(-pid, "SIGKILL");
-+  } catch {
-+    try {
-+      process.kill(pid, "SIGKILL");
-+    } catch {
-+      // Already gone.
-+    }
-+  }
-+}
-+
 +function spawnDetachedSleeper(t) {
 +  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 +    detached: true,
 +    stdio: "ignore"
 +  });
 +  sleeper.unref();
-+  t.after(() => killGroupQuietly(sleeper.pid));
++  t.after(() => killGroup(sleeper.pid, "SIGKILL"));
 +  return sleeper;
 +}
 +
@@ -1500,7 +1495,7 @@ index 0000000..2abaaf8
 +      return;
 +    }
 +    for (const pid of fs.readFileSync(pidReport, "utf8").trim().split("\n").map(Number)) {
-+      killGroupQuietly(pid);
++      killGroup(pid, "SIGKILL");
 +    }
 +  });
 +
@@ -1535,12 +1530,21 @@ index 0000000..2abaaf8
 +    owners: []
 +  });
 +
-+  await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 5000 });
++  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 5000 });
 +
 +  await waitFor(() => !isProcessAlive(sleeper.pid));
++  // Killing the pid the stale record named is half the contract; the other half
++  // is that the record no longer names it. Read it back through the production
++  // resolver rather than trusting the return value alone.
++  assert.ok(session, "the replacement broker never became ready within 5 s");
++  const record = loadBrokerSession(workspace);
++  assert.ok(record, "the stale record was cleared but no replacement was recorded");
++  assert.equal(record.pid, session.pid);
++  assert.notEqual(record.pid, sleeper.pid);
++  assert.notEqual(record.sessionDir, staleDir);
 +});
 +
-+// Positive control for the recycled-pid guard. It passes at p5 for an
++// Positive control for the pid-file ownership guard. It passes at p5 for an
 +// uninteresting reason (p5 never kills at all) and would fail against a Task 3
 +// that defaults killProcess to a kill *without* the guard, which is the
 +// regression it exists to catch.
@@ -1550,9 +1554,9 @@ index 0000000..2abaaf8
 +  const logFile = path.join(sessionDir, "broker.log");
 +  const survivor = spawnDetachedSleeper(t);
 +  // The caller still names `survivor`, but the pid file on disk names somebody
-+  // else — which is what a recycled pid looks like from the stale-record path.
-+  // terminateProcessTree signals the whole group, so guessing wrong here would
-+  // take an unrelated process group down.
++  // else — evidence that a writer other than this broker owns the path.
++  // terminateProcessTree signals the whole group, so acting on the caller's pid
++  // here would take an unrelated process group down.
 +  fs.writeFileSync(pidFile, `${survivor.pid + 1}\n`, "utf8");
 +  fs.writeFileSync(logFile, "broker log\n", "utf8");
 +
@@ -1608,7 +1612,7 @@ index f83c96a..6920c62 100644
 +        state.lastThreadStart = message.params;
 +        saveState(state);
 diff --git a/tests/helpers.mjs b/tests/helpers.mjs
-index d698119..c838968 100644
+index d698119..62ec570 100644
 --- a/tests/helpers.mjs
 +++ b/tests/helpers.mjs
 @@ -5,0 +6,7 @@ import { spawnSync } from "node:child_process";
@@ -1619,9 +1623,12 @@ index d698119..c838968 100644
 +
 +const REAP_POLL_MS = 25;
 +const REAP_TIMEOUT_MS = 2000;
-@@ -32,0 +40,87 @@ export function initGitRepo(cwd) {
+@@ -32,0 +40,91 @@ export function initGitRepo(cwd) {
 +
-+function killGroup(pid, signal) {
++// Signals the pid's whole process group, falling back to the pid alone when it
++// leads no group. Exported because tests that spawn their own detached processes
++// need exactly this teardown; there is no second copy of it.
++export function killGroup(pid, signal) {
 +  try {
 +    process.kill(-pid, signal);
 +  } catch {
@@ -1661,12 +1668,13 @@ index d698119..c838968 100644
 +    process.env.CLAUDE_PLUGIN_DATA = root;
 +    const failures = [];
 +    for (const { stateFile, session } of listBrokerSessions()) {
-+      // One bad record must not strand the rest, and this runs in an `after`
-+      // hook: a rejection here is reported as a test failure while the
-+      // remaining brokers stay alive — the worst of both outcomes. At this
-+      // task's base commit teardownBrokerSession still does existsSync-then-
-+      // unlink, and the broker's own shutdown races it for the same paths, so
-+      // ENOENT here is expected rather than exceptional until Task 3 lands.
++      // teardownBrokerSession force-removes its files, so the broker's own
++      // concurrent shutdown no longer makes ENOENT the expected outcome here.
++      // The try/catch stays for the unexpected one: one bad record (an
++      // unreadable session dir, a permission error) must not strand the rest,
++      // and this runs in an `after` hook, where a rejection is reported as a
++      // test failure while the remaining brokers stay alive — the worst of both
++      // outcomes.
 +      try {
 +        const pid = Number.isFinite(session.pid) ? session.pid : null;
 +        // killProcess is the production instrument, not a test double: the same
