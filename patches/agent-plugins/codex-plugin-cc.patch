@@ -231,11 +231,14 @@ index 1954274..a40434e 100644
 +        requestQueue.push({ socket, message });
 +        drainQueue();
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..92725c9 100644
+index 83df468..54958b1 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
-@@ -50,0 +51 @@ import {
+@@ -32 +31,0 @@ import {
+-  listJobs,
+@@ -50,0 +50,2 @@ import {
 +  isActiveJobStatus,
++  listJobsRetainingActive,
 @@ -54,0 +56 @@ import {
 +import { cleanupReviewerRuntime } from "./lib/runtime-home.mjs";
 @@ -79 +81 @@ function printUsage() {
@@ -261,23 +264,28 @@ index 83df468..92725c9 100644
 -  return status === "queued" || status === "running";
 -}
 -
-@@ -467 +461,2 @@ async function executeTaskRun(request) {
+@@ -339 +333,3 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
+-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
++  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)).filter(
++    (job) => job.id !== options.excludeJobId
++  );
+@@ -467 +463,2 @@ async function executeTaskRun(request) {
 -    resumeLast: request.resumeLast
 +    resumeLast: request.resumeLast,
 +    reviewer: request.reviewer
-@@ -493,2 +488,4 @@ async function executeTaskRun(request) {
+@@ -493,2 +490,4 @@ async function executeTaskRun(request) {
 -    persistThread: true,
 -    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
 +    persistThread: !request.reviewer,
 +    threadName: request.reviewer || resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
 +    reviewerJobId: request.reviewer ? request.jobId : null,
 +    timeoutMs: request.timeoutMs
-@@ -496,0 +494,4 @@ async function executeTaskRun(request) {
+@@ -496,0 +496,4 @@ async function executeTaskRun(request) {
 +  if (request.reviewer && result.touchedFiles.length > 0) {
 +    throw new Error(`Read-only Codex reviewer reported file changes: ${result.touchedFiles.join(", ")}`);
 +  }
 +
-@@ -540 +541,7 @@ function buildReviewJobMetadata(reviewName, target) {
+@@ -540 +543,7 @@ function buildReviewJobMetadata(reviewName, target) {
 -function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 +function buildTaskRunMetadata({ prompt, resumeLast = false, reviewer = false }) {
 +  if (reviewer) {
@@ -286,27 +294,27 @@ index 83df468..92725c9 100644
 +      summary: shorten(prompt || "Read-only plan review")
 +    };
 +  }
-@@ -592 +599 @@ function createTrackedProgress(job, options = {}) {
+@@ -592 +601 @@ function createTrackedProgress(job, options = {}) {
 -function buildTaskJob(workspaceRoot, taskMetadata, write) {
 +function buildTaskJob(workspaceRoot, taskMetadata, write, reviewer = false) {
-@@ -594,2 +601,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -594,2 +603,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    prefix: "task",
 -    kind: "task",
 +    prefix: reviewer ? "reviewer" : "task",
 +    kind: reviewer ? "plan-review" : "task",
-@@ -598 +605 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -598 +607 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    jobClass: "task",
 +    jobClass: reviewer ? "review" : "task",
-@@ -604 +611 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -604 +613 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
 +function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, reviewer, timeoutMs, jobId }) {
-@@ -611,0 +619,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
+@@ -611,0 +621,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
 +    reviewer,
 +    timeoutMs,
-@@ -671 +680 @@ async function runForegroundCommand(job, runner, options = {}) {
+@@ -671 +682 @@ async function runForegroundCommand(job, runner, options = {}) {
 -function spawnDetachedTaskWorker(cwd, jobId) {
 +function spawnDetachedTaskWorker(cwd, jobId, logFile) {
-@@ -672,0 +682,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -672,0 +684,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  // Same shape as spawnBrokerProcess. The child inherits an O_APPEND fd on the
 +  // job log, so everything it writes to fd 1/2 is appended to the file the job
 +  // record already points at via logFile — including output no application code
@@ -317,12 +325,12 @@ index 83df468..92725c9 100644
 +  // O_APPEND on the same inode from the same process, so the two interleave
 +  // chronologically: the last progress line, then the trail that ended it.
 +  const logFd = fs.openSync(logFile, "a");
-@@ -677 +696 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -677 +698 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 -    stdio: "ignore",
 +    stdio: ["ignore", logFd, logFd],
-@@ -680,0 +700 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -680,0 +702 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  fs.closeSync(logFd);
-@@ -683,0 +704,15 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -683,0 +706,25 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +function resolveJobDeadline(createdAt, timeoutMs) {
 +  // The issue's definition: enqueue time + timeout, and a deadline exists only
 +  // when a timeout does. Measured from the record's own createdAt rather than a
@@ -335,21 +343,35 @@ index 83df468..92725c9 100644
 +  if (!Number.isFinite(createdMs) || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
 +    return null;
 +  }
-+  return new Date(createdMs + timeoutMs).toISOString();
++  // Total by construction. A --timeout-ms large enough to push the sum outside
++  // the range a Date can represent clears the positive-finite guard on the
++  // option, and toISOString throws RangeError on the resulting invalid Date.
++  // Checking the constructed Date's own time value asks the platform where its
++  // limit is instead of restating the bound here. An unrepresentable deadline is
++  // no deadline: report none rather than failing the enqueue outright.
++  const deadline = new Date(createdMs + timeoutMs);
++  if (!Number.isFinite(deadline.getTime())) {
++    return null;
++  }
++  return deadline.toISOString();
 +}
 +
-@@ -688 +723,2 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -688 +735,6 @@ function enqueueBackgroundTask(cwd, job, request) {
 -  const child = spawnDetachedTaskWorker(cwd, job.id);
-+  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
++  // Resolved before the spawn. It depends only on the record's createdAt and the
++  // request's timeoutMs, both already known here, and anything that goes wrong
++  // between the spawn and writeJobFile leaves a running detached worker with no
++  // job record at all — unreachable, unreportable, and never reaped.
 +  const deadlineAt = resolveJobDeadline(job.createdAt, request.timeoutMs);
-@@ -694,0 +731 @@ function enqueueBackgroundTask(cwd, job, request) {
++  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
+@@ -694,0 +747 @@ function enqueueBackgroundTask(cwd, job, request) {
 +    ...(deadlineAt ? { deadlineAt } : {}),
-@@ -764,2 +801,2 @@ async function handleTask(argv) {
+@@ -764,2 +817,2 @@ async function handleTask(argv) {
 -    valueOptions: ["model", "effort", "cwd", "prompt-file"],
 -    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
 +    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms"],
 +    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "reviewer"],
-@@ -782,0 +820,8 @@ async function handleTask(argv) {
+@@ -782,0 +836,8 @@ async function handleTask(argv) {
 +  const reviewer = Boolean(options.reviewer);
 +  if (reviewer && (write || resumeLast)) {
 +    throw new Error("Reviewer jobs must be fresh and read-only.");
@@ -358,29 +380,32 @@ index 83df468..92725c9 100644
 +  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
 +    throw new Error("--timeout-ms must be a positive number.");
 +  }
-@@ -785 +830,2 @@ async function handleTask(argv) {
+@@ -785 +846,2 @@ async function handleTask(argv) {
 -    resumeLast
 +    resumeLast,
 +    reviewer
-@@ -792 +838 @@ async function handleTask(argv) {
+@@ -792 +854 @@ async function handleTask(argv) {
 -    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
-@@ -799,0 +846,2 @@ async function handleTask(argv) {
+@@ -799,0 +862,2 @@ async function handleTask(argv) {
 +      reviewer,
 +      timeoutMs,
-@@ -807 +855 @@ async function handleTask(argv) {
+@@ -807 +871 @@ async function handleTask(argv) {
 -  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
-@@ -817,0 +866,2 @@ async function handleTask(argv) {
+@@ -817,0 +882,2 @@ async function handleTask(argv) {
 +        reviewer,
 +        timeoutMs,
-@@ -976 +1026,4 @@ async function handleCancel(argv) {
+@@ -937 +1003 @@ function handleTaskResumeCandidate(argv) {
+-  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
++  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)));
+@@ -976 +1042,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
 +    job.kind === "plan-review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1040,3 @@ async function handleCancel(argv) {
+@@ -986,0 +1056,3 @@ async function handleCancel(argv) {
 +  if (job.kind === "plan-review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
@@ -740,13 +765,21 @@ index fead00c..aee30f2 100644
 -  });
 +  }, { reviewerJobId: options.reviewerJobId, env: options.env });
 diff --git a/plugins/codex/scripts/lib/job-control.mjs b/plugins/codex/scripts/lib/job-control.mjs
-index ad152c1..706183d 100644
+index ad152c1..af979e7 100644
 --- a/plugins/codex/scripts/lib/job-control.mjs
 +++ b/plugins/codex/scripts/lib/job-control.mjs
-@@ -5 +5 @@ import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+@@ -4,2 +4,8 @@ import { getSessionRuntimeStatus } from "./codex.mjs";
+-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
 -import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
-+import { isActiveJobStatus, isTerminalJobStatus, reconcileWorkerLiveness, SESSION_ID_ENV } from "./tracked-jobs.mjs";
-@@ -48,0 +49,9 @@ function getJobTypeLabel(job) {
++import { getConfig, readJobFile, resolveJobFile } from "./state.mjs";
++import {
++  isActiveJobStatus,
++  isTerminalJobStatus,
++  listJobsRetainingActive,
++  reconcileWorkerLiveness,
++  SESSION_ID_ENV
++} from "./tracked-jobs.mjs";
+@@ -48,0 +55,9 @@ function getJobTypeLabel(job) {
 +// Only the runtime's own progress lines may reach the status surface. Every line
 +// appendLogLine/appendLogBlock writes starts with `[${nowIso()}] `, so a full
 +// ISO-8601 timestamp prefix admits all of them and nothing else: the worker's
@@ -756,10 +789,10 @@ index ad152c1..706183d 100644
 +// being steered by text the runtime did not write.
 +const LOG_LINE_PREFIX_PATTERN = /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\s/;
 +
-@@ -71 +80 @@ export function readJobProgressPreview(logFile, maxLines = DEFAULT_MAX_PROGRESS_
+@@ -71 +86 @@ export function readJobProgressPreview(logFile, maxLines = DEFAULT_MAX_PROGRESS_
 -    .filter((line) => line.startsWith("["))
 +    .filter((line) => LOG_LINE_PREFIX_PATTERN.test(line))
-@@ -162,0 +172,8 @@ export function enrichJob(job, options = {}) {
+@@ -162,0 +178,8 @@ export function enrichJob(job, options = {}) {
 +  // Read as deadline-to-now rather than start-to-now: the same end-minus-start
 +  // computation, measured from the deadline. formatElapsedDuration returns null
 +  // for an unparseable start and for an end earlier than the start, so a record
@@ -768,7 +801,7 @@ index ad152c1..706183d 100644
 +  // both snapshot builders reconcile liveness before enriching, so a dead
 +  // worker is reported failed rather than overdue.
 +  const overdueBy = isActiveJobStatus(job.status) ? formatElapsedDuration(job.deadlineAt, null) : null;
-@@ -171,4 +188,5 @@ export function enrichJob(job, options = {}) {
+@@ -171,4 +194,5 @@ export function enrichJob(job, options = {}) {
 -    duration:
 -      job.status === "completed" || job.status === "failed" || job.status === "cancelled"
 -        ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
@@ -778,7 +811,7 @@ index ad152c1..706183d 100644
 +      : null,
 +    overdue: overdueBy != null,
 +    overdueBy
-@@ -216 +234,10 @@ export function buildStatusSnapshot(cwd, options = {}) {
+@@ -216 +240,10 @@ export function buildStatusSnapshot(cwd, options = {}) {
 -  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
 +  // Reconcile before sorting: the flip stamps a fresh updatedAt, so sorting
 +  // afterwards is what makes the flipped job the newest finished record
@@ -786,13 +819,24 @@ index ad152c1..706183d 100644
 +  // so the listing only ever rewrites records it surfaces; jobs of other
 +  // sessions are healed by their own session's listing or any single-job read.
 +  const jobs = sortJobsNewestFirst(
-+    filterJobsForCurrentSession(listJobs(workspaceRoot), options).map((job) =>
++    filterJobsForCurrentSession(listJobsRetainingActive(workspaceRoot), options).map((job) =>
 +      reconcileWorkerLiveness(workspaceRoot, job)
 +    )
 +  );
-@@ -252 +279 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
+@@ -244 +277 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
+-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
++  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot));
+@@ -252 +285 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 -    job: enrichJob(selected, { maxProgressLines: options.maxProgressLines })
 +    job: enrichJob(reconcileWorkerLiveness(workspaceRoot, selected), { maxProgressLines: options.maxProgressLines })
+@@ -258 +291,3 @@ export function resolveResultJob(cwd, reference) {
+-  const jobs = sortJobsNewestFirst(reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot)));
++  const jobs = sortJobsNewestFirst(
++    reference ? listJobsRetainingActive(workspaceRoot) : filterJobsForCurrentSession(listJobsRetainingActive(workspaceRoot))
++  );
+@@ -283 +318 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
+-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
++  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot));
 diff --git a/plugins/codex/scripts/lib/process.mjs b/plugins/codex/scripts/lib/process.mjs
 index dd8fc37..365f856 100644
 --- a/plugins/codex/scripts/lib/process.mjs
@@ -841,10 +885,10 @@ index 2ec1852..76ae1db 100644
 +  }
 diff --git a/plugins/codex/scripts/lib/runtime-home.mjs b/plugins/codex/scripts/lib/runtime-home.mjs
 new file mode 100644
-index 0000000..00ae521
+index 0000000..aff6584
 --- /dev/null
 +++ b/plugins/codex/scripts/lib/runtime-home.mjs
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,120 @@
 +import fs from "node:fs";
 +import os from "node:os";
 +import path from "node:path";
@@ -920,11 +964,15 @@ index 0000000..00ae521
 +  return { canonicalHome, runtimeHome, env: buildRuntimeEnv(runtimeHome, canonicalHome, env) };
 +}
 +
-+export function resolveReviewerRuntimeHome(cwd, jobId) {
++function resolveReviewerRuntimeHomeInStateDir(stateDir, jobId) {
 +  if (!jobId || !/^[a-zA-Z0-9._-]+$/.test(jobId)) {
 +    throw new Error("A safe reviewer job id is required for an isolated Codex runtime.");
 +  }
-+  return path.join(resolveStateDir(cwd), REVIEWER_RUNTIMES_DIR, jobId);
++  return path.join(stateDir, REVIEWER_RUNTIMES_DIR, jobId);
++}
++
++export function resolveReviewerRuntimeHome(cwd, jobId) {
++  return resolveReviewerRuntimeHomeInStateDir(resolveStateDir(cwd), jobId);
 +}
 +
 +export function createReviewerRuntime(cwd, jobId, options = {}) {
@@ -938,17 +986,31 @@ index 0000000..00ae521
 +  return { canonicalHome, runtimeHome, env: buildRuntimeEnv(runtimeHome, canonicalHome, env) };
 +}
 +
-+export function cleanupReviewerRuntime(cwd, jobId) {
-+  const runtimeHome = resolveReviewerRuntimeHome(cwd, jobId);
-+  const runtimeRoot = path.join(resolveStateDir(cwd), REVIEWER_RUNTIMES_DIR);
++// The state-dir variant carries the body, and the cwd variant delegates through
++// resolveStateDir — the same split state.mjs uses for updateJobRecordInStateDir
++// and pruneJobRecordsInStateDir, and for the same reason. resolveStateDir hashes
++// the *realpath* of a job's workspaceRoot and falls back to the literal path
++// when that fails, so for a worktree moved or deleted since the record was
++// written it names a different state dir than the one actually holding the
++// record. A caller that already knows the owning state dir — the SessionEnd hook
++// walks them — must aim there, or `rmSync` silently no-ops on an empty path and
++// the real runtime dir leaks for good now that the record survives to point at
++// it. The owned-root guard stays on this shared path, so both variants apply it.
++export function cleanupReviewerRuntimeInStateDir(stateDir, jobId) {
++  const runtimeHome = resolveReviewerRuntimeHomeInStateDir(stateDir, jobId);
++  const runtimeRoot = path.join(stateDir, REVIEWER_RUNTIMES_DIR);
 +  const relative = path.relative(runtimeRoot, runtimeHome);
 +  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
 +    throw new Error("Refusing to remove a reviewer runtime outside its owned root.");
 +  }
 +  fs.rmSync(runtimeHome, { recursive: true, force: true });
 +}
++
++export function cleanupReviewerRuntime(cwd, jobId) {
++  return cleanupReviewerRuntimeInStateDir(resolveStateDir(cwd), jobId);
++}
 diff --git a/plugins/codex/scripts/lib/state.mjs b/plugins/codex/scripts/lib/state.mjs
-index 2da2349..832bc0f 100644
+index 2da2349..a7b1c13 100644
 --- a/plugins/codex/scripts/lib/state.mjs
 +++ b/plugins/codex/scripts/lib/state.mjs
 @@ -13,0 +14,4 @@ const MAX_JOBS = 50;
@@ -1080,13 +1142,39 @@ index 2da2349..832bc0f 100644
 @@ -76 +186 @@ export function loadState(cwd) {
 -    return defaultState();
 +    return { ...defaultState(), jobs: listJobs(cwd) };
-@@ -93 +202,0 @@ export function saveState(cwd, state) {
+@@ -85,0 +196,25 @@ function pruneJobs(jobs) {
++// The one retention selection, applied by both the on-disk prune and the read
++// path. MAX_JOBS bounds the records the caller is willing to lose, and `retain`
++// says which are not eviction candidates at all. It exists because pruneJobs
++// ranks by updatedAt while a job's updatedAt only advances when its phase,
++// thread or turn changes (createJobProgressUpdater in tracked-jobs.mjs returns
++// early when nothing changed) — so a long-wedged worker sorts *oldest*, which is
++// precisely the record this feature exists to preserve.
++//
++// The two callers have to agree: a record the prune deliberately keeps on disk
++// that the read path then slices away is present but invisible to status, to
++// `status <id>` and to cancel. `retain = null` means nothing is exempt, so the
++// selection collapses to the status-blind cap every existing caller already
++// gets. state.mjs stays status-agnostic: the predicate comes from the caller.
++function selectRetainedJobs(records, retain) {
++  if (!retain) {
++    return pruneJobs(records);
++  }
++  const exempt = [];
++  const evictable = [];
++  for (const job of records) {
++    (retain(job) ? exempt : evictable).push(job);
++  }
++  return [...exempt, ...pruneJobs(evictable)];
++}
++
+@@ -93 +227,0 @@ export function saveState(cwd, state) {
 -  const previousJobs = loadState(cwd).jobs;
-@@ -101,2 +210 @@ export function saveState(cwd, state) {
+@@ -101,2 +235 @@ export function saveState(cwd, state) {
 -    },
 -    jobs: nextJobs
 +    }
-@@ -105,7 +213,5 @@ export function saveState(cwd, state) {
+@@ -105,7 +238,5 @@ export function saveState(cwd, state) {
 -  const retainedIds = new Set(nextJobs.map((job) => job.id));
 -  for (const job of previousJobs) {
 -    if (retainedIds.has(job.id)) {
@@ -1099,20 +1187,20 @@ index 2da2349..832bc0f 100644
 +  });
 +  for (const job of nextJobs) {
 +    writeJobFile(cwd, job.id, job);
-@@ -113,3 +219,2 @@ export function saveState(cwd, state) {
+@@ -113,3 +244,2 @@ export function saveState(cwd, state) {
 -
 -  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
 -  return nextState;
 +  pruneJobRecords(cwd);
 +  return { ...nextState, jobs: listJobs(cwd) };
-@@ -130 +235,5 @@ export function upsertJob(cwd, jobPatch) {
+@@ -130 +260,5 @@ export function upsertJob(cwd, jobPatch) {
 -  return updateState(cwd, (state) => {
 +  if (!jobPatch?.id) {
 +    throw new Error("A job id is required.");
 +  }
 +  const jobFile = resolveJobFile(cwd, jobPatch.id);
 +  return withMetadataLock(`${jobFile}.lock`, () => {
-@@ -132,8 +241,7 @@ export function upsertJob(cwd, jobPatch) {
+@@ -132,8 +266,7 @@ export function upsertJob(cwd, jobPatch) {
 -    const existingIndex = state.jobs.findIndex((job) => job.id === jobPatch.id);
 -    if (existingIndex === -1) {
 -      state.jobs.unshift({
@@ -1128,16 +1216,18 @@ index 2da2349..832bc0f 100644
 +      } catch {
 +        existing = {};
 +      }
-@@ -141,2 +249,3 @@ export function upsertJob(cwd, jobPatch) {
+@@ -141,2 +274,3 @@ export function upsertJob(cwd, jobPatch) {
 -    state.jobs[existingIndex] = {
 -      ...state.jobs[existingIndex],
 +    const next = {
 +      createdAt: existing.createdAt ?? timestamp,
 +      ...existing,
-@@ -145,0 +255,2 @@ export function upsertJob(cwd, jobPatch) {
+@@ -145,0 +280,31 @@ export function upsertJob(cwd, jobPatch) {
 +    atomicWriteFile(jobFile, `${JSON.stringify(next, null, 2)}\n`);
 +    return next;
-@@ -148,0 +260,33 @@ export function upsertJob(cwd, jobPatch) {
++  });
++}
++
 +export function updateJobRecordInStateDir(stateDir, jobId, mutate) {
 +  const jobsDir = path.join(stateDir, JOBS_DIR_NAME);
 +  // resolveJobFile used to create this directory as a side effect of
@@ -1164,15 +1254,14 @@ index 2da2349..832bc0f 100644
 +    const written = { ...next, updatedAt: nowIso() };
 +    atomicWriteFile(jobFile, `${JSON.stringify(written, null, 2)}\n`);
 +    return written;
-+  });
-+}
-+
+@@ -149,2 +314,21 @@ export function upsertJob(cwd, jobPatch) {
+-export function listJobs(cwd) {
+-  return loadState(cwd).jobs;
 +export function updateJobRecord(cwd, jobId, mutate) {
 +  return updateJobRecordInStateDir(resolveStateDir(cwd), jobId, mutate);
 +}
 +
-@@ -150 +294,14 @@ export function listJobs(cwd) {
--  return loadState(cwd).jobs;
++export function listJobs(cwd, { retain = null } = {}) {
 +  ensureStateDir(cwd);
 +  migrateLegacyJobIndex(cwd);
 +  const jobs = [];
@@ -1186,13 +1275,15 @@ index 2da2349..832bc0f 100644
 +      // A crashed writer cannot poison the remaining independent job records.
 +    }
 +  }
-+  return pruneJobs(jobs);
-@@ -169 +326,3 @@ export function writeJobFile(cwd, jobId, payload) {
++  // Exempt records bypass the MAX_JOBS slice entirely. Every caller sorts the
++  // result itself, so the exempt-first order this returns is not load-bearing.
++  return selectRetainedJobs(jobs, retain);
+@@ -169 +353,3 @@ export function writeJobFile(cwd, jobId, payload) {
 -  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 +  withMetadataLock(`${jobFile}.lock`, () => {
 +    atomicWriteFile(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
 +  });
-@@ -182,0 +342,60 @@ function removeJobFile(jobFile) {
+@@ -182,0 +369,52 @@ function removeJobFile(jobFile) {
 +export function removeJob(cwd, jobId) {
 +  return removeJobFromStateDir(resolveStateDir(cwd), jobId);
 +}
@@ -1230,17 +1321,9 @@ index 2da2349..832bc0f 100644
 +      // outcome listJobs + the old pruneJobRecords produced together.
 +    }
 +  }
-+  // MAX_JOBS bounds the records the caller is willing to evict, and `retain`
-+  // says which are not evictable at all. It exists because pruneJobs ranks by
-+  // updatedAt while a job's updatedAt only advances when its phase, thread or
-+  // turn changes (createJobProgressUpdater in tracked-jobs.mjs returns early
-+  // when nothing changed) — so a long-wedged worker sorts *oldest*, which is
-+  // precisely the record this feature exists to preserve. state.mjs stays
-+  // status-agnostic: the predicate comes from the caller, and pruneJobRecords
-+  // passes none, so cwd-scoped pruning keeps its current semantics exactly.
-+  const exempt = retain ? records.filter((job) => retain(job)) : [];
-+  const evictable = retain ? records.filter((job) => !retain(job)) : records;
-+  const retainedIds = new Set([...exempt, ...pruneJobs(evictable)].map((job) => job.id));
++  // pruneJobRecords passes no predicate, so cwd-scoped pruning keeps its current
++  // semantics exactly. See selectRetainedJobs for why `retain` exists.
++  const retainedIds = new Set(selectRetainedJobs(records, retain).map((job) => job.id));
 +  for (const name of names) {
 +    const jobId = name.slice(0, -".json".length);
 +    if (!retainedIds.has(jobId)) {
@@ -1254,15 +1337,23 @@ index 2da2349..832bc0f 100644
 +}
 +
 diff --git a/plugins/codex/scripts/lib/tracked-jobs.mjs b/plugins/codex/scripts/lib/tracked-jobs.mjs
-index 9028690..29a17ea 100644
+index 9028690..8c96ea6 100644
 --- a/plugins/codex/scripts/lib/tracked-jobs.mjs
 +++ b/plugins/codex/scripts/lib/tracked-jobs.mjs
-@@ -4 +4,3 @@ import process from "node:process";
+@@ -4 +4,11 @@ import process from "node:process";
 -import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
-+import { readJobFile, resolveJobFile, resolveJobLogFile, updateJobRecord, upsertJob, writeJobFile } from "./state.mjs";
++import {
++  listJobs,
++  readJobFile,
++  resolveJobFile,
++  resolveJobLogFile,
++  updateJobRecord,
++  upsertJob,
++  writeJobFile
++} from "./state.mjs";
 +import { isProcessAlive } from "./process.mjs";
 +import { cleanupReviewerRuntime } from "./runtime-home.mjs";
-@@ -103,11 +104,0 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
+@@ -103,11 +112,0 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
 -
 -    const jobFile = resolveJobFile(workspaceRoot, jobId);
 -    if (!fs.existsSync(jobFile)) {
@@ -1274,7 +1365,7 @@ index 9028690..29a17ea 100644
 -      ...storedJob,
 -      ...patch
 -    });
-@@ -204,0 +196,56 @@ export async function runTrackedJob(job, runner, options = {}) {
+@@ -204,0 +204,68 @@ export async function runTrackedJob(job, runner, options = {}) {
 +
 +// Active = queued | running. The only other statuses any writer produces are the
 +// terminal three (completed | failed | cancelled), so "not active" and "terminal"
@@ -1287,6 +1378,18 @@ index 9028690..29a17ea 100644
 +
 +export function isTerminalJobStatus(status) {
 +  return status === "completed" || status === "failed" || status === "cancelled";
++}
++
++// The single home of the read-path retention policy, matching what SessionEnd's
++// prune keeps on disk: an active record is never an eviction candidate. Without
++// it, listJobs's status-blind MAX_JOBS cap hides a wedged active record behind
++// fifty newer terminal ones — retained on disk, yet absent from status, from
++// `status <id>` and from the cancel path. It lives here rather than at each read
++// call site because this module already owns status semantics and already
++// imports state.mjs, so no new import direction appears and state.mjs stays
++// status-agnostic.
++export function listJobsRetainingActive(cwd) {
++  return listJobs(cwd, { retain: (job) => isActiveJobStatus(job.status) });
 +}
 +
 +function isWorkerProbeEligible(job) {
@@ -1332,7 +1435,7 @@ index 9028690..29a17ea 100644
 +  return reconciled ?? job;
 +}
 diff --git a/plugins/codex/scripts/session-lifecycle-hook.mjs b/plugins/codex/scripts/session-lifecycle-hook.mjs
-index 778571e..8d778cf 100644
+index 778571e..07698fb 100644
 --- a/plugins/codex/scripts/session-lifecycle-hook.mjs
 +++ b/plugins/codex/scripts/session-lifecycle-hook.mjs
 @@ -3,0 +4 @@ import fs from "node:fs";
@@ -1356,10 +1459,10 @@ index 778571e..8d778cf 100644
 +  updateJobRecordInStateDir
 +} from "./lib/state.mjs";
 +import { appendLogLine, isActiveJobStatus, nowIso, reconcileWorkerLiveness } from "./lib/tracked-jobs.mjs";
-+import { cleanupReviewerRuntime } from "./lib/runtime-home.mjs";
++import { cleanupReviewerRuntimeInStateDir } from "./lib/runtime-home.mjs";
 @@ -18 +18,0 @@ import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 -import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
-@@ -42,3 +42,8 @@ function appendEnvVar(name, value) {
+@@ -42,3 +42,12 @@ function appendEnvVar(name, value) {
 -function cleanupSessionJobs(cwd, sessionId) {
 -  if (!cwd || !sessionId) {
 -    return;
@@ -1369,9 +1472,13 @@ index 778571e..8d778cf 100644
 +  } catch {
 +    // Ignore teardown failures during session shutdown.
 +  }
-+  if (job.kind === "plan-review" && job.workspaceRoot) {
-+    cleanupReviewerRuntime(job.workspaceRoot, job.id);
-@@ -47,4 +52,26 @@ function cleanupSessionJobs(cwd, sessionId) {
++  // Aimed at the state dir this loop is walking, not at the record's
++  // workspaceRoot: in the divergence case below they are different dirs, and the
++  // runtime lives under this one. The `job.workspaceRoot` conjunct this
++  // condition used to carry existed only because the path derived from it.
++  if (job.kind === "plan-review") {
++    cleanupReviewerRuntimeInStateDir(stateDir, job.id);
+@@ -47,4 +56,26 @@ function cleanupSessionJobs(cwd, sessionId) {
 -  const workspaceRoot = resolveWorkspaceRoot(cwd);
 -  const stateFile = resolveStateFile(workspaceRoot);
 -  if (!fs.existsSync(stateFile)) {
@@ -1402,15 +1509,15 @@ index 778571e..8d778cf 100644
 +
 +  if (reason) {
 +    appendLogLine(written?.logFile ?? job.logFile ?? null, reason);
-@@ -51,0 +79 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -51,0 +83 @@ function cleanupSessionJobs(cwd, sessionId) {
 +}
-@@ -53,3 +81,2 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -53,3 +85,2 @@ function cleanupSessionJobs(cwd, sessionId) {
 -  const state = loadState(workspaceRoot);
 -  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
 -  if (removedJobs.length === 0) {
 +function cleanupSessionJobs(sessionId) {
 +  if (!sessionId) {
-@@ -58,4 +85,4 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -58,4 +89,4 @@ function cleanupSessionJobs(cwd, sessionId) {
 -
 -  for (const job of removedJobs) {
 -    const stillRunning = job.status === "queued" || job.status === "running";
@@ -1419,7 +1526,7 @@ index 778571e..8d778cf 100644
 +    migrateLegacyJobIndexInStateDir(stateDir);
 +    const jobsDir = path.join(stateDir, "jobs");
 +    if (!fs.existsSync(jobsDir)) {
-@@ -64,4 +91,45 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -64,4 +95,45 @@ function cleanupSessionJobs(cwd, sessionId) {
 -    try {
 -      terminateProcessTree(job.pid ?? Number.NaN);
 -    } catch {
@@ -1463,13 +1570,13 @@ index 778571e..8d778cf 100644
 +        // session regardless of status, and a terminal record whose own cleanup
 +        // never completed (`withAppServer`'s `finally` can throw) would
 +        // otherwise keep its runtime dir forever now that the record survives.
-+        if (current.kind === "plan-review" && current.workspaceRoot) {
-+          cleanupReviewerRuntime(current.workspaceRoot, current.id);
++        if (current.kind === "plan-review") {
++          cleanupReviewerRuntimeInStateDir(stateDir, current.id);
 +        }
 +        continue;
 +      }
 +      terminalizeLiveSessionJob(stateDir, current);
-@@ -68,0 +137,10 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -68,0 +141,10 @@ function cleanupSessionJobs(cwd, sessionId) {
 +    // SessionEnd used to delete this session's records, which made it the de
 +    // facto garbage collector of job artifacts. Retaining them means the state
 +    // layer's existing MAX_JOBS retention has to run at the same lifecycle
@@ -1480,13 +1587,13 @@ index 778571e..8d778cf 100644
 +    // would let one session's end delete a live record and log belonging to a
 +    // concurrent session, which is the opposite of what the issue asks for.
 +    pruneJobRecordsInStateDir(stateDir, { retain: (job) => isActiveJobStatus(job.status) });
-@@ -70,5 +147,0 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -70,5 +151,0 @@ function cleanupSessionJobs(cwd, sessionId) {
 -
 -  saveState(workspaceRoot, {
 -    ...state,
 -    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
 -  });
-@@ -84,30 +157,3 @@ async function handleSessionEnd(input) {
+@@ -84,30 +161,3 @@ async function handleSessionEnd(input) {
 -  const cwd = input.cwd || process.cwd();
 -  const brokerSession =
 -    loadBrokerSession(cwd) ??
@@ -1520,6 +1627,19 @@ index 778571e..8d778cf 100644
 +  const sessionId = input.session_id || process.env[SESSION_ID_ENV];
 +  cleanupSessionJobs(sessionId);
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
+diff --git a/plugins/codex/scripts/stop-review-gate-hook.mjs b/plugins/codex/scripts/stop-review-gate-hook.mjs
+index 2346bdc..6f31fab 100644
+--- a/plugins/codex/scripts/stop-review-gate-hook.mjs
++++ b/plugins/codex/scripts/stop-review-gate-hook.mjs
+@@ -11 +11 @@ import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
+-import { getConfig, listJobs } from "./lib/state.mjs";
++import { getConfig } from "./lib/state.mjs";
+@@ -13 +13 @@ import { sortJobsNewestFirst } from "./lib/job-control.mjs";
+-import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
++import { listJobsRetainingActive, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
+@@ -148 +148 @@ function main() {
+-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), input));
++  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobsRetainingActive(workspaceRoot), input));
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
 index c34b060..9c9cc89 100644
 --- a/tests/commands.test.mjs
@@ -2349,10 +2469,10 @@ index 0f8f57c..f4c286c 100644
 +    savedJobs.map((job) => job.id),
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
-index 0000000..280b029
+index 0000000..4192589
 --- /dev/null
 +++ b/tests/worker-postmortem.test.mjs
-@@ -0,0 +1,621 @@
+@@ -0,0 +1,772 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -2831,6 +2951,112 @@ index 0000000..280b029
 +  }
 +});
 +
++test("a wedged active record stays visible behind a full page of newer terminal records", (t) => {
++  const workspace = makeTempDir();
++  const sessionId = "sess-wedged-visibility";
++  const sleeper = spawnSleeper(t, workspace);
++  // MAX_JOBS (50) terminal records, every one with an updatedAt newer than the
++  // active record seeded below. That is the steady state this branch creates:
++  // SessionEnd retains terminal records instead of deleting them, so a full page
++  // of them is normal rather than exceptional.
++  for (let index = 0; index < 50; index += 1) {
++    const minute = String(index).padStart(2, "0");
++    seedJob(
++      workspace,
++      activeRecord(workspace, `task-done-${minute}`, null, sessionId, {
++        status: "completed",
++        phase: "done",
++        pid: null,
++        completedAt: `2026-08-01T11:${minute}:05.000Z`,
++        updatedAt: `2026-08-01T11:${minute}:06.000Z`
++      })
++    );
++  }
++  // The wedged worker: alive, but carrying the oldest updatedAt in the dir,
++  // because createJobProgressUpdater stamps updatedAt only when a phase, thread
++  // or turn changes. SessionEnd's prune deliberately exempts this record from
++  // the cap; a status-blind cap on the *read* path would hide it anyway, leaving
++  // it on disk but invisible to status, to `status <id>` and to cancel.
++  const { jobFile } = seedJob(
++    workspace,
++    activeRecord(workspace, "task-wedged", sleeper.pid, sessionId, {
++      updatedAt: "2026-08-01T09:00:00.000Z"
++    })
++  );
++  assert.equal(fs.existsSync(jobFile), true, jobFile);
++
++  const listed = run("node", [SCRIPT, "status", "--json"], { cwd: workspace });
++  assert.equal(listed.status, 0, listed.stderr);
++  const running = JSON.parse(listed.stdout).running;
++  assert.deepEqual(
++    running.map((job) => job.id),
++    ["task-wedged"]
++  );
++  assert.equal(running[0].status, "running");
++
++  // The exact-id read path is capped by the same slice, so it has to be asserted
++  // separately: a job id a human copied off an earlier report must still resolve.
++  const single = run("node", [SCRIPT, "status", "task-wedged", "--json"], { cwd: workspace });
++  assert.equal(single.status, 0, single.stderr);
++  assert.equal(JSON.parse(single.stdout).job.id, "task-wedged");
++  assert.equal(JSON.parse(single.stdout).job.status, "running");
++});
++
++test("session end cleans a reviewer runtime under the state dir it walks when workspaceRoot diverges", () => {
++  const stateWorkspace = makeTempDir();
++  const movedWorkspace = makeTempDir();
++  const sessionId = "sess-reviewer-divergent-statedir";
++  // The S3 divergence, reached at the on-disk seam: the records live in
++  // stateWorkspace's state dir while still claiming a workspaceRoot that
++  // resolves elsewhere — what a worktree moved or deleted since the record was
++  // written produces, because resolveStateDir hashes the realpath of
++  // workspaceRoot and falls back to the literal path when that fails. The
++  // reviewer runtimes live under the dir that actually holds the records, so
++  // cleanup derived from workspaceRoot aims at a dir holding nothing and leaks.
++  assert.notEqual(resolveStateDir(movedWorkspace), resolveStateDir(stateWorkspace));
++  const runtimeRoot = path.join(resolveStateDir(stateWorkspace), "reviewer-runtimes");
++  const seedRuntime = (jobId) => {
++    const runtimeHome = path.join(runtimeRoot, jobId);
++    fs.mkdirSync(runtimeHome, { recursive: true });
++    fs.writeFileSync(path.join(runtimeHome, "config.toml"), "", "utf8");
++    return runtimeHome;
++  };
++
++  const terminalRuntime = seedRuntime("reviewer-divergent-terminal");
++  const { jobFile: terminalJobFile } = seedJob(
++    stateWorkspace,
++    activeRecord(movedWorkspace, "reviewer-divergent-terminal", null, sessionId, {
++      kind: "plan-review",
++      status: "failed",
++      phase: "failed",
++      pid: null,
++      completedAt: "2026-08-01T10:00:09.000Z",
++      errorMessage: DEAD_WORKER_MESSAGE(4242)
++    })
++  );
++
++  const activeRuntime = seedRuntime("reviewer-divergent-active");
++  const { jobFile: activeJobFile } = seedJob(
++    stateWorkspace,
++    activeRecord(movedWorkspace, "reviewer-divergent-active", null, sessionId, {
++      kind: "plan-review"
++    })
++  );
++
++  const result = runSessionEndHook(stateWorkspace, sessionId);
++
++  assert.equal(result.status, 0, result.stderr);
++  // Both hook call sites: the already-terminal retry and the terminalize path.
++  assert.equal(fs.existsSync(terminalRuntime), false, terminalRuntime);
++  assert.equal(fs.existsSync(activeRuntime), false, activeRuntime);
++  // The records themselves are retained and written through the state dir the
++  // hook is walking, exactly as S3 already established.
++  assert.equal(JSON.parse(fs.readFileSync(terminalJobFile, "utf8")).status, "failed");
++  const activeStored = JSON.parse(fs.readFileSync(activeJobFile, "utf8"));
++  assert.equal(activeStored.status, "cancelled");
++  assert.equal(activeStored.errorMessage, "Session ended while the job was still running.");
++});
++
 +test("a background enqueue stamps deadlineAt from the record's own createdAt", () => {
 +  const repo = makeRepo();
 +  const binDir = makeTempDir();
@@ -2870,6 +3096,51 @@ index 0000000..280b029
 +  // A deadline exists only when a timeout does.
 +  assert.equal(untimedRecord.request.timeoutMs, null);
 +  assert.equal(untimedRecord.deadlineAt, undefined);
++});
++
++test("a timeout whose deadline is unrepresentable still lands a complete job record", () => {
++  const repo = makeRepo();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir, "slow-task");
++  const env = buildEnv(binDir);
++
++  // 1e18 ms clears the `Number.isFinite(timeoutMs) && timeoutMs > 0` guard on
++  // --timeout-ms, but createdAt + 1e18 lands outside the ±8.64e15 ms range a
++  // Date can represent, so `new Date(...).toISOString()` throws RangeError. The
++  // deadline used to be resolved *after* the detached worker was spawned and
++  // before the record was written, so that throw orphaned a running worker with
++  // no job record at all.
++  const launched = run(
++    "node",
++    [SCRIPT, "task", "--background", "--timeout-ms", "1e18", "--json", "investigate the failing test"],
++    { cwd: repo, env }
++  );
++  assert.equal(launched.status, 0, launched.stderr);
++  const { jobId, logFile } = JSON.parse(launched.stdout);
++
++  const jobFile = path.join(resolveStateDir(repo), "jobs", `${jobId}.json`);
++  assert.equal(fs.existsSync(jobFile), true, jobFile);
++  const record = JSON.parse(fs.readFileSync(jobFile, "utf8"));
++  assert.equal(record.id, jobId);
++  assert.equal(record.request.timeoutMs, 1e18);
++  assert.equal(record.logFile, logFile);
++  assert.equal(Number.isFinite(record.pid), true, JSON.stringify(record.pid));
++  // An unrepresentable deadline is no deadline: the key is absent, exactly as it
++  // is for a job launched without a timeout at all.
++  assert.equal("deadlineAt" in record, false, JSON.stringify(record.deadlineAt));
++
++  // The worker is tracked, not orphaned: it owns this record and writes its own
++  // outcome into it. (The clamped setTimeout makes it time out promptly, so the
++  // terminal status is failed; what matters is that the record receives it.)
++  const waited = run("node", [SCRIPT, "status", jobId, "--wait", "--timeout-ms", "15000", "--json"], {
++    cwd: repo,
++    env
++  });
++  assert.equal(waited.status, 0, waited.stderr);
++  const job = JSON.parse(waited.stdout).job;
++  assert.equal(job.status, "failed");
++  assert.equal(job.overdue, false);
++  assert.equal(job.deadlineAt, undefined);
 +});
 +
 +test("an alive job past its recorded deadline reports overdue without being flipped", (t) => {
