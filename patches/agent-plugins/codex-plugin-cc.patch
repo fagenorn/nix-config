@@ -342,14 +342,15 @@ index 72b30a7..3e78ae9 100644
 +          throw new Error("Failed to start the isolated Codex broker for this workspace.");
 +        }
 diff --git a/plugins/codex/scripts/lib/broker-lifecycle.mjs b/plugins/codex/scripts/lib/broker-lifecycle.mjs
-index ef76381..9324404 100644
+index ef76381..14580ee 100644
 --- a/plugins/codex/scripts/lib/broker-lifecycle.mjs
 +++ b/plugins/codex/scripts/lib/broker-lifecycle.mjs
-@@ -9 +9,2 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs
+@@ -9 +9,3 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs
 -import { resolveStateDir } from "./state.mjs";
++import { terminateProcessTree } from "./process.mjs";
 +import { createWorkspaceRuntime } from "./runtime-home.mjs";
 +import { listStateDirs, resolveStateDir } from "./state.mjs";
-@@ -13,0 +15,54 @@ const BROKER_STATE_FILE = "broker.json";
+@@ -13,0 +16,54 @@ const BROKER_STATE_FILE = "broker.json";
 +const BROKER_LOCK_DIR = "broker.lock";
 +const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 +const LOCK_STALE_MS = 30000;
@@ -404,27 +405,39 @@ index ef76381..9324404 100644
 +    owners: [...new Set([...(session.owners ?? []), owner])]
 +  };
 +}
-@@ -72 +127 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
+@@ -72 +128 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
 -function resolveBrokerStateFile(cwd) {
 +export function resolveBrokerStateFile(cwd) {
-@@ -76,2 +131 @@ function resolveBrokerStateFile(cwd) {
+@@ -76,2 +132 @@ function resolveBrokerStateFile(cwd) {
 -export function loadBrokerSession(cwd) {
 -  const stateFile = resolveBrokerStateFile(cwd);
 +function loadBrokerSessionFile(stateFile) {
-@@ -81 +134,0 @@ export function loadBrokerSession(cwd) {
+@@ -81 +135,0 @@ export function loadBrokerSession(cwd) {
 -
-@@ -88,0 +142,4 @@ export function loadBrokerSession(cwd) {
+@@ -88,0 +143,4 @@ export function loadBrokerSession(cwd) {
 +export function loadBrokerSession(cwd) {
 +  return loadBrokerSessionFile(resolveBrokerStateFile(cwd));
 +}
 +
-@@ -92 +149 @@ export function saveBrokerSession(cwd, session) {
+@@ -92 +150 @@ export function saveBrokerSession(cwd, session) {
 -  fs.writeFileSync(resolveBrokerStateFile(cwd), `${JSON.stringify(session, null, 2)}\n`, "utf8");
 +  atomicWriteJson(resolveBrokerStateFile(cwd), session);
-@@ -114,4 +171,8 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -114,16 +172,8 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const existing = loadBrokerSession(cwd);
 -  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
 -    return existing;
+-  }
+-
+-  if (existing) {
+-    teardownBrokerSession({
+-      endpoint: existing.endpoint ?? null,
+-      pidFile: existing.pidFile ?? null,
+-      logFile: existing.logFile ?? null,
+-      sessionDir: existing.sessionDir ?? null,
+-      pid: existing.pid ?? null,
+-      killProcess: options.killProcess ?? null
+-    });
+-    clearBrokerSession(cwd);
 -  }
 +  const stateDir = resolveStateDir(cwd);
 +  return withBrokerLock(stateDir, async () => {
@@ -434,15 +447,15 @@ index ef76381..9324404 100644
 +      saveBrokerSession(cwd, owned);
 +      return owned;
 +    }
-@@ -119,8 +180,29 @@ export async function ensureBrokerSession(cwd, options = {}) {
--  if (existing) {
--    teardownBrokerSession({
--      endpoint: existing.endpoint ?? null,
--      pidFile: existing.pidFile ?? null,
--      logFile: existing.logFile ?? null,
--      sessionDir: existing.sessionDir ?? null,
--      pid: existing.pid ?? null,
--      killProcess: options.killProcess ?? null
+@@ -131,8 +181,11 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-  const sessionDir = createBrokerSessionDir();
+-  const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
+-  const endpoint = endpointFactory(sessionDir, options.platform);
+-  const pidFile = path.join(sessionDir, "broker.pid");
+-  const logFile = path.join(sessionDir, "broker.log");
+-  const scriptPath =
+-    options.scriptPath ??
+-    fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
 +    if (existing) {
 +      teardownBrokerSession({
 +        endpoint: existing.endpoint ?? null,
@@ -450,11 +463,19 @@ index ef76381..9324404 100644
 +        logFile: existing.logFile ?? null,
 +        sessionDir: existing.sessionDir ?? null,
 +        pid: existing.pid ?? null,
-+        killProcess: options.killProcess ?? null
++        killProcess: options.killProcess
 +      });
 +      clearBrokerSession(cwd);
 +    }
-+
+@@ -140,8 +193,9 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-  const child = spawnBrokerProcess({
+-    scriptPath,
+-    cwd,
+-    endpoint,
+-    pidFile,
+-    logFile,
+-    env: options.env ?? process.env
+-  });
 +    const sessionDir = createBrokerSessionDir();
 +    const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
 +    const endpoint = endpointFactory(sessionDir, options.platform);
@@ -464,7 +485,10 @@ index ef76381..9324404 100644
 +      options.scriptPath ??
 +      fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
 +    const runtime = createWorkspaceRuntime(cwd, { env: options.env ?? process.env });
-+
+@@ -149,3 +203,23 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
+-  if (!ready) {
+-    teardownBrokerSession({
 +    const child = spawnBrokerProcess({
 +      scriptPath,
 +      cwd,
@@ -472,27 +496,8 @@ index ef76381..9324404 100644
 +      pidFile,
 +      logFile,
 +      env: runtime.env
-@@ -128,2 +209,0 @@ export async function ensureBrokerSession(cwd, options = {}) {
--    clearBrokerSession(cwd);
--  }
-@@ -131,17 +211,12 @@ export async function ensureBrokerSession(cwd, options = {}) {
--  const sessionDir = createBrokerSessionDir();
--  const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
--  const endpoint = endpointFactory(sessionDir, options.platform);
--  const pidFile = path.join(sessionDir, "broker.pid");
--  const logFile = path.join(sessionDir, "broker.log");
--  const scriptPath =
--    options.scriptPath ??
--    fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
--
--  const child = spawnBrokerProcess({
--    scriptPath,
--    cwd,
--    endpoint,
--    pidFile,
--    logFile,
--    env: options.env ?? process.env
--  });
++    });
++
 +    const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
 +    if (!ready) {
 +      teardownBrokerSession({
@@ -501,16 +506,13 @@ index ef76381..9324404 100644
 +        logFile,
 +        sessionDir,
 +        pid: child.pid ?? null,
-+        killProcess: options.killProcess ?? null
++        killProcess: options.killProcess
 +      });
 +      return null;
 +    }
-@@ -149,3 +224 @@ export async function ensureBrokerSession(cwd, options = {}) {
--  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
--  if (!ready) {
--    teardownBrokerSession({
++
 +    const session = addOwner({
-@@ -157 +230,40 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -157 +231,40 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -      killProcess: options.killProcess ?? null
 +      stateDir,
 +      workspaceRoot: cwd,
@@ -552,7 +554,7 @@ index ef76381..9324404 100644
 +        fs.unlinkSync(record.stateFile);
 +      }
 +      return { stop: true, session: current };
-@@ -159 +271,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -159 +272,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -    return null;
 +    if (!action) {
 +      continue;
@@ -565,12 +567,14 @@ index ef76381..9324404 100644
 +        logFile: action.session.logFile ?? null,
 +        sessionDir: action.session.sessionDir ?? null,
 +        pid: action.session.pid ?? null,
-+        killProcess: options.killProcess ?? null
++        killProcess: options.killProcess
 +      });
 +    }
 +    released.push(action);
-@@ -161,10 +287 @@ export async function ensureBrokerSession(cwd, options = {}) {
--
+@@ -160,0 +288,2 @@ export async function ensureBrokerSession(cwd, options = {}) {
++  return released;
++}
+@@ -162,9 +291,21 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const session = {
 -    endpoint,
 -    pidFile,
@@ -580,7 +584,62 @@ index ef76381..9324404 100644
 -  };
 -  saveBrokerSession(cwd, session);
 -  return session;
-+  return released;
++// terminateProcessTree signals the whole process *group* (kill(-pid, ...)), so a
++// recycled pid would take an unrelated group down with it. That risk is real
++// only for a pid read from a record that may be days old -- exactly when the
++// stale-record path fires -- and this is where a kill first appears on that
++// path, so the identity check belongs here.
++//
++// A missing pid file must NOT skip the kill: the broker writes it early in
++// main() but after Node bootstrap, so the not-ready path can legitimately find
++// no file for a child it definitely spawned, and R4 requires that child to die.
++// Only a pid file that exists and names somebody else is evidence of recycling.
++function pidFileNamesPid(pidFile, pid) {
++  if (!pidFile) {
++    return true;
++  }
++  let recorded;
++  try {
++    recorded = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
++  } catch {
++    return true;
++  }
++  return !Number.isFinite(recorded) || recorded === pid;
+@@ -173,2 +314,14 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = null }) {
+-  if (Number.isFinite(pid) && killProcess) {
++// killProcess defaults to the production kill so that omitting it cannot mean
++// "leave the broker running": a group SIGTERM, because a not-ready broker is
++// usually still inside CodexAppServerClient.connect -- before its own SIGTERM
++// handler is installed -- and only a group signal also reaps the codex
++// app-server it already spawned. Pass null to skip the kill deliberately.
++export function teardownBrokerSession({
++  endpoint = null,
++  pidFile,
++  logFile,
++  sessionDir = null,
++  pid = null,
++  killProcess = terminateProcessTree
++}) {
++  if (Number.isFinite(pid) && killProcess && pidFileNamesPid(pidFile, pid)) {
+@@ -182,2 +335,5 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+-  if (pidFile && fs.existsSync(pidFile)) {
+-    fs.unlinkSync(pidFile);
++  // Force removals, not existsSync-then-unlink: a SIGTERM'd broker runs its own
++  // shutdown and unlinks these same paths concurrently, so the check-then-act
++  // window is real. The post-condition is "the file is absent".
++  if (pidFile) {
++    fs.rmSync(pidFile, { force: true });
+@@ -186,2 +342,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+-  if (logFile && fs.existsSync(logFile)) {
+-    fs.unlinkSync(logFile);
++  if (logFile) {
++    fs.rmSync(logFile, { force: true });
+@@ -193,2 +349,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+-      if (target.kind === "unix" && fs.existsSync(target.path)) {
+-        fs.unlinkSync(target.path);
++      if (target.kind === "unix") {
++        fs.rmSync(target.path, { force: true });
 diff --git a/plugins/codex/scripts/lib/codex.mjs b/plugins/codex/scripts/lib/codex.mjs
 index fead00c..aee30f2 100644
 --- a/plugins/codex/scripts/lib/codex.mjs
@@ -1287,20 +1346,28 @@ index 778571e..e601a80 100644
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
 diff --git a/tests/broker-reaping.test.mjs b/tests/broker-reaping.test.mjs
 new file mode 100644
-index 0000000..0abc4ec
+index 0000000..2abaaf8
 --- /dev/null
 +++ b/tests/broker-reaping.test.mjs
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,214 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
 +import assert from "node:assert/strict";
 +import { fileURLToPath } from "node:url";
++import { spawn } from "node:child_process";
 +
 +import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 +import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
-+import { loadBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
++import {
++  createBrokerSessionDir,
++  ensureBrokerSession,
++  loadBrokerSession,
++  saveBrokerSession,
++  teardownBrokerSession
++} from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 +import { isProcessAlive } from "../plugins/codex/scripts/lib/process.mjs";
++import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 +
 +// State resolvers read CLAUDE_PLUGIN_DATA at call time and spawned CLI children
 +// inherit process.env (via buildEnv), so this pin gives the whole file — and
@@ -1369,6 +1436,133 @@ index 0000000..0abc4ec
 +  await waitFor(() => !isProcessAlive(appServerPid));
 +  assert.equal(loadBrokerSession(workspace), null);
 +  assert.equal(fs.existsSync(record.sessionDir), false);
++});
++
++function killGroupQuietly(pid) {
++  try {
++    process.kill(-pid, "SIGKILL");
++  } catch {
++    try {
++      process.kill(pid, "SIGKILL");
++    } catch {
++      // Already gone.
++    }
++  }
++}
++
++function spawnDetachedSleeper(t) {
++  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
++    detached: true,
++    stdio: "ignore"
++  });
++  sleeper.unref();
++  t.after(() => killGroupQuietly(sleeper.pid));
++  return sleeper;
++}
++
++test("teardownBrokerSession kills the recorded broker process when no killProcess is passed", async (t) => {
++  const sessionDir = createBrokerSessionDir();
++  const pidFile = path.join(sessionDir, "broker.pid");
++  const logFile = path.join(sessionDir, "broker.log");
++  const sleeper = spawnDetachedSleeper(t);
++  fs.writeFileSync(pidFile, `${sleeper.pid}\n`, "utf8");
++  fs.writeFileSync(logFile, "broker log\n", "utf8");
++
++  teardownBrokerSession({ endpoint: null, pidFile, logFile, sessionDir, pid: sleeper.pid });
++
++  await waitFor(() => !isProcessAlive(sleeper.pid));
++  assert.equal(fs.existsSync(pidFile), false);
++  assert.equal(fs.existsSync(logFile), false);
++  assert.equal(fs.existsSync(sessionDir), false);
++});
++
++test("the not-ready path terminates the broker it spawned and that broker's own child", async (t) => {
++  const workspace = makeWorkspace();
++  const reportDir = makeTempDir();
++  const pidReport = path.join(reportDir, "pids.txt");
++  const brokerStub = path.join(reportDir, "never-listens-broker.mjs");
++  fs.writeFileSync(
++    brokerStub,
++    [
++      'import fs from "node:fs";',
++      'import { spawn } from "node:child_process";',
++      '// Not detached: this child shares the stub broker\'s process group, so only',
++      '// a group signal reaps it -- which is the behaviour under test.',
++      'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
++      'fs.writeFileSync(process.env.BROKER_STUB_PID_REPORT, `${process.pid}\\n${child.pid}\\n`, "utf8");',
++      'setInterval(() => {}, 1000);',
++      ""
++    ].join("\n"),
++    "utf8"
++  );
++  t.after(() => {
++    if (!fs.existsSync(pidReport)) {
++      return;
++    }
++    for (const pid of fs.readFileSync(pidReport, "utf8").trim().split("\n").map(Number)) {
++      killGroupQuietly(pid);
++    }
++  });
++
++  const session = await ensureBrokerSession(workspace, {
++    scriptPath: brokerStub,
++    env: { ...process.env, BROKER_STUB_PID_REPORT: pidReport },
++    timeoutMs: 2000
++  });
++
++  assert.equal(session, null);
++  assert.equal(fs.existsSync(pidReport), true, "the stub broker never reported its pid");
++  const [stubPid, grandchildPid] = fs.readFileSync(pidReport, "utf8").trim().split("\n").map(Number);
++  await waitFor(() => !isProcessAlive(stubPid));
++  await waitFor(() => !isProcessAlive(grandchildPid));
++});
++
++test("the stale-record path terminates the broker whose endpoint no longer answers", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const sleeper = spawnDetachedSleeper(t);
++  const staleDir = createBrokerSessionDir();
++  saveBrokerSession(workspace, {
++    endpoint: `unix:${path.join(staleDir, "broker.sock")}`,
++    pidFile: path.join(staleDir, "broker.pid"),
++    logFile: path.join(staleDir, "broker.log"),
++    sessionDir: staleDir,
++    pid: sleeper.pid,
++    stateDir: resolveStateDir(workspace),
++    workspaceRoot: workspace,
++    codexHome: path.join(staleDir, "codex-home"),
++    owners: []
++  });
++
++  await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 5000 });
++
++  await waitFor(() => !isProcessAlive(sleeper.pid));
++});
++
++// Positive control for the recycled-pid guard. It passes at p5 for an
++// uninteresting reason (p5 never kills at all) and would fail against a Task 3
++// that defaults killProcess to a kill *without* the guard, which is the
++// regression it exists to catch.
++test("teardownBrokerSession does not signal a pid the pid file no longer claims", async (t) => {
++  const sessionDir = createBrokerSessionDir();
++  const pidFile = path.join(sessionDir, "broker.pid");
++  const logFile = path.join(sessionDir, "broker.log");
++  const survivor = spawnDetachedSleeper(t);
++  // The caller still names `survivor`, but the pid file on disk names somebody
++  // else — which is what a recycled pid looks like from the stale-record path.
++  // terminateProcessTree signals the whole group, so guessing wrong here would
++  // take an unrelated process group down.
++  fs.writeFileSync(pidFile, `${survivor.pid + 1}\n`, "utf8");
++  fs.writeFileSync(logFile, "broker log\n", "utf8");
++
++  teardownBrokerSession({ endpoint: null, pidFile, logFile, sessionDir, pid: survivor.pid });
++
++  assert.equal(isProcessAlive(survivor.pid), true, "the guard should have skipped this kill");
++  // The files still go: the post-condition is "no artifacts", independent of
++  // whether anything was signalled.
++  assert.equal(fs.existsSync(pidFile), false);
++  assert.equal(fs.existsSync(sessionDir), false);
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
 index c34b060..b013de8 100644
