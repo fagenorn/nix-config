@@ -77,7 +77,7 @@ Paths inside the scratch clone used by this plan:
 |---|---|
 | `lib/broker-supervisor.mjs` (new) | The supervision vocabulary: two env-var names + defaults, the strict positive-integer bound parser, record classification (`mine`/`foreign`/`missing`/`unreadable`), and the pure continue-or-exit decision. No timers, no processes, no filesystem. |
 | `app-server-broker.mjs` | Accepts `--log-file`; resolves its record path once at startup; tracks connection count and last activity; latches `recorded`; runs the `unref`'d supervision interval inside `main()`; performs the exit sequence; `shutdown` unlinks the log file and `rmdir`s the broker session dir. |
-| `lib/broker-lifecycle.mjs` | Records and gates on `scriptPath`; passes `--log-file` in `spawnBrokerProcess`; exports the lock-guarded "delete the record iff it names this endpoint"; `teardownBrokerSession` defaults `killProcess` and force-removes files; normalizes `owners`. |
+| `lib/broker-lifecycle.mjs` | Records and gates on `scriptPath`; passes `--log-file` in `spawnBrokerProcess`; exports the lock-guarded "delete the record iff it names this endpoint"; `teardownBrokerSession` defaults `killProcess`, guards against a recycled pid, and force-removes files. |
 | `tests/helpers.mjs` | Adds the hermetic-state-root-plus-reaper helper every state-writing test file calls once at module scope. |
 | `tests/fake-codex-fixture.mjs` | Records the fake `codex app-server`'s own pid in its state file so tests can observe the broker's grandchild dying. |
 | `tests/broker-reaping.test.mjs` (new) | All nine of the spec's tests, one behaviour-named file. |
@@ -107,7 +107,7 @@ Fixture rules: `makeTempDir` workspaces, `initGitRepo`, `installFakeCodex`, **pr
 ### Suite reaping ships first, not last
 - **Question:** In what order do the three mechanisms land?
 - **Choice:** Deterministic suite reaping (Task 2) before the teardown, build-identity and self-supervision work.
-- **Grounding:** It is the issue's headline (AC1/AC2, the 514-broker report, exhausted swap) and it satisfies R1/R2 on its own, so it is the tracer bullet. It also makes every *later* task's broker-spawning test self-cleaning: Tasks 3–6 each spawn real brokers, and without the reaper an aborted implementer run leaks a broker pair per test onto the developer's machine — the exact failure this issue exists to close.
+- **Grounding:** It is the issue's headline (AC1/AC2, the 514-broker report, exhausted swap) and it satisfies R1/R2 for every broker that reaches a saved record, so it is the tracer bullet. It is *not* sufficient on its own: `ensureBrokerSession`'s not-ready path returns without saving a record (`broker-lifecycle.mjs:212-222`), so a broker orphaned by a readiness timeout is invisible to a record-walking reaper and only Task 3 closes it. Step 8 is scoped accordingly. It also makes every *later* task's broker-spawning test self-cleaning: Tasks 3–6 each spawn real brokers, and without the reaper an aborted implementer run leaks a broker pair per test onto the developer's machine — the exact failure this issue exists to close.
 - **Alternative considered:** Policy module first (bottom-up) — rejected: it leaves five tasks' worth of new broker-spawning tests leaking before the reaper exists, and it front-loads the one module with no user-visible effect.
 
 ### The scratch clone is rebuilt from the committed patch at every task start
@@ -223,6 +223,58 @@ Fixture rules: `makeTempDir` workspaces, `initGitRepo`, `installFakeCodex`, **pr
 - **Choice:** Resume in place from Phase 5. The branch `worktree-issue-9-broker-reaping` is kept, its two artifact commits stand, and the flow restarts at the standards review.
 - **Grounding:** The pre-flight's remove-the-orphan rule targets an empty shell left by a run that exited before producing anything; the check exists to stop two sessions racing, and no second session is on this branch. What is actually here is 2267 lines of committed, grounded design: a spec carrying seven grill-round decisions (so Phase 3 ran) and a plan whose `## Requirement coverage` table binds R1–R8 to all seven tasks and to the issue's six acceptance criteria. `git merge-base HEAD origin/main` equals `origin/main`'s tip (`165a3b0`), so the base is still current and Phase 1's own requirement — branch from `origin/<integration-branch>` — already holds. No Phase-5 provenance section and no finding-ID entries exist in the plan, which fixes the resume point at Phase 5.
 - **Alternative considered:** Discard the worktree and rerun Phases 1–4 per the literal pre-flight rule — rejected: it destroys work this flow cannot cheaply reproduce, and a second design pass would diverge from the spec the plan already implements, for no correctness gain. Deleting also contradicts the standing rule to inspect a delete target first and surface a mismatch instead of proceeding: the target contradicts the "orphan" description.
+
+### B1: Task 2's Step 8 gate could go red for a hole Task 2 does not close
+- **Question:** The reviewer found Task 2's Step 8 asserting an exact process-count equality that depends on two things Task 2 does not own. (i) `ensureBrokerSession`'s not-ready path returns without saving a record (`broker-lifecycle.mjs:212-222`), so a broker orphaned by a readiness timeout is invisible to a record-walking reaper and only Task 3 kills it. (ii) `reapBrokers` had no `try`/`catch` while calling p5's `existsSync`-then-unlink `teardownBrokerSession` (`broker-lifecycle.mjs:299-312`), a race the plan itself calls real — a throw would reject the `after` hook *and* strand every remaining broker in the loop.
+- **Choice:** Kept the task order and fixed the gate and the reaper instead. `reapBrokers` now wraps each record in `try`/`catch` with `fs.rmSync` in a `finally`, collects failures, and reports them on stderr rather than throwing. Step 8 keeps **strict** equality for the AC2 single-test repro and, for the AC1 full-suite count, requires the implementer to classify any residue: a surviving broker outside a `codex-plugin-*-data-*` temp root is not the suite's; a `reapBrokers:` line in the log means the reaper saw it and failed, which is a Task 2 defect to fix; no such line means it was never recorded, which is Task 3's hole — record it as `NOTREADY_ORPHANS` and proceed. Task 7 Step 3 still demands strict equality on both commands. The plan's "satisfies R1/R2 on its own" claim is now scoped to brokers that reach a saved record.
+- **Grounding:** Verified both legs against the live tree. The per-record `try`/`catch` is correct permanently, not just as an ordering workaround: a reaper walking N records must not abandon records 2..N because record 1 threw, and an `after` hook that rejects converts a cleanup failure into a suite failure while still leaking. The residue rule reads the diagnostic the same fix introduces, so it costs no new machinery.
+- **Alternative considered:** The reviewer's first option — swap Tasks 2 and 3 so kill-by-default lands first. Rejected: it creates the mirror problem, because Task 3's own tests spawn real brokers and would leak with no reaper in place, and it means moving `pinHermeticStateRoot`, `waitFor`, `makeWorkspace`, `killGroupQuietly` and `spawnDetachedSleeper` between two ~250-line tasks. Also rejected: softening Step 8 to defer both counts to Task 7, which would leave the tracer-bullet task with no gate for its own acceptance criteria.
+
+### S1: the dictated CLAUDE.md sentence was false before it was written
+- **Question:** Task 7 Step 5 told the implementer to write "Every test file that writes under the state root calls `pinHermeticStateRoot`" and to credit that helper alone for leaving no surviving processes.
+- **Choice:** Rewrote the dictated sentence to name the five files that adopt the helper, to state that `isolation.test.mjs` manages a root of its own and is deliberately left alone, and to attribute process cleanliness to the reaper *plus* kill-by-default teardown *plus* the broker's own idle exit.
+- **Grounding:** `tests/isolation.test.mjs:15-30` sets `CLAUDE_PLUGIN_DATA` to its own temp dir per test, and spec D-3 excludes it by name ("`isolation.test.mjs` already pins and restores per test and is left alone"), so the original sentence was false on its face. from-issue's plan-prose ≠ code-prose rule: text the implementer copies verbatim into `CLAUDE.md` must describe how the code actually behaves. Step 5's existing reconcile-before-committing instruction is a backstop, not a licence to dictate a wrong sentence.
+- **Alternative considered:** Leave it and rely on that reconcile instruction — rejected: Step 4's evidence would pass, so nothing would prompt the implementer to notice the file-set claim is wrong.
+
+### S2: the exit-reason log line is deleted microseconds after it is written
+- **Question:** `superviseTick` writes `supervision: exiting reason=…` and then `shutdown` does `fs.rmSync(logFile, { force: true })`, while the dictated comment claimed "The log is the only debugger for a process nobody is attached to."
+- **Choice:** Kept the deletion and fixed the prose. The comment now says the line is readable for as long as the broker runs, that shutdown deletes the log because R3 requires a self-reaped broker to leave no artifacts, and that it is therefore a live-tail diagnostic rather than a post-mortem one.
+- **Grounding:** R3's acceptance criterion is "exits on its own … leaving no artifacts", so persisting the reason somewhere durable would break the criterion — the deletion is required, and the comment was the wrong half. The plan's own tests already read the log the only way that works, polling it while the broker is still up (`waitFor(() => fs.readFileSync(broker.logFile, …).includes("supervision: armed"))`), then asserting the log is gone after exit.
+- **Alternative considered:** Write the exit reason to a sibling file that survives — rejected: it is exactly the artifact R3 forbids, for a diagnostic nobody has asked for (YAGNI).
+
+### S3: an unhandled rejection in the supervision tick could kill a live broker
+- **Question:** `superviseTick` is driven by `void superviseTick()` from an interval with no `try`/`catch`, so any throw is an unhandled rejection.
+- **Choice:** Split the two fault classes. A fault in the predicates (`readRecordState`, `classifyBrokerRecord`, `decideBrokerSupervision`) is caught, logged and costs one tick — the broker stays alive. A fault in `shutdown`, which happens only after the record has been deleted and the decision is committed, is caught, logged, and followed by `process.exit(0)` anyway.
+- **Grounding:** Node aborts the process on an unhandled rejection by default, so a predicate bug would kill a broker that is still serving someone, and a `shutdown` throw would abandon cleanup half-done — leaving exactly the socket, pid file and log R3 promises are gone. The reviewer's stated consequence ("a record naming a dead pid") does not hold for the non-foreign path, since `deleteBrokerRecordIfEndpointMatches` runs *before* `shutdown`; the real consequences are the two above, and the fix is shaped to them.
+- **Alternative considered:** One outer `try`/`catch` that clears `exiting` and retries everything — rejected: a persistently failing `shutdown` would then retry forever and keep the broker alive, which is the precise failure this issue exists to close. Exiting with a stray socket is the lesser evil.
+
+### S4: kill-by-default introduces a group signal aimed at a possibly-recycled pid
+- **Question:** Task 3 makes `teardownBrokerSession` kill by default, and `terminateProcessTree` signals the whole process **group** (`process.mjs:100-101`, `kill(-pid, SIGTERM)`). On the stale-record path the pid comes from a record that may be days old, so a recycled pid would take an unrelated group down — a hazard this change introduces, since p5 passed `null` there and killed nothing.
+- **Choice:** Added a `pidFileNamesPid(pidFile, pid)` guard in front of the kill: skip only when the pid file exists **and** names a different pid. A missing or unparseable pid file does not skip. Added a positive-control test that pins the guard.
+- **Grounding:** The broker writes its pid file early in `main()` but after Node bootstrap (`app-server-broker.mjs:68`), so the not-ready path can legitimately find no pid file for a child it certainly spawned, and R4 requires that child to die — which is why "absent" must mean "kill", not "skip", and why the reviewer's "absent or names a different pid" needed narrowing. `pidFile` is already a parameter, so the check costs one read. Task 3's existing stale-record test writes no pid file and its teardown test writes a matching one, so both still pass.
+- **Alternative considered:** Probe process identity instead (start time, `/proc`, `ps -o lstart=`) — rejected: platform-specific for a race this narrow, when the broker already records its own pid on disk.
+
+### D1: Task 4 rewrote `addOwner`, which the plan itself declares out of scope
+- **Question:** The reviewer flagged Task 4's `addOwner` rewrite as having no consumer. Verification showed something stronger: p5's `addOwner` returns the session untouched when there is no session id (`broker-lifecycle.mjs:59-68`), while the rewrite always materialises `owners: [...]` — a change to "`addOwner`'s no-session behavior", which this plan's Global Constraints list as binding out of scope.
+- **Choice:** Dropped the rewrite. Task 4 Step 4 now says to leave `addOwner` exactly as it is and records why the record contract is already uniform. Fixed the two places that had described the normalisation as a deliverable.
+- **Grounding:** The rewrite was also inert: the spawn path already passes `owners: []` (`broker-lifecycle.mjs:233`), `releaseBrokerOwner` already reads `current.owners ?? []` (`:253`), and neither the new reuse gate nor `decideBrokerSupervision` reads `owners`, so Task 4's `assert.deepEqual(session.owners, [])` passes without it. A plan must not contradict its own binding scope line, and dropping code is the smaller, more reversible correction.
+- **Alternative considered:** Keep the rewrite and delete the out-of-scope line — rejected: the line comes from the approved spec's `## Out of scope`, so removing it is a scope change the review stage may not make unilaterally.
+
+### D2: the reaper test's record assertion could flake for the same reason as B1
+- **Question:** Task 2's test asserts `assert.ok(record)` right after a successful `review`, but the live suite guards the same situation with `if (!loadBrokerSession(repo)) return;` (`runtime.test.mjs:1008, 2329`) — because the not-ready path returns without saving a record.
+- **Choice:** Neither assert blindly nor skip. The test now retries `review` up to three times until a record appears and fails with a message naming the expiring 2 s readiness wait if none ever does.
+- **Grounding:** Copying the upstream early-return guard would make the test vacuous — its entire subject is a real recorded broker, so a silent pass would assert nothing about the reaper. Retrying keeps it non-vacuous and removes the flake class, and it is the same root cause as B1, which is why both are fixed together rather than one masking the other.
+- **Alternative considered:** Raise the readiness timeout for this test — rejected: the test drives the CLI as a subprocess, so it cannot pass `options.timeoutMs`, and no environment variable exposes the bound.
+
+## Standards review provenance
+
+- **Reviewer:** Claude fallback (`reviewer` subagent, fresh context, read-only toolset).
+- **Codex attempted first and failed:** `codex-collaboration` `plan-review` dispatched one isolated read-only Codex run (`codex-companion` present, so this was not a capability fallback). The bridge returned `CODEX_REVIEW_FAILURE:` after ~12.4 min with the job's recorded status and no `Blocking`/`Should fix`/`Discussion` output — failure class **timeout / no valid result**. Per the skill's contract that is a real Codex failure, so exactly one native fallback ran; Codex was not retried.
+- **Base SHA reviewed:** `165a3b000c4945c1b79ddca69e25b88b388acf27` (worktree base = `origin/main`), plan at HEAD `2181774`.
+- **Live pre-change code:** reviewed in a scratch clone of `openai/codex-plugin-cc` at pin `db52e28f4d9ded852ab3942cea316258ae4ef346` with the committed patch applied, verified byte-identical to `patches/agent-plugins/codex-plugin-cc.patch` at `patchRevision = 5`.
+- **Focus:** none configured; standard review bar.
+- **Dispositions:** 7 findings, **7 accepted, 0 rejected, 0 deferred** — 1 Blocking (B1), 4 Should-fix (S1–S4), 2 Discussion (D1, D2, both accepted; D1 promoted to should-fix after verification showed it contradicts a binding out-of-scope line). Two findings were applied with the reviewer's stated consequence corrected against the live code (S3, S4); see their entries.
+- The reviewer additionally confirmed, with no finding required: the suite reaper cannot escape its private temp root (`state.mjs:87-101` resolves the root at call time, nothing memoises it at import); a root `after` from an imported helper still runs under `--test-name-pattern`; every task's claimed p5 failure genuinely fails at p5; Task 4's positive control is a real control; and the patch/`patchRevision` protocol is followed at every patch-touching task.
 
 ---
 
@@ -390,11 +442,22 @@ test("the suite reaper stops every broker recorded under the hermetic state root
   const binDir = makeTempDir();
   installFakeCodex(binDir);
 
-  const review = run("node", [SCRIPT, "review"], { cwd: workspace, env: buildEnv(binDir) });
-  assert.equal(review.status, 0, review.stderr);
-
-  const record = loadBrokerSession(workspace);
-  assert.ok(record, "the review should have recorded a broker for this workspace");
+  // ensureBrokerSession returns without saving a record when its 2 s readiness
+  // wait expires (broker-lifecycle.mjs:212-222). The live suite tolerates that
+  // with `if (!loadBrokerSession(repo)) return;` (runtime.test.mjs:1008, 2329),
+  // but returning early here would make the test vacuous — its whole subject is
+  // a real recorded broker. Retry instead, and fail loudly if none is ever
+  // recorded.
+  let record = null;
+  for (let attempt = 1; attempt <= 3 && record === null; attempt += 1) {
+    const review = run("node", [SCRIPT, "review"], { cwd: workspace, env: buildEnv(binDir) });
+    assert.equal(review.status, 0, review.stderr);
+    record = loadBrokerSession(workspace);
+  }
+  assert.ok(
+    record,
+    "no review recorded a broker in 3 attempts: the broker's 2 s readiness wait is expiring on this machine"
+  );
   const brokerPid = record.pid;
   const appServerPid = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8")).appServerPid;
   assert.equal(Number.isFinite(brokerPid), true, "the broker record should carry a pid");
@@ -484,27 +547,48 @@ export function pinHermeticStateRoot(label) {
     // listStateDirs() resolves the root at call time and tests do repoint this
     // variable mid-file, so re-pin the captured root before walking it.
     process.env.CLAUDE_PLUGIN_DATA = root;
+    const failures = [];
     for (const { stateFile, session } of listBrokerSessions()) {
-      const pid = Number.isFinite(session.pid) ? session.pid : null;
-      // killProcess is the production instrument, not a test double: the same
-      // group SIGTERM session end uses. Each broker holds a codex app-server
-      // child, so a pid-only signal would strand one app-server per broker.
-      teardownBrokerSession({
-        endpoint: session.endpoint ?? null,
-        pidFile: session.pidFile ?? null,
-        logFile: session.logFile ?? null,
-        sessionDir: session.sessionDir ?? null,
-        pid,
-        killProcess: terminateProcessTree
-      });
-      if (pid !== null) {
-        await waitUntilGone(pid);
-        if (isProcessAlive(pid)) {
-          killGroup(pid, "SIGKILL");
+      // One bad record must not strand the rest, and this runs in an `after`
+      // hook: a rejection here is reported as a test failure while the
+      // remaining brokers stay alive — the worst of both outcomes. At this
+      // task's base commit teardownBrokerSession still does existsSync-then-
+      // unlink, and the broker's own shutdown races it for the same paths, so
+      // ENOENT here is expected rather than exceptional until Task 3 lands.
+      try {
+        const pid = Number.isFinite(session.pid) ? session.pid : null;
+        // killProcess is the production instrument, not a test double: the same
+        // group SIGTERM session end uses. Each broker holds a codex app-server
+        // child, so a pid-only signal would strand one app-server per broker.
+        teardownBrokerSession({
+          endpoint: session.endpoint ?? null,
+          pidFile: session.pidFile ?? null,
+          logFile: session.logFile ?? null,
+          sessionDir: session.sessionDir ?? null,
+          pid,
+          killProcess: terminateProcessTree
+        });
+        if (pid !== null) {
           await waitUntilGone(pid);
+          if (isProcessAlive(pid)) {
+            killGroup(pid, "SIGKILL");
+            await waitUntilGone(pid);
+          }
+          if (isProcessAlive(pid)) {
+            failures.push(`broker pid ${pid} survived SIGKILL`);
+          }
         }
+      } catch (error) {
+        failures.push(`${stateFile}: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        fs.rmSync(stateFile, { force: true });
       }
-      fs.rmSync(stateFile, { force: true });
+    }
+    // Surfaced, not thrown: every record has already been attempted, so the
+    // caller learns about a broker that genuinely would not die without the
+    // reaper having abandoned its remaining work.
+    if (failures.length > 0) {
+      process.stderr.write(`reapBrokers: ${failures.join("; ")}\n`);
     }
   }
 
@@ -545,16 +629,31 @@ count() { printf 'brokers=%s app-servers=%s\n' \
   "$(pgrep -f 'codex app-server' | wc -l | tr -d ' ')"; }
 
 count                                   # before
+
+# Keep the suite output: the residue rule below reads it.
 (cd "$SCRATCH" && env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH \
-   node --test tests/*.test.mjs)
-count                                   # must equal before
+   node --test tests/*.test.mjs) 2>&1 | tee /tmp/issue-9-task2-suite.log
+count                                   # AC1 target
 
 (cd "$SCRATCH" && env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH \
    node --test --test-name-pattern 'shared broker' tests/*.test.mjs)
-count                                   # must still equal before
+count                                   # AC2: must equal before — strict
 ```
 
-Expected: suite green (0 failures), and both after-counts identical to the before-count. Task 1 recorded `LEAK_AFTER_REPRO > 0` for the second command at p5, so this gate can fail.
+Expected: suite green (0 failures). The **AC2 repro count must equal the before-count exactly** — one workspace, one broker, and Task 1 recorded `LEAK_AFTER_REPRO > 0` for that same command at p5, so this half of the gate can fail and is not negotiable.
+
+The **AC1 full-suite count should equal the before-count too, but one residue class is not this task's to close.** If the AC1 count differs, classify the residue before proceeding — do not soften the gate and do not proceed on a hunch:
+
+```sh
+for p in $(pgrep -f 'app-server-broker.mjs serve'); do ps -o pid=,command= -p "$p"; done
+grep -c 'reapBrokers:' /tmp/issue-9-task2-suite.log || true
+```
+
+- Any surviving broker whose `--pid-file` argument is **not** under a `codex-plugin-*-data-*` temp root did not come from this suite (it is a real broker, most likely your own). Exclude it from the comparison and note it.
+- Otherwise, if `reapBrokers:` appears in the suite log, the reaper saw that broker and failed to kill it. **That is a Task 2 defect — fix it before committing.**
+- If no `reapBrokers:` line was emitted, the residue was never recorded, so no record-walking reaper could have found it: it is a broker `ensureBrokerSession` orphaned when its 2 s readiness wait expired before any record was saved (`broker-lifecycle.mjs:212-222`). **That is Task 3's hole, not Task 2's.** Record the count as `NOTREADY_ORPHANS`, report it, and proceed.
+
+Task 7 Step 3 re-asserts strict equality on **both** commands once Task 3's kill-by-default teardown has landed, which is where `NOTREADY_ORPHANS` must be `0`.
 
 - [ ] **Step 9: R8 evidence — the probe root stays clean**
 
@@ -617,7 +716,7 @@ A teardown that is asked to clean up after a broker actually kills it — group-
 **Interfaces:**
 - Consumes: `pinHermeticStateRoot`, `makeTempDir`, `initGitRepo`, `run` from `tests/helpers.mjs`; `installFakeCodex`, `buildEnv` from `tests/fake-codex-fixture.mjs`; `isProcessAlive` from `lib/process.mjs`; the `waitFor` and `makeWorkspace` helpers already in `tests/broker-reaping.test.mjs`.
 - Produces:
-  - `teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = terminateProcessTree })` — omitting `killProcess` now means "kill"; passing `null` still means "do not kill"; the pid, log and socket removals are force-removals.
+  - `teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = terminateProcessTree })` — omitting `killProcess` now means "kill"; passing `null` still means "do not kill"; the pid, log and socket removals are force-removals. The kill is skipped when `pidFile` exists and names a pid other than `pid` (recycled-pid guard); a missing or unparseable pid file does not skip it.
   - `ensureBrokerSession`'s not-ready and stale-record paths, and `releaseBrokerOwner`, pass `killProcess: options.killProcess` (no `?? null`).
 
 - [ ] **Step 1: Rebuild the scratch checkout**
@@ -742,13 +841,38 @@ test("the stale-record path terminates the broker whose endpoint no longer answe
 
   await waitFor(() => !isProcessAlive(sleeper.pid));
 });
+
+// Positive control for the recycled-pid guard. It passes at p5 for an
+// uninteresting reason (p5 never kills at all) and would fail against a Task 3
+// that defaults killProcess to a kill *without* the guard, which is the
+// regression it exists to catch.
+test("teardownBrokerSession does not signal a pid the pid file no longer claims", async (t) => {
+  const sessionDir = createBrokerSessionDir();
+  const pidFile = path.join(sessionDir, "broker.pid");
+  const logFile = path.join(sessionDir, "broker.log");
+  const survivor = spawnDetachedSleeper(t);
+  // The caller still names `survivor`, but the pid file on disk names somebody
+  // else — which is what a recycled pid looks like from the stale-record path.
+  // terminateProcessTree signals the whole group, so guessing wrong here would
+  // take an unrelated process group down.
+  fs.writeFileSync(pidFile, `${survivor.pid + 1}\n`, "utf8");
+  fs.writeFileSync(logFile, "broker log\n", "utf8");
+
+  teardownBrokerSession({ endpoint: null, pidFile, logFile, sessionDir, pid: survivor.pid });
+
+  assert.equal(isProcessAlive(survivor.pid), true, "the guard should have skipped this kill");
+  // The files still go: the post-condition is "no artifacts", independent of
+  // whether anything was signalled.
+  assert.equal(fs.existsSync(pidFile), false);
+  assert.equal(fs.existsSync(sessionDir), false);
+});
 ```
 
 - [ ] **Step 3: Run them and watch them fail**
 
 Run: `cd "$SCRATCH" && env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH node --test tests/broker-reaping.test.mjs`
 
-Expected: 3 failures, each `Timed out waiting for condition.` — at p5 `killProcess` defaults to `null` and the three call sites pass `?? null`, so every one of these processes survives its teardown. `session === null` and the file assertions already pass at p5; the surviving process is the single reason each test fails.
+Expected: **3 failures and 1 pass.** The three failures are each `Timed out waiting for condition.` — at p5 `killProcess` defaults to `null` and the three call sites pass `?? null`, so every one of those processes survives its teardown. `session === null` and the file assertions already pass at p5; the surviving process is the single reason each of the three fails. The fourth test (the recycled-pid guard) **passes at p5** and is labelled a positive control in the file: p5 kills nothing, so nothing to skip. If it ever fails, `pidFileNamesPid` is missing or wrong.
 
 - [ ] **Step 4: Default `killProcess` and force-remove files**
 
@@ -763,6 +887,29 @@ import { terminateProcessTree } from "./process.mjs";
 Replace `teardownBrokerSession`'s signature and its file removals:
 
 ```js
+// terminateProcessTree signals the whole process *group* (kill(-pid, ...)), so a
+// recycled pid would take an unrelated group down with it. That risk is real
+// only for a pid read from a record that may be days old -- exactly when the
+// stale-record path fires -- and this is where a kill first appears on that
+// path, so the identity check belongs here.
+//
+// A missing pid file must NOT skip the kill: the broker writes it early in
+// main() but after Node bootstrap, so the not-ready path can legitimately find
+// no file for a child it definitely spawned, and R4 requires that child to die.
+// Only a pid file that exists and names somebody else is evidence of recycling.
+function pidFileNamesPid(pidFile, pid) {
+  if (!pidFile) {
+    return true;
+  }
+  let recorded;
+  try {
+    recorded = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+  } catch {
+    return true;
+  }
+  return !Number.isFinite(recorded) || recorded === pid;
+}
+
 // killProcess defaults to the production kill so that omitting it cannot mean
 // "leave the broker running": a group SIGTERM, because a not-ready broker is
 // usually still inside CodexAppServerClient.connect -- before its own SIGTERM
@@ -776,7 +923,7 @@ export function teardownBrokerSession({
   pid = null,
   killProcess = terminateProcessTree
 }) {
-  if (Number.isFinite(pid) && killProcess) {
+  if (Number.isFinite(pid) && killProcess && pidFileNamesPid(pidFile, pid)) {
     try {
       killProcess(pid);
     } catch {
@@ -871,7 +1018,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `teardownBrokerSession`'s default `killProcess` (Task 3); `createBrokerEndpoint`, `parseBrokerEndpoint` from `lib/broker-endpoint.mjs`; `waitForBrokerEndpoint`, `createBrokerSessionDir`, `saveBrokerSession`, `ensureBrokerSession` from `lib/broker-lifecycle.mjs`.
-- Produces: the broker record carries `scriptPath` (the absolute path of the `app-server-broker.mjs` that started it) and always carries an `owners` array; `ensureBrokerSession` reuses a record only when `record.scriptPath` equals the script path it is about to use **and** the endpoint answers.
+- Produces: the broker record carries `scriptPath` (the absolute path of the `app-server-broker.mjs` that started it); `ensureBrokerSession` reuses a record only when `record.scriptPath` equals the script path it is about to use **and** the endpoint answers. `owners` is unchanged from p5 — the spawn path already seeds it with `[]`, so every record this task writes still carries one.
 
 - [ ] **Step 1: Rebuild the scratch checkout**
 
@@ -967,18 +1114,7 @@ Expected: the "retires a ready broker recorded by a different plugin build" test
 
 In `$SCRATCH/plugins/codex/scripts/lib/broker-lifecycle.mjs`:
 
-Normalize the record's `owners` so the reuse gate and the broker's supervisor see one record contract:
-
-```js
-function addOwner(session, env = process.env) {
-  const owners = new Set(session.owners ?? []);
-  const owner = env[SESSION_ID_ENV];
-  if (owner) {
-    owners.add(owner);
-  }
-  return { ...session, owners: [...owners] };
-}
-```
+**Leave `addOwner` exactly as it is.** An earlier draft rewrote it to always materialize `owners: [...]`; that is out of scope and unnecessary. p5's version returns the session untouched when there is no `CODEX_COMPANION_SESSION_ID` (`broker-lifecycle.mjs:59-68`), the spawn path already passes `owners: []` explicitly (`:233`), and `releaseBrokerOwner` already reads `current.owners ?? []` (`:253`), so the record contract every consumer sees is already uniform. Neither the reuse gate below nor `decideBrokerSupervision` reads `owners` at all.
 
 Hoist the script-path resolution above the reuse check — it costs no IO, so the build check runs before the 150 ms socket probe — and gate reuse on it:
 
@@ -1679,23 +1815,41 @@ Add the counters, the latch and the tick beside the existing socket state (`sock
     if (exiting) {
       return;
     }
-    const { present, record } = readRecordState();
-    const classification = classifyBrokerRecord({ present, record, endpoint });
-    if (classification === "mine" && !recorded) {
-      recorded = true;
-      // Before this line a missing record is the expected state, because
-      // ensureBrokerSession writes the record only after readiness. The log is
-      // the only debugger for a process nobody is attached to.
-      process.stderr.write(`supervision: armed endpoint=${endpoint}\n`);
+    let classification;
+    let decision;
+    // The only caller is `void superviseTick()` from an interval, so anything
+    // escaping here is an unhandled rejection and Node aborts the process by
+    // default. Aborting is the wrong answer while the broker may still be
+    // serving somebody, so a fault in the predicates costs one tick.
+    try {
+      const { present, record } = readRecordState();
+      classification = classifyBrokerRecord({ present, record, endpoint });
+      if (classification === "mine" && !recorded) {
+        recorded = true;
+        // Before this line a missing record is the expected state, because
+        // ensureBrokerSession writes the record only after readiness. This line
+        // is readable for as long as the broker runs; shutdown deletes the log,
+        // because R3 requires a self-reaped broker to leave no artifacts. It is
+        // a live-tail diagnostic, never a post-mortem one -- which is why the
+        // tests below poll the log while the broker is still up.
+        process.stderr.write(`supervision: armed endpoint=${endpoint}\n`);
+      }
+      decision = decideBrokerSupervision({
+        classification,
+        recorded,
+        connectionCount: sockets.size,
+        lastActivityMs,
+        nowMs: Date.now(),
+        idleTimeoutMs: bounds.idleTimeoutMs
+      });
+    } catch (error) {
+      process.stderr.write(
+        `supervision: tick failed (${
+          error instanceof Error ? error.message : String(error)
+        }); retrying next tick\n`
+      );
+      return;
     }
-    const decision = decideBrokerSupervision({
-      classification,
-      recorded,
-      connectionCount: sockets.size,
-      lastActivityMs,
-      nowMs: Date.now(),
-      idleTimeoutMs: bounds.idleTimeoutMs
-    });
     if (decision.action !== "exit") {
       return;
     }
@@ -1717,7 +1871,19 @@ Add the counters, the latch and the tick beside the existing socket state (`sock
         return;
       }
     }
-    await shutdown(server);
+    // The record is gone now, so the decision is committed and retrying is not
+    // an option: a shutdown fault must not leave this broker running. Exit
+    // regardless and accept a stray socket or log over an immortal broker,
+    // which is the failure this whole mechanism exists to prevent.
+    try {
+      await shutdown(server);
+    } catch (error) {
+      process.stderr.write(
+        `supervision: shutdown failed (${
+          error instanceof Error ? error.message : String(error)
+        }); exiting anyway\n`
+      );
+    }
     // A self-reap is not a failure.
     process.exit(0);
   }
@@ -1850,7 +2016,7 @@ Only after Step 4 passed. In `$WORKTREE/CLAUDE.md`, the `codex-plugin-cc` patch 
 Replace that trailing clause with a description of what the code now does:
 
 ```
-… — with the live Claude-session env unscrubbed, 4 upstream tests fail spuriously. Every test file that writes under the state root calls `pinHermeticStateRoot` (`tests/helpers.mjs`), which pins `CLAUDE_PLUGIN_DATA` to a private temp root and group-kills every broker recorded there at file teardown, so a run deposits no `codex-plugin-test-*` state dirs in `~/.claude/plugins/data/codex-nix-codex/state/` and leaves no surviving `app-server-broker` or `codex app-server` processes.
+… — with the live Claude-session env unscrubbed, 4 upstream tests fail spuriously. The five test files that write under the shared state root (`runtime`, `state`, `liveness`, `reviewer-detach`, `broker-reaping`) call `pinHermeticStateRoot` (`tests/helpers.mjs`), which pins `CLAUDE_PLUGIN_DATA` to a private temp root and group-kills every broker recorded there at file teardown; `isolation.test.mjs` pins and restores a root of its own per test and is left alone. That, plus a `teardownBrokerSession` that kills by default and a broker that exits on its own once nothing wants it, is why a run deposits no `codex-plugin-test-*` state dirs in `~/.claude/plugins/data/codex-nix-codex/state/` and leaves no surviving `app-server-broker` or `codex app-server` processes.
 ```
 
 Leave the "4 upstream tests fail spuriously" clause exactly as it is — that claim is out of scope and was not measured. Change nothing else in CLAUDE.md.
