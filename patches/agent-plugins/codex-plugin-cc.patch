@@ -83,6 +83,13 @@ index fb33a15..4d8c409 100644
 -argument-hint: '[--enable-review-gate|--disable-review-gate]'
 +description: Check whether the local Codex CLI is ready; the automatic stop-time review gate remains disabled
 +argument-hint: '[--disable-review-gate]'
+diff --git a/plugins/codex/commands/status.md b/plugins/codex/commands/status.md
+index 8f70663..aa1afb8 100644
+--- a/plugins/codex/commands/status.md
++++ b/plugins/codex/commands/status.md
+@@ -13 +13 @@ If the user did not pass a job ID:
+-- Preserve the actionable fields from the command output, including job ID, kind, status, phase, elapsed or duration, summary, and follow-up commands.
++- Preserve the actionable fields from the command output, including job ID, kind, status, phase, elapsed or duration (keep any `(overdue by ...)` marker attached to the elapsed value), summary, and follow-up commands.
 diff --git a/plugins/codex/hooks/hooks.json b/plugins/codex/hooks/hooks.json
 index 19e33b8..08cb4e9 100644
 --- a/plugins/codex/hooks/hooks.json
@@ -803,6 +810,35 @@ index dd8fc37..365f856 100644
 +    return error?.code !== "ESRCH";
 +  }
 +}
+diff --git a/plugins/codex/scripts/lib/render.mjs b/plugins/codex/scripts/lib/render.mjs
+index 2ec1852..76ae1db 100644
+--- a/plugins/codex/scripts/lib/render.mjs
++++ b/plugins/codex/scripts/lib/render.mjs
+@@ -108,0 +109,12 @@ function formatCodexResumeCommand(job) {
++function formatElapsedCell(job) {
++  if (!job.overdue) {
++    return job.elapsed ?? "";
++  }
++  // The overdue marker rides the Elapsed cell rather than a column of its own:
++  // commands/status.md tells the model to re-render a bare /codex:status as a
++  // compact table preserving an enumerated field list that names elapsed, so a
++  // separate column could be dropped on precisely the read where a wedged
++  // worker is discovered.
++  return [job.elapsed, `(overdue by ${job.overdueBy})`].filter(Boolean).join(" ");
++}
++
+@@ -119 +131 @@ function appendActiveJobsTable(lines, jobs) {
+-      `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(job.elapsed ?? "")} | ${escapeMarkdownCell(job.threadId ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} | ${actions.map((action) => `\`${action}\``).join("<br>")} |`
++      `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(formatElapsedCell(job))} | ${escapeMarkdownCell(job.threadId ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} | ${actions.map((action) => `\`${action}\``).join("<br>")} |`
+@@ -137,0 +150,8 @@ function pushJobDetails(lines, job, options = {}) {
++  if (job.overdue) {
++    // Advisory only — nothing is signalled and no state changes. The status is
++    // reported rather than a probe result, because a queued record with no
++    // usable pid is never probe-eligible and so never "answered" anything.
++    lines.push(
++      `  Overdue: ${job.overdueBy} past the recorded deadline ${job.deadlineAt}; the job is still ${job.status}. Cancel: /codex:cancel ${job.id}`
++    );
++  }
 diff --git a/plugins/codex/scripts/lib/runtime-home.mjs b/plugins/codex/scripts/lib/runtime-home.mjs
 new file mode 100644
 index 0000000..00ae521
@@ -1485,11 +1521,20 @@ index 778571e..8d778cf 100644
 +  cleanupSessionJobs(sessionId);
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
-index c34b060..b013de8 100644
+index c34b060..9c9cc89 100644
 --- a/tests/commands.test.mjs
 +++ b/tests/commands.test.mjs
-@@ -205 +205,18 @@ test("internal docs use task terminology for rescue runs", () => {
+@@ -205 +205,27 @@ test("internal docs use task terminology for rescue runs", () => {
 -test("hooks keep session-end cleanup and stop gating enabled", () => {
++test("the status command preserves the overdue marker when it re-renders the table", () => {
++  const source = read("commands/status.md");
++  // A bare /codex:status is re-rendered as a compact table from an enumerated
++  // field list, so the overdue marker has to be named there or the slash command
++  // drops it on exactly the read where a wedged worker is found.
++  assert.match(source, /overdue by/);
++  assert.match(source, /elapsed or duration/);
++});
++
 +test("the reviewer bridge agent prescribes only bounded foreground calls", () => {
 +  const agent = read("agents/codex-reviewer.md");
 +
@@ -1508,14 +1553,14 @@ index c34b060..b013de8 100644
 +});
 +
 +test("hooks keep session lifecycle cleanup without a Stop review gate", () => {
-@@ -209 +226,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
+@@ -209 +235,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
 -  assert.match(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /"Stop"/);
-@@ -217 +235 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -217 +244 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]'/);
 +  assert.match(setup, /argument-hint:\s*'\[--disable-review-gate\]'/);
-@@ -223 +240,0 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -223 +249,0 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(readme, /\/codex:setup --enable-review-gate/);
 diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
 index f83c96a..fdfb12c 100644
@@ -2304,10 +2349,10 @@ index 0f8f57c..f4c286c 100644
 +    savedJobs.map((job) => job.id),
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
-index 0000000..922141c
+index 0000000..280b029
 --- /dev/null
 +++ b/tests/worker-postmortem.test.mjs
-@@ -0,0 +1,589 @@
+@@ -0,0 +1,621 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -2896,4 +2941,36 @@ index 0000000..922141c
 +  // a crash, not as an overrun.
 +  assert.equal(job.overdue, false);
 +  assert.equal(job.overdueBy, null);
++});
++
++test("the status report marks an overdue job in the active-jobs table and its detail block", (t) => {
++  const workspace = makeTempDir();
++  const sleeper = spawnSleeper(t, workspace);
++  const deadlineAt = new Date(Date.now() - 300000).toISOString();
++  seedJob(
++    workspace,
++    activeRecord(workspace, "task-overdue-render", sleeper.pid, null, {
++      createdAt: new Date(Date.now() - 600000).toISOString(),
++      startedAt: new Date(Date.now() - 600000).toISOString(),
++      deadlineAt,
++      updatedAt: new Date(Date.now() - 60000).toISOString()
++    })
++  );
++
++  const result = run("node", [SCRIPT, "status"], { cwd: workspace });
++
++  assert.equal(result.status, 0, result.stderr);
++  // The marker rides the Elapsed cell, which commands/status.md's preserved
++  // field list names — a new column could be dropped when the model re-renders.
++  assert.match(
++    result.stdout,
++    /\| task-overdue-render \| rescue \| running \| starting \| \d+m \d+s \(overdue by \d+m \d+s\) \|/
++  );
++  assert.match(
++    result.stdout,
++    new RegExp(
++      `Overdue: \\d+m \\d+s past the recorded deadline ${deadlineAt}; the job is still running\\. Cancel: /codex:cancel task-overdue-render`
++    )
++  );
++  assert.match(result.stdout, /`\/codex:status task-overdue-render`<br>`\/codex:cancel task-overdue-render`/);
 +});
