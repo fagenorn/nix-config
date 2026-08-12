@@ -656,10 +656,10 @@ index ef76381..1583562 100644
 +        fs.rmSync(target.path, { force: true });
 diff --git a/plugins/codex/scripts/lib/broker-supervisor.mjs b/plugins/codex/scripts/lib/broker-supervisor.mjs
 new file mode 100644
-index 0000000..df62efd
+index 0000000..5d69509
 --- /dev/null
 +++ b/plugins/codex/scripts/lib/broker-supervisor.mjs
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,92 @@
 +import process from "node:process";
 +
 +// Supervision policy for the app-server broker: the record vocabulary, the two
@@ -673,7 +673,10 @@ index 0000000..df62efd
 +
 +// The idle bound only advances while nothing is connected: a client holds one
 +// socket from initialize() to close() (BrokerCodexAppServerClient in
-+// app-server.mjs), so even the 14-minute reviewer task never moves this clock.
++// app-server.mjs), so a call's own duration never moves this clock however long
++// it runs -- the stop-review gate's 15-minute `task` is the longest bounded call
++// this plugin makes of its own accord, and a foreground `task` without
++// --timeout-ms is not bounded at all.
 +// Ten minutes is therefore just how long an unattached broker lingers in the
 +// hope of being reused -- long enough to serve a burst of consecutive calls,
 +// short enough that an abandoned workspace releases its runtime within a coffee
@@ -1455,10 +1458,10 @@ index 778571e..e601a80 100644
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
 diff --git a/tests/broker-reaping.test.mjs b/tests/broker-reaping.test.mjs
 new file mode 100644
-index 0000000..ebc73a8
+index 0000000..ea75e10
 --- /dev/null
 +++ b/tests/broker-reaping.test.mjs
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,453 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1821,6 +1824,23 @@ index 0000000..ebc73a8
 +    ...overrides
 +  };
 +}
++
++test("classifyBrokerRecord names the four states the supervision decision dispatches on", () => {
++  assert.equal(classifyBrokerRecord({ present: true, record: productionRecord(), endpoint: MINE }), "mine");
++  assert.equal(
++    classifyBrokerRecord({
++      present: true,
++      record: productionRecord({ endpoint: "unix:/tmp/cxc-other/broker.sock" }),
++      endpoint: MINE
++    }),
++    "foreign"
++  );
++  assert.equal(classifyBrokerRecord({ present: false, record: null, endpoint: MINE }), "missing");
++  // Present but unparseable. loadBrokerSession returns null for an absent and a
++  // corrupt broker.json alike, which is why `present` is a separate input: this
++  // arm and "missing" are indistinguishable from the record alone.
++  assert.equal(classifyBrokerRecord({ present: true, record: null, endpoint: MINE }), "unreadable");
++});
 +
 +test("the supervision decision keeps a recorded broker with a live connection running", () => {
 +  assert.deepEqual(decide({ record: productionRecord(), recorded: true, connectionCount: 1, idleForMs: 999_999 }), {
