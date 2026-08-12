@@ -218,6 +218,12 @@ Fixture rules: `makeTempDir` workspaces, `initGitRepo`, `installFakeCodex`, **pr
 - **Grounding:** Its deliverable is *evidence*: that the scratch baseline still reproduces the committed patch byte-identically, and that both p5 leak measurements are non-zero so the later gates can fail. Manufacturing a commit for it would mean inventing a file change nobody asked for (the-bar YAGNI).
 - **Alternative considered:** Fold it into Task 2's Step 1 — rejected: the recovery procedure and the p5 baseline numbers are needed by Task 7 as well, and a fresh implementer that finds the baseline broken must stop rather than edit.
 
+### Flow: this worktree is resumed from Phase 5, not rebuilt from Phase 1
+- **Question:** A prior `--auto` run of `from-issue 9` ended after Phase 4, leaving this worktree clean with the spec and plan committed. `from-issue`'s Phase-0 pre-flight says a single *clean* matching worktree is an orphan to remove. Remove it and redo Phases 1–4, or resume?
+- **Choice:** Resume in place from Phase 5. The branch `worktree-issue-9-broker-reaping` is kept, its two artifact commits stand, and the flow restarts at the standards review.
+- **Grounding:** The pre-flight's remove-the-orphan rule targets an empty shell left by a run that exited before producing anything; the check exists to stop two sessions racing, and no second session is on this branch. What is actually here is 2267 lines of committed, grounded design: a spec carrying seven grill-round decisions (so Phase 3 ran) and a plan whose `## Requirement coverage` table binds R1–R8 to all seven tasks and to the issue's six acceptance criteria. `git merge-base HEAD origin/main` equals `origin/main`'s tip (`165a3b0`), so the base is still current and Phase 1's own requirement — branch from `origin/<integration-branch>` — already holds. No Phase-5 provenance section and no finding-ID entries exist in the plan, which fixes the resume point at Phase 5.
+- **Alternative considered:** Discard the worktree and rerun Phases 1–4 per the literal pre-flight rule — rejected: it destroys work this flow cannot cheaply reproduce, and a second design pass would diverge from the spec the plan already implements, for no correctness gain. Deleting also contradicts the standing rule to inspect a delete target first and surface a mismatch instead of proceeding: the target contradicts the "orphan" description.
+
 ---
 
 ### Task 1: Baseline guard and p5 evidence
