@@ -9,6 +9,16 @@ Interview me relentlessly about every aspect of this plan until we reach a share
 
 Ask the whole frontier as one numbered round of `❓ question / ➡️ recommended answer` pairs. A question whose answer depends on another question still open in this round belongs to a later round. The round's answers reshape the tree — recompute the frontier and ask the next round; done when it's empty.
 
+When every question in a round carries a ➡️ recommendation, say so once, at the first such round: they may
+reply with only the numbers they'd change, and anything they don't name adopts its recommendation and
+is recorded as a decision exactly as if they had typed it. A well-defaulted round then costs one short
+reply instead of a line of assent per question. The decisions stay theirs — the offer is made in the
+open, and any number they name overrides.
+
+Three kinds of question never ride on silence: anything that redraws the destination or the scope,
+anything hard to reverse, and anything that spends money or hands out a credential. Mark those in the
+round and wait for an answer in words, however many rounds it costs.
+
 If a question can be answered by exploring the codebase or docs, explore instead of asking — dispatch the lookup without blocking the round (only the questions downstream of it wait). The decisions are mine; the facts are yours.
 
 </what-to-do>
@@ -17,7 +27,7 @@ If a question can be answered by exploring the codebase or docs, explore instead
 
 ## Domain awareness
 
-During codebase exploration, also look for existing documentation.
+During codebase exploration, also look for existing documentation. Read a long one by section, not whole: past ~400 lines, grep its headings first and open only the sections that govern what you're grilling — `doc-grounded-questions` step 4 owns this rule.
 
 **Detect the layout before writing anything**, in this order:
 
