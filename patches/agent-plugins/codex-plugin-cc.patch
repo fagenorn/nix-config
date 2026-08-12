@@ -654,6 +654,101 @@ index ef76381..1583562 100644
 -        fs.unlinkSync(target.path);
 +      if (target.kind === "unix") {
 +        fs.rmSync(target.path, { force: true });
+diff --git a/plugins/codex/scripts/lib/broker-supervisor.mjs b/plugins/codex/scripts/lib/broker-supervisor.mjs
+new file mode 100644
+index 0000000..df62efd
+--- /dev/null
++++ b/plugins/codex/scripts/lib/broker-supervisor.mjs
+@@ -0,0 +1,89 @@
++import process from "node:process";
++
++// Supervision policy for the app-server broker: the record vocabulary, the two
++// bounds and the continue-or-exit decision. Pure by design -- no timers, no
++// processes, no filesystem -- so the decision table is testable without a
++// stopwatch and importing this module starts nothing. Its caller owns the tick,
++// the counters and the exit sequence.
++
++export const BROKER_IDLE_TIMEOUT_ENV = "CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS";
++export const BROKER_SUPERVISE_INTERVAL_ENV = "CODEX_COMPANION_BROKER_SUPERVISE_INTERVAL_MS";
++
++// The idle bound only advances while nothing is connected: a client holds one
++// socket from initialize() to close() (BrokerCodexAppServerClient in
++// app-server.mjs), so even the 14-minute reviewer task never moves this clock.
++// Ten minutes is therefore just how long an unattached broker lingers in the
++// hope of being reused -- long enough to serve a burst of consecutive calls,
++// short enough that an abandoned workspace releases its runtime within a coffee
++// break. Nothing in this plugin sets either variable; they exist so the
++// self-termination behaviours can be tested without a ten-minute wait.
++export const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 600000;
++export const DEFAULT_BROKER_SUPERVISE_INTERVAL_MS = 15000;
++
++const POSITIVE_INTEGER = /^[0-9]+$/;
++
++function parseBoundMs(name, raw, fallback) {
++  if (raw === undefined) {
++    return fallback;
++  }
++  const value = Number(raw);
++  if (!POSITIVE_INTEGER.test(raw) || !Number.isSafeInteger(value) || value <= 0) {
++    // A silent fallback would produce a broker whose reaping behaviour
++    // contradicts what the caller asked for, undetectable until it leaks.
++    throw new Error(`${name} must be a positive integer number of milliseconds; received ${JSON.stringify(raw)}.`);
++  }
++  return value;
++}
++
++export function resolveSupervisionBounds(env = process.env) {
++  return {
++    idleTimeoutMs: parseBoundMs(BROKER_IDLE_TIMEOUT_ENV, env[BROKER_IDLE_TIMEOUT_ENV], DEFAULT_BROKER_IDLE_TIMEOUT_MS),
++    superviseIntervalMs: parseBoundMs(
++      BROKER_SUPERVISE_INTERVAL_ENV,
++      env[BROKER_SUPERVISE_INTERVAL_ENV],
++      DEFAULT_BROKER_SUPERVISE_INTERVAL_MS
++    )
++  };
++}
++
++// A broker record is "mine" iff it names the endpoint this broker was started
++// with: every endpoint is derived from a fresh mkdtemp broker session dir
++// (createBrokerSessionDir plus createBrokerEndpoint), so it is already unique
++// per broker and needs no extra identity field. `present` is separate from
++// `record` because loadBrokerSession returns null for both an absent file and an
++// unparseable one, and only the absence is evidence this broker was retired.
++export function classifyBrokerRecord({ present, record, endpoint }) {
++  if (!present) {
++    return "missing";
++  }
++  if (record === null || typeof record !== "object") {
++    return "unreadable";
++  }
++  return record.endpoint === endpoint ? "mine" : "foreign";
++}
++
++export function decideBrokerSupervision({
++  classification,
++  recorded,
++  connectionCount,
++  lastActivityMs,
++  nowMs,
++  idleTimeoutMs
++}) {
++  if (classification === "foreign") {
++    // Whoever replaced the record already decided this broker is gone, so exit
++    // even with a client connected -- it is unreachable by design now.
++    return { action: "exit", reason: "replaced" };
++  }
++  if (classification === "missing" && recorded) {
++    return { action: "exit", reason: "orphaned" };
++  }
++  if (connectionCount === 0 && nowMs - lastActivityMs >= idleTimeoutMs) {
++    // The one criterion that covers every un-ownable case at once: unowned test
++    // brokers, plain-shell CLI brokers, and brokers whose owning session died
++    // without its SessionEnd hook running.
++    return { action: "exit", reason: "idle" };
++  }
++  // Includes "unreadable": only a definite absence justifies an exit.
++  return { action: "continue", reason: null };
++}
 diff --git a/plugins/codex/scripts/lib/codex.mjs b/plugins/codex/scripts/lib/codex.mjs
 index fead00c..aee30f2 100644
 --- a/plugins/codex/scripts/lib/codex.mjs
@@ -1360,10 +1455,10 @@ index 778571e..e601a80 100644
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
 diff --git a/tests/broker-reaping.test.mjs b/tests/broker-reaping.test.mjs
 new file mode 100644
-index 0000000..bdce101
+index 0000000..ebc73a8
 --- /dev/null
 +++ b/tests/broker-reaping.test.mjs
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,436 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1382,6 +1477,15 @@ index 0000000..bdce101
 +  teardownBrokerSession,
 +  waitForBrokerEndpoint
 +} from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
++import {
++  BROKER_IDLE_TIMEOUT_ENV,
++  BROKER_SUPERVISE_INTERVAL_ENV,
++  DEFAULT_BROKER_IDLE_TIMEOUT_MS,
++  DEFAULT_BROKER_SUPERVISE_INTERVAL_MS,
++  classifyBrokerRecord,
++  decideBrokerSupervision,
++  resolveSupervisionBounds
++} from "../plugins/codex/scripts/lib/broker-supervisor.mjs";
 +import { isProcessAlive } from "../plugins/codex/scripts/lib/process.mjs";
 +import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 +
@@ -1687,6 +1791,109 @@ index 0000000..bdce101
 +  const record = loadBrokerSession(workspace);
 +  assert.equal(record.endpoint, endpoint);
 +  assert.equal(record.scriptPath, BROKER_SCRIPT);
++});
++
++const MINE = "unix:/tmp/cxc-mine/broker.sock";
++
++function decide({ record, present = true, recorded = false, connectionCount = 0, idleForMs = 0, idleTimeoutMs = 1000 }) {
++  return decideBrokerSupervision({
++    classification: classifyBrokerRecord({ present, record, endpoint: MINE }),
++    recorded,
++    connectionCount,
++    lastActivityMs: 10_000,
++    nowMs: 10_000 + idleForMs,
++    idleTimeoutMs
++  });
++}
++
++function productionRecord(overrides = {}) {
++  return {
++    endpoint: MINE,
++    pidFile: "/tmp/cxc-mine/broker.pid",
++    logFile: "/tmp/cxc-mine/broker.log",
++    sessionDir: "/tmp/cxc-mine",
++    pid: 4242,
++    stateDir: "/tmp/state/workspace-0123456789abcdef",
++    workspaceRoot: "/tmp/workspace",
++    codexHome: "/tmp/state/workspace-0123456789abcdef/codex-home",
++    owners: [],
++    scriptPath: "/tmp/plugins/codex/scripts/app-server-broker.mjs",
++    ...overrides
++  };
++}
++
++test("the supervision decision keeps a recorded broker with a live connection running", () => {
++  assert.deepEqual(decide({ record: productionRecord(), recorded: true, connectionCount: 1, idleForMs: 999_999 }), {
++    action: "continue",
++    reason: null
++  });
++});
++
++test("the supervision decision exits a broker whose record names a different endpoint", () => {
++  assert.deepEqual(
++    decide({ record: productionRecord({ endpoint: "unix:/tmp/cxc-other/broker.sock" }), recorded: true, connectionCount: 1 }),
++    { action: "exit", reason: "replaced" }
++  );
++});
++
++test("the supervision decision exits a broker whose record disappeared after it was recorded", () => {
++  assert.deepEqual(decide({ present: false, record: null, recorded: true, connectionCount: 1 }), {
++    action: "exit",
++    reason: "orphaned"
++  });
++});
++
++test("the supervision decision keeps a broker running while its record has never appeared", () => {
++  // ensureBrokerSession writes the record only after readiness, so "missing"
++  // is the expected state for a young broker.
++  assert.deepEqual(decide({ present: false, record: null, recorded: false, connectionCount: 1 }), {
++    action: "continue",
++    reason: null
++  });
++});
++
++test("the supervision decision keeps a broker running when its record does not parse", () => {
++  // Only a definite absence justifies an exit; records are written by atomic
++  // rename, so a parse failure is corruption, not a torn read.
++  assert.deepEqual(decide({ present: true, record: null, recorded: true, connectionCount: 1 }), {
++    action: "continue",
++    reason: null
++  });
++});
++
++test("the supervision decision exits an unconnected broker at exactly the idle bound", () => {
++  assert.deepEqual(
++    decide({ record: productionRecord(), recorded: true, connectionCount: 0, idleForMs: 1000, idleTimeoutMs: 1000 }),
++    { action: "exit", reason: "idle" }
++  );
++});
++
++test("the supervision decision keeps an unconnected broker running below the idle bound", () => {
++  assert.deepEqual(
++    decide({ record: productionRecord(), recorded: true, connectionCount: 0, idleForMs: 999, idleTimeoutMs: 1000 }),
++    { action: "continue", reason: null }
++  );
++});
++
++test("supervision bounds default when unset and are honoured when overridden", () => {
++  assert.deepEqual(resolveSupervisionBounds({}), {
++    idleTimeoutMs: DEFAULT_BROKER_IDLE_TIMEOUT_MS,
++    superviseIntervalMs: DEFAULT_BROKER_SUPERVISE_INTERVAL_MS
++  });
++  assert.deepEqual(
++    resolveSupervisionBounds({ [BROKER_IDLE_TIMEOUT_ENV]: "500", [BROKER_SUPERVISE_INTERVAL_ENV]: "100" }),
++    { idleTimeoutMs: 500, superviseIntervalMs: 100 }
++  );
++});
++
++test("a supervision bound that is not a positive integer throws instead of falling back", () => {
++  for (const bad of ["0", "-1", "1.5", "abc", ""]) {
++    assert.throws(
++      () => resolveSupervisionBounds({ [BROKER_IDLE_TIMEOUT_ENV]: bad }),
++      new RegExp(BROKER_IDLE_TIMEOUT_ENV),
++      `expected ${JSON.stringify(bad)} to be rejected`
++    );
++  }
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
 index c34b060..b013de8 100644
