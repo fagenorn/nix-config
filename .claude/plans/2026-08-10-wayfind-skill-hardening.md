@@ -33,8 +33,8 @@ Copied from the spec and the issue; every task's requirements implicitly include
 
   | File | Before | After | Delta |
   |------|-------:|------:|------:|
-  | `wayfind/SKILL.md` | 7,236 | **10,852** | +3,616 |
-  | `grill-with-docs/SKILL.md` | 6,845 | **7,765** | +920 |
+  | `wayfind/SKILL.md` | 7,236 | **11,083** | +3,847 |
+  | `grill-with-docs/SKILL.md` | 6,845 | **7,770** | +925 |
   | `doc-grounded-questions/SKILL.md` | 9,631 | **10,193** | +562 |
 
   A file landing off its figure means text was padded, dropped or re-flowed beyond the spec. The spec's
@@ -74,7 +74,7 @@ bug, not an implementer's call:
 - **Base SHA:** 8cee250; plan reviewed at commit 6cf672d.
 - **Focus:** none configured.
 - **Findings:** 0 blocking, 0 should-fix, 3 discussion — D1 applied (parenthetical reworded, trailer kept, logged), D2 reviewer-confirmation of an existing spec decision (no change), D3 no change (reviewer's own low-confidence assessment). 0 rejected, 0 deferred.
-- **Independent reproduction by reviewer:** re-applied all 14 BEFORE→AFTER edits to fresh copies (byte counts land at exactly 10,852 / 7,765 / 10,193), ran the plan's verification script red at base (0/14) and green on edited copies (14/14), and reproduced the auxiliary grep/awk gates.
+- **Independent reproduction by reviewer:** re-applied all 14 BEFORE→AFTER edits to fresh copies (byte counts land at exactly 10,852 / 7,765 / 10,193 — the pre-fix-wave figures; see the final-review fix commit), ran the plan's verification script red at base (0/14) and green on edited copies (14/14), and reproduced the auxiliary grep/awk gates.
 - **Fallback:** not used.
 
 ## Auto-resolved decisions
@@ -94,7 +94,7 @@ bug, not an implementer's call:
 ### Verbatim application, including the spec's line wrapping
 - **Question:** The spec hard-wraps the AFTER text for P1b, P7, P8 and P5 at ~95 characters, but `wayfind/SKILL.md` and `grill-with-docs/SKILL.md` write every paragraph as one long unwrapped line. Copy the spec's wrapping, or re-flow to each file's house style?
 - **Choice:** Copy verbatim, wrapping included. Stated as a Global Constraint.
-- **Grounding:** The spec's Verification section makes verbatim application the contract: "the implementer can apply them as literal string replacements without re-deriving anchors." The difference is invisible — a single newline inside a Markdown paragraph renders identically to a space, and it is byte-neutral (one newline replaces one space), so the measured byte figures hold either way; I confirmed this by re-running the dry-run and reproducing 10,852 / 7,765 / 10,193 exactly. The issue's "read like the surrounding skill prose" constraint is about register (dense, imperative, rationale-bearing), not line width.
+- **Grounding:** The spec's Verification section makes verbatim application the contract: "the implementer can apply them as literal string replacements without re-deriving anchors." The difference is invisible — a single newline inside a Markdown paragraph renders identically to a space, and it is byte-neutral (one newline replaces one space), so the measured byte figures hold either way; I confirmed this by re-running the dry-run and reproducing 11,083 / 7,770 / 10,193 exactly. The issue's "read like the surrounding skill prose" constraint is about register (dense, imperative, rationale-bearing), not line width.
 - **Alternative considered:** Re-flowing the four inserted blocks to unwrapped single lines for house-style consistency. Rejected: it asks an implementer to transform text mid-copy, which is precisely where transcription drift enters, and it would break the `verify-edits.py` gate that makes this change checkable at all. If the mixed wrapping ever grates, it is a cosmetic follow-up on a file already committed.
 
 ### Gate design: derive checks from the spec, don't transcribe probes into the plan
@@ -128,9 +128,9 @@ bug, not an implementer's call:
 - **Alternative considered:** An empty `--allow-empty` marker commit. Rejected as noise in the history of a five-thousand-byte prose change.
 
 ### Byte counts asserted as exact equality
-- **Question:** Should the `wc -c` gate be exact (`= 10,852`) or a tolerance band?
+- **Question:** Should the `wc -c` gate be exact (`= 11,083`) or a tolerance band?
 - **Choice:** Exact equality, for all three files.
-- **Grounding:** I reproduced all three figures to the byte by re-running the spec's dry-run from the spec's own fenced blocks (7,236→10,852, 6,845→7,765, 9,631→10,193, +5,098 total), so the exact number is known-reachable rather than an estimate. Under verbatim application there is no legitimate source of variance, and exactness makes the gate catch a dropped blank line — which the presence check alone would miss.
+- **Grounding:** I reproduced all three figures to the byte by re-running the spec's dry-run from the spec's own fenced blocks (7,236→11,083, 6,845→7,770, 9,631→10,193, +5,334 total), so the exact number is known-reachable rather than an estimate. Under verbatim application there is no legitimate source of variance, and exactness makes the gate catch a dropped blank line — which the presence check alone would miss.
 - **Alternative considered:** A ±2% band, per the spec's softer "materially past its figure" phrasing. Rejected: a band tolerates exactly the whitespace slippage this gate exists to catch, and the spec's phrasing is guidance to a human reviewer, not a looser contract for a machine check.
 
 ### Task-4 gate staleness: the Phase-5 provenance commit sits inside the verification range
@@ -173,7 +173,7 @@ bug, not an implementer's call:
   2, 3 and 4 — invoked as `python3 "$(git rev-parse --git-dir)/verify-edits.py" [skill-name …]`, where
   each argument is a skill directory name (`wayfind`, `grill-with-docs`, `doc-grounded-questions`) and
   no argument means all three. Exit 0 = every checked edit present verbatim. Also produces
-  `wayfind/SKILL.md` at exactly 10,852 bytes.
+  `wayfind/SKILL.md` at exactly 11,083 bytes.
 
 **The ten edits, and the spec section carrying each one.** Apply the BEFORE→AFTER blocks from these
 sections verbatim; this plan does not reproduce them.
@@ -294,7 +294,7 @@ echo "-- P1b sits between the map fence and ## Tickets (want 2) --"
 awk '/^## The map/,/^## Tickets/' $W | grep -cE '^(Every line of this body|The body.s budget)'
 ```
 
-Expected, in order: `10/10 edits present verbatim.`; `10852` bytes; four `1`s for the invariants; then
+Expected, in order: `10/10 edits present verbatim.`; `11083` bytes; four `1`s for the invariants; then
 `1`, `0`, `1`, `1` for the gotchas; then `**One sitting per ticket.**` followed by `1. ` through `6. `
 in ascending order; then `2`.
 
@@ -313,7 +313,7 @@ dropped (P3), one-sitting-per-ticket discipline (P8), and an explicit map
 completion state and step 6 (P9).
 
 Applied verbatim from .claude/specs/2026-08-10-wayfind-skill-hardening-design.md;
-7,236 -> 10,852 bytes as measured there. All four invariants unchanged.
+7,236 -> 11,083 bytes as measured there. All four invariants unchanged.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -423,7 +423,7 @@ EOF
 - Consumes: `verify-edits.py` at `$(git rev-parse --git-dir)/verify-edits.py`, installed by Task 1
   Step 1 (re-create it from that step if absent); and the step-4 rule landed by Task 2, which P4c's
   line attributes by name.
-- Produces: `grill-with-docs/SKILL.md` at exactly 7,765 bytes. Nothing downstream consumes it.
+- Produces: `grill-with-docs/SKILL.md` at exactly 7,770 bytes. Nothing downstream consumes it.
 
 **The two edits, and the spec section carrying each one.** Apply verbatim from the spec, which this
 plan does not reproduce.
@@ -471,7 +471,7 @@ echo "-- net-neutral writes rule untouched (want 1) --"
 grep -cF 'both are same-commit obligations, never follow-ups' $G
 ```
 
-Expected: `2/2 edits present verbatim.`; `7765` bytes; then the four greps printing in exactly that
+Expected: `2/2 edits present verbatim.`; `7770` bytes; then the four greps printing in exactly that
 order — `Ask the whole frontier…`, `When every question in a round…`, `Three kinds of question…`,
 `If a question can be answered…` (line numbers will differ; the **order** is what is being checked);
 then `1` and `1`.
@@ -492,7 +492,7 @@ carrying the threshold so it is actionable without loading
 doc-grounded-questions (P4c).
 
 Applied verbatim from .claude/specs/2026-08-10-wayfind-skill-hardening-design.md;
-6,845 -> 7,765 bytes as measured there.
+6,845 -> 7,770 bytes as measured there.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -534,7 +534,7 @@ echo "base = $BASE"
 git diff --stat "$BASE"..HEAD
 ```
 
-Expected: `10852`, `7765`, `10193`, total `28810`. `$BASE` resolves to this plan's own commit (derived
+Expected: `11083`, `7770`, `10193`, total `29046`. `$BASE` resolves to this plan's own commit (derived
 by message rather than a fixed SHA, so review fixups between tasks cannot invalidate it). The diffstat
 lists **exactly three files under `home/common/agent-skills/skills/`**, plus at most flow-artifact
 paths under `.claude/plans/` or `.claude/specs/` from the from-issue flow's own process commits (the
