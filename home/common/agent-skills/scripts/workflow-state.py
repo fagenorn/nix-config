@@ -866,7 +866,8 @@ def command_progress(args: argparse.Namespace) -> int:
 
 
 def command_finish(args: argparse.Namespace) -> int:
-    now = format_utc(parse_utc(args.now, "--now"))
+    now_value = parse_utc(args.now, "--now")
+    now = format_utc(now_value)
     result = load_result_file(args.result_file, args.issue)
 
     def finish(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
@@ -889,6 +890,13 @@ def command_finish(args: argparse.Namespace) -> int:
             raise WorkflowError(
                 f"conflicting terminal result for issue {args.issue} attempt {args.attempt}"
             )
+        if attempt["state"] != "active":
+            raise WorkflowError("finish requires an active attempt")
+        if now_value >= parse_utc(attempt["deadline_at"], "attempt deadline"):
+            expired = stop_attempt(attempt, reason="attempt deadline expired")
+            issue_state["outcome"] = copy.deepcopy(expired)
+            state["updated_at"] = now
+            return expired, True
         attempt["state"] = result["state"]
         attempt["result"] = copy.deepcopy(result)
         issue_state["outcome"] = copy.deepcopy(result)

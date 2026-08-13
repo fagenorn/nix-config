@@ -282,6 +282,46 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn(str(worktree.resolve()), outcome["notes"])
         self.assertLessEqual(len(outcome["notes"]), 500)
 
+    def test_late_merged_finish_persists_canonical_stopped_expiry(self):
+        self.init_run()
+        worktree = self.root / "late-owner"
+        launched = self.launch(
+            issue=14, owner="owner-a", worktree=worktree, budget_minutes=10
+        )
+        persisted = self.finish(
+            launched["attempt"],
+            self.merged_result(),
+            now="2026-08-13T20:10:00Z",
+        )
+        state = self.read_state()["issues"]["14"]
+        self.assertEqual(persisted["state"], "stopped")
+        self.assertEqual(persisted, state["outcome"])
+        self.assertEqual(persisted, state["attempts"][0]["result"])
+        self.assertEqual(state["attempts"][0]["state"], "stopped")
+        self.assertEqual(persisted["pr_url"], None)
+        self.assertEqual(persisted["merge_sha"], None)
+        self.assertFalse(persisted["issue_closed"])
+        self.assertEqual(
+            persisted["notes"],
+            f"attempt deadline expired; worktree: {worktree.resolve()}",
+        )
+
+    def test_handed_off_finish_rejects_without_changing_state(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        handoff_path = self.write_handoff(14)
+        handed_off = self.progress(
+            turn_count=118,
+            context_tokens=20000,
+            handoff_path=handoff_path,
+        )
+        self.assertEqual(handed_off["state"], "handed_off")
+        before = self.state_path.read_bytes()
+        rejected = self.finish(1, self.merged_result(), ok=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("active attempt", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
     def test_owner_death_expiry_can_use_the_single_fresh_retry(self):
         self.init_run()
         self.launch(
