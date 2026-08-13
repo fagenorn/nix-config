@@ -65,7 +65,21 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "from-issue <num> --auto",
         )
         self.assertIn("exact immutable value", durable_section)
-        self.assertIn("separate attempt worktree", durable_section)
+        self.assertIn("independent of any issue worktree", durable_section)
+
+    def test_dispatcher_reserves_attempt_worktree_before_launch_and_envelope(self):
+        durable_section = self.section(
+            self.orchestrate, "### Durable run ledger", "## 4."
+        )
+        self.assert_ordered(
+            durable_section,
+            "reserve a collision-free exact absolute worktree path",
+            "workflow-state launch",
+            "--worktree <absolute-worktree>",
+            "worktree=<absolute-worktree>",
+        )
+        self.assertIn("configured worktree root", durable_section)
+        self.assertIn("does not create the worktree", durable_section)
 
     def test_dispatcher_retry_is_reconciled_and_helper_capped(self):
         retry_section = self.section(
@@ -137,6 +151,20 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "workflow-state finish",
             "send the exact JSON",
         )
+
+    def test_lifecycle_phase_one_uses_exact_reserved_attempt_worktree(self):
+        phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")
+        self.assert_ordered(
+            phase_one,
+            "lifecycle envelope exists",
+            "exact absolute `worktree`",
+            "create the worktree at that exact path",
+            "never choose another path",
+        )
+        self.assertIn("occupied or mismatched", phase_one)
+        self.assertIn("fail the attempt", phase_one)
+        self.assertIn("Direct standalone", phase_one)
+        self.assertIn("standard `worktrees` flow", phase_one)
 
     def test_auto_mode_never_skips_durable_checkpoints_or_terminal_writes(self):
         self.assertIn("never skips `workflow-state progress`", self.auto)

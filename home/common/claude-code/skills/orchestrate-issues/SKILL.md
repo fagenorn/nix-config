@@ -55,8 +55,11 @@ same `--repo-root <ledger_repo_root>`, run identity, and current time. The retur
 ledger is authoritative; rebuild the local task ledger from it before deciding
 what is queued or active.
 
-For each remaining issue: `TaskCreate` a ledger entry, choose the owner identity
-and separate attempt worktree, then call `workflow-state launch --repo-root <ledger_repo_root> --run-id
+For each remaining issue: `TaskCreate` a ledger entry and choose the owner
+identity. Under the configured worktree root, reserve a collision-free exact absolute worktree path
+for this attempt by verifying the path is absent from both the filesystem and
+`git worktree list`. Reservation selects the path but does not create the worktree;
+the lifecycle-aware owner creates it in Phase 1. Then call `workflow-state launch --repo-root <ledger_repo_root> --run-id
 <run-id> --issue <num> --owner <owner> --worktree <absolute-worktree>
 --budget-minutes <budget> --now <RFC3339-now>` before spawning. Spawn only when
 the returned attempt is active. Spawn one **background agent** (fresh context,

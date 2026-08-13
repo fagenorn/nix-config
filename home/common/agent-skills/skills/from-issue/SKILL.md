@@ -175,8 +175,17 @@ Declare `mechanical-only` only when the entire change is deletion or renaming wi
 
 Create the workspace before any spec/plan/grill commit lands; those commits go *in the worktree*, never on the integration branch.
 
+When a lifecycle envelope exists, use its exact absolute `worktree` as the
+attempt workspace. Re-check that it is absent from the filesystem and from
+`git worktree list`, then create the worktree at that exact path from
+`origin/<integration-branch>`. If the path is occupied or mismatched, fail the attempt
+through the terminal return procedure; never remove unknown contents and never choose another path.
+The envelope identity remains bound to this path through shipping and cleanup.
+Direct standalone invocation keeps the standard `worktrees` flow below, including
+its configured naming and worktree-root behavior.
+
 1. `git fetch origin`.
-2. Invoke `worktrees` (it encodes the destructive-ops carve-out and the prefix contract). Branch follows `branchNaming.pattern` (default `issue-<num>-<slug>`); `EnterWorktree` prepends `branchNaming.worktreePrefix` (default `worktree-`), so the on-disk branch is `<worktreePrefix>issue-<num>-<short-slug>`. Both forms are accepted downstream — don't strip the prefix. Skill absent → `git worktree add -b <branch> <path> origin/<integration-branch>`.
+2. For direct standalone use, invoke `worktrees` (it encodes the destructive-ops carve-out and the prefix contract). For lifecycle use, invoke it only if it accepts the envelope's exact path without renaming; otherwise use its documented fallback `git worktree add -b <branch> <exact-envelope-path> origin/<integration-branch>`. Branch follows `branchNaming.pattern` (default `issue-<num>-<slug>`); `EnterWorktree` prepends `branchNaming.worktreePrefix` (default `worktree-`), so the standalone on-disk branch is `<worktreePrefix>issue-<num>-<short-slug>`. Both branch forms are accepted downstream — don't strip the prefix.
 
    **Check position before calling the worktree tools.** ~43% of `EnterWorktree`/`ExitWorktree` failures are calls made while already positioned; the harness pins one worktree per session and refuses redundant or cross-pinned entries. Before `EnterWorktree`, compare `pwd` with the intended path: already there → skip the call; pinned elsewhere → `ExitWorktree` with `action: "keep"` first. Don't discover the pin state by letting the call fail.
 3. **Base on `origin/<integration-branch>`**, never the local branch, which may carry other agents' in-flight commits; branching off the remote ref before any commit lands is what stops parallel runs cross-contaminating each other. The merge with the integration branch happens later, in `ship-issue`.
