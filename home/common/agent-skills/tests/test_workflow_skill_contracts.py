@@ -53,6 +53,20 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("durable result takes precedence", self.orchestrate)
         self.assertIn("stale older-attempt notification", self.orchestrate)
 
+    def test_dispatcher_passes_immutable_ledger_root_separately_from_worktree(self):
+        durable_section = self.section(
+            self.orchestrate, "### Durable run ledger", "## 4."
+        )
+        self.assert_ordered(
+            durable_section,
+            "--repo-root <ledger_repo_root>",
+            "ledger_repo_root=<ledger_repo_root>",
+            "worktree=<absolute-worktree>",
+            "from-issue <num> --auto",
+        )
+        self.assertIn("exact immutable value", durable_section)
+        self.assertIn("separate attempt worktree", durable_section)
+
     def test_dispatcher_retry_is_reconciled_and_helper_capped(self):
         retry_section = self.section(
             self.orchestrate, "## 5. Failure policy", "## 6. Final report"
@@ -101,8 +115,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops(self):
         self.assertIn("optional lifecycle envelope", self.from_issue)
-        for field in ("run_id", "attempt", "owner", "worktree"):
+        for field in ("run_id", "attempt", "owner", "worktree", "ledger_repo_root"):
             self.assertIn(field, self.from_issue)
+        lifecycle_section = self.section(
+            self.from_issue, "## Lifecycle identity", "## The flow"
+        )
+        self.assertIn("immutable ledger_repo_root", lifecycle_section)
+        self.assertIn("separate owner worktree", lifecycle_section)
+        self.assertIn("Every `workflow-state` command", lifecycle_section)
+        self.assertIn("--repo-root <ledger_repo_root>", lifecycle_section)
         self.assertIn("direct standalone invocation remains compatible", self.from_issue)
         phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
         self.assertIn("lifecycle identity", phase_zero)
@@ -111,6 +132,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
         self.assert_ordered(
             phase_seven,
+            "ledger_repo_root",
             "receiving the ship report",
             "workflow-state finish",
             "send the exact JSON",
@@ -137,8 +159,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("caller-provided destination", self.handoff)
         self.assertIn("symlink", self.handoff)
         self.assertIn("path escape", self.handoff)
-        self.assertIn("Read the destination before writing", self.handoff)
-        self.assertIn("atomically replace", self.handoff)
+        self.assertIn("missing destination", self.handoff)
+        self.assertIn("created atomically", self.handoff)
+        self.assertIn("exclusive atomic operation", self.handoff)
+        self.assertIn("leaf appeared concurrently", self.handoff)
+        self.assertIn("never overwrite that race", self.handoff)
+        self.assert_ordered(
+            self.handoff,
+            "existing regular destination",
+            "read it before writing",
+            "atomically replace",
+        )
+        self.assertIn("non-symlink parent path", self.handoff)
         self.assertIn("mktemp", self.handoff)
         self.assertIn("Do not duplicate lifecycle JSON", self.handoff)
 

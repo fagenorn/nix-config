@@ -46,27 +46,31 @@ rediscover fog already declared on a map.
 ### Durable run ledger
 
 Before dispatch, choose a stable `run_id` for this issue set (or resume the one
-supplied by the caller). Run `workflow-state init-run --repo-root <repo-root>
+supplied by the caller). Resolve the dispatcher's absolute repository root once
+as `ledger_repo_root`; it is the exact immutable value used by every lifecycle
+command and is independent of any issue worktree. Run `workflow-state init-run
+--repo-root <ledger_repo_root>
 --run-id <run-id> --now <RFC3339-now>`, then `workflow-state reconcile` with the
-same run identity and current time. The returned ledger is authoritative; rebuild
-the local task ledger from it before deciding what is queued or active.
+same `--repo-root <ledger_repo_root>`, run identity, and current time. The returned
+ledger is authoritative; rebuild the local task ledger from it before deciding
+what is queued or active.
 
 For each remaining issue: `TaskCreate` a ledger entry, choose the owner identity
-and worktree, then call `workflow-state launch --repo-root <repo-root> --run-id
+and separate attempt worktree, then call `workflow-state launch --repo-root <ledger_repo_root> --run-id
 <run-id> --issue <num> --owner <owner> --worktree <absolute-worktree>
 --budget-minutes <budget> --now <RFC3339-now>` before spawning. Spawn only when
 the returned attempt is active. Spawn one **background agent** (fresh context,
 `run_in_background: true`) whose entire prompt is:
 
-> Lifecycle envelope: `run_id=<run-id>`, `attempt=<attempt>`, `owner=<owner>`,
-> `worktree=<absolute-worktree>`. Invoke the `from-issue` skill via the Skill tool
+> Lifecycle envelope: `ledger_repo_root=<ledger_repo_root>`, `run_id=<run-id>`,
+> `attempt=<attempt>`, `owner=<owner>`, `worktree=<absolute-worktree>`. Invoke the `from-issue` skill via the Skill tool
 > with the literal arguments `from-issue <num> --auto`, in <repo-root>. Persist
 > the normalized compact result before returning it, then return exactly the JSON
 > printed by `workflow-state finish` and nothing else.
 
 Never inline issue bodies, specs, or plans into a dispatch prompt — the
 child fetches its own issue; the worktree is the shared memory. Pass only the
-`run_id`, attempt, owner, worktree, and literal invocation above.
+`ledger_repo_root`, `run_id`, attempt, owner, worktree, and literal invocation above.
 
 ## 4. Wait on notifications and reconcile durable state
 

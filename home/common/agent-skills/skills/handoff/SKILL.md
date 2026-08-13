@@ -10,13 +10,22 @@ By default, save it to a temp file whose name you generate portably — e.g.
 `mktemp "${TMPDIR:-/tmp}/handoff-XXXXXX.md"` (the explicit `XXXXXX` template
 works on both macOS/BSD and Linux). This remains the default for interactive use.
 
-When the caller supplies a destination with the current `run_id`, accept it only
-under that run's `.superpowers/workflows/<run-id>/handoffs/` directory. Resolve
-and compare both paths, reject every symlink or path escape in the destination or
-its parents, and require the existing destination to be a regular non-symlink
-file. Read the destination before writing. Write a sibling temporary file, flush
-it, and atomically replace the validated caller-provided destination; return its
-exact path. Never follow a replaced or re-resolved path after validation.
+A caller-provided destination with the current `run_id` is accepted only under
+that run's `.superpowers/workflows/<run-id>/handoffs/` directory. Require
+that directory to exist, then validate the complete non-symlink parent path using
+no-follow directory opens. Reject every path escape, symlink component, or
+non-directory parent. Inspect the destination leaf without following it; reject
+an existing symlink or non-regular file, but allow a missing destination.
+
+Write and fsync a sibling temporary regular file without following any leaf.
+When the destination is missing, install it with an exclusive atomic operation
+(for example, hard-link the temporary file to the destination) that will fail if
+the leaf appeared concurrently; never overwrite that race. The missing
+destination is created atomically, then the temporary name is removed. When an
+existing regular destination is present, open and read it before writing, verify
+that the same regular file is still at the leaf, then atomically replace it with
+the sibling temporary file. Fsync the parent directory and return the exact
+destination path. Clean up the temporary file on every failure.
 
 Suggest the skills to be used, if any, by the next session.
 

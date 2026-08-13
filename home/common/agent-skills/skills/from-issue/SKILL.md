@@ -28,12 +28,17 @@ Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unse
 
 ## Lifecycle identity
 
-Resolve the optional lifecycle envelope supplied by a dispatcher: `run_id`,
-`attempt`, `owner`, and normalized `worktree`. Treat all four as one identity;
-never guess a missing field. A direct standalone invocation remains compatible
+Resolve the optional lifecycle envelope supplied by a dispatcher:
+`ledger_repo_root`, `run_id`, `attempt`, `owner`, and normalized `worktree`.
+Treat all five as one identity; never guess a missing field. Preserve the
+immutable ledger_repo_root exactly as supplied, and keep it distinct from the
+separate owner worktree recorded on the attempt. Every `workflow-state` command in
+this owner or its delegated remainder uses `--repo-root <ledger_repo_root>`;
+never substitute the current checkout or owner worktree. A direct standalone invocation remains compatible
 and does not require a ledger. An interactive standalone run may initialize its
 own run with `workflow-state init-run` only when the user explicitly requests
-durable orchestration; otherwise follow the canonical flow unchanged.
+durable orchestration; in that case resolve its ledger root once and carry it as
+`ledger_repo_root`. Otherwise follow the canonical flow unchanged.
 
 ## The flow
 
@@ -97,7 +102,10 @@ defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
 1. **`continue`** — proceed in this conversation.
 2. **`fresh_start`** — start a fresh conversation from committed artifacts; do
    not carry conversational state.
-3. **`handoff`** — invoke `handoff` with a destination beneath
+3. **`handoff`** — beneath `ledger_repo_root`, validate the established run
+   directory and create only its non-symlink `handoffs/` directory if missing.
+   Never pre-create or touch the destination leaf; the `handoff` skill owns safe
+   first-file creation. Invoke `handoff` with a destination beneath
    `.superpowers/workflows/<run-id>/handoffs/`, then repeat `workflow-state
    progress` with `--handoff-path <exact-path>` to finalize `handed_off` on the
    same attempt, and stop. Resume later with `workflow-state launch
@@ -242,6 +250,11 @@ You are running ship-issue for issue #<num> in <autonomous|interactive> mode. Us
 "interactive".
 
 Handoff from from-issue:
+  ledger_repo_root: <immutable ledger root from the lifecycle envelope>
+  run_id:            <run id from the lifecycle envelope>
+  attempt:           <attempt from the lifecycle envelope>
+  owner:             <owner from the lifecycle envelope>
+  owner_worktree:    <separate owner worktree from the lifecycle envelope>
   issue_number:   <num>
   branch:         <branch-name>
   worktree_path:  <absolute-worktree-path>
