@@ -23,6 +23,13 @@ at a `**CHECKPOINT**`:
    choice without re-deriving it.
 4. **Continue.** Don't post the question. Don't wait.
 
+Auto-resolving a checkpoint never skips `workflow-state progress`: persist the
+gate decision at every phase checkpoint and obey its returned action before the
+next phase starts. If it returns a durable handoff, invoke `handoff` at the
+per-run destination, finalize it through `workflow-state progress`, and stop.
+For every terminal result, call `workflow-state finish` successfully before any
+notification to the dispatcher; persistence always precedes notification.
+
 Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`,
 `ship-issue`) don't know about `--auto`. *You* carry the autonomous-mode context — when one tells you
 to ask or wait, run the self-answer pattern instead.
@@ -36,6 +43,8 @@ about the work itself rather than user-approval gates:
   question, or otherwise not implementable, surface that and stop. Auto-mode means "decide without
   asking", not "implement something incoherent". The same holds for the Phase-0 pre-flight stops
   (open/merged PR, dirty or multiple matching worktrees).
+  When lifecycle identity exists, finalize this terminal result through the
+  SKILL.md terminal return procedure before stopping.
 - **Phase 0 fog gate.** Before any worktree exists, test the grounded issue: can every open question
   be *phrased precisely* and answered from the docs, codebase precedent, or the issue itself with a
   defensible default? Vague-but-phraseable questions are normal `--auto` work — self-answer them.
