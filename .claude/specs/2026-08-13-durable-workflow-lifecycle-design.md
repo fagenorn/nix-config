@@ -45,7 +45,7 @@ Each orchestrator invocation has a stable `run_id` and one `state.json`:
 }
 ```
 
-One state file avoids split-brain between an attempt record and a result record. The helper writes a sibling temporary file, flushes and closes it, then replaces `state.json` atomically. Every mutation rereads and validates the current schema first. Unknown schema versions, states, transition names, actions, or attempt identities fail loudly without rewriting the ledger.
+One state file avoids split-brain between an attempt record and a result record. Every read–validate–mutate–replace transaction holds an exclusive advisory lock on the run's stable `state.lock`; read-only inspection holds a shared lock. With the lock held, the helper writes a sibling temporary file, flushes and closes it, replaces `state.json` atomically, and syncs the directory. Every mutation rereads and validates the current schema first. Unknown schema versions, states, transition names, actions, attempt identities, or lock failures fail loudly without rewriting the ledger. The supported hosts are macOS and Linux, so standard-library `fcntl.flock` is the framework-first cross-process guard; there is no unlocked fallback.
 
 The runtime directory also contains `handoffs/<issue>-<attempt>.md`; handoff prose is separate because it can be larger than the compact ledger. `.superpowers/workflows/.gitignore` ignores all run artifacts while retaining the directory convention.
 
@@ -56,9 +56,18 @@ Every attempt contains:
 ```json
 {
   "attempt": 1,
+  "issue": 14,
   "owner": "agent-handle",
   "worktree": "/absolute/worktree/path",
   "launch_kind": "fresh",
+  "launches": [
+    {
+      "kind": "fresh",
+      "owner": "agent-handle",
+      "worktree": "/absolute/worktree/path",
+      "at": "2026-08-13T20:00:00Z"
+    }
+  ],
   "started_at": "2026-08-13T20:00:00Z",
   "last_progress_at": "2026-08-13T20:12:00Z",
   "deadline_at": "2026-08-13T21:30:00Z",
@@ -71,7 +80,7 @@ Every attempt contains:
 }
 ```
 
-Attempt number is the fresh-launch ordinal, not a process count. A launch with the same issue, owner, and normalized worktree as the current nonterminal attempt is `resume`: it returns the existing attempt and does not change its original start or fixed deadline. A different owner or worktree is `fresh`; it creates attempt 2 and links `prior_attempt: 1`. Any request for attempt 3 is refused, the issue outcome becomes `failed`, and the terminal result identifies both prior attempts. Resuming a terminal attempt returns its terminal result instead of relaunching work.
+Attempt number is the fresh-launch ordinal, not a process count. Every accepted launch appends a `launches` event and updates `launch_kind`, making fresh-versus-resume reconstructable after either process exits. A launch with the same issue, owner, and normalized worktree as the current nonterminal attempt is `resume`: it appends a resume event to the existing attempt and does not change its original start or fixed deadline. A different owner or worktree is `fresh`; it creates attempt 2 and links `prior_attempt: 1`. Any request for attempt 3 is refused, the issue outcome becomes `failed`, and the terminal result identifies both prior attempts. Resuming a terminal attempt returns its terminal result instead of relaunching work and does not append an event.
 
 The deadline is fixed at fresh launch (`started_at + agentBudgetMinutes`). Progress changes `last_progress_at`, never the deadline. This prevents activity from extending an abandoned run indefinitely.
 
@@ -162,6 +171,8 @@ The public test seam is the CLI plus the resulting `state.json`, because that is
 - boundary actions for continue, fresh start, durable handoff, and full delegation, including the at-threshold case that must not continue;
 - a handed-off attempt resuming from a durable path without consuming a retry;
 - idempotent matching finish and rejection of conflicting/unknown transitions.
+- two concurrent owner processes updating distinct issues while the per-run lock preserves both outcomes;
+- one combined controller fixture in which a delayed completion, an expired silent owner, and a near-ceiling handoff produce one authoritative outcome per issue, no third attempt, and a resumable handoff.
 
 Add lightweight skill-contract assertions that check `orchestrate-issues`, `from-issue`, `AUTO.md`, and `handoff` name the helper and preserve the write-before-notify/order invariants. Wire these tests into a repository-owned `just` recipe and include that recipe plus `just build` in verification. Full deployed-agent pipeline evals remain valuable but are not the primary correctness proof for deterministic lifecycle policy.
 
@@ -236,3 +247,21 @@ Add lightweight skill-contract assertions that check `orchestrate-issues`, `from
 - **Choice:** Keep the tradeoff record in this committed design spec.
 - **Grounding:** The repository currently has no project context/ADR convention; prior cross-skill designs live under `.claude/specs`, and `grill-with-docs` says to create documentation lazily.
 - **Alternative considered:** Bootstrapping a full docs architecture was rejected as unrelated scope and duplication of this design record.
+
+### B1: Persist every accepted launch
+- **Question:** The reviewer found that returning `launch_kind: resume` without changing durable state does not let a reconstructed ledger prove that a resume occurred. What durable representation should replace it?
+- **Choice:** Store the issue on every attempt, append one `{kind, owner, worktree, at}` event per accepted launch, and update the attempt's current `launch_kind`; preserve the original start and deadline.
+- **Grounding:** Issue #14 requires durable attempt state to identify the issue and whether a launch is a resume or fresh retry. The previous schema recorded only the original fresh launch.
+- **Alternative considered:** Updating only `launch_kind` was rejected because it would erase the original launch chronology and could not distinguish one resume from repeated resumes.
+
+### B2: Serialize per-run ledger mutations
+- **Question:** The reviewer found that atomic replacement prevents torn files but still permits lost updates when parallel issue owners read the same version and replace it independently. How should concurrent writers be serialized?
+- **Choice:** Hold `fcntl.flock` on a stable per-run lock file across the complete read–validate–mutate–replace transaction, and fail loudly if locking fails.
+- **Grounding:** `orchestrate-issues` defaults to two parallel owners; a shared ledger must retain both. The Bar requires framework-first primitives and truthful durable state. Python on the repository's macOS/Linux targets supplies `fcntl`.
+- **Alternative considered:** Per-issue state files were rejected because they would reverse the approved one-ledger contract and require a second aggregation consistency model.
+
+### S2: Combined acceptance demo
+- **Question:** Are isolated unit scenarios sufficient for the issue's requested demo of delayed notification, silent owner, and context handoff in one final ledger?
+- **Choice:** Add one deterministic combined controller fixture in addition to focused tests.
+- **Grounding:** Issue #14 explicitly describes a final-ledger demo with all three conditions and one authoritative outcome per issue.
+- **Alternative considered:** Relying only on separate unit cases was rejected because their individual success would not prove reconciliation and outcome uniqueness coexist in one run.

@@ -12,13 +12,14 @@
 ## Global Constraints
 
 - Runtime state lives under the current repository's git-ignored `.superpowers/workflows/<run-id>/`; no runtime ledger or handoff is committed.
-- `state.json` has `schema_version: 1` and is replaced atomically after validation; unknown versions, states, actions, identities, and conflicting terminal writes exit non-zero without altering the previous file.
+- `state.json` has `schema_version: 1`; every transaction holds `fcntl.flock` on per-run `state.lock` across read–validate–mutate–replace, then replaces the file atomically. Unknown versions, states, actions, identities, lock failures, and conflicting terminal writes exit non-zero without altering the previous file.
 - Fresh attempts are numbered 1 and 2 only. Same issue + owner + normalized worktree resumes the current attempt without changing `started_at` or `deadline_at`; another fresh launch is refused and persists a failed issue outcome linked to attempts 1 and 2.
 - Deadlines are fixed at fresh launch. `last_progress_at` changes do not extend them. Overdue active attempts become visible `stopped` outcomes and retain the worktree path.
 - The compact terminal result fields are exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`, `discussion_items`, and `notes`; `state` is `merged | stopped | failed`, and `notes` is at most 500 characters.
 - Durable terminal state is written before the identical compact result is sent to the caller. Reconciliation happens before any retry; an older delayed notification never overrides a newer authoritative result.
 - Phase actions are the closed set `continue | fresh_start | handoff | delegate`. At/over either reserved ceiling, `continue` is forbidden; missing usage data selects `handoff` unless `delegate` or artifact-sufficient `fresh_start` already applies.
 - A durable handoff is `handed_off`, resumes the same attempt, and never consumes the fresh-retry allowance.
+- Every accepted launch persists the issue and an append-only `{kind, owner, worktree, at}` event; reconstruction never depends on command stdout.
 - Use no dependency beyond Python's standard library and no real sleeps, network, GitHub calls, or agent processes in tests.
 - Preserve unrelated worktree changes. Never bypass commit signing. Every implementation commit includes `Co-Authored-By: Codex <codex@openai.com>`.
 
@@ -87,6 +88,39 @@
 - **Grounding:** Tests should fail for behavior contract drift, not harmless editorial wrapping.
 - **Alternative considered:** Full snapshots were rejected as brittle and as duplicate authoritative copies of skill text.
 
+### B1: Durable launch history
+- **Question:** The fallback reviewer found that the original plan returned a resume marker but left persisted state looking like only a fresh launch. How should Task 1 change?
+- **Choice:** Require an issue field and append-only launch events on every accepted fresh/resume launch, and assert them after reopening state.
+- **Grounding:** Issue #14 requires reconstructable issue identity and resume-versus-fresh launch state; the amended spec records the corrected schema.
+- **Alternative considered:** Output-only launch markers were rejected because they disappear with a lost notification.
+
+### B2: Concurrent writer safety
+- **Question:** The fallback reviewer found atomic replacement alone permits lost updates from the dispatcher's default two parallel owners. What must Task 1 add?
+- **Choice:** Lock a stable per-run file with `fcntl.flock` across the entire transaction and add a concurrent subprocess test proving both issue updates survive.
+- **Grounding:** Live `orchestrate-issues/SKILL.md` defaults `maxParallel` to 2; the amended spec and Bar require one authoritative durable ledger.
+- **Alternative considered:** Optimistic unlocked replacement was rejected because it is crash-safe but not concurrency-safe.
+
+### S1: Focused red command
+- **Question:** The fallback reviewer found Task 2's dotted unittest name crosses the hyphenated `agent-skills` directory and is not importable. What command should replace it?
+- **Choice:** Run the test file by filesystem path for the focused red step.
+- **Grounding:** Existing repository test/eval commands use file paths, and the path form works without package import names.
+- **Alternative considered:** Renaming the production directory into a Python package was rejected as unrelated scope.
+
+### S2: One combined controller demo
+- **Question:** The fallback reviewer found the plan covered six scenarios separately but did not prove the issue's combined final-ledger demo.
+- **Choice:** Add one deterministic test containing delayed completion, silent expiry, near-ceiling handoff, outcome uniqueness, and retry-cap assertions.
+- **Grounding:** The issue's Demo paragraph requests those conditions in one fixture; the amended spec now names the seam.
+- **Alternative considered:** Separate tests alone were rejected because they cannot expose cross-issue reconciliation or uniqueness interactions.
+
+## Standards review
+
+- **Reviewer:** native Codex local contract fallback after three fresh read-only worker attempts produced no report.
+- **Job IDs:** `issue14-plan-review`, `issue14-plan-review-retry`, `issue14-plan-review-final` (infrastructure timeouts; no findings returned).
+- **Base SHA:** `c254feee264bf45b0c704b668ca8bbc7a56e25e4`
+- **Plan reviewed:** `7497ff5`
+- **Fallback used:** yes — local grade against `/nix/store/5npc5maarqgv7nkvmircdwpjx6z9nysy-hm_fromissue/REVIEW-CONTRACT.md`, live files, the Bar, and Python standards.
+- **Disposition:** B1 and B2 verified and applied to spec/plan; S1 and S2 verified and applied; no Discussion findings. UI/common-miss checks do not apply to this CLI/Markdown change. Remaining plan is clean after amendment.
+
 ---
 
 ### Task 1: Durable attempt and terminal-result lifecycle
@@ -139,6 +173,8 @@ def test_only_one_fresh_retry_and_refusal_links_prior_attempts(self):
 
 Also cover overdue active attempt → stopped with worktree path in notes, matching repeated `finish` idempotency, conflicting finish rejection with unchanged bytes, terminal resume returning the stored result rather than launching, invalid schema/action/state rejection, note length, nullable URL/SHA validation, and `.superpowers/workflows/.gitignore` containing `*`.
 
+Assert every accepted attempt contains `issue` and a persisted `launches` list. A matching resume appends a `resume` event with owner/worktree/time while preserving `started_at` and `deadline_at`; reopening the file must prove the event without relying on stdout. Add one concurrency test that launches helper subprocesses against distinct issues in the same run and asserts the reopened ledger contains both updates; coordinate their start with a test-only process barrier, never production sleeps.
+
 - [ ] **Step 2: Run the new test module and confirm the red state**
 
 Run: `python3 -m unittest -v home/common/agent-skills/tests/test_workflow_state.py`
@@ -158,9 +194,9 @@ RESULT_FIELDS = ("issue", "state", "pr_url", "merge_sha", "issue_closed", "discu
 
 Use `datetime.fromisoformat(value.replace("Z", "+00:00"))`, reject non-UTC/naive time, normalize worktrees with `Path.resolve(strict=False)`, and resolve the run directory only beneath `Path(repo_root).resolve() / ".superpowers/workflows"`. Validate `run_id` against `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`.
 
-For every mutation: read+validate existing JSON, mutate a fresh object, write JSON with sorted keys and a newline to `NamedTemporaryFile(dir=run_dir, delete=False)`, `flush`, `os.fsync`, close, `os.replace`, then fsync the directory when supported. On failure unlink only the helper's temporary file. Never catch-and-ignore validation or filesystem errors.
+For every transaction: open stable per-run `state.lock`, acquire `fcntl.LOCK_EX` before reading, read+validate existing JSON, mutate a fresh object, write JSON with sorted keys and a newline to `NamedTemporaryFile(dir=run_dir, delete=False)`, `flush`, `os.fsync`, close, `os.replace`, then fsync the directory when supported; release only after replacement completes. On failure unlink only the helper's temporary file. Never catch-and-ignore lock, validation, or filesystem errors. Read-only inspection takes `LOCK_SH`.
 
-`launch` returns the attempt object. A fresh launch sets a fixed deadline, `state: active`, `launch_kind: fresh`, `prior_attempt`, null terminal result/handoff, and phase fields. Same identity returns a copy with output `launch_kind: resume` but does not rewrite the stored original launch kind or dates. A third fresh request atomically stores the failed compact outcome and exits 3 after printing a precise refusal to stderr.
+`launch` returns the attempt object. A fresh launch stores `issue`, a fixed deadline, `state: active`, `launch_kind: fresh`, one fresh launch event, `prior_attempt`, null terminal result/handoff, and phase fields. Same identity appends a resume launch event and stores `launch_kind: resume` without rewriting start/deadline. A third fresh request atomically stores the failed compact outcome and exits 3 after printing a precise refusal to stderr.
 
 `finish` validates exact fields/types and issue match, persists the result on the named attempt and issue outcome, then prints the normalized object. `reconcile` expires every overdue active attempt and returns the full compact run view. Preserve worktree paths in every stopped/failed note without exceeding 500 characters.
 
@@ -209,9 +245,11 @@ cases = [
 
 Assert each result's action and persisted `phase`, `last_progress_at`, measured counts/ceilings/headroom. Add a test that `handoff` without a path leaves the attempt active but prints `handoff`; after an atomically written file beneath this run's `handoffs/`, repeating with `--handoff-path` sets `state: handed_off`. Reject a nonexistent path, symlink escape, path outside this run, `continue` at threshold, progress on terminal state, and a phase number that moves backward. Resume `handed_off` with matching owner/worktree plus exact `--resume-handoff` and assert attempt remains 1 and becomes active.
 
+Add `test_combined_controller_demo_has_one_authoritative_outcome_per_issue`: initialize one run with three issues; finish one before its simulated delayed notification, expire one silent owner through `reconcile`, and hand off one at its injected context threshold. Reconcile from a fresh process and assert exactly one authoritative outcome/state per issue, no attempt number above 2, the delayed notification cannot replace the durable result, and the handed-off issue carries an existing resumable path.
+
 - [ ] **Step 2: Run the focused tests and confirm the red state**
 
-Run: `python3 -m unittest -v home.common.agent-skills.tests.test_workflow_state.WorkflowStateTests.test_phase_action_precedence home.common.agent-skills.tests.test_workflow_state.WorkflowStateTests.test_durable_handoff_resumes_same_attempt`
+Run: `python3 -m unittest -v home/common/agent-skills/tests/test_workflow_state.py`
 
 Expected: FAIL because `progress` and handoff-resume validation do not exist.
 
