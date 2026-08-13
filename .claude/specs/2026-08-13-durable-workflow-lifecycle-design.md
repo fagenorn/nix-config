@@ -124,7 +124,10 @@ On startup, after any owner notification, and before any retry, the dispatcher c
 - A delayed notification for an older attempt cannot replace a newer authoritative terminal result.
 - An active attempt before its deadline stays active; it is neither retried nor marked complete.
 - An active attempt at/after its deadline becomes `stopped`, with the worktree in its result notes for inspection.
-- A handed-off attempt remains resumable; it is never counted as fresh or silently expired.
+- A handed-off attempt remains resumable while its fixed fresh-launch deadline
+  remains. It is never silently expired by `reconcile`: an explicit matching
+  resume at or after that deadline instead records a visible `stopped` result with
+  the worktree retained, so the dispatcher can apply its one-fresh-retry policy.
 
 Only after reconciliation reports a recoverable transient terminal failure may the dispatcher request one fresh attempt. The helper, not the prompt, enforces the cap.
 

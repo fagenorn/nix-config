@@ -18,7 +18,7 @@
 - The compact terminal result fields are exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`, `discussion_items`, and `notes`; `state` is `merged | stopped | failed`, and `notes` is at most 500 characters.
 - Durable terminal state is written before the identical compact result is sent to the caller. Reconciliation happens before any retry; an older delayed notification never overrides a newer authoritative result.
 - Phase actions are the closed set `continue | fresh_start | handoff | delegate`. At/over either reserved ceiling, `continue` is forbidden; missing usage data selects `handoff` unless `delegate` or artifact-sufficient `fresh_start` already applies.
-- A durable handoff is `handed_off`, resumes the same attempt, and never consumes the fresh-retry allowance.
+- A durable handoff is `handed_off`, resumes the same attempt while its fixed deadline remains, and never consumes the fresh-retry allowance. `reconcile` never silently expires it; an explicit matching late resume records a visible stopped result with its worktree retained, then permits the one fresh retry.
 - Every accepted launch persists the issue and an append-only `{kind, owner, worktree, at}` event; reconstruction never depends on command stdout.
 - Use no dependency beyond Python's standard library and no real sleeps, network, GitHub calls, or agent processes in tests.
 - Preserve unrelated worktree changes. Never bypass commit signing. Every implementation commit includes `Co-Authored-By: Codex <codex@openai.com>`.
@@ -243,7 +243,7 @@ cases = [
 ]
 ```
 
-Assert each result's action and persisted `phase`, `last_progress_at`, measured counts/ceilings/headroom. Add a test that `handoff` without a path leaves the attempt active but prints `handoff`; after an atomically written file beneath this run's `handoffs/`, repeating with `--handoff-path` sets `state: handed_off`. Reject a nonexistent path, symlink escape, path outside this run, `continue` at threshold, progress on terminal state, and a phase number that moves backward. Resume `handed_off` with matching owner/worktree plus exact `--resume-handoff` and assert attempt remains 1 and becomes active.
+Assert each result's action and persisted `phase`, `last_progress_at`, measured counts/ceilings/headroom. Add a test that `handoff` without a path leaves the attempt active but prints `handoff`; after an atomically written file beneath this run's `handoffs/`, repeating with `--handoff-path` sets `state: handed_off`. Reject a nonexistent path, symlink escape, path outside this run, `continue` at threshold, progress on terminal state, and a phase number that moves backward. Resume `handed_off` with matching owner/worktree plus exact `--resume-handoff` before its deadline and assert attempt remains 1 and becomes active. Also assert an explicit matching resume at/after that deadline records a stopped outcome retaining the worktree, then a distinct owner can launch attempt 2.
 
 Add `test_combined_controller_demo_has_one_authoritative_outcome_per_issue`: initialize one run with three issues; finish one before its simulated delayed notification, expire one silent owner through `reconcile`, and hand off one at its injected context threshold. Reconcile from a fresh process and assert exactly one authoritative outcome/state per issue, no attempt number above 2, the delayed notification cannot replace the durable result, and the handed-off issue carries an existing resumable path.
 

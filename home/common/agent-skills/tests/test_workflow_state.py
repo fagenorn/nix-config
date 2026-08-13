@@ -512,6 +512,48 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual((continued["phase_action"], continued["state"]), ("continue", "active"))
         self.assertEqual(continued["handoff_path"], str(handoff_path))
 
+    def test_late_handoff_resume_stops_and_permits_fresh_retry(self):
+        self.init_run()
+        worktree = self.root / "wt-a"
+        self.launch(issue=14, owner="owner-a", worktree=worktree)
+        handoff_path = self.write_handoff(14)
+        self.progress(turn_count=118, context_tokens=20000, handoff_path=handoff_path)
+
+        completed = self.run_cli(
+            "launch",
+            "--repo-root",
+            self.root,
+            "--run-id",
+            self.run_id,
+            "--issue",
+            14,
+            "--owner",
+            "owner-a",
+            "--worktree",
+            worktree,
+            "--now",
+            "2026-08-13T20:31:00Z",
+            "--budget-minutes",
+            30,
+            "--resume-handoff",
+            handoff_path,
+        )
+        resumed = json.loads(completed.stdout)
+        self.assertEqual((resumed["issue"], resumed["state"]), (14, "stopped"))
+        self.assertIn(str(worktree.resolve()), resumed["notes"])
+        persisted = self.read_state()["issues"]["14"]
+        self.assertEqual(persisted["outcome"], resumed)
+        self.assertEqual(persisted["attempts"][0]["state"], "stopped")
+        self.assertEqual(len(persisted["attempts"][0]["launches"]), 1)
+
+        retried = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T20:32:00Z",
+        )
+        self.assertEqual((retried["attempt"], retried["prior_attempt"]), (2, 1))
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
     def test_handoff_symlink_escape_is_rejected_without_state_change(self):
         self.init_run()

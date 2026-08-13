@@ -706,7 +706,10 @@ def command_launch(args: argparse.Namespace) -> int:
                         "resume handoff path does not match stored exact path"
                     )
                 if now_value >= parse_utc(latest["deadline_at"], "attempt deadline"):
-                    raise WorkflowError("cannot resume handoff after attempt deadline")
+                    outcome = stop_attempt(latest, reason="attempt deadline expired")
+                    issue_state["outcome"] = outcome
+                    state["updated_at"] = now
+                    return outcome, True
                 validate_handoff_path(run_dir, args.resume_handoff)
                 latest["state"] = "active"
                 latest["launch_kind"] = "resume"
