@@ -81,6 +81,77 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         return json.loads(completed.stdout) if ok else completed
 
+    def progress(
+        self,
+        *,
+        issue=14,
+        attempt=1,
+        phase=1,
+        now=DEFAULT_NOW,
+        turn_count=10,
+        context_tokens=20000,
+        turn_ceiling=120,
+        context_ceiling=150000,
+        turn_headroom=2,
+        context_headroom=10000,
+        next_needs_context=True,
+        artifacts_sufficient=False,
+        remainder_self_contained=False,
+        handoff_path=None,
+        ok=True,
+    ):
+        args = [
+            "progress",
+            "--repo-root",
+            self.root,
+            "--run-id",
+            self.run_id,
+            "--issue",
+            issue,
+            "--attempt",
+            attempt,
+            "--phase",
+            phase,
+            "--now",
+            now,
+            "--turn-ceiling",
+            turn_ceiling,
+            "--context-ceiling",
+            context_ceiling,
+            "--turn-headroom",
+            turn_headroom,
+            "--context-headroom",
+            context_headroom,
+            "--next-needs-context",
+            str(next_needs_context).lower(),
+            "--artifacts-sufficient",
+            str(artifacts_sufficient).lower(),
+            "--remainder-self-contained",
+            str(remainder_self_contained).lower(),
+        ]
+        if turn_count is not None:
+            args.extend(("--turn-count", turn_count))
+        if context_tokens is not None:
+            args.extend(("--context-tokens", context_tokens))
+        if handoff_path is not None:
+            args.extend(("--handoff-path", handoff_path))
+        completed = self.run_cli(*args, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def write_handoff(self, issue, contents="durable handoff\n"):
+        handoffs = self.workflows_dir / self.run_id / "handoffs"
+        handoffs.mkdir(exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=handoffs, delete=False
+        ) as output:
+            temporary_path = Path(output.name)
+            output.write(contents)
+            output.flush()
+            os.fsync(output.fileno())
+        handoff_path = handoffs / f"issue-{issue}.md"
+        os.replace(temporary_path, handoff_path)
+        return handoff_path
+
     def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, ok=True):
         result_path = self.root / f"result-{issue}-{attempt}.json"
         result_path.write_text(json.dumps(result), encoding="utf-8")
@@ -230,6 +301,317 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         state = self.read_state()["issues"]["14"]
         self.assertIsNone(state["outcome"])
         self.assertEqual(state["attempts"][0]["state"], "stopped")
+
+    def test_progress_action_precedence_and_complete_inputs_are_persisted(self):
+        self.init_run()
+        cases = [
+            (
+                {
+                    "remainder_self_contained": True,
+                    "turn_count": 119,
+                    "context_tokens": 149000,
+                },
+                "delegate",
+            ),
+            (
+                {
+                    "next_needs_context": False,
+                    "artifacts_sufficient": True,
+                    "turn_count": 119,
+                    "context_tokens": 149000,
+                },
+                "fresh_start",
+            ),
+            (
+                {
+                    "next_needs_context": True,
+                    "turn_count": 10,
+                    "context_tokens": 20000,
+                },
+                "continue",
+            ),
+            (
+                {
+                    "next_needs_context": True,
+                    "turn_count": 118,
+                    "context_tokens": 20000,
+                },
+                "handoff",
+            ),
+            (
+                {
+                    "next_needs_context": True,
+                    "turn_count": 10,
+                    "context_tokens": 140000,
+                },
+                "handoff",
+            ),
+            (
+                {
+                    "next_needs_context": True,
+                    "turn_count": None,
+                    "context_tokens": None,
+                },
+                "handoff",
+            ),
+        ]
+        for index, (overrides, expected_action) in enumerate(cases, start=1):
+            issue = 20 + index
+            self.launch(
+                issue=issue,
+                owner=f"owner-{issue}",
+                worktree=self.root / f"wt-{issue}",
+            )
+            result = self.progress(issue=issue, phase=index, **overrides)
+            persisted = self.read_state()["issues"][str(issue)]["attempts"][0]
+            expected_inputs = {
+                "turn_count": overrides.get("turn_count", 10),
+                "context_tokens": overrides.get("context_tokens", 20000),
+                "turn_ceiling": 120,
+                "context_ceiling": 150000,
+                "turn_headroom": 2,
+                "context_headroom": 10000,
+                "next_needs_context": overrides.get("next_needs_context", True),
+                "artifacts_sufficient": overrides.get("artifacts_sufficient", False),
+                "remainder_self_contained": overrides.get(
+                    "remainder_self_contained", False
+                ),
+            }
+            with self.subTest(expected_action=expected_action):
+                self.assertEqual(result["phase_action"], expected_action)
+                self.assertEqual(persisted["phase_action"], expected_action)
+                self.assertEqual(persisted["phase"], index)
+                self.assertEqual(persisted["last_progress_at"], DEFAULT_NOW)
+                self.assertEqual(persisted["phase_inputs"], expected_inputs)
+
+    def test_durable_handoff_requires_safe_file_and_resumes_same_attempt(self):
+        self.init_run()
+        worktree = self.root / "wt-a"
+        launched = self.launch(issue=14, owner="owner-a", worktree=worktree)
+        decision = self.progress(turn_count=118, context_tokens=20000)
+        self.assertEqual(
+            (decision["phase_action"], decision["state"]), ("handoff", "active")
+        )
+        self.assertIsNone(decision["handoff_path"])
+
+        nonexistent = self.workflows_dir / self.run_id / "handoffs" / "missing.md"
+        before = self.state_path.read_bytes()
+        rejected = self.progress(
+            turn_count=118, context_tokens=20000, handoff_path=nonexistent, ok=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        outside = self.root / "outside-handoff.md"
+        outside.write_text("outside\n", encoding="utf-8")
+        rejected = self.progress(
+            turn_count=118, context_tokens=20000, handoff_path=outside, ok=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        handoff_path = self.write_handoff(14)
+        finalized = self.progress(
+            turn_count=118, context_tokens=20000, handoff_path=handoff_path
+        )
+        self.assertEqual(finalized["state"], "handed_off")
+        self.assertEqual(finalized["handoff_path"], str(handoff_path))
+
+        wrong_path = str(handoff_path) + ".wrong"
+        rejected = self.run_cli(
+            "launch",
+            "--repo-root",
+            self.root,
+            "--run-id",
+            self.run_id,
+            "--issue",
+            14,
+            "--owner",
+            "owner-a",
+            "--worktree",
+            worktree,
+            "--now",
+            "2026-08-13T20:05:00Z",
+            "--budget-minutes",
+            30,
+            "--resume-handoff",
+            wrong_path,
+            ok=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+
+        resumed = self.run_cli(
+            "launch",
+            "--repo-root",
+            self.root,
+            "--run-id",
+            self.run_id,
+            "--issue",
+            14,
+            "--owner",
+            "owner-a",
+            "--worktree",
+            worktree,
+            "--now",
+            "2026-08-13T20:05:00Z",
+            "--budget-minutes",
+            30,
+            "--resume-handoff",
+            handoff_path,
+        )
+        resumed = json.loads(resumed.stdout)
+        self.assertEqual((resumed["attempt"], resumed["state"]), (1, "active"))
+        self.assertEqual(resumed["deadline_at"], launched["deadline_at"])
+        self.assertEqual(len(resumed["launches"]), 2)
+        continued = self.progress(
+            phase=2,
+            now="2026-08-13T20:06:00Z",
+            turn_count=10,
+            context_tokens=20000,
+        )
+        self.assertEqual((continued["phase_action"], continued["state"]), ("continue", "active"))
+        self.assertEqual(continued["handoff_path"], str(handoff_path))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_handoff_symlink_escape_is_rejected_without_state_change(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        handoffs = self.workflows_dir / self.run_id / "handoffs"
+        handoffs.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        external = outside / "handoff.md"
+        external.write_text("external\n", encoding="utf-8")
+        (handoffs / "escape").symlink_to(outside, target_is_directory=True)
+        before = self.state_path.read_bytes()
+        rejected = self.progress(
+            turn_count=118,
+            context_tokens=20000,
+            handoff_path=handoffs / "escape" / "handoff.md",
+            ok=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(external.read_text(encoding="utf-8"), "external\n")
+
+    def test_progress_rejects_threshold_continue_invalid_inputs_and_transitions(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        at_turn_threshold = self.progress(turn_count=118, context_tokens=20000)
+        self.assertEqual(at_turn_threshold["phase_action"], "handoff")
+        at_context_threshold = self.progress(
+            phase=2, turn_count=10, context_tokens=140000
+        )
+        self.assertEqual(at_context_threshold["phase_action"], "handoff")
+
+        for args in (
+            ("--next-needs-context", "yes"),
+            ("--turn-count", "-1"),
+            ("--turn-headroom", "120"),
+        ):
+            with self.subTest(args=args):
+                command = [
+                    "progress",
+                    "--repo-root",
+                    self.root,
+                    "--run-id",
+                    self.run_id,
+                    "--issue",
+                    14,
+                    "--attempt",
+                    1,
+                    "--phase",
+                    3,
+                    "--now",
+                    DEFAULT_NOW,
+                    "--turn-ceiling",
+                    120,
+                    "--context-ceiling",
+                    150000,
+                    "--turn-headroom",
+                    2,
+                    "--context-headroom",
+                    10000,
+                    "--next-needs-context",
+                    "true",
+                    "--artifacts-sufficient",
+                    "false",
+                    "--remainder-self-contained",
+                    "false",
+                    *args,
+                ]
+                before = self.state_path.read_bytes()
+                rejected = self.run_cli(*command, ok=False)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(self.state_path.read_bytes(), before)
+
+        backward = self.progress(phase=1, ok=False)
+        self.assertNotEqual(backward.returncode, 0)
+        terminal = self.finish(1, self.merged_result())
+        self.assertEqual(terminal["state"], "merged")
+        rejected = self.progress(phase=3, ok=False)
+        self.assertNotEqual(rejected.returncode, 0)
+
+    def test_combined_controller_demo_has_one_authoritative_outcome_per_issue(self):
+        self.init_run()
+
+        completed = self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        durable_result = self.merged_result(14)
+        self.finish(completed["attempt"], durable_result, issue=14)
+        delayed_result = {
+            **durable_result,
+            "state": "failed",
+            "pr_url": None,
+            "merge_sha": None,
+            "issue_closed": False,
+            "notes": "delayed notification",
+        }
+        delayed = self.finish(1, delayed_result, issue=14, ok=False)
+        self.assertNotEqual(delayed.returncode, 0)
+
+        self.launch(
+            issue=15,
+            owner="silent-owner",
+            worktree=self.root / "wt-15",
+            budget_minutes=10,
+        )
+        self.reconcile(now="2026-08-13T20:10:00Z")
+
+        self.launch(issue=16, owner="owner-c", worktree=self.root / "wt-16")
+        decision = self.progress(
+            issue=16,
+            now="2026-08-13T20:05:00Z",
+            turn_count=10,
+            context_tokens=140000,
+        )
+        self.assertEqual(decision["phase_action"], "handoff")
+        handoff_path = self.write_handoff(16)
+        self.progress(
+            issue=16,
+            now="2026-08-13T20:05:00Z",
+            turn_count=10,
+            context_tokens=140000,
+            handoff_path=handoff_path,
+        )
+
+        final_state = self.reconcile(now="2026-08-13T20:11:00Z")
+        self.assertEqual(set(final_state["issues"]), {"14", "15", "16"})
+        self.assertEqual(final_state["issues"]["14"]["outcome"], durable_result)
+        self.assertEqual(final_state["issues"]["15"]["outcome"]["state"], "stopped")
+        self.assertIsNone(final_state["issues"]["16"]["outcome"])
+        self.assertEqual(
+            final_state["issues"]["16"]["attempts"][-1]["state"], "handed_off"
+        )
+        for issue_state in final_state["issues"].values():
+            self.assertLessEqual(len(issue_state["attempts"]), 2)
+            self.assertTrue(
+                all(attempt["attempt"] <= 2 for attempt in issue_state["attempts"])
+            )
+        resumable = Path(
+            final_state["issues"]["16"]["attempts"][-1]["handoff_path"]
+        )
+        self.assertEqual(resumable, handoff_path)
+        self.assertTrue(resumable.is_file())
 
     def test_matching_repeated_finish_is_idempotent(self):
         self.init_run()

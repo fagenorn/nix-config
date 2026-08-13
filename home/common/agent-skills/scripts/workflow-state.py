@@ -29,6 +29,17 @@ RESULT_FIELDS = (
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PHASE_ACTIONS = frozenset({"continue", "fresh_start", "handoff", "delegate"})
+PHASE_INPUT_FIELDS = (
+    "turn_count",
+    "context_tokens",
+    "turn_ceiling",
+    "context_ceiling",
+    "turn_headroom",
+    "context_headroom",
+    "next_needs_context",
+    "artifacts_sufficient",
+    "remainder_self_contained",
+)
 STATE_FIELDS = frozenset(
     {"schema_version", "run_id", "created_at", "updated_at", "issues"}
 )
@@ -84,6 +95,24 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected a nonnegative integer") from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("expected a nonnegative integer")
+    return parsed
+
+
+def literal_boolean(value: str) -> bool:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise argparse.ArgumentTypeError("expected literal true or false")
+
+
 def require_plain_int(value: Any, label: str, *, minimum: int = 0) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise WorkflowError(f"invalid {label}")
@@ -124,6 +153,65 @@ def validate_launch_event(value: Any, *, owner: str, worktree: str) -> None:
     if value["owner"] != owner or value["worktree"] != worktree:
         raise WorkflowError("invalid launch identity")
     parse_utc(value["at"], "launch time")
+
+
+def select_phase_action(
+    *,
+    turn_count: int | None,
+    context_tokens: int | None,
+    turn_ceiling: int,
+    context_ceiling: int,
+    turn_headroom: int,
+    context_headroom: int,
+    next_needs_context: bool,
+    artifacts_sufficient: bool,
+    remainder_self_contained: bool,
+) -> str:
+    if remainder_self_contained:
+        return "delegate"
+    if not next_needs_context and artifacts_sufficient:
+        return "fresh_start"
+    if turn_count is None or context_tokens is None:
+        return "handoff"
+    if (
+        turn_count >= turn_ceiling - turn_headroom
+        or context_tokens >= context_ceiling - context_headroom
+    ):
+        return "handoff"
+    if not next_needs_context:
+        return "handoff"
+    return "continue"
+
+
+def validate_phase_inputs(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or tuple(value.keys()) != PHASE_INPUT_FIELDS:
+        if not isinstance(value, dict) or set(value) != set(PHASE_INPUT_FIELDS):
+            raise WorkflowError(
+                "invalid phase inputs: fields must be exactly "
+                + ", ".join(PHASE_INPUT_FIELDS)
+            )
+    for field in ("turn_count", "context_tokens"):
+        if value[field] is not None:
+            require_plain_int(value[field], f"phase input {field}")
+    for field in (
+        "turn_ceiling",
+        "context_ceiling",
+        "turn_headroom",
+        "context_headroom",
+    ):
+        require_plain_int(value[field], f"phase input {field}")
+    if value["turn_headroom"] >= value["turn_ceiling"]:
+        raise WorkflowError("turn headroom must be smaller than turn ceiling")
+    if value["context_headroom"] >= value["context_ceiling"]:
+        raise WorkflowError("context headroom must be smaller than context ceiling")
+    for field in (
+        "next_needs_context",
+        "artifacts_sufficient",
+        "remainder_self_contained",
+    ):
+        if not isinstance(value[field], bool):
+            raise WorkflowError(f"invalid phase input {field}: expected boolean")
+    return value
 
 
 def validate_attempt(value: Any, *, issue: int, expected_number: int) -> None:
@@ -171,17 +259,26 @@ def validate_attempt(value: Any, *, issue: int, expected_number: int) -> None:
             raise WorkflowError("nonterminal attempt must not carry a terminal result")
     elif result is None or result["state"] != value["state"]:
         raise WorkflowError("terminal attempt state and result must match")
-    if value["handoff_path"] is not None and not isinstance(value["handoff_path"], str):
-        raise WorkflowError("invalid attempt handoff path")
+    if value["handoff_path"] is not None:
+        if not isinstance(value["handoff_path"], str) or not Path(
+            value["handoff_path"]
+        ).is_absolute():
+            raise WorkflowError("invalid attempt handoff path")
     require_plain_int(value["phase"], "attempt phase")
+    if (value["phase_action"] is None) != (value["phase_inputs"] is None):
+        raise WorkflowError("phase action and inputs must both be null or both be set")
     if value["phase_action"] is not None:
         if (
             not isinstance(value["phase_action"], str)
             or value["phase_action"] not in PHASE_ACTIONS
         ):
             raise WorkflowError("invalid phase action")
-    if value["phase_inputs"] is not None and not isinstance(value["phase_inputs"], dict):
-        raise WorkflowError("invalid phase inputs")
+        phase_inputs = validate_phase_inputs(value["phase_inputs"])
+        if select_phase_action(**phase_inputs) != value["phase_action"]:
+            raise WorkflowError("phase action does not match persisted inputs")
+    if value["state"] == "handed_off":
+        if value["phase_action"] != "handoff" or value["handoff_path"] is None:
+            raise WorkflowError("handed-off attempt requires a durable handoff")
 
 
 def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
@@ -301,6 +398,84 @@ def open_existing_regular(path: Path, label: str, flags: int) -> int:
         os.close(descriptor)
         raise
     return descriptor
+
+
+def open_existing_directory(path: Path, label: str) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        path_info = path.lstat()
+        directory_info = os.fstat(descriptor)
+        if (
+            stat.S_ISLNK(path_info.st_mode)
+            or not stat.S_ISDIR(path_info.st_mode)
+            or not stat.S_ISDIR(directory_info.st_mode)
+            or (path_info.st_dev, path_info.st_ino)
+            != (directory_info.st_dev, directory_info.st_ino)
+        ):
+            raise WorkflowError(f"{label} changed while being opened")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def validate_handoff_path(run_dir: Path, path_value: str) -> str:
+    handoffs_dir = run_dir / "handoffs"
+    candidate = Path(os.path.abspath(path_value))
+    candidate_status = path_status(candidate)
+    if candidate_status is None:
+        raise WorkflowError("handoff path does not exist")
+    if stat.S_ISLNK(candidate_status.st_mode) or not stat.S_ISREG(
+        candidate_status.st_mode
+    ):
+        raise WorkflowError("handoff path must be a non-symlink regular file")
+    try:
+        resolved_handoffs = handoffs_dir.resolve(strict=True)
+        resolved_candidate = candidate.resolve(strict=True)
+        relative = resolved_candidate.relative_to(resolved_handoffs)
+    except (FileNotFoundError, ValueError) as error:
+        raise WorkflowError(
+            "handoff path must be beneath this run's handoffs directory"
+        ) from error
+    if relative == Path("."):
+        raise WorkflowError("handoff path must name a file")
+
+    directory_descriptor = open_existing_directory(
+        handoffs_dir, "handoffs directory"
+    )
+    try:
+        parts = relative.parts
+        for part in parts[:-1]:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            child_descriptor = os.open(part, flags, dir_fd=directory_descriptor)
+            try:
+                if not stat.S_ISDIR(os.fstat(child_descriptor).st_mode):
+                    raise WorkflowError("handoff parent must be a non-symlink directory")
+            except BaseException:
+                os.close(child_descriptor)
+                raise
+            os.close(directory_descriptor)
+            directory_descriptor = child_descriptor
+
+        file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        file_descriptor = os.open(parts[-1], file_flags, dir_fd=directory_descriptor)
+        try:
+            if not stat.S_ISREG(os.fstat(file_descriptor).st_mode):
+                raise WorkflowError("handoff path must be a non-symlink regular file")
+        finally:
+            os.close(file_descriptor)
+    finally:
+        os.close(directory_descriptor)
+    return str(candidate)
 
 
 def open_stable_lock(lock_path: Path) -> int:
@@ -500,6 +675,7 @@ def command_launch(args: argparse.Namespace) -> int:
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
     worktree = str(Path(args.worktree).resolve(strict=False))
+    run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
     if not args.owner:
         raise WorkflowError("owner must not be empty")
 
@@ -518,14 +694,21 @@ def command_launch(args: argparse.Namespace) -> int:
             if issue_state["outcome"] is not None:
                 if same_identity or issue_state["outcome"]["state"] == "merged":
                     return issue_state["outcome"], False
-            if same_identity and latest["state"] == "active":
+            if latest["state"] == "handed_off":
+                if not same_identity:
+                    raise WorkflowError(
+                        "handed-off attempt requires matching owner and worktree"
+                    )
+                if args.resume_handoff is None:
+                    raise WorkflowError("handed-off attempt requires --resume-handoff")
+                if args.resume_handoff != latest["handoff_path"]:
+                    raise WorkflowError(
+                        "resume handoff path does not match stored exact path"
+                    )
                 if now_value >= parse_utc(latest["deadline_at"], "attempt deadline"):
-                    outcome = stop_attempt(latest, reason="attempt deadline expired")
-                    issue_state["outcome"] = outcome
-                    state["updated_at"] = now
-                    return outcome, True
-                if args.resume_handoff is not None:
-                    raise WorkflowError("active attempt does not have a resumable handoff")
+                    raise WorkflowError("cannot resume handoff after attempt deadline")
+                validate_handoff_path(run_dir, args.resume_handoff)
+                latest["state"] = "active"
                 latest["launch_kind"] = "resume"
                 latest["launches"].append(
                     {
@@ -537,8 +720,25 @@ def command_launch(args: argparse.Namespace) -> int:
                 )
                 state["updated_at"] = now
                 return latest, True
-            if same_identity and latest["state"] == "handed_off":
-                raise WorkflowError("handoff resume is not available until a handoff is verified")
+            if args.resume_handoff is not None:
+                raise WorkflowError("attempt does not have a resumable handoff")
+            if same_identity and latest["state"] == "active":
+                if now_value >= parse_utc(latest["deadline_at"], "attempt deadline"):
+                    outcome = stop_attempt(latest, reason="attempt deadline expired")
+                    issue_state["outcome"] = outcome
+                    state["updated_at"] = now
+                    return outcome, True
+                latest["launch_kind"] = "resume"
+                latest["launches"].append(
+                    {
+                        "kind": "resume",
+                        "owner": args.owner,
+                        "worktree": worktree,
+                        "at": now,
+                    }
+                )
+                state["updated_at"] = now
+                return latest, True
 
         if len(attempts) >= 2:
             worktrees = ", ".join(attempt["worktree"] for attempt in attempts[:2])
@@ -606,6 +806,63 @@ def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid result file JSON: {error}") from error
     return validate_result(value, expected_issue=issue)
+
+
+def command_progress(args: argparse.Namespace) -> int:
+    now_value = parse_utc(args.now, "--now")
+    now = format_utc(now_value)
+    phase_inputs = {
+        "turn_count": args.turn_count,
+        "context_tokens": args.context_tokens,
+        "turn_ceiling": args.turn_ceiling,
+        "context_ceiling": args.context_ceiling,
+        "turn_headroom": args.turn_headroom,
+        "context_headroom": args.context_headroom,
+        "next_needs_context": args.next_needs_context,
+        "artifacts_sufficient": args.artifacts_sufficient,
+        "remainder_self_contained": args.remainder_self_contained,
+    }
+    validate_phase_inputs(phase_inputs)
+    action = select_phase_action(**phase_inputs)
+    if args.handoff_path is not None and action != "handoff":
+        raise WorkflowError("handoff path is only valid for a handoff action")
+    run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
+
+    def progress(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        assert state is not None
+        issue_state = state["issues"].get(str(args.issue))
+        if issue_state is None:
+            raise WorkflowError(f"unknown issue identity: {args.issue}")
+        if args.attempt > len(issue_state["attempts"]):
+            raise WorkflowError(
+                f"unknown attempt identity: issue {args.issue} attempt {args.attempt}"
+            )
+        attempt = issue_state["attempts"][args.attempt - 1]
+        if attempt["state"] != "active":
+            raise WorkflowError("progress requires an active attempt")
+        if args.phase < attempt["phase"]:
+            raise WorkflowError("phase must not move backward")
+        if now_value < parse_utc(attempt["last_progress_at"], "attempt progress time"):
+            raise WorkflowError("progress time must not move backward")
+        if now_value >= parse_utc(attempt["deadline_at"], "attempt deadline"):
+            raise WorkflowError("cannot record progress at or after attempt deadline")
+
+        handoff_path = None
+        if args.handoff_path is not None:
+            handoff_path = validate_handoff_path(run_dir, args.handoff_path)
+        attempt["phase"] = args.phase
+        attempt["last_progress_at"] = now
+        attempt["phase_action"] = action
+        attempt["phase_inputs"] = copy.deepcopy(phase_inputs)
+        if handoff_path is not None:
+            attempt["state"] = "handed_off"
+            attempt["handoff_path"] = handoff_path
+        state["updated_at"] = now
+        return attempt, True
+
+    persisted = transact(args.repo_root, args.run_id, progress)
+    print_json(persisted)
+    return 0
 
 
 def command_finish(args: argparse.Namespace) -> int:
@@ -703,6 +960,25 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("--attempt", required=True, type=positive_int)
     finish.add_argument("--result-file", required=True)
     finish.set_defaults(handler=command_finish)
+
+    progress = subparsers.add_parser("progress")
+    add_run_arguments(progress)
+    progress.add_argument("--issue", required=True, type=positive_int)
+    progress.add_argument("--attempt", required=True, type=positive_int)
+    progress.add_argument("--phase", required=True, type=nonnegative_int)
+    progress.add_argument("--turn-count", type=nonnegative_int)
+    progress.add_argument("--context-tokens", type=nonnegative_int)
+    progress.add_argument("--turn-ceiling", type=nonnegative_int, default=120)
+    progress.add_argument("--context-ceiling", type=nonnegative_int, default=150000)
+    progress.add_argument("--turn-headroom", type=nonnegative_int, default=2)
+    progress.add_argument("--context-headroom", type=nonnegative_int, default=10000)
+    progress.add_argument("--next-needs-context", required=True, type=literal_boolean)
+    progress.add_argument("--artifacts-sufficient", required=True, type=literal_boolean)
+    progress.add_argument(
+        "--remainder-self-contained", required=True, type=literal_boolean
+    )
+    progress.add_argument("--handoff-path")
+    progress.set_defaults(handler=command_progress)
 
     reconcile = subparsers.add_parser("reconcile")
     add_run_arguments(reconcile)
