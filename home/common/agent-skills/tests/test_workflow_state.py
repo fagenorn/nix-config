@@ -311,6 +311,146 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 self.assertEqual(self.state_path.read_bytes(), before)
                 self.state_path.unlink()
 
+    def test_cross_field_lifecycle_corruption_is_rejected_without_changes(self):
+        terminal = self.merged_result()
+        corruptions = (
+            (
+                "active-with-result",
+                lambda attempt: attempt.__setitem__("result", terminal),
+            ),
+            (
+                "terminal-without-result",
+                lambda attempt: attempt.__setitem__("state", "merged"),
+            ),
+            (
+                "terminal-state-mismatch",
+                lambda attempt: attempt.update(
+                    {"state": "failed", "result": terminal}
+                ),
+            ),
+            (
+                "launch-kind-mismatch",
+                lambda attempt: attempt.__setitem__("launch_kind", "resume"),
+            ),
+            (
+                "start-after-progress",
+                lambda attempt: attempt.__setitem__(
+                    "started_at", "2026-08-13T20:01:00Z"
+                ),
+            ),
+            (
+                "progress-after-deadline",
+                lambda attempt: attempt.__setitem__(
+                    "last_progress_at", "2026-08-13T20:31:00Z"
+                ),
+            ),
+            (
+                "launch-before-start",
+                lambda attempt: attempt["launches"][0].__setitem__(
+                    "at", "2026-08-13T19:59:00Z"
+                ),
+            ),
+            (
+                "launch-after-deadline",
+                lambda attempt: attempt["launches"][0].__setitem__(
+                    "at", "2026-08-13T20:31:00Z"
+                ),
+            ),
+        )
+        for label, corrupt in corruptions:
+            with self.subTest(label=label):
+                self.init_run()
+                self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+                state = self.read_state()
+                attempt = state["issues"]["14"]["attempts"][0]
+                corrupt(attempt)
+                self.state_path.write_text(json.dumps(state), encoding="utf-8")
+                before = self.state_path.read_bytes()
+                completed = self.reconcile(ok=False)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(self.state_path.read_bytes(), before)
+                self.state_path.unlink()
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_repository_path_escapes_are_rejected_before_external_mutation(self):
+        outside_temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_temporary_directory.cleanup)
+        outside = Path(outside_temporary_directory.name)
+
+        missing_root = self.root / "missing-repository"
+        missing = self.run_cli(
+            "init-run",
+            "--repo-root",
+            missing_root,
+            "--run-id",
+            self.run_id,
+            "--now",
+            DEFAULT_NOW,
+            ok=False,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertFalse(missing_root.exists())
+
+        symlink_root = self.root / "symlink-root"
+        symlink_root.mkdir()
+        (symlink_root / ".superpowers").symlink_to(
+            outside, target_is_directory=True
+        )
+        escaped = self.run_cli(
+            "init-run",
+            "--repo-root",
+            symlink_root,
+            "--run-id",
+            self.run_id,
+            "--now",
+            DEFAULT_NOW,
+            ok=False,
+        )
+        self.assertNotEqual(escaped.returncode, 0)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_symlinked_stable_lock_and_state_are_rejected_without_external_mutation(self):
+        outside_temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_temporary_directory.cleanup)
+        outside = Path(outside_temporary_directory.name)
+
+        for stable_name in ("state.lock", "state.json"):
+            with self.subTest(stable_name=stable_name):
+                run_id = f"stable-{stable_name.replace('.', '-')}"
+                self.run_cli(
+                    "init-run",
+                    "--repo-root",
+                    self.root,
+                    "--run-id",
+                    run_id,
+                    "--now",
+                    DEFAULT_NOW,
+                )
+                run_dir = self.workflows_dir / run_id
+                stable_path = run_dir / stable_name
+                external_path = outside / stable_name
+                if stable_name == "state.json":
+                    external_path.write_bytes(stable_path.read_bytes())
+                else:
+                    external_path.write_bytes(b"external lock sentinel")
+                before = external_path.read_bytes()
+                stable_path.unlink()
+                stable_path.symlink_to(external_path)
+
+                rejected = self.run_cli(
+                    "reconcile",
+                    "--repo-root",
+                    self.root,
+                    "--run-id",
+                    run_id,
+                    "--now",
+                    DEFAULT_NOW,
+                    ok=False,
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(external_path.read_bytes(), before)
+
     def test_result_schema_note_length_and_nullable_url_sha_validation(self):
         self.init_run()
         attempt = self.launch(

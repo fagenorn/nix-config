@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import tempfile
 from typing import Any, Callable
@@ -134,9 +135,11 @@ def validate_attempt(value: Any, *, issue: int, expected_number: int) -> None:
         raise WorkflowError("invalid attempt owner")
     if not isinstance(value["worktree"], str) or not Path(value["worktree"]).is_absolute():
         raise WorkflowError("invalid attempt worktree")
-    parse_utc(value["started_at"], "attempt start time")
-    parse_utc(value["deadline_at"], "attempt deadline")
-    parse_utc(value["last_progress_at"], "attempt progress time")
+    started_at = parse_utc(value["started_at"], "attempt start time")
+    deadline_at = parse_utc(value["deadline_at"], "attempt deadline")
+    last_progress_at = parse_utc(value["last_progress_at"], "attempt progress time")
+    if not started_at <= last_progress_at <= deadline_at:
+        raise WorkflowError("invalid attempt timestamp order")
     if not isinstance(value["state"], str) or value["state"] not in ATTEMPT_STATES:
         raise WorkflowError("invalid attempt state")
     if not isinstance(value["launch_kind"], str) or value["launch_kind"] not in {
@@ -146,15 +149,28 @@ def validate_attempt(value: Any, *, issue: int, expected_number: int) -> None:
         raise WorkflowError("invalid attempt launch kind")
     if not isinstance(value["launches"], list) or not value["launches"]:
         raise WorkflowError("invalid attempt launches")
+    previous_launch_at = started_at
     for event in value["launches"]:
         validate_launch_event(event, owner=value["owner"], worktree=value["worktree"])
+        launch_at = parse_utc(event["at"], "launch time")
+        if not previous_launch_at <= launch_at <= deadline_at:
+            raise WorkflowError("invalid launch timestamp order")
+        previous_launch_at = launch_at
     if value["launches"][0]["kind"] != "fresh":
         raise WorkflowError("invalid attempt launches: first event must be fresh")
+    if value["launch_kind"] != value["launches"][-1]["kind"]:
+        raise WorkflowError("attempt launch kind does not match latest launch event")
     expected_prior = None if expected_number == 1 else expected_number - 1
     if value["prior_attempt"] != expected_prior:
         raise WorkflowError("invalid prior attempt identity")
-    if value["result"] is not None:
-        validate_result(value["result"], expected_issue=issue)
+    result = value["result"]
+    if result is not None:
+        result = validate_result(result, expected_issue=issue)
+    if value["state"] in {"active", "handed_off"}:
+        if result is not None:
+            raise WorkflowError("nonterminal attempt must not carry a terminal result")
+    elif result is None or result["state"] != value["state"]:
+        raise WorkflowError("terminal attempt state and result must match")
     if value["handoff_path"] is not None and not isinstance(value["handoff_path"], str):
         raise WorkflowError("invalid attempt handoff path")
     require_plain_int(value["phase"], "attempt phase")
@@ -177,8 +193,10 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
         )
     if value["run_id"] != run_id:
         raise WorkflowError("workflow state run identity does not match requested run")
-    parse_utc(value["created_at"], "run creation time")
-    parse_utc(value["updated_at"], "run update time")
+    created_at = parse_utc(value["created_at"], "run creation time")
+    updated_at = parse_utc(value["updated_at"], "run update time")
+    if updated_at < created_at:
+        raise WorkflowError("invalid run timestamp order")
     if not isinstance(value["issues"], dict):
         raise WorkflowError("invalid workflow issues")
     for issue_key, issue_value in value["issues"].items():
@@ -200,6 +218,12 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
             raise WorkflowError("invalid attempts list")
         for number, attempt in enumerate(attempts, start=1):
             validate_attempt(attempt, issue=issue, expected_number=number)
+            started_at = parse_utc(attempt["started_at"], "attempt start time")
+            if started_at < created_at:
+                raise WorkflowError("attempt starts before run creation")
+            for launch in attempt["launches"]:
+                if parse_utc(launch["at"], "launch time") > updated_at:
+                    raise WorkflowError("launch occurs after run update time")
         if issue_value["outcome"] is not None:
             validate_result(issue_value["outcome"], expected_issue=issue)
             if not attempts or attempts[-1]["result"] != issue_value["outcome"]:
@@ -210,36 +234,116 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
 def workflow_paths(repo_root_value: str, run_id: str) -> tuple[Path, Path, Path]:
     if not RUN_ID_PATTERN.fullmatch(run_id):
         raise WorkflowError("invalid run_id")
-    repo_root = Path(repo_root_value).resolve()
+    supplied_root = Path(repo_root_value).absolute()
+    root_status = path_status(supplied_root)
+    if root_status is None:
+        raise WorkflowError("repository root does not exist")
+    if stat.S_ISLNK(root_status.st_mode) or not stat.S_ISDIR(root_status.st_mode):
+        raise WorkflowError("repository root must be a non-symlink directory")
+    repo_root = supplied_root.resolve(strict=True)
     workflows_dir = repo_root / ".superpowers" / "workflows"
-    workflows_dir.mkdir(parents=True, exist_ok=True)
-    workflows_dir = workflows_dir.resolve()
-    try:
-        workflows_dir.relative_to(repo_root)
-    except ValueError as error:
-        raise WorkflowError("workflows directory escapes repository root") from error
-    run_dir = (workflows_dir / run_id).resolve(strict=False)
-    try:
-        run_dir.relative_to(workflows_dir)
-    except ValueError as error:
-        raise WorkflowError("run directory escapes repository workflows directory") from error
-    run_dir.mkdir(parents=False, exist_ok=True)
-    if run_dir.resolve() != run_dir:
-        raise WorkflowError("run directory escapes repository workflows directory")
-    ensure_gitignore(workflows_dir)
+    ensure_directory(repo_root / ".superpowers", ".superpowers")
+    ensure_directory(workflows_dir, "workflows")
+    run_dir = workflows_dir / run_id
+    ensure_directory(run_dir, "run directory")
     return run_dir, run_dir / "state.json", run_dir / "state.lock"
+
+
+def path_status(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def ensure_directory(path: Path, label: str) -> None:
+    status = path_status(path)
+    if status is None:
+        try:
+            path.mkdir()
+        except FileExistsError:
+            status = path_status(path)
+        else:
+            status = path_status(path)
+    if status is None or stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
+        raise WorkflowError(f"{label} must be a non-symlink directory")
+
+
+def require_regular_path(path: Path, label: str, *, allow_missing: bool) -> bool:
+    status = path_status(path)
+    if status is None:
+        if allow_missing:
+            return False
+        raise WorkflowError(f"{label} does not exist")
+    if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+        raise WorkflowError(f"{label} must be a non-symlink regular file")
+    return True
+
+
+def verify_open_file(path: Path, descriptor: int, label: str) -> None:
+    path_info = path.lstat()
+    file_info = os.fstat(descriptor)
+    if (
+        stat.S_ISLNK(path_info.st_mode)
+        or not stat.S_ISREG(path_info.st_mode)
+        or not stat.S_ISREG(file_info.st_mode)
+        or (path_info.st_dev, path_info.st_ino) != (file_info.st_dev, file_info.st_ino)
+    ):
+        raise WorkflowError(f"{label} changed while being opened")
+
+
+def open_existing_regular(path: Path, label: str, flags: int) -> int:
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags | no_follow)
+    try:
+        verify_open_file(path, descriptor, label)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def open_stable_lock(lock_path: Path) -> int:
+    require_regular_path(lock_path, "state lock", allow_missing=True)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | no_follow,
+            0o600,
+        )
+    except FileExistsError:
+        descriptor = open_existing_regular(lock_path, "state lock", os.O_RDWR)
+    else:
+        try:
+            verify_open_file(lock_path, descriptor, "state lock")
+        except BaseException:
+            os.close(descriptor)
+            raise
+    return descriptor
 
 
 def ensure_gitignore(workflows_dir: Path) -> None:
     gitignore = workflows_dir / ".gitignore"
+    require_regular_path(gitignore, "workflows .gitignore", allow_missing=True)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(gitignore, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        descriptor = os.open(
+            gitignore,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow,
+            0o644,
+        )
     except FileExistsError:
-        patterns = gitignore.read_text(encoding="utf-8").splitlines()
+        descriptor = open_existing_regular(
+            gitignore, "workflows .gitignore", os.O_RDONLY
+        )
+        with os.fdopen(descriptor, encoding="utf-8") as source:
+            patterns = source.read().splitlines()
         if "*" not in patterns:
             raise WorkflowError("workflows .gitignore must contain '*'")
         return
     with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        verify_open_file(gitignore, output.fileno(), "workflows .gitignore")
         output.write("*\n")
         output.flush()
         os.fsync(output.fileno())
@@ -247,10 +351,10 @@ def ensure_gitignore(workflows_dir: Path) -> None:
 
 
 def read_locked_state(state_path: Path, run_id: str) -> dict[str, Any]:
-    if not state_path.exists():
-        raise WorkflowError(f"workflow run {run_id!r} is not initialized")
+    require_regular_path(state_path, "workflow state", allow_missing=False)
     try:
-        with state_path.open(encoding="utf-8") as source:
+        descriptor = open_existing_regular(state_path, "workflow state", os.O_RDONLY)
+        with os.fdopen(descriptor, encoding="utf-8") as source:
             value = json.load(source)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid workflow state JSON: {error}") from error
@@ -258,7 +362,11 @@ def read_locked_state(state_path: Path, run_id: str) -> dict[str, Any]:
 
 
 def fsync_directory(directory: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     descriptor = os.open(directory, flags)
     try:
         os.fsync(descriptor)
@@ -301,9 +409,16 @@ def transact(
     repo_root: str, run_id: str, mutation: Mutation, *, allow_missing: bool = False
 ) -> Any:
     run_dir, state_path, lock_path = workflow_paths(repo_root, run_id)
-    with lock_path.open("a+b") as lock:
+    require_regular_path(state_path, "workflow state", allow_missing=True)
+    require_regular_path(lock_path, "state lock", allow_missing=True)
+    ensure_gitignore(run_dir.parent)
+    lock_descriptor = open_stable_lock(lock_path)
+    with os.fdopen(lock_descriptor, "r+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        if state_path.exists():
+        state_exists = require_regular_path(
+            state_path, "workflow state", allow_missing=True
+        )
+        if state_exists:
             current = read_locked_state(state_path, run_id)
             state = copy.deepcopy(current)
         elif allow_missing:
