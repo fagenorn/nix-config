@@ -26,6 +26,18 @@ EXPECTED_TIERS = {
     "codex-transport": ("sonnet", "medium"),
 }
 
+EXPECTED_SUBAGENT_TYPES = {
+    "issue-owner": {"general-purpose"},
+    "ship-owner": {"general-purpose"},
+    "implementer": {"implementer"},
+    "reviewer": {"reviewer"},
+    "reviewer-lite": {"reviewer-lite"},
+    "mechanic": {"mechanic"},
+    "explorer": {"Explore"},
+    "researcher": {"general-purpose"},
+    "codex-transport": {"codex:rescue", "codex:codex-reviewer"},
+}
+
 EXPECTED_OWNER_SITES = {
     "orchestration-issue-owner": (
         "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
@@ -312,6 +324,11 @@ def write_fixture(root: Path, data: dict) -> None:
 
 
 class AgentModelMatrixTest(unittest.TestCase):
+    def test_executable_subagent_type_mapping_is_exhaustive(self):
+        module = load_module()
+        self.assertEqual(module.ALLOWED_SUBAGENT_TYPES, EXPECTED_SUBAGENT_TYPES)
+        self.assertEqual(set(module.ALLOWED_SUBAGENT_TYPES), set(EXPECTED_TIERS))
+
     def test_matrix_declares_the_exact_closed_role_tiers(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         self.assertEqual(set(data), {"roles", "dispatch_sites", "scenarios"})
@@ -745,6 +762,57 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertIn("marker selection must match dispatch row", joined)
         self.assertIn("call model 'sonnet' must match dispatch row 'opus'", joined)
         self.assertIn("call effort 'medium' must match dispatch row 'high'", joined)
+
+    def test_agent_call_requires_one_known_role_compatible_subagent_type(self):
+        module = load_module()
+        cases = {
+            "missing": (
+                'Agent(model="opus", effort="high") performs the review.',
+                "call must select exactly one subagent_type",
+            ),
+            "duplicate": (
+                'Agent(subagent_type="reviewer", subagent_type="reviewer", '
+                'model="opus", effort="high") performs the review.',
+                "call must select exactly one subagent_type",
+            ),
+            "unknown": (
+                'Agent(subagent_type="unregistered", model="opus", '
+                'effort="high") performs the review.',
+                "unknown call subagent_type 'unregistered'",
+            ),
+            "same-tier-role-mismatch": (
+                'Agent(subagent_type="implementer", model="opus", '
+                'effort="high") performs the review.',
+                "call subagent_type 'implementer' is not allowed for role 'reviewer'",
+            ),
+        }
+        for name, (call, expected_error) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                data = json.loads(MATRIX.read_text(encoding="utf-8"))
+                marker = (
+                    "<!-- agent-dispatch: id=typed role=reviewer "
+                    "model=opus effort=high -->"
+                )
+                manifest = root / "workflow.md"
+                manifest.write_text(f"{marker}\n{call}\n", encoding="utf-8")
+                data["dispatch_sites"] = [
+                    {
+                        "id": "typed",
+                        "path": "workflow.md",
+                        "marker": marker,
+                        "call": call,
+                        "role": "reviewer",
+                        "model": "opus",
+                        "effort": "high",
+                        "requires": [],
+                    }
+                ]
+                write_fixture(root, data)
+
+                errors = module.validate(root)
+
+            self.assertIn(expected_error, "\n".join(errors), name)
 
     def test_trace_is_deterministic_and_rejects_unknown_scenario(self):
         module = load_module()

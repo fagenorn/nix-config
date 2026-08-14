@@ -38,6 +38,17 @@ EXPECTED_ROLE_TIERS = {
     "researcher": ("sonnet", "medium"),
     "codex-transport": ("sonnet", "medium"),
 }
+ALLOWED_SUBAGENT_TYPES = {
+    "issue-owner": {"general-purpose"},
+    "ship-owner": {"general-purpose"},
+    "implementer": {"implementer"},
+    "reviewer": {"reviewer"},
+    "reviewer-lite": {"reviewer-lite"},
+    "mechanic": {"mechanic"},
+    "explorer": {"Explore"},
+    "researcher": {"general-purpose"},
+    "codex-transport": {"codex:rescue", "codex:codex-reviewer"},
+}
 CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite", "mechanic"}
 WORKFLOW_FAMILIES = {"orchestration", "from-issue", "sdd", "shipping"}
 EXPECTED_SCENARIOS = {*WORKFLOW_FAMILIES, "representative"}
@@ -155,6 +166,27 @@ def _validate_selection(
     return errors
 
 
+def _validate_subagent_type(call: str, role: object, label: str) -> list[str]:
+    values = re.findall(r'\bsubagent_type="([^"]+)"', call)
+    if len(values) != 1:
+        return [f"{label}: call must select exactly one subagent_type"]
+    subagent_type = values[0]
+    known_types = {
+        allowed
+        for role_types in ALLOWED_SUBAGENT_TYPES.values()
+        for allowed in role_types
+    }
+    if subagent_type not in known_types:
+        return [f"{label}: unknown call subagent_type {subagent_type!r}"]
+    allowed_types = ALLOWED_SUBAGENT_TYPES.get(role) if isinstance(role, str) else None
+    if allowed_types is not None and subagent_type not in allowed_types:
+        return [
+            f"{label}: call subagent_type {subagent_type!r} is not allowed "
+            f"for role {role!r}"
+        ]
+    return []
+
+
 def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if set(data) != TOP_LEVEL_FIELDS:
@@ -170,6 +202,11 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
     if set(roles) != set(EXPECTED_ROLE_TIERS):
         errors.append(
             "matrix.roles: role names must be exactly "
+            + ", ".join(sorted(EXPECTED_ROLE_TIERS))
+        )
+    if set(ALLOWED_SUBAGENT_TYPES) != set(EXPECTED_ROLE_TIERS):
+        errors.append(
+            "subagent type mapping: role names must be exactly "
             + ", ".join(sorted(EXPECTED_ROLE_TIERS))
         )
     for role, spec in roles.items():
@@ -258,6 +295,9 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
                         f"{label}: call must be a non-empty literal Agent(...) line"
                     )
                 else:
+                    errors.extend(
+                        _validate_subagent_type(call, site.get("role"), label)
+                    )
                     for field in ("model", "effort"):
                         values = re.findall(
                             rf'\b{field}="([^"]+)"',
