@@ -1,6 +1,7 @@
 ---
 name: implementer
 description: Executes one implementation task from a plan against explicit acceptance criteria in a worktree. Dispatch with a self-contained brief.
+model: opus
 effort: high
 ---
 

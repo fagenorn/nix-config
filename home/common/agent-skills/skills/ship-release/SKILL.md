@@ -8,6 +8,17 @@ argument-hint: "[scope hint — optional one-line summary phrase to seed the mer
 
 Counterpart to `ship-issue`: where that lands one feature on the integration branch, this lands the accumulated integration branch on the default branch, tags + publishes a GitHub Release, and (when a deploy adapter is configured) watches the platform pick it up. The unit of work is **all merges on the integration branch since the last default-branch merge**, not a single issue.
 
+## Ownership
+
+When a controller delegates the release, it must launch one owner for the entire
+existing phase sequence with this explicit selection:
+
+<!-- agent-dispatch: id=ship-release-owner role=ship-owner model=opus effort=high -->
+Agent(subagent_type="general-purpose", model="opus", effort="high") owns the release through final reporting.
+
+A direct interactive invocation keeps the current session as owner. Do not split
+release ownership across cheaper transport or mechanic agents.
+
 ## Project bindings (resolve first)
 
 Read `.claude/skills.config.json` at the project root. Auto-detect absent keys: tracker = `gh` for a github.com remote (else `glab`/none); branches from the repo default. Remaining defaults: `integrationBranch=main`, `defaultBranch=main`, `commit.coAuthoredBy=true`, `unsetGithubToken=false`, `deploy.adapter=none`. Degrade gracefully — never read a configured doc/hints path that doesn't exist, never hard-fail on a missing optional binding.

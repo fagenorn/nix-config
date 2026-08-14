@@ -17,6 +17,13 @@ If the spec covers several independent subsystems, write one plan per subsystem 
 
 Before defining tasks, map which files get created or modified and what each is responsible for. Decomposition decisions get locked in here.
 
+When that map depends on one sharply bounded repository fact, keep the planning judgment in this Opus owner and delegate only the read-only lookup:
+
+<!-- agent-dispatch: id=planning-bounded-fact-lookup role=explorer model=haiku effort=medium -->
+Agent(subagent_type="Explore", model="haiku", effort="medium") performs one sharply bounded read-only repository lookup without choosing task boundaries.
+
+If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the plan phase's existing fixed-schema report.
+
 - One clear responsibility per file, with a well-defined interface. Files that change together live together; split by responsibility, not by technical layer.
 - Prefer focused files: edits are more reliable in code that fits in one context.
 - In an existing codebase, follow its established patterns. Don't unilaterally restructure — but a split of a file you're already modifying is fair game.

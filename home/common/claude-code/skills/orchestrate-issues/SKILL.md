@@ -62,8 +62,10 @@ for this attempt by verifying the path is absent from both the filesystem and
 the lifecycle-aware owner creates it in Phase 1. Then call `workflow-state launch --repo-root <ledger_repo_root> --run-id
 <run-id> --issue <num> --owner <owner> --worktree <absolute-worktree>
 --budget-minutes <budget> --now <RFC3339-now>` before spawning. Spawn only when
-the returned attempt is active. Spawn one **background agent** (fresh context,
-`run_in_background: true`) whose entire prompt is:
+the returned attempt is active.
+
+<!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
+Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
 
 > Lifecycle envelope: `ledger_repo_root=<ledger_repo_root>`, `run_id=<run-id>`,
 > `attempt=<attempt>`, `owner=<owner>`, `worktree=<absolute-worktree>`. Invoke the `from-issue` skill via the Skill tool

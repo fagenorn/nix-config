@@ -110,8 +110,10 @@ defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
    progress` with `--handoff-path <exact-path>` to finalize `handed_off` on the
    same attempt, and stop. Resume later with `workflow-state launch
    --resume-handoff <exact-path>` and the same identity.
-4. **`delegate`** — dispatch the entire remainder to a fresh agent with the
-   lifecycle envelope and artifact paths.
+4. **`delegate`** —
+<!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
+Agent(subagent_type="general-purpose", model="opus", effort="high") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
+   This is a fresh agent; it reconstructs context from those artifacts rather than inheriting conversation history.
 
 Without lifecycle identity, retain direct standalone compatibility: apply the
 same action order locally, using the 120-turn/150000-token ceilings, and use the
@@ -221,7 +223,9 @@ A plan reviewed only by its author risks blind spots, and you are the author. Un
 
 1. Resolve `codex.planReview.enabled` (default `true`) and `.focus` (default `null`; when set, pass its emphasis alongside `projectHints`).
 2. **Enabled and `codex-collaboration` available** → invoke its `plan-review` operation. It assembles the packet itself (its SKILL.md enumerates the contents) and owns foreground execution, isolation, read-only enforcement, validation, and a one-time native fallback on a real Codex failure — a busy or concurrent reviewer is never a fallback condition. Supply the issue and acceptance criteria, the Phase-0 investigation and open questions, the worktree base SHA, the spec and plan paths, the optional focus, and — as the review contract — **the absolute path to `REVIEW-CONTRACT.md` beside this file**, which it reads into the packet.
-3. **Disabled or unavailable** (including when this skill runs natively in Codex) → dispatch one fresh `reviewer` agent, no inherited context, same inputs, same `REVIEW-CONTRACT.md` path, told to read that file first.
+3. **Disabled or unavailable** (including when this skill runs natively in Codex) →
+<!-- agent-dispatch: id=from-issue-plan-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") launches one fresh plan reviewer with no inherited context, the same inputs, and the same `REVIEW-CONTRACT.md` path, told to read that file first.
 
 **The contract travels by path, never inlined** — pasting reviewer text here costs the orchestrator its full length for the rest of the session.
 
@@ -237,7 +241,12 @@ Apply blocking fixes inline to the plan (standing local-commit authorization). B
 
 Invoke `sdd`: it reads the plan, dispatches an implementer per task, and reviews each output.
 
-If the plan is `mechanical-only`, dispatch a single implementer+reviewer pair for the whole change; per-task ceremony adds no signal for one mechanical task.
+If the plan is `mechanical-only`, use one mechanic plus one first-pass reviewer for the whole change; per-task ceremony adds no signal for one mechanical task.
+
+<!-- agent-dispatch: id=from-issue-mechanical-implementation role=mechanic model=sonnet effort=medium -->
+Agent(subagent_type="mechanic", model="sonnet", effort="medium") executes the fully specified mechanical change.
+<!-- agent-dispatch: id=from-issue-mechanical-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") performs its first-pass review.
 
 **CHECKPOINT** — Confirm the implementation is committed on the feature branch.
 
@@ -247,9 +256,15 @@ degradation decision reads it.
 
 ## Phase 7 — Ship
 
-Dispatch `ship-issue` as a fresh subagent via the `Agent` tool (`general-purpose`) — not inline via `Skill`. By now this conversation carries every artifact of the flow, and ship-issue's ~100 turns over that 200–300k prefix costs ~1–3M weighted tokens versus a fresh ~10k subagent that returns one summary.
+<!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
+Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow, and ship-issue's ~100 turns over that 200–300k prefix costs ~1–3M weighted tokens versus a fresh ~10k subagent that returns one summary.
 
-Absent → deliver inline: push the branch, open a PR against `<integration-branch>`, dispatch a fresh reviewer subagent over the diff, wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, close the issue, clean up worktree + branch. With `issueTracker.kind=none`, merge locally and clean up.
+Absent → deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff:
+
+<!-- agent-dispatch: id=from-issue-inline-ship-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh first-pass reviewer over the shipping diff.
+
+Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, close the issue, and clean up the worktree + branch. With `issueTracker.kind=none`, merge locally and clean up.
 
 Subagent prompt (the handoff goes in the prompt, not a file — the subagent's starting context *is* the prompt):
 
