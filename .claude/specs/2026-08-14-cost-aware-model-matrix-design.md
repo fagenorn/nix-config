@@ -38,8 +38,8 @@ The initial matrix is:
 | researcher | Sonnet | medium | bounded primary-source synthesis producing exactly one cited findings artifact |
 
 The Codex bridge remains a Sonnet transport role even when the detached reviewer it
-starts is a stronger independent system. Any move from explorer or mechanic to Opus is
-an explicit escalation recorded in the task ledger or returned report. Unknown role or
+starts is a stronger independent system. Any move from a cheap role to Opus is an
+explicit escalation recorded in the task ledger or returned report. Unknown role or
 dispatch-kind values fail loudly; there is no default branch that inherits a caller.
 
 A static contract test inventories the finite dispatch sites in the workflow skills,

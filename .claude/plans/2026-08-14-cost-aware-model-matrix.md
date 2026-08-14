@@ -84,12 +84,25 @@
 - **Grounding:** The research skill's live contract requires synthesis and a file write; issue 15 permits bounded exploration on Sonnet or Haiku, and the spec's existing role boundaries make neither explorer nor mechanic truthful for both parts.
 - **Alternative considered:** Split reading and persistence between explorer and mechanic. Rejected because it invents a two-agent handoff, duplicates the source packet, and weakens the single-artifact contract without an issue requirement.
 
+### S1: Researcher escalation prose
+- **Question:** The backtrack reviewer found that the spec's escalation sentence still named only explorer and mechanic after researcher was added.
+- **Choice:** Say “any cheap role” so researcher, explorer, mechanic, and transport all share the explicit Opus escalation rule.
+- **Grounding:** The reviewer identified stale prose at the exact role-ledger boundary; the solution already applies the stop/escalate rule to every cheap role.
+- **Alternative considered:** Enumerate all cheap roles. Rejected because the closed matrix is authoritative and another future cheap role would stale the sentence again.
+
+### S2: Task 2 output names research
+- **Question:** The backtrack reviewer found that Task 2's interface promised bounded exploration markers but omitted bounded research from the summary.
+- **Choice:** Name both bounded exploration and bounded research dispatches in Task 2's produced interface.
+- **Grounding:** Task 2 files and exact tests already include the research skill; the interface must truthfully summarize the slice.
+- **Alternative considered:** Leave research implicit under exploration. Rejected because the new role exists precisely to distinguish those contracts.
+
 ## Standards review
 
 - **Reviewer:** native fallback reviewer `/root/issue_15/plan_review_fallback`
 - **Base SHA:** `27911e47621600849cadedea8aec1b96c3728062`
 - **Fallback used:** yes — the first independent reviewer exceeded the bounded window without returning a verdict.
 - **Disposition:** B1 accepted and applied to Task 2; B2 accepted and applied to Task 3; B3 accepted and applied to Tasks 1–2. No Should-fix or Discussion findings.
+- **Backtrack review:** native fallback reviewer `/root/issue_15/plan_review_fallback` reviewed `3db2d90`; S1 and S2 were accepted and applied. No Blocking or Discussion findings.
 
 ---
 
@@ -153,7 +166,7 @@ git commit -m "feat(agents): declare explicit model roles (#15)" -m "Co-Authored
 
 **Interfaces:**
 - Consumes: Task 1 matrix schema and `agent-dispatch` marker parser.
-- Produces: manifest entries and markers for orchestration issue-owner, autonomous design/grill, autonomous planning, standards review, phase delegation, shipping handoff, and bounded exploration dispatches.
+- Produces: manifest entries and markers for orchestration issue-owner, autonomous design/grill, autonomous planning, standards review, phase delegation, shipping handoff, bounded exploration, and bounded research dispatches.
 
 - [ ] **Step 1: Extend tests with failing owner-site expectations**
 
