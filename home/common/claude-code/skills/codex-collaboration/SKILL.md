@@ -111,6 +111,38 @@ Parallel reviews are valid. A queued or active review is never a reason to use a
 Claude fallback. Wait for the requested job. The patched reviewer runtime does
 not share a broker with interactive commands or with another reviewer.
 
+## Live bridge certification evidence
+
+This section applies only when certifying that deployed bridge definitions are
+current; it does not change the normal launch, read-only, timeout, output, or
+fallback contracts above. Deploy the candidate collaboration skill, bridge
+agent, and plugin first. Certification must then be invoked by an externally
+started fresh Claude session, never by the session that performed deployment.
+
+That fresh session creates one schema-version-1 JSON evidence artifact with
+`schema_version` set to `1` and `kind` set to `bridge-smoke`, and must:
+
+1. Resolve the paths actually loaded for the deployed `skill`, `agent`, and
+   `plugin`, then record each deployed revision and `deployed_at` timestamp under
+   `deployment`.
+2. Record its externally established session ID and `started_at` timestamp under
+   `session`. Reject stale evidence when the session began before any recorded
+   deployment: **Reject stale sessions rather than treating them as current.**
+3. Invoke exactly one `plan-review` and one `diff-review` through this
+   collaboration skill and its bridge agent. For each operation, record the
+   bridge execution ID, job ID, observation time, terminal status, and matching
+   result or failure under `agent_mediated`.
+4. Record the corresponding direct transport probe under `direct`, with its own
+   execution ID, observation time, terminal status, and result or failure. Keep
+   it distinct from the mediated result: direct-only evidence cannot certify
+   the bridge.
+5. Preserve partial failures in the artifact. Record the bridge agent's own
+   terminal failure before any allowed native fallback and never replace that
+   failure with the fallback result.
+6. Run `agent-evidence bridge <artifact.json>`. Call the bridge current only
+   when that exact command exits 0; a nonzero exit rejects certification and its
+   diagnostics remain attached to the evidence record.
+
 ## Validate and fall back
 
 A valid result has the operation's required headings — a one-line axis verdict then

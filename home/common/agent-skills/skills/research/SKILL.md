@@ -15,3 +15,29 @@ Its job:
 1. Investigate the question against **primary sources** — official docs, source code, specs, first-party APIs — not a secondary write-up of them. Follow every claim back to the source that owns it.
 2. Write the findings to exactly one Markdown file under the project's `specDir` (from `.claude/skills.config.json`, default `.claude/specs`), citing the source for each claim. Create no other artifact.
 3. Report back exactly `{file_path, key_facts[]}` — the path it wrote, and only the facts the caller asked for. Everything else stays in the file.
+
+## Live availability and blocking evidence
+
+When the question includes a live availability or blocking conclusion, keep the
+one-artifact contract above: put the evidence and its validation result in the
+same Markdown findings file, retain no second project artifact, and keep the
+exact `{file_path, key_facts[]}` return shape.
+
+Represent the live evidence as schema version 1 with `kind` set to
+`research-observations`. Every observation must have a unique observation ID in
+`id`, an independent execution ID in `execution_id`, an `observed_at` timestamp
+with an explicit UTC offset, a non-empty source identity in `source`, and a
+non-empty `outcome`.
+
+A conclusion based on one observation must be `transient`, reference exactly
+that observation ID, stay scoped to that observation, and include a non-empty
+independent follow-up in `follow_up`. A `standing` conclusion requires at least two
+observations from distinct executions and two independent timepoints after
+normalizing their explicit-offset timestamps.
+
+Before writing or returning any standing conclusion, materialize the embedded
+evidence object as a temporary validation input and run
+`agent-evidence research <artifact.json>`. The command must exit 0. On failure,
+preserve the observations and diagnostics in the sole Markdown findings file,
+return no standing conclusion, and retain no temporary input as a second
+artifact.
