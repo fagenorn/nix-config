@@ -9,6 +9,10 @@ ORCHESTRATE = (
 FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
 AUTO = REPO_ROOT / "home/common/agent-skills/skills/from-issue/AUTO.md"
 HANDOFF = REPO_ROOT / "home/common/agent-skills/skills/handoff/SKILL.md"
+COLLABORATION = (
+    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md"
+)
+RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
 
 
 class WorkflowSkillContractsTest(unittest.TestCase):
@@ -18,6 +22,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.from_issue = FROM_ISSUE.read_text(encoding="utf-8")
         cls.auto = AUTO.read_text(encoding="utf-8")
         cls.handoff = HANDOFF.read_text(encoding="utf-8")
+        cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
+        cls.research = RESEARCH.read_text(encoding="utf-8")
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -201,6 +207,99 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("non-symlink parent path", self.handoff)
         self.assertIn("mktemp", self.handoff)
         self.assertIn("Do not duplicate lifecycle JSON", self.handoff)
+
+    def test_collaboration_requires_fresh_validated_bridge_evidence(self):
+        evidence = " ".join(
+            self.section(
+                self.collaboration,
+                "## Live bridge certification evidence",
+                "## Validate and fall back",
+            ).split()
+        )
+        for fragment in (
+            "`schema_version`",
+            "`bridge-smoke`",
+            "`skill`",
+            "`agent`",
+            "`plugin`",
+            "`started_at`",
+            "plan-review",
+            "diff-review",
+            "`direct`",
+            "`agent_mediated`",
+            "agent-evidence bridge",
+            "Reject stale",
+            "direct-only evidence cannot certify",
+            "immutable deployment receipt",
+            "authoritative deployed paths",
+            "assigned session ID",
+            "immutable session envelope",
+            "same assigned session ID",
+            "actual `started_at`",
+            "consumes both",
+            "loaded revisions match the deployment receipt",
+            "absent or mismatched receipt or envelope rejects certification",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, evidence)
+        self.assert_ordered(
+            evidence,
+            "Deploy the candidate",
+            "immutable deployment receipt",
+            "At actual launch",
+            "immutable session envelope",
+            "externally started fresh Claude session",
+        )
+        self.assert_ordered(
+            evidence,
+            "exactly one `plan-review`",
+            "exactly one `diff-review`",
+        )
+        self.assertIn("Keep `agent_mediated` distinct from `direct`", evidence)
+        self.assert_ordered(evidence, "terminal failure", "native fallback")
+        self.assert_ordered(
+            evidence,
+            "agent-evidence bridge <artifact.json>",
+            "exits 0",
+            "call the bridge current",
+        )
+
+    def test_research_requires_corroborated_validated_observations(self):
+        heading = "## Live availability and blocking evidence"
+        evidence = " ".join(self.research[self.research.index(heading) :].split())
+        for fragment in (
+            "`research-observations`",
+            "observation ID",
+            "execution ID",
+            "`observed_at`",
+            "source identity",
+            "`outcome`",
+            "transient",
+            "standing",
+            "two independent timepoints",
+            "follow-up",
+            "agent-evidence research",
+            "same Markdown findings file",
+            "retain no second project artifact",
+            "retain no temporary input as a second artifact",
+            "exact `{file_path, key_facts[]}` return shape",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, evidence)
+        self.assert_ordered(
+            evidence,
+            "`transient`",
+            "reference exactly one observation ID",
+            "`follow_up`",
+        )
+        self.assertIn("distinct `execution_id` values", evidence)
+        self.assertIn("distinct normalized `observed_at` timestamps", evidence)
+        self.assert_ordered(
+            evidence,
+            "agent-evidence research <artifact.json>",
+            "exits 0",
+            "return a standing conclusion",
+        )
 
 
 if __name__ == "__main__":

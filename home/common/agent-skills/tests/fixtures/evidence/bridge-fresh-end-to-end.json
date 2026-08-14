@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "kind": "bridge-smoke",
+  "evidence_id": "bridge-fresh-e2e",
+  "captured_at": "2026-08-14T12:10:00Z",
+  "deployment": {
+    "skill": {
+      "revision": "skill-r2",
+      "deployed_at": "2026-08-14T12:00:00Z"
+    },
+    "agent": {
+      "revision": "agent-r2",
+      "deployed_at": "2026-08-14T12:00:01Z"
+    },
+    "plugin": {
+      "revision": "plugin-r2",
+      "deployed_at": "2026-08-14T12:00:02Z"
+    }
+  },
+  "session": {
+    "id": "claude-fresh-1",
+    "started_at": "2026-08-14T12:01:00Z"
+  },
+  "claim": {
+    "status": "certified"
+  },
+  "operations": [
+    {
+      "name": "plan-review",
+      "direct": {
+        "execution_id": "direct-plan-1",
+        "observed_at": "2026-08-14T12:02:00Z",
+        "status": "completed",
+        "result": "Direct transport returned a diagnostic result."
+      },
+      "agent_mediated": {
+        "execution_id": "agent-plan-1",
+        "job_id": "job-plan-1",
+        "observed_at": "2026-08-14T12:03:00Z",
+        "status": "completed",
+        "result": "## Blocking\nNone.\n\n## Should fix\nNone.\n\n## Discussion\nNone."
+      }
+    },
+    {
+      "name": "diff-review",
+      "direct": {
+        "execution_id": "direct-diff-1",
+        "observed_at": "2026-08-14T12:04:00Z",
+        "status": "completed",
+        "result": "Direct transport returned a diagnostic result."
+      },
+      "agent_mediated": {
+        "execution_id": "agent-diff-1",
+        "job_id": "job-diff-1",
+        "observed_at": "2026-08-14T12:05:00Z",
+        "status": "completed",
+        "result": "**Correctness:** Clean — No correctness findings.\n\n## Critical\nNone.\n\n## Important\nNone.\n\n## Minor\nNone."
+      }
+    }
+  ]
+}
