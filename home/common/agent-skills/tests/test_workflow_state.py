@@ -554,6 +554,28 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         self.assertEqual((retried["attempt"], retried["prior_attempt"]), (2, 1))
 
+    def test_reconcile_expires_unresumed_handoff_and_permits_fresh_retry(self):
+        self.init_run()
+        worktree = self.root / "wt-a"
+        self.launch(issue=14, owner="owner-a", worktree=worktree)
+        handoff_path = self.write_handoff(14)
+        self.progress(turn_count=118, context_tokens=20000, handoff_path=handoff_path)
+
+        reconciled = self.reconcile(now="2026-08-13T20:31:00Z")
+        persisted = reconciled["issues"]["14"]
+        attempt = persisted["attempts"][0]
+        self.assertEqual((attempt["state"], persisted["outcome"]["state"]), ("stopped", "stopped"))
+        self.assertEqual(attempt["handoff_path"], str(handoff_path))
+        self.assertIn(str(worktree.resolve()), persisted["outcome"]["notes"])
+
+        retried = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T20:32:00Z",
+        )
+        self.assertEqual((retried["attempt"], retried["prior_attempt"]), (2, 1))
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
     def test_handoff_symlink_escape_is_rejected_without_state_change(self):
         self.init_run()

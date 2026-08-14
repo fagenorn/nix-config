@@ -15,7 +15,7 @@ The helper is a Python standard-library CLI with four operations:
 1. `init-run` creates or validates a run ledger.
 2. `launch` records either a same-owner/worktree resume or a fresh attempt, enforcing the two-attempt cap.
 3. `progress` advances the last-progress timestamp and phase-boundary decision, optionally recording a durable handoff path.
-4. `finish` records a terminal result before the owner exits; `reconcile` reconstructs the compact dispatcher outcome from durable state and expires overdue active attempts.
+4. `finish` records a terminal result before the owner exits; `reconcile` reconstructs the compact dispatcher outcome from durable state and expires overdue active or handed-off attempts.
 
 `orchestrate-issues` creates one run, records every launch, and reconciles durable state whenever it starts/resumes and before dispatching a retry. Notifications remain the fast path, but their payload is checked against the durable terminal result; the file is authoritative if a notification is missing or late.
 
@@ -33,12 +33,12 @@ Each orchestrator invocation has a stable `run_id` and one `state.json`:
 {
   "schema_version": 1,
   "run_id": "20260813T200000Z-a1b2c3d4",
-  "repo_root": "/absolute/repo/path",
   "created_at": "2026-08-13T20:00:00Z",
+  "updated_at": "2026-08-13T20:00:00Z",
   "issues": {
     "14": {
+      "issue": 14,
       "attempts": [],
-      "authoritative_attempt": null,
       "outcome": null
     }
   }
@@ -76,17 +76,18 @@ Every attempt contains:
   "phase_action": "continue",
   "handoff_path": null,
   "prior_attempt": null,
-  "terminal_result": null
+  "result": null,
+  "phase_inputs": null
 }
 ```
 
-Attempt number is the fresh-launch ordinal, not a process count. Every accepted launch appends a `launches` event and updates `launch_kind`, making fresh-versus-resume reconstructable after either process exits. A launch with the same issue, owner, and normalized worktree as the current nonterminal attempt is `resume`: it appends a resume event to the existing attempt and does not change its original start or fixed deadline. A different owner or worktree is `fresh`; it creates attempt 2 and links `prior_attempt: 1`. Any request for attempt 3 is refused, the issue outcome becomes `failed`, and the terminal result identifies both prior attempts. Resuming a terminal attempt returns its terminal result instead of relaunching work and does not append an event.
+Attempt number is the fresh-launch ordinal, not a process count. Every accepted launch appends a `launches` event and updates `launch_kind`, making fresh-versus-resume reconstructable after either process exits. A launch with the same issue, owner, and normalized worktree as the current nonterminal attempt is `resume`: it appends a resume event to the existing attempt and does not change its original start or fixed deadline. A different owner or worktree is `fresh`; it creates attempt 2 and links `prior_attempt: 1`. Any request for attempt 3 is refused, the issue outcome becomes `failed`, and the terminal result identifies both prior attempts. The latest attempt together with the issue `outcome` is authoritative; each attempt stores its own terminal data in `result`. Resuming a terminal attempt returns its stored result instead of relaunching work and does not append an event.
 
 The deadline is fixed at fresh launch (`started_at + agentBudgetMinutes`). Progress changes `last_progress_at`, never the deadline. This prevents activity from extending an abandoned run indefinitely.
 
 ### Lifecycle state machine
 
-Attempt states are `active`, `handed_off`, `stopped`, `failed`, and `merged`. Only `active` is nonterminal for deadline purposes; `handed_off` is resumable but cannot be dispatched as a fresh retry until its durable handoff is explicitly resumed.
+Attempt states are `active`, `handed_off`, `stopped`, `failed`, and `merged`. `active` and `handed_off` are nonterminal for deadline purposes; a handoff is resumable only before its fixed deadline and cannot be dispatched as a fresh retry until it becomes visibly stopped.
 
 Allowed transitions are:
 
@@ -95,7 +96,7 @@ Allowed transitions are:
 - `active` → `handed_off` after a durable handoff is written
 - `handed_off` → `active` only through a same-owner/worktree resume using the handoff
 - `active` → `stopped`, `failed`, or `merged` through `finish`
-- overdue `active` → `stopped` through `reconcile`
+- overdue `active` or `handed_off` → `stopped` through `reconcile`
 
 All terminal transitions preserve the worktree path. The helper never removes a worktree. `finish` requires the compact result schema and stores it before printing the exact same normalized JSON for the caller to send. A second identical `finish` is idempotent; a conflicting terminal result fails loudly.
 
@@ -122,12 +123,9 @@ On startup, after any owner notification, and before any retry, the dispatcher c
 - A durable terminal result wins over missing or delayed notification state.
 - A notification matching the durable result is acknowledged and causes no state change.
 - A delayed notification for an older attempt cannot replace a newer authoritative terminal result.
-- An active attempt before its deadline stays active; it is neither retried nor marked complete.
-- An active attempt at/after its deadline becomes `stopped`, with the worktree in its result notes for inspection.
-- A handed-off attempt remains resumable while its fixed fresh-launch deadline
-  remains. It is never silently expired by `reconcile`: an explicit matching
-  resume at or after that deadline instead records a visible `stopped` result with
-  the worktree retained, so the dispatcher can apply its one-fresh-retry policy.
+- An active or handed-off attempt before its deadline remains recoverable and is neither retried nor marked complete.
+- An active or handed-off attempt at/after its deadline becomes `stopped`, with the worktree in its result notes for inspection. A stopped handoff retains its durable handoff path.
+- An explicit matching late resume reaches the same stopped result; after either expiry path, the dispatcher can apply its one-fresh-retry policy.
 
 Only after reconciliation reports a recoverable transient terminal failure may the dispatcher request one fresh attempt. The helper, not the prompt, enforces the cap.
 
@@ -169,6 +167,7 @@ The public test seam is the CLI plus the resulting `state.json`, because that is
 
 - a persisted terminal result recovered before a delayed notification arrives;
 - an active owner that dies and crosses its injected deadline, becoming visibly stopped with worktree retained;
+- a never-resumed handoff that crosses its fixed deadline, becoming visibly stopped while retaining its handoff path and allowing the fresh retry;
 - same-owner/worktree resume preserving attempt 1 and its deadline;
 - one distinct fresh retry creating linked attempt 2, followed by mechanically refused attempt 3 and failed issue outcome;
 - boundary actions for continue, fresh start, durable handoff, and full delegation, including the at-threshold case that must not continue;
@@ -202,6 +201,12 @@ Add lightweight skill-contract assertions that check `orchestrate-issues`, `from
 - **Choice:** Store versioned per-run state under git-ignored `.superpowers/workflows/<run-id>/`.
 - **Grounding:** `sdd/SKILL.md` and `sdd/scripts/sdd-workspace` already establish `.superpowers` as the per-worktree durable agent-state convention, and the repository git exclude covers it.
 - **Alternative considered:** A platform temp directory was rejected because cleanup/reboot can erase it and a fresh session cannot reliably discover it.
+
+### Ledger envelope and authority representation
+- **Question:** Should the serialized state duplicate the repository root and explicit authority pointers, or use the path-bound lifecycle envelope and ordered issue state?
+- **Choice:** Keep the immutable `repo_root` in every lifecycle command envelope and validate the run below that path; model authority as the latest ordered attempt plus the issue `outcome`; store per-attempt terminal data as `result`.
+- **Grounding:** The helper resolves every run beneath the supplied immutable root, validates that an issue outcome matches its latest attempt, and uses one compact terminal-result shape without duplicating a second pointer or field name.
+- **Alternative considered:** Persisting `repo_root`, `authoritative_attempt`, and `terminal_result` was rejected as redundant state that can diverge from the already validated path, ordered attempts, and `outcome`/`result` relationship.
 
 ### State ownership and atomicity
 - **Question:** Should attempts/results be separate files managed by prompt instructions or one helper-owned ledger?

@@ -14,11 +14,11 @@
 - Runtime state lives under the current repository's git-ignored `.superpowers/workflows/<run-id>/`; no runtime ledger or handoff is committed.
 - `state.json` has `schema_version: 1`; every transaction holds `fcntl.flock` on per-run `state.lock` across read–validate–mutate–replace, then replaces the file atomically. Unknown versions, states, actions, identities, lock failures, and conflicting terminal writes exit non-zero without altering the previous file.
 - Fresh attempts are numbered 1 and 2 only. Same issue + owner + normalized worktree resumes the current attempt without changing `started_at` or `deadline_at`; another fresh launch is refused and persists a failed issue outcome linked to attempts 1 and 2.
-- Deadlines are fixed at fresh launch. `last_progress_at` changes do not extend them. Overdue active attempts become visible `stopped` outcomes and retain the worktree path.
+- Deadlines are fixed at fresh launch. `last_progress_at` changes do not extend them. Overdue active or handed-off attempts become visible `stopped` outcomes and retain the worktree path; a stopped handoff keeps its durable path.
 - The compact terminal result fields are exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`, `discussion_items`, and `notes`; `state` is `merged | stopped | failed`, and `notes` is at most 500 characters.
 - Durable terminal state is written before the identical compact result is sent to the caller. Reconciliation happens before any retry; an older delayed notification never overrides a newer authoritative result.
 - Phase actions are the closed set `continue | fresh_start | handoff | delegate`. At/over either reserved ceiling, `continue` is forbidden; missing usage data selects `handoff` unless `delegate` or artifact-sufficient `fresh_start` already applies.
-- A durable handoff is `handed_off`, resumes the same attempt while its fixed deadline remains, and never consumes the fresh-retry allowance. `reconcile` never silently expires it; an explicit matching late resume records a visible stopped result with its worktree retained, then permits the one fresh retry.
+- A durable handoff is `handed_off`, resumes the same attempt while its fixed deadline remains, and never consumes the fresh-retry allowance. At or after its deadline, either `reconcile` or an explicit matching late resume records a visible stopped result with its worktree and handoff path retained, then permits the one fresh retry.
 - Every accepted launch persists the issue and an append-only `{kind, owner, worktree, at}` event; reconstruction never depends on command stdout.
 - Use no dependency beyond Python's standard library and no real sleeps, network, GitHub calls, or agent processes in tests.
 - Preserve unrelated worktree changes. Never bypass commit signing. Every implementation commit includes `Co-Authored-By: Codex <codex@openai.com>`.
@@ -171,7 +171,7 @@ def test_only_one_fresh_retry_and_refusal_links_prior_attempts(self):
     self.assertIn("attempts 1 and 2", refused.stderr)
 ```
 
-Also cover overdue active attempt → stopped with worktree path in notes, matching repeated `finish` idempotency, conflicting finish rejection with unchanged bytes, terminal resume returning the stored result rather than launching, invalid schema/action/state rejection, note length, nullable URL/SHA validation, and `.superpowers/workflows/.gitignore` containing `*`.
+Also cover overdue active or handed-off attempt → stopped with worktree path in notes, matching repeated `finish` idempotency, conflicting finish rejection with unchanged bytes, terminal resume returning the stored result rather than launching, invalid schema/action/state rejection, note length, nullable URL/SHA validation, and `.superpowers/workflows/.gitignore` containing `*`.
 
 Assert every accepted attempt contains `issue` and a persisted `launches` list. A matching resume appends a `resume` event with owner/worktree/time while preserving `started_at` and `deadline_at`; reopening the file must prove the event without relying on stdout. Add one concurrency test that launches helper subprocesses against distinct issues in the same run and asserts the reopened ledger contains both updates; coordinate their start with a test-only process barrier, never production sleeps.
 
@@ -198,7 +198,7 @@ For every transaction: open stable per-run `state.lock`, acquire `fcntl.LOCK_EX`
 
 `launch` returns the attempt object. A fresh launch stores `issue`, a fixed deadline, `state: active`, `launch_kind: fresh`, one fresh launch event, `prior_attempt`, null terminal result/handoff, and phase fields. Same identity appends a resume launch event and stores `launch_kind: resume` without rewriting start/deadline. A third fresh request atomically stores the failed compact outcome and exits 3 after printing a precise refusal to stderr.
 
-`finish` validates exact fields/types and issue match, persists the result on the named attempt and issue outcome, then prints the normalized object. `reconcile` expires every overdue active attempt and returns the full compact run view. Preserve worktree paths in every stopped/failed note without exceeding 500 characters.
+`finish` validates exact fields/types and issue match, persists the result on the named attempt and issue outcome, then prints the normalized object. `reconcile` expires every overdue active or handed-off attempt and returns the full compact run view. Preserve worktree paths in every stopped/failed note without exceeding 500 characters.
 
 - [ ] **Step 4: Run lifecycle tests and inspect atomic state**
 
@@ -243,7 +243,7 @@ cases = [
 ]
 ```
 
-Assert each result's action and persisted `phase`, `last_progress_at`, measured counts/ceilings/headroom. Add a test that `handoff` without a path leaves the attempt active but prints `handoff`; after an atomically written file beneath this run's `handoffs/`, repeating with `--handoff-path` sets `state: handed_off`. Reject a nonexistent path, symlink escape, path outside this run, `continue` at threshold, progress on terminal state, and a phase number that moves backward. Resume `handed_off` with matching owner/worktree plus exact `--resume-handoff` before its deadline and assert attempt remains 1 and becomes active. Also assert an explicit matching resume at/after that deadline records a stopped outcome retaining the worktree, then a distinct owner can launch attempt 2.
+Assert each result's action and persisted `phase`, `last_progress_at`, measured counts/ceilings/headroom. Add a test that `handoff` without a path leaves the attempt active but prints `handoff`; after an atomically written file beneath this run's `handoffs/`, repeating with `--handoff-path` sets `state: handed_off`. Reject a nonexistent path, symlink escape, path outside this run, `continue` at threshold, progress on terminal state, and a phase number that moves backward. Resume `handed_off` with matching owner/worktree plus exact `--resume-handoff` before its deadline and assert attempt remains 1 and becomes active. Assert both `reconcile` and an explicit matching resume at/after that deadline record a stopped outcome retaining the worktree and handoff path, then a distinct owner can launch attempt 2.
 
 Add `test_combined_controller_demo_has_one_authoritative_outcome_per_issue`: initialize one run with three issues; finish one before its simulated delayed notification, expire one silent owner through `reconcile`, and hand off one at its injected context threshold. Reconcile from a fresh process and assert exactly one authoritative outcome/state per issue, no attempt number above 2, the delayed notification cannot replace the durable result, and the handed-off issue carries an existing resumable path.
 

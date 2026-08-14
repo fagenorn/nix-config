@@ -922,7 +922,7 @@ def command_reconcile(args: argparse.Namespace) -> int:
             if issue_state["outcome"] is not None:
                 continue
             for attempt in issue_state["attempts"]:
-                if attempt["state"] != "active":
+                if attempt["state"] not in {"active", "handed_off"}:
                     continue
                 deadline = parse_utc(attempt["deadline_at"], "attempt deadline")
                 if now_value >= deadline:
