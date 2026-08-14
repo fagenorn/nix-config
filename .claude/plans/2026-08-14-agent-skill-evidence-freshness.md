@@ -87,6 +87,38 @@
 - **Grounding:** The issue rejects stale sessions and direct-only shortcuts; the approved spec distinguishes deterministic tests from release evidence.
 - **Alternative considered:** Committing a synthetic passing live artifact was rejected because it would be test data mislabeled as an observation.
 
+### B-01: Validate the complete bridge record
+- **Question:** The reviewer found that the plan required mediated success but did not explicitly test or implement exactly one required operation, both layers, terminal result/failure shape, and claim consistency.
+- **Choice:** Validate and test the whole bridge document before certification: exactly one plan-review and diff-review, exactly one direct and agent-mediated record for each, terminal payload shape for both layers, and a claim that agrees with the mediated observations.
+- **Grounding:** The approved spec's bridge contract rejects a missing operation or layer, nonterminal execution, and claim disagreement; the reviewer cited the Task 1 gaps against that contract.
+- **Alternative considered:** Reviewer's call accepted as-is.
+
+### B-02: Validate every research observation before claim scoping
+- **Question:** The reviewer found that validating uniqueness only across claim-referenced observations could let malformed unreferenced records pass inside certified evidence.
+- **Choice:** Type-check and enforce unique observation IDs, execution IDs, and normalized timestamps across every recorded observation, then validate the claim's referenced subset.
+- **Grounding:** The approved spec defines document-wide observation integrity and explicitly rejects duplicate identifiers and timepoints; the reviewer verified Task 1 had narrowed that invariant incorrectly.
+- **Alternative considered:** Reviewer's call accepted as-is.
+
+### S-01: Run the named workflow gate
+- **Question:** The reviewer found that Task 3 enumerated the same Python test modules but omitted the approved spec's exact `just agent-workflow-tests` gate.
+- **Choice:** Add the exact Justfile gate to whole-issue verification in addition to the focused evidence tests.
+- **Grounding:** The spec and existing Justfile name that stable repository command, which is the interface maintainers expect CI and reviewers to exercise.
+- **Alternative considered:** Treating equivalent direct unittest invocation as sufficient was rejected because it can drift from the repository-owned recipe.
+
+### S-02: Keep session creation outside the running bridge skill
+- **Question:** The reviewer found ambiguity in asking an already-running skill invocation to start the fresh session whose loaded definitions it must certify.
+- **Choice:** State that certification is invoked from an externally started post-deployment session; the shipping owner creates that session and hands it the capture operation.
+- **Grounding:** The post-deployment live gate already owns sequencing, and a session cannot prove its own pre-start deployment boundary by recursively replacing itself.
+- **Alternative considered:** An in-session session-spawn mechanism was rejected because no supported, separately identified mechanism is documented in the live repository.
+
+## Standards review provenance
+
+- **Reviewer:** Native Codex reviewer (`plan_review`), fresh context, read-only
+- **Base SHA:** `6b903d0875e059868436f41c92b0b0a59f1debc8`
+- **Focus:** issue/spec conformance, executable evidence boundaries, repository verification gates
+- **Disposition:** 4 accepted, 0 rejected, 0 deferred; 0 Discussion items
+- **Fallback:** Native-reviewer path selected because `codex-collaboration` is Claude-only in this Codex session
+
 ---
 
 ### Task 1: Evidence validator, fixtures, and deployment
@@ -172,10 +204,16 @@ def run_validator(kind: str, fixture: str) -> subprocess.CompletedProcess[str]:
 
 Required cases: fresh bridge passes; stale emits `BRIDGE_SESSION_STALE`;
 direct-only emits `BRIDGE_MEDIATED_REQUIRED` while its failure text remains in
-the fixture; single research failure passes as transient; changing its claim to
-standing in a temporary file emits `RESEARCH_CORROBORATION_REQUIRED`;
-corroborated research passes; duplicate execution/time values reject; naive
-timestamps reject; unsupported schema and wrong kind reject.
+the fixture; missing and duplicate required operations reject; a missing direct
+or mediated layer rejects; nonterminal records and terminal records without the
+matching result/failure payload reject; a certified claim over failed mediated
+observations and a rejected claim over fully successful mediated observations
+both emit `BRIDGE_CLAIM_MISMATCH`; single research failure passes as transient;
+changing its claim to standing in a temporary file emits
+`RESEARCH_CORROBORATION_REQUIRED`; corroborated research passes; duplicate
+observation/execution/time values anywhere in the document reject, including
+unreferenced observations; naive timestamps reject; unsupported schema and
+wrong kind reject.
 
 - [ ] **Step 2: Run the focused tests and observe the missing-command failure**
 
@@ -203,12 +241,17 @@ def main(argv: Sequence[str] | None = None) -> int: ...
 Parse timestamps through one helper that requires `tzinfo` and normalizes to
 UTC. Type-check before descending so malformed documents return diagnostics
 instead of tracebacks. For bridge certification, collect all three deployment
-instants, compare the session start with their maximum, index operations by
-name, require both named operations, and require each `agent_mediated.status` to
-be `completed` with non-empty result and job ID. Preserve direct records without
-letting them affect certification. For research, resolve claim references,
-then enforce the transient or standing rules over only the referenced
-observations.
+instants, compare the session start with their maximum, reject duplicate or
+unknown operation names, and require exactly one `plan-review` and one
+`diff-review`. Each operation must contain exactly one `direct` and one
+`agent_mediated` record. Both layers require a terminal status plus a non-empty
+`result` for completion or `failure` for unsuccessful terminal states;
+successful mediated records additionally require a job ID. Direct outcomes do
+not certify, but their record shape is still validated. Require the claim status
+to agree with the combined mediated outcomes. For research, validate types and
+uniqueness of IDs, execution IDs, and normalized timestamps across every
+observation first; then resolve claim references and enforce transient or
+standing rules over the referenced subset.
 
 - [ ] **Step 4: Deploy the command**
 
@@ -276,11 +319,13 @@ structured evidence validator or all required fields.
 
 - [ ] **Step 3: Update the bridge skill**
 
-Add a bounded live-evidence section that instructs the owning session to:
+Add a bounded live-evidence section stating that certification is invoked from
+an externally started fresh session after the candidate definitions are
+deployed. It instructs that fresh session to:
 
 1. capture the deployed skill/agent/plugin revisions and deployment timestamps
    from the paths actually loaded;
-2. start a new Claude session after deployment and record its ID/start time;
+2. record its own externally established session ID and start time;
 3. run `plan-review` and `diff-review` through the collaboration skill and
    bridge agent, recording their job IDs and terminal outcomes;
 4. record any direct transport probes separately without treating them as the
@@ -338,6 +383,11 @@ Co-Authored-By: Codex <noreply@openai.com>"
 Run: `python3 -m unittest -v home/common/agent-skills/tests/test_agent_evidence.py home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 
 Expected: all tests pass with no failures or errors.
+
+Run: `just agent-workflow-tests`
+
+Expected: the repository-owned workflow gate passes every workflow-state and
+skill-contract test.
 
 Run: `just agent-model-matrix`
 
