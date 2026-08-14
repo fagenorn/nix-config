@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "research-observations",
+  "evidence_id": "service-single-failure",
+  "captured_at": "2026-08-14T13:00:00Z",
+  "question": "Is the service presently available?",
+  "claim": {
+    "classification": "transient",
+    "conclusion": "The request failed at the recorded observation.",
+    "observation_ids": [
+      "obs-1"
+    ],
+    "follow_up": "Run one independent observation before making a standing availability claim."
+  },
+  "observations": [
+    {
+      "id": "obs-1",
+      "execution_id": "exec-1",
+      "observed_at": "2026-08-14T12:59:00Z",
+      "source": "first-party API",
+      "outcome": "failed"
+    }
+  ]
+}
