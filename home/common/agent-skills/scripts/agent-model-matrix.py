@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -235,6 +236,16 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
                 if not isinstance(marker, str) or not marker:
                     errors.append(f"{label}: marker must be a non-empty string")
                 else:
+                    expected_marker = (
+                        f"<!-- agent-dispatch: id={site.get('id')} "
+                        f"role={site.get('role')} model={site.get('model')} "
+                        f"effort={site.get('effort')} -->"
+                    )
+                    if marker != expected_marker:
+                        errors.append(
+                            f"{label}: marker selection must match dispatch row; "
+                            f"expected {expected_marker!r}"
+                        )
                     count = lines.count(marker)
                     if count != 1:
                         errors.append(
@@ -247,6 +258,20 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
                         f"{label}: call must be a non-empty literal Agent(...) line"
                     )
                 else:
+                    for field in ("model", "effort"):
+                        values = re.findall(
+                            rf'\b{field}="([^"]+)"',
+                            call,
+                        )
+                        if len(values) != 1:
+                            errors.append(
+                                f"{label}: call must select exactly one {field}"
+                            )
+                        elif values[0] != site.get(field):
+                            errors.append(
+                                f"{label}: call {field} {values[0]!r} must match "
+                                f"dispatch row {site.get(field)!r}"
+                            )
                     call_key = (site["path"], call)
                     if call_key in dispatch_calls:
                         errors.append(

@@ -710,6 +710,42 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertIn("reviewer-lite requires", joined)
         self.assertIn("does not match role 'reviewer'", joined)
 
+    def test_marker_and_call_selection_must_match_the_dispatch_row(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = json.loads(MATRIX.read_text(encoding="utf-8"))
+            marker = (
+                "<!-- agent-dispatch: id=mismatched role=mechanic "
+                "model=sonnet effort=medium -->"
+            )
+            call = (
+                'Agent(subagent_type="mechanic", model="sonnet", '
+                'effort="medium") performs the review.'
+            )
+            manifest = root / "workflow.md"
+            manifest.write_text(f"{marker}\n{call}\n", encoding="utf-8")
+            data["dispatch_sites"] = [
+                {
+                    "id": "mismatched",
+                    "path": "workflow.md",
+                    "marker": marker,
+                    "call": call,
+                    "role": "reviewer",
+                    "model": "opus",
+                    "effort": "high",
+                    "requires": [],
+                }
+            ]
+            write_fixture(root, data)
+
+            errors = module.validate(root)
+
+        joined = "\n".join(errors)
+        self.assertIn("marker selection must match dispatch row", joined)
+        self.assertIn("call model 'sonnet' must match dispatch row 'opus'", joined)
+        self.assertIn("call effort 'medium' must match dispatch row 'high'", joined)
+
     def test_trace_is_deterministic_and_rejects_unknown_scenario(self):
         module = load_module()
         first = module.trace(REPO_ROOT, "sdd")
