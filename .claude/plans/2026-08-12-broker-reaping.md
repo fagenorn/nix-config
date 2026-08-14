@@ -16,7 +16,7 @@
 - **The nix-store plugin copy is read-only.** Never edit anything under `/nix/store`. Never edit the plugin files in this repo — they do not exist here.
 - **All plugin code edits happen in the scratch clone** at the fixed path below, and land in this repo **only** as `patches/agent-plugins/codex-plugin-cc.patch`. Never commit in the scratch clone.
 - Upstream pin: `db52e28f4d9ded852ab3942cea316258ae4ef346`. Never change it.
-- `patchRevision` in `lib/agent-plugins.nix` goes `5` → `6` **exactly once** (Task 2), never higher.
+- `patchRevision` in `lib/agent-plugins.nix` is **`7`**, set once and never higher. Task 2 originally set `5` → `6`; issue #10 then shipped its own `6` to `main` first, so the post-merge value is `7` (see the Auto-resolved decision "Integration: `main` shipped `patchRevision = 6` first"). Nothing may renumber it again on this branch.
 - **After creating any new file in the scratch clone, re-run `git add -N .` before regenerating the patch**, or the regenerated patch silently omits the file and the change ships broken. Every task that creates a file carries an explicit gate for this.
 - Mandatory test command, run from the scratch clone root (the `env -u` scrub removes this machine's live Claude-session variables, without which 4 upstream tests fail spuriously):
   ```sh
@@ -325,6 +325,24 @@ Fixture rules: `makeTempDir` workspaces, `initGitRepo`, `installFakeCodex`, **pr
 - **Choice:** Accepted the deduplication, then corrected the *forward-looking* references: Task 6's three teardown lines now read `t.after(() => killGroup(broker.child.pid, "SIGKILL"))`. Tasks 3's and 4's already-executed code blocks keep their original `killGroupQuietly` text as the historical record of what those implementers were told; the divergence is recorded here and in the sdd ledger rather than by rewriting dispatched instructions.
 - **Grounding:** Task 4's implementer hit exactly this and flagged it — it substituted `killGroup(pid, "SIGKILL")` because writing a second group-kill helper was forbidden by its brief, and the review confirmed the substitution matched the file's existing teardown idiom. Since task briefs are extracted from this plan verbatim, leaving Task 6's text stale would hand its implementer a call to an undefined function and cost a review round to rediscover the same thing.
 - **Alternative considered:** Re-add a local `killGroupQuietly` wrapper so every task's dictated text stays literally true — rejected: it reintroduces the duplication the review removed. Also rejected: rewrite Tasks 3 and 4's blocks too, which would make the plan disagree with the briefs those implementers actually worked from.
+
+### Integration: `main` shipped `patchRevision = 6` first
+- **Question:** Issue #10 merged to `main` while this branch was in Phase 6, claiming `patchRevision = 6` — the same number Task 2 set here. What number does this branch ship, and how is the shared patch file reconciled?
+- **Choice:** `patchRevision = 7`, set in the integration merge commit (`2ee96b1`) and nowhere else. The Global Constraints line and Task 7 Step 2's expectation were both corrected from `6` to `7`.
+- **Grounding:** `codexVersion = "${codexUpstreamVersion}-nix.${shortRevision codexRevision}.p${toString patchRevision}"` (`lib/agent-plugins.nix:14`) embeds the revision in the derivation name, so two different patch contents both calling themselves `p6` would name a single store path for two different derivations — a real cache-poisoning hazard, not a cosmetic clash. Verified `main` at `ac45ce5` carries `6`, so `7` is the next free number. Worth recording how this nearly escaped: both sides made the *identical* `5` → `6` edit, so git merged that line silently and `patchRevision` never appeared in the conflict list. The only conflicted file was the patch itself.
+- **Alternative considered:** Keep `6` and argue the contents are equivalent — rejected outright, they are not. Also rejected: renumber inside Task 2's original commit by rewriting history, which would invalidate every review already performed against those SHAs.
+
+### Integration: the patch file was merged as a tree, never as patch text
+- **Question:** `patches/agent-plugins/codex-plugin-cc.patch` conflicted. Resolve it as text like any other conflict, or reconstruct it?
+- **Choice:** Reconstructed. The three states — merge-base `165a3b0`, `origin/main`, and this branch's `78b3b29` — were materialised as real source trees from pin `db52e28f`, three-way merged with git, and the patch regenerated from the merged tree with the plan's documented `git diff -U0 <pin>` protocol. The tree merge was clean, no conflicts, with `tests/runtime.test.mjs` auto-merged.
+- **Grounding:** The patch is zero-context, so every hunk header is a bare `@@ -a,b +c,d @@` whose line numbers both sides shifted independently, and the derivation applies it with `patch -p1`, which tolerates offsets. A textually-merged zero-context patch can therefore apply *successfully* to the wrong lines and produce a silently wrong plugin — the failure mode has no error message. `main`'s own CLAUDE.md guidance (added by issue #11) makes the same point about the patch carrying no per-line file attribution. Result checked three ways before commit: `git apply --unidiff-zero --check`, `patch -p1 --dry-run`, and a green `just build` (which runs the real `patch -p1`), plus a file-count reconciliation — 29 = the base's 22 + this branch's 3 new + #10's 4 new.
+- **Alternative considered:** Resolve the text by hand — rejected as unverifiable for the reason above. Also rejected: rebase this branch onto `main` instead of merging, which would replay six reviewed implementation commits against a changed patch file and invalidate their review SHAs for no benefit.
+
+### Integration: #10's new test file leaks brokers, so R1 needs one more file
+- **Question:** The merged suite left 6 live brokers, breaking AC1 on the merged tree even though both sides were green alone. Is fixing a test file that arrived with issue #10 in scope here?
+- **Choice:** Yes — added as Task 8, closing the gap by having `tests/worker-postmortem.test.mjs` adopt `pinHermeticStateRoot`.
+- **Grounding:** R1's acceptance criterion is about *the suite*, not about a fixed list of files: "a full suite run with the documented env-scrubbed command leaves zero additional `app-server-broker` processes". Spec D-3 enumerated five adopting files because those were the files that existed when it was written; a sixth broker-spawning file arriving later is the same defect this issue exists to close, reached by a new route. Diagnosed rather than assumed: all six survivors trace to that file — five workspaces named `codex-plugin-postmortem-repo-*` and one from its unprefixed `makeTempDir()` — and it already sets `CLAUDE_PLUGIN_DATA` to its own `codex-plugin-postmortem-data-*` root at module scope with no reaping hook, which is also why the live plugin data dir stayed clean and R8's evidence still holds.
+- **Alternative considered:** Declare it #10's regression and ship AC1 red with a note — rejected: the demo the issue names is the whole suite, and a criterion that only holds when you exclude one file is not the criterion. Also rejected: write a second reaper for that file — the existing helper's root prefix already matches the name that file chose, so adoption is a one-line substitution.
 
 ## Standards review provenance
 
@@ -2023,7 +2041,7 @@ git status --porcelain
 just build
 ```
 
-Expected: `patchRevision = 6;` exactly (not 5, not 7), a clean working tree, and a successful build.
+Expected: `patchRevision = 7;` exactly (not 5, not 6), a clean working tree, and a successful build. The value is `7` rather than Task 2's `6` because `main` shipped issue #10's own `patchRevision = 6` before this branch merged; the integration commit renumbered it and regenerated the patch on top of #10's.
 
 - [ ] **Step 3: The AC1 / AC2 demo**
 
@@ -2061,13 +2079,13 @@ Expected: `0` state dirs under the probe root (Task 1 recorded `PROBE_STATE_DIRS
 
 - [ ] **Step 5: Correct the one CLAUDE.md sentence**
 
-Only after Step 4 passed. In `$WORKTREE/CLAUDE.md`, the `codex-plugin-cc` patch bullet currently ends:
+Only after Step 4 passed. In `$WORKTREE/CLAUDE.md` (line 60 after the integration merge), the `codex-plugin-cc` patch bullet carries this clause — **mid-bullet, no longer at the end**:
 
 ```
 … — with the live Claude-session env unscrubbed, 4 upstream tests fail spuriously and every test run leaks `codex-plugin-test-*` state dirs into `~/.claude/plugins/data/codex-nix-codex/state/`.
 ```
 
-Replace that trailing clause with a description of what the code now does:
+**`main` has since appended a further sentence to that same bullet**, starting `To assert anything *about* the patched plugin source …` and ending `… cannot tell you which file a match sits in.` It arrived with issue #11, is unrelated to this issue, and must be **preserved verbatim and left last** — R8 permits exactly one sentence's worth of change and this is not it. Replace only the leak clause, with a description of what the code now does:
 
 ```
 … — with the live Claude-session env unscrubbed, 4 upstream tests fail spuriously. The five test files that write under the shared state root (`runtime`, `state`, `liveness`, `reviewer-detach`, `broker-reaping`) call `pinHermeticStateRoot` (`tests/helpers.mjs`), which pins `CLAUDE_PLUGIN_DATA` to a private temp root and group-kills every broker recorded there at file teardown; `isolation.test.mjs` pins and restores a root of its own per test and is left alone. That, plus a `teardownBrokerSession` that kills by default and a broker that exits on its own once nothing wants it, is why a run deposits no `codex-plugin-test-*` state dirs in `~/.claude/plugins/data/codex-nix-codex/state/` and leaves no surviving `app-server-broker` or `codex app-server` processes.
@@ -2102,11 +2120,83 @@ EOF
 
 ---
 
+### Task 8: The merged suite reaps #10's brokers too (R1)
+
+Issue #10 merged to `main` first and brought a new broker-spawning test file with it. Integration commit `2ee96b1` merged it in; the merged suite is green (151 tests / 147 pass / 0 fail / 4 expected skips) but leaves **6 live brokers**, so R1/AC1 is red on the tree that will actually ship. This task closes that and nothing else.
+
+**Files:**
+- Modify (scratch): `$SCRATCH/tests/worker-postmortem.test.mjs`
+- Read only: `$SCRATCH/tests/helpers.mjs` (`pinHermeticStateRoot`), the five files that already adopt it
+- Regenerate: `$WORKTREE/patches/agent-plugins/codex-plugin-cc.patch`
+
+**Interfaces:**
+- Consumes: `pinHermeticStateRoot(label)` from `tests/helpers.mjs` — makes `codex-plugin-${label}-data-` as a private temp root, assigns `process.env.CLAUDE_PLUGIN_DATA`, deletes `CODEX_COMPANION_SESSION_ID` / `CODEX_COMPANION_TRANSCRIPT_PATH`, and installs the file-scoped reaping `after` hook.
+- Produces: nothing new. `patchRevision` stays `7`.
+
+- [ ] **Step 1: Rebuild the scratch checkout**
+
+Run the *Rebuild block* from the plan header against the **post-merge** committed patch.
+
+- [ ] **Step 2: Confirm the diagnosis before editing**
+
+The claim to re-derive, not trust: every surviving broker belongs to `tests/worker-postmortem.test.mjs`. It sets its own state root at module scope —
+
+```js
+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-postmortem-data-");
+```
+
+— with no reaping hook anywhere in the file, and it drives `codex-companion.mjs` through `installFakeCodex` in 7 places. Use the header's `count` and the `mine`/`ps -Eww` attribution; do not use `pkill`. If any survivor is **not** attributable to that file, stop and report it — a second leaking file is a different finding and this task's one-line fix would hide it.
+
+- [ ] **Step 3: Adopt the helper**
+
+Replace that assignment with `pinHermeticStateRoot("postmortem")` and add it to the existing `./helpers.mjs` import (keep `makeTempDir`, still used for workspaces and bin dirs).
+
+The label is `"postmortem"` deliberately: it yields the prefix `codex-plugin-postmortem-data-`, byte-identical to the root name that file already chose, so no other line in it changes and #10's own temp-dir naming survives.
+
+Two things to check rather than assume, and report both:
+- The file must not read `process.env.CLAUDE_PLUGIN_DATA` expecting the old value — the helper assigns the same shape, but confirm it, and confirm nothing re-points the variable mid-file (the helper re-pins its captured root before walking, so a mid-file repoint is survivable but worth knowing).
+- The helper also deletes the two `CODEX_COMPANION_*` variables. Under the documented scrubbed command they are already unset, so this is a no-op there; say so explicitly if you confirm it, and flag it if any test in the file depends on them.
+
+- [ ] **Step 4: The R1 gate**
+
+```sh
+reap_mine
+count                                   # must print brokers=0 app-servers=0
+(cd "$SCRATCH" && timeout 540 env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH \
+   node --test --test-timeout=120000 tests/*.test.mjs)
+count                                   # must print brokers=0 app-servers=0
+```
+
+Expected: 151 tests, 0 failures, 4 expected skips, and **`brokers=0 app-servers=0`** after. Bound every run with `timeout`; a hang must surface as a failed command, never as silence. Report the counts verbatim and the RED figure you measured in Step 2.
+
+- [ ] **Step 5: Regenerate, build, commit**
+
+Run the header's *Regeneration block*, then `just build` from `$WORKTREE` (expect the derivation to still say `p7`), then commit the patch. `patchRevision` must remain `7` — do not touch it.
+
+```bash
+cd "$WORKTREE"
+git add patches/agent-plugins/codex-plugin-cc.patch
+git commit -m "$(cat <<'EOF'
+test(agent-plugins): reap the brokers #10's post-mortem tests spawn (#9)
+
+tests/worker-postmortem.test.mjs arrived with issue #10, pins its own state
+root and spawns real brokers through codex-companion, but installs no reaping
+hook -- so the merged suite left 6 brokers alive and AC1 was red on the merged
+tree. It now calls pinHermeticStateRoot("postmortem"), whose root prefix is
+byte-identical to the name the file already used.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
 ## Requirement coverage
 
 | Req | Acceptance criterion | Task |
 |---|---|---|
-| R1 | Full scrubbed suite run leaves zero additional brokers and zero additional orphaned app-servers | 2 (mechanism, Step 8) · 7 (final demo, Step 3) |
+| R1 | Full scrubbed suite run leaves zero additional brokers and zero additional orphaned app-servers | 2 (mechanism, Step 8) · 8 (#10's post-mortem file adopts the mechanism) · 7 (final demo, Step 3) |
 | R2 | `--test-name-pattern 'shared broker'` leaves zero additional brokers | 2 (Step 8) · 7 (Step 3) |
 | R3 | A broker whose record is gone or replaced, or that nothing has connected to for the idle bound, exits on its own leaving no artifacts and taking its app-server with it | 5 (decision table) · 6 (wiring, `--log-file`, exit sequence) |
 | R4 | `ensureBrokerSession`'s not-ready and stale-record paths terminate the child and its own child | 3 |
