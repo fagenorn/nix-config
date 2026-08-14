@@ -90,11 +90,17 @@ command is missing, take the capability fallback above — use the native
 reviewer flow immediately and record it as such. Never convert a missing
 runtime into a timed-out Codex attempt.
 
-Dispatch the plugin agent `codex:codex-reviewer` once with the complete packet.
+Dispatch the plugin agent once with the complete packet using this transport
+selection:
+
+<!-- agent-dispatch: id=codex-review-transport role=codex-transport model=sonnet effort=medium -->
+Agent(subagent_type="codex:codex-reviewer", model="sonnet", effort="medium") transports the complete review packet to the isolated Codex runtime.
+
 Run it in the foreground, with the first line of the dispatch exactly
 `WORKTREE_ROOT: <absolute worktree root>` so the bridge keys runtime job state
 to the reviewed worktree. Launch mechanics live solely in that agent's
-definition. The contract: the review runs fresh in an isolated read-only
+definition. This selection changes only the Claude transport tier; it does not
+select or change the external Codex runtime model. The contract: the review runs fresh in an isolated read-only
 Codex runtime (fresh `CODEX_HOME`, approval policy `never`, sandbox
 `read-only`), survives the bridge's own lifetime, and is bounded by the
 runtime's internal ~14 min budget — expect up to ~15 minutes wall clock. The
@@ -118,8 +124,13 @@ confidence, and unknowns. Treat only these as Codex failures:
   dead-worker detection), with the job's recorded error on the line;
 - the result is empty or malformed after one completed fresh run.
 
-On a real failure, dispatch exactly one fresh Claude `reviewer`-type standards
-reviewer (read-only toolset, matching from-issue Phase 5 step 3) with the same
+On a real failure, dispatch exactly one fresh Claude standards reviewer with the
+same packet using:
+
+<!-- agent-dispatch: id=codex-failure-fallback-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") performs the one-time native standards-review fallback.
+
+Give it the read-only toolset matching from-issue Phase 5 step 3 and the same
 packet and the same read-only/output contract. Do not ask
 that fallback reviewer to imitate Codex. Record the concrete failure class and
 that Claude fallback was used. Do not retry Codex and do not fall back because of

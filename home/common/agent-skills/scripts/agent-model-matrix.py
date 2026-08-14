@@ -24,7 +24,7 @@ DISPATCH_FIELDS = {
     "effort",
     "requires",
 }
-EVENT_FIELDS = {"id", "role", "model", "effort", "requires"}
+EVENT_FIELDS = {"workflow", "dispatch", "role", "model", "effort", "requires"}
 REVIEWER_LITE_REQUIREMENTS = {"named-prior-findings", "bounded-fix-diff"}
 EXPECTED_ROLE_TIERS = {
     "issue-owner": ("opus", "high"),
@@ -38,7 +38,8 @@ EXPECTED_ROLE_TIERS = {
     "codex-transport": ("sonnet", "medium"),
 }
 CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite", "mechanic"}
-EXPECTED_SCENARIOS = {"orchestration", "from-issue", "sdd", "shipping"}
+WORKFLOW_FAMILIES = {"orchestration", "from-issue", "sdd", "shipping"}
+EXPECTED_SCENARIOS = {*WORKFLOW_FAMILIES, "representative"}
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -199,6 +200,7 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
     if not isinstance(dispatch_value, list):
         errors.append("matrix.dispatch_sites: must be an array")
     dispatch_ids: set[str] = set()
+    dispatch_by_id: dict[str, dict[str, Any]] = {}
     dispatch_calls: set[tuple[str, str]] = set()
     manifested_calls: dict[Path, dict[str, str]] = {}
     for index, site in enumerate(dispatch_sites):
@@ -218,6 +220,7 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
             errors.append(f"{label}: duplicate id {site_id!r}")
         else:
             dispatch_ids.add(site_id)
+            dispatch_by_id[site_id] = site
         errors.extend(_validate_selection(site, label, roles))
         manifest, path_errors = _safe_manifest_path(root, site.get("path"), label)
         errors.extend(path_errors)
@@ -285,7 +288,6 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
             "matrix.scenarios: scenario names must be exactly "
             + ", ".join(sorted(EXPECTED_SCENARIOS))
         )
-    event_ids: set[str] = set()
     for scenario, events in scenarios.items():
         label = f"matrix.scenarios.{scenario}"
         if not isinstance(scenario, str) or not scenario:
@@ -293,6 +295,7 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
         if not isinstance(events, list):
             errors.append(f"{label}: must be an array")
             continue
+        scenario_dispatches: set[str] = set()
         for index, event in enumerate(events):
             event_label = f"{label}[{index}]"
             if not isinstance(event, dict):
@@ -303,14 +306,51 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
                     f"{event_label}: fields must be exactly "
                     + ", ".join(sorted(EVENT_FIELDS))
                 )
-            event_id = event.get("id")
-            if not isinstance(event_id, str) or not event_id:
-                errors.append(f"{event_label}.id: must be a non-empty string")
-            elif event_id in event_ids:
-                errors.append(f"{event_label}: duplicate id {event_id!r}")
+            workflow = event.get("workflow")
+            if not isinstance(workflow, str) or workflow not in WORKFLOW_FAMILIES:
+                errors.append(f"{event_label}: unknown workflow {workflow!r}")
+            elif scenario != "representative" and workflow != scenario:
+                errors.append(
+                    f"{event_label}: workflow {workflow!r} must match scenario "
+                    f"{scenario!r}"
+                )
+            dispatch = event.get("dispatch")
+            if not isinstance(dispatch, str) or not dispatch:
+                errors.append(f"{event_label}.dispatch: must be a non-empty string")
+            elif dispatch in scenario_dispatches:
+                errors.append(f"{event_label}: duplicate dispatch {dispatch!r}")
             else:
-                event_ids.add(event_id)
+                scenario_dispatches.add(dispatch)
+                site = dispatch_by_id.get(dispatch)
+                if site is None:
+                    errors.append(
+                        f"{event_label}: unknown dispatch {dispatch!r}; register it first"
+                    )
+                elif any(
+                    event.get(field) != site.get(field)
+                    for field in ("role", "model", "effort", "requires")
+                ):
+                    errors.append(
+                        f"{event_label}: selection must match dispatch {dispatch!r}"
+                    )
             errors.extend(_validate_selection(event, event_label, roles))
+            if event.get("role") == "reviewer-lite" and isinstance(workflow, str):
+                prior_full_review = any(
+                    prior.get("workflow") == workflow
+                    and prior.get("role") == "reviewer"
+                    and isinstance(prior.get("dispatch"), str)
+                    and (
+                        "first-pass" in prior["dispatch"]
+                        or "full-" in prior["dispatch"]
+                    )
+                    for prior in events[:index]
+                    if isinstance(prior, dict)
+                )
+                if not prior_full_review:
+                    errors.append(
+                        f"{event_label}: reviewer-lite must follow a named "
+                        "first-pass or full-review dispatch in the same workflow"
+                    )
     return errors
 
 
@@ -381,7 +421,10 @@ def trace(root: str | Path | None, scenario: str) -> list[dict[str, str]]:
     if scenario not in scenarios:
         raise ValueError(f"unknown scenario {scenario!r}")
     return [
-        {field: event[field] for field in ("id", "role", "model", "effort")}
+        {
+            field: event[field]
+            for field in ("workflow", "dispatch", "role", "model", "effort")
+        }
         for event in scenarios[scenario]
     ]
 

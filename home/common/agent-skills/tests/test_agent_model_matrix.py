@@ -221,6 +221,58 @@ EXPECTED_SDD_SITES = {
     ),
 }
 
+EXPECTED_SHIPPING_SITES = {
+    "ship-release-owner": (
+        "home/common/agent-skills/skills/ship-release/SKILL.md",
+        "ship-owner",
+        "opus",
+        "high",
+        [],
+    ),
+    "ship-issue-merge-delta-review": (
+        "home/common/agent-skills/skills/ship-issue/SKILL.md",
+        "reviewer",
+        "opus",
+        "high",
+        [],
+    ),
+    "ship-issue-full-conformance-review": (
+        "home/common/agent-skills/skills/ship-issue/SKILL.md",
+        "reviewer",
+        "opus",
+        "high",
+        [],
+    ),
+    "ship-issue-full-correctness-fallback": (
+        "home/common/agent-skills/skills/ship-issue/SKILL.md",
+        "reviewer",
+        "opus",
+        "high",
+        [],
+    ),
+    "ship-issue-scoped-fix-rereview": (
+        "home/common/agent-skills/skills/ship-issue/SKILL.md",
+        "reviewer-lite",
+        "sonnet",
+        "medium",
+        ["named-prior-findings", "bounded-fix-diff"],
+    ),
+    "codex-review-transport": (
+        "home/common/claude-code/skills/codex-collaboration/SKILL.md",
+        "codex-transport",
+        "sonnet",
+        "medium",
+        [],
+    ),
+    "codex-failure-fallback-review": (
+        "home/common/claude-code/skills/codex-collaboration/SKILL.md",
+        "reviewer",
+        "opus",
+        "high",
+        [],
+    ),
+}
+
 
 def load_module():
     spec = importlib.util.spec_from_file_location("agent_model_matrix", SCRIPT)
@@ -286,7 +338,9 @@ class AgentModelMatrixTest(unittest.TestCase):
 
     def test_from_issue_trace_includes_bounded_researcher(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
-        events = {event["id"]: event for event in data["scenarios"]["from-issue"]}
+        events = {
+            event["dispatch"]: event for event in data["scenarios"]["from-issue"]
+        }
         event = events["research-background-researcher"]
         self.assertEqual(
             (event["role"], event["model"], event["effort"]),
@@ -360,6 +414,65 @@ class AgentModelMatrixTest(unittest.TestCase):
                 site["marker"],
                 f"<!-- agent-dispatch: id={site_id} role={role} "
                 f"model={model} effort={effort} -->",
+            )
+
+    def test_shipping_and_codex_dispatches_select_exact_tiers(self):
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        sites = {site["id"]: site for site in data["dispatch_sites"]}
+        self.assertEqual(set(EXPECTED_SHIPPING_SITES) - set(sites), set())
+        for site_id, (path, role, model, effort, requires) in EXPECTED_SHIPPING_SITES.items():
+            site = sites[site_id]
+            self.assertEqual(site["path"], path, site_id)
+            self.assertEqual(
+                (site["role"], site["model"], site["effort"], site["requires"]),
+                (role, model, effort, requires),
+                site_id,
+            )
+            self.assertEqual(
+                site["marker"],
+                f"<!-- agent-dispatch: id={site_id} role={role} "
+                f"model={model} effort={effort} -->",
+            )
+            self.assertIn("Agent(", site["call"], site_id)
+
+    def test_representative_trace_covers_every_workflow_with_safe_rereviews(self):
+        module = load_module()
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        events = data["scenarios"]["representative"]
+        trace = module.trace(REPO_ROOT, "representative")
+
+        self.assertEqual(
+            {event["workflow"] for event in trace},
+            {"orchestration", "from-issue", "sdd", "shipping"},
+        )
+        self.assertTrue(
+            all(
+                set(event) == {"workflow", "dispatch", "role", "model", "effort"}
+                for event in trace
+            )
+        )
+        self.assertTrue(
+            all(
+                event["model"] not in (None, "inherit")
+                and event["effort"] not in (None, "inherit")
+                for event in trace
+            )
+        )
+        for index, event in enumerate(events):
+            if event["role"] != "reviewer-lite":
+                continue
+            self.assertEqual(
+                event["requires"],
+                ["named-prior-findings", "bounded-fix-diff"],
+            )
+            self.assertTrue(
+                any(
+                    prior["workflow"] == event["workflow"]
+                    and prior["role"] == "reviewer"
+                    and "review" in prior["dispatch"]
+                    for prior in events[:index]
+                ),
+                event,
             )
 
     def test_reviewer_lite_cannot_be_a_first_pass_reviewer(self):
@@ -541,7 +654,13 @@ class AgentModelMatrixTest(unittest.TestCase):
         second = module.trace(REPO_ROOT, "sdd")
         self.assertEqual(first, second)
         self.assertTrue(first)
-        self.assertTrue(all(set(event) == {"id", "role", "model", "effort"} for event in first))
+        self.assertTrue(
+            all(
+                set(event)
+                == {"workflow", "dispatch", "role", "model", "effort"}
+                for event in first
+            )
+        )
         with self.assertRaises(ValueError):
             module.trace(REPO_ROOT, "does-not-exist")
 

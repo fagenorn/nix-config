@@ -408,12 +408,86 @@
       "model": "opus",
       "effort": "high",
       "requires": []
+    },
+    {
+      "id": "ship-release-owner",
+      "path": "home/common/agent-skills/skills/ship-release/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=ship-release-owner role=ship-owner model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") owns the release through final reporting.",
+      "role": "ship-owner",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "ship-issue-merge-delta-review",
+      "path": "home/common/agent-skills/skills/ship-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") reviews exactly the non-empty merge delta.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "ship-issue-full-conformance-review",
+      "path": "home/common/agent-skills/skills/ship-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=ship-issue-full-conformance-review role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") performs the full conformance review.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "ship-issue-full-correctness-fallback",
+      "path": "home/common/agent-skills/skills/ship-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=ship-issue-full-correctness-fallback role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") performs the full correctness fallback review.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "ship-issue-scoped-fix-rereview",
+      "path": "home/common/agent-skills/skills/ship-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=ship-issue-scoped-fix-rereview role=reviewer-lite model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"reviewer-lite\", model=\"sonnet\", effort=\"medium\") re-reviews named prior findings against the bounded fix diff.",
+      "role": "reviewer-lite",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": [
+        "named-prior-findings",
+        "bounded-fix-diff"
+      ]
+    },
+    {
+      "id": "codex-review-transport",
+      "path": "home/common/claude-code/skills/codex-collaboration/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=codex-review-transport role=codex-transport model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"codex:codex-reviewer\", model=\"sonnet\", effort=\"medium\") transports the complete review packet to the isolated Codex runtime.",
+      "role": "codex-transport",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": []
+    },
+    {
+      "id": "codex-failure-fallback-review",
+      "path": "home/common/claude-code/skills/codex-collaboration/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=codex-failure-fallback-review role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") performs the one-time native standards-review fallback.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
     }
   ],
   "scenarios": {
     "orchestration": [
       {
-        "id": "orchestration-issue-owner",
+        "workflow": "orchestration",
+        "dispatch": "orchestration-issue-owner",
         "role": "issue-owner",
         "model": "opus",
         "effort": "high",
@@ -422,35 +496,32 @@
     ],
     "from-issue": [
       {
-        "id": "from-issue-owner",
+        "workflow": "from-issue",
+        "dispatch": "from-issue-phase-delegate",
         "role": "issue-owner",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "research-background-researcher",
+        "workflow": "from-issue",
+        "dispatch": "research-background-researcher",
         "role": "researcher",
         "model": "sonnet",
         "effort": "medium",
         "requires": []
       },
       {
-        "id": "from-issue-plan-review",
+        "workflow": "from-issue",
+        "dispatch": "from-issue-plan-review",
         "role": "reviewer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "from-issue-implementation",
-        "role": "implementer",
-        "model": "opus",
-        "effort": "high",
-        "requires": []
-      },
-      {
-        "id": "from-issue-shipping",
+        "workflow": "from-issue",
+        "dispatch": "from-issue-ship-owner",
         "role": "ship-owner",
         "model": "opus",
         "effort": "high",
@@ -459,28 +530,32 @@
     ],
     "sdd": [
       {
-        "id": "sdd-mechanic-implementation",
+        "workflow": "sdd",
+        "dispatch": "sdd-mechanic-implementation",
         "role": "mechanic",
         "model": "sonnet",
         "effort": "medium",
         "requires": []
       },
       {
-        "id": "sdd-nonmechanical-implementation",
+        "workflow": "sdd",
+        "dispatch": "sdd-nonmechanical-implementation",
         "role": "implementer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-first-pass-task-review",
+        "workflow": "sdd",
+        "dispatch": "sdd-first-pass-task-review",
         "role": "reviewer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-scoped-task-rereview",
+        "workflow": "sdd",
+        "dispatch": "sdd-scoped-task-rereview",
         "role": "reviewer-lite",
         "model": "sonnet",
         "effort": "medium",
@@ -490,49 +565,56 @@
         ]
       },
       {
-        "id": "sdd-task-rereview-escalation",
+        "workflow": "sdd",
+        "dispatch": "sdd-task-rereview-escalation",
         "role": "reviewer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-codex-rescue-transport",
+        "workflow": "sdd",
+        "dispatch": "sdd-codex-rescue-transport",
         "role": "codex-transport",
         "model": "sonnet",
         "effort": "medium",
         "requires": []
       },
       {
-        "id": "sdd-post-rescue-implementation",
+        "workflow": "sdd",
+        "dispatch": "sdd-post-rescue-implementation",
         "role": "implementer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-round-five-implementation",
+        "workflow": "sdd",
+        "dispatch": "sdd-round-five-implementation",
         "role": "implementer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-final-conformance-review",
+        "workflow": "sdd",
+        "dispatch": "sdd-final-conformance-review",
         "role": "reviewer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-final-correctness-review",
+        "workflow": "sdd",
+        "dispatch": "sdd-final-correctness-review",
         "role": "reviewer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-final-conformance-rereview",
+        "workflow": "sdd",
+        "dispatch": "sdd-final-conformance-rereview",
         "role": "reviewer-lite",
         "model": "sonnet",
         "effort": "medium",
@@ -542,7 +624,8 @@
         ]
       },
       {
-        "id": "sdd-final-correctness-rereview",
+        "workflow": "sdd",
+        "dispatch": "sdd-final-correctness-rereview",
         "role": "reviewer-lite",
         "model": "sonnet",
         "effort": "medium",
@@ -552,7 +635,8 @@
         ]
       },
       {
-        "id": "sdd-final-rereview-escalation",
+        "workflow": "sdd",
+        "dispatch": "sdd-final-rereview-escalation",
         "role": "reviewer",
         "model": "opus",
         "effort": "high",
@@ -561,25 +645,159 @@
     ],
     "shipping": [
       {
-        "id": "shipping-owner",
+        "workflow": "shipping",
+        "dispatch": "ship-release-owner",
         "role": "ship-owner",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "shipping-review",
+        "workflow": "shipping",
+        "dispatch": "ship-issue-merge-delta-review",
         "role": "reviewer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "shipping-codex-transport",
+        "workflow": "shipping",
+        "dispatch": "ship-issue-full-conformance-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "shipping",
+        "dispatch": "codex-review-transport",
         "role": "codex-transport",
         "model": "sonnet",
         "effort": "medium",
         "requires": []
+      },
+      {
+        "workflow": "shipping",
+        "dispatch": "ship-issue-full-correctness-fallback",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "shipping",
+        "dispatch": "codex-failure-fallback-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "shipping",
+        "dispatch": "ship-issue-scoped-fix-rereview",
+        "role": "reviewer-lite",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": [
+          "named-prior-findings",
+          "bounded-fix-diff"
+        ]
+      }
+    ],
+    "representative": [
+      {
+        "workflow": "orchestration",
+        "dispatch": "orchestration-issue-owner",
+        "role": "issue-owner",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "from-issue",
+        "dispatch": "from-issue-phase-delegate",
+        "role": "issue-owner",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "from-issue",
+        "dispatch": "research-background-researcher",
+        "role": "researcher",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": []
+      },
+      {
+        "workflow": "from-issue",
+        "dispatch": "from-issue-plan-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "sdd",
+        "dispatch": "sdd-nonmechanical-implementation",
+        "role": "implementer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "sdd",
+        "dispatch": "sdd-first-pass-task-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "sdd",
+        "dispatch": "sdd-scoped-task-rereview",
+        "role": "reviewer-lite",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": [
+          "named-prior-findings",
+          "bounded-fix-diff"
+        ]
+      },
+      {
+        "workflow": "shipping",
+        "dispatch": "ship-release-owner",
+        "role": "ship-owner",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "shipping",
+        "dispatch": "ship-issue-full-conformance-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "workflow": "shipping",
+        "dispatch": "codex-review-transport",
+        "role": "codex-transport",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": []
+      },
+      {
+        "workflow": "shipping",
+        "dispatch": "ship-issue-scoped-fix-rereview",
+        "role": "reviewer-lite",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": [
+          "named-prior-findings",
+          "bounded-fix-diff"
+        ]
       }
     ]
   }
