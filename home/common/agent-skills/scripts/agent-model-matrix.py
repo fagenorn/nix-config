@@ -15,6 +15,7 @@ AGENTS_PATH = Path("home/common/claude-code/agents")
 TOP_LEVEL_FIELDS = {"roles", "dispatch_sites", "scenarios"}
 ROLE_FIELDS = {"model", "effort", "eligible", "prohibited"}
 DISPATCH_FIELDS = {
+    "call",
     "id",
     "path",
     "marker",
@@ -197,6 +198,8 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
     if not isinstance(dispatch_value, list):
         errors.append("matrix.dispatch_sites: must be an array")
     dispatch_ids: set[str] = set()
+    dispatch_calls: set[tuple[str, str]] = set()
+    manifested_calls: dict[Path, dict[str, str]] = {}
     for index, site in enumerate(dispatch_sites):
         label = f"matrix.dispatch_sites[{index}]"
         if not isinstance(site, dict):
@@ -221,16 +224,56 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
             if not manifest.is_file():
                 errors.append(f"{label}: manifest path does not exist: {site.get('path')}")
             else:
+                text = manifest.read_text(encoding="utf-8")
+                lines = text.splitlines()
                 marker = site.get("marker")
                 if not isinstance(marker, str) or not marker:
                     errors.append(f"{label}: marker must be a non-empty string")
                 else:
-                    count = manifest.read_text(encoding="utf-8").count(marker)
+                    count = lines.count(marker)
                     if count != 1:
                         errors.append(
                             f"{label}: marker {marker!r} occurs {count} times in "
                             f"{site.get('path')}; expected exactly 1"
                         )
+                call = site.get("call")
+                if not isinstance(call, str) or not call or "Agent(" not in call:
+                    errors.append(
+                        f"{label}: call must be a non-empty literal Agent(...) line"
+                    )
+                else:
+                    call_key = (site["path"], call)
+                    if call_key in dispatch_calls:
+                        errors.append(
+                            f"{label}: duplicate call anchor {call!r} in {site['path']}"
+                        )
+                    dispatch_calls.add(call_key)
+                    count = lines.count(call)
+                    if count != 1:
+                        errors.append(
+                            f"{label}: call {call!r} occurs {count} times in "
+                            f"{site.get('path')}; expected exactly 1"
+                        )
+                    manifested_calls.setdefault(manifest, {})[call] = (
+                        marker if isinstance(marker, str) else ""
+                    )
+                    if (
+                        isinstance(marker, str)
+                        and lines.count(marker) == 1
+                        and count == 1
+                        and lines.index(call) != lines.index(marker) + 1
+                    ):
+                        errors.append(
+                            f"{label}: call must be immediately after marker in "
+                            f"{site.get('path')}"
+                        )
+
+    for manifest, calls in manifested_calls.items():
+        for line_number, line in enumerate(
+            manifest.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if "Agent(" in line and line not in calls:
+                errors.append(f"{manifest}:{line_number}: unmarked Agent call {line!r}")
 
     scenarios_value = data.get("scenarios")
     scenarios = scenarios_value if isinstance(scenarios_value, dict) else {}

@@ -95,7 +95,148 @@
       ]
     }
   },
-  "dispatch_sites": [],
+  "dispatch_sites": [
+    {
+      "id": "orchestration-issue-owner",
+      "path": "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:",
+      "role": "issue-owner",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "from-issue-phase-delegate",
+      "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.",
+      "role": "issue-owner",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "from-issue-design-grill",
+      "path": "home/common/agent-skills/skills/from-issue/AUTO.md",
+      "marker": "<!-- agent-dispatch: id=from-issue-design-grill role=issue-owner model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") launches the autonomous design-and-grill owner.",
+      "role": "issue-owner",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "from-issue-planning",
+      "path": "home/common/agent-skills/skills/from-issue/AUTO.md",
+      "marker": "<!-- agent-dispatch: id=from-issue-planning role=issue-owner model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") launches the autonomous planning owner.",
+      "role": "issue-owner",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "from-issue-plan-review",
+      "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=from-issue-plan-review role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") launches one fresh plan reviewer with no inherited context, the same inputs, and the same `REVIEW-CONTRACT.md` path, told to read that file first.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "from-issue-mechanical-implementation",
+      "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=from-issue-mechanical-implementation role=mechanic model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"mechanic\", model=\"sonnet\", effort=\"medium\") executes the fully specified mechanical change.",
+      "role": "mechanic",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": []
+    },
+    {
+      "id": "from-issue-mechanical-review",
+      "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=from-issue-mechanical-review role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") performs its first-pass review.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "from-issue-ship-owner",
+      "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow, and ship-issue's ~100 turns over that 200–300k prefix costs ~1–3M weighted tokens versus a fresh ~10k subagent that returns one summary.",
+      "role": "ship-owner",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "from-issue-inline-ship-review",
+      "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=from-issue-inline-ship-review role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") launches a fresh first-pass reviewer over the shipping diff.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "design-bounded-fact-lookup",
+      "path": "home/common/agent-skills/skills/design/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=haiku effort=medium -->",
+      "call": "Agent(subagent_type=\"Explore\", model=\"haiku\", effort=\"medium\") performs one sharply bounded read-only fact lookup without making the design decision.",
+      "role": "explorer",
+      "model": "haiku",
+      "effort": "medium",
+      "requires": []
+    },
+    {
+      "id": "grill-bounded-fact-lookup",
+      "path": "home/common/agent-skills/skills/grill-with-docs/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=grill-bounded-fact-lookup role=explorer model=haiku effort=medium -->",
+      "call": "Agent(subagent_type=\"Explore\", model=\"haiku\", effort=\"medium\") performs one sharply bounded read-only fact lookup without making the design decision.",
+      "role": "explorer",
+      "model": "haiku",
+      "effort": "medium",
+      "requires": []
+    },
+    {
+      "id": "planning-bounded-fact-lookup",
+      "path": "home/common/agent-skills/skills/writing-plans/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=planning-bounded-fact-lookup role=explorer model=haiku effort=medium -->",
+      "call": "Agent(subagent_type=\"Explore\", model=\"haiku\", effort=\"medium\") performs one sharply bounded read-only repository lookup without choosing task boundaries.",
+      "role": "explorer",
+      "model": "haiku",
+      "effort": "medium",
+      "requires": []
+    },
+    {
+      "id": "doc-grounded-bounded-code-lookup",
+      "path": "home/common/agent-skills/skills/doc-grounded-questions/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=doc-grounded-bounded-code-lookup role=explorer model=haiku effort=medium -->",
+      "call": "Agent(subagent_type=\"Explore\", model=\"haiku\", effort=\"medium\") performs one sharply bounded read-only central-concept lookup without resolving the question.",
+      "role": "explorer",
+      "model": "haiku",
+      "effort": "medium",
+      "requires": []
+    },
+    {
+      "id": "research-background-explorer",
+      "path": "home/common/agent-skills/skills/research/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=research-background-explorer role=explorer model=haiku effort=medium -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"haiku\", effort=\"medium\", run_in_background=true) performs the bounded primary-source research while the caller keeps working.",
+      "role": "explorer",
+      "model": "haiku",
+      "effort": "medium",
+      "requires": []
+    }
+  ],
   "scenarios": {
     "orchestration": [
       {

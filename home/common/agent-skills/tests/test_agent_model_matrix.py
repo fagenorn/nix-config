@@ -25,6 +25,93 @@ EXPECTED_TIERS = {
     "codex-transport": ("sonnet", "medium"),
 }
 
+EXPECTED_OWNER_SITES = {
+    "orchestration-issue-owner": (
+        "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
+        "issue-owner",
+        "opus",
+        "high",
+    ),
+    "from-issue-phase-delegate": (
+        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "issue-owner",
+        "opus",
+        "high",
+    ),
+    "from-issue-design-grill": (
+        "home/common/agent-skills/skills/from-issue/AUTO.md",
+        "issue-owner",
+        "opus",
+        "high",
+    ),
+    "from-issue-planning": (
+        "home/common/agent-skills/skills/from-issue/AUTO.md",
+        "issue-owner",
+        "opus",
+        "high",
+    ),
+    "from-issue-plan-review": (
+        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "reviewer",
+        "opus",
+        "high",
+    ),
+    "from-issue-mechanical-implementation": (
+        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "mechanic",
+        "sonnet",
+        "medium",
+    ),
+    "from-issue-mechanical-review": (
+        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "reviewer",
+        "opus",
+        "high",
+    ),
+    "from-issue-ship-owner": (
+        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "ship-owner",
+        "opus",
+        "high",
+    ),
+    "from-issue-inline-ship-review": (
+        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "reviewer",
+        "opus",
+        "high",
+    ),
+    "design-bounded-fact-lookup": (
+        "home/common/agent-skills/skills/design/SKILL.md",
+        "explorer",
+        "haiku",
+        "medium",
+    ),
+    "grill-bounded-fact-lookup": (
+        "home/common/agent-skills/skills/grill-with-docs/SKILL.md",
+        "explorer",
+        "haiku",
+        "medium",
+    ),
+    "planning-bounded-fact-lookup": (
+        "home/common/agent-skills/skills/writing-plans/SKILL.md",
+        "explorer",
+        "haiku",
+        "medium",
+    ),
+    "doc-grounded-bounded-code-lookup": (
+        "home/common/agent-skills/skills/doc-grounded-questions/SKILL.md",
+        "explorer",
+        "haiku",
+        "medium",
+    ),
+    "research-background-explorer": (
+        "home/common/agent-skills/skills/research/SKILL.md",
+        "explorer",
+        "haiku",
+        "medium",
+    ),
+}
+
 
 def load_module():
     spec = importlib.util.spec_from_file_location("agent_model_matrix", SCRIPT)
@@ -97,6 +184,73 @@ class AgentModelMatrixTest(unittest.TestCase):
         module = load_module()
         self.assertEqual(module.validate(REPO_ROOT), [])
 
+    def test_owner_design_and_research_dispatches_select_exact_tiers(self):
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        sites = {site["id"]: site for site in data["dispatch_sites"]}
+        self.assertEqual(set(EXPECTED_OWNER_SITES) - set(sites), set())
+        for site_id, (path, role, model, effort) in EXPECTED_OWNER_SITES.items():
+            site = sites[site_id]
+            self.assertEqual(site["path"], path, site_id)
+            self.assertEqual(
+                (site["role"], site["model"], site["effort"]),
+                (role, model, effort),
+                site_id,
+            )
+            self.assertEqual(
+                site["marker"],
+                f"<!-- agent-dispatch: id={site_id} role={role} "
+                f"model={model} effort={effort} -->",
+            )
+            self.assertIn("Agent(", site["call"], site_id)
+
+    def test_cheap_tier_escalation_names_opus_role_and_durable_destination(self):
+        for relative in (
+            "home/common/agent-skills/skills/design/SKILL.md",
+            "home/common/agent-skills/skills/grill-with-docs/SKILL.md",
+            "home/common/agent-skills/skills/writing-plans/SKILL.md",
+            "home/common/agent-skills/skills/doc-grounded-questions/SKILL.md",
+            "home/common/agent-skills/skills/research/SKILL.md",
+        ):
+            text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("issue-owner` on Opus/high", text, relative)
+            self.assertRegex(text, r"ledger|fixed-schema report", relative)
+
+    def test_unmarked_agent_call_in_manifested_skill_fails(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = json.loads(MATRIX.read_text(encoding="utf-8"))
+            marker = (
+                "<!-- agent-dispatch: id=marked role=reviewer "
+                "model=opus effort=high -->"
+            )
+            call = 'Agent(subagent_type="reviewer", model="opus", effort="high")'
+            manifest = root / "workflow.md"
+            manifest.write_text(
+                f"{marker}\n{call}\n"
+                'Agent(subagent_type="general-purpose")\n',
+                encoding="utf-8",
+            )
+            data["dispatch_sites"] = [
+                {
+                    "id": "marked",
+                    "path": "workflow.md",
+                    "marker": marker,
+                    "call": call,
+                    "role": "reviewer",
+                    "model": "opus",
+                    "effort": "high",
+                    "requires": [],
+                }
+            ]
+            write_fixture(root, data)
+
+            errors = module.validate(root)
+
+        self.assertTrue(
+            any("unmarked Agent call" in error for error in errors), errors
+        )
+
     def test_cli_reports_missing_manifest_path_and_unknown_role(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -106,6 +260,7 @@ class AgentModelMatrixTest(unittest.TestCase):
                     "id": "missing-site",
                     "path": "missing/SKILL.md",
                     "marker": "agent-dispatch:missing-site",
+                    "call": 'Agent(subagent_type="general-purpose")',
                     "role": "not-a-role",
                     "model": "opus",
                     "effort": "high",
@@ -171,6 +326,7 @@ class AgentModelMatrixTest(unittest.TestCase):
                     "id": "duplicate",
                     "path": "workflow.md",
                     "marker": "absent-marker",
+                    "call": 'Agent(subagent_type="reviewer-lite")',
                     "role": "reviewer-lite",
                     "model": "sonnet",
                     "effort": "medium",
@@ -180,6 +336,7 @@ class AgentModelMatrixTest(unittest.TestCase):
                     "id": "duplicate",
                     "path": "workflow.md",
                     "marker": "expected-marker",
+                    "call": 'Agent(subagent_type="reviewer")',
                     "role": "reviewer",
                     "model": "sonnet",
                     "effort": "medium",
