@@ -127,6 +127,9 @@ def _validate_selection(
         errors.append(f"{label}: unknown role {role!r}")
         return errors
     role_spec = roles[role]
+    if not isinstance(role_spec, dict):
+        errors.append(f"{label}: role {role!r} has an invalid specification")
+        return errors
     for field in ("model", "effort"):
         value = item.get(field)
         if not isinstance(value, str) or not value:
@@ -283,6 +286,10 @@ def _agent_errors(root: Path, roles: dict[str, Any]) -> list[str]:
         if role not in roles:
             errors.append(f"{path}: unknown role {role!r}")
             continue
+        role_spec = roles[role]
+        if not isinstance(role_spec, dict):
+            errors.append(f"{path}: role {role!r} has an invalid specification")
+            continue
         if role in seen_roles:
             errors.append(f"{path}: duplicate agent role {role!r}")
         seen_roles.add(role)
@@ -292,10 +299,10 @@ def _agent_errors(root: Path, roles: dict[str, Any]) -> list[str]:
             value = metadata.get(field)
             if not value:
                 errors.append(f"{path}: omitted {field}")
-            elif value != roles[role].get(field):
+            elif value != role_spec.get(field):
                 errors.append(
                     f"{path}: {field} {value!r} does not match role {role!r} "
-                    f"({roles[role].get(field)!r})"
+                    f"({role_spec.get(field)!r})"
                 )
     missing = CUSTOM_AGENT_ROLES - seen_roles
     extra = seen_roles - CUSTOM_AGENT_ROLES

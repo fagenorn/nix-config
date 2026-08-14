@@ -144,6 +144,21 @@ class AgentModelMatrixTest(unittest.TestCase):
             errors,
         )
 
+    def test_malformed_known_role_returns_errors_instead_of_crashing(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = json.loads(MATRIX.read_text(encoding="utf-8"))
+            data["roles"]["reviewer"] = "not-an-object"
+            write_fixture(root, data)
+
+            errors = module.validate(root)
+
+        self.assertTrue(
+            any("matrix.roles.reviewer: must be an object" in error for error in errors),
+            errors,
+        )
+
     def test_duplicate_dispatch_id_marker_mismatch_and_reviewer_lite_misuse_fail(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as temporary:
