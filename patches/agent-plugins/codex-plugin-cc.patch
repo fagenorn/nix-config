@@ -103,7 +103,7 @@ index 19e33b8..08cb4e9 100644
 -        ]
 -      }
 diff --git a/plugins/codex/scripts/app-server-broker.mjs b/plugins/codex/scripts/app-server-broker.mjs
-index 1954274..92a41c2 100644
+index 1954274..9252fc4 100644
 --- a/plugins/codex/scripts/app-server-broker.mjs
 +++ b/plugins/codex/scripts/app-server-broker.mjs
 @@ -9 +9 @@ import { parseArgs } from "./lib/args.mjs";
@@ -121,25 +121,51 @@ index 1954274..92a41c2 100644
 +const EXTERNAL_AGENT_IMPORT = "externalAgentConfig/import";
 +const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
 +const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start", EXTERNAL_AGENT_IMPORT]);
-@@ -51 +59,3 @@ async function main() {
+@@ -39,0 +48,21 @@ function isInterruptRequest(message) {
++// How long a self-reaping broker waits for a graceful shutdown before it stops
++// waiting: long enough for a healthy codex app-server to exit once its stdin is
++// closed, short enough that a wedged one costs seconds instead of forever.
++const REAP_SHUTDOWN_BOUND_MS = 2000;
++
++// Resolves true if the promise settles within boundMs, false if the bound wins.
++// The loser is abandoned rather than cancelled, which is safe only because every
++// caller here is on its way to process.exit: an abandoned await cannot outlive
++// the process. unref'd so this timer never keeps the process alive by itself.
++function settledWithin(promise, boundMs) {
++  return new Promise((resolve) => {
++    const timer = setTimeout(() => resolve(false), boundMs);
++    timer.unref();
++    const settle = () => {
++      clearTimeout(timer);
++      resolve(true);
++    };
++    promise.then(settle, settle);
++  });
++}
++
+@@ -51 +80,3 @@ async function main() {
 -    throw new Error("Usage: node scripts/app-server-broker.mjs serve --endpoint <value> [--cwd <path>] [--pid-file <path>]");
 +    throw new Error(
 +      "Usage: node scripts/app-server-broker.mjs serve --endpoint <value> [--cwd <path>] [--pid-file <path>] [--log-file <path>]"
 +    );
-@@ -55 +65 @@ async function main() {
+@@ -55 +86 @@ async function main() {
 -    valueOptions: ["cwd", "pid-file", "endpoint"]
 +    valueOptions: ["cwd", "pid-file", "log-file", "endpoint"]
-@@ -61,0 +72,6 @@ async function main() {
+@@ -61,0 +93,6 @@ async function main() {
 +  // Before writePidFile and before the app-server is spawned: a bad bound must
 +  // not leave a half-started broker behind. Throwing here means the broker
 +  // never becomes ready, ensureBrokerSession returns null, and the CLI reports
 +  // that it failed to start the broker.
 +  const bounds = resolveSupervisionBounds(process.env);
 +
-@@ -65,0 +82,13 @@ async function main() {
+@@ -65,0 +103,17 @@ async function main() {
 +  const logFile = options["log-file"] ? path.resolve(options["log-file"]) : null;
-+  // Derived exactly as teardownBrokerSession derives it: the socket, pid file
-+  // and log file all live in one mkdtemp broker session dir.
++  // The socket, the pid file and the log file all live in one mkdtemp broker
++  // session dir, so any of the three names it. teardownBrokerSession resolves
++  // the same dir from the broker record's explicit sessionDir when it has one
++  // and otherwise from the pid file or the log file; the socket-dirname arm
++  // below is this file's own fallback, for a broker started with neither
++  // --pid-file nor --log-file, and teardown has no equivalent.
 +  const brokerSessionDir = pidFile
 +    ? path.dirname(pidFile)
 +    : logFile
@@ -150,10 +176,10 @@ index 1954274..92a41c2 100644
 +  // resolveWorkspaceRoot shells out to git rev-parse, so this is resolved once
 +  // and never per tick.
 +  const brokerRecordFile = resolveBrokerStateFile(cwd);
-@@ -71,0 +101,2 @@ async function main() {
+@@ -71,0 +126,2 @@ async function main() {
 +  let activeStreamMethod = null;
 +  const requestQueue = [];
-@@ -72,0 +104,7 @@ async function main() {
+@@ -72,0 +129,7 @@ async function main() {
 +  let recorded = false;
 +  let lastActivityMs = Date.now();
 +  let exiting = false;
@@ -161,7 +187,7 @@ index 1954274..92a41c2 100644
 +  function markActivity() {
 +    lastActivityMs = Date.now();
 +  }
-@@ -80,0 +119,47 @@ async function main() {
+@@ -80,0 +144,37 @@ async function main() {
 +      activeStreamMethod = null;
 +    }
 +    drainQueue();
@@ -199,9 +225,7 @@ index 1954274..92a41c2 100644
 +      if (!activeStreamSocket) {
 +        drainQueue();
 +      }
-+    }
-+  }
-+
+@@ -83,0 +184,11 @@ async function main() {
 +  function drainQueue() {
 +    if (activeRequestSocket || activeStreamSocket) {
 +      return;
@@ -209,27 +233,28 @@ index 1954274..92a41c2 100644
 +    const next = requestQueue.shift();
 +    if (!next) {
 +      return;
-@@ -81,0 +167 @@ async function main() {
++    }
 +    void runQueuedRequest(next.socket, next.message);
-@@ -90 +176,4 @@ async function main() {
++  }
++
+@@ -90 +201,4 @@ async function main() {
 -    if (message.method === "turn/completed" && activeStreamSocket === target) {
 +    const turnCompleted = message.method === "turn/completed" && activeStreamMethod !== EXTERNAL_AGENT_IMPORT;
 +    const importCompleted =
 +      message.method === EXTERNAL_AGENT_IMPORT_COMPLETED && activeStreamMethod === EXTERNAL_AGENT_IMPORT;
 +    if ((turnCompleted || importCompleted) && activeStreamSocket === target) {
-@@ -92 +181 @@ async function main() {
+@@ -92 +206 @@ async function main() {
 -      if (!threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
 +      if (importCompleted || !threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
-@@ -94,0 +184 @@ async function main() {
+@@ -94,0 +209 @@ async function main() {
 +        activeStreamMethod = null;
-@@ -97,0 +188 @@ async function main() {
+@@ -97,0 +213 @@ async function main() {
 +        drainQueue();
-@@ -105,0 +197,2 @@ async function main() {
-+    // This awaits the codex app-server child's exit, so the broker takes its
-+    // app-server with it.
-@@ -108,2 +201,7 @@ async function main() {
--    if (listenTarget.kind === "unix" && fs.existsSync(listenTarget.path)) {
--      fs.unlinkSync(listenTarget.path);
+@@ -101,0 +218,31 @@ async function main() {
++  // Synchronous and dependent on nothing but the filesystem: neither a peer nor
++  // the app-server child can stall these, which is why the bounded reap path
++  // below still runs them.
++  function removeBrokerSessionFiles() {
 +    // Force removals: teardownBrokerSession may be unlinking these same paths
 +    // concurrently after signalling this process.
 +    if (listenTarget.kind === "unix") {
@@ -237,9 +262,7 @@ index 1954274..92a41c2 100644
 +    }
 +    if (pidFile) {
 +      fs.rmSync(pidFile, { force: true });
-@@ -111,2 +209,10 @@ async function main() {
--    if (pidFile && fs.existsSync(pidFile)) {
--      fs.unlinkSync(pidFile);
++    }
 +    if (logFile) {
 +      fs.rmSync(logFile, { force: true });
 +    }
@@ -250,7 +273,63 @@ index 1954274..92a41c2 100644
 +        // Non-recursive on purpose: anything unexpected in the broker session
 +        // dir stays.
 +      }
-@@ -115,0 +222,99 @@ async function main() {
++    }
++  }
++
++  // The graceful path, for broker/shutdown and for a signal: somebody asked for
++  // a clean stop, so peers get a half-close and the child gets as long as it
++  // needs. Unbounded, which means a peer that never answers the half-close or a
++  // child that never exits can stall it -- acceptable only because a requester
++  // is still holding the connection and can give up; supervision cannot, so it
++  // uses reapShutdown instead.
+@@ -102,0 +250,5 @@ async function main() {
++    // Latched here as well as on the supervision path so a shutdown in progress
++    // is never also a supervision decision: today both callers process.exit
++    // immediately afterwards and a concurrent tick would be harmless, and this
++    // keeps that true if either stops exiting.
++    exiting = true;
+@@ -105,0 +258,2 @@ async function main() {
++    // This awaits the codex app-server child's exit, so the broker takes its
++    // app-server with it.
+@@ -108,2 +262,14 @@ async function main() {
+-    if (listenTarget.kind === "unix" && fs.existsSync(listenTarget.path)) {
+-      fs.unlinkSync(listenTarget.path);
++    removeBrokerSessionFiles();
++  }
++
++  // The bounded twin of shutdown(), for the self-reap path only. Its caller has
++  // already decided to die, so every wait a peer or the child could stall
++  // forever is either dropped unilaterally or capped at REAP_SHUTDOWN_BOUND_MS.
++  async function reapShutdown(server) {
++    exiting = true;
++    // destroy(), not the graceful path's end(): end() is a half-close that then
++    // waits for the peer's FIN, and a wedged peer never sends one. No broker
++    // record names this endpoint any more, so a peer still attached here is
++    // talking to a corpse.
++    for (const socket of sockets) {
++      socket.destroy();
+@@ -111,2 +277,15 @@ async function main() {
+-    if (pidFile && fs.existsSync(pidFile)) {
+-      fs.unlinkSync(pidFile);
++    // Stops accepting, and nothing here awaits the callback: with the
++    // connections destroyed above there is nothing left worth waiting for, and
++    // the socket file is removed below either way.
++    server.close();
++    // close() ends the child's stdin, SIGTERMs it 50 ms later and then awaits its
++    // exit -- an await that a child ignoring both never ends.
++    const closed = await settledWithin(appClient.close().catch(() => {}), REAP_SHUTDOWN_BOUND_MS);
++    if (!closed) {
++      // Escalate rather than walk away: R3 wants the app-server to go with its
++      // broker. The kill is not awaited -- after SIGKILL the kernel finishes
++      // this with or without a broker still here to watch.
++      appClient.terminateSpawnedChild("SIGKILL");
++      process.stderr.write(
++        `supervision: app-server did not exit within ${REAP_SHUTDOWN_BOUND_MS}ms; killed it endpoint=${endpoint}\n`
++      );
+@@ -113,0 +293,107 @@ async function main() {
++    removeBrokerSessionFiles();
++  }
++
 +  // `present` comes from the file existing, never from the parse succeeding: a
 +  // corrupt broker.json is corruption, not evidence that this broker was
 +  // retired, and collapsing the two would have a live broker kill itself over a
@@ -334,11 +413,18 @@ index 1954274..92a41c2 100644
 +    }
 +    // No record names this broker any more -- it was deleted above, or it names
 +    // another endpoint, or it does not parse -- so the decision is committed and
-+    // retrying is not an option: a shutdown fault must not leave this broker
-+    // running. Exit regardless and accept a stray socket or log over an immortal
-+    // broker, which is the failure this whole mechanism exists to prevent.
++    // retrying is not an option: neither a shutdown fault nor a shutdown that
++    // never finishes may leave this broker running. reapShutdown therefore waits
++    // at most REAP_SHUTDOWN_BOUND_MS on anything a peer or the child controls, so
++    // process.exit(0) below is reached one such wait plus a few synchronous file
++    // removals after this point even when a peer never closes its end and the
++    // child never exits. What the bound gives up is the child's clean exit, which
++    // it takes by SIGKILL instead, and -- if even that does not land -- an
++    // app-server outliving this broker. A stray socket, an unreaped child or a
++    // surviving log is an acceptable price for not becoming an immortal broker,
++    // which is the failure this whole mechanism exists to prevent.
 +    try {
-+      await shutdown(server);
++      await reapShutdown(server);
 +    } catch (error) {
 +      process.stderr.write(
 +        `supervision: shutdown failed (${
@@ -348,13 +434,11 @@ index 1954274..92a41c2 100644
 +    }
 +    // A self-reap is not a failure.
 +    process.exit(0);
-+  }
-+
-@@ -119,0 +325 @@ async function main() {
+@@ -119,0 +406 @@ async function main() {
 +    markActivity();
-@@ -126,0 +333 @@ async function main() {
+@@ -126,0 +414 @@ async function main() {
 +        markActivity();
-@@ -170,13 +377 @@ async function main() {
+@@ -170,13 +458 @@ async function main() {
 -        const allowInterruptDuringActiveStream =
 -          isInterruptRequest(message) && activeStreamSocket && activeStreamSocket !== socket && !activeRequestSocket;
 -
@@ -369,7 +453,7 @@ index 1954274..92a41c2 100644
 -          continue;
 -        }
 +        const allowInterruptDuringActiveStream = isInterruptRequest(message) && activeStreamSocket;
-@@ -197,25 +392,2 @@ async function main() {
+@@ -197,25 +473,2 @@ async function main() {
 -        const isStreaming = STREAMING_METHODS.has(message.method);
 -        activeRequestSocket = socket;
 -
@@ -397,11 +481,11 @@ index 1954274..92a41c2 100644
 -        }
 +        requestQueue.push({ socket, message });
 +        drainQueue();
-@@ -226,0 +399 @@ async function main() {
+@@ -226,0 +480 @@ async function main() {
 +      markActivity();
-@@ -231,0 +405 @@ async function main() {
+@@ -231,0 +486 @@ async function main() {
 +      markActivity();
-@@ -245,0 +420,18 @@ async function main() {
+@@ -245,0 +501,18 @@ async function main() {
 +  // Started here, never at import: a module that starts a timer when it is
 +  // imported has no off switch. unref'd so supervision never keeps an
 +  // otherwise-finished process alive.
@@ -527,14 +611,37 @@ index 83df468..3c1a437 100644
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
 diff --git a/plugins/codex/scripts/lib/app-server.mjs b/plugins/codex/scripts/lib/app-server.mjs
-index 72b30a7..3e78ae9 100644
+index 72b30a7..bc15b3c 100644
 --- a/plugins/codex/scripts/lib/app-server.mjs
 +++ b/plugins/codex/scripts/lib/app-server.mjs
-@@ -341,0 +342,3 @@ export class CodexAppServerClient {
+@@ -79,0 +80,8 @@ class AppServerClientBase {
++  // Escalation past close(), for a caller that cannot wait for the child any
++  // longer: close() ends stdin and SIGTERMs, and a child that ignores both must
++  // not outlive the process that owns it. A client that talks to a broker over a
++  // socket owns no child, so there is nothing here to terminate.
++  terminateSpawnedChild() {
++    return false;
++  }
++
+@@ -267,0 +276,13 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
++  terminateSpawnedChild(signal = "SIGKILL") {
++    if (!this.proc || this.proc.exitCode !== null || this.proc.signalCode !== null) {
++      return false;
++    }
++    try {
++      return this.proc.kill(signal);
++    } catch {
++      // The child may have been reaped between the check and the signal; either
++      // way the caller's post-condition -- no app-server left running -- holds.
++      return false;
++    }
++  }
++
+@@ -341,0 +363,3 @@ export class CodexAppServerClient {
 +        if (!brokerEndpoint) {
 +          throw new Error("No shared Codex broker is active for this workspace.");
 +        }
-@@ -345,0 +349,3 @@ export class CodexAppServerClient {
+@@ -345,0 +370,3 @@ export class CodexAppServerClient {
 +        if (!brokerEndpoint) {
 +          throw new Error("Failed to start the isolated Codex broker for this workspace.");
 +        }
@@ -1694,11 +1801,12 @@ index 778571e..e601a80 100644
 +  await releaseBrokerOwner(sessionId, { killProcess: terminateProcessTree });
 diff --git a/tests/broker-reaping.test.mjs b/tests/broker-reaping.test.mjs
 new file mode 100644
-index 0000000..46e7cb5
+index 0000000..394de9d
 --- /dev/null
 +++ b/tests/broker-reaping.test.mjs
-@@ -0,0 +1,646 @@
+@@ -0,0 +1,784 @@
 +import fs from "node:fs";
++import net from "node:net";
 +import path from "node:path";
 +import test from "node:test";
 +import assert from "node:assert/strict";
@@ -1706,7 +1814,7 @@ index 0000000..46e7cb5
 +import { spawn } from "node:child_process";
 +
 +import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-+import { initGitRepo, killGroup, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
++import { initGitRepo, killGroup, makeTempDir, pinHermeticStateRoot, run, writeExecutable } from "./helpers.mjs";
 +import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 +import {
 +  clearBrokerSession,
@@ -2343,6 +2451,143 @@ index 0000000..46e7cb5
 +
 +  await waitFor(() => !isProcessAlive(broker.child.pid));
 +  assert.equal(fs.existsSync(broker.sessionDir), false);
++});
++
++// A peer that takes the broker's FIN and never answers with one of its own:
++// allowHalfOpen keeps this socket's write side open when its read side ends, so
++// the connection stays established from the server's side and a server.close()
++// that waits for every connection to close waits for this one forever. That is
++// what an unresponsive client looks like to a broker -- no sleep stands in for
++// it. The connect itself is bounded so a broker that never accepts fails the
++// test instead of hanging it.
++function connectHalfOpenPeer(t, endpoint) {
++  const target = parseBrokerEndpoint(endpoint);
++  return new Promise((resolve, reject) => {
++    const socket = net.connect({ path: target.path, allowHalfOpen: true });
++    const timer = setTimeout(() => {
++      socket.destroy();
++      reject(new Error("Timed out connecting to the broker endpoint."));
++    }, 10000);
++    socket.once("connect", () => {
++      clearTimeout(timer);
++      // The broker drops this connection unilaterally, which surfaces here as
++      // ECONNRESET; without a handler that would throw in the test process.
++      socket.on("error", () => {});
++      t.after(() => socket.destroy());
++      resolve(socket);
++    });
++    socket.once("error", (error) => {
++      clearTimeout(timer);
++      reject(error);
++    });
++  });
++}
++
++test("a live broker replaced while a peer holds its connection half-open still exits", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const canonicalHome = makeCanonicalHome();
++  const broker = startSupervisedBroker({
++    workspace,
++    binDir,
++    canonicalHome,
++    idleTimeoutMs: 60000,
++    superviseIntervalMs: 100
++  });
++  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
++
++  assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
++  saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
++  await waitFor(() => fs.readFileSync(broker.logFile, "utf8").includes("supervision: armed"));
++  const appServerPid = appServerPidOf(binDir);
++  await connectHalfOpenPeer(t, broker.endpoint);
++
++  // The "replaced" arm exits even with a client connected -- that is its stated
++  // purpose -- so it is the one exit path guaranteed to face a peer that may
++  // never close its end. A broker that waits for that peer has decided to die
++  // and then lives forever.
++  saveBrokerSession(workspace, {
++    ...brokerRecord(workspace, broker, canonicalHome),
++    endpoint: "unix:/tmp/cxc-a-different-broker/broker.sock",
++    pid: null
++  });
++
++  await waitFor(() => !isProcessAlive(broker.child.pid), { timeoutMs: 20000 });
++  await waitFor(() => !isProcessAlive(appServerPid));
++  assert.equal(fs.existsSync(broker.sessionDir), false);
++});
++
++// A codex app-server that answers `initialize` and then refuses to die: it
++// ignores SIGTERM and stays alive after its stdin is ended, so the broker's
++// appClient.close() -- which ends stdin, SIGTERMs 50 ms later and then awaits the
++// child's exit -- never completes on its own. installFakeCodex has no shape for
++// "the child hangs", and this file already writes purpose-built stubs
++// (startStubBroker, the never-listens broker) for conditions the shared fixture
++// cannot express.
++function installWedgedCodex(binDir, pidReport) {
++  writeExecutable(
++    path.join(binDir, "codex"),
++    [
++      "#!/usr/bin/env node",
++      'const fs = require("node:fs");',
++      'const readline = require("node:readline");',
++      'if (process.argv[2] !== "app-server") {',
++      "  process.exit(0);",
++      "}",
++      `fs.writeFileSync(${JSON.stringify(pidReport)}, String(process.pid), "utf8");`,
++      'process.on("SIGTERM", () => {});',
++      'process.on("SIGINT", () => {});',
++      "const rl = readline.createInterface({ input: process.stdin });",
++      'rl.on("line", (line) => {',
++      "  const message = JSON.parse(line);",
++      "  if (message.id !== undefined) {",
++      '    process.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "wedged-app-server" } }) + "\\n");',
++      "  }",
++      "});",
++      "setInterval(() => {}, 1000);",
++      ""
++    ].join("\n")
++  );
++}
++
++test("a self-reaping broker whose app-server will not exit still exits and takes it with it", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  const pidReport = path.join(binDir, "wedged-app-server.pid");
++  installWedgedCodex(binDir, pidReport);
++  const canonicalHome = makeCanonicalHome();
++  const broker = startSupervisedBroker({
++    workspace,
++    binDir,
++    canonicalHome,
++    idleTimeoutMs: 60000,
++    superviseIntervalMs: 100
++  });
++  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
++
++  assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
++  saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
++  await waitFor(() => fs.readFileSync(broker.logFile, "utf8").includes("supervision: armed"));
++  await waitFor(() => fs.existsSync(pidReport));
++  const appServerPid = Number(fs.readFileSync(pidReport, "utf8").trim());
++  t.after(() => killGroup(appServerPid, "SIGKILL"));
++
++  clearBrokerSession(workspace);
++
++  // A graceful shutdown is impossible here, so this passes only because the wait
++  // for one is bounded.
++  await waitFor(() => !isProcessAlive(broker.child.pid), { timeoutMs: 20000 });
++  // R3 wants the app-server to go with its broker, and the bound must not trade
++  // that away: what close() could not achieve, the escalation past it must.
++  await waitFor(() => !isProcessAlive(appServerPid));
++  // Nor may the bound trade away the removals, which need neither the peer nor
++  // the child.
++  assert.equal(fs.existsSync(broker.pidFile), false);
++  assert.equal(fs.existsSync(broker.logFile), false);
++  assert.equal(fs.existsSync(parseBrokerEndpoint(broker.endpoint).path), false);
++  assert.equal(fs.existsSync(broker.sessionDir), false);
++  assert.equal(loadBrokerSession(workspace), null);
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
 index c34b060..b013de8 100644
