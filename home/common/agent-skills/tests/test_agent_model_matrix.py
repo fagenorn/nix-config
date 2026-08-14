@@ -22,6 +22,7 @@ EXPECTED_TIERS = {
     "reviewer-lite": ("sonnet", "medium"),
     "mechanic": ("sonnet", "medium"),
     "explorer": ("haiku", "medium"),
+    "researcher": ("sonnet", "medium"),
     "codex-transport": ("sonnet", "medium"),
 }
 
@@ -104,10 +105,10 @@ EXPECTED_OWNER_SITES = {
         "haiku",
         "medium",
     ),
-    "research-background-explorer": (
+    "research-background-researcher": (
         "home/common/agent-skills/skills/research/SKILL.md",
-        "explorer",
-        "haiku",
+        "researcher",
+        "sonnet",
         "medium",
     ),
 }
@@ -163,6 +164,26 @@ class AgentModelMatrixTest(unittest.TestCase):
             )
             self.assertIsInstance(spec["eligible"], list)
             self.assertIsInstance(spec["prohibited"], list)
+
+    def test_researcher_contract_is_one_bounded_cited_artifact(self):
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        researcher = data["roles"]["researcher"]
+        self.assertEqual(
+            researcher["eligible"],
+            ["bounded primary-source synthesis with exactly one cited artifact"],
+        )
+        self.assertIn("read-only fact lookup", researcher["prohibited"])
+        self.assertIn("more than one artifact", researcher["prohibited"])
+        self.assertIn("uncited artifact", researcher["prohibited"])
+
+    def test_from_issue_trace_includes_bounded_researcher(self):
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        events = {event["id"]: event for event in data["scenarios"]["from-issue"]}
+        event = events["research-background-researcher"]
+        self.assertEqual(
+            (event["role"], event["model"], event["effort"]),
+            ("researcher", "sonnet", "medium"),
+        )
 
     def test_every_custom_agent_explicitly_matches_its_matrix_role(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))

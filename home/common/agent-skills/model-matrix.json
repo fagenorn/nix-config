@@ -83,6 +83,20 @@
         "judgment"
       ]
     },
+    "researcher": {
+      "model": "sonnet",
+      "effort": "medium",
+      "eligible": [
+        "bounded primary-source synthesis with exactly one cited artifact"
+      ],
+      "prohibited": [
+        "read-only fact lookup",
+        "more than one artifact",
+        "uncited artifact",
+        "open-ended research",
+        "implementation or workflow-state changes"
+      ]
+    },
     "codex-transport": {
       "model": "sonnet",
       "effort": "medium",
@@ -227,12 +241,12 @@
       "requires": []
     },
     {
-      "id": "research-background-explorer",
+      "id": "research-background-researcher",
       "path": "home/common/agent-skills/skills/research/SKILL.md",
-      "marker": "<!-- agent-dispatch: id=research-background-explorer role=explorer model=haiku effort=medium -->",
-      "call": "Agent(subagent_type=\"general-purpose\", model=\"haiku\", effort=\"medium\", run_in_background=true) performs the bounded primary-source research while the caller keeps working.",
-      "role": "explorer",
-      "model": "haiku",
+      "marker": "<!-- agent-dispatch: id=research-background-researcher role=researcher model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"sonnet\", effort=\"medium\", run_in_background=true) performs the bounded primary-source synthesis and writes exactly one cited findings artifact while the caller keeps working.",
+      "role": "researcher",
+      "model": "sonnet",
       "effort": "medium",
       "requires": []
     }
@@ -253,6 +267,13 @@
         "role": "issue-owner",
         "model": "opus",
         "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "research-background-researcher",
+        "role": "researcher",
+        "model": "sonnet",
+        "effort": "medium",
         "requires": []
       },
       {

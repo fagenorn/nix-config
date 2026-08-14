@@ -34,6 +34,7 @@ EXPECTED_ROLE_TIERS = {
     "reviewer-lite": ("sonnet", "medium"),
     "mechanic": ("sonnet", "medium"),
     "explorer": ("haiku", "medium"),
+    "researcher": ("sonnet", "medium"),
     "codex-transport": ("sonnet", "medium"),
 }
 CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite", "mechanic"}
