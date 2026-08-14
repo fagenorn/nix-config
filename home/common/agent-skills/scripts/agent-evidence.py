@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Sequence
 
@@ -25,6 +26,13 @@ class Diagnostic:
     code: str
     path: str
     message: str
+
+
+@dataclass(frozen=True)
+class _BridgeRecord:
+    successful: bool | None
+    execution_id: str | None
+    observed_at: datetime | None
 
 
 def _add(
@@ -136,10 +144,10 @@ def _timestamp(
 
 def _validate_common(
     document: object, expected_kind: str, diagnostics: list[Diagnostic]
-) -> tuple[dict[str, Any] | None, str | None]:
+) -> tuple[dict[str, Any] | None, str | None, datetime | None]:
     root = _mapping(document, "$", diagnostics)
     if root is None:
-        return None, None
+        return None, None, None
 
     if "schema_version" not in root:
         _add(
@@ -177,8 +185,42 @@ def _validate_common(
         )
 
     evidence_id = _nonempty_string(root, "evidence_id", "$", diagnostics)
-    _timestamp(root, "captured_at", "$", diagnostics)
-    return root, evidence_id
+    captured_at = _timestamp(root, "captured_at", "$", diagnostics)
+    return root, evidence_id, captured_at
+
+
+def _has_ordered_headings(result: str, expected: tuple[str, ...]) -> bool:
+    headings = [
+        match.group(1).strip().rstrip("#").strip()
+        for match in re.finditer(r"(?m)^#{1,6}[ \t]+(.+?)[ \t]*$", result)
+    ]
+    position = -1
+    for required in expected:
+        matches = [
+            index for index, heading in enumerate(headings) if heading == required
+        ]
+        if len(matches) != 1 or matches[0] <= position:
+            return False
+        position = matches[0]
+    return True
+
+
+def _valid_mediated_result(operation_name: str, result: str) -> bool:
+    if operation_name == "plan-review":
+        return _has_ordered_headings(
+            result, ("Blocking", "Should fix", "Discussion")
+        )
+    if operation_name == "diff-review":
+        first_line = result.splitlines()[0]
+        verdict = re.fullmatch(
+            r"\*\*Correctness:\*\* "
+            r"(?:Clean(?:\s+[—-]\s+.+)?|Findings\s+[—-]\s+.+)",
+            first_line,
+        )
+        return verdict is not None and _has_ordered_headings(
+            result, ("Critical", "Important", "Minor")
+        )
+    return False
 
 
 def _validate_bridge_record(
@@ -187,16 +229,17 @@ def _validate_bridge_record(
     diagnostics: list[Diagnostic],
     *,
     mediated: bool,
-) -> bool | None:
+    operation_name: str | None,
+) -> _BridgeRecord:
     record = _mapping(value, path, diagnostics)
     if record is None:
-        return None
+        return _BridgeRecord(None, None, None)
 
-    _nonempty_string(record, "execution_id", path, diagnostics)
-    _timestamp(record, "observed_at", path, diagnostics)
+    execution_id = _nonempty_string(record, "execution_id", path, diagnostics)
+    observed_at = _timestamp(record, "observed_at", path, diagnostics)
     status = _nonempty_string(record, "status", path, diagnostics)
     if status is None:
-        return None
+        return _BridgeRecord(None, execution_id, observed_at)
     if status not in TERMINAL_STATUSES:
         _add(
             diagnostics,
@@ -204,12 +247,13 @@ def _validate_bridge_record(
             f"{path}.status",
             "status must be a terminal outcome",
         )
-        return None
+        return _BridgeRecord(None, execution_id, observed_at)
 
     successful = status in SUCCESS_STATUSES
     payload_key = "result" if successful else "failure"
     opposite_key = "failure" if successful else "result"
     payload = _nonempty_string(record, payload_key, path, diagnostics)
+    record_valid = payload is not None
     if payload is None:
         _add(
             diagnostics,
@@ -224,6 +268,7 @@ def _validate_bridge_record(
             f"{path}.{opposite_key}",
             f"terminal status {status!r} must not carry {opposite_key}",
         )
+        record_valid = False
 
     if mediated and successful:
         job_id = _nonempty_string(record, "job_id", path, diagnostics)
@@ -234,15 +279,30 @@ def _validate_bridge_record(
                 f"{path}.job_id",
                 "successful mediated records require a job ID",
             )
+            record_valid = False
+        if (
+            payload is not None
+            and operation_name in REQUIRED_OPERATIONS
+            and not _valid_mediated_result(operation_name, payload)
+        ):
+            _add(
+                diagnostics,
+                "BRIDGE_MEDIATED_RESULT_INVALID",
+                f"{path}.result",
+                f"result does not match the {operation_name} terminal envelope",
+            )
+            record_valid = False
 
-    if payload is None or opposite_key in record:
-        return None
-    return successful
+    return _BridgeRecord(
+        successful if record_valid else None,
+        execution_id,
+        observed_at,
+    )
 
 
 def validate_bridge(document: object) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
-    root, _ = _validate_common(document, BRIDGE_KIND, diagnostics)
+    root, _, captured_at = _validate_common(document, BRIDGE_KIND, diagnostics)
     if root is None:
         return sorted(diagnostics)
 
@@ -296,6 +356,8 @@ def validate_bridge(document: object) -> list[Diagnostic]:
     operations = _required_list(root, "operations", "$", diagnostics)
     named_operations: dict[str, tuple[int, dict[str, Any]]] = {}
     mediated_outcomes: dict[str, bool | None] = {}
+    seen_execution_ids: dict[str, str] = {}
+    observation_times: list[tuple[str, datetime]] = []
     if operations is not None:
         for index, value in enumerate(operations):
             operation_path = f"$.operations[{index}]"
@@ -333,14 +395,47 @@ def validate_bridge(document: object) -> list[Diagnostic]:
                     )
                     layer_outcomes[layer] = None
                     continue
-                layer_outcomes[layer] = _validate_bridge_record(
+                validated_record = _validate_bridge_record(
                     operation[layer],
                     layer_path,
                     diagnostics,
                     mediated=layer == "agent_mediated",
+                    operation_name=name,
                 )
+                layer_outcomes[layer] = validated_record.successful
+                if validated_record.execution_id is not None:
+                    if validated_record.execution_id in seen_execution_ids:
+                        _add(
+                            diagnostics,
+                            "BRIDGE_EXECUTION_ID_DUPLICATE",
+                            f"{layer_path}.execution_id",
+                            f"execution ID {validated_record.execution_id!r} is duplicated",
+                        )
+                    else:
+                        seen_execution_ids[validated_record.execution_id] = layer_path
+                if validated_record.observed_at is not None:
+                    observation_times.append(
+                        (f"{layer_path}.observed_at", validated_record.observed_at)
+                    )
             if name in REQUIRED_OPERATIONS and name not in mediated_outcomes:
                 mediated_outcomes[name] = layer_outcomes.get("agent_mediated")
+
+    if session_time is not None and captured_at is not None:
+        for observation_path, observed_at in observation_times:
+            if observed_at < session_time:
+                _add(
+                    diagnostics,
+                    "BRIDGE_OBSERVATION_TIME_INVALID",
+                    observation_path,
+                    "observation occurred before the bridge session started",
+                )
+            elif observed_at > captured_at:
+                _add(
+                    diagnostics,
+                    "BRIDGE_OBSERVATION_TIME_INVALID",
+                    observation_path,
+                    "observation occurred after the evidence was captured",
+                )
 
     for required_name in sorted(REQUIRED_OPERATIONS):
         if required_name not in named_operations:
@@ -385,7 +480,7 @@ def validate_bridge(document: object) -> list[Diagnostic]:
 
 def validate_research(document: object) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
-    root, _ = _validate_common(document, RESEARCH_KIND, diagnostics)
+    root, _, _ = _validate_common(document, RESEARCH_KIND, diagnostics)
     if root is None:
         return sorted(diagnostics)
 

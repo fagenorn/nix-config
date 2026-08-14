@@ -38,7 +38,7 @@
         "job_id": "job-plan-1",
         "observed_at": "2026-08-14T12:03:00Z",
         "status": "completed",
-        "result": "The deployed bridge agent returned the Codex plan review."
+        "result": "## Blocking\nNone.\n\n## Should fix\nNone.\n\n## Discussion\nNone."
       }
     },
     {
@@ -54,7 +54,7 @@
         "job_id": "job-diff-1",
         "observed_at": "2026-08-14T12:05:00Z",
         "status": "completed",
-        "result": "The deployed bridge agent returned the Codex diff review."
+        "result": "**Correctness:** Clean — No correctness findings.\n\n## Critical\nNone.\n\n## Important\nNone.\n\n## Minor\nNone."
       }
     }
   ]

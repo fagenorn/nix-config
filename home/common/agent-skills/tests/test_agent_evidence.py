@@ -147,6 +147,79 @@ class AgentEvidenceTest(unittest.TestCase):
             "BRIDGE_CLAIM_MISMATCH",
         )
 
+    def test_bridge_observations_must_be_within_session_capture_window(self):
+        original = self.fixture("bridge-fresh-end-to-end.json")
+        variants = (
+            (0, "direct", "2026-08-14T12:00:59Z"),
+            (1, "agent_mediated", "2026-08-14T12:10:01Z"),
+        )
+
+        for operation_index, layer, observed_at in variants:
+            with self.subTest(layer=layer, observed_at=observed_at):
+                document = deepcopy(original)
+                document["operations"][operation_index][layer]["observed_at"] = (
+                    observed_at
+                )
+                self.assert_diagnostic(
+                    self.run_document("bridge", document),
+                    "BRIDGE_OBSERVATION_TIME_INVALID",
+                )
+
+    def test_bridge_execution_ids_are_unique_across_every_record(self):
+        original = self.fixture("bridge-fresh-end-to-end.json")
+        variants = (
+            ((0, "direct"), (0, "agent_mediated")),
+            ((0, "direct"), (1, "direct")),
+        )
+
+        for source, target in variants:
+            with self.subTest(source=source, target=target):
+                document = deepcopy(original)
+                source_operation, source_layer = source
+                target_operation, target_layer = target
+                duplicate = document["operations"][source_operation][source_layer][
+                    "execution_id"
+                ]
+                document["operations"][target_operation][target_layer][
+                    "execution_id"
+                ] = duplicate
+                self.assert_diagnostic(
+                    self.run_document("bridge", document),
+                    "BRIDGE_EXECUTION_ID_DUPLICATE",
+                )
+
+    def test_successful_mediated_results_require_operation_envelopes(self):
+        original = self.fixture("bridge-fresh-end-to-end.json")
+        variants = (
+            (
+                0,
+                "## Blocking\nNone.\n\n## Should fix\nNone.",
+            ),
+            (
+                0,
+                "## Discussion\nNone.\n\n## Blocking\nNone.\n\n## Should fix\nNone.",
+            ),
+            (
+                1,
+                "**Correctness:** Clean\n\n## Critical\nNone.\n\n## Important\nNone.",
+            ),
+            (
+                1,
+                "## Critical\nNone.\n\n## Important\nNone.\n\n## Minor\nNone.",
+            ),
+        )
+
+        for operation_index, malformed_result in variants:
+            with self.subTest(operation_index=operation_index):
+                document = deepcopy(original)
+                document["operations"][operation_index]["agent_mediated"][
+                    "result"
+                ] = malformed_result
+                self.assert_diagnostic(
+                    self.run_document("bridge", document),
+                    "BRIDGE_MEDIATED_RESULT_INVALID",
+                )
+
     def test_single_research_failure_passes_as_transient(self):
         completed = run_validator("research", "research-single-failure.json")
 
