@@ -632,6 +632,45 @@ class AgentModelMatrixTest(unittest.TestCase):
             errors,
         )
 
+    def test_malformed_reviewer_lite_requires_returns_errors_instead_of_crashing(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = json.loads(MATRIX.read_text(encoding="utf-8"))
+            marker = (
+                "<!-- agent-dispatch: id=malformed role=reviewer-lite "
+                "model=sonnet effort=medium -->"
+            )
+            call = (
+                'Agent(subagent_type="reviewer-lite", model="sonnet", '
+                'effort="medium") verifies malformed requirements.'
+            )
+            manifest = root / "workflow.md"
+            manifest.write_text(f"{marker}\n{call}\n", encoding="utf-8")
+            data["dispatch_sites"] = [
+                {
+                    "id": "malformed",
+                    "path": "workflow.md",
+                    "marker": marker,
+                    "call": call,
+                    "role": "reviewer-lite",
+                    "model": "sonnet",
+                    "effort": "medium",
+                    "requires": ["named-prior-findings", {"invalid": "object"}],
+                }
+            ]
+            write_fixture(root, data)
+
+            errors = module.validate(root)
+
+        self.assertTrue(
+            any(
+                "requires: must be an array of non-empty strings" in error
+                for error in errors
+            ),
+            errors,
+        )
+
     def test_duplicate_dispatch_id_marker_mismatch_and_reviewer_lite_misuse_fail(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as temporary:

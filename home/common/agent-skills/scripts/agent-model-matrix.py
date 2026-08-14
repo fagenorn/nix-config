@@ -143,8 +143,9 @@ def _validate_selection(
                 f"({role_spec.get(field)!r})"
             )
     requirements = item.get("requires")
-    errors.extend(_string_list(requirements, f"{label}.requires"))
-    if role == "reviewer-lite" and isinstance(requirements, list):
+    requirement_errors = _string_list(requirements, f"{label}.requires")
+    errors.extend(requirement_errors)
+    if role == "reviewer-lite" and not requirement_errors:
         missing = REVIEWER_LITE_REQUIREMENTS - set(requirements)
         if missing:
             errors.append(
