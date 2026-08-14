@@ -4078,10 +4078,10 @@ index 0f8f57c..cafb91e 100644
 +    savedJobs.map((job) => job.id),
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
-index 0000000..ef2e1e1
+index 0000000..05c264b
 --- /dev/null
 +++ b/tests/worker-postmortem.test.mjs
-@@ -0,0 +1,858 @@
+@@ -0,0 +1,857 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -4090,17 +4090,16 @@ index 0000000..ef2e1e1
 +import { fileURLToPath } from "node:url";
 +
 +import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-+import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
++import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env (via buildEnv), so pinning them here keeps every test in
-+// this file hermetic even when the suite runs inside a live Claude Code session.
++// this file hermetic even when the suite runs inside a live Claude Code session,
++// and every broker recorded under that private root is reaped when the file ends.
 +// node --test runs each file in its own process; nothing leaks across files.
-+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-postmortem-data-");
-+delete process.env.CODEX_COMPANION_SESSION_ID;
-+delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++pinHermeticStateRoot("postmortem");
 +
 +const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 +const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
