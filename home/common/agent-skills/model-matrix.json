@@ -324,13 +324,23 @@
       "requires": []
     },
     {
-      "id": "sdd-final-codex-review-transport",
+      "id": "sdd-round-five-implementation",
       "path": "home/common/agent-skills/skills/sdd/SKILL.md",
-      "marker": "<!-- agent-dispatch: id=sdd-final-codex-review-transport role=codex-transport model=sonnet effort=medium -->",
-      "call": "Agent(subagent_type=\"codex:codex-reviewer\", model=\"sonnet\", effort=\"medium\") is the transport that `codex-collaboration` owns and launches for the whole-branch correctness packet without selecting the external runtime's model.",
-      "role": "codex-transport",
-      "model": "sonnet",
-      "effort": "medium",
+      "marker": "<!-- agent-dispatch: id=sdd-round-five-implementation role=implementer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") owns the fifth and final fix round.",
+      "role": "implementer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "sdd-task-rereview-escalation",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-task-rereview-escalation role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") adjudicates an ambiguous or branch-wide task re-review escape.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
       "requires": []
     },
     {
@@ -388,6 +398,16 @@
         "named-prior-findings",
         "bounded-fix-diff"
       ]
+    },
+    {
+      "id": "sdd-final-rereview-escalation",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-final-rereview-escalation role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") adjudicates an ambiguous or branch-wide final-axis re-review escape.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
     }
   ],
   "scenarios": {
@@ -470,6 +490,13 @@
         ]
       },
       {
+        "id": "sdd-task-rereview-escalation",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
         "id": "sdd-codex-rescue-transport",
         "role": "codex-transport",
         "model": "sonnet",
@@ -484,17 +511,17 @@
         "requires": []
       },
       {
-        "id": "sdd-final-conformance-review",
-        "role": "reviewer",
+        "id": "sdd-round-five-implementation",
+        "role": "implementer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-final-codex-review-transport",
-        "role": "codex-transport",
-        "model": "sonnet",
-        "effort": "medium",
+        "id": "sdd-final-conformance-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
         "requires": []
       },
       {
@@ -523,6 +550,13 @@
           "named-prior-findings",
           "bounded-fix-diff"
         ]
+      },
+      {
+        "id": "sdd-final-rereview-escalation",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
       }
     ],
     "shipping": [

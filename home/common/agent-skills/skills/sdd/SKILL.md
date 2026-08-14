@@ -94,11 +94,19 @@ Agent(subagent_type="implementer", model="opus", effort="high") applies the veri
 
 <!-- agent-dispatch: id=sdd-rescue-fallback-implementation role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") owns the fresh-context rescue fallback.
-- **Round 5 — last round**, fresh implementer, same packet plus round 4's findings.
+- **Round 5 — last round**, same packet plus round 4's findings, owned by a fresh Opus/high implementer:
+
+<!-- agent-dispatch: id=sdd-round-five-implementation role=implementer model=opus effort=high -->
+Agent(subagent_type="implementer", model="opus", effort="high") owns the fifth and final fix round.
 
 Every round: the implementer fixes, re-runs the covering tests, appends a fix report (what changed, covering tests, command, output) to the same report file, and returns the short contract. Confirm all three fix-report elements before dispatching the re-review — reviewers do not re-run tests.
 
-The re-review is scoped: `scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head the previous review saw), template [re-review-prompt.md](re-review-prompt.md), with the findings list, brief, and report paths. Its explicit `reviewer-lite` selection verdicts each finding ADDRESSED / NOT ADDRESSED and flags new breakage in the fix diff only; out-of-scope observations go to the ledger as deferred minors. A result that requires ambiguous adjudication or branch-wide review escapes reviewer-lite: dispatch a full `reviewer` on Opus/high and record the escalation in this plan's SDD ledger.
+The re-review is scoped: `scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head the previous review saw), template [re-review-prompt.md](re-review-prompt.md), with the findings list, brief, and report paths. Its explicit `reviewer-lite` selection verdicts each finding ADDRESSED / NOT ADDRESSED and flags new breakage in the fix diff only; out-of-scope observations go to the ledger as deferred minors. A result that requires ambiguous adjudication or branch-wide review escapes reviewer-lite through this explicit full-review dispatch:
+
+<!-- agent-dispatch: id=sdd-task-rereview-escalation role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") adjudicates an ambiguous or branch-wide task re-review escape.
+
+Record the escalation and selected full-review role in this plan's SDD ledger.
 
 After each round, append: `Task <N>: fix round <R>/5 (<X> addressed, <Y> open — <one-liners>; commits <a7>..<b7>)`.
 
@@ -121,12 +129,7 @@ Clean review — or everything parked-with-ruling at the cap — appends `Task <
 Run `scripts/review-package PLAN_FILE MERGE_BASE HEAD` (MERGE_BASE = `git merge-base <integration-branch> HEAD`) once, then review the branch on two axes **in parallel, as isolated subagents** over that same package:
 
 - **Conformance axis** — did the diff deliver what issue + spec + plan promised, honoring the project's ADRs, context docs, and standards. Native `reviewer`, model per Agent tiers, template [conformance-reviewer-prompt.md](conformance-reviewer-prompt.md).
-- **Correctness axis** — is it built right: bugs, boundary error handling, dead branches, assertions that pin the documented contract, DRY, cross-task integration. When the `codex-collaboration` skill is available, use the explicit transport selection below; it owns only the launch and one-time fallback while the external Codex reviewer keeps its independently configured model:
-
-<!-- agent-dispatch: id=sdd-final-codex-review-transport role=codex-transport model=sonnet effort=medium -->
-Agent(subagent_type="codex:codex-reviewer", model="sonnet", effort="medium") is the transport that `codex-collaboration` owns and launches for the whole-branch correctness packet without selecting the external runtime's model.
-
-  Invoke `codex-collaboration`'s `diff-review` operation for this axis. Unavailable → use the Opus/high native reviewer selected in [correctness-reviewer-prompt.md](correctness-reviewer-prompt.md). Either way the axis is never skipped.
+- **Correctness axis** — is it built right: bugs, boundary error handling, dead branches, assertions that pin the documented contract, DRY, cross-task integration. When the `codex-collaboration` skill is available, invoke its `diff-review` operation for this axis; that skill solely owns the isolated Codex transport launch and one-time native fallback, while the external Codex reviewer keeps its independently configured model. Unavailable → use the Opus/high native reviewer selected in [correctness-reviewer-prompt.md](correctness-reviewer-prompt.md). Either way the axis is never skipped.
 
 Point the conformance dispatch at the ledger's deferred-minor and parked lines so it triages what must be fixed before merge. Verdicts come back ≤400 words each, findings Critical/Important/Minor anchored to file:line. **Never merge the two reports** into one narrative — they are independent signals; disposition each on its own, and record both verdicts plus the correctness axis's reviewer identity (`Codex` | `native` | `fallback` + failure class) in the ledger.
 
@@ -142,7 +145,12 @@ Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-verdict
 <!-- agent-dispatch: id=sdd-final-correctness-rereview role=reviewer-lite model=sonnet effort=medium -->
 Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-verdicts the named correctness findings against the bounded fix diff.
 
-For either axis, supply (1) the axis's findings list verbatim, (2) a fix-range package from `scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head that axis's first pass reviewed), and (3) the instruction to verdict each finding ADDRESSED / NOT ADDRESSED and flag new breakage in the fix diff only — out-of-scope observations go to the ledger as deferred minors; ≤400 words. Ambiguous or branch-wide judgment escapes to a full `reviewer` on Opus/high and the escalation is recorded in the SDD ledger. Adjudicate residuals like the task-loop breaker. There is no second fix wave — residual load-bearing findings surface to the caller.
+For either axis, supply (1) the axis's findings list verbatim, (2) a fix-range package from `scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head that axis's first pass reviewed), and (3) the instruction to verdict each finding ADDRESSED / NOT ADDRESSED and flag new breakage in the fix diff only — out-of-scope observations go to the ledger as deferred minors; ≤400 words. Ambiguous or branch-wide judgment escapes reviewer-lite through this explicit full-review dispatch:
+
+<!-- agent-dispatch: id=sdd-final-rereview-escalation role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") adjudicates an ambiguous or branch-wide final-axis re-review escape.
+
+Record the escalation and selected full-review role in the SDD ledger. Adjudicate residuals like the task-loop breaker. There is no second fix wave — residual load-bearing findings surface to the caller.
 
 ## Finish
 

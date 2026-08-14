@@ -163,11 +163,25 @@ EXPECTED_SDD_SITES = {
         "high",
         [],
     ),
-    "sdd-final-codex-review-transport": (
+    "sdd-round-five-implementation": (
         "home/common/agent-skills/skills/sdd/SKILL.md",
-        "codex-transport",
-        "sonnet",
-        "medium",
+        "implementer",
+        "opus",
+        "high",
+        [],
+    ),
+    "sdd-task-rereview-escalation": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "reviewer",
+        "opus",
+        "high",
+        [],
+    ),
+    "sdd-final-rereview-escalation": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "reviewer",
+        "opus",
+        "high",
         [],
     ),
     "sdd-final-conformance-review": (
