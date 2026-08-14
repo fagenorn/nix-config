@@ -475,6 +475,29 @@ class AgentModelMatrixTest(unittest.TestCase):
                 event,
             )
 
+    def test_shipping_traces_use_the_ship_issue_owner_before_ship_issue_reviews(self):
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        for scenario in ("shipping", "representative"):
+            events = [
+                event
+                for event in data["scenarios"][scenario]
+                if event["workflow"] == "shipping"
+            ]
+            dispatches = [event["dispatch"] for event in events]
+            self.assertIn("from-issue-ship-owner", dispatches, scenario)
+            self.assertNotIn("ship-release-owner", dispatches, scenario)
+            owner_index = dispatches.index("from-issue-ship-owner")
+            review_indices = [
+                index
+                for index, dispatch in enumerate(dispatches)
+                if dispatch.startswith("ship-issue-") and "review" in dispatch
+            ]
+            self.assertTrue(review_indices, scenario)
+            self.assertTrue(
+                all(owner_index < review_index for review_index in review_indices),
+                scenario,
+            )
+
     def test_reviewer_lite_cannot_be_a_first_pass_reviewer(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as temporary:
