@@ -117,17 +117,21 @@ This section applies only when certifying that deployed bridge definitions are
 current; it does not change the normal launch, read-only, timeout, output, or
 fallback contracts above. Deploy the candidate collaboration skill, bridge
 agent, and plugin first. Before any certification launch, the deployment/shipping
-owner creates and seals an immutable deployment/launch receipt. The receipt names
-the authoritative deployed paths, revisions, and `deployed_at` timestamps for all
-three components, plus the assigned session ID and start timestamp. Only then may
-the owner launch the externally started fresh Claude session; the session that
-performed deployment can never certify its own deployment.
+owner creates and seals an immutable deployment receipt. It names the
+authoritative deployed paths, revisions, and `deployed_at` timestamps for all
+three components, plus the assigned session ID; it cannot claim an actual start
+time that has not happened yet.
 
-Give the sealed receipt to the fresh session as a read-only pre-launch handoff.
-The fresh session consumes it and independently resolves the paths and revisions
-actually loaded, comparing them with the authoritative receipt before recording
-evidence. An absent or mismatched receipt rejects certification. The receipt is
-external provenance only; do not add receipt fields to the evidence schema.
+At actual launch, the launcher creates an immutable session envelope and starts
+the externally started fresh Claude session as one launch action. The envelope
+records the same assigned session ID and the actual `started_at` timestamp. Give
+both immutable objects to the fresh session as a read-only handoff. The fresh
+session consumes both, verifies their session IDs match, independently resolves
+the paths and revisions actually loaded, and verifies the loaded revisions match
+the deployment receipt. An absent or mismatched receipt or envelope rejects
+certification. These objects are external provenance only; do not add receipt or
+envelope fields to the evidence schema. The session that performed deployment
+can never certify its own deployment.
 
 That fresh session creates one schema-version-1 JSON evidence artifact with
 `schema_version` set to `1` and `kind` set to `bridge-smoke`, and must:
@@ -135,10 +139,11 @@ That fresh session creates one schema-version-1 JSON evidence artifact with
 1. After the independent receipt comparison, record the authoritative revision
    and `deployed_at` timestamp for the loaded `skill`, `agent`, and `plugin`
    under `deployment`.
-2. Record its externally established session ID and `started_at` timestamp under
-   `session`, and verify both against the receipt assignment. Reject stale
-   evidence when the session began before any recorded deployment: **Reject stale
-   sessions rather than treating them as current.**
+2. Record the assigned session ID and actual `started_at` timestamp from the
+   session envelope under `session`, after verifying that ID against the
+   deployment receipt. Reject stale evidence when the session began before any
+   recorded deployment: **Reject stale sessions rather than treating them as
+   current.**
 3. Invoke exactly one `plan-review` and exactly one `diff-review` through this
    collaboration skill and its bridge agent. For each operation, record the
    bridge execution ID, job ID, observation time, terminal status, and matching

@@ -230,17 +230,24 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "agent-evidence bridge",
             "Reject stale",
             "direct-only evidence cannot certify",
-            "immutable deployment/launch receipt",
+            "immutable deployment receipt",
             "authoritative deployed paths",
-            "assigned session ID and start timestamp",
-            "absent or mismatched receipt rejects certification",
+            "assigned session ID",
+            "immutable session envelope",
+            "same assigned session ID",
+            "actual `started_at`",
+            "consumes both",
+            "loaded revisions match the deployment receipt",
+            "absent or mismatched receipt or envelope rejects certification",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, evidence)
         self.assert_ordered(
             evidence,
             "Deploy the candidate",
-            "immutable deployment/launch receipt",
+            "immutable deployment receipt",
+            "At actual launch",
+            "immutable session envelope",
             "externally started fresh Claude session",
         )
         self.assert_ordered(
@@ -273,6 +280,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "follow-up",
             "agent-evidence research",
             "same Markdown findings file",
+            "retain no second project artifact",
+            "retain no temporary input as a second artifact",
             "exact `{file_path, key_facts[]}` return shape",
         ):
             with self.subTest(fragment=fragment):
