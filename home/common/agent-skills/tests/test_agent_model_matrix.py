@@ -113,6 +113,100 @@ EXPECTED_OWNER_SITES = {
     ),
 }
 
+EXPECTED_SDD_SITES = {
+    "sdd-mechanic-implementation": (
+        "home/common/agent-skills/skills/sdd/implementer-prompt.md",
+        "mechanic",
+        "sonnet",
+        "medium",
+        [],
+    ),
+    "sdd-nonmechanical-implementation": (
+        "home/common/agent-skills/skills/sdd/implementer-prompt.md",
+        "implementer",
+        "opus",
+        "high",
+        [],
+    ),
+    "sdd-first-pass-task-review": (
+        "home/common/agent-skills/skills/sdd/task-reviewer-prompt.md",
+        "reviewer",
+        "opus",
+        "high",
+        [],
+    ),
+    "sdd-scoped-task-rereview": (
+        "home/common/agent-skills/skills/sdd/re-review-prompt.md",
+        "reviewer-lite",
+        "sonnet",
+        "medium",
+        ["named-prior-findings", "bounded-fix-diff"],
+    ),
+    "sdd-codex-rescue-transport": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "codex-transport",
+        "sonnet",
+        "medium",
+        [],
+    ),
+    "sdd-post-rescue-implementation": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "implementer",
+        "opus",
+        "high",
+        [],
+    ),
+    "sdd-rescue-fallback-implementation": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "implementer",
+        "opus",
+        "high",
+        [],
+    ),
+    "sdd-final-codex-review-transport": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "codex-transport",
+        "sonnet",
+        "medium",
+        [],
+    ),
+    "sdd-final-conformance-review": (
+        "home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md",
+        "reviewer",
+        "opus",
+        "high",
+        [],
+    ),
+    "sdd-final-correctness-review": (
+        "home/common/agent-skills/skills/sdd/correctness-reviewer-prompt.md",
+        "reviewer",
+        "opus",
+        "high",
+        [],
+    ),
+    "sdd-final-review-fixer": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "implementer",
+        "opus",
+        "high",
+        [],
+    ),
+    "sdd-final-conformance-rereview": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "reviewer-lite",
+        "sonnet",
+        "medium",
+        ["named-prior-findings", "bounded-fix-diff"],
+    ),
+    "sdd-final-correctness-rereview": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "reviewer-lite",
+        "sonnet",
+        "medium",
+        ["named-prior-findings", "bounded-fix-diff"],
+    ),
+}
+
 
 def load_module():
     spec = importlib.util.spec_from_file_location("agent_model_matrix", SCRIPT)
@@ -235,6 +329,59 @@ class AgentModelMatrixTest(unittest.TestCase):
             text = (REPO_ROOT / relative).read_text(encoding="utf-8")
             self.assertIn("issue-owner` on Opus/high", text, relative)
             self.assertRegex(text, r"ledger|fixed-schema report", relative)
+
+    def test_sdd_dispatches_select_exact_tiers(self):
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        sites = {site["id"]: site for site in data["dispatch_sites"]}
+        self.assertEqual(set(EXPECTED_SDD_SITES) - set(sites), set())
+        for site_id, (path, role, model, effort, requires) in EXPECTED_SDD_SITES.items():
+            site = sites[site_id]
+            self.assertEqual(site["path"], path, site_id)
+            self.assertEqual(
+                (site["role"], site["model"], site["effort"], site["requires"]),
+                (role, model, effort, requires),
+                site_id,
+            )
+            self.assertEqual(
+                site["marker"],
+                f"<!-- agent-dispatch: id={site_id} role={role} "
+                f"model={model} effort={effort} -->",
+            )
+
+    def test_reviewer_lite_cannot_be_a_first_pass_reviewer(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = json.loads(MATRIX.read_text(encoding="utf-8"))
+            marker = (
+                "<!-- agent-dispatch: id=first-pass role=reviewer-lite "
+                "model=sonnet effort=medium -->"
+            )
+            call = (
+                'Agent(subagent_type="reviewer-lite", model="sonnet", '
+                'effort="medium") performs a first-pass review.'
+            )
+            manifest = root / "workflow.md"
+            manifest.write_text(f"{marker}\n{call}\n", encoding="utf-8")
+            data["dispatch_sites"] = [
+                {
+                    "id": "first-pass",
+                    "path": "workflow.md",
+                    "marker": marker,
+                    "call": call,
+                    "role": "reviewer-lite",
+                    "model": "sonnet",
+                    "effort": "medium",
+                    "requires": [],
+                }
+            ]
+            write_fixture(root, data)
+
+            errors = module.validate(root)
+
+        self.assertTrue(
+            any("reviewer-lite requires" in error for error in errors), errors
+        )
 
     def test_unmarked_agent_call_in_manifested_skill_fails(self):
         module = load_module()

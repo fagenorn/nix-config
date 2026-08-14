@@ -249,6 +249,145 @@
       "model": "sonnet",
       "effort": "medium",
       "requires": []
+    },
+    {
+      "id": "sdd-mechanic-implementation",
+      "path": "home/common/agent-skills/skills/sdd/implementer-prompt.md",
+      "marker": "<!-- agent-dispatch: id=sdd-mechanic-implementation role=mechanic model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"mechanic\", model=\"sonnet\", effort=\"medium\") executes the task from this prompt.",
+      "role": "mechanic",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": []
+    },
+    {
+      "id": "sdd-nonmechanical-implementation",
+      "path": "home/common/agent-skills/skills/sdd/implementer-prompt.md",
+      "marker": "<!-- agent-dispatch: id=sdd-nonmechanical-implementation role=implementer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") executes the task from this prompt.",
+      "role": "implementer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "sdd-first-pass-task-review",
+      "path": "home/common/agent-skills/skills/sdd/task-reviewer-prompt.md",
+      "marker": "<!-- agent-dispatch: id=sdd-first-pass-task-review role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") performs this first-pass task review.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "sdd-scoped-task-rereview",
+      "path": "home/common/agent-skills/skills/sdd/re-review-prompt.md",
+      "marker": "<!-- agent-dispatch: id=sdd-scoped-task-rereview role=reviewer-lite model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"reviewer-lite\", model=\"sonnet\", effort=\"medium\") verifies the named prior findings against the bounded fix diff.",
+      "role": "reviewer-lite",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": [
+        "named-prior-findings",
+        "bounded-fix-diff"
+      ]
+    },
+    {
+      "id": "sdd-codex-rescue-transport",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-codex-rescue-transport role=codex-transport model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"codex:rescue\", model=\"sonnet\", effort=\"medium\") transports the bounded stuck-breaker diagnosis to the external Codex runtime without selecting that runtime's model.",
+      "role": "codex-transport",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": []
+    },
+    {
+      "id": "sdd-post-rescue-implementation",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-post-rescue-implementation role=implementer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") applies the verified rescue diagnosis plus the open findings.",
+      "role": "implementer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "sdd-rescue-fallback-implementation",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-rescue-fallback-implementation role=implementer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") owns the fresh-context rescue fallback.",
+      "role": "implementer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "sdd-final-codex-review-transport",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-final-codex-review-transport role=codex-transport model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"codex:codex-reviewer\", model=\"sonnet\", effort=\"medium\") is the transport that `codex-collaboration` owns and launches for the whole-branch correctness packet without selecting the external runtime's model.",
+      "role": "codex-transport",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": []
+    },
+    {
+      "id": "sdd-final-conformance-review",
+      "path": "home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md",
+      "marker": "<!-- agent-dispatch: id=sdd-final-conformance-review role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") performs the first-pass whole-branch conformance review.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "sdd-final-correctness-review",
+      "path": "home/common/agent-skills/skills/sdd/correctness-reviewer-prompt.md",
+      "marker": "<!-- agent-dispatch: id=sdd-final-correctness-review role=reviewer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") performs the native first-pass whole-branch correctness review.",
+      "role": "reviewer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "sdd-final-review-fixer",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-final-review-fixer role=implementer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") fixes the verified whole-branch findings in one wave.",
+      "role": "implementer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "sdd-final-conformance-rereview",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-final-conformance-rereview role=reviewer-lite model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"reviewer-lite\", model=\"sonnet\", effort=\"medium\") re-verdicts the named conformance findings against the bounded fix diff.",
+      "role": "reviewer-lite",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": [
+        "named-prior-findings",
+        "bounded-fix-diff"
+      ]
+    },
+    {
+      "id": "sdd-final-correctness-rereview",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-final-correctness-rereview role=reviewer-lite model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"reviewer-lite\", model=\"sonnet\", effort=\"medium\") re-verdicts the named correctness findings against the bounded fix diff.",
+      "role": "reviewer-lite",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": [
+        "named-prior-findings",
+        "bounded-fix-diff"
+      ]
     }
   ],
   "scenarios": {
@@ -300,21 +439,83 @@
     ],
     "sdd": [
       {
-        "id": "sdd-implementation",
+        "id": "sdd-mechanic-implementation",
+        "role": "mechanic",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": []
+      },
+      {
+        "id": "sdd-nonmechanical-implementation",
         "role": "implementer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-first-pass-review",
+        "id": "sdd-first-pass-task-review",
         "role": "reviewer",
         "model": "opus",
         "effort": "high",
         "requires": []
       },
       {
-        "id": "sdd-bounded-rereview",
+        "id": "sdd-scoped-task-rereview",
+        "role": "reviewer-lite",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": [
+          "named-prior-findings",
+          "bounded-fix-diff"
+        ]
+      },
+      {
+        "id": "sdd-codex-rescue-transport",
+        "role": "codex-transport",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": []
+      },
+      {
+        "id": "sdd-post-rescue-implementation",
+        "role": "implementer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "sdd-final-conformance-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "sdd-final-codex-review-transport",
+        "role": "codex-transport",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": []
+      },
+      {
+        "id": "sdd-final-correctness-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "sdd-final-conformance-rereview",
+        "role": "reviewer-lite",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": [
+          "named-prior-findings",
+          "bounded-fix-diff"
+        ]
+      },
+      {
+        "id": "sdd-final-correctness-rereview",
         "role": "reviewer-lite",
         "model": "sonnet",
         "effort": "medium",
