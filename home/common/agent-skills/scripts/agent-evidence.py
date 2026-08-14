@@ -112,7 +112,16 @@ def _parse_timestamp_value(
             "timestamp must include a UTC offset",
         )
         return None
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        _add(
+            diagnostics,
+            "TIMESTAMP_INVALID",
+            path,
+            "timestamp is outside the supported UTC range",
+        )
+        return None
 
 
 def _timestamp(

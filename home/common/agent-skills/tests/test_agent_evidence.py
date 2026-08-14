@@ -226,6 +226,17 @@ class AgentEvidenceTest(unittest.TestCase):
             self.run_document("research", research), "TIMESTAMP_TIMEZONE_REQUIRED"
         )
 
+    def test_timestamp_normalization_overflow_reports_invalid_timestamp(self):
+        document = self.fixture("research-single-failure.json")
+        document["observations"][0]["observed_at"] = (
+            "0001-01-01T00:00:00+23:59"
+        )
+
+        completed = self.run_document("research", document)
+
+        self.assert_diagnostic(completed, "TIMESTAMP_INVALID")
+        self.assertNotIn("Traceback", completed.stderr)
+
     def test_unsupported_schema_and_wrong_kind_reject(self):
         fixture_names = {
             "bridge": "bridge-fresh-end-to-end.json",
