@@ -59,6 +59,31 @@
 - **Grounding:** The current justfile exposes workflow tests and the repository's primary build is a Nix system output.
 - **Alternative considered:** Run live paid agents in CI. Rejected by the spec's deterministic, credential-free evaluation seam.
 
+### B1: Research dispatch coverage
+- **Question:** The reviewer found that the research skill's background-agent launch was absent from the dispatch inventory, leaving a pipeline fact-finding path able to inherit model and effort.
+- **Choice:** Add the research skill to Task 2 and map its bounded read-only launch to explorer Haiku/medium, with explicit Opus/high escalation when the question becomes ambiguous or judgment-bearing.
+- **Grounding:** The design and grill skills route primary-source fact lookup through research; issue 15 covers every pipeline dispatch that could otherwise inherit.
+- **Alternative considered:** Treat research as outside issue delivery. Rejected because from-issue design phases invoke it directly.
+
+### B2: Codex rescue dispatch coverage
+- **Question:** The reviewer found that SDD's round-four `codex:rescue` stuck-breaker was absent from Task 3.
+- **Choice:** Inventory it as Codex transport Sonnet/medium and keep the fresh Opus/high implementer as the agent that applies the verified diagnosis.
+- **Grounding:** The live SDD fix loop contains this closed dispatch path; the spec excludes changing the external reviewer model, not the transport agent that launches bounded Codex work.
+- **Alternative considered:** Fold rescue into the external-reviewer exclusion. Rejected because that would leave an actual SDD dispatch ambient.
+
+### B3: Call-to-marker completeness
+- **Question:** The reviewer noted that validating declared manifest rows alone would not catch a newly added, unmarked Agent call in a manifested skill.
+- **Choice:** Give every manifest row a unique literal call anchor and require a one-to-one adjacency between each recognized call anchor and its exact marker; scan manifested files for recognized Agent/background/typed-dispatch call forms and reject any unpaired call.
+- **Grounding:** The universal bar requires fail-loud exhaustiveness at closed-set dispatch sites, and issue 15 explicitly requires a validation failure for implicit dispatch.
+- **Alternative considered:** Trust contributors to add manifest rows with new calls. Rejected because omission is the failure the validator must detect.
+
+## Standards review
+
+- **Reviewer:** native fallback reviewer `/root/issue_15/plan_review_fallback`
+- **Base SHA:** `27911e47621600849cadedea8aec1b96c3728062`
+- **Fallback used:** yes — the first independent reviewer exceeded the bounded window without returning a verdict.
+- **Disposition:** B1 accepted and applied to Task 2; B2 accepted and applied to Task 3; B3 accepted and applied to Tasks 1–2. No Should-fix or Discussion findings.
+
 ---
 
 ### Task 1: Closed matrix, validator, and custom agent tiers
@@ -117,6 +142,7 @@ git commit -m "feat(agents): declare explicit model roles (#15)" -m "Co-Authored
 - Modify: `home/common/agent-skills/skills/grill-with-docs/SKILL.md`
 - Modify: `home/common/agent-skills/skills/writing-plans/SKILL.md`
 - Modify: `home/common/agent-skills/skills/doc-grounded-questions/SKILL.md`
+- Modify: `home/common/agent-skills/skills/research/SKILL.md`
 
 **Interfaces:**
 - Consumes: Task 1 matrix schema and `agent-dispatch` marker parser.
@@ -124,7 +150,7 @@ git commit -m "feat(agents): declare explicit model roles (#15)" -m "Co-Authored
 
 - [ ] **Step 1: Extend tests with failing owner-site expectations**
 
-Add exact expected IDs and matrix selections for every dispatch in the listed owner/design skills. Assert from-issue owner/design/plan/ship use Opus/high, standards review uses reviewer Opus/high, and bounded fact lookup uses explorer Haiku/medium or mechanic Sonnet/medium according to whether it mutates state. Assert cheap-tier escalation prose names the selected Opus role and ledger/report destination.
+Add exact expected IDs and matrix selections for every dispatch in the listed owner/design/research skills. Assert from-issue owner/design/plan/ship use Opus/high, standards review uses reviewer Opus/high, and bounded fact lookup—including the research background agent—uses explorer Haiku/medium or mechanic Sonnet/medium according to whether it mutates state. Assert cheap-tier escalation prose names the selected Opus role and ledger/report destination. Add a temporary manifested-skill fixture with an unmarked `Agent` call and require a validation error.
 
 - [ ] **Step 2: Run and observe the missing-site failures**
 
@@ -134,7 +160,7 @@ Expected: FAIL listing owner/design dispatch IDs absent from the matrix and Mark
 
 - [ ] **Step 3: Add exact selections at every owner dispatch**
 
-Extend `dispatch_sites`, place one exact marker immediately before each call instruction, and rewrite ambient phrases such as “model inherited” or bare `general-purpose` to explicit Opus/high selections. Bounded read-only facts select explorer Haiku/medium; any stateful inventory selects mechanic Sonnet/medium. Require the existing ledger/fixed report to record escalation to Opus.
+Extend `dispatch_sites` with a unique literal call anchor per site, place one exact marker immediately before each call instruction, and rewrite ambient phrases such as “model inherited” or bare `general-purpose` to explicit Opus/high selections. The validator must pair every recognized call form in a manifested file to exactly one adjacent marker and reject unmarked or duplicate calls. Bounded read-only facts and the research agent select explorer Haiku/medium; any stateful inventory selects mechanic Sonnet/medium. Require the existing ledger/fixed report to record escalation to Opus.
 
 - [ ] **Step 4: Verify**
 
@@ -145,7 +171,7 @@ Expected: PASS; all declared owner/design sites appear once and no inherited-mod
 - [ ] **Step 5: Commit**
 
 ```bash
-git add home/common/agent-skills/model-matrix.json home/common/agent-skills/tests/test_agent_model_matrix.py home/common/claude-code/skills/orchestrate-issues/SKILL.md home/common/agent-skills/skills/{from-issue,design,grill-with-docs,writing-plans,doc-grounded-questions}
+git add home/common/agent-skills/model-matrix.json home/common/agent-skills/tests/test_agent_model_matrix.py home/common/claude-code/skills/orchestrate-issues/SKILL.md home/common/agent-skills/skills/{from-issue,design,grill-with-docs,writing-plans,doc-grounded-questions,research}
 git commit -m "fix(agents): pin issue-owner dispatch tiers (#15)" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
@@ -163,11 +189,11 @@ git commit -m "fix(agents): pin issue-owner dispatch tiers (#15)" -m "Co-Authore
 
 **Interfaces:**
 - Consumes: `reviewer-lite` agent contract and Task 1 marker validation.
-- Produces: explicit SDD site IDs for mechanic/implementer, first-pass reviewer, scoped reviewer-lite, final conformance reviewer, native correctness reviewer, Codex transport, and full-review fallback.
+- Produces: explicit SDD site IDs for mechanic/implementer, first-pass reviewer, scoped reviewer-lite, final conformance reviewer, native correctness reviewer, Codex reviewer transport, `codex:rescue` transport, and full-review fallback.
 
 - [ ] **Step 1: Add failing SDD matrix assertions**
 
-Require every SDD dispatch site to select an exact role/model/effort. Assert first-pass task and both whole-branch axes are reviewer Opus/high, scoped named-finding re-review is reviewer-lite Sonnet/medium, non-mechanical work is implementer Opus/high, deterministic work is mechanic Sonnet/medium, and the bridge call is codex-transport Sonnet/medium. Add a negative fixture that marks reviewer-lite as first-pass and expect validation failure.
+Require every SDD dispatch site to select an exact role/model/effort. Assert first-pass task and both whole-branch axes are reviewer Opus/high, scoped named-finding re-review is reviewer-lite Sonnet/medium, non-mechanical work is implementer Opus/high, deterministic work is mechanic Sonnet/medium, and both the review bridge and `codex:rescue` stuck-breaker are codex-transport Sonnet/medium. Add a negative fixture that marks reviewer-lite as first-pass and expect validation failure.
 
 - [ ] **Step 2: Run and observe the current shared-reviewer failure**
 
@@ -177,7 +203,7 @@ Expected: FAIL because current SDD prose routes scoped re-reviews through the sa
 
 - [ ] **Step 3: Implement SDD selections and eligibility guard**
 
-Add exact markers and explicit selections to the SDD controller and prompt headers. Change only the scoped re-review call/template to reviewer-lite. Preserve existing review rubrics, fix-round limits, two-axis independence, and external Codex reviewer semantics. State that ambiguous or branch-wide findings escape reviewer-lite to reviewer Opus/high and record that escalation in the SDD ledger.
+Add exact markers and explicit selections to the SDD controller and prompt headers. Change only the scoped re-review call/template to reviewer-lite. Mark `codex:rescue` as Sonnet/medium bounded transport and the post-diagnosis implementer as Opus/high. Preserve existing review rubrics, fix-round limits, two-axis independence, and external Codex reviewer semantics. State that ambiguous or branch-wide findings escape reviewer-lite to reviewer Opus/high and record that escalation in the SDD ledger.
 
 - [ ] **Step 4: Verify**
 
