@@ -1,0 +1,189 @@
+{
+  "roles": {
+    "issue-owner": {
+      "model": "opus",
+      "effort": "high",
+      "eligible": [
+        "issue ownership",
+        "design and planning judgment"
+      ],
+      "prohibited": [
+        "mechanical-only work"
+      ]
+    },
+    "ship-owner": {
+      "model": "opus",
+      "effort": "high",
+      "eligible": [
+        "ship ownership",
+        "merge and release judgment"
+      ],
+      "prohibited": [
+        "mechanical transport"
+      ]
+    },
+    "implementer": {
+      "model": "opus",
+      "effort": "high",
+      "eligible": [
+        "non-mechanical implementation"
+      ],
+      "prohibited": [
+        "deterministic mechanical work"
+      ]
+    },
+    "reviewer": {
+      "model": "opus",
+      "effort": "high",
+      "eligible": [
+        "first-pass review",
+        "plan review",
+        "conformance review",
+        "correctness review",
+        "pull-request review",
+        "whole-branch review"
+      ],
+      "prohibited": [
+        "mechanical transport"
+      ]
+    },
+    "reviewer-lite": {
+      "model": "sonnet",
+      "effort": "medium",
+      "eligible": [
+        "named prior findings",
+        "bounded fix diff"
+      ],
+      "prohibited": [
+        "first-pass review",
+        "ambiguous adjudication",
+        "whole-branch review"
+      ]
+    },
+    "mechanic": {
+      "model": "sonnet",
+      "effort": "medium",
+      "eligible": [
+        "deterministic mechanical work"
+      ],
+      "prohibited": [
+        "design judgment",
+        "ambiguous implementation"
+      ]
+    },
+    "explorer": {
+      "model": "haiku",
+      "effort": "medium",
+      "eligible": [
+        "sharply bounded read-only exploration"
+      ],
+      "prohibited": [
+        "writes",
+        "open-ended investigation",
+        "judgment"
+      ]
+    },
+    "codex-transport": {
+      "model": "sonnet",
+      "effort": "medium",
+      "eligible": [
+        "deterministic Codex reviewer transport"
+      ],
+      "prohibited": [
+        "changing the external Codex reviewer model",
+        "review judgment"
+      ]
+    }
+  },
+  "dispatch_sites": [],
+  "scenarios": {
+    "orchestration": [
+      {
+        "id": "orchestration-issue-owner",
+        "role": "issue-owner",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      }
+    ],
+    "from-issue": [
+      {
+        "id": "from-issue-owner",
+        "role": "issue-owner",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "from-issue-plan-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "from-issue-implementation",
+        "role": "implementer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "from-issue-shipping",
+        "role": "ship-owner",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      }
+    ],
+    "sdd": [
+      {
+        "id": "sdd-implementation",
+        "role": "implementer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "sdd-first-pass-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "sdd-bounded-rereview",
+        "role": "reviewer-lite",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": [
+          "named-prior-findings",
+          "bounded-fix-diff"
+        ]
+      }
+    ],
+    "shipping": [
+      {
+        "id": "shipping-owner",
+        "role": "ship-owner",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "shipping-review",
+        "role": "reviewer",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
+      },
+      {
+        "id": "shipping-codex-transport",
+        "role": "codex-transport",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": []
+      }
+    ]
+  }
+}

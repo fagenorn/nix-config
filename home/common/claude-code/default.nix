@@ -123,8 +123,8 @@ in
 
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
   # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
-  # subagents dispatch as these types instead (implementer/reviewer = high,
-  # mechanic = medium on sonnet). Skills' dispatch specs reference them by name.
+  # subagents dispatch explicitly as implementer/reviewer (opus/high) or
+  # mechanic/reviewer-lite (sonnet/medium). Skills reference them by name.
   home.file.".claude/agents" = {
     source = ./agents;
     recursive = true;
