@@ -231,61 +231,73 @@ index 1954274..a40434e 100644
 +        requestQueue.push({ socket, message });
 +        drainQueue();
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..54958b1 100644
+index 83df468..f7fe157 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
-@@ -32 +31,0 @@ import {
+@@ -32,2 +31,0 @@ import {
 -  listJobs,
-@@ -50,0 +50,2 @@ import {
+-  setConfig,
+@@ -50,0 +49,2 @@ import {
 +  isActiveJobStatus,
 +  listJobsRetainingActive,
+@@ -53 +53,2 @@ import {
+-  SESSION_ID_ENV
++  SESSION_ID_ENV,
++  setConfigRetainingActive
 @@ -54,0 +56 @@ import {
 +import { cleanupReviewerRuntime } from "./lib/runtime-home.mjs";
-@@ -79 +81 @@ function printUsage() {
+@@ -70,0 +73,4 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
++// Node's maximum setTimeout delay (2^31 - 1 ms, ~24.9 days). A larger delay is
++// silently clamped to 1 ms, so this is the ceiling on a timeout the worker can
++// actually enforce — and therefore on one a job record may advertise.
++const MAX_ENFORCEABLE_TIMEOUT_MS = 2147483647;
+@@ -79 +85 @@ function printUsage() {
 -      "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
 +      "  node scripts/codex-companion.mjs setup [--disable-review-gate] [--json]",
-@@ -82 +84 @@ function printUsage() {
+@@ -82 +88 @@ function printUsage() {
 -      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
 +      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--reviewer] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
-@@ -198,4 +199,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
+@@ -198,4 +203,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 -  if (!config.stopReviewGate) {
 -    nextSteps.push("Optional: run `/codex:setup --enable-review-gate` to require a fresh review before stop.");
 -  }
 -
-@@ -230,3 +228,3 @@ async function handleSetup(argv) {
+@@ -230,4 +232,4 @@ async function handleSetup(argv) {
 -    setConfig(workspaceRoot, "stopReviewGate", true);
 -    actionsTaken.push(`Enabled the stop-time review gate for ${workspaceRoot}.`);
 -  } else if (options["disable-review-gate"]) {
+-    setConfig(workspaceRoot, "stopReviewGate", false);
 +    throw new Error("The automatic Stop review gate is disabled by this locally patched plugin.");
 +  }
 +  if (getConfig(workspaceRoot).stopReviewGate || options["disable-review-gate"]) {
-@@ -290,4 +287,0 @@ function renderStatusPayload(report, asJson) {
++    setConfigRetainingActive(workspaceRoot, "stopReviewGate", false);
+@@ -290,4 +291,0 @@ function renderStatusPayload(report, asJson) {
 -function isActiveJobStatus(status) {
 -  return status === "queued" || status === "running";
 -}
 -
-@@ -339 +333,3 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
+@@ -339 +337,3 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
 -  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
 +  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)).filter(
 +    (job) => job.id !== options.excludeJobId
 +  );
-@@ -467 +463,2 @@ async function executeTaskRun(request) {
+@@ -467 +467,2 @@ async function executeTaskRun(request) {
 -    resumeLast: request.resumeLast
 +    resumeLast: request.resumeLast,
 +    reviewer: request.reviewer
-@@ -493,2 +490,4 @@ async function executeTaskRun(request) {
+@@ -493,2 +494,4 @@ async function executeTaskRun(request) {
 -    persistThread: true,
 -    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
 +    persistThread: !request.reviewer,
 +    threadName: request.reviewer || resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
 +    reviewerJobId: request.reviewer ? request.jobId : null,
 +    timeoutMs: request.timeoutMs
-@@ -496,0 +496,4 @@ async function executeTaskRun(request) {
+@@ -496,0 +500,4 @@ async function executeTaskRun(request) {
 +  if (request.reviewer && result.touchedFiles.length > 0) {
 +    throw new Error(`Read-only Codex reviewer reported file changes: ${result.touchedFiles.join(", ")}`);
 +  }
 +
-@@ -540 +543,7 @@ function buildReviewJobMetadata(reviewName, target) {
+@@ -540 +547,7 @@ function buildReviewJobMetadata(reviewName, target) {
 -function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 +function buildTaskRunMetadata({ prompt, resumeLast = false, reviewer = false }) {
 +  if (reviewer) {
@@ -294,27 +306,27 @@ index 83df468..54958b1 100644
 +      summary: shorten(prompt || "Read-only plan review")
 +    };
 +  }
-@@ -592 +601 @@ function createTrackedProgress(job, options = {}) {
+@@ -592 +605 @@ function createTrackedProgress(job, options = {}) {
 -function buildTaskJob(workspaceRoot, taskMetadata, write) {
 +function buildTaskJob(workspaceRoot, taskMetadata, write, reviewer = false) {
-@@ -594,2 +603,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -594,2 +607,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    prefix: "task",
 -    kind: "task",
 +    prefix: reviewer ? "reviewer" : "task",
 +    kind: reviewer ? "plan-review" : "task",
-@@ -598 +607 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -598 +611 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    jobClass: "task",
 +    jobClass: reviewer ? "review" : "task",
-@@ -604 +613 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -604 +617 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
 +function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, reviewer, timeoutMs, jobId }) {
-@@ -611,0 +621,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
+@@ -611,0 +625,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
 +    reviewer,
 +    timeoutMs,
-@@ -671 +682 @@ async function runForegroundCommand(job, runner, options = {}) {
+@@ -671 +686 @@ async function runForegroundCommand(job, runner, options = {}) {
 -function spawnDetachedTaskWorker(cwd, jobId) {
 +function spawnDetachedTaskWorker(cwd, jobId, logFile) {
-@@ -672,0 +684,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -672,0 +688,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  // Same shape as spawnBrokerProcess. The child inherits an O_APPEND fd on the
 +  // job log, so everything it writes to fd 1/2 is appended to the file the job
 +  // record already points at via logFile — including output no application code
@@ -325,12 +337,12 @@ index 83df468..54958b1 100644
 +  // O_APPEND on the same inode from the same process, so the two interleave
 +  // chronologically: the last progress line, then the trail that ended it.
 +  const logFd = fs.openSync(logFile, "a");
-@@ -677 +698 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -677 +702 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 -    stdio: "ignore",
 +    stdio: ["ignore", logFd, logFd],
-@@ -680,0 +702 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -680,0 +706 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  fs.closeSync(logFd);
-@@ -683,0 +706,25 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -683,0 +710,35 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +function resolveJobDeadline(createdAt, timeoutMs) {
 +  // The issue's definition: enqueue time + timeout, and a deadline exists only
 +  // when a timeout does. Measured from the record's own createdAt rather than a
@@ -343,9 +355,19 @@ index 83df468..54958b1 100644
 +  if (!Number.isFinite(createdMs) || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
 +    return null;
 +  }
-+  // Total by construction. A --timeout-ms large enough to push the sum outside
-+  // the range a Date can represent clears the positive-finite guard on the
-+  // option, and toISOString throws RangeError on the resulting invalid Date.
++  // Only record a deadline the runtime will actually enforce. The worker's budget
++  // is a setTimeout (`lib/codex.mjs`), and Node clamps any delay above
++  // MAX_ENFORCEABLE_TIMEOUT_MS to 1 ms — so a --timeout-ms above it makes the job
++  // fail almost immediately while a naive createdAt + timeoutMs would advertise a
++  // deadline weeks out with `overdue: false`. Reporting must not promise what
++  // enforcement will not honour, and the honest report for an unenforceable
++  // budget is the same as for an unrepresentable one: no deadline.
++  if (timeoutMs > MAX_ENFORCEABLE_TIMEOUT_MS) {
++    return null;
++  }
++  // Total by construction. The cap above keeps the sum representable for any
++  // real createdAt, but a crafted createdAt near the edge of the Date range can
++  // still overflow, and toISOString throws RangeError on an invalid Date.
 +  // Checking the constructed Date's own time value asks the platform where its
 +  // limit is instead of restating the bound here. An unrepresentable deadline is
 +  // no deadline: report none rather than failing the enqueue outright.
@@ -356,7 +378,7 @@ index 83df468..54958b1 100644
 +  return deadline.toISOString();
 +}
 +
-@@ -688 +735,6 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -688 +749,6 @@ function enqueueBackgroundTask(cwd, job, request) {
 -  const child = spawnDetachedTaskWorker(cwd, job.id);
 +  // Resolved before the spawn. It depends only on the record's createdAt and the
 +  // request's timeoutMs, both already known here, and anything that goes wrong
@@ -364,14 +386,14 @@ index 83df468..54958b1 100644
 +  // job record at all — unreachable, unreportable, and never reaped.
 +  const deadlineAt = resolveJobDeadline(job.createdAt, request.timeoutMs);
 +  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
-@@ -694,0 +747 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -694,0 +761 @@ function enqueueBackgroundTask(cwd, job, request) {
 +    ...(deadlineAt ? { deadlineAt } : {}),
-@@ -764,2 +817,2 @@ async function handleTask(argv) {
+@@ -764,2 +831,2 @@ async function handleTask(argv) {
 -    valueOptions: ["model", "effort", "cwd", "prompt-file"],
 -    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
 +    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms"],
 +    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "reviewer"],
-@@ -782,0 +836,8 @@ async function handleTask(argv) {
+@@ -782,0 +850,8 @@ async function handleTask(argv) {
 +  const reviewer = Boolean(options.reviewer);
 +  if (reviewer && (write || resumeLast)) {
 +    throw new Error("Reviewer jobs must be fresh and read-only.");
@@ -380,32 +402,32 @@ index 83df468..54958b1 100644
 +  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
 +    throw new Error("--timeout-ms must be a positive number.");
 +  }
-@@ -785 +846,2 @@ async function handleTask(argv) {
+@@ -785 +860,2 @@ async function handleTask(argv) {
 -    resumeLast
 +    resumeLast,
 +    reviewer
-@@ -792 +854 @@ async function handleTask(argv) {
+@@ -792 +868 @@ async function handleTask(argv) {
 -    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
-@@ -799,0 +862,2 @@ async function handleTask(argv) {
+@@ -799,0 +876,2 @@ async function handleTask(argv) {
 +      reviewer,
 +      timeoutMs,
-@@ -807 +871 @@ async function handleTask(argv) {
+@@ -807 +885 @@ async function handleTask(argv) {
 -  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
-@@ -817,0 +882,2 @@ async function handleTask(argv) {
+@@ -817,0 +896,2 @@ async function handleTask(argv) {
 +        reviewer,
 +        timeoutMs,
-@@ -937 +1003 @@ function handleTaskResumeCandidate(argv) {
+@@ -937 +1017 @@ function handleTaskResumeCandidate(argv) {
 -  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
 +  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)));
-@@ -976 +1042,4 @@ async function handleCancel(argv) {
+@@ -976 +1056,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
 +    job.kind === "plan-review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1056,3 @@ async function handleCancel(argv) {
+@@ -986,0 +1070,3 @@ async function handleCancel(argv) {
 +  if (job.kind === "plan-review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
@@ -1010,7 +1032,7 @@ index 0000000..aff6584
 +  return cleanupReviewerRuntimeInStateDir(resolveStateDir(cwd), jobId);
 +}
 diff --git a/plugins/codex/scripts/lib/state.mjs b/plugins/codex/scripts/lib/state.mjs
-index 2da2349..a7b1c13 100644
+index 2da2349..29eb4f2 100644
 --- a/plugins/codex/scripts/lib/state.mjs
 +++ b/plugins/codex/scripts/lib/state.mjs
 @@ -13,0 +14,4 @@ const MAX_JOBS = 50;
@@ -1078,7 +1100,8 @@ index 2da2349..a7b1c13 100644
 +    .readdirSync(stateRoot, { withFileTypes: true })
 +    .filter((entry) => entry.isDirectory())
 +    .map((entry) => path.join(stateRoot, entry.name));
-@@ -57,0 +115,52 @@ export function ensureStateDir(cwd) {
+@@ -58 +115,58 @@ export function ensureStateDir(cwd) {
+-export function loadState(cwd) {
 +export function migrateLegacyJobIndexInStateDir(stateDir, options = {}) {
 +  const stateFile = path.join(stateDir, STATE_FILE_NAME);
 +  if (!fs.existsSync(stateFile)) {
@@ -1131,18 +1154,24 @@ index 2da2349..a7b1c13 100644
 +  });
 +}
 +
-@@ -61 +170 @@ export function loadState(cwd) {
++// `retain` threads through every state read and write for the same reason
++// listJobs takes it (see selectRetainedJobs): loadState's job list is what
++// saveState writes back and prunes against, so a status-blind load followed by a
++// status-blind prune evicts an exempt record just as surely as a status-blind
++// read hides one. A caller that passes the predicate to one must pass it to all.
++export function loadState(cwd, { retain = null } = {}) {
+@@ -61 +175 @@ export function loadState(cwd) {
 -    return defaultState();
-+    return { ...defaultState(), jobs: listJobs(cwd) };
-@@ -64,0 +174 @@ export function loadState(cwd) {
++    return { ...defaultState(), jobs: listJobs(cwd, { retain }) };
+@@ -64,0 +179 @@ export function loadState(cwd) {
 +    migrateLegacyJobIndex(cwd);
-@@ -73 +183 @@ export function loadState(cwd) {
+@@ -73 +188 @@ export function loadState(cwd) {
 -      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : []
-+      jobs: listJobs(cwd)
-@@ -76 +186 @@ export function loadState(cwd) {
++      jobs: listJobs(cwd, { retain })
+@@ -76 +191 @@ export function loadState(cwd) {
 -    return defaultState();
-+    return { ...defaultState(), jobs: listJobs(cwd) };
-@@ -85,0 +196,25 @@ function pruneJobs(jobs) {
++    return { ...defaultState(), jobs: listJobs(cwd, { retain }) };
+@@ -85,0 +201,25 @@ function pruneJobs(jobs) {
 +// The one retention selection, applied by both the on-disk prune and the read
 +// path. MAX_JOBS bounds the records the caller is willing to lose, and `retain`
 +// says which are not eviction candidates at all. It exists because pruneJobs
@@ -1168,13 +1197,18 @@ index 2da2349..a7b1c13 100644
 +  return [...exempt, ...pruneJobs(evictable)];
 +}
 +
-@@ -93 +227,0 @@ export function saveState(cwd, state) {
+@@ -92,2 +232 @@ function removeFileIfExists(filePath) {
+-export function saveState(cwd, state) {
 -  const previousJobs = loadState(cwd).jobs;
-@@ -101,2 +235 @@ export function saveState(cwd, state) {
++export function saveState(cwd, state, { retain = null } = {}) {
+@@ -95 +234 @@ export function saveState(cwd, state) {
+-  const nextJobs = pruneJobs(state.jobs ?? []);
++  const nextJobs = selectRetainedJobs(state.jobs ?? [], retain);
+@@ -101,2 +240 @@ export function saveState(cwd, state) {
 -    },
 -    jobs: nextJobs
 +    }
-@@ -105,7 +238,5 @@ export function saveState(cwd, state) {
+@@ -105,7 +243,5 @@ export function saveState(cwd, state) {
 -  const retainedIds = new Set(nextJobs.map((job) => job.id));
 -  for (const job of previousJobs) {
 -    if (retainedIds.has(job.id)) {
@@ -1187,20 +1221,28 @@ index 2da2349..a7b1c13 100644
 +  });
 +  for (const job of nextJobs) {
 +    writeJobFile(cwd, job.id, job);
-@@ -113,3 +244,2 @@ export function saveState(cwd, state) {
+@@ -113,3 +249,2 @@ export function saveState(cwd, state) {
 -
 -  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
 -  return nextState;
-+  pruneJobRecords(cwd);
-+  return { ...nextState, jobs: listJobs(cwd) };
-@@ -130 +260,5 @@ export function upsertJob(cwd, jobPatch) {
++  pruneJobRecords(cwd, { retain });
++  return { ...nextState, jobs: listJobs(cwd, { retain }) };
+@@ -118,2 +253,2 @@ export function saveState(cwd, state) {
+-export function updateState(cwd, mutate) {
+-  const state = loadState(cwd);
++export function updateState(cwd, mutate, { retain = null } = {}) {
++  const state = loadState(cwd, { retain });
+@@ -121 +256 @@ export function updateState(cwd, mutate) {
+-  return saveState(cwd, state);
++  return saveState(cwd, state, { retain });
+@@ -130 +265,5 @@ export function upsertJob(cwd, jobPatch) {
 -  return updateState(cwd, (state) => {
 +  if (!jobPatch?.id) {
 +    throw new Error("A job id is required.");
 +  }
 +  const jobFile = resolveJobFile(cwd, jobPatch.id);
 +  return withMetadataLock(`${jobFile}.lock`, () => {
-@@ -132,8 +266,7 @@ export function upsertJob(cwd, jobPatch) {
+@@ -132,8 +271,7 @@ export function upsertJob(cwd, jobPatch) {
 -    const existingIndex = state.jobs.findIndex((job) => job.id === jobPatch.id);
 -    if (existingIndex === -1) {
 -      state.jobs.unshift({
@@ -1216,18 +1258,18 @@ index 2da2349..a7b1c13 100644
 +      } catch {
 +        existing = {};
 +      }
-@@ -141,2 +274,3 @@ export function upsertJob(cwd, jobPatch) {
+@@ -141,2 +279,3 @@ export function upsertJob(cwd, jobPatch) {
 -    state.jobs[existingIndex] = {
 -      ...state.jobs[existingIndex],
 +    const next = {
 +      createdAt: existing.createdAt ?? timestamp,
 +      ...existing,
-@@ -145,0 +280,31 @@ export function upsertJob(cwd, jobPatch) {
+@@ -145,0 +285,2 @@ export function upsertJob(cwd, jobPatch) {
 +    atomicWriteFile(jobFile, `${JSON.stringify(next, null, 2)}\n`);
 +    return next;
-+  });
-+}
-+
+@@ -149,2 +290,27 @@ export function upsertJob(cwd, jobPatch) {
+-export function listJobs(cwd) {
+-  return loadState(cwd).jobs;
 +export function updateJobRecordInStateDir(stateDir, jobId, mutate) {
 +  const jobsDir = path.join(stateDir, JOBS_DIR_NAME);
 +  // resolveJobFile used to create this directory as a side effect of
@@ -1254,9 +1296,15 @@ index 2da2349..a7b1c13 100644
 +    const written = { ...next, updatedAt: nowIso() };
 +    atomicWriteFile(jobFile, `${JSON.stringify(written, null, 2)}\n`);
 +    return written;
-@@ -149,2 +314,21 @@ export function upsertJob(cwd, jobPatch) {
--export function listJobs(cwd) {
--  return loadState(cwd).jobs;
++  });
+@@ -153,7 +319,34 @@ export function listJobs(cwd) {
+-export function setConfig(cwd, key, value) {
+-  return updateState(cwd, (state) => {
+-    state.config = {
+-      ...state.config,
+-      [key]: value
+-    };
+-  });
 +export function updateJobRecord(cwd, jobId, mutate) {
 +  return updateJobRecordInStateDir(resolveStateDir(cwd), jobId, mutate);
 +}
@@ -1278,12 +1326,28 @@ index 2da2349..a7b1c13 100644
 +  // Exempt records bypass the MAX_JOBS slice entirely. Every caller sorts the
 +  // result itself, so the exempt-first order this returns is not load-bearing.
 +  return selectRetainedJobs(jobs, retain);
-@@ -169 +353,3 @@ export function writeJobFile(cwd, jobId, payload) {
++}
++
++export function setConfig(cwd, key, value, { retain = null } = {}) {
++  return updateState(
++    cwd,
++    (state) => {
++      state.config = {
++        ...state.config,
++        [key]: value
++      };
++    },
++    { retain }
++  );
+@@ -162,0 +356,2 @@ export function getConfig(cwd) {
++  // Reads config only and discards the job list, so the retention predicate is
++  // immaterial here — nothing is written back.
+@@ -169 +364,3 @@ export function writeJobFile(cwd, jobId, payload) {
 -  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 +  withMetadataLock(`${jobFile}.lock`, () => {
 +    atomicWriteFile(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
 +  });
-@@ -182,0 +369,52 @@ function removeJobFile(jobFile) {
+@@ -182,0 +380,52 @@ function removeJobFile(jobFile) {
 +export function removeJob(cwd, jobId) {
 +  return removeJobFromStateDir(resolveStateDir(cwd), jobId);
 +}
@@ -1321,8 +1385,8 @@ index 2da2349..a7b1c13 100644
 +      // outcome listJobs + the old pruneJobRecords produced together.
 +    }
 +  }
-+  // pruneJobRecords passes no predicate, so cwd-scoped pruning keeps its current
-+  // semantics exactly. See selectRetainedJobs for why `retain` exists.
++  // See selectRetainedJobs for why `retain` exists; passing none collapses this
++  // to the status-blind cap.
 +  const retainedIds = new Set(selectRetainedJobs(records, retain).map((job) => job.id));
 +  for (const name of names) {
 +    const jobId = name.slice(0, -".json".length);
@@ -1332,28 +1396,29 @@ index 2da2349..a7b1c13 100644
 +  }
 +}
 +
-+function pruneJobRecords(cwd) {
-+  pruneJobRecordsInStateDir(resolveStateDir(cwd));
++function pruneJobRecords(cwd, { retain = null } = {}) {
++  pruneJobRecordsInStateDir(resolveStateDir(cwd), { retain });
 +}
 +
 diff --git a/plugins/codex/scripts/lib/tracked-jobs.mjs b/plugins/codex/scripts/lib/tracked-jobs.mjs
-index 9028690..8c96ea6 100644
+index 9028690..923f864 100644
 --- a/plugins/codex/scripts/lib/tracked-jobs.mjs
 +++ b/plugins/codex/scripts/lib/tracked-jobs.mjs
-@@ -4 +4,11 @@ import process from "node:process";
+@@ -4 +4,12 @@ import process from "node:process";
 -import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 +import {
 +  listJobs,
 +  readJobFile,
 +  resolveJobFile,
 +  resolveJobLogFile,
++  setConfig,
 +  updateJobRecord,
 +  upsertJob,
 +  writeJobFile
 +} from "./state.mjs";
 +import { isProcessAlive } from "./process.mjs";
 +import { cleanupReviewerRuntime } from "./runtime-home.mjs";
-@@ -103,11 +112,0 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
+@@ -103,11 +113,0 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
 -
 -    const jobFile = resolveJobFile(workspaceRoot, jobId);
 -    if (!fs.existsSync(jobFile)) {
@@ -1365,7 +1430,7 @@ index 9028690..8c96ea6 100644
 -      ...storedJob,
 -      ...patch
 -    });
-@@ -204,0 +204,68 @@ export async function runTrackedJob(job, runner, options = {}) {
+@@ -204,0 +205,84 @@ export async function runTrackedJob(job, runner, options = {}) {
 +
 +// Active = queued | running. The only other statuses any writer produces are the
 +// terminal three (completed | failed | cancelled), so "not active" and "terminal"
@@ -1389,7 +1454,23 @@ index 9028690..8c96ea6 100644
 +// imports state.mjs, so no new import direction appears and state.mjs stays
 +// status-agnostic.
 +export function listJobsRetainingActive(cwd) {
-+  return listJobs(cwd, { retain: (job) => isActiveJobStatus(job.status) });
++  return listJobs(cwd, { retain: retainActiveJob });
++}
++
++// The write-path half of that same policy, and the reason it is not optional: a
++// config write is loadState → mutate → saveState, and saveState prunes the jobs
++// dir against the list loadState produced. Status-blind, that sequence *deletes*
++// the wedged active record listJobsRetainingActive exists to keep visible —
++// `/codex:setup --disable-review-gate` alone was enough to destroy a live job's
++// JSON and log once fifty newer terminal records became the steady state. The
++// read fix without this one only made the record visible right up until the next
++// config write.
++export function setConfigRetainingActive(cwd, key, value) {
++  return setConfig(cwd, key, value, { retain: retainActiveJob });
++}
++
++function retainActiveJob(job) {
++  return isActiveJobStatus(job?.status);
 +}
 +
 +function isWorkerProbeEligible(job) {
@@ -1435,7 +1516,7 @@ index 9028690..8c96ea6 100644
 +  return reconciled ?? job;
 +}
 diff --git a/plugins/codex/scripts/session-lifecycle-hook.mjs b/plugins/codex/scripts/session-lifecycle-hook.mjs
-index 778571e..07698fb 100644
+index 778571e..ba2b247 100644
 --- a/plugins/codex/scripts/session-lifecycle-hook.mjs
 +++ b/plugins/codex/scripts/session-lifecycle-hook.mjs
 @@ -3,0 +4 @@ import fs from "node:fs";
@@ -1462,15 +1543,25 @@ index 778571e..07698fb 100644
 +import { cleanupReviewerRuntimeInStateDir } from "./lib/runtime-home.mjs";
 @@ -18 +18,0 @@ import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 -import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
-@@ -42,3 +42,12 @@ function appendEnvVar(name, value) {
+@@ -42,3 +42,22 @@ function appendEnvVar(name, value) {
 -function cleanupSessionJobs(cwd, sessionId) {
 -  if (!cwd || !sessionId) {
 -    return;
 +function terminalizeLiveSessionJob(stateDir, job) {
++  // The outcome is kept, not swallowed. terminateProcessTree throws when the kill
++  // itself was refused (EPERM on a reparented worker, an unexpected errno) as
++  // opposed to the process already being gone (ESRCH, reported as
++  // `delivered: false`). Swallowing that throw and writing `cancelled` anyway
++  // claimed a clean cancellation for a worker that may still be running, and
++  // nulled the one field — pid — a post-mortem reader needs to check. This whole
++  // issue is about terminalizing *truthfully*, so an unconfirmed kill has to
++  // reach the record.
++  const targetPid = job.pid ?? Number.NaN;
++  let terminationError = null;
 +  try {
-+    terminateProcessTree(job.pid ?? Number.NaN);
-+  } catch {
-+    // Ignore teardown failures during session shutdown.
++    terminateProcessTree(targetPid);
++  } catch (error) {
++    terminationError = error;
 +  }
 +  // Aimed at the state dir this loop is walking, not at the record's
 +  // workspaceRoot: in the divergence case below they are different dirs, and the
@@ -1478,7 +1569,7 @@ index 778571e..07698fb 100644
 +  // condition used to carry existed only because the path derived from it.
 +  if (job.kind === "plan-review") {
 +    cleanupReviewerRuntimeInStateDir(stateDir, job.id);
-@@ -47,4 +56,26 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -47,4 +66,43 @@ function cleanupSessionJobs(cwd, sessionId) {
 -  const workspaceRoot = resolveWorkspaceRoot(cwd);
 -  const stateFile = resolveStateFile(workspaceRoot);
 -  if (!fs.existsSync(stateFile)) {
@@ -1494,8 +1585,25 @@ index 778571e..07698fb 100644
 +      // dead-worker flip) reached the record first; keep what it wrote.
 +      return null;
 +    }
-+    reason = `Session ended while the job was still ${current.status}.`;
 +    const completedAt = nowIso();
++    if (terminationError) {
++      // Terminal either way — the session is over and an active record nothing
++      // will ever revisit is its own bug — but recorded as `failed`, not
++      // `cancelled`: we cannot say we cancelled what we could not kill. The pid
++      // survives so the trail names the process an operator may still have to
++      // reap by hand.
++      reason =
++        `Session ended while the job was still ${current.status}, but terminating pid ${targetPid} failed ` +
++        `(${terminationError.message ?? terminationError}); the worker may have outlived the session.`;
++      return {
++        ...current,
++        status: "failed",
++        phase: "failed",
++        completedAt,
++        errorMessage: reason
++      };
++    }
++    reason = `Session ended while the job was still ${current.status}.`;
 +    return {
 +      ...current,
 +      status: "cancelled",
@@ -1509,15 +1617,15 @@ index 778571e..07698fb 100644
 +
 +  if (reason) {
 +    appendLogLine(written?.logFile ?? job.logFile ?? null, reason);
-@@ -51,0 +83 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -51,0 +110 @@ function cleanupSessionJobs(cwd, sessionId) {
 +}
-@@ -53,3 +85,2 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -53,3 +112,2 @@ function cleanupSessionJobs(cwd, sessionId) {
 -  const state = loadState(workspaceRoot);
 -  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
 -  if (removedJobs.length === 0) {
 +function cleanupSessionJobs(sessionId) {
 +  if (!sessionId) {
-@@ -58,4 +89,4 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -58,4 +116,4 @@ function cleanupSessionJobs(cwd, sessionId) {
 -
 -  for (const job of removedJobs) {
 -    const stillRunning = job.status === "queued" || job.status === "running";
@@ -1526,7 +1634,7 @@ index 778571e..07698fb 100644
 +    migrateLegacyJobIndexInStateDir(stateDir);
 +    const jobsDir = path.join(stateDir, "jobs");
 +    if (!fs.existsSync(jobsDir)) {
-@@ -64,4 +95,45 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -64,4 +122,45 @@ function cleanupSessionJobs(cwd, sessionId) {
 -    try {
 -      terminateProcessTree(job.pid ?? Number.NaN);
 -    } catch {
@@ -1576,7 +1684,7 @@ index 778571e..07698fb 100644
 +        continue;
 +      }
 +      terminalizeLiveSessionJob(stateDir, current);
-@@ -68,0 +141,10 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -68,0 +168,10 @@ function cleanupSessionJobs(cwd, sessionId) {
 +    // SessionEnd used to delete this session's records, which made it the de
 +    // facto garbage collector of job artifacts. Retaining them means the state
 +    // layer's existing MAX_JOBS retention has to run at the same lifecycle
@@ -1587,13 +1695,13 @@ index 778571e..07698fb 100644
 +    // would let one session's end delete a live record and log belonging to a
 +    // concurrent session, which is the opposite of what the issue asks for.
 +    pruneJobRecordsInStateDir(stateDir, { retain: (job) => isActiveJobStatus(job.status) });
-@@ -70,5 +151,0 @@ function cleanupSessionJobs(cwd, sessionId) {
+@@ -70,5 +178,0 @@ function cleanupSessionJobs(cwd, sessionId) {
 -
 -  saveState(workspaceRoot, {
 -    ...state,
 -    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
 -  });
-@@ -84,30 +161,3 @@ async function handleSessionEnd(input) {
+@@ -84,30 +188,3 @@ async function handleSessionEnd(input) {
 -  const cwd = input.cwd || process.cwd();
 -  const brokerSession =
 -    loadBrokerSession(cwd) ??
@@ -2469,10 +2577,10 @@ index 0f8f57c..f4c286c 100644
 +    savedJobs.map((job) => job.id),
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
-index 0000000..4192589
+index 0000000..ef2e1e1
 --- /dev/null
 +++ b/tests/worker-postmortem.test.mjs
-@@ -0,0 +1,772 @@
+@@ -0,0 +1,858 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -3002,6 +3110,58 @@ index 0000000..4192589
 +  assert.equal(JSON.parse(single.stdout).job.status, "running");
 +});
 +
++test("a config write keeps a wedged active record and its log", (t) => {
++  const workspace = makeTempDir();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const sessionId = "sess-wedged-config-write";
++  const sleeper = spawnSleeper(t, workspace);
++  // Same steady state as the visibility test above: a full page of newer terminal
++  // records, which retention makes normal rather than exceptional.
++  for (let index = 0; index < 50; index += 1) {
++    const minute = String(index).padStart(2, "0");
++    seedJob(
++      workspace,
++      activeRecord(workspace, `task-cfg-done-${minute}`, null, sessionId, {
++        status: "completed",
++        phase: "done",
++        pid: null,
++        completedAt: `2026-08-01T12:${minute}:05.000Z`,
++        updatedAt: `2026-08-01T12:${minute}:06.000Z`
++      })
++    );
++  }
++  const { jobFile, logFile } = seedJob(
++    workspace,
++    activeRecord(workspace, "task-wedged-cfg", sleeper.pid, sessionId, {
++      updatedAt: "2026-08-01T09:00:00.000Z"
++    })
++  );
++
++  // A config write is loadState -> mutate -> saveState, and saveState prunes the
++  // jobs dir against the list loadState produced. Status-blind, that pair evicted
++  // the exempt record outright: `/codex:setup --disable-review-gate` deleted a
++  // live job's JSON and its log, defeating on the write path exactly what the
++  // read-path exemption protects.
++  const setup = run("node", [SCRIPT, "setup", "--disable-review-gate", "--json"], {
++    cwd: workspace,
++    env: buildEnv(binDir)
++  });
++  assert.equal(setup.status, 0, setup.stderr);
++
++  assert.equal(fs.existsSync(jobFile), true, jobFile);
++  assert.equal(fs.existsSync(logFile), true, logFile);
++  const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
++  assert.equal(stored.status, "running");
++  assert.equal(stored.pid, sleeper.pid);
++
++  // Still reachable through the exact-id read path, so the record was retained
++  // rather than merely left on disk.
++  const single = run("node", [SCRIPT, "status", "task-wedged-cfg", "--json"], { cwd: workspace });
++  assert.equal(single.status, 0, single.stderr);
++  assert.equal(JSON.parse(single.stdout).job.id, "task-wedged-cfg");
++});
++
 +test("session end cleans a reviewer runtime under the state dir it walks when workspaceRoot diverges", () => {
 +  const stateWorkspace = makeTempDir();
 +  const movedWorkspace = makeTempDir();
@@ -3139,6 +3299,40 @@ index 0000000..4192589
 +  assert.equal(waited.status, 0, waited.stderr);
 +  const job = JSON.parse(waited.stdout).job;
 +  assert.equal(job.status, "failed");
++  assert.equal(job.overdue, false);
++  assert.equal(job.deadlineAt, undefined);
++});
++
++test("a timeout the runtime cannot enforce records no deadline", () => {
++  const repo = makeRepo();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir, "slow-task");
++  const env = buildEnv(binDir);
++
++  // 3e9 ms (~34.7 days) is the band the representability check alone misses: the
++  // sum is a perfectly valid Date, so a deadline *was* recorded — but the
++  // worker's budget is a setTimeout, and Node clamps any delay above 2^31-1 ms
++  // to 1 ms. The job therefore died almost immediately while its record
++  // advertised a deadline five weeks out and `overdue: false`, which is the one
++  // thing the deadline field must never do: promise what enforcement will not
++  // honour.
++  const launched = run(
++    "node",
++    [SCRIPT, "task", "--background", "--timeout-ms", "3e9", "--json", "investigate the failing test"],
++    { cwd: repo, env }
++  );
++  assert.equal(launched.status, 0, launched.stderr);
++  const { jobId } = JSON.parse(launched.stdout);
++
++  const record = JSON.parse(fs.readFileSync(path.join(resolveStateDir(repo), "jobs", `${jobId}.json`), "utf8"));
++  assert.equal("deadlineAt" in record, false, JSON.stringify(record.deadlineAt));
++
++  const waited = run("node", [SCRIPT, "status", jobId, "--wait", "--timeout-ms", "15000", "--json"], {
++    cwd: repo,
++    env
++  });
++  assert.equal(waited.status, 0, waited.stderr);
++  const job = JSON.parse(waited.stdout).job;
 +  assert.equal(job.overdue, false);
 +  assert.equal(job.deadlineAt, undefined);
 +});
