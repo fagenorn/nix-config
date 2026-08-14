@@ -43,31 +43,57 @@ list into the final report. from-issue's Phase-0 fog gate stays the deep check
 for fog nobody has charted yet; this only avoids paying a whole agent run to
 rediscover fog already declared on a map.
 
-For each remaining issue: `TaskCreate` a ledger entry, then spawn one **background
-agent** (fresh context, `run_in_background: true`) whose entire prompt is:
+### Durable run ledger
 
-> Invoke the `from-issue` skill via the Skill tool with arguments
-> `<num> --auto`, in <repo-root>. Work autonomously to completion (from-issue
-> hands off to ship-issue itself). Then report back exactly this JSON and
-> nothing else: `{"issue": <num>, "state": "merged|stopped|failed",
-> "pr_url": ..., "merge_sha": ..., "discussion_items": [...],
-> "blocked_reason": ...}`. Details belong in the worktree and the PR, not
-> the report.
+Before dispatch, choose a stable `run_id` for this issue set (or resume the one
+supplied by the caller). Resolve the dispatcher's absolute repository root once
+as `ledger_repo_root`; it is the exact immutable value used by every lifecycle
+command and is independent of any issue worktree. Run `workflow-state init-run
+--repo-root <ledger_repo_root>
+--run-id <run-id> --now <RFC3339-now>`, then `workflow-state reconcile` with the
+same `--repo-root <ledger_repo_root>`, run identity, and current time. The returned
+ledger is authoritative; rebuild the local task ledger from it before deciding
+what is queued or active.
+
+For each remaining issue: `TaskCreate` a ledger entry and choose the owner
+identity. Under the configured worktree root, reserve a collision-free exact absolute worktree path
+for this attempt by verifying the path is absent from both the filesystem and
+`git worktree list`. Reservation selects the path but does not create the worktree;
+the lifecycle-aware owner creates it in Phase 1. Then call `workflow-state launch --repo-root <ledger_repo_root> --run-id
+<run-id> --issue <num> --owner <owner> --worktree <absolute-worktree>
+--budget-minutes <budget> --now <RFC3339-now>` before spawning. Spawn only when
+the returned attempt is active. Spawn one **background agent** (fresh context,
+`run_in_background: true`) whose entire prompt is:
+
+> Lifecycle envelope: `ledger_repo_root=<ledger_repo_root>`, `run_id=<run-id>`,
+> `attempt=<attempt>`, `owner=<owner>`, `worktree=<absolute-worktree>`. Invoke the `from-issue` skill via the Skill tool
+> with the literal arguments `from-issue <num> --auto`, in <repo-root>. Persist
+> the normalized compact result before returning it, then return exactly the JSON
+> printed by `workflow-state finish` and nothing else.
 
 Never inline issue bodies, specs, or plans into a dispatch prompt — the
-child fetches its own issue; the worktree is the shared memory.
+child fetches its own issue; the worktree is the shared memory. Pass only the
+`ledger_repo_root`, `run_id`, attempt, owner, worktree, and literal invocation above.
 
-## 4. Wait on notifications — never poll
+## 4. Wait on notifications and reconcile durable state
 
-Background agents notify on exit. Do not `sleep`, run no-op commands, or
-re-check task state on a loop; each poll is a full model turn. On each
-notification: update the ledger entry, record `discussion_items` verbatim,
-dispatch the next queued issue if a slot is free.
+Background agents notify on exit. Never poll continuously: do not `sleep`, run
+no-op commands, or re-check task state on a loop. Reconciliation is event-driven
+and mandatory on **dispatcher resume**, **notification receipt**, **before retry**,
+and **before final drain**: call `workflow-state reconcile`, then update the local
+ledger from the durable result before acting. This reconstructs completion after
+a delayed or missing notification.
+
+The durable result takes precedence over notification text. Ignore a stale older-attempt notification
+when a newer attempt or terminal outcome is recorded.
+Record `discussion_items` from the durable compact outcome verbatim and dispatch
+the next queued issue only after reconciliation frees a slot.
 
 **Budget guard:** if an agent has been silent past a wall-clock budget
-(default 90 min; `orchestration.agentBudgetMinutes` overrides), surface it
-to the user with its issue number and worktree path for inspection — don't
-silently wait forever, and don't kill it on your own.
+(default 90 min; `orchestration.agentBudgetMinutes` overrides), `workflow-state
+reconcile` persists a `stopped` outcome that retains the worktree. Surface it for
+inspection. It is not automatically relaunched: first apply the failure policy,
+then let `workflow-state launch` enforce the fresh-attempt cap.
 
 ## 5. Failure policy
 
@@ -76,8 +102,11 @@ silently wait forever, and don't kill it on your own.
   child's stated reason verbatim in the ledger and never retry.
 - **`fogged` is a verdict too** — never retried in this run; it clears when
   the decision tickets blocking it close.
-- **Transient failures** (CI flake, network, harness death) → retry the
-  issue once with a fresh agent; then record `failed`.
+- **Transient failures** (CI flake, network, harness death) → call
+  `workflow-state reconcile` first. If the durable outcome still permits a retry,
+  call `workflow-state launch` with a fresh owner/worktree and spawn only from its
+  accepted result. The helper allows attempts 1 and 2 only and refuses a third fresh attempt;
+  record its durable failed outcome instead of counting in prose.
 - A failed issue never blocks unrelated issues.
 
 ## 6. Final report
