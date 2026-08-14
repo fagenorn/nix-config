@@ -140,6 +140,12 @@ Fixture rules: `makeTempDir` workspaces, `initGitRepo`, `installFakeCodex`, **pr
 
 ## Auto-resolved decisions
 
+### A second CLAUDE.md sentence, added at ship time, beyond R8's one-sentence budget
+- **Question:** The spec's `## Out of scope` and this plan's line 30 both bind "any CLAUDE.md change beyond R8's single sentence," and Task 7 Step 5 says "Change nothing else in CLAUDE.md." `ship-issue`'s Phase 3 (consolidate learnings) then produced exactly one promotable learning whose only existing home is that same bullet. Add it, or drop it?
+- **Choice:** Added, as commit `379ba9b`: one sentence stating that two branches editing this patch must be reconciled by three-way merging the *source trees*, never by merging the patch text, because `patch -p1` applies a textually-merged zero-context patch at lenient offsets with no error and an identical `patchRevision` bump on both sides hides the collision from git's conflict list.
+- **Grounding:** The out-of-scope binding governs *implementation* tasks 1–8, whose budget it was written to protect; Phase 3 is a later, separately-authorized step whose whole purpose is promoting learnings into existing docs, and `ship-issue` places learning-doc commits under standing authorization. The learning is this branch's own hard-won one — it is precisely what integration commit `2ee96b1` had to recover from — and it passes all four CONSOLIDATE rubric tests. The repo declares no `docPaths`, so the patch bullet in `CLAUDE.md` is the only existing home; a learning with no home is dropped, and dropping this one would lose the branch's most expensive lesson.
+- **Alternative considered:** Drop the sentence to honor the letter of the scope line, per the D1 precedent where an out-of-scope CLAUDE.md change was dropped — rejected because D1 dropped an *implementation-phase* edit that had no consolidation mandate behind it, whereas this one is the designated output of a phase that runs after the scope binding's jurisdiction ends. Recording the deviation here, rather than silently keeping it, is what the precedent actually requires.
+
 ### Task granularity: seven tasks, five of them patch-touching
 - **Question:** How is the spec's work split into tasks?
 - **Choice:** Task 1 baseline guard (no commit); Tasks 2–6 one mechanism each, each ending in a green suite, a regenerated patch, a green `just build` and one worktree commit; Task 7 final evidence + the R8 doc correction.
