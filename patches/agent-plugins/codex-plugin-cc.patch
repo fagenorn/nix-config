@@ -110,23 +110,100 @@ index 19e33b8..08cb4e9 100644
 -        ]
 -      }
 diff --git a/plugins/codex/scripts/app-server-broker.mjs b/plugins/codex/scripts/app-server-broker.mjs
-index 1954274..a40434e 100644
+index 1954274..2097f9f 100644
 --- a/plugins/codex/scripts/app-server-broker.mjs
 +++ b/plugins/codex/scripts/app-server-broker.mjs
 @@ -9 +9 @@ import { parseArgs } from "./lib/args.mjs";
 -import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 +import { CodexAppServerClient } from "./lib/app-server.mjs";
-@@ -12 +12,3 @@ import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
+@@ -10,0 +11,6 @@ import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
++import { deleteBrokerRecordIfEndpointMatches, resolveBrokerStateFile } from "./lib/broker-lifecycle.mjs";
++import {
++  classifyBrokerRecord,
++  decideBrokerSupervision,
++  resolveSupervisionBounds
++} from "./lib/broker-supervisor.mjs";
+@@ -12 +18,3 @@ import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 -const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 +const EXTERNAL_AGENT_IMPORT = "externalAgentConfig/import";
 +const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
 +const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start", EXTERNAL_AGENT_IMPORT]);
-@@ -71,0 +74,2 @@ async function main() {
+@@ -39,0 +48,28 @@ function isInterruptRequest(message) {
++// How long the unilateral path waits for the codex app-server child to exit
++// before it kills it: long enough for a healthy one to go once its stdin is
++// closed, short enough that a wedged one costs seconds instead of forever.
++const REAP_SHUTDOWN_BOUND_MS = 2000;
++
++// How long the polite path tries for a clean stop -- the child's own exit and a
++// server close that needs every peer to close first -- before it gives up and
++// takes the unilateral path instead. Every exit path in this file therefore
++// reaches process.exit(0) within GRACEFUL_SHUTDOWN_BOUND_MS +
++// REAP_SHUTDOWN_BOUND_MS at worst, whatever a peer or the child does.
++const GRACEFUL_SHUTDOWN_BOUND_MS = 2000;
++
++// Resolves true if the promise settles within boundMs, false if the bound wins.
++// The loser is abandoned rather than cancelled, which is safe only because every
++// caller here is on its way to process.exit: an abandoned await cannot outlive
++// the process. unref'd so this timer never keeps the process alive by itself.
++function settledWithin(promise, boundMs) {
++  return new Promise((resolve) => {
++    const timer = setTimeout(() => resolve(false), boundMs);
++    timer.unref();
++    const settle = () => {
++      clearTimeout(timer);
++      resolve(true);
++    };
++    promise.then(settle, settle);
++  });
++}
++
+@@ -51 +87,3 @@ async function main() {
+-    throw new Error("Usage: node scripts/app-server-broker.mjs serve --endpoint <value> [--cwd <path>] [--pid-file <path>]");
++    throw new Error(
++      "Usage: node scripts/app-server-broker.mjs serve --endpoint <value> [--cwd <path>] [--pid-file <path>] [--log-file <path>]"
++    );
+@@ -55 +93 @@ async function main() {
+-    valueOptions: ["cwd", "pid-file", "endpoint"]
++    valueOptions: ["cwd", "pid-file", "log-file", "endpoint"]
+@@ -61,0 +100,6 @@ async function main() {
++  // Before writePidFile and before the app-server is spawned: a bad bound must
++  // not leave a half-started broker behind. Throwing here means the broker
++  // never becomes ready, ensureBrokerSession returns null, and the CLI reports
++  // that it failed to start the broker.
++  const bounds = resolveSupervisionBounds(process.env);
++
+@@ -65,0 +110,17 @@ async function main() {
++  const logFile = options["log-file"] ? path.resolve(options["log-file"]) : null;
++  // The socket, the pid file and the log file all live in one mkdtemp broker
++  // session dir, so any of the three names it. teardownBrokerSession resolves
++  // the same dir from the broker record's explicit sessionDir when it has one
++  // and otherwise from the pid file or the log file; the socket-dirname arm
++  // below is this file's own fallback, for a broker started with neither
++  // --pid-file nor --log-file, and teardown has no equivalent.
++  const brokerSessionDir = pidFile
++    ? path.dirname(pidFile)
++    : logFile
++      ? path.dirname(logFile)
++      : listenTarget.kind === "unix"
++        ? path.dirname(listenTarget.path)
++        : null;
++  // resolveWorkspaceRoot shells out to git rev-parse, so this is resolved once
++  // and never per tick.
++  const brokerRecordFile = resolveBrokerStateFile(cwd);
+@@ -71,0 +133,2 @@ async function main() {
 +  let activeStreamMethod = null;
 +  const requestQueue = [];
-@@ -80,0 +85 @@ async function main() {
+@@ -72,0 +136,7 @@ async function main() {
++  let recorded = false;
++  let lastActivityMs = Date.now();
++  let exiting = false;
++
++  function markActivity() {
++    lastActivityMs = Date.now();
++  }
+@@ -80,0 +151,47 @@ async function main() {
 +      activeStreamMethod = null;
-@@ -81,0 +87,47 @@ async function main() {
++    }
 +    drainQueue();
 +  }
 +
@@ -172,22 +249,235 @@ index 1954274..a40434e 100644
 +    const next = requestQueue.shift();
 +    if (!next) {
 +      return;
-+    }
+@@ -81,0 +199 @@ async function main() {
 +    void runQueuedRequest(next.socket, next.message);
-@@ -90 +142,4 @@ async function main() {
+@@ -90 +208,4 @@ async function main() {
 -    if (message.method === "turn/completed" && activeStreamSocket === target) {
 +    const turnCompleted = message.method === "turn/completed" && activeStreamMethod !== EXTERNAL_AGENT_IMPORT;
 +    const importCompleted =
 +      message.method === EXTERNAL_AGENT_IMPORT_COMPLETED && activeStreamMethod === EXTERNAL_AGENT_IMPORT;
 +    if ((turnCompleted || importCompleted) && activeStreamSocket === target) {
-@@ -92 +147 @@ async function main() {
+@@ -92 +213 @@ async function main() {
 -      if (!threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
 +      if (importCompleted || !threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
-@@ -94,0 +150 @@ async function main() {
+@@ -94,0 +216 @@ async function main() {
 +        activeStreamMethod = null;
-@@ -97,0 +154 @@ async function main() {
+@@ -97,0 +220,26 @@ async function main() {
 +        drainQueue();
-@@ -170,13 +227 @@ async function main() {
++      }
++    }
++  }
++
++  // Synchronous and dependent on nothing but the filesystem: neither a peer nor
++  // the app-server child can stall these, which is why the bounded reap path
++  // below still runs them.
++  function removeBrokerSessionFiles() {
++    // Force removals: teardownBrokerSession may be unlinking these same paths
++    // concurrently after signalling this process.
++    if (listenTarget.kind === "unix") {
++      fs.rmSync(listenTarget.path, { force: true });
++    }
++    if (pidFile) {
++      fs.rmSync(pidFile, { force: true });
++    }
++    if (logFile) {
++      fs.rmSync(logFile, { force: true });
++    }
++    if (brokerSessionDir) {
++      try {
++        fs.rmdirSync(brokerSessionDir);
++      } catch {
++        // Non-recursive on purpose: anything unexpected in the broker session
++        // dir stays.
+@@ -101,0 +250,10 @@ async function main() {
++  // The polite path, for a broker/shutdown request and for a signal: peers get a
++  // half-close so a reply already written to them is flushed, and the child gets
++  // to exit on its own. Both of those waits are things a peer or the child can
++  // stall forever, so they are attempted only for GRACEFUL_SHUTDOWN_BOUND_MS and
++  // then abandoned for reapShutdown, which takes the same ending unilaterally.
++  // Nothing outside this process would finish the job otherwise: nobody escalates
++  // a broker's SIGTERM to SIGKILL (teardownBrokerSession goes through
++  // terminateProcessTree, which sends SIGTERM and stops there), and a
++  // broker/shutdown requester who gives up only drops its own connection, which
++  // is no help when the stall is another peer or the child.
+@@ -102,0 +261,5 @@ async function main() {
++    // Latched here as well as on the supervision path so a shutdown in progress
++    // is never also a supervision decision. Skipping supervision is safe only
++    // because this path is itself bounded: the latch fences off the supervision
++    // timer without fencing off the bounded exit it exists to provide.
++    exiting = true;
+@@ -106,4 +269,18 @@ async function main() {
+-    await appClient.close().catch(() => {});
+-    await new Promise((resolve) => server.close(resolve));
+-    if (listenTarget.kind === "unix" && fs.existsSync(listenTarget.path)) {
+-      fs.unlinkSync(listenTarget.path);
++    const stoppedGracefully = await settledWithin(
++      (async () => {
++        // This awaits the codex app-server child's exit, so the broker takes its
++        // app-server with it, and then the server's own close, which fires only
++        // once every peer connection has closed.
++        await appClient.close().catch(() => {});
++        await new Promise((resolve) => server.close(resolve));
++      })(),
++      GRACEFUL_SHUTDOWN_BOUND_MS
++    );
++    if (!stoppedGracefully) {
++      process.stderr.write(
++        `shutdown: no clean stop within ${GRACEFUL_SHUTDOWN_BOUND_MS}ms; dropping peers endpoint=${endpoint}\n`
++      );
++      // Abandoning the awaits above is safe because every caller is on its way to
++      // process.exit(0); reapShutdown finishes the job and does the removals.
++      await reapShutdown(server);
++      return;
+@@ -111,2 +288,17 @@ async function main() {
+-    if (pidFile && fs.existsSync(pidFile)) {
+-      fs.unlinkSync(pidFile);
++    removeBrokerSessionFiles();
++  }
++
++  // The unilateral path: the supervision decision takes it directly, and
++  // shutdown() falls through to it when politeness runs out of time. Its caller
++  // is committed to dying, so every wait a peer or the child could stall forever
++  // is either dropped outright or capped at REAP_SHUTDOWN_BOUND_MS.
++  async function reapShutdown(server) {
++    exiting = true;
++    // destroy(), not shutdown()'s end(): end() is a half-close that then waits
++    // for the peer's FIN, and a wedged peer never sends one. A peer still
++    // attached at this point is talking to a corpse either way -- on the
++    // supervision path no broker record names this endpoint any more, and on the
++    // shutdown path the half-close it would have waited for has already had its
++    // bounded chance.
++    for (const socket of sockets) {
++      socket.destroy();
+@@ -113,0 +306,123 @@ async function main() {
++    // Stops accepting, and nothing here awaits the callback: with the
++    // connections destroyed above there is nothing left worth waiting for, and
++    // the socket file is removed below either way.
++    server.close();
++    // close() ends the child's stdin, SIGTERMs it 50 ms later and then awaits its
++    // exit -- an await that a child ignoring both never ends.
++    const closed = await settledWithin(appClient.close().catch(() => {}), REAP_SHUTDOWN_BOUND_MS);
++    if (!closed) {
++      // Escalate rather than walk away: R3 wants the app-server to go with its
++      // broker. The kill is not awaited -- after SIGKILL the kernel finishes
++      // this with or without a broker still here to watch.
++      appClient.terminateSpawnedChild("SIGKILL");
++      process.stderr.write(
++        `reap: app-server did not exit within ${REAP_SHUTDOWN_BOUND_MS}ms; killed it endpoint=${endpoint}\n`
++      );
++    }
++    removeBrokerSessionFiles();
++  }
++
++  // `present` comes from the file existing, never from the parse succeeding: a
++  // corrupt broker.json is corruption, not evidence that this broker was
++  // retired, and collapsing the two would have a live broker kill itself over a
++  // half-written record.
++  function readRecordState() {
++    if (!fs.existsSync(brokerRecordFile)) {
++      return { present: false, record: null };
++    }
++    try {
++      return { present: true, record: JSON.parse(fs.readFileSync(brokerRecordFile, "utf8")) };
++    } catch {
++      return { present: true, record: null };
++    }
++  }
++
++  async function superviseTick() {
++    if (exiting) {
++      return;
++    }
++    let classification;
++    let decision;
++    // A fault in the predicates costs one tick and nothing more: the broker may
++    // still be serving somebody, and dying because its own supervision threw is
++    // strictly worse than lingering. Whatever gets past this is caught at the
++    // interval callback instead, because an unhandled rejection from an async
++    // interval callback aborts the process under Node's default
++    // --unhandled-rejections=throw.
++    try {
++      const { present, record } = readRecordState();
++      classification = classifyBrokerRecord({ present, record, endpoint });
++      if (classification === "mine" && !recorded) {
++        recorded = true;
++        // Before this line a missing record is the expected state, because
++        // ensureBrokerSession writes the record only after readiness. This line
++        // is readable for as long as the broker runs; shutdown deletes the log,
++        // because R3 requires a self-reaped broker to leave no artifacts. It is
++        // a live-tail diagnostic, never a post-mortem one -- which is why the
++        // tests poll the log while the broker is still up.
++        process.stderr.write(`supervision: armed endpoint=${endpoint}\n`);
++      }
++      decision = decideBrokerSupervision({
++        classification,
++        recorded,
++        connectionCount: sockets.size,
++        lastActivityMs,
++        nowMs: Date.now(),
++        idleTimeoutMs: bounds.idleTimeoutMs
++      });
++    } catch (error) {
++      process.stderr.write(
++        `supervision: tick failed (${
++          error instanceof Error ? error.message : String(error)
++        }); retrying next tick\n`
++      );
++      return;
++    }
++    if (decision.action !== "exit") {
++      return;
++    }
++    // Logged before the latch is set, not after: nothing here awaits, so no
++    // second tick can interleave, and a write that throws then leaves the same
++    // decision to be made again next tick rather than latching a broker that
++    // neither supervises itself nor ever exits.
++    process.stderr.write(`supervision: exiting reason=${decision.reason} endpoint=${endpoint}\n`);
++    exiting = true;
++    if (classification !== "foreign") {
++      try {
++        await deleteBrokerRecordIfEndpointMatches(cwd, endpoint);
++      } catch (error) {
++        // ensureBrokerSession holds this lock for its whole body, so contention
++        // is legitimate: retry on the next tick rather than dying and leaving a
++        // record that names a dead process.
++        process.stderr.write(
++          `supervision: broker record lock unavailable (${
++            error instanceof Error ? error.message : String(error)
++          }); retrying next tick\n`
++        );
++        exiting = false;
++        return;
++      }
++    }
++    // No record names this broker any more -- it was deleted above, or it names
++    // another endpoint, or it does not parse -- so the decision is committed and
++    // retrying is not an option: neither a shutdown fault nor a shutdown that
++    // never finishes may leave this broker running. reapShutdown therefore waits
++    // at most REAP_SHUTDOWN_BOUND_MS on anything a peer or the child controls, so
++    // process.exit(0) below is reached one such wait plus a few synchronous file
++    // removals after this point even when a peer never closes its end and the
++    // child never exits. What the bound gives up is the child's clean exit, which
++    // it takes by SIGKILL instead, and -- if even that does not land -- an
++    // app-server outliving this broker. A stray socket, an unreaped child or a
++    // surviving log is an acceptable price for not becoming an immortal broker,
++    // which is the failure this whole mechanism exists to prevent.
++    try {
++      await reapShutdown(server);
++    } catch (error) {
++      process.stderr.write(
++        `supervision: shutdown failed (${
++          error instanceof Error ? error.message : String(error)
++        }); exiting anyway\n`
++      );
++    }
++    // A self-reap is not a failure.
++    process.exit(0);
+@@ -119,0 +435 @@ async function main() {
++    markActivity();
+@@ -126,0 +443 @@ async function main() {
++        markActivity();
+@@ -170,13 +487 @@ async function main() {
 -        const allowInterruptDuringActiveStream =
 -          isInterruptRequest(message) && activeStreamSocket && activeStreamSocket !== socket && !activeRequestSocket;
 -
@@ -202,7 +492,7 @@ index 1954274..a40434e 100644
 -          continue;
 -        }
 +        const allowInterruptDuringActiveStream = isInterruptRequest(message) && activeStreamSocket;
-@@ -197,25 +242,2 @@ async function main() {
+@@ -197,25 +502,2 @@ async function main() {
 -        const isStreaming = STREAMING_METHODS.has(message.method);
 -        activeRequestSocket = socket;
 -
@@ -230,6 +520,29 @@ index 1954274..a40434e 100644
 -        }
 +        requestQueue.push({ socket, message });
 +        drainQueue();
+@@ -226,0 +509 @@ async function main() {
++      markActivity();
+@@ -231,0 +515 @@ async function main() {
++      markActivity();
+@@ -245,0 +530,18 @@ async function main() {
++  // Started here, never at import: a module that starts a timer when it is
++  // imported has no off switch. unref'd so supervision never keeps an
++  // otherwise-finished process alive.
++  const supervisionTimer = setInterval(() => {
++    // Without this catch an unhandled rejection here would abort the process,
++    // and a broker that dies because its own supervision threw is worse than one
++    // that lingers. superviseTick already absorbs its predicate, lock and
++    // shutdown faults; this catches the ones it did not foresee.
++    superviseTick().catch((error) => {
++      process.stderr.write(
++        `supervision: tick rejected (${
++          error instanceof Error ? error.message : String(error)
++        }); retrying next tick\n`
++      );
++    });
++  }, bounds.superviseIntervalMs);
++  supervisionTimer.unref();
++
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
 index 83df468..f7fe157 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
@@ -432,26 +745,56 @@ index 83df468..f7fe157 100644
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
 diff --git a/plugins/codex/scripts/lib/app-server.mjs b/plugins/codex/scripts/lib/app-server.mjs
-index 72b30a7..3e78ae9 100644
+index 72b30a7..24dbf8f 100644
 --- a/plugins/codex/scripts/lib/app-server.mjs
 +++ b/plugins/codex/scripts/lib/app-server.mjs
-@@ -341,0 +342,3 @@ export class CodexAppServerClient {
+@@ -79,0 +80,8 @@ class AppServerClientBase {
++  // Escalation past close(), for a caller that cannot wait for the child any
++  // longer: close() ends stdin and SIGTERMs, and a child that ignores both must
++  // not outlive the process that owns it. A client that talks to a broker over a
++  // socket owns no child, so there is nothing here to terminate.
++  terminateSpawnedChild() {
++    return false;
++  }
++
+@@ -267,0 +276,19 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
++  terminateSpawnedChild(signal = "SIGKILL") {
++    if (!this.proc || this.proc.exitCode !== null || this.proc.signalCode !== null) {
++      return false;
++    }
++    try {
++      if (process.platform === "win32") {
++        // Same reason close() reaches for the tree here: with shell: true the
++        // direct child is cmd.exe, so signalling proc.pid would kill the shell
++        // and orphan the app-server. taskkill /T /F is this platform's SIGKILL.
++        return terminateProcessTree(this.proc.pid).delivered;
++      }
++      return this.proc.kill(signal);
++    } catch {
++      // The child may have been reaped between the check and the signal; either
++      // way the caller's post-condition -- no app-server left running -- holds.
++      return false;
++    }
++  }
++
+@@ -341,0 +369,3 @@ export class CodexAppServerClient {
 +        if (!brokerEndpoint) {
 +          throw new Error("No shared Codex broker is active for this workspace.");
 +        }
-@@ -345,0 +349,3 @@ export class CodexAppServerClient {
+@@ -345,0 +376,3 @@ export class CodexAppServerClient {
 +        if (!brokerEndpoint) {
 +          throw new Error("Failed to start the isolated Codex broker for this workspace.");
 +        }
 diff --git a/plugins/codex/scripts/lib/broker-lifecycle.mjs b/plugins/codex/scripts/lib/broker-lifecycle.mjs
-index ef76381..9324404 100644
+index ef76381..d26bc3f 100644
 --- a/plugins/codex/scripts/lib/broker-lifecycle.mjs
 +++ b/plugins/codex/scripts/lib/broker-lifecycle.mjs
-@@ -9 +9,2 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs
+@@ -9 +9,3 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs
 -import { resolveStateDir } from "./state.mjs";
++import { terminateProcessTree } from "./process.mjs";
 +import { createWorkspaceRuntime } from "./runtime-home.mjs";
 +import { listStateDirs, resolveStateDir } from "./state.mjs";
-@@ -13,0 +15,54 @@ const BROKER_STATE_FILE = "broker.json";
+@@ -13,0 +16,54 @@ const BROKER_STATE_FILE = "broker.json";
 +const BROKER_LOCK_DIR = "broker.lock";
 +const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 +const LOCK_STALE_MS = 30000;
@@ -506,37 +849,101 @@ index ef76381..9324404 100644
 +    owners: [...new Set([...(session.owners ?? []), owner])]
 +  };
 +}
-@@ -72 +127 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
+@@ -43 +99,8 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
+-export async function sendBrokerShutdown(endpoint) {
++// Bounded like waitForBrokerEndpoint above, and for a sharper reason: the caller
++// awaits this immediately before teardownBrokerSession's kill fallback, so an
++// unbounded wait here is a way for a broker to become immortal. A broker that
++// accepts the connection and then never answers -- wedged inside its own startup,
++// event loop blocked -- emits neither "data" nor "close", and without this timer
++// SessionEnd would wait on it forever and never reach the kill. The timer is
++// deliberately not unref'd: settling is what lets teardown run.
++export async function sendBrokerShutdown(endpoint, timeoutMs = 2000) {
+@@ -45,0 +109,12 @@ export async function sendBrokerShutdown(endpoint) {
++    let settled = false;
++    let timer;
++    const settle = (closeSocket) => {
++      if (settled) {
++        return;
++      }
++      settled = true;
++      clearTimeout(timer);
++      closeSocket();
++      resolve();
++    };
++    timer = setTimeout(() => settle(() => socket.destroy()), timeoutMs);
+@@ -50,6 +125,3 @@ export async function sendBrokerShutdown(endpoint) {
+-    socket.on("data", () => {
+-      socket.end();
+-      resolve();
+-    });
+-    socket.on("error", resolve);
+-    socket.on("close", resolve);
++    socket.on("data", () => settle(() => socket.end()));
++    socket.on("error", () => settle(() => {}));
++    socket.on("close", () => settle(() => {}));
+@@ -61,6 +133,10 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
+-  const child = spawn(process.execPath, [scriptPath, "serve", "--endpoint", endpoint, "--cwd", cwd, "--pid-file", pidFile], {
+-    cwd,
+-    env,
+-    detached: true,
+-    stdio: ["ignore", logFd, logFd]
+-  });
++  const child = spawn(
++    process.execPath,
++    [scriptPath, "serve", "--endpoint", endpoint, "--cwd", cwd, "--pid-file", pidFile, "--log-file", logFile],
++    {
++      cwd,
++      env,
++      detached: true,
++      stdio: ["ignore", logFd, logFd]
++    }
++  );
+@@ -72 +148 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
 -function resolveBrokerStateFile(cwd) {
 +export function resolveBrokerStateFile(cwd) {
-@@ -76,2 +131 @@ function resolveBrokerStateFile(cwd) {
+@@ -76,2 +152 @@ function resolveBrokerStateFile(cwd) {
 -export function loadBrokerSession(cwd) {
 -  const stateFile = resolveBrokerStateFile(cwd);
 +function loadBrokerSessionFile(stateFile) {
-@@ -81 +134,0 @@ export function loadBrokerSession(cwd) {
+@@ -81 +155,0 @@ export function loadBrokerSession(cwd) {
 -
-@@ -88,0 +142,4 @@ export function loadBrokerSession(cwd) {
+@@ -88,0 +163,4 @@ export function loadBrokerSession(cwd) {
 +export function loadBrokerSession(cwd) {
 +  return loadBrokerSessionFile(resolveBrokerStateFile(cwd));
 +}
 +
-@@ -92 +149 @@ export function saveBrokerSession(cwd, session) {
+@@ -92 +170 @@ export function saveBrokerSession(cwd, session) {
 -  fs.writeFileSync(resolveBrokerStateFile(cwd), `${JSON.stringify(session, null, 2)}\n`, "utf8");
 +  atomicWriteJson(resolveBrokerStateFile(cwd), session);
-@@ -114,4 +171,8 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -101,0 +180,21 @@ export function clearBrokerSession(cwd) {
++// The broker's own exit path: drop the record only while it still names this
++// broker, so a broker that has already been replaced never deletes the new
++// broker's record. Throws on lock timeout -- the caller retries on its next
++// supervision tick.
++export async function deleteBrokerRecordIfEndpointMatches(cwd, endpoint, options = {}) {
++  const stateDir = resolveStateDir(cwd);
++  return withBrokerLock(
++    stateDir,
++    async () => {
++      const stateFile = resolveBrokerStateFile(cwd);
++      const current = loadBrokerSessionFile(stateFile);
++      if (!current || current.endpoint !== endpoint) {
++        return false;
++      }
++      fs.rmSync(stateFile, { force: true });
++      return true;
++    },
++    options.lockTimeoutMs ?? 5000
++  );
++}
++
+@@ -114,13 +213,47 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const existing = loadBrokerSession(cwd);
 -  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
 -    return existing;
 -  }
-+  const stateDir = resolveStateDir(cwd);
-+  return withBrokerLock(stateDir, async () => {
-+    const existing = loadBrokerSession(cwd);
-+    if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
-+      const owned = addOwner(existing, options.env ?? process.env);
-+      saveBrokerSession(cwd, owned);
-+      return owned;
-+    }
-@@ -119,8 +180,29 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-
 -  if (existing) {
 -    teardownBrokerSession({
 -      endpoint: existing.endpoint ?? null,
@@ -545,6 +952,24 @@ index ef76381..9324404 100644
 -      sessionDir: existing.sessionDir ?? null,
 -      pid: existing.pid ?? null,
 -      killProcess: options.killProcess ?? null
++  const stateDir = resolveStateDir(cwd);
++  const scriptPath =
++    options.scriptPath ?? fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
++  return withBrokerLock(stateDir, async () => {
++    const existing = loadBrokerSession(cwd);
++    // Under a Nix-managed install this path is a store path whose hash covers
++    // the whole patched tree and whose name embeds the patch revision, so path
++    // equality is build identity. A record written before this field existed
++    // has no scriptPath and is therefore foreign, which retires it on first
++    // contact with no migration code. Checked before the 150 ms readiness probe
++    // because it costs no IO.
++    const sameBuild = existing?.scriptPath === scriptPath;
++    if (existing && sameBuild && (await isBrokerEndpointReady(existing.endpoint))) {
++      const owned = addOwner(existing, options.env ?? process.env);
++      saveBrokerSession(cwd, owned);
++      return owned;
++    }
++
 +    if (existing) {
 +      teardownBrokerSession({
 +        endpoint: existing.endpoint ?? null,
@@ -552,7 +977,10 @@ index ef76381..9324404 100644
 +        logFile: existing.logFile ?? null,
 +        sessionDir: existing.sessionDir ?? null,
 +        pid: existing.pid ?? null,
-+        killProcess: options.killProcess ?? null
++        // From a persisted record of unknown age: signal only with a pid file
++        // that still names this pid.
++        pidSource: "record",
++        killProcess: options.killProcess
 +      });
 +      clearBrokerSession(cwd);
 +    }
@@ -562,9 +990,6 @@ index ef76381..9324404 100644
 +    const endpoint = endpointFactory(sessionDir, options.platform);
 +    const pidFile = path.join(sessionDir, "broker.pid");
 +    const logFile = path.join(sessionDir, "broker.log");
-+    const scriptPath =
-+      options.scriptPath ??
-+      fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
 +    const runtime = createWorkspaceRuntime(cwd, { env: options.env ?? process.env });
 +
 +    const child = spawnBrokerProcess({
@@ -574,10 +999,10 @@ index ef76381..9324404 100644
 +      pidFile,
 +      logFile,
 +      env: runtime.env
-@@ -128,2 +209,0 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -128,2 +260,0 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -    clearBrokerSession(cwd);
 -  }
-@@ -131,17 +211,12 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -131,17 +262,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const sessionDir = createBrokerSessionDir();
 -  const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
 -  const endpoint = endpointFactory(sessionDir, options.platform);
@@ -603,20 +1028,24 @@ index ef76381..9324404 100644
 +        logFile,
 +        sessionDir,
 +        pid: child.pid ?? null,
-+        killProcess: options.killProcess ?? null
++        // This call spawned that child seconds ago, so it must die even if it
++        // has not written its pid file yet (R4).
++        pidSource: "spawned",
++        killProcess: options.killProcess
 +      });
 +      return null;
 +    }
-@@ -149,3 +224 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -149,3 +278 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
 -  if (!ready) {
 -    teardownBrokerSession({
 +    const session = addOwner({
-@@ -157 +230,40 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -157 +284,41 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -      killProcess: options.killProcess ?? null
 +      stateDir,
 +      workspaceRoot: cwd,
 +      codexHome: runtime.runtimeHome,
++      scriptPath,
 +      owners: []
 +    }, options.env ?? process.env);
 +    saveBrokerSession(cwd, session);
@@ -654,7 +1083,7 @@ index ef76381..9324404 100644
 +        fs.unlinkSync(record.stateFile);
 +      }
 +      return { stop: true, session: current };
-@@ -159 +271,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -159 +326,18 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -    return null;
 +    if (!action) {
 +      continue;
@@ -667,12 +1096,17 @@ index ef76381..9324404 100644
 +        logFile: action.session.logFile ?? null,
 +        sessionDir: action.session.sessionDir ?? null,
 +        pid: action.session.pid ?? null,
-+        killProcess: options.killProcess ?? null
++        // Also a persisted record: the shutdown request above may already have
++        // taken the broker down, unlinking its pid file on the way.
++        pidSource: "record",
++        killProcess: options.killProcess
 +      });
 +    }
 +    released.push(action);
-@@ -161,10 +287 @@ export async function ensureBrokerSession(cwd, options = {}) {
--
+@@ -160,0 +345,2 @@ export async function ensureBrokerSession(cwd, options = {}) {
++  return released;
++}
+@@ -162,9 +348,62 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const session = {
 -    endpoint,
 -    pidFile,
@@ -682,7 +1116,206 @@ index ef76381..9324404 100644
 -  };
 -  saveBrokerSession(cwd, session);
 -  return session;
-+  return released;
++// What the pid file at that path says about `pid`, as three distinct answers:
++//
++//   "confirms" -- a file exists there and names exactly this pid.
++//   "denies"   -- a file exists there and names a *different* finite pid.
++//   "unknown"  -- no pidFile path at all, no file at the given one, an unreadable
++//                 file, or contents that do not parse as a pid: nothing here says
++//                 who owns this pid.
++//
++// sessionDir is mkdtemp-unique per broker and only that broker writes its own pid
++// file into it (unlinking it on shutdown), so a foreign pid at that path means an
++// external writer.
++// Exported so the test-suite reaper can gate its SIGKILL escalation on the same
++// evidence teardownBrokerSession gates its SIGTERM on; there is no second copy.
++export function pidFileEvidence(pidFile, pid) {
++  if (!pidFile) {
++    return "unknown";
++  }
++  let recorded;
++  try {
++    recorded = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
++  } catch {
++    return "unknown";
++  }
++  if (!Number.isFinite(recorded)) {
++    return "unknown";
++  }
++  return recorded === pid ? "confirms" : "denies";
++}
++
++// Whether `pid` may be signalled, given where the caller got it. Because
++// terminateProcessTree signals the whole process *group* (kill(-pid, ...)), a
++// signal aimed at the wrong pid takes an unrelated group down, so "denies" stops
++// every caller. The two provenances differ only on "unknown":
++//
++//   "spawned" -- this process spawned that pid seconds ago and is now giving up
++//     on it. The broker writes its pid file early in main() but after Node
++//     bootstrap, so a child that definitely exists can legitimately have written
++//     nothing yet, and R4 requires that child to die. Absent file => still kill.
++//   "record" -- the pid was read from a persisted broker record that may be days
++//     old. An absent pid file is then evidence the broker already shut down
++//     cleanly (its own shutdown unlinks it) and that the recorded pid may since
++//     have been recycled by an unrelated process. Absent file => do not signal.
++//
++// What this closes and what it does not: on the record path a pid is signalled
++// only with positive ownership evidence, so the common recycling case -- a
++// days-old record whose broker exited cleanly and whose pid was reused -- can no
++// longer be group-signalled. It does not close recycling after an *unclean* exit:
++// a broker killed by SIGKILL never unlinks its pid file, so a record-sourced pid
++// that was recycled after such an exit still reads "confirms" and is signalled.
++// Narrowing that residue further would need liveness probing, which is out of
++// scope here. The "spawned" path is the one that still accepts an absent file,
++// for the R4 reason above; its pid comes from a child spawned moments earlier in
++// the same call, which is why recycling is not a live concern there.
++function maySignalPid(pidFile, pid, pidSource) {
++  const evidence = pidFileEvidence(pidFile, pid);
++  if (evidence === "confirms") {
++    return true;
++  }
++  if (evidence === "denies") {
++    return false;
++  }
++  return pidSource === "spawned";
+@@ -173,2 +412,19 @@ export async function ensureBrokerSession(cwd, options = {}) {
+-export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = null }) {
+-  if (Number.isFinite(pid) && killProcess) {
++// killProcess defaults to the production kill so that omitting it cannot mean
++// "leave the broker running": a group SIGTERM, because a not-ready broker is
++// usually still inside CodexAppServerClient.connect -- before its own SIGTERM
++// handler is installed -- and only a group signal also reaps the codex
++// app-server it already spawned. Pass null to skip the kill deliberately.
++//
++// pidSource defaults to "record", the arm that demands positive ownership
++// evidence, so that a call site which forgets the parameter cannot group-signal
++// a recycled pid; "spawned" has to be asked for.
++export function teardownBrokerSession({
++  endpoint = null,
++  pidFile,
++  logFile,
++  sessionDir = null,
++  pid = null,
++  pidSource = "record",
++  killProcess = terminateProcessTree
++}) {
++  if (Number.isFinite(pid) && killProcess && maySignalPid(pidFile, pid, pidSource)) {
+@@ -182,2 +438,5 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+-  if (pidFile && fs.existsSync(pidFile)) {
+-    fs.unlinkSync(pidFile);
++  // Force removals, not existsSync-then-unlink: a SIGTERM'd broker runs its own
++  // shutdown and unlinks these same paths concurrently, so the check-then-act
++  // window is real. The post-condition is "the file is absent".
++  if (pidFile) {
++    fs.rmSync(pidFile, { force: true });
+@@ -186,2 +445,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+-  if (logFile && fs.existsSync(logFile)) {
+-    fs.unlinkSync(logFile);
++  if (logFile) {
++    fs.rmSync(logFile, { force: true });
+@@ -193,2 +452,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+-      if (target.kind === "unix" && fs.existsSync(target.path)) {
+-        fs.unlinkSync(target.path);
++      if (target.kind === "unix") {
++        fs.rmSync(target.path, { force: true });
+diff --git a/plugins/codex/scripts/lib/broker-supervisor.mjs b/plugins/codex/scripts/lib/broker-supervisor.mjs
+new file mode 100644
+index 0000000..5d69509
+--- /dev/null
++++ b/plugins/codex/scripts/lib/broker-supervisor.mjs
+@@ -0,0 +1,92 @@
++import process from "node:process";
++
++// Supervision policy for the app-server broker: the record vocabulary, the two
++// bounds and the continue-or-exit decision. Pure by design -- no timers, no
++// processes, no filesystem -- so the decision table is testable without a
++// stopwatch and importing this module starts nothing. Its caller owns the tick,
++// the counters and the exit sequence.
++
++export const BROKER_IDLE_TIMEOUT_ENV = "CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS";
++export const BROKER_SUPERVISE_INTERVAL_ENV = "CODEX_COMPANION_BROKER_SUPERVISE_INTERVAL_MS";
++
++// The idle bound only advances while nothing is connected: a client holds one
++// socket from initialize() to close() (BrokerCodexAppServerClient in
++// app-server.mjs), so a call's own duration never moves this clock however long
++// it runs -- the stop-review gate's 15-minute `task` is the longest bounded call
++// this plugin makes of its own accord, and a foreground `task` without
++// --timeout-ms is not bounded at all.
++// Ten minutes is therefore just how long an unattached broker lingers in the
++// hope of being reused -- long enough to serve a burst of consecutive calls,
++// short enough that an abandoned workspace releases its runtime within a coffee
++// break. Nothing in this plugin sets either variable; they exist so the
++// self-termination behaviours can be tested without a ten-minute wait.
++export const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 600000;
++export const DEFAULT_BROKER_SUPERVISE_INTERVAL_MS = 15000;
++
++const POSITIVE_INTEGER = /^[0-9]+$/;
++
++function parseBoundMs(name, raw, fallback) {
++  if (raw === undefined) {
++    return fallback;
++  }
++  const value = Number(raw);
++  if (!POSITIVE_INTEGER.test(raw) || !Number.isSafeInteger(value) || value <= 0) {
++    // A silent fallback would produce a broker whose reaping behaviour
++    // contradicts what the caller asked for, undetectable until it leaks.
++    throw new Error(`${name} must be a positive integer number of milliseconds; received ${JSON.stringify(raw)}.`);
++  }
++  return value;
++}
++
++export function resolveSupervisionBounds(env = process.env) {
++  return {
++    idleTimeoutMs: parseBoundMs(BROKER_IDLE_TIMEOUT_ENV, env[BROKER_IDLE_TIMEOUT_ENV], DEFAULT_BROKER_IDLE_TIMEOUT_MS),
++    superviseIntervalMs: parseBoundMs(
++      BROKER_SUPERVISE_INTERVAL_ENV,
++      env[BROKER_SUPERVISE_INTERVAL_ENV],
++      DEFAULT_BROKER_SUPERVISE_INTERVAL_MS
++    )
++  };
++}
++
++// A broker record is "mine" iff it names the endpoint this broker was started
++// with: every endpoint is derived from a fresh mkdtemp broker session dir
++// (createBrokerSessionDir plus createBrokerEndpoint), so it is already unique
++// per broker and needs no extra identity field. `present` is separate from
++// `record` because loadBrokerSession returns null for both an absent file and an
++// unparseable one, and only the absence is evidence this broker was retired.
++export function classifyBrokerRecord({ present, record, endpoint }) {
++  if (!present) {
++    return "missing";
++  }
++  if (record === null || typeof record !== "object") {
++    return "unreadable";
++  }
++  return record.endpoint === endpoint ? "mine" : "foreign";
++}
++
++export function decideBrokerSupervision({
++  classification,
++  recorded,
++  connectionCount,
++  lastActivityMs,
++  nowMs,
++  idleTimeoutMs
++}) {
++  if (classification === "foreign") {
++    // Whoever replaced the record already decided this broker is gone, so exit
++    // even with a client connected -- it is unreachable by design now.
++    return { action: "exit", reason: "replaced" };
++  }
++  if (classification === "missing" && recorded) {
++    return { action: "exit", reason: "orphaned" };
++  }
++  if (connectionCount === 0 && nowMs - lastActivityMs >= idleTimeoutMs) {
++    // The one criterion that covers every un-ownable case at once: unowned test
++    // brokers, plain-shell CLI brokers, and brokers whose owning session died
++    // without its SessionEnd hook running.
++    return { action: "exit", reason: "idle" };
++  }
++  // Includes "unreadable": only a definite absence justifies an exit.
++  return { action: "continue", reason: null };
++}
 diff --git a/plugins/codex/scripts/lib/codex.mjs b/plugins/codex/scripts/lib/codex.mjs
 index fead00c..aee30f2 100644
 --- a/plugins/codex/scripts/lib/codex.mjs
@@ -860,10 +1493,19 @@ index ad152c1..af979e7 100644
 -  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
 +  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot));
 diff --git a/plugins/codex/scripts/lib/process.mjs b/plugins/codex/scripts/lib/process.mjs
-index dd8fc37..365f856 100644
+index dd8fc37..34ab7c0 100644
 --- a/plugins/codex/scripts/lib/process.mjs
 +++ b/plugins/codex/scripts/lib/process.mjs
-@@ -135,0 +136,12 @@ export function formatCommandFailure(result) {
+@@ -56,0 +57,5 @@ function looksLikeMissingProcessMessage(text) {
++// Only a positive pid is signallable. The group signal below negates pid, so a
++// non-positive one aims somewhere catastrophic rather than at a process: kill(-0)
++// is kill(0), the caller's *own* process group, and pid -1 negates to 1 whose
++// EPERM falls through to kill(-1) -- the broadcast to every process this user can
++// signal. Neither is a broker, so both are rejected before any signalling.
+@@ -58 +63 @@ export function terminateProcessTree(pid, options = {}) {
+-  if (!Number.isFinite(pid)) {
++  if (!Number.isFinite(pid) || pid <= 0) {
+@@ -135,0 +141,12 @@ export function formatCommandFailure(result) {
 +
 +export function isProcessAlive(pid) {
 +  // Only ESRCH proves absence. Success or EPERM (a live process we may not
@@ -1748,6 +2390,891 @@ index 2346bdc..6f31fab 100644
 @@ -148 +148 @@ function main() {
 -  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), input));
 +  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobsRetainingActive(workspaceRoot), input));
+diff --git a/tests/broker-reaping.test.mjs b/tests/broker-reaping.test.mjs
+new file mode 100644
+index 0000000..c871991
+--- /dev/null
++++ b/tests/broker-reaping.test.mjs
+@@ -0,0 +1,879 @@
++import fs from "node:fs";
++import net from "node:net";
++import path from "node:path";
++import test from "node:test";
++import assert from "node:assert/strict";
++import { fileURLToPath } from "node:url";
++import { spawn } from "node:child_process";
++
++import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
++import { initGitRepo, killGroup, makeTempDir, pinHermeticStateRoot, run, writeExecutable } from "./helpers.mjs";
++import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
++import {
++  clearBrokerSession,
++  createBrokerSessionDir,
++  ensureBrokerSession,
++  loadBrokerSession,
++  resolveBrokerStateFile,
++  saveBrokerSession,
++  spawnBrokerProcess,
++  teardownBrokerSession,
++  waitForBrokerEndpoint
++} from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
++import {
++  BROKER_IDLE_TIMEOUT_ENV,
++  BROKER_SUPERVISE_INTERVAL_ENV,
++  DEFAULT_BROKER_IDLE_TIMEOUT_MS,
++  DEFAULT_BROKER_SUPERVISE_INTERVAL_MS,
++  classifyBrokerRecord,
++  decideBrokerSupervision,
++  resolveSupervisionBounds
++} from "../plugins/codex/scripts/lib/broker-supervisor.mjs";
++import { isProcessAlive } from "../plugins/codex/scripts/lib/process.mjs";
++import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
++
++// State resolvers read CLAUDE_PLUGIN_DATA at call time and spawned CLI children
++// inherit process.env (via buildEnv), so this pin gives the whole file — and
++// every broker it starts — a private state root, and reaps every broker
++// recorded there when the file ends. node --test runs each file in its own
++// process; nothing leaks across files.
++const { reapBrokers } = pinHermeticStateRoot("broker-reaping");
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
++const BROKER_SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "app-server-broker.mjs");
++
++// A store path from an older patch revision: this is exactly the shape the
++// record carries under a Nix-managed install, where the hash covers the whole
++// patched tree and the name embeds the patch revision.
++const FOREIGN_SCRIPT_PATH =
++  "/nix/store/0000000000000000000000000000000000000000-codex-plugin-cc-1.0.6-nix.db52e28f.p4/plugins/codex/scripts/app-server-broker.mjs";
++
++async function waitFor(predicate, { timeoutMs = 10000, intervalMs = 25 } = {}) {
++  const start = Date.now();
++  while (Date.now() - start < timeoutMs) {
++    if (await predicate()) {
++      return;
++    }
++    await new Promise((resolve) => setTimeout(resolve, intervalMs));
++  }
++  throw new Error("Timed out waiting for condition.");
++}
++
++function makeWorkspace() {
++  const workspace = makeTempDir();
++  initGitRepo(workspace);
++  fs.writeFileSync(path.join(workspace, "README.md"), "hello\n");
++  run("git", ["add", "README.md"], { cwd: workspace });
++  run("git", ["commit", "-m", "init"], { cwd: workspace });
++  fs.writeFileSync(path.join(workspace, "README.md"), "hello again\n");
++  return workspace;
++}
++
++test("the suite reaper stops every broker recorded under the hermetic state root", async () => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++
++  // ensureBrokerSession returns without saving a record when its 2 s readiness
++  // wait expires (broker-lifecycle.mjs:212-222). The live suite tolerates that
++  // with `if (!loadBrokerSession(repo)) return;` (runtime.test.mjs:1008, 2329),
++  // but returning early here would make the test vacuous — its whole subject is
++  // a real recorded broker. Retry instead, and fail loudly if none is ever
++  // recorded.
++  let record = null;
++  for (let attempt = 1; attempt <= 3 && record === null; attempt += 1) {
++    const review = run("node", [SCRIPT, "review"], { cwd: workspace, env: buildEnv(binDir) });
++    assert.equal(review.status, 0, review.stderr);
++    record = loadBrokerSession(workspace);
++  }
++  assert.ok(
++    record,
++    "no review recorded a broker in 3 attempts: the broker's 2 s readiness wait is expiring on this machine"
++  );
++  const brokerPid = record.pid;
++  const appServerPid = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8")).appServerPid;
++  assert.equal(Number.isFinite(brokerPid), true, "the broker record should carry a pid");
++  assert.equal(Number.isFinite(appServerPid), true, "the fake codex should have recorded its app-server pid");
++  assert.equal(isProcessAlive(brokerPid), true);
++
++  await reapBrokers();
++
++  // reapBrokers verifies the recorded pid itself before returning, so this is
++  // asserted directly; the app-server grandchild is reaped by the kernel a
++  // moment later, so that one gets a bounded poll.
++  assert.equal(isProcessAlive(brokerPid), false);
++  await waitFor(() => !isProcessAlive(appServerPid));
++  assert.equal(loadBrokerSession(workspace), null);
++  assert.equal(fs.existsSync(record.sessionDir), false);
++});
++
++function spawnDetachedSleeper(t) {
++  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
++    detached: true,
++    stdio: "ignore"
++  });
++  sleeper.unref();
++  t.after(() => killGroup(sleeper.pid, "SIGKILL"));
++  return sleeper;
++}
++
++test("teardownBrokerSession kills the recorded broker process when no killProcess is passed", async (t) => {
++  const sessionDir = createBrokerSessionDir();
++  const pidFile = path.join(sessionDir, "broker.pid");
++  const logFile = path.join(sessionDir, "broker.log");
++  const sleeper = spawnDetachedSleeper(t);
++  fs.writeFileSync(pidFile, `${sleeper.pid}\n`, "utf8");
++  fs.writeFileSync(logFile, "broker log\n", "utf8");
++
++  teardownBrokerSession({ endpoint: null, pidFile, logFile, sessionDir, pid: sleeper.pid });
++
++  await waitFor(() => !isProcessAlive(sleeper.pid));
++  assert.equal(fs.existsSync(pidFile), false);
++  assert.equal(fs.existsSync(logFile), false);
++  assert.equal(fs.existsSync(sessionDir), false);
++});
++
++test("the not-ready path terminates the broker it spawned and that broker's own child", async (t) => {
++  const workspace = makeWorkspace();
++  const reportDir = makeTempDir();
++  const pidReport = path.join(reportDir, "pids.txt");
++  const brokerStub = path.join(reportDir, "never-listens-broker.mjs");
++  fs.writeFileSync(
++    brokerStub,
++    [
++      'import fs from "node:fs";',
++      'import { spawn } from "node:child_process";',
++      '// Not detached: this child shares the stub broker\'s process group, so only',
++      '// a group signal reaps it -- which is the behaviour under test.',
++      'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
++      'fs.writeFileSync(process.env.BROKER_STUB_PID_REPORT, `${process.pid}\\n${child.pid}\\n`, "utf8");',
++      'setInterval(() => {}, 1000);',
++      ""
++    ].join("\n"),
++    "utf8"
++  );
++  t.after(() => {
++    if (!fs.existsSync(pidReport)) {
++      return;
++    }
++    for (const pid of fs.readFileSync(pidReport, "utf8").trim().split("\n").map(Number)) {
++      killGroup(pid, "SIGKILL");
++    }
++  });
++
++  const session = await ensureBrokerSession(workspace, {
++    scriptPath: brokerStub,
++    env: { ...process.env, BROKER_STUB_PID_REPORT: pidReport },
++    timeoutMs: 2000
++  });
++
++  assert.equal(session, null);
++  assert.equal(fs.existsSync(pidReport), true, "the stub broker never reported its pid");
++  const [stubPid, grandchildPid] = fs.readFileSync(pidReport, "utf8").trim().split("\n").map(Number);
++  await waitFor(() => !isProcessAlive(stubPid));
++  await waitFor(() => !isProcessAlive(grandchildPid));
++});
++
++test("the stale-record path terminates the broker whose endpoint no longer answers", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const sleeper = spawnDetachedSleeper(t);
++  const staleDir = createBrokerSessionDir();
++  const stalePidFile = path.join(staleDir, "broker.pid");
++  // A record-sourced pid is signalled only when the pid file still names it, so
++  // the fixture has to include the file a live broker would have written. Without
++  // it this record would describe a broker that already shut down cleanly (which
++  // unlinks the file) and whose pid may since have been recycled — a pid the
++  // stale-record path deliberately leaves alone.
++  fs.writeFileSync(stalePidFile, `${sleeper.pid}\n`, "utf8");
++  saveBrokerSession(workspace, {
++    endpoint: `unix:${path.join(staleDir, "broker.sock")}`,
++    pidFile: stalePidFile,
++    logFile: path.join(staleDir, "broker.log"),
++    sessionDir: staleDir,
++    pid: sleeper.pid,
++    stateDir: resolveStateDir(workspace),
++    workspaceRoot: workspace,
++    codexHome: path.join(staleDir, "codex-home"),
++    owners: [],
++    // Same-build on purpose: the reuse gate checks build identity before it
++    // probes readiness, so a record without this field would be retired as
++    // foreign and this test would observe that teardown instead of the stale
++    // one it exists to pin.
++    scriptPath: BROKER_SCRIPT
++  });
++
++  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 5000 });
++
++  await waitFor(() => !isProcessAlive(sleeper.pid));
++  // Killing the pid the stale record named is half the contract; the other half
++  // is that the record no longer names it. Read it back through the production
++  // resolver rather than trusting the return value alone.
++  assert.ok(session, "the replacement broker never became ready within 5 s");
++  const record = loadBrokerSession(workspace);
++  assert.ok(record, "the stale record was cleared but no replacement was recorded");
++  assert.equal(record.pid, session.pid);
++  assert.notEqual(record.pid, sleeper.pid);
++  assert.notEqual(record.sessionDir, staleDir);
++});
++
++// Positive control for the pid-file ownership guard. It passes at p5 for an
++// uninteresting reason (p5 never kills at all) and would fail against a Task 3
++// that defaults killProcess to a kill *without* the guard, which is the
++// regression it exists to catch.
++test("teardownBrokerSession does not signal a pid the pid file no longer claims", async (t) => {
++  const sessionDir = createBrokerSessionDir();
++  const pidFile = path.join(sessionDir, "broker.pid");
++  const logFile = path.join(sessionDir, "broker.log");
++  const survivor = spawnDetachedSleeper(t);
++  // The caller still names `survivor`, but the pid file on disk names somebody
++  // else — evidence that a writer other than this broker owns the path.
++  // terminateProcessTree signals the whole group, so acting on the caller's pid
++  // here would take an unrelated process group down.
++  fs.writeFileSync(pidFile, `${survivor.pid + 1}\n`, "utf8");
++  fs.writeFileSync(logFile, "broker log\n", "utf8");
++
++  teardownBrokerSession({ endpoint: null, pidFile, logFile, sessionDir, pid: survivor.pid });
++
++  assert.equal(isProcessAlive(survivor.pid), true, "the guard should have skipped this kill");
++  // The files still go: the post-condition is "no artifacts", independent of
++  // whether anything was signalled.
++  assert.equal(fs.existsSync(pidFile), false);
++  assert.equal(fs.existsSync(sessionDir), false);
++});
++
++// Answers the reuse gate's 150 ms connect probe and nothing else: the gate only
++// asks whether something is listening, so a bare accept-and-close server is a
++// faithful stand-in for a ready broker without a codex app-server behind it.
++function startStubBroker(t, sessionDir, endpoint) {
++  const target = parseBrokerEndpoint(endpoint);
++  const source = `import net from "node:net"; net.createServer((socket) => socket.end()).listen(${JSON.stringify(
++    target.path
++  )}); setInterval(() => {}, 1000);`;
++  const child = spawn(process.execPath, ["--input-type=module", "--eval", source], {
++    detached: true,
++    stdio: "ignore"
++  });
++  child.unref();
++  // A real broker writes this file at startup and unlinks it on shutdown, so a
++  // stand-in for a *ready* broker has to have one: a record-sourced pid is
++  // signalled only while its pid file still names it, and without the file this
++  // stub would look like a broker that had already exited cleanly.
++  fs.writeFileSync(path.join(sessionDir, "broker.pid"), `${child.pid}\n`, "utf8");
++  t.after(() => killGroup(child.pid, "SIGKILL"));
++  return child;
++}
++
++function stubRecord(workspace, sessionDir, endpoint, pid, scriptPath) {
++  return {
++    endpoint,
++    pidFile: path.join(sessionDir, "broker.pid"),
++    logFile: path.join(sessionDir, "broker.log"),
++    sessionDir,
++    pid,
++    stateDir: resolveStateDir(workspace),
++    workspaceRoot: workspace,
++    codexHome: path.join(sessionDir, "codex-home"),
++    owners: [],
++    // Omit the key entirely when no scriptPath is given: that is what a
++    // broker.json written before the field existed looks like on disk, and it
++    // is a distinct input from a key holding a foreign path.
++    ...(scriptPath === undefined ? {} : { scriptPath })
++  };
++}
++
++test("ensureBrokerSession retires a ready broker recorded by a different plugin build", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const foreignDir = createBrokerSessionDir();
++  const foreignEndpoint = createBrokerEndpoint(foreignDir);
++  const stub = startStubBroker(t, foreignDir, foreignEndpoint);
++  assert.equal(await waitForBrokerEndpoint(foreignEndpoint, 5000), true, "the stub broker never listened");
++  saveBrokerSession(workspace, stubRecord(workspace, foreignDir, foreignEndpoint, stub.pid, FOREIGN_SCRIPT_PATH));
++
++  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 10000 });
++
++  assert.ok(session, "a fresh broker should have replaced the foreign-build one");
++  assert.notEqual(session.endpoint, foreignEndpoint);
++  assert.equal(session.scriptPath, BROKER_SCRIPT);
++  assert.deepEqual(session.owners, []);
++  await waitFor(() => !isProcessAlive(stub.pid));
++});
++
++test("ensureBrokerSession retires a ready broker whose record predates scriptPath", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const legacyDir = createBrokerSessionDir();
++  const legacyEndpoint = createBrokerEndpoint(legacyDir);
++  const stub = startStubBroker(t, legacyDir, legacyEndpoint);
++  assert.equal(await waitForBrokerEndpoint(legacyEndpoint, 5000), true, "the stub broker never listened");
++  saveBrokerSession(workspace, stubRecord(workspace, legacyDir, legacyEndpoint, stub.pid));
++  // Pin the precondition through the production resolver: the subject is an
++  // absent key, not a foreign value, and no migration step may invent one.
++  assert.equal("scriptPath" in loadBrokerSession(workspace), false);
++
++  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 10000 });
++
++  assert.ok(session, "a fresh broker should have replaced the pre-change one");
++  assert.notEqual(session.endpoint, legacyEndpoint);
++  assert.equal(session.scriptPath, BROKER_SCRIPT);
++  await waitFor(() => !isProcessAlive(stub.pid));
++});
++
++test("ensureBrokerSession reuses a ready broker recorded by this plugin build", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const sessionDir = createBrokerSessionDir();
++  const endpoint = createBrokerEndpoint(sessionDir);
++  const stub = startStubBroker(t, sessionDir, endpoint);
++  assert.equal(await waitForBrokerEndpoint(endpoint, 5000), true, "the stub broker never listened");
++  saveBrokerSession(workspace, stubRecord(workspace, sessionDir, endpoint, stub.pid, BROKER_SCRIPT));
++
++  const session = await ensureBrokerSession(workspace, { env: buildEnv(binDir), timeoutMs: 10000 });
++
++  // Without this control, the tests above pass trivially if reuse breaks
++  // entirely.
++  assert.equal(session.endpoint, endpoint);
++  assert.equal(isProcessAlive(stub.pid), true);
++  // The reuse path re-saves the record through addOwner, so read it back: a
++  // scriptPath dropped there is invisible in the return value and would make
++  // the very next ensureBrokerSession call retire this broker as foreign.
++  const record = loadBrokerSession(workspace);
++  assert.equal(record.endpoint, endpoint);
++  assert.equal(record.scriptPath, BROKER_SCRIPT);
++});
++
++const MINE = "unix:/tmp/cxc-mine/broker.sock";
++
++function decide({ record, present = true, recorded = false, connectionCount = 0, idleForMs = 0, idleTimeoutMs = 1000 }) {
++  return decideBrokerSupervision({
++    classification: classifyBrokerRecord({ present, record, endpoint: MINE }),
++    recorded,
++    connectionCount,
++    lastActivityMs: 10_000,
++    nowMs: 10_000 + idleForMs,
++    idleTimeoutMs
++  });
++}
++
++function productionRecord(overrides = {}) {
++  return {
++    endpoint: MINE,
++    pidFile: "/tmp/cxc-mine/broker.pid",
++    logFile: "/tmp/cxc-mine/broker.log",
++    sessionDir: "/tmp/cxc-mine",
++    pid: 4242,
++    stateDir: "/tmp/state/workspace-0123456789abcdef",
++    workspaceRoot: "/tmp/workspace",
++    codexHome: "/tmp/state/workspace-0123456789abcdef/codex-home",
++    owners: [],
++    scriptPath: "/tmp/plugins/codex/scripts/app-server-broker.mjs",
++    ...overrides
++  };
++}
++
++test("classifyBrokerRecord names the four states the supervision decision dispatches on", () => {
++  assert.equal(classifyBrokerRecord({ present: true, record: productionRecord(), endpoint: MINE }), "mine");
++  assert.equal(
++    classifyBrokerRecord({
++      present: true,
++      record: productionRecord({ endpoint: "unix:/tmp/cxc-other/broker.sock" }),
++      endpoint: MINE
++    }),
++    "foreign"
++  );
++  assert.equal(classifyBrokerRecord({ present: false, record: null, endpoint: MINE }), "missing");
++  // Present but unparseable. loadBrokerSession returns null for an absent and a
++  // corrupt broker.json alike, which is why `present` is a separate input: this
++  // arm and "missing" are indistinguishable from the record alone.
++  assert.equal(classifyBrokerRecord({ present: true, record: null, endpoint: MINE }), "unreadable");
++});
++
++test("the supervision decision keeps a recorded broker with a live connection running", () => {
++  assert.deepEqual(decide({ record: productionRecord(), recorded: true, connectionCount: 1, idleForMs: 999_999 }), {
++    action: "continue",
++    reason: null
++  });
++});
++
++test("the supervision decision exits a broker whose record names a different endpoint", () => {
++  assert.deepEqual(
++    decide({ record: productionRecord({ endpoint: "unix:/tmp/cxc-other/broker.sock" }), recorded: true, connectionCount: 1 }),
++    { action: "exit", reason: "replaced" }
++  );
++});
++
++test("the supervision decision exits a broker whose record disappeared after it was recorded", () => {
++  assert.deepEqual(decide({ present: false, record: null, recorded: true, connectionCount: 1 }), {
++    action: "exit",
++    reason: "orphaned"
++  });
++});
++
++test("the supervision decision keeps a broker running while its record has never appeared", () => {
++  // ensureBrokerSession writes the record only after readiness, so "missing"
++  // is the expected state for a young broker.
++  assert.deepEqual(decide({ present: false, record: null, recorded: false, connectionCount: 1 }), {
++    action: "continue",
++    reason: null
++  });
++});
++
++test("the supervision decision keeps a broker running when its record does not parse", () => {
++  // Only a definite absence justifies an exit; records are written by atomic
++  // rename, so a parse failure is corruption, not a torn read.
++  assert.deepEqual(decide({ present: true, record: null, recorded: true, connectionCount: 1 }), {
++    action: "continue",
++    reason: null
++  });
++});
++
++test("the supervision decision exits an unconnected broker at exactly the idle bound", () => {
++  assert.deepEqual(
++    decide({ record: productionRecord(), recorded: true, connectionCount: 0, idleForMs: 1000, idleTimeoutMs: 1000 }),
++    { action: "exit", reason: "idle" }
++  );
++});
++
++test("the supervision decision keeps an unconnected broker running below the idle bound", () => {
++  assert.deepEqual(
++    decide({ record: productionRecord(), recorded: true, connectionCount: 0, idleForMs: 999, idleTimeoutMs: 1000 }),
++    { action: "continue", reason: null }
++  );
++});
++
++test("supervision bounds default when unset and are honoured when overridden", () => {
++  assert.deepEqual(resolveSupervisionBounds({}), {
++    idleTimeoutMs: DEFAULT_BROKER_IDLE_TIMEOUT_MS,
++    superviseIntervalMs: DEFAULT_BROKER_SUPERVISE_INTERVAL_MS
++  });
++  assert.deepEqual(
++    resolveSupervisionBounds({ [BROKER_IDLE_TIMEOUT_ENV]: "500", [BROKER_SUPERVISE_INTERVAL_ENV]: "100" }),
++    { idleTimeoutMs: 500, superviseIntervalMs: 100 }
++  );
++});
++
++test("a supervision bound that is not a positive integer throws instead of falling back", () => {
++  for (const bad of ["0", "-1", "1.5", "abc", ""]) {
++    assert.throws(
++      () => resolveSupervisionBounds({ [BROKER_IDLE_TIMEOUT_ENV]: bad }),
++      new RegExp(BROKER_IDLE_TIMEOUT_ENV),
++      `expected ${JSON.stringify(bad)} to be rejected`
++    );
++  }
++});
++
++function makeCanonicalHome() {
++  const canonicalHome = makeTempDir();
++  fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{}\n");
++  fs.writeFileSync(path.join(canonicalHome, "config.toml"), 'model = "canonical"\n');
++  return canonicalHome;
++}
++
++// Starts a real broker through the production spawn path, with the supervision
++// bounds shortened so its self-termination is observable in seconds. buildEnv
++// spreads process.env, so the file's pinned CLAUDE_PLUGIN_DATA reaches the
++// broker and it resolves the same broker record this test writes.
++function startSupervisedBroker({ workspace, binDir, canonicalHome, idleTimeoutMs, superviseIntervalMs }) {
++  const sessionDir = createBrokerSessionDir();
++  const endpoint = createBrokerEndpoint(sessionDir);
++  const pidFile = path.join(sessionDir, "broker.pid");
++  const logFile = path.join(sessionDir, "broker.log");
++  const child = spawnBrokerProcess({
++    scriptPath: BROKER_SCRIPT,
++    cwd: workspace,
++    endpoint,
++    pidFile,
++    logFile,
++    env: {
++      ...buildEnv(binDir),
++      CODEX_HOME: canonicalHome,
++      [BROKER_IDLE_TIMEOUT_ENV]: String(idleTimeoutMs),
++      [BROKER_SUPERVISE_INTERVAL_ENV]: String(superviseIntervalMs)
++    }
++  });
++  return { child, endpoint, pidFile, logFile, sessionDir };
++}
++
++function brokerRecord(workspace, broker, canonicalHome) {
++  return {
++    endpoint: broker.endpoint,
++    pidFile: broker.pidFile,
++    logFile: broker.logFile,
++    sessionDir: broker.sessionDir,
++    pid: broker.child.pid,
++    stateDir: resolveStateDir(workspace),
++    workspaceRoot: workspace,
++    codexHome: canonicalHome,
++    owners: [],
++    scriptPath: BROKER_SCRIPT
++  };
++}
++
++function appServerPidOf(binDir) {
++  return JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8")).appServerPid;
++}
++
++test("a live broker exits when its broker record disappears", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const canonicalHome = makeCanonicalHome();
++  const broker = startSupervisedBroker({
++    workspace,
++    binDir,
++    canonicalHome,
++    idleTimeoutMs: 60000,
++    superviseIntervalMs: 100
++  });
++  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
++
++  assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
++  saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
++  // The `recorded` latch is what separates "orphaned" from "not yet recorded",
++  // so wait for the broker to say it has seen its own record before removing it.
++  await waitFor(() => fs.readFileSync(broker.logFile, "utf8").includes("supervision: armed"));
++  const appServerPid = appServerPidOf(binDir);
++
++  clearBrokerSession(workspace);
++
++  await waitFor(() => !isProcessAlive(broker.child.pid));
++  await waitFor(() => !isProcessAlive(appServerPid));
++  assert.equal(fs.existsSync(broker.pidFile), false);
++  assert.equal(fs.existsSync(broker.logFile), false);
++  assert.equal(fs.existsSync(parseBrokerEndpoint(broker.endpoint).path), false);
++  assert.equal(fs.existsSync(broker.sessionDir), false);
++  assert.equal(loadBrokerSession(workspace), null);
++});
++
++test("a live broker exits when its broker record is replaced, leaving the replacement alone", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const canonicalHome = makeCanonicalHome();
++  const broker = startSupervisedBroker({
++    workspace,
++    binDir,
++    canonicalHome,
++    idleTimeoutMs: 60000,
++    superviseIntervalMs: 100
++  });
++  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
++
++  assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
++  saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
++  await waitFor(() => fs.readFileSync(broker.logFile, "utf8").includes("supervision: armed"));
++
++  const replacement = {
++    ...brokerRecord(workspace, broker, canonicalHome),
++    endpoint: "unix:/tmp/cxc-a-different-broker/broker.sock",
++    pid: null
++  };
++  saveBrokerSession(workspace, replacement);
++
++  await waitFor(() => !isProcessAlive(broker.child.pid));
++  // An exiting broker must never delete a record that is not its own.
++  assert.equal(loadBrokerSession(workspace).endpoint, replacement.endpoint);
++  assert.equal(fs.existsSync(broker.sessionDir), false);
++});
++
++test("a live broker exits when nothing connects for the idle bound", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const canonicalHome = makeCanonicalHome();
++  const broker = startSupervisedBroker({
++    workspace,
++    binDir,
++    canonicalHome,
++    idleTimeoutMs: 500,
++    superviseIntervalMs: 100
++  });
++  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
++  saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
++
++  await waitFor(() => !isProcessAlive(broker.child.pid), { timeoutMs: 15000 });
++
++  // The record and the directory are what distinguish an idle self-exit from a
++  // broker that simply failed to start.
++  assert.equal(loadBrokerSession(workspace), null);
++  assert.equal(fs.existsSync(broker.sessionDir), false);
++});
++
++// Proving that something does *not* happen needs a window, so this one is
++// counted in supervision intervals: every interval that elapses is one more
++// chance for a broker that mistook corruption for absence to have exited.
++async function assertAliveForTicks(pid, superviseIntervalMs, ticks, message) {
++  const deadline = Date.now() + superviseIntervalMs * ticks;
++  while (Date.now() < deadline) {
++    assert.equal(isProcessAlive(pid), true, message);
++    await new Promise((resolve) => setTimeout(resolve, 25));
++  }
++}
++
++test("a live broker keeps running when its broker record exists but does not parse", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const canonicalHome = makeCanonicalHome();
++  const superviseIntervalMs = 100;
++  const broker = startSupervisedBroker({
++    workspace,
++    binDir,
++    canonicalHome,
++    idleTimeoutMs: 60000,
++    superviseIntervalMs
++  });
++  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
++
++  assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
++  saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
++  await waitFor(() => fs.readFileSync(broker.logFile, "utf8").includes("supervision: armed"));
++
++  // A half-written broker.json is corruption, not evidence that this broker was
++  // retired. The broker must therefore take `present` from the file existing and
++  // not from the parse succeeding: deriving it from the parsed record collapses
++  // this case into "missing" and the broker kills itself over somebody's
++  // half-flushed editor buffer.
++  fs.writeFileSync(resolveBrokerStateFile(workspace), "{ not json", "utf8");
++
++  await assertAliveForTicks(
++    broker.child.pid,
++    superviseIntervalMs,
++    10,
++    "the broker exited while its record was merely unparseable"
++  );
++
++  // Control against a vacuous pass: the same broker, on the same timer, does
++  // exit the moment the record is definitely absent — so surviving the corrupt
++  // record above was a decision, not a dead supervision loop.
++  clearBrokerSession(workspace);
++
++  await waitFor(() => !isProcessAlive(broker.child.pid));
++  assert.equal(fs.existsSync(broker.sessionDir), false);
++});
++
++// A peer that takes the broker's FIN and never answers with one of its own:
++// allowHalfOpen keeps this socket's write side open when its read side ends, so
++// the connection stays established from the server's side and a server.close()
++// that waits for every connection to close waits for this one forever. That is
++// what an unresponsive client looks like to a broker -- no sleep stands in for
++// it. The connect itself is bounded so a broker that never accepts fails the
++// test instead of hanging it.
++function connectHalfOpenPeer(t, endpoint) {
++  const target = parseBrokerEndpoint(endpoint);
++  return new Promise((resolve, reject) => {
++    const socket = net.connect({ path: target.path, allowHalfOpen: true });
++    const timer = setTimeout(() => {
++      socket.destroy();
++      reject(new Error("Timed out connecting to the broker endpoint."));
++    }, 10000);
++    socket.once("connect", () => {
++      clearTimeout(timer);
++      // The broker drops this connection unilaterally, which surfaces here as
++      // ECONNRESET; without a handler that would throw in the test process.
++      socket.on("error", () => {});
++      t.after(() => socket.destroy());
++      resolve(socket);
++    });
++    socket.once("error", (error) => {
++      clearTimeout(timer);
++      reject(error);
++    });
++  });
++}
++
++test("a live broker replaced while a peer holds its connection half-open still exits", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const canonicalHome = makeCanonicalHome();
++  const broker = startSupervisedBroker({
++    workspace,
++    binDir,
++    canonicalHome,
++    idleTimeoutMs: 60000,
++    superviseIntervalMs: 100
++  });
++  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
++
++  assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
++  saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
++  await waitFor(() => fs.readFileSync(broker.logFile, "utf8").includes("supervision: armed"));
++  const appServerPid = appServerPidOf(binDir);
++  await connectHalfOpenPeer(t, broker.endpoint);
++
++  // The "replaced" arm exits even with a client connected -- that is its stated
++  // purpose -- so it is the one exit path guaranteed to face a peer that may
++  // never close its end. A broker that waits for that peer has decided to die
++  // and then lives forever.
++  saveBrokerSession(workspace, {
++    ...brokerRecord(workspace, broker, canonicalHome),
++    endpoint: "unix:/tmp/cxc-a-different-broker/broker.sock",
++    pid: null
++  });
++
++  await waitFor(() => !isProcessAlive(broker.child.pid), { timeoutMs: 20000 });
++  await waitFor(() => !isProcessAlive(appServerPid));
++  assert.equal(fs.existsSync(broker.sessionDir), false);
++});
++
++// A codex app-server that answers `initialize` and then refuses to die: it
++// ignores SIGTERM and stays alive after its stdin is ended, so the broker's
++// appClient.close() -- which ends stdin, SIGTERMs 50 ms later and then awaits the
++// child's exit -- never completes on its own. installFakeCodex has no shape for
++// "the child hangs", and this file already writes purpose-built stubs
++// (startStubBroker, the never-listens broker) for conditions the shared fixture
++// cannot express.
++function installWedgedCodex(binDir, pidReport) {
++  writeExecutable(
++    path.join(binDir, "codex"),
++    [
++      "#!/usr/bin/env node",
++      'const fs = require("node:fs");',
++      'const readline = require("node:readline");',
++      'if (process.argv[2] !== "app-server") {',
++      "  process.exit(0);",
++      "}",
++      `fs.writeFileSync(${JSON.stringify(pidReport)}, String(process.pid), "utf8");`,
++      'process.on("SIGTERM", () => {});',
++      'process.on("SIGINT", () => {});',
++      "const rl = readline.createInterface({ input: process.stdin });",
++      'rl.on("line", (line) => {',
++      "  const message = JSON.parse(line);",
++      "  if (message.id !== undefined) {",
++      '    process.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "wedged-app-server" } }) + "\\n");',
++      "  }",
++      "});",
++      "setInterval(() => {}, 1000);",
++      ""
++    ].join("\n")
++  );
++}
++
++test("a self-reaping broker whose app-server will not exit still exits and takes it with it", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  const pidReport = path.join(binDir, "wedged-app-server.pid");
++  installWedgedCodex(binDir, pidReport);
++  const canonicalHome = makeCanonicalHome();
++  const broker = startSupervisedBroker({
++    workspace,
++    binDir,
++    canonicalHome,
++    idleTimeoutMs: 60000,
++    superviseIntervalMs: 100
++  });
++  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
++
++  assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
++  saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
++  await waitFor(() => fs.readFileSync(broker.logFile, "utf8").includes("supervision: armed"));
++  await waitFor(() => fs.existsSync(pidReport));
++  const appServerPid = Number(fs.readFileSync(pidReport, "utf8").trim());
++  t.after(() => killGroup(appServerPid, "SIGKILL"));
++
++  clearBrokerSession(workspace);
++
++  // A graceful shutdown is impossible here, so this passes only because the wait
++  // for one is bounded.
++  await waitFor(() => !isProcessAlive(broker.child.pid), { timeoutMs: 20000 });
++  // R3 wants the app-server to go with its broker, and the bound must not trade
++  // that away: what close() could not achieve, the escalation past it must.
++  await waitFor(() => !isProcessAlive(appServerPid));
++  // Nor may the bound trade away the removals, which need neither the peer nor
++  // the child.
++  assert.equal(fs.existsSync(broker.pidFile), false);
++  assert.equal(fs.existsSync(broker.logFile), false);
++  assert.equal(fs.existsSync(parseBrokerEndpoint(broker.endpoint).path), false);
++  assert.equal(fs.existsSync(broker.sessionDir), false);
++  assert.equal(loadBrokerSession(workspace), null);
++});
++
++// The two halves of the pid-provenance rule. An absent pid file means opposite
++// things depending on where the pid came from, and teardownBrokerSession
++// signals process *groups*, so getting this backwards on either side is a real
++// hazard: a needless group signal on one, a surviving broker on the other.
++test("teardownBrokerSession does not signal a record-sourced pid that no pid file confirms", async (t) => {
++  const sessionDir = createBrokerSessionDir();
++  const pidFile = path.join(sessionDir, "broker.pid");
++  const logFile = path.join(sessionDir, "broker.log");
++  const survivor = spawnDetachedSleeper(t);
++  fs.writeFileSync(logFile, "broker log\n", "utf8");
++  // The subject: a persisted record naming a pid, and no pid file anywhere —
++  // exactly what a broker that shut down cleanly leaves behind, after which
++  // that pid may belong to an unrelated process.
++  assert.equal(fs.existsSync(pidFile), false, "this test's subject is a record with no pid file beside it");
++
++  teardownBrokerSession({ endpoint: null, pidFile, logFile, sessionDir, pid: survivor.pid, pidSource: "record" });
++
++  // A delivered group SIGTERM kills this sleeper within milliseconds, so "was
++  // not signalled" is only observable across a window; asserting the instant
++  // teardown returns would pass even if the signal had gone out.
++  await new Promise((resolve) => setTimeout(resolve, 500));
++  assert.equal(isProcessAlive(survivor.pid), true, "an unconfirmed record-sourced pid must not be signalled");
++  // The artifact removals do not depend on the signal decision.
++  assert.equal(fs.existsSync(logFile), false);
++  assert.equal(fs.existsSync(sessionDir), false);
++});
++
++test("teardownBrokerSession kills a just-spawned pid that has not written its pid file yet", async (t) => {
++  const sessionDir = createBrokerSessionDir();
++  const pidFile = path.join(sessionDir, "broker.pid");
++  const logFile = path.join(sessionDir, "broker.log");
++  const child = spawnDetachedSleeper(t);
++  fs.writeFileSync(logFile, "broker log\n", "utf8");
++  // The broker writes its pid file early in main() but after Node bootstrap, so
++  // this is the state a legitimate just-spawned child is in when the not-ready
++  // path gives up on it. R4 requires that child to die anyway.
++  assert.equal(fs.existsSync(pidFile), false, "this test's subject is a child that has written no pid file");
++
++  teardownBrokerSession({ endpoint: null, pidFile, logFile, sessionDir, pid: child.pid, pidSource: "spawned" });
++
++  await waitFor(() => !isProcessAlive(child.pid));
++  assert.equal(fs.existsSync(sessionDir), false);
++});
++
++test("a SIGTERMed broker exits even with a half-open peer and an app-server that will not die", async (t) => {
++  const workspace = makeWorkspace();
++  const binDir = makeTempDir();
++  const pidReport = path.join(binDir, "wedged-app-server.pid");
++  installWedgedCodex(binDir, pidReport);
++  const canonicalHome = makeCanonicalHome();
++  const broker = startSupervisedBroker({
++    workspace,
++    binDir,
++    canonicalHome,
++    idleTimeoutMs: 60000,
++    superviseIntervalMs: 100
++  });
++  t.after(() => killGroup(broker.child.pid, "SIGKILL"));
++
++  assert.equal(await waitForBrokerEndpoint(broker.endpoint, 10000), true, "the broker never became ready");
++  saveBrokerSession(workspace, brokerRecord(workspace, broker, canonicalHome));
++  await waitFor(() => fs.existsSync(pidReport));
++  const appServerPid = Number(fs.readFileSync(pidReport, "utf8").trim());
++  t.after(() => killGroup(appServerPid, "SIGKILL"));
++  await connectHalfOpenPeer(t, broker.endpoint);
++
++  // This is how teardownBrokerSession actually reaches a broker: terminateProcessTree
++  // SIGTERMs the group and never escalates to SIGKILL. The record it leaves in
++  // place still names this broker, so supervision would decide to continue --
++  // nothing outside this process will finish the job, so the signal handler's own
++  // path has to.
++  killGroup(broker.child.pid, "SIGTERM");
++
++  await waitFor(() => !isProcessAlive(broker.child.pid), { timeoutMs: 20000 });
++  // The app-server ignores SIGTERM, so it can only be gone if the broker
++  // escalated on its way out.
++  await waitFor(() => !isProcessAlive(appServerPid));
++  assert.equal(fs.existsSync(broker.pidFile), false);
++  assert.equal(fs.existsSync(broker.logFile), false);
++  assert.equal(fs.existsSync(parseBrokerEndpoint(broker.endpoint).path), false);
++  assert.equal(fs.existsSync(broker.sessionDir), false);
++});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
 index c34b060..9c9cc89 100644
 --- a/tests/commands.test.mjs
@@ -1791,14 +3318,150 @@ index c34b060..9c9cc89 100644
 @@ -223 +249,0 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(readme, /\/codex:setup --enable-review-gate/);
 diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
-index f83c96a..fdfb12c 100644
+index f83c96a..6920c62 100644
 --- a/tests/fake-codex-fixture.mjs
 +++ b/tests/fake-codex-fixture.mjs
-@@ -274,0 +275 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
+@@ -274,0 +275,2 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
++bootState.appServerPid = process.pid;
 +bootState.lastCodexHome = process.env.CODEX_HOME || null;
-@@ -314,0 +316,2 @@ rl.on("line", (line) => {
+@@ -314,0 +317,2 @@ rl.on("line", (line) => {
 +        state.lastThreadStart = message.params;
 +        saveState(state);
+diff --git a/tests/helpers.mjs b/tests/helpers.mjs
+index d698119..55f28fb 100644
+--- a/tests/helpers.mjs
++++ b/tests/helpers.mjs
+@@ -5,0 +6,7 @@ import { spawnSync } from "node:child_process";
++import { after } from "node:test";
++
++import { listBrokerSessions, pidFileEvidence, teardownBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
++import { isProcessAlive, terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
++
++const REAP_POLL_MS = 25;
++const REAP_TIMEOUT_MS = 2000;
+@@ -32,0 +40,122 @@ export function initGitRepo(cwd) {
++
++// Signals the pid's whole process group, falling back to the pid alone when it
++// leads no group. Exported because tests that spawn their own detached processes
++// need exactly this teardown; there is no second copy of it.
++export function killGroup(pid, signal) {
++  // Same rejection terminateProcessTree makes, and for the same reason: negating a
++  // non-positive pid aims at the caller's own process group (-0) or at the
++  // signal-everything broadcast (-1), never at a process worth killing.
++  if (!Number.isFinite(pid) || pid <= 0) {
++    return;
++  }
++  try {
++    process.kill(-pid, signal);
++  } catch {
++    try {
++      process.kill(pid, signal);
++    } catch {
++      // Already gone.
++    }
++  }
++}
++
++async function waitUntilGone(pid) {
++  const deadline = Date.now() + REAP_TIMEOUT_MS;
++  while (Date.now() < deadline && isProcessAlive(pid)) {
++    await new Promise((resolve) => setTimeout(resolve, REAP_POLL_MS));
++  }
++}
++
++// Gives the calling test file its own state root and leaves the process table
++// as it found it: every broker recorded under that root is stopped when the
++// file ends. Call once at module scope; the returned reapBrokers is what the
++// file-scoped `after` hook runs, exposed so a test can drive it directly.
++//
++// The root is a private temp dir, which is what keeps this reaper unable to
++// reach a real broker: under the documented scrubbed test command the shared
++// state root is os.tmpdir()/codex-companion, where a developer's own
++// plain-shell broker lives.
++export function pinHermeticStateRoot(label) {
++  const root = makeTempDir(`codex-plugin-${label}-data-`);
++  process.env.CLAUDE_PLUGIN_DATA = root;
++  delete process.env.CODEX_COMPANION_SESSION_ID;
++  delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++
++  async function reapBrokers() {
++    // listStateDirs() resolves the root at call time and tests do repoint this
++    // variable mid-file, so re-pin the captured root before walking it.
++    process.env.CLAUDE_PLUGIN_DATA = root;
++    const failures = [];
++    for (const { stateFile, session } of listBrokerSessions()) {
++      // teardownBrokerSession force-removes its files, so the broker's own
++      // concurrent shutdown no longer makes ENOENT the expected outcome here.
++      // The try/catch stays for the unexpected one: one bad record (an
++      // unreadable session dir, a permission error) must not strand the rest,
++      // and this runs in an `after` hook, where a rejection is reported as a
++      // test failure while the remaining brokers stay alive — the worst of both
++      // outcomes.
++      try {
++        const pid = Number.isFinite(session.pid) ? session.pid : null;
++        // Read the evidence *before* teardownBrokerSession force-removes the pid
++        // file, because the escalation below needs it and would otherwise always
++        // see an absent file. Only a pid the file still names may be escalated:
++        // teardown declines to signal the rest precisely because a record-sourced
++        // pid whose file is gone belongs to a broker that already shut down
++        // cleanly, and may since have been recycled by an unrelated process.
++        // Escalating that pid would group-SIGKILL the recycled owner and undo the
++        // gate teardown just applied.
++        const ownershipConfirmed = pid !== null && pidFileEvidence(session.pidFile ?? null, pid) === "confirms";
++        // killProcess is the production instrument, not a test double: the same
++        // group SIGTERM session end uses. Each broker holds a codex app-server
++        // child, so a pid-only signal would strand one app-server per broker.
++        teardownBrokerSession({
++          endpoint: session.endpoint ?? null,
++          pidFile: session.pidFile ?? null,
++          logFile: session.logFile ?? null,
++          sessionDir: session.sessionDir ?? null,
++          pid,
++          // Every pid here comes out of a persisted broker record, so it is
++          // signalled only while the pid file still names it. A broker that shut
++          // down cleanly unlinked that file and needs no signal; one that did not
++          // is caught by the escalation below.
++          pidSource: "record",
++          killProcess: terminateProcessTree
++        });
++        if (ownershipConfirmed) {
++          await waitUntilGone(pid);
++          if (isProcessAlive(pid)) {
++            killGroup(pid, "SIGKILL");
++            await waitUntilGone(pid);
++          }
++          if (isProcessAlive(pid)) {
++            failures.push(`broker pid ${pid} survived SIGKILL`);
++          }
++        }
++      } catch (error) {
++        failures.push(`${stateFile}: ${error instanceof Error ? error.message : String(error)}`);
++      } finally {
++        // `force` swallows ENOENT but not EPERM/EACCES/EBUSY, and a throw from a
++        // `finally` propagates straight out of this loop -- abandoning every
++        // record after this one and skipping the aggregated failure below, which
++        // is the opposite of what that aggregation is for. Record it instead.
++        try {
++          fs.rmSync(stateFile, { force: true });
++        } catch (error) {
++          failures.push(`${stateFile}: ${error instanceof Error ? error.message : String(error)}`);
++        }
++      }
++    }
++    // Thrown, only once every record has been attempted: a broker that outlived
++    // SIGKILL is exactly the leakage this reaper exists to prevent, so it has to
++    // fail the run rather than scroll past in stderr. Throwing here, after the
++    // loop, costs nothing the earlier rationale worried about — no remaining
++    // record is abandoned, and each record's own `finally` has already removed
++    // its state file.
++    if (failures.length > 0) {
++      throw new Error(`reapBrokers: ${failures.join("; ")}`);
++    }
++  }
++
++  after(reapBrokers);
++  return { root, reapBrokers };
++}
 diff --git a/tests/isolation.test.mjs b/tests/isolation.test.mjs
 new file mode 100644
 index 0000000..3d8b555
@@ -1918,10 +3581,10 @@ index 0000000..3d8b555
 +});
 diff --git a/tests/liveness.test.mjs b/tests/liveness.test.mjs
 new file mode 100644
-index 0000000..60fefea
+index 0000000..beaa22c
 --- /dev/null
 +++ b/tests/liveness.test.mjs
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,243 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -1929,17 +3592,16 @@ index 0000000..60fefea
 +import { spawn } from "node:child_process";
 +import { fileURLToPath } from "node:url";
 +
-+import { makeTempDir, run } from "./helpers.mjs";
++import { makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env, so pinning them here keeps every test in this file
-+// hermetic even when the suite runs inside a live Claude Code session.
++// hermetic even when the suite runs inside a live Claude Code session, and every
++// broker recorded under that private root is reaped when the file ends.
 +// node --test runs each file in its own process; nothing leaks across files.
-+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-liveness-data-");
-+delete process.env.CODEX_COMPANION_SESSION_ID;
-+delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++pinHermeticStateRoot("liveness");
 +
 +const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 +const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
@@ -2168,10 +3830,10 @@ index 0000000..60fefea
 +});
 diff --git a/tests/reviewer-detach.test.mjs b/tests/reviewer-detach.test.mjs
 new file mode 100644
-index 0000000..e29047b
+index 0000000..443512f
 --- /dev/null
 +++ b/tests/reviewer-detach.test.mjs
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,149 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -2179,16 +3841,15 @@ index 0000000..e29047b
 +import { fileURLToPath } from "node:url";
 +
 +import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-+import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
++import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env (via buildEnv), so pinning them here keeps every test in
-+// this file hermetic even when the suite runs inside a live Claude Code session.
++// this file hermetic even when the suite runs inside a live Claude Code session,
++// and every broker recorded under that private root is reaped when the file ends.
 +// node --test runs each file in its own process; nothing leaks across files.
-+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-reviewer-detach-data-");
-+delete process.env.CODEX_COMPANION_SESSION_ID;
-+delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++pinHermeticStateRoot("reviewer-detach");
 +
 +const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 +const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
@@ -2323,14 +3984,23 @@ index 0000000..e29047b
 +  assert.equal(fs.existsSync(resolveReviewerRuntimeHome(repo, launchPayload.jobId)), false);
 +});
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
-index 8f27683..144f108 100644
+index 8f27683..309c907 100644
 --- a/tests/runtime.test.mjs
 +++ b/tests/runtime.test.mjs
-@@ -11 +11,2 @@ import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/l
+@@ -9 +9 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
+-import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
++import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
+@@ -11 +11,8 @@ import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/l
 -import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +import { listJobs, resolveJobFile, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
-@@ -30,0 +32,20 @@ async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
++
++// State resolvers read CLAUDE_PLUGIN_DATA at call time and spawned CLI children
++// inherit process.env (via buildEnv), so this pin keeps every test in this file
++// hermetic and reaps every broker the file starts. node --test runs each file in
++// its own process; nothing leaks across files.
++pinHermeticStateRoot("runtime");
+@@ -30,0 +38,20 @@ async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
 +function runChild(command, args, options = {}) {
 +  return new Promise((resolve, reject) => {
 +    const child = spawn(command, args, {
@@ -2351,46 +4021,46 @@ index 8f27683..144f108 100644
 +  });
 +}
 +
-@@ -32,0 +54 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
+@@ -32,0 +60 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 +  const workspace = makeTempDir();
-@@ -36 +58 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
+@@ -36 +64 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -44 +66 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
+@@ -44 +72 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 -  assert.equal(payload.sessionRuntime.mode, "direct");
 +  assert.equal(payload.sessionRuntime.mode, "shared");
-@@ -48,0 +71 @@ test("setup is ready without npm when Codex is already installed and authenticat
+@@ -48,0 +77 @@ test("setup is ready without npm when Codex is already installed and authenticat
 +  const workspace = makeTempDir();
-@@ -53 +76 @@ test("setup is ready without npm when Codex is already installed and authenticat
+@@ -53 +82 @@ test("setup is ready without npm when Codex is already installed and authenticat
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -69,0 +93 @@ test("setup trusts app-server API key auth even when login status alone would fa
+@@ -69,0 +99 @@ test("setup trusts app-server API key auth even when login status alone would fa
 +  const workspace = makeTempDir();
-@@ -73 +97 @@ test("setup trusts app-server API key auth even when login status alone would fa
+@@ -73 +103 @@ test("setup trusts app-server API key auth even when login status alone would fa
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -87,0 +112 @@ test("setup is ready when the active provider does not require OpenAI login", ()
+@@ -87,0 +118 @@ test("setup is ready when the active provider does not require OpenAI login", ()
 +  const workspace = makeTempDir();
-@@ -91 +116 @@ test("setup is ready when the active provider does not require OpenAI login", ()
+@@ -91 +122 @@ test("setup is ready when the active provider does not require OpenAI login", ()
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -105,0 +131 @@ test("setup treats custom providers with app-server-ready config as ready", () =
+@@ -105,0 +137 @@ test("setup treats custom providers with app-server-ready config as ready", () =
 +  const workspace = makeTempDir();
-@@ -109 +135 @@ test("setup treats custom providers with app-server-ready config as ready", () =
+@@ -109 +141 @@ test("setup treats custom providers with app-server-ready config as ready", () =
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -123,0 +150 @@ test("setup reports not ready when app-server config read fails", () => {
+@@ -123,0 +156 @@ test("setup reports not ready when app-server config read fails", () => {
 +  const workspace = makeTempDir();
-@@ -127 +154 @@ test("setup reports not ready when app-server config read fails", () => {
+@@ -127 +160 @@ test("setup reports not ready when app-server config read fails", () => {
 -    cwd: ROOT,
 +    cwd: workspace,
-@@ -473,3 +500,2 @@ test("review logs reasoning summaries and review output to the job log", () => {
+@@ -473,3 +506,2 @@ test("review logs reasoning summaries and review output to the job log", () => {
 -  const stateDir = resolveStateDir(repo);
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
-@@ -765,0 +792,74 @@ test("task --fresh is treated as routing control and does not leak into the prom
+@@ -765,0 +798,74 @@ test("task --fresh is treated as routing control and does not leak into the prom
 +test("reviewer tasks run foreground in a fresh read-only runtime and clean it up", () => {
 +  const repo = makeTempDir();
 +  const binDir = makeTempDir();
@@ -2465,46 +4135,46 @@ index 8f27683..144f108 100644
 +  assert.equal(loadBrokerSession(repo), null);
 +});
 +
-@@ -802,3 +902,2 @@ test("task logs reasoning summaries and assistant messages to the job log", () =
+@@ -802,3 +908,2 @@ test("task logs reasoning summaries and assistant messages to the job log", () =
 -  const stateDir = resolveStateDir(repo);
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
-@@ -826,3 +925,2 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
+@@ -826,3 +931,2 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
 -  const stateDir = resolveStateDir(repo);
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
-@@ -1627,2 +1725 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
+@@ -1627,2 +1731 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const cancelled = state.jobs.find((job) => job.id === "task-live");
 +  const cancelled = JSON.parse(fs.readFileSync(jobFile, "utf8"));
-@@ -1688,2 +1785,2 @@ test("cancel without a job id ignores active jobs from other Claude sessions", (
+@@ -1688,2 +1791,2 @@ test("cancel without a job id ignores active jobs from other Claude sessions", (
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  assert.equal(state.jobs[0].status, "running");
 +  const stored = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-other"), "utf8"));
 +  assert.equal(stored.status, "running");
-@@ -1736,2 +1833,2 @@ test("cancel with a job id can still target an active job from another Claude se
+@@ -1736,2 +1839,2 @@ test("cancel with a job id can still target an active job from another Claude se
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  assert.equal(state.jobs[0].status, "cancelled");
 +  const stored = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-other"), "utf8"));
 +  assert.equal(stored.status, "cancelled");
-@@ -1761 +1857,0 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+@@ -1761 +1863,0 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
 -  const stateDir = resolveStateDir(repo);
-@@ -1763,2 +1859 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+@@ -1763,2 +1865 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
 -    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -    const job = state.jobs.find((candidate) => candidate.id === jobId);
 +    const job = JSON.parse(fs.readFileSync(resolveJobFile(repo, jobId), "utf8"));
-@@ -1804 +1899 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+@@ -1804 +1905 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
 -test("session end fully cleans up jobs for the ending session", async (t) => {
 +test("session end terminates live workers and retains terminal records", async (t) => {
-@@ -1905,0 +2001,3 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1905,0 +2007,3 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 +  // SessionEnd deletes nothing now: every record of the ending session is left
 +  // terminal and retained, with its log, beside the other session's untouched
 +  // pair.
-@@ -1907,2 +2005,9 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1907,2 +2011,9 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 -    fs.readdirSync(path.dirname(otherJobFile)).sort(),
 -    [path.basename(otherJobFile), path.basename(otherSessionLog)].sort()
 +    fs.readdirSync(jobsDir).sort(),
@@ -2516,7 +4186,7 @@ index 8f27683..144f108 100644
 +      path.basename(otherSessionLog),
 +      path.basename(runningLog)
 +    ].sort()
-@@ -1920,4 +2025,14 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1920,4 +2031,14 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  assert.deepEqual(state.jobs.map((job) => job.id), ["review-other"]);
 -  const otherJob = state.jobs[0];
@@ -2535,10 +4205,10 @@ index 8f27683..144f108 100644
 +  // newest; the seeded pair keeps its 15:35 / 15:31 order behind it.
 +  assert.deepEqual(jobIds, ["review-running", "review-other", "review-completed"]);
 +  assert.equal(listJobs(repo).find((job) => job.id === "review-other").logFile, otherSessionLog);
-@@ -1926 +2041 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1926 +2047 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 -test("stop hook runs a stop-time review task and blocks on findings when the review gate is enabled", () => {
 +test.skip("upstream-only: stop hook blocks on findings when the review gate is enabled", () => {
-@@ -2039 +2154,11 @@ test("stop hook logs running tasks to stderr without blocking when the review ga
+@@ -2039 +2160,11 @@ test("stop hook logs running tasks to stderr without blocking when the review ga
 -test("stop hook allows the stop when the review gate is enabled and the stop-time review task is clean", () => {
 +test("setup refuses to enable the automatic Stop review gate", () => {
 +  const workspace = makeTempDir();
@@ -2551,36 +4221,44 @@ index 8f27683..144f108 100644
 +});
 +
 +test.skip("upstream-only: stop hook allows a clean result when the review gate is enabled", () => {
-@@ -2064 +2189 @@ test("stop hook allows the stop when the review gate is enabled and the stop-tim
+@@ -2064 +2195 @@ test("stop hook allows the stop when the review gate is enabled and the stop-tim
 -test("stop hook does not block when Codex is unavailable even if the review gate is enabled", () => {
 +test.skip("upstream-only: stop hook tolerates unavailable Codex when the review gate is enabled", () => {
-@@ -2091 +2216 @@ test("stop hook does not block when Codex is unavailable even if the review gate
+@@ -2091 +2222 @@ test("stop hook does not block when Codex is unavailable even if the review gate
 -test("stop hook runs the actual task when auth status looks stale", () => {
 +test.skip("upstream-only: stop hook refreshes stale authentication", () => {
-@@ -2258 +2383 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
+@@ -2258 +2389 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
 -  assert.equal(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
 +  assert.notEqual(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
 diff --git a/tests/state.test.mjs b/tests/state.test.mjs
-index 0f8f57c..f4c286c 100644
+index 0f8f57c..cafb91e 100644
 --- a/tests/state.test.mjs
 +++ b/tests/state.test.mjs
-@@ -8 +8 @@ import { makeTempDir } from "./helpers.mjs";
+@@ -7,2 +7,8 @@ import assert from "node:assert/strict";
+-import { makeTempDir } from "./helpers.mjs";
 -import { resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
++import { makeTempDir, pinHermeticStateRoot } from "./helpers.mjs";
 +import { listJobs, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
-@@ -94 +94,3 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
++
++// State resolvers read CLAUDE_PLUGIN_DATA at call time and spawned CLI children
++// inherit process.env (via buildEnv), so this pin keeps every test in this file
++// hermetic and reaps every broker the file starts. node --test runs each file in
++// its own process; nothing leaks across files.
++pinHermeticStateRoot("state");
+@@ -94 +100,3 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
 -  assert.equal(savedState.jobs.length, 50);
 +  assert.equal("jobs" in savedState, false);
 +  const savedJobs = listJobs(workspace);
 +  assert.equal(savedJobs.length, 50);
-@@ -96 +98 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
+@@ -96 +104 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
 -    savedState.jobs.map((job) => job.id),
 +    savedJobs.map((job) => job.id),
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
-index 0000000..ef2e1e1
+index 0000000..05c264b
 --- /dev/null
 +++ b/tests/worker-postmortem.test.mjs
-@@ -0,0 +1,858 @@
+@@ -0,0 +1,857 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -2589,17 +4267,16 @@ index 0000000..ef2e1e1
 +import { fileURLToPath } from "node:url";
 +
 +import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-+import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
++import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env (via buildEnv), so pinning them here keeps every test in
-+// this file hermetic even when the suite runs inside a live Claude Code session.
++// this file hermetic even when the suite runs inside a live Claude Code session,
++// and every broker recorded under that private root is reaped when the file ends.
 +// node --test runs each file in its own process; nothing leaks across files.
-+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-postmortem-data-");
-+delete process.env.CODEX_COMPANION_SESSION_ID;
-+delete process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
++pinHermeticStateRoot("postmortem");
 +
 +const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 +const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
