@@ -5,7 +5,7 @@
 
 **Goal:** Every `app-server-broker` process the codex-companion runtime spawns is reaped when its work is done — the suite reaps its own brokers immediately, a broker nobody wants exits on its own within a bounded interval, and every teardown that claims to clean up after a broker actually kills it.
 
-**Architecture:** Three mechanisms for three failure modes, exactly as `.claude/specs/2026-08-12-broker-reaping-design.md` settled. (1) *Deterministic suite reaping*: every test file that writes under the state root pins `CLAUDE_PLUGIN_DATA` to a private temp root at module scope and a file-scoped `after` hook group-kills every broker recorded under that root. (2) *Broker self-supervision*: a pure decision module (`lib/broker-supervisor.mjs`) plus an `unref`'d interval inside the broker's `main()` that exits when the workspace's broker record no longer names this broker, or when nothing has connected for a bounded idle interval. (3) *Honest teardown*: `teardownBrokerSession` defaults `killProcess` to `terminateProcessTree` and force-removes files, and `ensureBrokerSession` refuses to reuse a broker recorded by a different plugin build. The plugin's code is not in this repo: all edits happen in a scratch clone of `openai/codex-plugin-cc` at pinned rev `db52e28f4d9ded852ab3942cea316258ae4ef346` and land here only as a regenerated `patches/agent-plugins/codex-plugin-cc.patch` plus a `patchRevision` bump 5 → 6. **Design authority: the spec. This plan implements it; it does not redesign it.**
+**Architecture:** Three mechanisms for three failure modes, exactly as `.claude/specs/2026-08-12-broker-reaping-design.md` settled. (1) *Deterministic suite reaping*: every test file that writes under the state root pins `CLAUDE_PLUGIN_DATA` to a private temp root at module scope and a file-scoped `after` hook group-kills every broker recorded under that root. (2) *Broker self-supervision*: a pure decision module (`lib/broker-supervisor.mjs`) plus an `unref`'d interval inside the broker's `main()` that exits when the workspace's broker record no longer names this broker, or when nothing has connected for a bounded idle interval. (3) *Honest teardown*: `teardownBrokerSession` defaults `killProcess` to `terminateProcessTree` and force-removes files, and `ensureBrokerSession` refuses to reuse a broker recorded by a different plugin build. The plugin's code is not in this repo: all edits happen in a scratch clone of `openai/codex-plugin-cc` at pinned rev `db52e28f4d9ded852ab3942cea316258ae4ef346` and land here only as a regenerated `patches/agent-plugins/codex-plugin-cc.patch` plus a `patchRevision` bump that ships `7` (Task 2 set `6`; the integration merge renumbered it to `7` because `main` took `6` first). **Design authority: the spec. This plan implements it; it does not redesign it.**
 
 **Tech stack:** Node ESM (`.mjs`, node builtins only), `node --test` + `node:assert/strict`, nix-darwin / home-manager (`just build`), zero-context git patch (`git apply --unidiff-zero` / `git diff -U0`).
 
@@ -124,7 +124,7 @@ Because `count` is scoped, the gates below assert an **absolute `brokers=0 app-s
 | `tests/fake-codex-fixture.mjs` | Records the fake `codex app-server`'s own pid in its state file so tests can observe the broker's grandchild dying. |
 | `tests/broker-reaping.test.mjs` (new) | All nine of the spec's tests plus the recycled-pid positive control, one behaviour-named file. |
 | `patches/agent-plugins/codex-plugin-cc.patch` (worktree) | The only plugin-code artifact this repo carries. |
-| `lib/agent-plugins.nix` (worktree) | `patchRevision = 5` → `6`. |
+| `lib/agent-plugins.nix` (worktree) | `patchRevision = 5` → `7`. |
 | `CLAUDE.md` (worktree) | R8: the one sentence claiming every test run leaks `codex-plugin-test-*` state dirs into the live plugin data dir. |
 
 ## Test seams
@@ -2025,7 +2025,7 @@ The acceptance-criteria demo on the finished code, then — and only then — th
 - Read only: `$SCRATCH`, `lib/agent-plugins.nix`, `patches/agent-plugins/codex-plugin-cc.patch`
 
 **Interfaces:**
-- Consumes: Task 1's recorded `PROBE_STATE_DIRS_P5` and `LEAK_AFTER_REPRO`; the committed patch at `patchRevision = 6`.
+- Consumes: Task 1's recorded `PROBE_STATE_DIRS_P5` and `LEAK_AFTER_REPRO`; the committed patch at `patchRevision = 7`.
 - Produces: the corrected CLAUDE.md sentence, and the reported evidence.
 
 - [ ] **Step 1: Rebuild the scratch checkout from the committed patch**
@@ -2202,5 +2202,5 @@ EOF
 | R4 | `ensureBrokerSession`'s not-ready and stale-record paths terminate the child and its own child | 3 |
 | R5 | A broker recorded by a different plugin build is retired, not reused; pre-change records count as foreign | 4 |
 | R6 | The scrubbed suite passes, including new tests that fail at p5 for R3, R4, R5 | 3 (tests 5/6/7 fail at p5) · 4 (test 8 fails at p5) · 6 (tests 2/3/4 fail at p5) · 7 (final green) |
-| R7 | Patch regenerated, `patchRevision` 5 → 6, `just build` green | 2 (bump) · 3–6 (regeneration + build) · 7 (final verification) |
+| R7 | Patch regenerated, `patchRevision` 5 → 7, `just build` green | 2 (bump) · 3–6 (regeneration + build) · 7 (final verification) |
 | R8 | The CLAUDE.md leak sentence corrected once the suite is observed leaving the live plugin data dir clean | 7 (evidence in Step 4, edit in Step 5) |
