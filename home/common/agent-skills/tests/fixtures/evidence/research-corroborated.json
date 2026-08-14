@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "kind": "research-observations",
+  "evidence_id": "service-corroborated",
+  "captured_at": "2026-08-14T13:05:00Z",
+  "question": "Is the service presently available?",
+  "claim": {
+    "classification": "standing",
+    "conclusion": "Two independent observations found the service unavailable.",
+    "observation_ids": [
+      "obs-1",
+      "obs-2"
+    ]
+  },
+  "observations": [
+    {
+      "id": "obs-1",
+      "execution_id": "exec-1",
+      "observed_at": "2026-08-14T12:59:00Z",
+      "source": "first-party API",
+      "outcome": "failed"
+    },
+    {
+      "id": "obs-2",
+      "execution_id": "exec-2",
+      "observed_at": "2026-08-14T13:01:00Z",
+      "source": "first-party status API",
+      "outcome": "failed"
+    }
+  ]
+}

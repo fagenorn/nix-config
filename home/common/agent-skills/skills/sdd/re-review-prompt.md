@@ -7,11 +7,18 @@ new breakage. It is not a fresh review — the full review already happened.
 **Purpose:** Verify each finding from the previous review was addressed, and
 that the fix itself broke nothing.
 
+This role is legal only because the call supplies named prior findings and a
+`FIX_BASE_SHA..HEAD_SHA` diff package. It never performs a first pass or expands
+its scope to the whole branch.
+
+<!-- agent-dispatch: id=sdd-scoped-task-rereview role=reviewer-lite model=sonnet effort=medium -->
+Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies the named prior findings against the bounded fix diff.
+
 ```
-Subagent (reviewer):
+Subagent (reviewer-lite, Sonnet/medium as selected above):
   description: "Re-review Task N fix round R"
-  model: [MODEL — REQUIRED: choose per SKILL.md Model Selection; an omitted
-         model silently inherits the session's most expensive one]
+  model: sonnet
+  effort: medium
   prompt: |
     You are re-reviewing one task's fix round. A previous review produced
     findings; an implementer has attempted to fix them. Your job is to
@@ -84,6 +91,9 @@ Subagent (reviewer):
 
     Issues you noticed entirely outside the fix diff. Non-blocking; the
     controller ledgers these for the final review. "None" if none.
+    If a finding needs ambiguous adjudication or branch-wide review, do not
+    decide it: report it here so the controller can escalate explicitly to a
+    full `reviewer` on Opus/high and record the escalation in the SDD ledger.
 
     ### Verdict
 
@@ -92,8 +102,6 @@ Subagent (reviewer):
 ```
 
 **Placeholders:**
-- `[MODEL]` — REQUIRED: reviewer model per SKILL.md Model Selection; scoped
-  re-reviews of small fix diffs take a cheap-to-mid tier
 - `[BRIEF_FILE]` — the task brief file (same file the implementer worked from)
 - `[FINDINGS]` — the Critical/Important findings and spec gaps from the
   previous review, copied verbatim, one per bullet

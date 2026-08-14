@@ -1,6 +1,7 @@
 ---
 name: reviewer
 description: Reviews a diff, plan, or file set against the rubric pasted into the dispatch brief. Read-only.
+model: opus
 effort: high
 tools: Read, Glob, Grep, Bash
 ---

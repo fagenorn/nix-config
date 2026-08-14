@@ -5,8 +5,14 @@ The native form of the correctness axis — dispatched directly when
 operation carries this file by absolute path as the Codex reviewer's rubric, so keep
 the body reviewer-agnostic: nothing in it may assume which model is reading it.
 
+When the native fallback owns this first-pass whole-branch axis, it uses the
+explicit full reviewer tier:
+
+<!-- agent-dispatch: id=sdd-final-correctness-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") performs the native first-pass whole-branch correctness review.
+
 ```
-Subagent (reviewer):
+Subagent (reviewer, Opus/high for the native path selected above):
   description: "Final review — correctness axis"
   prompt: |
     You are reviewing a completed feature branch for CORRECTNESS: is it built

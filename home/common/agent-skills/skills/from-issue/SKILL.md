@@ -26,6 +26,20 @@ Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unse
 
 **tracker-cli hygiene.** When `unsetGithubToken` is true, prefix *every* `<tracker-cli>` call — including ones you add ad-hoc — with `unset GITHUB_TOKEN &&`; some harnesses export a token without the target org's access. When false (default), use the ambient credential.
 
+## Lifecycle identity
+
+Resolve the optional lifecycle envelope supplied by a dispatcher:
+`ledger_repo_root`, `run_id`, `attempt`, `owner`, and normalized `worktree`.
+Treat all five as one identity; never guess a missing field. Preserve the
+immutable ledger_repo_root exactly as supplied, and keep it distinct from the
+separate owner worktree recorded on the attempt. Every `workflow-state` command in
+this owner or its delegated remainder uses `--repo-root <ledger_repo_root>`;
+never substitute the current checkout or owner worktree. A direct standalone invocation remains compatible
+and does not require a ledger. An interactive standalone run may initialize its
+own run with `workflow-state init-run` only when the user explicitly requests
+durable orchestration; in that case resolve its ledger root once and carry it as
+`ledger_repo_root`. Otherwise follow the canonical flow unchanged.
+
 ## The flow
 
 ```
@@ -75,15 +89,49 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 **Structured report-backs.** A subagent's final message is re-read by its caller on every later turn (~87 re-reads per report, measured). Every `Agent` dispatch here states a fixed return schema in its prompt: artifact paths, a one-word verdict/state, ≤500 characters of notes. Details go in worktree files, never in the report. Use the tiered agent types where the task fits — `implementer`, `reviewer`, `mechanic` — over `general-purpose`.
 
-**Turn/context budget.** Cost is quadratic: every turn re-reads the whole prefix. At each phase boundary, measure against ~100–120 assistant turns / ~150k context and take the first branch that applies:
+**Executable phase gate.** At every phase boundary, including Phase 0 through
+Phase 7, call `workflow-state progress` when lifecycle identity exists. Pass the
+observed turn count and context tokens when available, the completed phase, and
+truthful booleans for whether the next phase needs this context, committed
+artifacts fully reconstruct it, and the remainder is self-contained. Do not fabricate usage:
+omit unavailable `--turn-count` or `--context-tokens`. Use the
+defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
+--context-headroom 10000`. Obey the returned action exactly; the closed set is
+`continue | fresh_start | handoff | delegate`:
 
-1. **Continue** — the next phase needs this conversation and budget remains.
-2. **Fresh start** (`/clear`) — everything above is disposable; the artifacts are on disk.
-3. **Handoff** — something must travel that isn't in an artifact: invoke `handoff`. Interactive: give the user the path. `--auto`: finish the phase, write the handoff, stop, report the path as `blocked_reason`.
-4. **Subagent** — the rest is self-contained enough to dispatch out entirely.
-5. **Compact** (`/compact`) — last resort, never the first reach.
+1. **`continue`** — proceed in this conversation.
+2. **`fresh_start`** — start a fresh conversation from committed artifacts; do
+   not carry conversational state.
+3. **`handoff`** — beneath `ledger_repo_root`, validate the established run
+   directory and create only its non-symlink `handoffs/` directory if missing.
+   Never pre-create or touch the destination leaf; the `handoff` skill owns safe
+   first-file creation. Invoke `handoff` with a destination beneath
+   `.superpowers/workflows/<run-id>/handoffs/`, then repeat `workflow-state
+   progress` with `--handoff-path <exact-path>` to finalize `handed_off` on the
+   same attempt, and stop. Resume later with `workflow-state launch
+   --resume-handoff <exact-path>` and the same identity.
+4. **`delegate`** —
+<!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
+Agent(subagent_type="general-purpose", model="opus", effort="high") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
+   This is a fresh agent; it reconstructs context from those artifacts rather than inheriting conversation history.
 
-Never cross ~150 turns.
+Without lifecycle identity, retain direct standalone compatibility: apply the
+same action order locally, using the 120-turn/150000-token ceilings, and use the
+default interactive handoff behavior.
+
+## Terminal return procedure
+
+Use this one procedure for Phase-0 content stops, budget stops, execution failure,
+and Phase-7 success whenever lifecycle identity exists. Assemble a temporary JSON
+file with exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`,
+`discussion_items`, and `notes` (`notes` is at most 500 characters). Pass it with
+`--result-file <path>` to `workflow-state finish` using the exact run, issue,
+attempt, and current time. Capture stdout; only after that durable write succeeds,
+send the exact JSON from stdout unchanged to the caller.
+
+The rule is: failure to persist is a failure to finish. Surface it and never report the issue as merged or completed.
+Without lifecycle identity, send the same compact schema
+directly so existing standalone callers remain compatible.
 
 ## Phase 0 — Investigate
 
@@ -113,6 +161,10 @@ Confirm nothing is already shipping this issue — two sessions racing on one is
 
 If the issue is several issues bundled, stop and suggest `to-issues`. If it's a question or duplicate, report that and stop.
 
+Every Phase-0 early stop above uses the terminal return procedure when lifecycle identity
+exists: write a `stopped` or `failed` result through `workflow-state finish`
+before notifying the caller.
+
 **Open questions is mandatory even in `--auto`** — self-answering happens in the spec's `## Auto-resolved decisions`, not by dropping the section, which is the audit point the resolutions hang off. With nothing open, write "None — Phase 2 will surface anything missed".
 
 ### Mechanical-only shortcut
@@ -125,8 +177,17 @@ Declare `mechanical-only` only when the entire change is deletion or renaming wi
 
 Create the workspace before any spec/plan/grill commit lands; those commits go *in the worktree*, never on the integration branch.
 
+When a lifecycle envelope exists, use its exact absolute `worktree` as the
+attempt workspace. Re-check that it is absent from the filesystem and from
+`git worktree list`, then create the worktree at that exact path from
+`origin/<integration-branch>`. If the path is occupied or mismatched, fail the attempt
+through the terminal return procedure; never remove unknown contents and never choose another path.
+The envelope identity remains bound to this path through shipping and cleanup.
+Direct standalone invocation keeps the standard `worktrees` flow below, including
+its configured naming and worktree-root behavior.
+
 1. `git fetch origin`.
-2. Invoke `worktrees` (it encodes the destructive-ops carve-out and the prefix contract). Branch follows `branchNaming.pattern` (default `issue-<num>-<slug>`); `EnterWorktree` prepends `branchNaming.worktreePrefix` (default `worktree-`), so the on-disk branch is `<worktreePrefix>issue-<num>-<short-slug>`. Both forms are accepted downstream — don't strip the prefix. Skill absent → `git worktree add -b <branch> <path> origin/<integration-branch>`.
+2. For direct standalone use, invoke `worktrees` (it encodes the destructive-ops carve-out and the prefix contract). For lifecycle use, invoke it only if it accepts the envelope's exact path without renaming; otherwise use its documented fallback `git worktree add -b <branch> <exact-envelope-path> origin/<integration-branch>`. Branch follows `branchNaming.pattern` (default `issue-<num>-<slug>`); `EnterWorktree` prepends `branchNaming.worktreePrefix` (default `worktree-`), so the standalone on-disk branch is `<worktreePrefix>issue-<num>-<short-slug>`. Both branch forms are accepted downstream — don't strip the prefix.
 
    **Check position before calling the worktree tools.** ~43% of `EnterWorktree`/`ExitWorktree` failures are calls made while already positioned; the harness pins one worktree per session and refuses redundant or cross-pinned entries. Before `EnterWorktree`, compare `pwd` with the intended path: already there → skip the call; pinned elsewhere → `ExitWorktree` with `action: "keep"` first. Don't discover the pin state by letting the call fail.
 3. **Base on `origin/<integration-branch>`**, never the local branch, which may carry other agents' in-flight commits; branching off the remote ref before any commit lands is what stops parallel runs cross-contaminating each other. The merge with the integration branch happens later, in `ship-issue`.
@@ -162,7 +223,9 @@ A plan reviewed only by its author risks blind spots, and you are the author. Un
 
 1. Resolve `codex.planReview.enabled` (default `true`) and `.focus` (default `null`; when set, pass its emphasis alongside `projectHints`).
 2. **Enabled and `codex-collaboration` available** → invoke its `plan-review` operation. It assembles the packet itself (its SKILL.md enumerates the contents) and owns foreground execution, isolation, read-only enforcement, validation, and a one-time native fallback on a real Codex failure — a busy or concurrent reviewer is never a fallback condition. Supply the issue and acceptance criteria, the Phase-0 investigation and open questions, the worktree base SHA, the spec and plan paths, the optional focus, and — as the review contract — **the absolute path to `REVIEW-CONTRACT.md` beside this file**, which it reads into the packet.
-3. **Disabled or unavailable** (including when this skill runs natively in Codex) → dispatch one fresh `reviewer` agent, no inherited context, same inputs, same `REVIEW-CONTRACT.md` path, told to read that file first.
+3. **Disabled or unavailable** (including when this skill runs natively in Codex) →
+<!-- agent-dispatch: id=from-issue-plan-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") launches one fresh plan reviewer with no inherited context, the same inputs, and the same `REVIEW-CONTRACT.md` path, told to read that file first.
 
 **The contract travels by path, never inlined** — pasting reviewer text here costs the orchestrator its full length for the rest of the session.
 
@@ -178,7 +241,12 @@ Apply blocking fixes inline to the plan (standing local-commit authorization). B
 
 Invoke `sdd`: it reads the plan, dispatches an implementer per task, and reviews each output.
 
-If the plan is `mechanical-only`, dispatch a single implementer+reviewer pair for the whole change; per-task ceremony adds no signal for one mechanical task.
+If the plan is `mechanical-only`, use one mechanic plus one first-pass reviewer for the whole change; per-task ceremony adds no signal for one mechanical task.
+
+<!-- agent-dispatch: id=from-issue-mechanical-implementation role=mechanic model=sonnet effort=medium -->
+Agent(subagent_type="mechanic", model="sonnet", effort="medium") executes the fully specified mechanical change.
+<!-- agent-dispatch: id=from-issue-mechanical-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") performs its first-pass review.
 
 **CHECKPOINT** — Confirm the implementation is committed on the feature branch.
 
@@ -188,9 +256,15 @@ degradation decision reads it.
 
 ## Phase 7 — Ship
 
-Dispatch `ship-issue` as a fresh subagent via the `Agent` tool (`general-purpose`) — not inline via `Skill`. By now this conversation carries every artifact of the flow, and ship-issue's ~100 turns over that 200–300k prefix costs ~1–3M weighted tokens versus a fresh ~10k subagent that returns one summary.
+<!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
+Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow, and ship-issue's ~100 turns over that 200–300k prefix costs ~1–3M weighted tokens versus a fresh ~10k subagent that returns one summary.
 
-Absent → deliver inline: push the branch, open a PR against `<integration-branch>`, dispatch a fresh reviewer subagent over the diff, wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, close the issue, clean up worktree + branch. With `issueTracker.kind=none`, merge locally and clean up.
+Absent → deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff:
+
+<!-- agent-dispatch: id=from-issue-inline-ship-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh first-pass reviewer over the shipping diff.
+
+Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, close the issue, and clean up the worktree + branch. With `issueTracker.kind=none`, merge locally and clean up.
 
 Subagent prompt (the handoff goes in the prompt, not a file — the subagent's starting context *is* the prompt):
 
@@ -200,6 +274,11 @@ You are running ship-issue for issue #<num> in <autonomous|interactive> mode. Us
 "interactive".
 
 Handoff from from-issue:
+  ledger_repo_root: <immutable ledger root from the lifecycle envelope>
+  run_id:            <run id from the lifecycle envelope>
+  attempt:           <attempt from the lifecycle envelope>
+  owner:             <owner from the lifecycle envelope>
+  owner_worktree:    <separate owner worktree from the lifecycle envelope>
   issue_number:   <num>
   branch:         <branch-name>
   worktree_path:  <absolute-worktree-path>
@@ -239,6 +318,12 @@ PR and the worktree, not the report:
 ```
 
 **Phase-number namespace.** `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating or reporting so the two sequences stay distinguishable.
+
+After receiving the ship report, from-issue owns the terminal durable write:
+assemble its compact result, call `workflow-state finish`, then send the exact JSON
+printed on stdout unchanged. A fresh ship agent never writes the owner's final
+ledger result. Apply the same terminal return procedure to any Phase-6 execution
+failure or Phase-7 stopped/failed report.
 
 ## Notes
 
