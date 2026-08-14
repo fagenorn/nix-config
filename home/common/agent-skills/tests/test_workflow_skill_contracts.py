@@ -209,6 +209,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("Do not duplicate lifecycle JSON", self.handoff)
 
     def test_collaboration_requires_fresh_validated_bridge_evidence(self):
+        evidence = " ".join(
+            self.section(
+                self.collaboration,
+                "## Live bridge certification evidence",
+                "## Validate and fall back",
+            ).split()
+        )
         for fragment in (
             "`schema_version`",
             "`bridge-smoke`",
@@ -223,11 +230,36 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "agent-evidence bridge",
             "Reject stale",
             "direct-only evidence cannot certify",
+            "immutable deployment/launch receipt",
+            "authoritative deployed paths",
+            "assigned session ID and start timestamp",
+            "absent or mismatched receipt rejects certification",
         ):
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, self.collaboration)
+                self.assertIn(fragment, evidence)
+        self.assert_ordered(
+            evidence,
+            "Deploy the candidate",
+            "immutable deployment/launch receipt",
+            "externally started fresh Claude session",
+        )
+        self.assert_ordered(
+            evidence,
+            "exactly one `plan-review`",
+            "exactly one `diff-review`",
+        )
+        self.assertIn("Keep `agent_mediated` distinct from `direct`", evidence)
+        self.assert_ordered(evidence, "terminal failure", "native fallback")
+        self.assert_ordered(
+            evidence,
+            "agent-evidence bridge <artifact.json>",
+            "exits 0",
+            "call the bridge current",
+        )
 
     def test_research_requires_corroborated_validated_observations(self):
+        heading = "## Live availability and blocking evidence"
+        evidence = " ".join(self.research[self.research.index(heading) :].split())
         for fragment in (
             "`research-observations`",
             "observation ID",
@@ -240,9 +272,25 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "two independent timepoints",
             "follow-up",
             "agent-evidence research",
+            "same Markdown findings file",
+            "exact `{file_path, key_facts[]}` return shape",
         ):
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, self.research)
+                self.assertIn(fragment, evidence)
+        self.assert_ordered(
+            evidence,
+            "`transient`",
+            "reference exactly one observation ID",
+            "`follow_up`",
+        )
+        self.assertIn("distinct `execution_id` values", evidence)
+        self.assertIn("distinct normalized `observed_at` timestamps", evidence)
+        self.assert_ordered(
+            evidence,
+            "agent-evidence research <artifact.json>",
+            "exits 0",
+            "return a standing conclusion",
+        )
 
 
 if __name__ == "__main__":

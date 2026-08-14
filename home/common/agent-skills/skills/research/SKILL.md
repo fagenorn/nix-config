@@ -29,15 +29,14 @@ Represent the live evidence as schema version 1 with `kind` set to
 with an explicit UTC offset, a non-empty source identity in `source`, and a
 non-empty `outcome`.
 
-A conclusion based on one observation must be `transient`, reference exactly
-that observation ID, stay scoped to that observation, and include a non-empty
-independent follow-up in `follow_up`. A `standing` conclusion requires at least two
-observations from distinct executions and two independent timepoints after
-normalizing their explicit-offset timestamps.
+A `transient` conclusion based on one observation must reference exactly one
+observation ID in `observation_ids`, stay scoped to that observation, and include
+a non-empty independent follow-up in `follow_up`. A `standing` conclusion
+requires at least two observations with distinct `execution_id` values and
+distinct normalized `observed_at` timestamps — two independent timepoints.
 
-Before writing or returning any standing conclusion, materialize the embedded
-evidence object as a temporary validation input and run
-`agent-evidence research <artifact.json>`. The command must exit 0. On failure,
-preserve the observations and diagnostics in the sole Markdown findings file,
-return no standing conclusion, and retain no temporary input as a second
-artifact.
+Materialize the embedded evidence object as a temporary validation input and run
+`agent-evidence research <artifact.json>`. Only after the command exits 0 may the
+agent return a standing conclusion. On failure, preserve the observations and
+diagnostics in the sole Markdown findings file, return no standing conclusion,
+and retain no temporary input as a second artifact.
