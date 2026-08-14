@@ -14,6 +14,7 @@
 - Opus/high owns issue and ship ownership, design/planning judgment, non-mechanical implementation, and first-pass, plan, conformance, correctness, PR, and whole-branch reviews.
 - Sonnet/medium owns deterministic mechanic and transport work.
 - Haiku/medium owns sharply bounded read-only exploration.
+- Sonnet/medium researcher owns bounded primary-source synthesis and may write exactly one cited findings artifact.
 - Reviewer-lite is Sonnet/medium and is legal only with named prior findings plus a bounded fix diff; it never performs a first pass, ambiguous adjudication, or whole-branch review.
 - Every custom pipeline agent and every dispatch site in the closed manifest declares or selects both model and effort; unknown or omitted cases fail loudly.
 - Cheap-tier escalation to Opus is explicit in the workflow ledger or fixed-schema report.
@@ -61,7 +62,7 @@
 
 ### B1: Research dispatch coverage
 - **Question:** The reviewer found that the research skill's background-agent launch was absent from the dispatch inventory, leaving a pipeline fact-finding path able to inherit model and effort.
-- **Choice:** Add the research skill to Task 2 and map its bounded read-only launch to explorer Haiku/medium, with explicit Opus/high escalation when the question becomes ambiguous or judgment-bearing.
+- **Choice:** Add the research skill to Task 2 and map its bounded primary-source synthesis plus one cited artifact to researcher Sonnet/medium, with explicit Opus/high escalation when the question becomes ambiguous or judgment-bearing.
 - **Grounding:** The design and grill skills route primary-source fact lookup through research; issue 15 covers every pipeline dispatch that could otherwise inherit.
 - **Alternative considered:** Treat research as outside issue delivery. Rejected because from-issue design phases invoke it directly.
 
@@ -76,6 +77,12 @@
 - **Choice:** Give every manifest row a unique literal call anchor and require a one-to-one adjacency between each recognized call anchor and its exact marker; scan manifested files for recognized Agent/background/typed-dispatch call forms and reject any unpaired call.
 - **Grounding:** The universal bar requires fail-loud exhaustiveness at closed-set dispatch sites, and issue 15 explicitly requires a validation failure for implicit dispatch.
 - **Alternative considered:** Trust contributors to add manifest rows with new calls. Rejected because omission is the failure the validator must detect.
+
+### Phase 6 F1: Researcher role boundary
+- **Question:** Task 2 review found that research writes a Markdown artifact while B1 assigned the read-only explorer role; which plan text should govern?
+- **Choice:** Backtrack the spec and plan to add researcher Sonnet/medium for bounded primary-source synthesis with exactly one cited artifact; preserve explorer Haiku/medium as read-only and mechanic Sonnet/medium as judgment-free.
+- **Grounding:** The research skill's live contract requires synthesis and a file write; issue 15 permits bounded exploration on Sonnet or Haiku, and the spec's existing role boundaries make neither explorer nor mechanic truthful for both parts.
+- **Alternative considered:** Split reading and persistence between explorer and mechanic. Rejected because it invents a two-agent handoff, duplicates the source packet, and weakens the single-artifact contract without an issue requirement.
 
 ## Standards review
 
@@ -101,7 +108,7 @@
 
 **Interfaces:**
 - Consumes: Python 3 standard library and existing YAML-like agent frontmatter.
-- Produces: matrix roles `issue-owner`, `ship-owner`, `implementer`, `reviewer`, `reviewer-lite`, `mechanic`, `explorer`, and `codex-transport`; CLI functions `load_matrix(root)`, `validate(root) -> list[str]`, and `trace(root, scenario) -> list[dict[str, str]]`.
+- Produces: matrix roles `issue-owner`, `ship-owner`, `implementer`, `reviewer`, `reviewer-lite`, `mechanic`, `explorer`, `researcher`, and `codex-transport`; CLI functions `load_matrix(root)`, `validate(root) -> list[str]`, and `trace(root, scenario) -> list[dict[str, str]]`.
 
 - [ ] **Step 1: Write the failing contract tests**
 
@@ -150,7 +157,7 @@ git commit -m "feat(agents): declare explicit model roles (#15)" -m "Co-Authored
 
 - [ ] **Step 1: Extend tests with failing owner-site expectations**
 
-Add exact expected IDs and matrix selections for every dispatch in the listed owner/design/research skills. Assert from-issue owner/design/plan/ship use Opus/high, standards review uses reviewer Opus/high, and bounded fact lookup—including the research background agent—uses explorer Haiku/medium or mechanic Sonnet/medium according to whether it mutates state. Assert cheap-tier escalation prose names the selected Opus role and ledger/report destination. Add a temporary manifested-skill fixture with an unmarked `Agent` call and require a validation error.
+Add exact expected IDs and matrix selections for every dispatch in the listed owner/design/research skills. Assert from-issue owner/design/plan/ship use Opus/high, standards review uses reviewer Opus/high, bounded read-only fact lookup uses explorer Haiku/medium, bounded cited research uses researcher Sonnet/medium, and deterministic stateful inventory uses mechanic Sonnet/medium. Assert cheap-tier escalation prose names the selected Opus role and ledger/report destination. Add a temporary manifested-skill fixture with an unmarked `Agent` call and require a validation error.
 
 - [ ] **Step 2: Run and observe the missing-site failures**
 
@@ -160,7 +167,7 @@ Expected: FAIL listing owner/design dispatch IDs absent from the matrix and Mark
 
 - [ ] **Step 3: Add exact selections at every owner dispatch**
 
-Extend `dispatch_sites` with a unique literal call anchor per site, place one exact marker immediately before each call instruction, and rewrite ambient phrases such as “model inherited” or bare `general-purpose` to explicit Opus/high selections. The validator must pair every recognized call form in a manifested file to exactly one adjacent marker and reject unmarked or duplicate calls. Bounded read-only facts and the research agent select explorer Haiku/medium; any stateful inventory selects mechanic Sonnet/medium. Require the existing ledger/fixed report to record escalation to Opus.
+Extend `dispatch_sites` with a unique literal call anchor per site, place one exact marker immediately before each call instruction, and rewrite ambient phrases such as “model inherited” or bare `general-purpose` to explicit Opus/high selections. The validator must pair every recognized call form in a manifested file to exactly one adjacent marker and reject unmarked or duplicate calls. Bounded read-only facts select explorer Haiku/medium; bounded primary-source research with one cited artifact selects researcher Sonnet/medium; deterministic stateful inventory selects mechanic Sonnet/medium. Require the existing ledger/fixed report to record escalation to Opus.
 
 - [ ] **Step 4: Verify**
 

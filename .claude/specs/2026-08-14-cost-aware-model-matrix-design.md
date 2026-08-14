@@ -35,6 +35,7 @@ The initial matrix is:
 | reviewer-lite | Sonnet | medium | one scoped re-review with named findings and a bounded fix diff |
 | mechanic | Sonnet | medium | transcription, inventories, bulk edits, transport, bookkeeping |
 | explorer | Haiku | medium | bounded, read-only inventory or repository fact lookup |
+| researcher | Sonnet | medium | bounded primary-source synthesis producing exactly one cited findings artifact |
 
 The Codex bridge remains a Sonnet transport role even when the detached reviewer it
 starts is a stronger independent system. Any move from explorer or mechanic to Opus is
@@ -78,9 +79,11 @@ Any such need routes to the full reviewer.
 
 Mechanic selects Sonnet at medium effort for deterministic changes, inventory, and
 transport. Explorer selects Haiku at medium effort only for read-only, sharply bounded
-fact lookup. If either role encounters ambiguity, it stops or explicitly escalates to
-Opus; the controller records the escalation in its existing ledger/report rather than
-letting the runtime inherit a model.
+fact lookup. Researcher selects Sonnet at medium effort for a sharply bounded
+primary-source question and may write exactly one cited findings artifact under the
+configured spec directory. If any cheap role encounters ambiguity or a judgment beyond
+its bounded brief, it stops or explicitly escalates to Opus; the controller records the
+escalation in its existing ledger/report rather than letting the runtime inherit a model.
 
 ### Validation covers declared sites, not arbitrary prose
 
@@ -146,9 +149,15 @@ merge, lifecycle, and cleanup semantics delivered by prior issues.
 
 ### Inventory tier
 - **Question:** Should bounded inventory always use Haiku or retain Sonnet?
-- **Choice:** Use Haiku for read-only fact lookup and Sonnet mechanic for transformations, transport, or inventories whose output changes workflow state.
+- **Choice:** Use Haiku explorer for read-only fact lookup, Sonnet researcher for bounded primary-source synthesis with one cited artifact, and Sonnet mechanic for deterministic transformations, transport, or inventories whose output changes workflow state.
 - **Grounding:** The issue permits Sonnet or Haiku according to boundedness; existing mechanic policy covers inventories plus bookkeeping and already selects Sonnet.
 - **Alternative considered:** Move every inventory to Haiku. Rejected because stateful bookkeeping and transformation require the mechanic's stricter stop-on-judgment contract.
+
+### Phase 6 F1: Separate research from read-only exploration
+- **Question:** Task 2 review found that the research background agent writes a Markdown artifact while the explorer role prohibits writes; which contract should govern?
+- **Choice:** Keep explorer Haiku/medium read-only and introduce researcher Sonnet/medium for bounded primary-source synthesis that produces exactly one cited artifact.
+- **Grounding:** Issue 15 explicitly permits bounded exploration on Sonnet or Haiku according to boundedness; `research/SKILL.md` requires both source synthesis and one file write, while mechanic prohibits the judgment that synthesis requires.
+- **Alternative considered:** Let explorer write, use mechanic for research, or escalate all research to Opus. Rejected respectively because each erases a useful role boundary, assigns judgment to a mechanical role, or overprices a sharply bounded question.
 
 ### Escalation evidence
 - **Question:** Where should a cheap-tier escalation be recorded?
