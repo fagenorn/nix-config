@@ -786,7 +786,7 @@ index 72b30a7..24dbf8f 100644
 +          throw new Error("Failed to start the isolated Codex broker for this workspace.");
 +        }
 diff --git a/plugins/codex/scripts/lib/broker-lifecycle.mjs b/plugins/codex/scripts/lib/broker-lifecycle.mjs
-index ef76381..204371b 100644
+index ef76381..d26bc3f 100644
 --- a/plugins/codex/scripts/lib/broker-lifecycle.mjs
 +++ b/plugins/codex/scripts/lib/broker-lifecycle.mjs
 @@ -9 +9,3 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs
@@ -849,7 +849,40 @@ index ef76381..204371b 100644
 +    owners: [...new Set([...(session.owners ?? []), owner])]
 +  };
 +}
-@@ -61,6 +117,10 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
+@@ -43 +99,8 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
+-export async function sendBrokerShutdown(endpoint) {
++// Bounded like waitForBrokerEndpoint above, and for a sharper reason: the caller
++// awaits this immediately before teardownBrokerSession's kill fallback, so an
++// unbounded wait here is a way for a broker to become immortal. A broker that
++// accepts the connection and then never answers -- wedged inside its own startup,
++// event loop blocked -- emits neither "data" nor "close", and without this timer
++// SessionEnd would wait on it forever and never reach the kill. The timer is
++// deliberately not unref'd: settling is what lets teardown run.
++export async function sendBrokerShutdown(endpoint, timeoutMs = 2000) {
+@@ -45,0 +109,12 @@ export async function sendBrokerShutdown(endpoint) {
++    let settled = false;
++    let timer;
++    const settle = (closeSocket) => {
++      if (settled) {
++        return;
++      }
++      settled = true;
++      clearTimeout(timer);
++      closeSocket();
++      resolve();
++    };
++    timer = setTimeout(() => settle(() => socket.destroy()), timeoutMs);
+@@ -50,6 +125,3 @@ export async function sendBrokerShutdown(endpoint) {
+-    socket.on("data", () => {
+-      socket.end();
+-      resolve();
+-    });
+-    socket.on("error", resolve);
+-    socket.on("close", resolve);
++    socket.on("data", () => settle(() => socket.end()));
++    socket.on("error", () => settle(() => {}));
++    socket.on("close", () => settle(() => {}));
+@@ -61,6 +133,10 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
 -  const child = spawn(process.execPath, [scriptPath, "serve", "--endpoint", endpoint, "--cwd", cwd, "--pid-file", pidFile], {
 -    cwd,
 -    env,
@@ -866,24 +899,24 @@ index ef76381..204371b 100644
 +      stdio: ["ignore", logFd, logFd]
 +    }
 +  );
-@@ -72 +132 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
+@@ -72 +148 @@ export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile
 -function resolveBrokerStateFile(cwd) {
 +export function resolveBrokerStateFile(cwd) {
-@@ -76,2 +136 @@ function resolveBrokerStateFile(cwd) {
+@@ -76,2 +152 @@ function resolveBrokerStateFile(cwd) {
 -export function loadBrokerSession(cwd) {
 -  const stateFile = resolveBrokerStateFile(cwd);
 +function loadBrokerSessionFile(stateFile) {
-@@ -81 +139,0 @@ export function loadBrokerSession(cwd) {
+@@ -81 +155,0 @@ export function loadBrokerSession(cwd) {
 -
-@@ -88,0 +147,4 @@ export function loadBrokerSession(cwd) {
+@@ -88,0 +163,4 @@ export function loadBrokerSession(cwd) {
 +export function loadBrokerSession(cwd) {
 +  return loadBrokerSessionFile(resolveBrokerStateFile(cwd));
 +}
 +
-@@ -92 +154 @@ export function saveBrokerSession(cwd, session) {
+@@ -92 +170 @@ export function saveBrokerSession(cwd, session) {
 -  fs.writeFileSync(resolveBrokerStateFile(cwd), `${JSON.stringify(session, null, 2)}\n`, "utf8");
 +  atomicWriteJson(resolveBrokerStateFile(cwd), session);
-@@ -101,0 +164,21 @@ export function clearBrokerSession(cwd) {
+@@ -101,0 +180,21 @@ export function clearBrokerSession(cwd) {
 +// The broker's own exit path: drop the record only while it still names this
 +// broker, so a broker that has already been replaced never deletes the new
 +// broker's record. Throws on lock timeout -- the caller retries on its next
@@ -905,7 +938,7 @@ index ef76381..204371b 100644
 +  );
 +}
 +
-@@ -114,13 +197,47 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -114,13 +213,47 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const existing = loadBrokerSession(cwd);
 -  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
 -    return existing;
@@ -966,10 +999,10 @@ index ef76381..204371b 100644
 +      pidFile,
 +      logFile,
 +      env: runtime.env
-@@ -128,2 +244,0 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -128,2 +260,0 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -    clearBrokerSession(cwd);
 -  }
-@@ -131,17 +246,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -131,17 +262,15 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const sessionDir = createBrokerSessionDir();
 -  const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
 -  const endpoint = endpointFactory(sessionDir, options.platform);
@@ -1002,12 +1035,12 @@ index ef76381..204371b 100644
 +      });
 +      return null;
 +    }
-@@ -149,3 +262 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -149,3 +278 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
 -  if (!ready) {
 -    teardownBrokerSession({
 +    const session = addOwner({
-@@ -157 +268,41 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -157 +284,41 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -      killProcess: options.killProcess ?? null
 +      stateDir,
 +      workspaceRoot: cwd,
@@ -1050,7 +1083,7 @@ index ef76381..204371b 100644
 +        fs.unlinkSync(record.stateFile);
 +      }
 +      return { stop: true, session: current };
-@@ -159 +310,18 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -159 +326,18 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -    return null;
 +    if (!action) {
 +      continue;
@@ -1070,10 +1103,10 @@ index ef76381..204371b 100644
 +      });
 +    }
 +    released.push(action);
-@@ -160,0 +329,2 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -160,0 +345,2 @@ export async function ensureBrokerSession(cwd, options = {}) {
 +  return released;
 +}
-@@ -162,9 +332,60 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -162,9 +348,62 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -  const session = {
 -    endpoint,
 -    pidFile,
@@ -1094,7 +1127,9 @@ index ef76381..204371b 100644
 +// sessionDir is mkdtemp-unique per broker and only that broker writes its own pid
 +// file into it (unlinking it on shutdown), so a foreign pid at that path means an
 +// external writer.
-+function pidFileEvidence(pidFile, pid) {
++// Exported so the test-suite reaper can gate its SIGKILL escalation on the same
++// evidence teardownBrokerSession gates its SIGTERM on; there is no second copy.
++export function pidFileEvidence(pidFile, pid) {
 +  if (!pidFile) {
 +    return "unknown";
 +  }
@@ -1143,7 +1178,7 @@ index ef76381..204371b 100644
 +    return false;
 +  }
 +  return pidSource === "spawned";
-@@ -173,2 +394,19 @@ export async function ensureBrokerSession(cwd, options = {}) {
+@@ -173,2 +412,19 @@ export async function ensureBrokerSession(cwd, options = {}) {
 -export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = null }) {
 -  if (Number.isFinite(pid) && killProcess) {
 +// killProcess defaults to the production kill so that omitting it cannot mean
@@ -1165,7 +1200,7 @@ index ef76381..204371b 100644
 +  killProcess = terminateProcessTree
 +}) {
 +  if (Number.isFinite(pid) && killProcess && maySignalPid(pidFile, pid, pidSource)) {
-@@ -182,2 +420,5 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+@@ -182,2 +438,5 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
 -  if (pidFile && fs.existsSync(pidFile)) {
 -    fs.unlinkSync(pidFile);
 +  // Force removals, not existsSync-then-unlink: a SIGTERM'd broker runs its own
@@ -1173,12 +1208,12 @@ index ef76381..204371b 100644
 +  // window is real. The post-condition is "the file is absent".
 +  if (pidFile) {
 +    fs.rmSync(pidFile, { force: true });
-@@ -186,2 +427,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+@@ -186,2 +445,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
 -  if (logFile && fs.existsSync(logFile)) {
 -    fs.unlinkSync(logFile);
 +  if (logFile) {
 +    fs.rmSync(logFile, { force: true });
-@@ -193,2 +434,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
+@@ -193,2 +452,2 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
 -      if (target.kind === "unix" && fs.existsSync(target.path)) {
 -        fs.unlinkSync(target.path);
 +      if (target.kind === "unix") {
@@ -1458,10 +1493,19 @@ index ad152c1..af979e7 100644
 -  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
 +  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot));
 diff --git a/plugins/codex/scripts/lib/process.mjs b/plugins/codex/scripts/lib/process.mjs
-index dd8fc37..365f856 100644
+index dd8fc37..34ab7c0 100644
 --- a/plugins/codex/scripts/lib/process.mjs
 +++ b/plugins/codex/scripts/lib/process.mjs
-@@ -135,0 +136,12 @@ export function formatCommandFailure(result) {
+@@ -56,0 +57,5 @@ function looksLikeMissingProcessMessage(text) {
++// Only a positive pid is signallable. The group signal below negates pid, so a
++// non-positive one aims somewhere catastrophic rather than at a process: kill(-0)
++// is kill(0), the caller's *own* process group, and pid -1 negates to 1 whose
++// EPERM falls through to kill(-1) -- the broadcast to every process this user can
++// signal. Neither is a broker, so both are rejected before any signalling.
+@@ -58 +63 @@ export function terminateProcessTree(pid, options = {}) {
+-  if (!Number.isFinite(pid)) {
++  if (!Number.isFinite(pid) || pid <= 0) {
+@@ -135,0 +141,12 @@ export function formatCommandFailure(result) {
 +
 +export function isProcessAlive(pid) {
 +  // Only ESRCH proves absence. Success or EPERM (a live process we may not
@@ -3284,23 +3328,29 @@ index f83c96a..6920c62 100644
 +        state.lastThreadStart = message.params;
 +        saveState(state);
 diff --git a/tests/helpers.mjs b/tests/helpers.mjs
-index d698119..d256c64 100644
+index d698119..55f28fb 100644
 --- a/tests/helpers.mjs
 +++ b/tests/helpers.mjs
 @@ -5,0 +6,7 @@ import { spawnSync } from "node:child_process";
 +import { after } from "node:test";
 +
-+import { listBrokerSessions, teardownBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
++import { listBrokerSessions, pidFileEvidence, teardownBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 +import { isProcessAlive, terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
 +
 +const REAP_POLL_MS = 25;
 +const REAP_TIMEOUT_MS = 2000;
-@@ -32,0 +40,99 @@ export function initGitRepo(cwd) {
+@@ -32,0 +40,122 @@ export function initGitRepo(cwd) {
 +
 +// Signals the pid's whole process group, falling back to the pid alone when it
 +// leads no group. Exported because tests that spawn their own detached processes
 +// need exactly this teardown; there is no second copy of it.
 +export function killGroup(pid, signal) {
++  // Same rejection terminateProcessTree makes, and for the same reason: negating a
++  // non-positive pid aims at the caller's own process group (-0) or at the
++  // signal-everything broadcast (-1), never at a process worth killing.
++  if (!Number.isFinite(pid) || pid <= 0) {
++    return;
++  }
 +  try {
 +    process.kill(-pid, signal);
 +  } catch {
@@ -3349,6 +3399,15 @@ index d698119..d256c64 100644
 +      // outcomes.
 +      try {
 +        const pid = Number.isFinite(session.pid) ? session.pid : null;
++        // Read the evidence *before* teardownBrokerSession force-removes the pid
++        // file, because the escalation below needs it and would otherwise always
++        // see an absent file. Only a pid the file still names may be escalated:
++        // teardown declines to signal the rest precisely because a record-sourced
++        // pid whose file is gone belongs to a broker that already shut down
++        // cleanly, and may since have been recycled by an unrelated process.
++        // Escalating that pid would group-SIGKILL the recycled owner and undo the
++        // gate teardown just applied.
++        const ownershipConfirmed = pid !== null && pidFileEvidence(session.pidFile ?? null, pid) === "confirms";
 +        // killProcess is the production instrument, not a test double: the same
 +        // group SIGTERM session end uses. Each broker holds a codex app-server
 +        // child, so a pid-only signal would strand one app-server per broker.
@@ -3365,7 +3424,7 @@ index d698119..d256c64 100644
 +          pidSource: "record",
 +          killProcess: terminateProcessTree
 +        });
-+        if (pid !== null) {
++        if (ownershipConfirmed) {
 +          await waitUntilGone(pid);
 +          if (isProcessAlive(pid)) {
 +            killGroup(pid, "SIGKILL");
@@ -3378,7 +3437,15 @@ index d698119..d256c64 100644
 +      } catch (error) {
 +        failures.push(`${stateFile}: ${error instanceof Error ? error.message : String(error)}`);
 +      } finally {
-+        fs.rmSync(stateFile, { force: true });
++        // `force` swallows ENOENT but not EPERM/EACCES/EBUSY, and a throw from a
++        // `finally` propagates straight out of this loop -- abandoning every
++        // record after this one and skipping the aggregated failure below, which
++        // is the opposite of what that aggregation is for. Record it instead.
++        try {
++          fs.rmSync(stateFile, { force: true });
++        } catch (error) {
++          failures.push(`${stateFile}: ${error instanceof Error ? error.message : String(error)}`);
++        }
 +      }
 +    }
 +    // Thrown, only once every record has been attempted: a broker that outlived
