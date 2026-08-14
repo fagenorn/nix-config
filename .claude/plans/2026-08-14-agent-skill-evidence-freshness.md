@@ -415,13 +415,20 @@ committed fixtures. Expected observations:
 - [ ] **Step 4: Prepare the post-deployment live gate**
 
 In the execution report, record this exact non-synthetic gate for the shipping
-owner: after the candidate definitions are deployed, start a new Claude session;
-capture the definitions it loaded and their deployment times; run real
-plan-review and diff-review through the collaboration skill and bridge agent;
-preserve direct and mediated results in one bridge-smoke JSON document; run
-`agent-evidence bridge <artifact.json>`; do not report live certification unless
-it exits 0. If deployment/session authority is unavailable, report the live
-gate as unverified rather than substituting fixtures.
+owner: after the candidate definitions are deployed, the deployment owner seals
+an immutable receipt containing their authoritative paths, revisions,
+`deployed_at` timestamps, and an assigned session ID. As one launch action, the
+launcher creates an immutable envelope with that same ID and the actual
+`started_at` timestamp, then starts a new external Claude session. Give both
+objects to the session read-only; it must verify the IDs match, independently
+resolve the definitions it loaded, and match their paths and revisions to the
+receipt. The deploying session cannot certify itself, and receipt/envelope facts
+remain external provenance rather than evidence-schema fields. The fresh session
+then runs real plan-review and diff-review through the collaboration skill and
+bridge agent, preserves direct and mediated results in one bridge-smoke JSON
+document, and runs `agent-evidence bridge <artifact.json>`. Do not report live
+certification unless it exits 0. If deployment/session authority is unavailable,
+report the live gate as unverified rather than substituting fixtures.
 
 - [ ] **Step 5: Scope-check the branch**
 

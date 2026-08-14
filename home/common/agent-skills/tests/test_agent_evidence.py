@@ -52,7 +52,7 @@ class AgentEvidenceTest(unittest.TestCase):
         completed = run_validator("bridge", "bridge-fresh-end-to-end.json")
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(completed.stdout, "VALID bridge bridge-fresh-e2e\n")
+        self.assertEqual(completed.stdout, "VALID bridge-smoke bridge-fresh-e2e\n")
         self.assertEqual(completed.stderr, "")
 
     def test_stale_bridge_session_rejects(self):
@@ -225,7 +225,8 @@ class AgentEvidenceTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(
-            completed.stdout, "VALID research service-single-failure\n"
+            completed.stdout,
+            "VALID research-observations service-single-failure\n",
         )
         self.assertEqual(completed.stderr, "")
 
@@ -242,7 +243,10 @@ class AgentEvidenceTest(unittest.TestCase):
         completed = run_validator("research", "research-corroborated.json")
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(completed.stdout, "VALID research service-corroborated\n")
+        self.assertEqual(
+            completed.stdout,
+            "VALID research-observations service-corroborated\n",
+        )
         self.assertEqual(completed.stderr, "")
 
     def test_research_observation_identity_is_unique_across_all_observations(self):

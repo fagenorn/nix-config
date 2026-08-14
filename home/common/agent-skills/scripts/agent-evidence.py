@@ -664,7 +664,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     assert isinstance(document, dict)
-    print(f"VALID {arguments.kind} {document['evidence_id']}")
+    print(f"VALID {document['kind']} {document['evidence_id']}")
     return 0
 
 
