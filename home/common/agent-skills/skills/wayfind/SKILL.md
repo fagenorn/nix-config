@@ -5,7 +5,7 @@ description: Chart a big fuzzy effort as a map issue with decision tickets, then
 
 # Wayfind
 
-A loose idea too big for one session, wrapped in fog: the **destination** isn't visible yet. Wayfind charts the way as a **shared map** on the issue tracker and works its **decision tickets** — questions resolved by a decision, not slices of a build — one at a time until nothing is left to decide. Then the effort leaves this skill: specs go to `to-issues`, builds to `from-issue`; their slices cite **Decisions so far** in `## Decisions`, so implementing agents inherit the answers.
+A loose idea too big for one session, wrapped in fog: the **destination** isn't visible yet. Wayfind charts the way as a **shared map** on the tracker and works its **decision tickets** — questions resolved by decisions, not build slices — one at a time until nothing is left to decide. Then the effort leaves this skill: specs go to `to-issues`, builds to `from-issue`; their slices cite **Decisions so far** in `## Decisions`, so implementing agents inherit the answers.
 
 This is **planning, not doing** — the pull to just do the work usually signals the map is done. Sits between `prototype` and `to-issues`; replaces `prototype` when the open question isn't UI- or state-shaped.
 
@@ -69,7 +69,7 @@ Resolving a ticket clears fog: graduate the newly-phrasable into fresh tickets, 
 ## Chart the map (first invocation, from a loose idea)
 
 1. **Name the destination** — a `grill-with-docs` session pins it; destination fixes scope, so it's settled first.
-2. **Map the frontier** — grill again, breadth-first. **No fog surfaced?** The journey fits one session — no map; say so and route to `design`/`to-issues` instead.
+2. **Map the frontier** — grill again, breadth-first. **No fog surfaced?** The journey fits one session — no map; route to `design`/`to-issues` instead.
 3. **Create the map** (Destination + Notes filled, fog into Not yet specified).
 4. **Create the specifiable tickets** as children, then wire blocking edges in a second pass (issues need ids first).
 5. **Fire the research tickets** — one `research` agent per ticket, in parallel.
@@ -79,12 +79,12 @@ Resolving a ticket clears fog: graduate the newly-phrasable into fresh tickets, 
 
 **One sitting per ticket**; stopping mid-resolution parks state in the ticket first — settled, open, next action (why: DISCIPLINE.md).
 
-1. Load the map low-res. Under `kind: none`, that is the session's only read (compression's rewrite excepted): record into the loaded copy, anchored under its section heading so concurrent sessions' lines survive. On a shared tracker, re-read just before updating.
+1. Load the map low-res. Under `kind: none`, that is the session's only read (compression's rewrite excepted): record into the loaded copy, anchored under its section heading so concurrent lines survive; on a shared tracker, re-read just before updating.
 2. Choose: the user's named ticket, else the first frontier ticket. **Claim it.**
 3. Resolve it, zooming into related/closed tickets on demand; use the skills the ticket type and Notes name. Never resolve more than one per session (research dispatches excepted).
 4. Record: resolution comment, close the ticket, append its gist to Decisions so far — one line, ≤160 characters, links exempt. Over the ~6k budget → compress back under now, before finishing.
-5. Maintain — part of resolving, not optional cleanup: graduate the fog this answer made phrasable (create-then-wire, delete the entry), rule out-of-scope discoveries out, update or delete invalidated tickets. One-ticket-per-session bounds what you *resolve*, never this bookkeeping. Expect concurrent sessions.
-6. **Complete the map** when the decision frontier and **Not yet specified** are both empty. Anything still open gets an explicit re-disposition: resolved, out of scope, or a named **standing verification hook** with its reopen condition written down. Then close the map (`kind: none`: `state` → `complete`) with a closing note under **Destination**: what was reached, a link (the spec, or Decisions so far), and the next command — `/to-issues` (multi-slice spec) or `/from-issue` (single-session build). Announce it, run nothing: the spec and the handoff are the human's.
+5. Maintain — part of resolving, not optional cleanup: graduate newly-phrasable fog (create-then-wire, delete the entry), rule out-of-scope discoveries out, update or delete invalidated tickets. One-per-session bounds what you *resolve*, never this bookkeeping. Expect concurrent sessions.
+6. **Complete the map** when the decision frontier and **Not yet specified** are both empty. Anything still open gets an explicit re-disposition: resolved, out of scope, or a named **standing verification hook** with its reopen condition written down. Then close the map (`kind: none`: `state` → `complete`) with a closing note under **Destination**: what was reached, a link (the spec, or Decisions so far), and the next command — `/to-issues` (multi-slice spec) or `/from-issue` (single-session build). Announce it, run nothing: the handoff is the human's.
 
 ## Inflow from the fog gate
 
