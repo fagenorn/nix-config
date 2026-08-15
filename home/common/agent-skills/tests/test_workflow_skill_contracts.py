@@ -15,6 +15,13 @@ COLLABORATION = (
 RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
 WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
 SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
+FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
+
+
+def nested_workflow_documents():
+    for directory in (FROM_ISSUE_DIR, SDD_DIR):
+        for path in sorted(directory.glob("*.md")):
+            yield path, path.read_text(encoding="utf-8")
 
 
 class WorkflowSkillContractsTest(unittest.TestCase):
@@ -125,6 +132,30 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn("never a poll loop", self.orchestrate)
         self.assertIn("never repeated short sleeps", self.orchestrate)
+
+    def test_background_dispatch_flag_appears_only_in_orchestrate_issues(self):
+        self.assertIn("run_in_background=true", self.orchestrate)
+        for path, text in nested_workflow_documents():
+            with self.subTest(path=str(path)):
+                self.assertNotIn("run_in_background", text)
+
+    def test_nested_dispatches_stay_unnamed_and_foreground(self):
+        for path, text in nested_workflow_documents():
+            for line_number, line in enumerate(text.splitlines(), 1):
+                if "Agent(" not in line:
+                    continue
+                with self.subTest(path=f"{path}:{line_number}"):
+                    self.assertNotIn("name=", line)
+                    self.assertNotIn("run_in_background", line)
+
+    def test_sdd_resume_by_identity_instruction_exists(self):
+        sdd_root = (SDD_DIR / "SKILL.md").read_text(encoding="utf-8")
+        fix_loop = (SDD_DIR / "fix-loop.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "Record the implementer's agent identity — fix rounds 1–3 resume it",
+            sdd_root,
+        )
+        self.assertIn("resume the original implementer", fix_loop)
 
     def test_preflight_worktree_deletion_requires_proof_of_disposability(self):
         self.assertNotIn("one, clean → remove it", self.from_issue)
