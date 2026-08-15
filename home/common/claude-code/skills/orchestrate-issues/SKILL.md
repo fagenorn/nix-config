@@ -97,6 +97,16 @@ reconcile` persists a `stopped` outcome that retains the worktree. Surface it fo
 inspection. It is not automatically relaunched: first apply the failure policy,
 then let `workflow-state launch` enforce the fresh-attempt cap.
 
+**Deadline wake path.** Triggers are event-only, so without a wake path a
+silent agent's expired budget is discovered only when some unrelated
+notification lands. When a dispatch or resume arms a deadline, arm
+**exactly one** deadline observer for the wave: a single detached background command
+that sleeps until the earliest armed deadline plus a small grace and then
+exits, re-invoking you for one `workflow-state reconcile` pass. Re-arm one
+observer only when a new, later deadline is armed and none is pending. This
+is one scheduled re-check per armed deadline horizon — never a poll loop,
+never repeated short sleeps.
+
 ## 5. Failure policy
 
 - **Content-level stops are verdicts, not errors** — wrong issue type,
@@ -105,10 +115,21 @@ then let `workflow-state launch` enforce the fresh-attempt cap.
 - **`fogged` is a verdict too** — never retried in this run; it clears when
   the decision tickets blocking it close.
 - **Transient failures** (CI flake, network, harness death) → call
-  `workflow-state reconcile` first. If the durable outcome still permits a retry,
-  call `workflow-state launch` with a fresh owner/worktree and spawn only from its
-  accepted result. The helper allows attempts 1 and 2 only and refuses a third fresh attempt;
-  record its durable failed outcome instead of counting in prose.
+  `workflow-state reconcile` first, then **resume before fresh**:
+  1. Recorded attempt `handed_off` → relaunch the **same owner identity** with
+     `workflow-state launch --resume-handoff <stored exact handoff path>` —
+     same owner, same worktree — and re-spawn the owner with the same
+     lifecycle envelope plus the resume instruction.
+  2. Recorded attempt still `active` (the harness died without a terminal
+     write) → relaunch the same identity with `workflow-state launch` (it
+     records a resume event on the same attempt) and re-spawn with the same
+     envelope; committed artifacts and the worktree are the resumed owner's
+     memory.
+  3. Only when resume is impossible — the attempt is terminal and the durable
+     outcome still permits a retry — call `workflow-state launch` with a
+     fresh owner/worktree and spawn only from its accepted result. The helper allows
+     attempts 1 and 2 only and refuses a third fresh attempt; record its durable
+     failed outcome instead of counting in prose.
 - A failed issue never blocks unrelated issues.
 
 ## 6. Final report

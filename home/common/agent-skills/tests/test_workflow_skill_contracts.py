@@ -101,6 +101,31 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("retains the worktree", self.orchestrate)
         self.assertIn("not automatically relaunch", self.orchestrate)
 
+    def test_dispatcher_resumes_recorded_attempt_before_fresh_launch(self):
+        retry_section = self.section(
+            self.orchestrate, "## 5. Failure policy", "## 6. Final report"
+        )
+        self.assert_ordered(
+            retry_section,
+            "workflow-state reconcile",
+            "resume before fresh",
+            "--resume-handoff",
+            "same owner, same worktree",
+            "resume is impossible",
+            "fresh owner/worktree",
+        )
+
+    def test_dispatcher_deadline_has_one_bounded_wake_path(self):
+        self.assert_ordered(
+            self.orchestrate,
+            "Deadline wake path",
+            "exactly one",
+            "deadline observer",
+            "workflow-state reconcile",
+        )
+        self.assertIn("never a poll loop", self.orchestrate)
+        self.assertIn("never repeated short sleeps", self.orchestrate)
+
     def test_preflight_worktree_deletion_requires_proof_of_disposability(self):
         self.assertNotIn("one, clean → remove it", self.from_issue)
         phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
