@@ -42,7 +42,8 @@ about the work itself rather than user-approval gates:
 - **Phase 0 wrong-issue-type stop.** If the issue is several issues bundled, a duplicate, a pure
   question, or otherwise not implementable, surface that and stop. Auto-mode means "decide without
   asking", not "implement something incoherent". The same holds for the Phase-0 pre-flight stops
-  (open/merged PR, dirty or multiple matching worktrees).
+  (open/merged PR, dirty or multiple matching worktrees, and a matching worktree whose
+  disposability cannot be proven — prefer resuming it; never delete on ambiguity).
   When lifecycle identity exists, finalize this terminal result through the
   SKILL.md terminal return procedure before stopping.
 - **Phase 0 fog gate.** Before any worktree exists, test the grounded issue: can every open question

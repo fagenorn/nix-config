@@ -13,6 +13,8 @@ COLLABORATION = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md"
 )
 RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
+WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
+SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 
 
 class WorkflowSkillContractsTest(unittest.TestCase):
@@ -24,6 +26,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.handoff = HANDOFF.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
+        cls.worktrees = WORKTREES.read_text(encoding="utf-8")
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -97,6 +100,32 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("refuses a third fresh attempt", retry_section)
         self.assertIn("retains the worktree", self.orchestrate)
         self.assertIn("not automatically relaunch", self.orchestrate)
+
+    def test_preflight_worktree_deletion_requires_proof_of_disposability(self):
+        self.assertNotIn("one, clean → remove it", self.from_issue)
+        phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
+        self.assert_ordered(
+            phase_zero,
+            "inspect before touching",
+            "unpushed commits",
+            "workflow-state ledger",
+            "spec/plan artifacts",
+            "resume that worktree",
+            "provably disposable",
+        )
+        self.assertIn("prefer resume", phase_zero)
+        self.assertIn("stop as blocked", phase_zero)
+        self.assertIn("never delete on ambiguity", self.auto)
+
+    def test_worktrees_isolation_failure_reports_blocked_not_in_place(self):
+        self.assertNotIn("say so and work in place", self.worktrees)
+        self.assertIn("never silently work in place", self.worktrees)
+        self.assert_ordered(
+            self.worktrees,
+            "creation fails",
+            "Report blocked",
+            "ask for direction",
+        )
 
     def test_owner_persists_exact_terminal_result_before_return(self):
         owner_return_section = self.section(

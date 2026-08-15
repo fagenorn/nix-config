@@ -147,7 +147,13 @@ Confirm nothing is already shipping this issue — two sessions racing on one is
 4. **Closed unmerged**: check why (`<tracker-cli> pr view <pr>` for body + comments). Duplicate/superseded/replaced → surface and stop. Otherwise it was abandoned: continue, and Phase 1 makes a fresh branch. In `--auto`, log this as an Auto-resolved decision.
 5. `git worktree list | grep <worktreePrefix>issue-<num>-`:
    - none → continue;
-   - one, clean → remove it (`git worktree remove <path>` + `git branch -D <branch>`), an orphan from a run that exited mid-flow;
+   - one → **inspect before touching it**; a "clean" tree can still hold committed spec/plan/execution work that only ships at Phase 7. Check all four signals:
+     1. unpushed commits: `git log origin/<integration-branch>..<branch> --oneline` — any ahead count is prior work;
+     2. workflow-state ledger: any recorded attempt naming this worktree that is `active` or `handed_off`;
+     3. tracker/PR state referencing the branch (beyond the PR pre-flight above);
+     4. spec/plan artifacts under `specDir`/`planDir` inside the worktree.
+
+     If **any** signal exists → resume that worktree instead of recreating it (interactively, propose resume and wait; in `--auto`, prefer resume, and when the signals conflict or resume is ambiguous, stop as blocked through the terminal return procedure). Deletion (`git worktree remove <path>` + `git branch -D <branch>`) is allowed only when the worktree is **provably disposable**: zero commits ahead of `origin/<integration-branch>`, no active or handed-off ledger attempt, no spec/plan artifacts, and no uncommitted work;
    - one with uncommitted work → **stop and ask the user**; their in-progress state isn't yours to discard;
    - several → stop and ask which to resume or discard.
 
