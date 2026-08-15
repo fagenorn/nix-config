@@ -12,6 +12,9 @@ HANDOFF = REPO_ROOT / "home/common/agent-skills/skills/handoff/SKILL.md"
 COLLABORATION = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md"
 )
+CERTIFICATION = (
+    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/CERTIFICATION.md"
+)
 RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
 
 
@@ -23,6 +26,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.auto = AUTO.read_text(encoding="utf-8")
         cls.handoff = HANDOFF.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
+        cls.certification = CERTIFICATION.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
 
     def assert_ordered(self, text, *anchors):
@@ -209,13 +213,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("Do not duplicate lifecycle JSON", self.handoff)
 
     def test_collaboration_requires_fresh_validated_bridge_evidence(self):
-        evidence = " ".join(
-            self.section(
-                self.collaboration,
-                "## Live bridge certification evidence",
-                "## Validate and fall back",
-            ).split()
-        )
+        # The certification block lives in CERTIFICATION.md, referenced from
+        # SKILL.md's Launch section.
+        self.assertIn("CERTIFICATION.md", self.collaboration)
+        evidence = " ".join(self.certification.split())
         for fragment in (
             "`schema_version`",
             "`bridge-smoke`",
