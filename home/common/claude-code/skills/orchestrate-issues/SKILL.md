@@ -102,9 +102,12 @@ silent agent's expired budget is discovered only when some unrelated
 notification lands. When a dispatch or resume arms a deadline, arm
 **exactly one** deadline observer for the wave: a single detached background command
 that sleeps until the earliest armed deadline plus a small grace and then
-exits, re-invoking you for one `workflow-state reconcile` pass. Re-arm one
-observer only when a new, later deadline is armed and none is pending. This
-is one scheduled re-check per armed deadline horizon — never a poll loop,
+exits, re-invoking you for one `workflow-state reconcile` pass. While an
+observer is pending, never arm a second. Re-arm exactly one observer
+whenever there is none pending and an armed, unfired deadline remains —
+both when a new deadline is armed and after an observer fires and its
+reconcile pass leaves later deadlines still outstanding. This is one
+scheduled re-check per armed deadline horizon — never a poll loop,
 never repeated short sleeps.
 
 ## 5. Failure policy

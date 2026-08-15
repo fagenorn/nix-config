@@ -173,6 +173,10 @@ def scan_file(path):
                             if isinstance(block, dict) and block.get("type") == "tool_result":
                                 rid = block.get("tool_use_id")
                                 break
+                    if rid is None:
+                        # String-content replays carry no tool_result block;
+                        # fall back to record identity so they dedup too.
+                        rid = rec.get("uuid") or rec.get("requestId")
                     if rid:
                         if rid in seen_result_ids:
                             continue
@@ -183,13 +187,19 @@ def scan_file(path):
                         agent_result_bytes.append(
                             len(rcontent) if isinstance(rcontent, str) else len(str(rcontent))
                         )
-                elif (
-                    isinstance(content, str)
-                    and not rec.get("isSidechain")
-                    and not rec.get("isMeta")
-                ):
-                    text = content.strip().lower()
-                    if len(text) <= 48 and PROCEED_RE.match(text):
+                elif not rec.get("isSidechain") and not rec.get("isMeta"):
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        text = " ".join(
+                            block.get("text", "")
+                            for block in content
+                            if isinstance(block, dict) and block.get("type") == "text"
+                        )
+                    else:
+                        text = ""
+                    text = text.strip().lower()
+                    if text and len(text) <= 48 and PROCEED_RE.match(text):
                         interventions += 1
                 continue
 

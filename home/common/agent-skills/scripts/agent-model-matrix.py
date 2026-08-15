@@ -418,14 +418,32 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
                 and isinstance(event.get("requires"), list)
                 and "named-prior-findings" in event["requires"]
             ):
+                # An axis-named re-verdict (…-conformance-… / …-correctness-…)
+                # must trace to a first pass on the SAME axis, not be
+                # satisfied vacuously by an unrelated reviewer event; a
+                # re-review whose dispatch names no axis accepts any prior.
+                lite_dispatch = event.get("dispatch")
+                lite_axis = next(
+                    (
+                        axis
+                        for axis in ("conformance", "correctness")
+                        if isinstance(lite_dispatch, str)
+                        and axis in lite_dispatch
+                    ),
+                    None,
+                )
                 prior_full_review = any(
                     prior.get("workflow") == workflow
-                    and prior.get("role") == "reviewer"
+                    and prior.get("role")
+                    in ("reviewer", "conformance-reviewer")
                     and isinstance(prior.get("dispatch"), str)
                     and (
                         "first-pass" in prior["dispatch"]
                         or "full-" in prior["dispatch"]
+                        or "final-conformance" in prior["dispatch"]
+                        or "final-correctness" in prior["dispatch"]
                     )
+                    and (lite_axis is None or lite_axis in prior["dispatch"])
                     for prior in events[:index]
                     if isinstance(prior, dict)
                 )

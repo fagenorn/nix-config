@@ -83,7 +83,7 @@ Before forming any user-facing question, invoke `doc-grounded-questions` (if una
    This step is first because a merged-but-untagged release makes step 3 read "zero merges → nothing to release", silently losing the tag + Release. When neither resume path applies, record `headSha` in a fresh state file and continue.
 1. **Default checkout, not a worktree.** `git rev-parse --git-common-dir` should be `.git` (or end in `.git`); a path like `<repo>/.git/worktrees/<name>` means the user is in a feature worktree. A release is repo-wide — switch to the main checkout (`cd $(git -C "$(git rev-parse --git-common-dir)/.." rev-parse --show-toplevel)`) or surface.
 2. **Working tree clean.** `git status --porcelain` empty. Uncommitted changes are not part of the release — surface, don't auto-stash.
-3. **`<integration>` is ahead of `<default>`.** `git log origin/<default>..origin/<integration> --first-parent --merges --pretty=oneline | wc -l` non-zero. Zero → nothing to release; report and stop, don't open an empty PR. (Single-branch case: `PREV=$(git describe --tags --abbrev=0 origin/<default> 2>/dev/null)` — note the explicit ref; bare `git describe` reads whatever HEAD the user parked on — then check `git log ${PREV:+$PREV..}origin/<default> --oneline` is non-empty.)
+3. **`<integration>` is ahead of `<default>`.** `git log origin/<default>..origin/<integration> --first-parent --merges --pretty=oneline | wc -l` non-zero. Zero → nothing to release; report and stop, don't open an empty PR. (Single-branch case: `PREV=$(git describe --tags --abbrev=0 origin/<default> 2>/dev/null || true)` — the `|| true` keeps a no-tags repo (first release) alive under `set -e`, and the explicit ref matters because bare `git describe` reads whatever HEAD the user parked on — then check `git log ${PREV:+$PREV..}origin/<default> --oneline` is non-empty.)
 4. **No existing open release PR.** `${GH_PREFIX}gh pr list --base <default> --head <integration> --state open --json number,url,headRefOid`. If one exists and its `headRefOid` matches `origin/<integration>`, a prior session crashed mid-flow — skip Phases 1–2 and resume at Phase 3 or 4 depending on CI state. If its head is stale, surface; don't silently force-update a PR another session/operator opened.
 5. **CI on `origin/<integration>` is green.** `${GH_PREFIX}gh run list --branch <integration> --limit 5 --json conclusion,status,name,databaseId,headSha`; every run whose `headSha` equals `origin/<integration>` should be `conclusion: success`. Anything `cancelled`, `failure`, or still pending → surface. Common cause: a `ship-issue` merge whose post-merge CI hasn't settled or got cancelled. Either wait it out (`gh run rerun --failed`) or hold the release — don't cut from a tip whose own CI didn't pass.
 6. **Local `<integration>` in sync with origin.** Compare `git rev-parse <integration>` against `git rev-parse origin/<integration>`:
@@ -175,9 +175,17 @@ The bump is grounded in the categorisation `CHANGELOG.md` already produced — t
 
 ### 4.5a. Resolve the merge SHA
 
+Run exactly ONE of these — they are alternatives, not a sequence.
+
+PR path (a release PR was merged):
+
 ```bash
 MERGE_SHA=$(${GH_PREFIX}gh pr view <pr-num> --json mergeCommit -q .mergeCommit.oid)
-# no-PR paths (single-branch and/or kind == none), AFTER any local merge:
+```
+
+The no-PR paths (single-branch and/or kind == none) resolve it AFTER any local merge:
+
+```bash
 MERGE_SHA=$(git rev-parse <default>)
 ```
 
@@ -188,12 +196,14 @@ On the no-PR paths the target is the **local** `<default>` — `origin/<default>
 The only legitimate skip: this merge commit was already tagged + released (a prior crashed session, or a manual recovery). Check **before** 4.5e/4.5f so a re-entry can't double-tag:
 
 ```bash
-EXISTING=$(${GH_PREFIX}gh release list --limit 5 --json tagName,targetCommitish -q \
-  ".[] | select(.targetCommitish == \"$MERGE_SHA\") | .tagName")
-# kind == none (no forge): EXISTING=$(git tag --points-at "$MERGE_SHA" 'v[0-9]*')
+# with a remote, fetch tags first so a tag pushed by a crashed session is visible
+git remote get-url origin >/dev/null 2>&1 && git fetch --tags --quiet origin
+EXISTING=$(git tag --points-at "$MERGE_SHA" 'v[0-9]*')
 ```
 
-Non-empty → ask "Release `$EXISTING` already exists for merge $MERGE_SHA. Skip tag + create?" Default: skip — record `tag`/`releaseUrl` in the state file and go to Phase 5. Don't double-tag. A tag that exists without its Release → resume at 4.5f only.
+The check is tag-based on both paths: `gh release list`'s `targetCommitish` holds a **branch name**, not the merge SHA, for releases created against a pushed tag, so filtering it by `$MERGE_SHA` fails open and re-tags an already-released merge on re-entry.
+
+Non-empty → ask "Release `$EXISTING` already exists for merge $MERGE_SHA. Skip tag + create?" Default: skip — record `tag`/`releaseUrl` in the state file and go to Phase 5. Don't double-tag. A tag that exists but has no Release (forge case: `${GH_PREFIX}gh release view "$EXISTING"` fails) → resume at 4.5f only.
 
 ### 4.5c. Find the previous release tag
 
