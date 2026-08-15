@@ -30,7 +30,7 @@ Dispatch by agent type — the definitions carry the model and effort tier; neve
 - **`implementer`** — every other implementation task: prose-specified work, multi-file integration, anything needing judgment inside a fixed scope.
 - **`reviewer`** — first-pass task review and every first-pass whole-branch review.
 - **`reviewer-lite`** — only a scoped re-review supplied with named prior findings and a bounded fix diff. Ambiguous adjudication or branch-wide review escalates to `reviewer` on Opus/high and is recorded in the SDD ledger.
-- The **final review's two axes** dispatch per §Final review — the conformance axis as `reviewer` (it reviews the union of every task, so if any single task warranted your most capable model, this does too — override the model upward rather than down), the correctness axis via `codex-collaboration`'s `diff-review` when that skill is available, else as `reviewer`.
+- The **final review's two axes** dispatch per §Final review — the conformance axis as `reviewer` on Sonnet/high (delivered-vs-promised grading is checklist-shaped work against written promises; the top tier stays on correctness), the correctness axis via `codex-collaboration`'s `diff-review` when that skill is available, else as `reviewer` on Opus/high.
 - **Stuck tasks escalate across models, not just tiers** — see the fix loop's round 4.
 
 Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi-step work and costs more overall. When unsure between mechanic and implementer, pick implementer.
@@ -63,6 +63,11 @@ If the implementer asks questions — before or during — answer completely; do
 ### 3. Review the task
 
 Per-task reviews are task-scoped gates; never skip one, and never accept a report missing either verdict (spec compliance AND quality). Implementer self-review never substitutes.
+
+For a task the plan's task index routes to the **mechanical or low-risk lane**, the first-pass gate is a scoped lane verification instead of the full reviewer — the dispatch must name the declared lane and the bounded task diff:
+
+<!-- agent-dispatch: id=sdd-lane-task-verification role=reviewer-lite model=sonnet effort=medium -->
+Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies the bounded mechanical/low-risk lane task diff against its brief.
 
 - The reviewer gets three paths — brief, report, review package — plus the global constraints copied **verbatim** from the plan (exact values, formats, stated relationships). The template carries the process rules; the constraints block is what THIS project's spec demands.
 - Don't add open-ended directives ("check all uses") without a concrete task-specific reason; don't ask it to re-run tests the implementer already ran; and never pre-judge — if your prompt contains "do not flag" or "at most Minor", stop: adjudication happens in the loop, not the dispatch.

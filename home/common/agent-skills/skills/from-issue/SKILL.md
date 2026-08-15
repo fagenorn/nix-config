@@ -114,6 +114,10 @@ defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
 <!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
    This is a fresh agent; it reconstructs context from those artifacts rather than inheriting conversation history.
+   Exception — **ledger-only remainder**: when every content artifact is final and only `workflow-state` transitions plus verbatim result relay remain (no content judgment of any kind), delegate to the cheap bookkeeper instead of an issue owner:
+<!-- agent-dispatch: id=from-issue-ledger-remainder role=bookkeeper model=haiku effort=low -->
+Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.
+   Give it the exact commands, identities, and file paths inline; it decides nothing and edits nothing.
 
 Without lifecycle identity, retain direct standalone compatibility: apply the
 same action order locally, using the 120-turn/150000-token ceilings, and use the
@@ -249,8 +253,8 @@ Invoke `sdd`: it reads the plan, dispatches an implementer per task, and reviews
 
 If the plan is `mechanical-only`, use one mechanic plus one first-pass reviewer for the whole change; per-task ceremony adds no signal for one mechanical task.
 
-<!-- agent-dispatch: id=from-issue-mechanical-implementation role=mechanic model=sonnet effort=medium -->
-Agent(subagent_type="mechanic", model="sonnet", effort="medium") executes the fully specified mechanical change.
+<!-- agent-dispatch: id=from-issue-mechanical-implementation role=mechanic model=sonnet effort=high -->
+Agent(subagent_type="mechanic", model="sonnet", effort="high") executes the fully specified mechanical change.
 <!-- agent-dispatch: id=from-issue-mechanical-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs its first-pass review.
 

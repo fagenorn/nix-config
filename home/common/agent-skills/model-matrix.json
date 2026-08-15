@@ -47,28 +47,53 @@
         "mechanical transport"
       ]
     },
+    "conformance-reviewer": {
+      "model": "sonnet",
+      "effort": "high",
+      "eligible": [
+        "final conformance review (delivered vs promised)"
+      ],
+      "prohibited": [
+        "correctness review",
+        "mechanical transport"
+      ]
+    },
     "reviewer-lite": {
       "model": "sonnet",
       "effort": "medium",
       "eligible": [
         "named prior findings",
-        "bounded fix diff"
+        "bounded fix diff",
+        "mechanical/low-risk lane task verification"
       ],
       "prohibited": [
-        "first-pass review",
+        "full-lane first-pass review",
         "ambiguous adjudication",
         "whole-branch review"
       ]
     },
     "mechanic": {
       "model": "sonnet",
-      "effort": "medium",
+      "effort": "high",
       "eligible": [
         "deterministic mechanical work"
       ],
       "prohibited": [
         "design judgment",
         "ambiguous implementation"
+      ]
+    },
+    "bookkeeper": {
+      "model": "haiku",
+      "effort": "low",
+      "eligible": [
+        "ledger-only workflow-state transitions",
+        "verbatim result relay"
+      ],
+      "prohibited": [
+        "content judgment",
+        "implementation",
+        "review"
       ]
     },
     "explorer": {
@@ -163,11 +188,11 @@
     {
       "id": "from-issue-mechanical-implementation",
       "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
-      "marker": "<!-- agent-dispatch: id=from-issue-mechanical-implementation role=mechanic model=sonnet effort=medium -->",
-      "call": "Agent(subagent_type=\"mechanic\", model=\"sonnet\", effort=\"medium\") executes the fully specified mechanical change.",
+      "marker": "<!-- agent-dispatch: id=from-issue-mechanical-implementation role=mechanic model=sonnet effort=high -->",
+      "call": "Agent(subagent_type=\"mechanic\", model=\"sonnet\", effort=\"high\") executes the fully specified mechanical change.",
       "role": "mechanic",
       "model": "sonnet",
-      "effort": "medium",
+      "effort": "high",
       "requires": []
     },
     {
@@ -178,6 +203,16 @@
       "role": "reviewer",
       "model": "opus",
       "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "from-issue-ledger-remainder",
+      "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=from-issue-ledger-remainder role=bookkeeper model=haiku effort=low -->",
+      "call": "Agent(subagent_type=\"mechanic\", model=\"haiku\", effort=\"low\") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.",
+      "role": "bookkeeper",
+      "model": "haiku",
+      "effort": "low",
       "requires": []
     },
     {
@@ -253,11 +288,11 @@
     {
       "id": "sdd-mechanic-implementation",
       "path": "home/common/agent-skills/skills/sdd/implementer-prompt.md",
-      "marker": "<!-- agent-dispatch: id=sdd-mechanic-implementation role=mechanic model=sonnet effort=medium -->",
-      "call": "Agent(subagent_type=\"mechanic\", model=\"sonnet\", effort=\"medium\") executes the task from this prompt.",
+      "marker": "<!-- agent-dispatch: id=sdd-mechanic-implementation role=mechanic model=sonnet effort=high -->",
+      "call": "Agent(subagent_type=\"mechanic\", model=\"sonnet\", effort=\"high\") executes the task from this prompt.",
       "role": "mechanic",
       "model": "sonnet",
-      "effort": "medium",
+      "effort": "high",
       "requires": []
     },
     {
@@ -291,6 +326,19 @@
       "requires": [
         "named-prior-findings",
         "bounded-fix-diff"
+      ]
+    },
+    {
+      "id": "sdd-lane-task-verification",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-lane-task-verification role=reviewer-lite model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"reviewer-lite\", model=\"sonnet\", effort=\"medium\") verifies the bounded mechanical/low-risk lane task diff against its brief.",
+      "role": "reviewer-lite",
+      "model": "sonnet",
+      "effort": "medium",
+      "requires": [
+        "risk-lane-mechanical-or-low",
+        "bounded-task-diff"
       ]
     },
     {
@@ -346,10 +394,10 @@
     {
       "id": "sdd-final-conformance-review",
       "path": "home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md",
-      "marker": "<!-- agent-dispatch: id=sdd-final-conformance-review role=reviewer model=opus effort=high -->",
-      "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") performs the first-pass whole-branch conformance review.",
-      "role": "reviewer",
-      "model": "opus",
+      "marker": "<!-- agent-dispatch: id=sdd-final-conformance-review role=conformance-reviewer model=sonnet effort=high -->",
+      "call": "Agent(subagent_type=\"reviewer\", model=\"sonnet\", effort=\"high\") performs the first-pass whole-branch conformance review.",
+      "role": "conformance-reviewer",
+      "model": "sonnet",
       "effort": "high",
       "requires": []
     },
@@ -526,6 +574,14 @@
         "model": "opus",
         "effort": "high",
         "requires": []
+      },
+      {
+        "workflow": "from-issue",
+        "dispatch": "from-issue-ledger-remainder",
+        "role": "bookkeeper",
+        "model": "haiku",
+        "effort": "low",
+        "requires": []
       }
     ],
     "sdd": [
@@ -534,8 +590,19 @@
         "dispatch": "sdd-mechanic-implementation",
         "role": "mechanic",
         "model": "sonnet",
-        "effort": "medium",
+        "effort": "high",
         "requires": []
+      },
+      {
+        "workflow": "sdd",
+        "dispatch": "sdd-lane-task-verification",
+        "role": "reviewer-lite",
+        "model": "sonnet",
+        "effort": "medium",
+        "requires": [
+          "risk-lane-mechanical-or-low",
+          "bounded-task-diff"
+        ]
       },
       {
         "workflow": "sdd",
@@ -599,8 +666,8 @@
       {
         "workflow": "sdd",
         "dispatch": "sdd-final-conformance-review",
-        "role": "reviewer",
-        "model": "opus",
+        "role": "conformance-reviewer",
+        "model": "sonnet",
         "effort": "high",
         "requires": []
       },

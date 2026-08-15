@@ -1,7 +1,7 @@
 ---
 name: mechanic
 description: Mechanical, low-judgment work — inventories, bulk renames, format sweeps, extraction, bookkeeping. Cheap and fast.
-effort: medium
+effort: high
 model: sonnet
 ---
 

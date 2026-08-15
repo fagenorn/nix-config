@@ -77,7 +77,7 @@ committed artifact.
 
 Both dispatches select the `issue-owner` matrix role on Opus/high explicitly;
 design quality is worth paying for here. Purely mechanical dispatches elsewhere
-in the flow use `mechanic` on Sonnet/medium; reviewer-shaped first passes use
+in the flow use `mechanic` on Sonnet/high; reviewer-shaped first passes use
 `reviewer` on Opus/high.
 
 Both prompts must carry, inline (the subagent starts with no context and loads no skills of its own
