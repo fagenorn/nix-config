@@ -1,0 +1,53 @@
+{
+  "skill_name": "writing-plans",
+  "notes": "Eval 1 is a pipeline run against the shared tinytask fixture: the well-specified issue file stands in for a spec (the skill's own trigger is 'you have requirements for multi-step work'). Assertions grade behavioral outcomes and are written against the TARGET plan contract — a thin index plus per-task briefs, and a compact decision-ledger row shape `ID | choice | grounding | rejected alternative` — while still accepting today's single-file plan with `### <decision>` entries; asserts that depend on the unmerged contract carry a \"contract\" key so integration can re-verify them once the slimmed skill text lands. Eval 2 is plan-only and guards gate-scoping behavior.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "plan-from-well-specified-requirements",
+      "mode": "pipeline",
+      "prompt": "Use the `writing-plans` skill to turn `issues/001-well-specified.md` into an implementation plan.\n\nContext you need before you start:\n\n- This project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`. The file `issues/001-well-specified.md` **is** the requirements; its acceptance criteria are the spec.\n- Work on the current branch in this checkout. Do not create a worktree, do not branch.\n- Autonomous mode: nobody is present to answer questions. Self-answer every planning decision and log it in the plan's decision section.\n- Produce and commit the plan artifacts only. Do not implement anything: no edits under `tinytask/` or `tests/`.\n\nIn your final message report the plan path(s) and one line per planning decision you self-answered.",
+      "expected_output": "Plan artifacts under the configured planDir, committed on the current branch: either one plan file with Task N sections, or (target contract) a thin index plus per-task briefs. Every task carries at least one falsifiable verification line naming a command and the observation that would show the task incomplete. Planning decisions are logged in a decision section — target contract: compact ledger rows `ID | choice | grounding | rejected alternative`. No placeholders (TBD/TODO/'implement later'), and no source file touched.",
+      "asserts": [
+        {
+          "name": "a plan artifact exists under planDir",
+          "shell": "has_file \"$REPO/$PLAN_DIR\"/*.md"
+        },
+        {
+          "name": "every task section (inline or per-task brief) has a falsifiable verification line",
+          "contract": "accepts both today's single-file plan and the target thin-index + per-task-brief layout",
+          "shell": "files=$(grep -rlE '^##+[[:space:]]+[Tt]ask[[:space:]]+[0-9]' \"$REPO/$PLAN_DIR\" 2>/dev/null); [ -n \"$files\" ] || fail \"no task sections under $PLAN_DIR\"; for f in $files; do plan_tasks_verifiable \"$f\" || exit 1; done"
+        },
+        {
+          "name": "self-answered decisions are logged (### entries or compact ledger rows)",
+          "contract": "compact decision-ledger row `ID | choice | grounding | rejected alternative` counts as an entry, alongside today's `### <decision>` shape",
+          "shell": "f=$(grep -rliE '^#+ .*(decision|auto-resolved)' \"$REPO/$PLAN_DIR\" 2>/dev/null | head -1); [ -n \"$f\" ] || fail \"no decision section in any plan artifact under $PLAN_DIR\"; awk 'BEGIN{found=0;entries=0} tolower($0) ~ /^#+ .*(decision|auto-resolved)/ {inside=1;found=1;next} inside && /^#+ / {inside=0} inside && (/^### / || (split($0,t,\"|\")>=4 && $0 ~ /[A-Za-z]/ && $0 !~ /^[|: -]+$/)) {entries++} END{if(!found){print \"decision heading vanished\"; exit 1} if(entries<1){print \"decision section has no entries (### or ledger rows)\"; exit 1}}' \"$f\""
+        },
+        {
+          "name": "the plan artifacts are committed",
+          "shell": "[ -n \"$(git -C \"$REPO\" log --oneline origin/main..HEAD -- \"$PLAN_DIR\" 2>/dev/null)\" ] || fail \"no commit touching $PLAN_DIR on the current branch\""
+        },
+        {
+          "name": "no placeholder text in any plan artifact",
+          "shell": "bad=$(grep -rnE '\\bTBD\\b|\\bTODO\\b|implement later|fill in (the )?details' \"$REPO/$PLAN_DIR\" 2>/dev/null); [ -z \"$bad\" ] || fail \"placeholder text: $bad\""
+        },
+        {
+          "name": "the implementation was not started",
+          "shell": "path_unchanged_since \"$REPO\" origin/main tinytask tests"
+        },
+        {
+          "name": "no worktree was created",
+          "shell": "[ \"$WT_COUNT\" -eq 0 ] || fail \"created $WT_COUNT worktree(s) despite being told to stay on the current branch\""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "verification-gates-scoped-to-plan-owned-paths",
+      "mode": "plan-only",
+      "prompt": "You're writing the plan for a two-task feature in a repo where from-issue drives the flow: the plan and spec land as `docs(plans):`/`docs(specs):` commits on the same branch, and ship-time syncs merge the integration branch in. I want you to write the verification gate for the final task. Before you write it, explain what a BAD gate looks like here and why, then give me the exact gate you'd write instead. Plan-only — no files, just the reasoning and the gate text.",
+      "expected_output": "The answer must reject raw commit-range expectations — 'exactly N files changed between BASE..HEAD', 'every commit in the range is a feat:' — and explain the two concrete failure modes: the caller's spec/plan artifact commits land in the range, and a ship-time sync merge pulls in everything the integration branch advanced by, so an unscoped gate reads another issue's shipped work as scope creep. The good gate is scoped to the files the plan owns: a pathspec'd diff (`git diff --stat BASE..HEAD -- <paths from the plan's Files: blocks>`) or a direct file-content assertion; where commit shape genuinely is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`) and exempt the artifact and review-fixup subjects. The gate must also be falsifiable at the base commit — a criterion already true at BASE is how an implementer completes a no-op.",
+      "files": []
+    }
+  ]
+}
