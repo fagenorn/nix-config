@@ -16,6 +16,8 @@ git log origin/<default>..origin/<integration> --first-parent --merges \
 
 Field separator `%x1f` (US), record separator `%x1e` (RS) — neither collides with anything in commit messages. Parse into `{sha, subject, committed_at, body}`.
 
+Single-branch (`<integration> == <default>`): the range is `$PREV..origin/<default>` where `PREV=$(git describe --tags --abbrev=0 origin/<default> 2>/dev/null)` (whole history when no tag yet), and drop `--merges` — direct commits are the release units there.
+
 For each merge, resolve the PR (skip when `issueTracker.kind == "none"`):
 
 ```bash
@@ -128,7 +130,7 @@ Any "no" or "not sure" → iterate before opening. The body becomes the merge co
 
 ## Version bump signals
 
-Feeds [`SKILL.md` Phase 4.5b](./SKILL.md#45b-decide-major--minor--patch): the same buckets that produced the changelog drive the semver bump. Walk top-down, **stop at the first matching rule**.
+Feeds [`SKILL.md` Phase 4.5d](./SKILL.md#45d-decide-major--minor--patch): the same buckets that produced the changelog drive the semver bump. **This table is the only copy of the rubric** — SKILL.md points here. Walk top-down, **stop at the first matching rule**.
 
 | Bucket evidence | Bump |
 |---|---|
