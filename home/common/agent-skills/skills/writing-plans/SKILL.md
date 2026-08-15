@@ -5,9 +5,13 @@ description: Turn a spec into a task-by-task implementation plan before touching
 
 # Writing Plans
 
-Write the plan for an engineer who is skilled but has zero context for this codebase, this toolset, and this domain, and who will read exactly one task without the others. Every task names the files it touches, the code to write, how to test it, and how to verify it. DRY. YAGNI. Test-first. Frequent commits.
+Write the plan for an engineer who is skilled but has zero context for this codebase, this toolset, and this domain, and who will read exactly one task without the others. Every task names the files it touches, the exact interfaces and invariants it must satisfy, how to test it, and how to verify it. DRY. YAGNI. Test-first. Frequent commits.
 
-**Save to** `<planDir>/YYYY-MM-DD-<feature-name>.md` (`planDir` from `.claude/skills.config.json`, default `.claude/plans`), committed in the worktree you were called in.
+**Save to** `<planDir>/YYYY-MM-DD-<feature-name>.md` (`planDir` from `~/.agents/bin/resolve-bindings`; helper missing → `.claude/skills.config.json`, default `.claude/plans`), committed in the worktree you were called in.
+
+## Payload discipline
+
+This section is the pipeline's shared reference — sibling skills cite it instead of restating it, and plans embed it in tasks. Move information as cheaply as it arrives: targeted `rg`/grep over whole-file reads; bounded reads (offset/limit around the lines that matter) when a file must open; test and build output summarized to the failing lines, never pasted wholesale; long logs written to disk and passed as paths; artifacts (briefs, packages, reports) handed between agents as file paths, not inlined content. Verification steps name commands whose output is small by construction (quiet flags, filters, tails) so contexts stay flat.
 
 ## Scope check
 
@@ -61,25 +65,42 @@ verbatim from the spec. Every task's requirements implicitly include this sectio
 <The seams the spec agreed on, one line each. Implementers test at these and
 nowhere else; a task needing a new seam is a plan bug, not an implementer's call.>
 
-## Auto-resolved decisions
+## Task index
 
-<One entry per question you answered instead of the user — mandatory when the
-caller runs autonomously, expected otherwise, since task granularity, test
-framing, verification gates and commit boundaries are all your calls:
+<One line per task: ID, title, files touched, risk lane. Lanes:
+- `mechanical` — deletion/renaming with no behavioral, configuration, interface,
+  generated-output, or semantic-documentation effect.
+- `low-risk` — small semantic changes: bounded, locally-verifiable behavior
+  changes — excluding anything touching concurrency, lifecycle, destructive
+  operations, security, release, migration, or public contracts.
+- `full` — everything else.
 
-### <decision title>
-- **Question:** what would have been asked
-- **Choice:** what you picked
-- **Grounding:** the docs / code / spec references that justify it
-- **Alternative considered:** what you rejected and why
+Example: `Task 3 — Wire settings loader — src/config.py, tests/test_config.py — low-risk`>
 
-Never consolidate entries — a later phase extends this section rather than
-rewriting it, so the design stays traceable in order.>
+## Decisions
+
+<The spec owns the single issue-level decision ledger — a `## Decision ledger`
+table of `| ID | Choice | Grounding | Rejected alternative |` rows. Never
+duplicate its rows here: cite them by ID ("per D3") wherever a task rests on
+one. When planning itself forces a NEW non-obvious decision — scope, interface,
+behavioral, test-seam, irreversible, or user-preference — append a row to the
+spec's ledger and cite its ID. Do NOT log routine task splits, commit
+boundaries, obvious verification commands, or mechanical pattern-following.
+Consolidation is permitted and encouraged: merge related decisions into one
+row.>
 
 ---
 ```
 
 ## Task structure
+
+Task bodies carry exact interfaces, invariants, assertions, verification
+commands, and decision-rich algorithms — where an algorithm embodies a real
+decision, spell the decision out step by step. Full implementation code appears
+ONLY when it preserves a decision that prose or interfaces cannot safely express
+(a subtle algorithm, an exact wire format); otherwise interfaces plus assertions
+suffice. Test code is the exception: failing tests are written out in full —
+they ARE the task's contract.
 
 ````markdown
 ### Task N: <Component>
@@ -94,6 +115,11 @@ rewriting it, so the design stays traceable in order.>
 - Produces: <what later tasks rely on — exact names, parameter and return types.
   An implementer sees only its own task; this block is how it learns the names
   neighboring tasks use.>
+
+**Invariants:**
+- <the properties this task must preserve, one line each, phrased so a test or
+  assertion can pin them — e.g. "the cache never outlives its worktree",
+  "output is byte-identical for identical input">
 
 - [ ] **Step 1: Write the failing test**
 
@@ -110,9 +136,14 @@ Expected: FAIL — `function` is not defined
 
 - [ ] **Step 3: Write the minimal implementation**
 
+<The exact signature to implement, the invariants and assertions it must
+satisfy, and the algorithm's decisions where they are non-obvious. A full code
+block appears here only under the carve-out above — when it preserves a
+decision prose/interfaces cannot safely express.>
+
 ```python
-def function(input):
-    return expected
+def function(input: InputType) -> Expected:
+    """Contract: <the invariant this function pins>."""
 ```
 
 - [ ] **Step 4: Verify**
@@ -139,8 +170,11 @@ These are plan failures — never write them:
 - "TBD", "TODO", "implement later", "fill in details"
 - "Add appropriate error handling" / "add validation" / "handle edge cases"
 - "Write tests for the above" without the test code
-- "Similar to Task N" — repeat the code; tasks are read out of order and in isolation
-- Steps that say what to do without showing how (code steps need code blocks)
+- "Similar to Task N" — restate the interfaces, invariants and assertions (and
+  the code, where the carve-out applies); tasks are read out of order and in isolation
+- Steps that say what to do without pinning it — every implementation step names
+  its exact interface, invariants and assertions; a code block appears when the
+  carve-out demands one, and test steps always carry their test code
 - References to types, functions or methods no task defines
 
 ## Self-review
@@ -151,6 +185,7 @@ Read the finished plan against the spec with fresh eyes. This is your own checkl
 2. **Placeholder scan** — search for the patterns above and fix what you find.
 3. **Type consistency** — do the signatures, method names and property names used in later tasks match what earlier tasks define? `clearLayers()` in Task 3 and `clearFullLayers()` in Task 7 is a bug.
 4. **Falsifiability and gate scope** — every task has a verification line that can fail, and no gate asserts over an unscoped commit range.
+5. **Task index accuracy** — one index row per task, and each row's files and risk lane match the task body; a lane claiming `mechanical` or `low-risk` for work inside the exclusion list is a plan bug.
 
 Fix inline and move on; no re-review pass.
 

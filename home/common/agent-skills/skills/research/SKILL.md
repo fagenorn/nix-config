@@ -13,7 +13,7 @@ The research question must be sharply bounded before launch. If it becomes open-
 Its job:
 
 1. Investigate the question against **primary sources** — official docs, source code, specs, first-party APIs — not a secondary write-up of them. Follow every claim back to the source that owns it.
-2. Write the findings to exactly one Markdown file under the project's `specDir` (from `.claude/skills.config.json`, default `.claude/specs`), citing the source for each claim. Create no other artifact.
+2. Write the findings to exactly one Markdown file under the project's `specDir` (from `~/.agents/bin/resolve-bindings`; helper missing → `.claude/skills.config.json`, default `.claude/specs`), citing the source for each claim. Create no other artifact. State the artifact's durability explicitly at the top of the file — **committed** (the caller commits it with the work), **attached** (linked from the ticket/issue that asked), or **intentionally temporary** (deleted once the decision that needed it is recorded) — chosen deliberately from the caller's intent, never left implicit.
 3. Report back exactly `{file_path, key_facts[]}` — the path it wrote, and only the facts the caller asked for. Everything else stays in the file.
 
 ## Live availability and blocking evidence

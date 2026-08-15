@@ -7,9 +7,13 @@ description: Build a throwaway prototype before committing to a design — termi
 
 A prototype is **throwaway code that answers a question**. The question decides the shape.
 
-## Always start in a fresh worktree
+## First, pin the question — read-only
 
-Prototypes are throwaway by definition — they don't belong on the current working branch. Before doing anything else (before picking a branch, before reading code, before asking clarifying questions), set up an isolated worktree by invoking the `worktrees` skill — or, if that skill isn't available, run `git worktree add` directly. Name the worktree after the prototype's question (e.g. `prototype-settings-layout`, `prototype-billing-state-machine`) so it's obvious what's inside it and that it's disposable.
+Before creating anything, determine which question this prototype answers — from the user's prompt, a read-only look at the surrounding code, or by asking if the user is around. This step touches nothing: no worktree, no branch, no files. The question names the worktree and decides the branch below; a worktree created before the question is pinned gets a meaningless name and, when the question turns out pre-answered, exists for nothing.
+
+## Then start in a fresh worktree
+
+Prototypes are throwaway by definition — they don't belong on the current working branch. Once the question is pinned, and before writing any code, set up an isolated worktree by invoking the `worktrees` skill — or, if that skill isn't available, run `git worktree add` directly. Name the worktree after the question (e.g. `prototype-settings-layout`, `prototype-billing-state-machine`) so it's obvious what's inside it and that it's disposable.
 
 If the project isn't a git repo, work in a clearly-named scratch directory instead (e.g. `prototype-settings-layout/` outside the source tree, or a clearly-marked subfolder) so the throwaway code stays equally easy to spot and delete.
 
@@ -19,7 +23,7 @@ If a worktree already exists for this prototype (e.g. the user pre-created one o
 
 ## Pick a branch
 
-Identify which question is being answered — from the user's prompt, the surrounding code, or by asking if the user is around:
+The pinned question routes the build:
 
 - **"Does this logic / state model feel right?"** → [LOGIC.md](LOGIC.md). Build a tiny interactive terminal app that pushes the state machine through cases that are hard to reason about on paper.
 - **"What should this look like?"** → [UI.md](UI.md). Generate several radically different UI variations on a single route, switchable via a URL search param and a floating bottom bar.
@@ -33,8 +37,8 @@ The two branches produce very different artifacts — getting this wrong wastes 
 3. **No persistence by default.** State lives in memory. Persistence is the thing the prototype is _checking_, not something it should depend on. If the question explicitly involves a database, hit a scratch DB or a local file with a clear "PROTOTYPE — wipe me" name.
 4. **Skip the polish.** No tests, no error handling beyond what makes the prototype _runnable_, no abstractions. The point is to learn something fast and then delete it.
 5. **Surface the state.** After every action (logic) or on every variant switch (UI), print or render the full relevant state so the user can see what changed.
-6. **Delete or absorb when done.** When the prototype has answered its question, either delete it or fold the validated decision into the real code — don't leave it rotting in the repo.
+6. **Delete or absorb when done.** When the prototype has answered its question, drop the worktree (deleting is a one-liner precisely because everything lives there) or absorb: capture the validated decision durably and re-implement it properly on a real branch — the prototype worktree itself is never merged or promoted.
 
 ## When done
 
-The _answer_ is the only thing worth keeping from a prototype. Capture it somewhere durable (commit message, ADR, issue, or a `NOTES.md` next to the prototype) along with the question it was answering. If the user is around, that capture is a quick conversation; if not, leave the placeholder so they (or you, on the next pass) can fill in the verdict before deleting the prototype.
+The _answer_ is the only thing worth keeping from a prototype — never the worktree. Capture it somewhere durable *outside* the prototype worktree (ADR, issue comment, spec's decision ledger, or a commit message on the real branch) along with the question it was answering; anything captured only inside the worktree dies with it. If the user is around, that capture is a quick conversation; if not, leave a `NOTES.md` placeholder in the worktree so they (or you, on the next pass) can fill in the verdict before dropping it.

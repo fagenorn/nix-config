@@ -9,35 +9,19 @@ Break a plan into independently-grabbable issues using vertical slices (tracer b
 
 ## Project bindings (resolve first)
 
-This skill is project-agnostic. Before acting, resolve project-specific values:
-
-1. If `.claude/skills.config.json` exists at the project root, read it for the bindings below.
-2. For any absent key (or no config file), auto-detect: issue tracker = `gh` if the git remote is github.com
-   (else `glab`/none); verify commands from the manifest (package.json scripts, *.slnx/*.sln -> dotnet test,
-   Cargo.toml -> cargo test, go.mod -> go test, Makefile -> make test); branches from the repo default.
-3. Defaults when neither config nor detection yields a value: integrationBranch=main, defaultBranch=main,
-   commit.coAuthoredBy=true, unsetGithubToken=false, deploy.adapter=none, specDir=.claude/specs, planDir=.claude/plans.
-4. Degrade gracefully: any configured-but-absent doc path, sibling skill, or hints file is skipped silently —
-   never read a file that does not exist, never hard-fail on a missing optional binding.
+This skill is project-agnostic. Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set (tracker kind/CLI, `specDir`, `planDir`, branches) from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
 
 Keys this skill uses: `issueTracker{kind,cli}`, `docPaths{context,contextMap}` (optional, used only for grounding; `docPaths.adrDir` is a legacy override where a repo still has a central ADR directory).
 
 ### Resolve the issue tracker
 
-Determine where issues live and which backend creates them:
-
-1. If `issueTracker` is set in config, use it. `kind: github` → use the `cli` (default `gh`); `kind: gitlab` → `glab`;
-   `kind: none` → there is no tracker, so present the breakdown but do not attempt to publish issues (output the
-   slices as a markdown list / file for the user to file manually).
-2. Else auto-detect from the git remote: `git remote get-url origin` pointing at github.com → `gh`; gitlab → `glab`.
-3. Else, if neither config nor remote resolves a tracker, ask the user exactly one question:
-   *"Where do issues live, and which CLI or MCP creates them?"* — then proceed with their answer.
+The helper's `trackerKind`/`trackerCli` say where issues live. `kind: github` → the `cli` (default `gh`); `kind: gitlab` → `glab`; `kind: none` → there is no tracker: present the breakdown but do not publish (output the slices as a markdown list / file for the user to file manually). If neither config nor remote resolves a tracker, ask the user exactly one question: *"Where do issues live, and which CLI or MCP creates them?"* — then proceed with their answer.
 
 ## Process
 
 ### 1. Gather context
 
-Work from whatever is already in the conversation context. If the user passes an issue reference (issue number, URL, or path) as an argument, fetch it from the issue tracker and read its full body and comments.
+Work from whatever is already in the conversation context. If the user passes an issue reference (issue number, URL, or path) as an argument, fetch it from the issue tracker and read its full body. Load the comment thread only when it is likely to matter — the body references a discussion, the issue shows review activity, or the body alone leaves an open question; otherwise skip it.
 
 ### 2. Explore the codebase (optional)
 
@@ -63,7 +47,7 @@ Slices may be human-required or autonomous/agent-executable. Human-required slic
 - Prefer many thin slices over few thick ones
 </vertical-slice-rules>
 
-**Wide refactors are the exception to vertical slicing.** A wide refactor is one mechanical change — rename a column, retype a shared symbol — whose blast radius fans across the whole codebase, so a single edit breaks thousands of call sites at once and no vertical slice can land green. Don't force it into a tracer bullet; sequence it as **expand–contract**. First expand: add the new form beside the old so nothing breaks. Then migrate the call sites in batches sized by blast radius (per package, per directory), each batch its own slice blocked by the expand, keeping CI green batch to batch because the old form still exists. Finally contract: delete the old form once no caller remains, in a slice blocked by every migrate batch. When even the batches can't stay green alone, keep the sequence but let them share an integration branch that all block a final integrate-and-verify slice — green is promised only there.
+**Wide refactors are the exception to vertical slicing.** One mechanical change with codebase-wide blast radius (rename a column, retype a shared symbol) can't land green as a tracer bullet — sequence it as expand–contract per [WIDE-REFACTORS.md](./WIDE-REFACTORS.md); read that file when such a slice candidate appears.
 
 ### 4. Quiz the user
 
