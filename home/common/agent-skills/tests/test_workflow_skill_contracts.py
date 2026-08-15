@@ -350,6 +350,21 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "call the bridge current",
         )
 
+    def test_helper_binaries_resolve_from_bare_names(self):
+        # Skills invoke workflow-state/agent-evidence by bare name. The Nix
+        # module must put ~/.agents/bin on PATH, and each contract must anchor
+        # the full path as fallback for shells that skip profile init.
+        nix_module = (
+            REPO_ROOT / "home/common/agent-skills/default.nix"
+        ).read_text(encoding="utf-8")
+        self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
+        for name, text in (("from-issue", self.from_issue), ("orchestrate", self.orchestrate)):
+            with self.subTest(skill=name):
+                self.assertIn("~/.agents/bin/workflow-state", text)
+        for name, text in (("research", self.research), ("certification", self.certification)):
+            with self.subTest(skill=name):
+                self.assertIn("~/.agents/bin/agent-evidence", text)
+
     def test_research_requires_corroborated_validated_observations(self):
         heading = "## Live availability and blocking evidence"
         evidence = " ".join(self.research[self.research.index(heading) :].split())

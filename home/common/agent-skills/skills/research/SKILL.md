@@ -36,7 +36,9 @@ requires at least two observations with distinct `execution_id` values and
 distinct normalized `observed_at` timestamps — two independent timepoints.
 
 Materialize the embedded evidence object as a temporary validation input and run
-`agent-evidence research <artifact.json>`. Only after the command exits 0 may the
+`agent-evidence research <artifact.json>` (the helper at
+`~/.agents/bin/agent-evidence`; use the full path if the bare name does not
+resolve on PATH). Only after the command exits 0 may the
 agent return a standing conclusion. On failure, preserve the observations and
 diagnostics in the sole Markdown findings file, return no standing conclusion,
 and retain no temporary input as a second artifact.

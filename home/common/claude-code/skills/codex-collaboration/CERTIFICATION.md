@@ -42,6 +42,8 @@ That fresh session creates one schema-version-1 JSON evidence artifact with
 5. Preserve partial failures in the artifact. Record the bridge agent's own
    terminal failure before any allowed native fallback and never replace that
    failure with the fallback result.
-6. Run `agent-evidence bridge <artifact.json>`. Only after that exact command
+6. Run `agent-evidence bridge <artifact.json>` (the helper at
+   `~/.agents/bin/agent-evidence`; use the full path if the bare name does not
+   resolve on PATH). Only after that exact command
    exits 0 may the session call the bridge current; a nonzero exit rejects
    certification and its diagnostics remain attached to the evidence record.

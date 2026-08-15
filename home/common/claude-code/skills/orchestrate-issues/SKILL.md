@@ -48,7 +48,9 @@ rediscover fog already declared on a map.
 Before dispatch, choose a stable `run_id` for this issue set (or resume the one
 supplied by the caller). Resolve the dispatcher's absolute repository root once
 as `ledger_repo_root`; it is the exact immutable value used by every lifecycle
-command and is independent of any issue worktree. Run `workflow-state init-run
+command and is independent of any issue worktree. Lifecycle commands run the
+helper at `~/.agents/bin/workflow-state`; if the bare `workflow-state` name
+does not resolve on PATH, use that full path. Run `workflow-state init-run
 --repo-root <ledger_repo_root>
 --run-id <run-id> --now <RFC3339-now>`, then `workflow-state reconcile` with the
 same `--repo-root <ledger_repo_root>`, run identity, and current time. The returned

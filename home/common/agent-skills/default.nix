@@ -124,5 +124,11 @@ in
     unset -f migrateCodexSkillLink
   '';
 
+  # The workflow skills invoke these helpers by bare name (`workflow-state`,
+  # `agent-evidence`), so ~/.agents/bin must be on PATH or every spawned agent
+  # shell gets exit 127 — the failure codex-companion hit before it was wrapped
+  # onto PATH (see home/common/claude-code/default.nix).
+  home.sessionPath = [ "$HOME/.agents/bin" ];
+
   home.packages = [ pkgs.python3 ];
 }

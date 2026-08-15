@@ -26,6 +26,8 @@ this owner or its delegated remainder uses `--repo-root <ledger_repo_root>`;
 never substitute the current checkout or owner worktree. A direct standalone invocation remains compatible
 and does not require a ledger; it may `workflow-state init-run` its own run only when
 the user explicitly requests durable orchestration, carrying that root as `ledger_repo_root`.
+The `workflow-state` executable is `~/.agents/bin/workflow-state`; if the bare
+name does not resolve on PATH, invoke it by that full path.
 
 ## The flow
 
