@@ -343,7 +343,7 @@
     },
     {
       "id": "sdd-codex-rescue-transport",
-      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "path": "home/common/agent-skills/skills/sdd/fix-loop.md",
       "marker": "<!-- agent-dispatch: id=sdd-codex-rescue-transport role=codex-transport model=sonnet effort=medium -->",
       "call": "Agent(subagent_type=\"codex:rescue\", model=\"sonnet\", effort=\"medium\") transports the bounded stuck-breaker diagnosis to the external Codex runtime without selecting that runtime's model.",
       "role": "codex-transport",
@@ -353,7 +353,7 @@
     },
     {
       "id": "sdd-post-rescue-implementation",
-      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "path": "home/common/agent-skills/skills/sdd/fix-loop.md",
       "marker": "<!-- agent-dispatch: id=sdd-post-rescue-implementation role=implementer model=opus effort=high -->",
       "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") applies the verified rescue diagnosis plus the open findings.",
       "role": "implementer",
@@ -363,7 +363,7 @@
     },
     {
       "id": "sdd-rescue-fallback-implementation",
-      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "path": "home/common/agent-skills/skills/sdd/fix-loop.md",
       "marker": "<!-- agent-dispatch: id=sdd-rescue-fallback-implementation role=implementer model=opus effort=high -->",
       "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") owns the fresh-context rescue fallback.",
       "role": "implementer",
@@ -373,7 +373,7 @@
     },
     {
       "id": "sdd-round-five-implementation",
-      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "path": "home/common/agent-skills/skills/sdd/fix-loop.md",
       "marker": "<!-- agent-dispatch: id=sdd-round-five-implementation role=implementer model=opus effort=high -->",
       "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") owns the fifth and final fix round.",
       "role": "implementer",
@@ -383,7 +383,7 @@
     },
     {
       "id": "sdd-task-rereview-escalation",
-      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "path": "home/common/agent-skills/skills/sdd/fix-loop.md",
       "marker": "<!-- agent-dispatch: id=sdd-task-rereview-escalation role=reviewer model=opus effort=high -->",
       "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") adjudicates an ambiguous or branch-wide task re-review escape.",
       "role": "reviewer",
@@ -413,7 +413,7 @@
     },
     {
       "id": "sdd-final-review-fixer",
-      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "path": "home/common/agent-skills/skills/sdd/final-review.md",
       "marker": "<!-- agent-dispatch: id=sdd-final-review-fixer role=implementer model=opus effort=high -->",
       "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") fixes the verified whole-branch findings in one wave.",
       "role": "implementer",
@@ -423,7 +423,7 @@
     },
     {
       "id": "sdd-final-conformance-rereview",
-      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "path": "home/common/agent-skills/skills/sdd/final-review.md",
       "marker": "<!-- agent-dispatch: id=sdd-final-conformance-rereview role=reviewer-lite model=sonnet effort=medium -->",
       "call": "Agent(subagent_type=\"reviewer-lite\", model=\"sonnet\", effort=\"medium\") re-verdicts the named conformance findings against the bounded fix diff.",
       "role": "reviewer-lite",
@@ -436,7 +436,7 @@
     },
     {
       "id": "sdd-final-correctness-rereview",
-      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "path": "home/common/agent-skills/skills/sdd/final-review.md",
       "marker": "<!-- agent-dispatch: id=sdd-final-correctness-rereview role=reviewer-lite model=sonnet effort=medium -->",
       "call": "Agent(subagent_type=\"reviewer-lite\", model=\"sonnet\", effort=\"medium\") re-verdicts the named correctness findings against the bounded fix diff.",
       "role": "reviewer-lite",
@@ -449,7 +449,7 @@
     },
     {
       "id": "sdd-final-rereview-escalation",
-      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "path": "home/common/agent-skills/skills/sdd/final-review.md",
       "marker": "<!-- agent-dispatch: id=sdd-final-rereview-escalation role=reviewer model=opus effort=high -->",
       "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") adjudicates an ambiguous or branch-wide final-axis re-review escape.",
       "role": "reviewer",
