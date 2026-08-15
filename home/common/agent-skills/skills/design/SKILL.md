@@ -46,7 +46,7 @@ When the caller runs autonomously (`from-issue --auto`), **the `➡️` recommen
 
 ## Output
 
-Write the design to `<specDir>/<YYYY-MM-DD>-<topic>-design.md` (`specDir` from `.claude/skills.config.json`, default `.claude/specs`) and commit it in the worktree you were called in — never on the integration branch.
+Write the design to `<specDir>/<YYYY-MM-DD>-<topic>-design.md` (`specDir` from `~/.agents/bin/resolve-bindings`; helper missing → `.claude/skills.config.json`, default `.claude/specs`) and commit it in the worktree you were called in — never on the integration branch.
 
 Sections: **Problem** (from the user's perspective) · **Solution** · **Decisions** (modules and interfaces touched, schema and API contracts, behavior — no file paths or line numbers; they rot) · **Test seams** (the agreed seams and the prior art they follow) · **Out of scope** (mandatory, and real) · **Decision ledger** — the issue's single decision store, a table later phases cite by row ID instead of restating rationale:
 

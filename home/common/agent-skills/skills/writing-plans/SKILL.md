@@ -7,7 +7,11 @@ description: Turn a spec into a task-by-task implementation plan before touching
 
 Write the plan for an engineer who is skilled but has zero context for this codebase, this toolset, and this domain, and who will read exactly one task without the others. Every task names the files it touches, the exact interfaces and invariants it must satisfy, how to test it, and how to verify it. DRY. YAGNI. Test-first. Frequent commits.
 
-**Save to** `<planDir>/YYYY-MM-DD-<feature-name>.md` (`planDir` from `.claude/skills.config.json`, default `.claude/plans`), committed in the worktree you were called in.
+**Save to** `<planDir>/YYYY-MM-DD-<feature-name>.md` (`planDir` from `~/.agents/bin/resolve-bindings`; helper missing → `.claude/skills.config.json`, default `.claude/plans`), committed in the worktree you were called in.
+
+## Payload discipline
+
+This section is the pipeline's shared reference — sibling skills cite it instead of restating it, and plans embed it in tasks. Move information as cheaply as it arrives: targeted `rg`/grep over whole-file reads; bounded reads (offset/limit around the lines that matter) when a file must open; test and build output summarized to the failing lines, never pasted wholesale; long logs written to disk and passed as paths; artifacts (briefs, packages, reports) handed between agents as file paths, not inlined content. Verification steps name commands whose output is small by construction (quiet flags, filters, tails) so contexts stay flat.
 
 ## Scope check
 

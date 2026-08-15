@@ -9,29 +9,13 @@ Break a plan into independently-grabbable issues using vertical slices (tracer b
 
 ## Project bindings (resolve first)
 
-This skill is project-agnostic. Before acting, resolve project-specific values:
-
-1. If `.claude/skills.config.json` exists at the project root, read it for the bindings below.
-2. For any absent key (or no config file), auto-detect: issue tracker = `gh` if the git remote is github.com
-   (else `glab`/none); verify commands from the manifest (package.json scripts, *.slnx/*.sln -> dotnet test,
-   Cargo.toml -> cargo test, go.mod -> go test, Makefile -> make test); branches from the repo default.
-3. Defaults when neither config nor detection yields a value: integrationBranch=main, defaultBranch=main,
-   commit.coAuthoredBy=true, unsetGithubToken=false, deploy.adapter=none, specDir=.claude/specs, planDir=.claude/plans.
-4. Degrade gracefully: any configured-but-absent doc path, sibling skill, or hints file is skipped silently —
-   never read a file that does not exist, never hard-fail on a missing optional binding.
+This skill is project-agnostic. Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set (tracker kind/CLI, `specDir`, `planDir`, branches) from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
 
 Keys this skill uses: `issueTracker{kind,cli}`, `docPaths{context,contextMap}` (optional, used only for grounding; `docPaths.adrDir` is a legacy override where a repo still has a central ADR directory).
 
 ### Resolve the issue tracker
 
-Determine where issues live and which backend creates them:
-
-1. If `issueTracker` is set in config, use it. `kind: github` → use the `cli` (default `gh`); `kind: gitlab` → `glab`;
-   `kind: none` → there is no tracker, so present the breakdown but do not attempt to publish issues (output the
-   slices as a markdown list / file for the user to file manually).
-2. Else auto-detect from the git remote: `git remote get-url origin` pointing at github.com → `gh`; gitlab → `glab`.
-3. Else, if neither config nor remote resolves a tracker, ask the user exactly one question:
-   *"Where do issues live, and which CLI or MCP creates them?"* — then proceed with their answer.
+The helper's `trackerKind`/`trackerCli` say where issues live. `kind: github` → the `cli` (default `gh`); `kind: gitlab` → `glab`; `kind: none` → there is no tracker: present the breakdown but do not publish (output the slices as a markdown list / file for the user to file manually). If neither config nor remote resolves a tracker, ask the user exactly one question: *"Where do issues live, and which CLI or MCP creates them?"* — then proceed with their answer.
 
 ## Process
 
