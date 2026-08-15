@@ -177,7 +177,7 @@
     },
     {
       "id": "from-issue-plan-review",
-      "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
+      "path": "home/common/agent-skills/skills/from-issue/standards-review.md",
       "marker": "<!-- agent-dispatch: id=from-issue-plan-review role=reviewer model=opus effort=high -->",
       "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") launches one fresh plan reviewer with no inherited context, the same inputs, and the same `REVIEW-CONTRACT.md` path, told to read that file first.",
       "role": "reviewer",
@@ -219,7 +219,7 @@
       "id": "from-issue-ship-owner",
       "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
       "marker": "<!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->",
-      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow, and ship-issue's ~100 turns over that 200–300k prefix costs ~1–3M weighted tokens versus a fresh ~10k subagent that returns one summary.",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow; a fresh ~10k subagent returns one summary instead of ~100 turns over a 200–300k prefix.",
       "role": "ship-owner",
       "model": "opus",
       "effort": "high",
@@ -227,7 +227,7 @@
     },
     {
       "id": "from-issue-inline-ship-review",
-      "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
+      "path": "home/common/agent-skills/skills/from-issue/ship-handoff.md",
       "marker": "<!-- agent-dispatch: id=from-issue-inline-ship-review role=reviewer model=opus effort=high -->",
       "call": "Agent(subagent_type=\"reviewer\", model=\"opus\", effort=\"high\") launches a fresh first-pass reviewer over the shipping diff.",
       "role": "reviewer",

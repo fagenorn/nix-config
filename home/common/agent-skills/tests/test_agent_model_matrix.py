@@ -68,7 +68,7 @@ EXPECTED_OWNER_SITES = {
         "high",
     ),
     "from-issue-plan-review": (
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "home/common/agent-skills/skills/from-issue/standards-review.md",
         "reviewer",
         "opus",
         "high",
@@ -98,7 +98,7 @@ EXPECTED_OWNER_SITES = {
         "high",
     ),
     "from-issue-inline-ship-review": (
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "home/common/agent-skills/skills/from-issue/ship-handoff.md",
         "reviewer",
         "opus",
         "high",

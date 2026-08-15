@@ -12,16 +12,16 @@ Standards review still happens. You don't get to skip thinking — you only stop
 Wherever a phase or sub-skill would ask the user a clarifying question, present option sets, or pause
 at a `**CHECKPOINT**`:
 
-1. **Ground first.** Use this phase's `GROUNDING.md` cache (see `SKILL.md` → Doc grounding). If the
+1. **Ground first.** Use this phase's `GROUNDING.md` cache (see `grounding.md` beside `SKILL.md`). If the
    decision reaches into an area the cache doesn't cover, load that area and append it.
 2. **Pick the most defensible default** — the choice that aligns with documented invariants and ADRs,
    matches existing precedent in the codebase, honors the issue author's stated intent, and keeps
    scope tight. When two options are both defensible, prefer the smaller, more reversible, more
    idiomatic one.
-3. **Log it** as a row in the spec's `## Decision ledger` (the table format in `SKILL.md`), applying
-   the non-obvious-only filter — routine splits, commit boundaries, and obvious verification commands
-   are not rows. Plans and ADRs cite the ID. This is the audit trail: a human reviewing the PR can
-   challenge any choice without re-deriving it.
+3. **Log it** as a row in the spec's `## Decision ledger` (the table format in `decision-ledger.md`),
+   applying the non-obvious-only filter — routine splits, commit boundaries, and obvious verification
+   commands are not rows. Plans and ADRs cite the ID. This is the audit trail: a human reviewing the
+   PR can challenge any choice without re-deriving it.
 4. **Continue.** Don't post the question. Don't wait.
 
 Auto-resolving a checkpoint never skips `workflow-state progress`: persist the
@@ -89,7 +89,7 @@ beyond the exceptions named below):
   `commit.coAuthoredBy`, `<tracker-cli>`, `unsetGithubToken`),
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
 - the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
-  filter, pasted verbatim from `SKILL.md`,
+  filter, pasted verbatim from `decision-ledger.md`,
 - the fixed return schema, with "details live in the committed files, not in your report".
 
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally
