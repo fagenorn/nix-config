@@ -59,19 +59,29 @@ Checkpoint between every phase; don't auto-chain. State the artifact produced (p
 
 **Override:** with `--auto`, checkpoints become self-resolved decisions logged inline — see `AUTO.md`. Two content-level stops survive there: the Phase-0 wrong-issue-type and pre-flight stops, and Phase-5 blocking findings that editing the plan can't fix.
 
-## Auto-resolved decisions (artifact discipline)
+## Decision ledger (artifact discipline)
 
-Every artifact this flow produces — spec, plan, ADR — carries a section named exactly `## Auto-resolved decisions` listing each question the agent answered instead of the user. Mandatory under `--auto`; expected interactively too, since the author still calls task granularity, test framing, verification gates, and commit boundaries. One entry per decision:
+Non-obvious decisions this flow makes instead of the user live in **one issue-level ledger table** in the spec, under a section named exactly `## Decision ledger`. The plan and ADRs cite rows by ID ("per D3") and never restate or duplicate them. Mandatory under `--auto`; expected interactively too.
 
 ```markdown
-### <short question / decision title>
-- **Question:** what would have been asked
-- **Choice:** what you picked
-- **Grounding:** the docs / code / issue references that justify it (link or quote)
-- **Alternative considered:** what you rejected and why
+| ID | Choice | Grounding | Rejected alternative |
+|----|--------|-----------|----------------------|
+| D1 | <what was decided, one line> | <doc/standard/user statement it rests on> | <the alternative and why not, one line> |
 ```
 
-**Never consolidate entries.** Phase-5 findings *extend* the plan's section instead of amending Phase-4 entries, so a reader can trace the design chronologically. When a Phase-5 entry reverses a Phase-4 choice, its `Alternative considered` describes what *the reviewer* rejected.
+- Log ONLY non-obvious decisions: scope, interface, behavioral, test-seam, irreversible, or user-preference calls.
+- Do NOT log routine task splits, commit boundaries, obvious verification commands, or mechanical pattern-following.
+- Consolidation is permitted and encouraged: merge related decisions into one row. Later phases (plan, Phase-5 review) append new rows; a row that reverses an earlier one names it ("reverses D2") in its Choice.
+
+## Risk lanes
+
+Assigned per task at planning time (Phase 4), recorded in the plan's `## Task index`, and applied by `sdd` during execution:
+
+- **mechanical** — deletion/renaming with **no** behavioral, configuration, interface, generated-output, or semantic-documentation effect; file and line counts never qualify a change on their own.
+- **low-risk** — small semantic changes: bounded, locally-verifiable behavior changes, **excluding** anything touching concurrency, lifecycle, destructive operations, security, release, migration, or public contracts.
+- **full** — everything else.
+
+Mechanical and low-risk tasks get scoped (inline or reviewer-lite) per-task verification; full-lane tasks get a full per-task review. The independent final two-axis review is mandatory for **every** lane.
 
 ## Doc grounding
 
@@ -148,7 +158,7 @@ Confirm nothing is already shipping this issue — two sessions racing on one is
 1. `<tracker-cli> pr list --state all --search "issue-<num>" --json number,title,headRefName,state`. The default search hits titles, bodies *and* branch names, catching PRs whose branch is `<worktreePrefix>issue-<num>-...` even when the title omits the number; don't narrow with `in:title,body`.
 2. **Open PR** for this issue: stop. Surface the URL and recommend `/ship-issue <num>` to resume it, or that the user close it first.
 3. **Merged PR**: stop. Surface the merge commit; ask whether they meant a different issue or a follow-up.
-4. **Closed unmerged**: check why (`<tracker-cli> pr view <pr>` for body + comments). Duplicate/superseded/replaced → surface and stop. Otherwise it was abandoned: continue, and Phase 1 makes a fresh branch. In `--auto`, log this as an Auto-resolved decision.
+4. **Closed unmerged**: check why (`<tracker-cli> pr view <pr>` for body + comments). Duplicate/superseded/replaced → surface and stop. Otherwise it was abandoned: continue, and Phase 1 makes a fresh branch. In `--auto`, carry this into the spec's decision ledger.
 5. `git worktree list | grep <worktreePrefix>issue-<num>-`:
    - none → continue;
    - one → **inspect before touching it**; a "clean" tree can still hold committed spec/plan/execution work that only ships at Phase 7. Check all four signals:
@@ -175,11 +185,11 @@ Every Phase-0 early stop above uses the terminal return procedure when lifecycle
 exists: write a `stopped` or `failed` result through `workflow-state finish`
 before notifying the caller.
 
-**Open questions is mandatory even in `--auto`** — self-answering happens in the spec's `## Auto-resolved decisions`, not by dropping the section, which is the audit point the resolutions hang off. With nothing open, write "None — Phase 2 will surface anything missed".
+**Open questions is mandatory even in `--auto`** — self-answering happens in the spec's `## Decision ledger`, not by dropping the section, which is the audit point the resolutions hang off. With nothing open, write "None — Phase 2 will surface anything missed".
 
 ### Mechanical-only shortcut
 
-Declare `mechanical-only` only when the entire change is deletion or renaming with **no** behavioral, configuration, interface, generated-output, or semantic-documentation effect; file and line counts never qualify a change on their own. Then Phase 5 self-grades against `REVIEW-CONTRACT.md` and Phase 6 dispatches one implementer+reviewer pair for the whole change. Every phase still runs. Skip manufactured TDD framing: state why the shortcut applies and verify directly.
+Declare `mechanical-only` only when the **entire** change fits the mechanical lane (§Risk lanes). Then Phase 5 self-grades against `REVIEW-CONTRACT.md` and Phase 6 dispatches one implementer+reviewer pair for the whole change. Every phase still runs. Skip manufactured TDD framing: state why the shortcut applies and verify directly.
 
 **CHECKPOINT** — Confirm restatement + scope. Require a per-question disposition for each open question: an answer, "defer to brainstorm", or "agent-choose" (auto-resolve and log). A bare "proceed" means re-prompt — the questions don't vanish on the way to Phase 2.
 
@@ -221,7 +231,7 @@ Invoke `grill-with-docs`. It sharpens the spec against the context doc, surfaces
 
 ## Phase 4 — Plan
 
-Invoke `writing-plans` for a plan under `planDir`, committed in the worktree, carrying its own `## Auto-resolved decisions` section.
+Invoke `writing-plans` for a plan under `planDir`, committed in the worktree. The plan header carries a `## Task index` — one line per task: ID, title, files touched, and risk lane assigned here per §Risk lanes. The plan cites decision-ledger rows by ID ("per D3") instead of restating rationale, and appends any new non-obvious plan-level decisions to the spec's ledger.
 
 **Plan-prose ≠ code-prose.** Anything the plan dictates that the implementer copies verbatim into the codebase — docstring, comment, context-doc sentence, ADR clause — must describe how the live code *will actually behave*, not how the plan hypothesises it. Otherwise the code lands slightly different and the prose becomes a lie (a recurring post-PR fix-up). If you can't describe the behavior precisely yet, write a TODO with the open question; the execute phase rewrites it from the implemented code.
 
@@ -243,7 +253,7 @@ Agent(subagent_type="reviewer", model="opus", effort="high") launches one fresh 
 
 Verify every actionable finding against the live worktree before touching the plan; stale or unsupported ones are recorded as rejected, not silently applied. Record provenance in the plan (reviewer, job id, base SHA, whether fallback was used) plus each disposition, and never copy a raw reviewer transcript into project artifacts.
 
-Apply blocking fixes inline to the plan (standing local-commit authorization). Bring should-fix items to the user; in `--auto`, apply them too. Extend the plan's `## Auto-resolved decisions` with one entry per applied finding, titled by finding ID (`### B1: test-fixture isolation`): **Question** = the reviewer's note, **Choice** = what you edited, **Grounding** = their rationale plus any doc cite, **Alternative considered** = what you weighed, or "Reviewer's call accepted as-is."
+Apply blocking fixes inline to the plan (standing local-commit authorization). Bring should-fix items to the user; in `--auto`, apply them too. Append one ledger row per applied **non-obvious** finding — Choice = the edit, Grounding = the reviewer's rationale plus any doc cite, Rejected alternative = what you weighed (or "reviewer's call accepted as-is") — and a row that reverses an earlier decision names it.
 
 **CHECKPOINT** — Confirm standards review is clean.
 

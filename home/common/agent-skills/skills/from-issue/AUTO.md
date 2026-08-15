@@ -18,9 +18,10 @@ at a `**CHECKPOINT**`:
    matches existing precedent in the codebase, honors the issue author's stated intent, and keeps
    scope tight. When two options are both defensible, prefer the smaller, more reversible, more
    idiomatic one.
-3. **Log it** in the artifact's `## Auto-resolved decisions` section, one entry per decision, using
-   the template in `SKILL.md`. This is the audit trail: a human reviewing the PR can challenge any
-   choice without re-deriving it.
+3. **Log it** as a row in the spec's `## Decision ledger` (the table format in `SKILL.md`), applying
+   the non-obvious-only filter — routine splits, commit boundaries, and obvious verification commands
+   are not rows. Plans and ADRs cite the ID. This is the audit trail: a human reviewing the PR can
+   challenge any choice without re-deriving it.
 4. **Continue.** Don't post the question. Don't wait.
 
 Auto-resolving a checkpoint never skips `workflow-state progress`: persist the
@@ -57,7 +58,7 @@ about the work itself rather than user-approval gates:
   default posture.
 - **Phase 5 blocking findings.** Apply blocking fixes to the plan inline. If a blocker can't be fixed
   by editing the plan — it means the spec or the issue scope is wrong — back up to that phase, redo
-  it, and log the loop in `Auto-resolved decisions`.
+  it, and log the loop in the decision ledger.
 
 Should-fix findings: apply inline and log with the reviewer's rationale. Exception: a should-fix that
 implies a scope change ("the plan covers A but the spec promised A+B") — back up rather than
@@ -87,7 +88,8 @@ beyond the exceptions named below):
 - the resolved bindings it needs (`specDir`, `planDir`, `docPaths.*`, `projectHints`,
   `commit.coAuthoredBy`, `<tracker-cli>`, `unsetGithubToken`),
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
-- the self-answer pattern above and the `## Auto-resolved decisions` template, pasted verbatim,
+- the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
+  filter, pasted verbatim from `SKILL.md`,
 - the fixed return schema, with "details live in the committed files, not in your report".
 
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally
@@ -111,7 +113,7 @@ Return schema:
 ```
 spec_path:  <path relative to repo root>
 adr_paths:  [<path>, …]   ([] if none)
-decisions:  [<one-line title per auto-resolved decision>]
+decisions:  [<ledger ID: one-line choice>]
 notes:      <≤500 chars: unresolved tension, scope surprise, or anything the plan phase must know>
 ```
 
@@ -120,8 +122,9 @@ notes:      <≤500 chars: unresolved tension, scope surprise, or anything the p
 <!-- agent-dispatch: id=from-issue-planning role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches the autonomous planning owner.
 
-Writes the implementation plan under `planDir`, committed in the worktree, including its own
-`## Auto-resolved decisions` section. Give it the spec path and the design subagent's `decisions` and
+Writes the implementation plan under `planDir`, committed in the worktree, with a `## Task index`
+carrying each task's risk lane; it cites decision-ledger rows by ID and appends new non-obvious
+plan-level decisions to the spec's ledger. Give it the spec path and the design subagent's `decisions` and
 `notes` — not its transcript. `SKILL.md`'s plan-prose ≠ code-prose rule goes in the prompt.
 
 When Phase 0 declared the issue `mechanical-only`, this dispatch also performs the Phase-5 self-grade
