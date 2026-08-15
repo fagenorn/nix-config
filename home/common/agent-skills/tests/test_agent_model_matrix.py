@@ -19,8 +19,10 @@ EXPECTED_TIERS = {
     "ship-owner": ("opus", "high"),
     "implementer": ("opus", "high"),
     "reviewer": ("opus", "high"),
+    "conformance-reviewer": ("sonnet", "high"),
     "reviewer-lite": ("sonnet", "medium"),
-    "mechanic": ("sonnet", "medium"),
+    "mechanic": ("sonnet", "high"),
+    "bookkeeper": ("haiku", "low"),
     "explorer": ("haiku", "medium"),
     "researcher": ("sonnet", "medium"),
     "codex-transport": ("sonnet", "medium"),
@@ -31,8 +33,10 @@ EXPECTED_SUBAGENT_TYPES = {
     "ship-owner": {"general-purpose"},
     "implementer": {"implementer"},
     "reviewer": {"reviewer"},
+    "conformance-reviewer": {"reviewer"},
     "reviewer-lite": {"reviewer-lite"},
     "mechanic": {"mechanic"},
+    "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
     "codex-transport": {"codex:rescue", "codex:codex-reviewer"},
@@ -64,7 +68,7 @@ EXPECTED_OWNER_SITES = {
         "high",
     ),
     "from-issue-plan-review": (
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "home/common/agent-skills/skills/from-issue/standards-review.md",
         "reviewer",
         "opus",
         "high",
@@ -73,7 +77,13 @@ EXPECTED_OWNER_SITES = {
         "home/common/agent-skills/skills/from-issue/SKILL.md",
         "mechanic",
         "sonnet",
-        "medium",
+        "high",
+    ),
+    "from-issue-ledger-remainder": (
+        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "bookkeeper",
+        "haiku",
+        "low",
     ),
     "from-issue-mechanical-review": (
         "home/common/agent-skills/skills/from-issue/SKILL.md",
@@ -88,7 +98,7 @@ EXPECTED_OWNER_SITES = {
         "high",
     ),
     "from-issue-inline-ship-review": (
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "home/common/agent-skills/skills/from-issue/ship-handoff.md",
         "reviewer",
         "opus",
         "high",
@@ -130,8 +140,15 @@ EXPECTED_SDD_SITES = {
         "home/common/agent-skills/skills/sdd/implementer-prompt.md",
         "mechanic",
         "sonnet",
-        "medium",
+        "high",
         [],
+    ),
+    "sdd-lane-task-verification": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "reviewer-lite",
+        "sonnet",
+        "medium",
+        ["risk-lane-mechanical-or-low", "bounded-task-diff"],
     ),
     "sdd-nonmechanical-implementation": (
         "home/common/agent-skills/skills/sdd/implementer-prompt.md",
@@ -155,42 +172,42 @@ EXPECTED_SDD_SITES = {
         ["named-prior-findings", "bounded-fix-diff"],
     ),
     "sdd-codex-rescue-transport": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/agent-skills/skills/sdd/fix-loop.md",
         "codex-transport",
         "sonnet",
         "medium",
         [],
     ),
     "sdd-post-rescue-implementation": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/agent-skills/skills/sdd/fix-loop.md",
         "implementer",
         "opus",
         "high",
         [],
     ),
     "sdd-rescue-fallback-implementation": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/agent-skills/skills/sdd/fix-loop.md",
         "implementer",
         "opus",
         "high",
         [],
     ),
     "sdd-round-five-implementation": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/agent-skills/skills/sdd/fix-loop.md",
         "implementer",
         "opus",
         "high",
         [],
     ),
     "sdd-task-rereview-escalation": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/agent-skills/skills/sdd/fix-loop.md",
         "reviewer",
         "opus",
         "high",
         [],
     ),
     "sdd-final-rereview-escalation": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/agent-skills/skills/sdd/final-review.md",
         "reviewer",
         "opus",
         "high",
@@ -198,8 +215,8 @@ EXPECTED_SDD_SITES = {
     ),
     "sdd-final-conformance-review": (
         "home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md",
-        "reviewer",
-        "opus",
+        "conformance-reviewer",
+        "sonnet",
         "high",
         [],
     ),
@@ -211,21 +228,21 @@ EXPECTED_SDD_SITES = {
         [],
     ),
     "sdd-final-review-fixer": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/agent-skills/skills/sdd/final-review.md",
         "implementer",
         "opus",
         "high",
         [],
     ),
     "sdd-final-conformance-rereview": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/agent-skills/skills/sdd/final-review.md",
         "reviewer-lite",
         "sonnet",
         "medium",
         ["named-prior-findings", "bounded-fix-diff"],
     ),
     "sdd-final-correctness-rereview": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/agent-skills/skills/sdd/final-review.md",
         "reviewer-lite",
         "sonnet",
         "medium",
@@ -540,6 +557,65 @@ class AgentModelMatrixTest(unittest.TestCase):
                     "model": "sonnet",
                     "effort": "medium",
                     "requires": [],
+                }
+            ]
+            write_fixture(root, data)
+
+            errors = module.validate(root)
+
+        self.assertTrue(
+            any("reviewer-lite requires" in error for error in errors), errors
+        )
+
+    def test_reviewer_lite_lane_verification_is_legal_without_prior_full_review(self):
+        module = load_module()
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        sites = {site["id"]: site for site in data["dispatch_sites"]}
+        lane_site = sites["sdd-lane-task-verification"]
+        self.assertEqual(
+            lane_site["requires"],
+            ["risk-lane-mechanical-or-low", "bounded-task-diff"],
+        )
+        sdd_events = data["scenarios"]["sdd"]
+        lane_index = next(
+            index
+            for index, event in enumerate(sdd_events)
+            if event["dispatch"] == "sdd-lane-task-verification"
+        )
+        self.assertFalse(
+            any(
+                event["role"] == "reviewer"
+                for event in sdd_events[:lane_index]
+            ),
+            "lane verification must be legal before any full review dispatch",
+        )
+        self.assertEqual(module.validate(REPO_ROOT), [])
+
+    def test_reviewer_lite_partial_lane_requirements_fail(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = json.loads(MATRIX.read_text(encoding="utf-8"))
+            marker = (
+                "<!-- agent-dispatch: id=partial-lane role=reviewer-lite "
+                "model=sonnet effort=medium -->"
+            )
+            call = (
+                'Agent(subagent_type="reviewer-lite", model="sonnet", '
+                'effort="medium") verifies a lane diff without declaring the lane.'
+            )
+            manifest = root / "workflow.md"
+            manifest.write_text(f"{marker}\n{call}\n", encoding="utf-8")
+            data["dispatch_sites"] = [
+                {
+                    "id": "partial-lane",
+                    "path": "workflow.md",
+                    "marker": marker,
+                    "call": call,
+                    "role": "reviewer-lite",
+                    "model": "sonnet",
+                    "effort": "medium",
+                    "requires": ["bounded-task-diff"],
                 }
             ]
             write_fixture(root, data)

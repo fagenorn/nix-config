@@ -4,11 +4,11 @@ One of the two isolated axis reviewers in the final review. This axis grades
 delivered-vs-promised; the parallel correctness axis grades bugs and build quality —
 this prompt tells its reviewer not to duplicate that job.
 
-<!-- agent-dispatch: id=sdd-final-conformance-review role=reviewer model=opus effort=high -->
-Agent(subagent_type="reviewer", model="opus", effort="high") performs the first-pass whole-branch conformance review.
+<!-- agent-dispatch: id=sdd-final-conformance-review role=conformance-reviewer model=sonnet effort=high -->
+Agent(subagent_type="reviewer", model="sonnet", effort="high") performs the first-pass whole-branch conformance review.
 
 ```
-Subagent (reviewer, Opus/high as selected above):
+Subagent (reviewer, Sonnet/high as selected above):
   description: "Final review — conformance axis"
   prompt: |
     You are reviewing a completed feature branch for CONFORMANCE: did the diff

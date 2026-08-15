@@ -12,15 +12,16 @@ Standards review still happens. You don't get to skip thinking — you only stop
 Wherever a phase or sub-skill would ask the user a clarifying question, present option sets, or pause
 at a `**CHECKPOINT**`:
 
-1. **Ground first.** Use this phase's `GROUNDING.md` cache (see `SKILL.md` → Doc grounding). If the
+1. **Ground first.** Use this phase's `GROUNDING.md` cache (see `grounding.md` beside `SKILL.md`). If the
    decision reaches into an area the cache doesn't cover, load that area and append it.
 2. **Pick the most defensible default** — the choice that aligns with documented invariants and ADRs,
    matches existing precedent in the codebase, honors the issue author's stated intent, and keeps
    scope tight. When two options are both defensible, prefer the smaller, more reversible, more
    idiomatic one.
-3. **Log it** in the artifact's `## Auto-resolved decisions` section, one entry per decision, using
-   the template in `SKILL.md`. This is the audit trail: a human reviewing the PR can challenge any
-   choice without re-deriving it.
+3. **Log it** as a row in the spec's `## Decision ledger` (the table format in `decision-ledger.md`),
+   applying the non-obvious-only filter — routine splits, commit boundaries, and obvious verification
+   commands are not rows. Plans and ADRs cite the ID. This is the audit trail: a human reviewing the
+   PR can challenge any choice without re-deriving it.
 4. **Continue.** Don't post the question. Don't wait.
 
 Auto-resolving a checkpoint never skips `workflow-state progress`: persist the
@@ -42,7 +43,8 @@ about the work itself rather than user-approval gates:
 - **Phase 0 wrong-issue-type stop.** If the issue is several issues bundled, a duplicate, a pure
   question, or otherwise not implementable, surface that and stop. Auto-mode means "decide without
   asking", not "implement something incoherent". The same holds for the Phase-0 pre-flight stops
-  (open/merged PR, dirty or multiple matching worktrees).
+  (open/merged PR, dirty or multiple matching worktrees, and a matching worktree whose
+  disposability cannot be proven — prefer resuming it; never delete on ambiguity).
   When lifecycle identity exists, finalize this terminal result through the
   SKILL.md terminal return procedure before stopping.
 - **Phase 0 fog gate.** Before any worktree exists, test the grounded issue: can every open question
@@ -56,7 +58,7 @@ about the work itself rather than user-approval gates:
   default posture.
 - **Phase 5 blocking findings.** Apply blocking fixes to the plan inline. If a blocker can't be fixed
   by editing the plan — it means the spec or the issue scope is wrong — back up to that phase, redo
-  it, and log the loop in `Auto-resolved decisions`.
+  it, and log the loop in the decision ledger.
 
 Should-fix findings: apply inline and log with the reviewer's rationale. Exception: a should-fix that
 implies a scope change ("the plan covers A but the spec promised A+B") — back up rather than
@@ -76,7 +78,7 @@ committed artifact.
 
 Both dispatches select the `issue-owner` matrix role on Opus/high explicitly;
 design quality is worth paying for here. Purely mechanical dispatches elsewhere
-in the flow use `mechanic` on Sonnet/medium; reviewer-shaped first passes use
+in the flow use `mechanic` on Sonnet/high; reviewer-shaped first passes use
 `reviewer` on Opus/high.
 
 Both prompts must carry, inline (the subagent starts with no context and loads no skills of its own
@@ -86,7 +88,8 @@ beyond the exceptions named below):
 - the resolved bindings it needs (`specDir`, `planDir`, `docPaths.*`, `projectHints`,
   `commit.coAuthoredBy`, `<tracker-cli>`, `unsetGithubToken`),
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
-- the self-answer pattern above and the `## Auto-resolved decisions` template, pasted verbatim,
+- the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
+  filter, pasted verbatim from `decision-ledger.md`,
 - the fixed return schema, with "details live in the committed files, not in your report".
 
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally
@@ -110,7 +113,7 @@ Return schema:
 ```
 spec_path:  <path relative to repo root>
 adr_paths:  [<path>, …]   ([] if none)
-decisions:  [<one-line title per auto-resolved decision>]
+decisions:  [<ledger ID: one-line choice>]
 notes:      <≤500 chars: unresolved tension, scope surprise, or anything the plan phase must know>
 ```
 
@@ -119,8 +122,9 @@ notes:      <≤500 chars: unresolved tension, scope surprise, or anything the p
 <!-- agent-dispatch: id=from-issue-planning role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches the autonomous planning owner.
 
-Writes the implementation plan under `planDir`, committed in the worktree, including its own
-`## Auto-resolved decisions` section. Give it the spec path and the design subagent's `decisions` and
+Writes the implementation plan under `planDir`, committed in the worktree, with a `## Task index`
+carrying each task's risk lane; it cites decision-ledger rows by ID and appends new non-obvious
+plan-level decisions to the spec's ledger. Give it the spec path and the design subagent's `decisions` and
 `notes` — not its transcript. `SKILL.md`'s plan-prose ≠ code-prose rule goes in the prompt.
 
 When Phase 0 declared the issue `mechanical-only`, this dispatch also performs the Phase-5 self-grade
