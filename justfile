@@ -59,7 +59,9 @@ evals skill id:
 agent-workflow-tests:
   python3 -m unittest -v \
     home/common/agent-skills/tests/test_workflow_state.py \
-    home/common/agent-skills/tests/test_workflow_skill_contracts.py
+    home/common/agent-skills/tests/test_workflow_skill_contracts.py \
+    home/common/agent-skills/tests/test_ship_release_contracts.py \
+    tests/test_agent_costs.py
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
 agent-model-matrix:

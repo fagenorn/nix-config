@@ -64,6 +64,11 @@ in
       executable = true;
     };
 
+    ".agents/bin/resolve-bindings" = {
+      source = ./scripts/resolve-bindings;
+      executable = true;
+    };
+
     ".agents/bin/agent-evidence" = {
       source = ./scripts/agent-evidence.py;
       executable = true;
