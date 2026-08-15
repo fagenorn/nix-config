@@ -23,6 +23,13 @@ at a `**CHECKPOINT**`:
    choice without re-deriving it.
 4. **Continue.** Don't post the question. Don't wait.
 
+Auto-resolving a checkpoint never skips `workflow-state progress`: persist the
+gate decision at every phase checkpoint and obey its returned action before the
+next phase starts. If it returns a durable handoff, invoke `handoff` at the
+per-run destination, finalize it through `workflow-state progress`, and stop.
+For every terminal result, call `workflow-state finish` successfully before any
+notification to the dispatcher; persistence always precedes notification.
+
 Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`,
 `ship-issue`) don't know about `--auto`. *You* carry the autonomous-mode context — when one tells you
 to ask or wait, run the self-answer pattern instead.
@@ -36,6 +43,8 @@ about the work itself rather than user-approval gates:
   question, or otherwise not implementable, surface that and stop. Auto-mode means "decide without
   asking", not "implement something incoherent". The same holds for the Phase-0 pre-flight stops
   (open/merged PR, dirty or multiple matching worktrees).
+  When lifecycle identity exists, finalize this terminal result through the
+  SKILL.md terminal return procedure before stopping.
 - **Phase 0 fog gate.** Before any worktree exists, test the grounded issue: can every open question
   be *phrased precisely* and answered from the docs, codebase precedent, or the issue itself with a
   defensible default? Vague-but-phraseable questions are normal `--auto` work — self-answer them.
@@ -65,9 +74,10 @@ config bindings, and each phase's returned report.** Brainstorm and grill conver
 enter this context. Don't ask a subagent to "show its reasoning"; the reasoning belongs in the
 committed artifact.
 
-Both dispatches: `Agent` tool, `subagent_type: general-purpose`, model inherited — design quality is
-worth paying for here. Purely mechanical dispatches elsewhere in the flow use `mechanic`;
-reviewer-shaped dispatches use `reviewer`.
+Both dispatches select the `issue-owner` matrix role on Opus/high explicitly;
+design quality is worth paying for here. Purely mechanical dispatches elsewhere
+in the flow use `mechanic` on Sonnet/medium; reviewer-shaped first passes use
+`reviewer` on Opus/high.
 
 Both prompts must carry, inline (the subagent starts with no context and loads no skills of its own
 beyond the exceptions named below):
@@ -87,6 +97,9 @@ installed, it uses the inline fallback named in the corresponding `SKILL.md` pha
 
 ### Design subagent — Phases 2 + 3
 
+<!-- agent-dispatch: id=from-issue-design-grill role=issue-owner model=opus effort=high -->
+Agent(subagent_type="general-purpose", model="opus", effort="high") launches the autonomous design-and-grill owner.
+
 One dispatch covering brainstorm and grill. It produces the design doc under `specDir`, applies the
 grill's refinements to it, and writes any context-doc updates and ADRs — all committed in the
 worktree. Splitting these into two dispatches would mean re-establishing the whole design in a second
@@ -102,6 +115,9 @@ notes:      <≤500 chars: unresolved tension, scope surprise, or anything the p
 ```
 
 ### Plan subagent — Phase 4 (+ mechanical Phase 5)
+
+<!-- agent-dispatch: id=from-issue-planning role=issue-owner model=opus effort=high -->
+Agent(subagent_type="general-purpose", model="opus", effort="high") launches the autonomous planning owner.
 
 Writes the implementation plan under `planDir`, committed in the worktree, including its own
 `## Auto-resolved decisions` section. Give it the spec path and the design subagent's `decisions` and

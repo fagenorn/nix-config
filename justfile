@@ -55,6 +55,17 @@ update:
 evals skill id:
   ./home/common/agent-skills/evals/run-eval.sh {{skill}} {{id}}
 
+# Verify durable workflow lifecycle and skill contracts without agent/network timing.
+agent-workflow-tests:
+  python3 -m unittest -v \
+    home/common/agent-skills/tests/test_workflow_state.py \
+    home/common/agent-skills/tests/test_workflow_skill_contracts.py
+
+# Validate every explicit pipeline dispatch and print the four-family demo trace.
+agent-model-matrix:
+  python3 home/common/agent-skills/scripts/agent-model-matrix.py validate
+  python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
+
 ## remote nix vm installation
 install IP:
   ssh -o "StrictHostKeyChecking no" nixos@{{IP}} "sudo bash -c '\

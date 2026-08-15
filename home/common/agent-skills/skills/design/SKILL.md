@@ -24,7 +24,12 @@ Ask the whole frontier in one numbered round:
 - The round's answers reshape the tree — settled decisions push the frontier outward. Recompute it and ask the next round.
 - Done when the frontier is empty: every branch visited, nothing silently assumed.
 
-**Facts are your job, never the user's.** When a frontier question needs a fact from the environment — filesystem, tooling, library behavior, prior art in the codebase — dispatch a subagent to find it (`research` when the answer needs cited sources, otherwise a read-only dispatch). Don't block on it: an in-flight lookup is an unsettled prerequisite, so only the questions downstream of it wait; ask the rest of the frontier now. The *decisions* are the user's.
+**Facts are your job, never the user's.** When a frontier question needs a sharply bounded fact from the environment — filesystem, tooling, library behavior, prior art in the codebase — use the read-only explorer below. When the answer needs cited primary sources, invoke `research`; that skill owns its own marked background launch.
+
+<!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=haiku effort=medium -->
+Agent(subagent_type="Explore", model="haiku", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
+
+Don't block on it: an in-flight lookup is an unsettled prerequisite, so only the questions downstream of it wait; ask the rest of the frontier now. The *decisions* are the user's. If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the phase's existing fixed-schema report.
 
 **Ground before round 1.** Invoke `doc-grounded-questions`, or read this phase's `GROUNDING.md` cache when the caller already built one. A question the project's docs already answer is not a question — state the answer, cite it, move on.
 

@@ -200,7 +200,11 @@ otherwise run the full two-axis review:
 commit's combined diff (`git show --cc <merge-commit>` — conflict resolutions and
 scope-creep sweeps) plus any commits made after the head sdd reviewed. Empty →
 record "merge-delta empty, nothing to review" in the PR body and continue to
-Phase 6. Non-empty → dispatch one fresh `reviewer` subagent over exactly that delta
+Phase 6. Non-empty → use this exact fresh first-pass dispatch over only that delta:
+
+<!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") reviews exactly the non-empty merge delta.
+
 (nested dispatch works even inside an `Agent` subagent; if `Agent` isn't in your
 tool surface, `ToolSearch` `select:Agent` first — never inline the review), with
 Phase 1's scope-creep categories (retirement / addition) as its checklist plus the
@@ -209,14 +213,25 @@ project-hints review paragraph when `projectHints` exists (a directory → its
 Blocking / Should-fix / Discussion, ≤400 words, file:line anchors.
 
 **Full two-axis review.** Same machinery and rubrics as sdd's final review, over the
-post-sync range `$BASE_SHA..$HEAD_SHA`: dispatch the native conformance reviewer
-(sdd's `conformance-reviewer-prompt.md`, deployed beside its SKILL.md) in parallel
-with the correctness axis via `codex-collaboration`'s `diff-review` when available,
-else a native reviewer on sdd's `correctness-reviewer-prompt.md`. At ship there is
+post-sync range `$BASE_SHA..$HEAD_SHA`. Launch the native conformance axis with:
+
+<!-- agent-dispatch: id=ship-issue-full-conformance-review role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") performs the full conformance review.
+
+Run it in parallel with the correctness axis via `codex-collaboration`'s
+`diff-review` when available. When that capability is unavailable, use the native
+correctness prompt with this first-pass dispatch:
+
+<!-- agent-dispatch: id=ship-issue-full-correctness-fallback role=reviewer model=opus effort=high -->
+Agent(subagent_type="reviewer", model="opus", effort="high") performs the full correctness fallback review.
+
+The conformance axis uses sdd's `conformance-reviewer-prompt.md`, deployed beside
+its SKILL.md; the native correctness fallback uses
+`correctness-reviewer-prompt.md`. At ship there is
 no sdd ledger or diff package: omit the ledger-triage placeholder and let each
 reviewer fetch the range per its template's fallback. Verdicts ≤400 words each,
 Critical/Important/Minor, never merged. sdd templates unavailable →
-still TWO isolated native `reviewer` subagents, never one combined: one briefed with
+still use the two isolated native dispatches above, never one combined: one briefed with
 a pasted one-paragraph conformance rubric (delivered-vs-promised against
 issue/spec/plan, doc conformance, stale-prose audit, message-format parity), one
 with a pasted one-paragraph correctness rubric (bugs, boundary error handling, dead
@@ -237,6 +252,17 @@ Apply Blocking fixes inline — but `apply` and `push` are separate steps, not o
 3. `git add` the changed files; commit `fix(issue-<num>): address PR review — <short blocker>` (follow `commit.coAuthoredBy`).
 4. `git push`.
 5. Verify the push landed: `gh pr view <pr-num> --json headRefOid` must equal `git rev-parse HEAD`. Diverged → the push didn't take; retry before Phase 6.
+
+For a named finding from the full two-axis path, re-review only that finding and
+the bounded fix diff after step 5; never use this as a first-pass, merge-delta, or
+whole-branch review:
+
+<!-- agent-dispatch: id=ship-issue-scoped-fix-rereview role=reviewer-lite model=sonnet effort=medium -->
+Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-reviews named prior findings against the bounded fix diff.
+
+If the fix changes unrelated behavior or the finding cannot be checked in that
+bounded diff, stop the cheap re-review and return to the appropriate full Opus/high
+axis above.
 
 In `--auto`, apply Should-fix items inline through the same five steps and log each as a PR comment with a one-line rationale. Only Discussion items stay user-facing — surface those with a doc-grounded prompt. Then continue.
 

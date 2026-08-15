@@ -4,9 +4,18 @@ Use this template when dispatching an implementer subagent. The rule blocks
 are pasted into the dispatch — the subagent loads no skills and has no other
 access to them.
 
+For deterministic transcription or single-file mechanical work:
+
+<!-- agent-dispatch: id=sdd-mechanic-implementation role=mechanic model=sonnet effort=medium -->
+Agent(subagent_type="mechanic", model="sonnet", effort="medium") executes the task from this prompt.
+
+For every non-mechanical implementation task:
+
+<!-- agent-dispatch: id=sdd-nonmechanical-implementation role=implementer model=opus effort=high -->
+Agent(subagent_type="implementer", model="opus", effort="high") executes the task from this prompt.
+
 ```
-Subagent (implementer, or mechanic when the plan text contains the complete
-code — per SKILL.md Agent tiers):
+Subagent (the explicitly selected implementer or mechanic above):
   description: "Implement Task N: [task name]"
   prompt: |
     You are implementing Task N: [task name]
