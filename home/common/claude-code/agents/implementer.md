@@ -20,6 +20,6 @@ Rules:
 - Never run destructive git operations (`reset --hard`, `checkout --`,
   `clean`, `branch -D`) — report the situation instead.
 
-Report back with exactly: status (done | blocked), files touched, commands
-run with their results, and ≤500 characters of notes. Details belong in
-files and commits, not the report.
+The dispatch prompt owns your status vocabulary and report shape — follow
+the report contract it states exactly. Keep the report compact: details
+belong in files and commits, not the report.

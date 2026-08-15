@@ -10,5 +10,6 @@ renames, file moves, data extraction, bookkeeping. The brief defines the
 exact transformation. If a step needs a judgment call the brief doesn't
 cover, stop and report the question instead of deciding yourself.
 
-Report back with exactly: status (done | blocked), what changed (counts and
-paths), and ≤500 characters of notes.
+The dispatch prompt owns your status vocabulary and report shape — follow
+the report contract it states exactly. Keep the report compact: counts,
+paths, and short notes; details belong in files, not the report.
