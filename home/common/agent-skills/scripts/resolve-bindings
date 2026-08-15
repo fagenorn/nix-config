@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Print the standard project binding set the workflow skills share.
+
+Reads `.claude/skills.config.json` at the repository root (found by walking up
+from the current directory, or from --repo-root), fills absent keys by
+auto-detection (issue tracker from the origin remote URL), and falls back to the
+shared defaults. Output is deterministic `key=value` lines, one per binding, so
+skills read one small command result instead of re-deriving the set in prose.
+
+No network access; auto-detection uses only local git metadata.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+CONFIG_RELPATH = Path(".claude/skills.config.json")
+
+DEFAULTS = {
+    "specDir": ".claude/specs",
+    "planDir": ".claude/plans",
+    "integrationBranch": "main",
+    "defaultBranch": "main",
+    "branchPattern": "issue-<num>-<slug>",
+    "worktreePrefix": "worktree-",
+    "coAuthoredBy": "true",
+    "unsetGithubToken": "false",
+}
+
+
+def find_repo_root(start: Path) -> Path | None:
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists() or (candidate / CONFIG_RELPATH).is_file():
+            return candidate
+    return None
+
+
+def load_config(root: Path) -> dict:
+    path = root / CONFIG_RELPATH
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"resolve-bindings: cannot read {path}: {error}", file=sys.stderr)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def origin_url(root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def repo_slug(url: str) -> str:
+    match = re.search(r"[:/]([^/:]+/[^/:]+?)(?:\.git)?/?$", url)
+    return match.group(1) if match else ""
+
+
+def detect_tracker(url: str) -> tuple[str, str]:
+    if "github.com" in url:
+        return "github", "gh"
+    if "gitlab" in url:
+        return "gitlab", "glab"
+    return "none", ""
+
+
+def as_bool_str(value: object, default: str) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return default
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo-root", type=Path, help="repository root override")
+    args = parser.parse_args()
+
+    start = (args.repo_root or Path.cwd()).resolve()
+    root = find_repo_root(start)
+    if root is None:
+        root = start
+
+    config = load_config(root)
+    url = origin_url(root)
+
+    tracker = config.get("issueTracker") or {}
+    detected_kind, detected_cli = detect_tracker(url)
+    kind = tracker.get("kind") or detected_kind
+    cli = tracker.get("cli") or ({"github": "gh", "gitlab": "glab"}.get(kind, ""))
+
+    naming = config.get("branchNaming") or {}
+    commit = config.get("commit") or {}
+
+    bindings = {
+        "repoRoot": str(root),
+        "repoSlug": config.get("repoSlug") or repo_slug(url),
+        "trackerKind": kind,
+        "trackerCli": cli,
+        "specDir": config.get("specDir") or DEFAULTS["specDir"],
+        "planDir": config.get("planDir") or DEFAULTS["planDir"],
+        "integrationBranch": config.get("integrationBranch")
+        or DEFAULTS["integrationBranch"],
+        "defaultBranch": config.get("defaultBranch") or DEFAULTS["defaultBranch"],
+        "branchPattern": naming.get("pattern") or DEFAULTS["branchPattern"],
+        "worktreePrefix": naming.get("worktreePrefix") or DEFAULTS["worktreePrefix"],
+        "coAuthoredBy": as_bool_str(
+            commit.get("coAuthoredBy"), DEFAULTS["coAuthoredBy"]
+        ),
+        "unsetGithubToken": as_bool_str(
+            config.get("unsetGithubToken"), DEFAULTS["unsetGithubToken"]
+        ),
+    }
+
+    for key in sorted(bindings):
+        print(f"{key}={bindings[key]}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

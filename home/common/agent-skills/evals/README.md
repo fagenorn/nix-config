@@ -1,12 +1,16 @@
 # Skill evals
 
-Measurement harness for the skills in `../skills/`. Each skill keeps its cases in
-`../skills/<skill>/evals/evals.json`; everything here is the shared machinery.
+Measurement harness for the skills in `../skills/` (shared tree) and
+`../../claude-code/skills/` (Claude-only tree — `codex-collaboration`,
+`orchestrate-issues`). Each skill keeps its cases in
+`<skill-root>/<skill>/evals/evals.json`; everything here is the shared machinery.
+The runner searches the shared tree first, then the Claude-only tree.
 
 ```sh
 just evals from-issue 3      # pipeline eval: sandbox, run, grade, verdict
 just evals ship-issue 1      # plan-only eval: prints prompt + expected output
 EVAL_MODEL=opus just evals from-issue 1
+EVAL_TRIALS=5 just evals from-issue 1   # repeat 5x: pass rate + p50/p90 wall time
 ```
 
 ## Two kinds of eval
@@ -48,6 +52,26 @@ order of magnitude more and is reserved for risky landings.
   fog. The wayfind evals work it; every other eval must leave it untouched. Verify the fixture
   with `python3 -m unittest discover` from its root.
 - Env: `EVAL_MODEL` (default `sonnet`), `EVAL_TIMEOUT` seconds (default 2700),
-  `EVAL_MAX_USD` (optional ceiling).
+  `EVAL_MAX_USD` (optional ceiling), `EVAL_TRIALS` (default 1).
 - Sandboxes are kept after the run and their path is printed, so you can inspect the spec
   and plan a failing assert complained about. Clean up with `rm -rf $TMPDIR/eval-*`.
+- Asserts may carry a `"contract": "..."` key documenting a target artifact contract
+  (e.g. the compact decision-ledger row shape) the assert depends on; the runner ignores
+  it, integration re-verifies it when the contract lands.
+
+## Results persistence
+
+Every run appends one JSON line per trial to `results/results.jsonl` (gitignored):
+timestamp, skill, eval id/name, mode, model, trial number, verdict, per-assert
+pass/fail, wall seconds, claude exit code, sandbox path, and the `EVAL_MAX_USD`
+ceiling when one was set (the harness has no per-run actual-cost source — `claude -p
+--output-format text` does not report spend, so only the ceiling is recorded).
+Plan-only runs record a `PRINTED` verdict. With `EVAL_TRIALS=N` (N>1) the runner
+reruns the eval in a fresh sandbox per trial and prints a summary — pass rate and
+nearest-rank p50/p90 wall time — so repeatability comparisons (before/after a skill
+edit) are one `jq` away:
+
+```sh
+jq -r 'select(.skill=="from-issue" and .id==1) | [.ts,.verdict,.wall_s] | @tsv' \
+  results/results.jsonl
+```

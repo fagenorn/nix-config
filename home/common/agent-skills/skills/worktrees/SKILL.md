@@ -34,7 +34,7 @@ True → you are already in a linked worktree; report the path and branch and st
 
 The caller's `branchNaming.pattern` (default `issue-<num>-<slug>`) names the branch. **`EnterWorktree` prepends `branchNaming.worktreePrefix`** (default `worktree-`), so the on-disk branch is `<worktreePrefix><pattern>`. Both forms are accepted by everything downstream — pre-flight searches, PR lookups, cleanup — so never strip the prefix to "correct" it, and never assume its absence.
 
-No native worktree tool: `git worktree add -b <branch> <path> origin/<integration-branch>`. Base on the remote ref, not the local branch, which may carry another agent's in-flight commits. Put worktrees in `.worktrees/` at the repo root and confirm it is ignored (`git check-ignore -q .worktrees`) before creating anything inside it. If creation fails on a sandbox permission error, say so and work in place.
+No native worktree tool: `git worktree add -b <branch> <path> origin/<integration-branch>`. Base on the remote ref, not the local branch, which may carry another agent's in-flight commits. Put worktrees in `.worktrees/` at the repo root and confirm it is ignored (`git check-ignore -q .worktrees`) before creating anything inside it. If creation fails — sandbox permission error or anything else — **never silently work in place**: isolation was the caller's requirement, and in-place work puts commits on a branch the caller promised not to touch. Report blocked with the exact failure and ask for direction; the caller decides between fixing permissions, another location, or explicitly authorizing in-place work.
 
 ## refs/stash is shared
 

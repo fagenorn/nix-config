@@ -23,22 +23,35 @@ release ownership across cheaper transport or mechanic agents.
 
 Read `.claude/skills.config.json` at the project root. Auto-detect absent keys: tracker = `gh` for a github.com remote (else `glab`/none); branches from the repo default. Remaining defaults: `integrationBranch=main`, `defaultBranch=main`, `commit.coAuthoredBy=true`, `unsetGithubToken=false`, `deploy.adapter=none`. Degrade gracefully — never read a configured doc/hints path that doesn't exist, never hard-fail on a missing optional binding.
 
-`<integration>` means the resolved `integrationBranch`, `<default>` the resolved `defaultBranch`. When they're identical (the common single-branch repo) there is no PR to open: confirm the working tree is at the tip you intend to release, then skip straight to Phase 4.5. The two-branch flow below is the general case.
+`<integration>` means the resolved `integrationBranch`, `<default>` the resolved `defaultBranch`. When they're identical (the common single-branch repo) there is no PR to open: run Phases 0 **and** 1 — the pre-flight and the changelog body / bump evidence are still required — then skip Phases 2–4 and continue at Phase 4.5. The release ref is the confirmed tip of `<default>`. The two-branch flow below is the general case.
 
 Derive `repoSlug` once from `git remote get-url origin` when config doesn't set it (strip the `git@github.com:` / `https://github.com/` prefix and trailing `.git`), and reuse it for every PR/commit/release URL. **Never hardcode an owner/name.**
 
-When `issueTracker.kind == "none"` there is no forge: merge `<integration>` into `<default>` locally with a true merge commit (`git merge --no-ff`), tag it, skip the PR / CI-wait / GitHub-Release steps, and report the merge SHA + tag.
+When `issueTracker.kind == "none"` there is no forge: run Phases 0–1, then replace Phases 2–4 with a local true merge (`git checkout <default> && git merge --no-ff <integration>`), tag the **local merge result** — `git rev-parse <default>` *after* the merge, never `origin/<default>`, which is still the stale pre-merge tip — skip the PR / CI-wait / GitHub-Release steps, and report the merge SHA + tag.
+
+## Durable release state
+
+A release must survive a crash between any two phases — after Phase 4 the merge exists whether or not this session lives to tag it. Keep a skill-owned state file at `.superpowers/workflows/ship-release/state.json` (ensure `.superpowers/workflows/.gitignore` exists and contains `*`; create both if missing):
+
+```json
+{"headSha": "<origin/<integration> tip being released>", "pr": null, "prUrl": null,
+ "mergeSha": null, "tag": null, "releaseUrl": null, "deployState": "pending"}
+```
+
+Write it atomically (temp file in the same dir, then `mv`) at every transition: Phase 0 (`headSha`), Phase 2 (`pr`, `prUrl`), Phase 4 or the local merge (`mergeSha`), Phase 4.5 (`tag`, then `releaseUrl`), Phase 5 (`deployState`: `watching` → `done`; `none` when no adapter). Phase 0 reads it **first** and re-enters at the first null field. Phase 6 deletes it after the report — a present file always means an unfinished release.
 
 ## The flow
 
 ```
-0. Pre-flight    → default checkout (not a worktree), tree clean, <integration> ahead of <default>,
-                   no open release PR, <integration> CI green, local/origin <integration> in sync
+0. Pre-flight    → resume check (durable state, then latest MERGED base→head PR), default checkout
+                   (not a worktree), tree clean, <integration> ahead of <default>, no open release PR,
+                   <integration> CI green, local/origin <integration> in sync
 1. Changelog     → mine merges since last release; assemble the categorised PR body per CHANGELOG.md
 2. Open PR       → nothing to push; gh pr create --base <default> --head <integration>
 3. Wait for CI   → one blocking gh pr checks --watch call (no wakeup loop, no improvised polling)
 4. Merge         → gh pr merge --merge (NO --delete-branch — the integration branch is permanent)
-4.5. Tag+Release → semver bump from the CHANGELOG.md categories; tag the merge commit; gh release create
+4.5. Tag+Release → resolve MERGE_SHA, skip-check for an existing release, THEN semver bump from the
+                   CHANGELOG.md categories; tag the merge commit; gh release create
 5. Watch deploy  → only when deploy.adapter != none: poll per service until the running commit is the
                    merge SHA at a terminal SUCCESS status
 6. Report        → PR URL, merge SHA, version tag + release URL, per-service deployment IDs + statuses
@@ -63,13 +76,17 @@ Before forming any user-facing question, invoke `doc-grounded-questions` (if una
 
 ## Phase 0 — Pre-flight
 
+0. **Resume check — before any "nothing to release" verdict.** `git fetch origin --prune --tags`, then:
+   - **Durable state.** Read `.superpowers/workflows/ship-release/state.json` if present. `mergeSha` set but no `tag` → set `MERGE_SHA` from it and jump to Phase 4.5. `tag` set but no `releaseUrl` (forge case) → resume at 4.5f. Released but `deployState` not terminal and `deploy.adapter != none` → jump to Phase 5. A record whose `headSha` matches neither `origin/<integration>` nor a resumable `mergeSha` is stale → surface it, then continue fresh.
+   - **Merged-PR lookup.** No usable state: `${GH_PREFIX}gh pr list --base <default> --head <integration> --state merged --limit 1 --json number,url,mergeCommit,mergedAt`. If the newest merged release PR's `mergeCommit.oid` carries no `v*` tag (`git tag --points-at <oid> 'v[0-9]*'` empty) and its head was the current `origin/<integration>` tip, a prior session crashed after Phase 4: set `MERGE_SHA=<oid>` and resume at Phase 4.5. (kind == none: the same check is `git tag --points-at $(git rev-parse <default>) 'v[0-9]*'` on the local merge result.)
+
+   This step is first because a merged-but-untagged release makes step 3 read "zero merges → nothing to release", silently losing the tag + Release. When neither resume path applies, record `headSha` in a fresh state file and continue.
 1. **Default checkout, not a worktree.** `git rev-parse --git-common-dir` should be `.git` (or end in `.git`); a path like `<repo>/.git/worktrees/<name>` means the user is in a feature worktree. A release is repo-wide — switch to the main checkout (`cd $(git -C "$(git rev-parse --git-common-dir)/.." rev-parse --show-toplevel)`) or surface.
 2. **Working tree clean.** `git status --porcelain` empty. Uncommitted changes are not part of the release — surface, don't auto-stash.
-3. **Fetch.** `git fetch origin --prune`.
-4. **`<integration>` is ahead of `<default>`.** `git log origin/<default>..origin/<integration> --first-parent --merges --pretty=oneline | wc -l` non-zero. Zero → nothing to release; report and stop, don't open an empty PR. (Single-branch case: check `git log $(git describe --tags --abbrev=0 2>/dev/null || echo origin/<default>)..origin/<default>` is non-empty.)
-5. **No existing open release PR.** `${GH_PREFIX}gh pr list --base <default> --head <integration> --state open --json number,url,headRefOid`. If one exists and its `headRefOid` matches `origin/<integration>`, a prior session crashed mid-flow — skip Phases 1–2 and resume at Phase 3 or 4 depending on CI state. If its head is stale, surface; don't silently force-update a PR another session/operator opened.
-6. **CI on `origin/<integration>` is green.** `${GH_PREFIX}gh run list --branch <integration> --limit 5 --json conclusion,status,name,databaseId,headSha`; every run whose `headSha` equals `origin/<integration>` should be `conclusion: success`. Anything `cancelled`, `failure`, or still pending → surface. Common cause: a `ship-issue` merge whose post-merge CI hasn't settled or got cancelled. Either wait it out (`gh run rerun --failed`) or hold the release — don't cut from a tip whose own CI didn't pass.
-7. **Local `<integration>` in sync with origin.** Compare `git rev-parse <integration>` against `git rev-parse origin/<integration>`:
+3. **`<integration>` is ahead of `<default>`.** `git log origin/<default>..origin/<integration> --first-parent --merges --pretty=oneline | wc -l` non-zero. Zero → nothing to release; report and stop, don't open an empty PR. (Single-branch case: `PREV=$(git describe --tags --abbrev=0 origin/<default> 2>/dev/null || true)` — the `|| true` keeps a no-tags repo (first release) alive under `set -e`, and the explicit ref matters because bare `git describe` reads whatever HEAD the user parked on — then check `git log ${PREV:+$PREV..}origin/<default> --oneline` is non-empty.)
+4. **No existing open release PR.** `${GH_PREFIX}gh pr list --base <default> --head <integration> --state open --json number,url,headRefOid`. If one exists and its `headRefOid` matches `origin/<integration>`, a prior session crashed mid-flow — skip Phases 1–2 and resume at Phase 3 or 4 depending on CI state. If its head is stale, surface; don't silently force-update a PR another session/operator opened.
+5. **CI on `origin/<integration>` is green.** `${GH_PREFIX}gh run list --branch <integration> --limit 5 --json conclusion,status,name,databaseId,headSha`; every run whose `headSha` equals `origin/<integration>` should be `conclusion: success`. Anything `cancelled`, `failure`, or still pending → surface. Common cause: a `ship-issue` merge whose post-merge CI hasn't settled or got cancelled. Either wait it out (`gh run rerun --failed`) or hold the release — don't cut from a tip whose own CI didn't pass.
+6. **Local `<integration>` in sync with origin.** Compare `git rev-parse <integration>` against `git rev-parse origin/<integration>`:
    - Equal, or no local branch at all → continue (this skill reads `origin/<integration>`).
    - **Local ahead** → unpushed commits on the integration line. Almost always wrong: commits get there via PR merges. Surface with `git log --oneline --left-right LOCAL...REMOTE | head -20` and ask whether they belong in this release. Don't auto-resolve — push and reset are destructive in opposite directions.
    - **Local behind** → stale local branch. Offer `git checkout <integration> && git merge --ff-only origin/<integration>` and proceed; the skill doesn't need it but the user will for follow-up work.
@@ -105,7 +122,7 @@ EOF
 
 Title pattern: `merge: <integration> — <two or three comma-separated themes>`, under 70 chars, same shape as the eventual merge subject *minus* the `(<integration> → <default>)` suffix (added back at merge time via `--subject`). A user-supplied scope-hint argument seeds it — refine after reading the merges, but keep the user's intent.
 
-Capture the PR number and URL; you need them through Phase 5.
+Capture the PR number and URL; you need them through Phase 5. Persist `pr` + `prUrl` to the durable state file now.
 
 ## Phase 3 — Wait for CI
 
@@ -146,33 +163,59 @@ ${GH_PREFIX}gh pr merge <pr-num> --merge \
 
 `--subject` is mandatory whenever the forge default ("Merge pull request #N from owner/<integration>") doesn't match the repo convention. Mirror the PR title with `(<integration> → <default>)` appended.
 
-Verify: `${GH_PREFIX}gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid`. Capture that oid as `MERGE_SHA`.
+Verify: `${GH_PREFIX}gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid`. Capture that oid as `MERGE_SHA` and persist `mergeSha` to the durable state file **before doing anything else** — a crash here otherwise strands a merged, untagged release.
 
 Then `git fetch origin` to refresh local refs. Don't `git push origin <default>` or `git checkout <default> && git merge` — the remote is the source of truth, and local-default divergence has bitten parallel sessions.
 
 ## Phase 4.5 — Tag + GitHub Release
 
-Every release gets a semver tag and a GitHub Release. No flag, no opt-out: the tag is the stable anchor an operator references ("we shipped v1.4.0 last Tuesday"), the Release is the discoverable artefact with the PR body as notes. (When `issueTracker.kind == "none"`, create the local annotated tag only and skip 4.5d–4.5e.)
+Every release gets a semver tag and a GitHub Release. No flag, no opt-out: the tag is the stable anchor an operator references ("we shipped v1.4.0 last Tuesday"), the Release is the discoverable artefact with the PR body as notes. (When `issueTracker.kind == "none"`, create the local annotated tag only and skip 4.5f–4.5g.)
 
-The bump is grounded in the categorisation `CHANGELOG.md` already produced — read [its "Version bump signals"](./CHANGELOG.md#version-bump-signals) before computing, and don't re-litigate the categorisation here.
+The bump is grounded in the categorisation `CHANGELOG.md` already produced — the semver rubric lives **only** in [its "Version bump signals"](./CHANGELOG.md#version-bump-signals); read it before computing, don't re-derive it here, and don't re-litigate the categorisation.
 
-### 4.5a. Find the previous release tag
+### 4.5a. Resolve the merge SHA
+
+Run exactly ONE of these — they are alternatives, not a sequence.
+
+PR path (a release PR was merged):
 
 ```bash
-PREV_TAG=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)
+MERGE_SHA=$(${GH_PREFIX}gh pr view <pr-num> --json mergeCommit -q .mergeCommit.oid)
 ```
 
-Non-empty → regular case, bump per 4.5b. No `v*` tags (or only non-semver checkpoint tags) → bootstrap: surface the existing tags and propose **v0.1.0** ("pre-1.0; the MAJOR-bump decision is deferred until the platform is declared 1.0-stable. Override?"). Never silently jump to `v1.0.0` — 0.x → 1.0 is a product statement, not a mechanical one.
+The no-PR paths (single-branch and/or kind == none) resolve it AFTER any local merge:
 
-### 4.5b. Decide MAJOR / MINOR / PATCH
+```bash
+MERGE_SHA=$(git rev-parse <default>)
+```
 
-Apply in order, stopping at the first match:
+On the no-PR paths the target is the **local** `<default>` — `origin/<default>` is the stale pre-merge tip whenever Phase 2–4 was a local merge that nothing pushed, and tagging it silently releases the wrong commit.
 
-1. **MAJOR** — an entry in `## Deploy notes` requires *operator action to upgrade* and is *not backward-compatible*: an env var the app refuses to start without; a migration dropping a column/table with no client-side shim; an endpoint-shape or auth change with no compat path; an ADR flagged breaking.
-2. **MINOR** — an entry in `## Highlights` or `## Features` (a new operator-visible capability).
-3. **PATCH** — only `## Improvements`, `## Fixes`, `## Internal`, or non-breaking `## Deploy notes` (additive env vars with defaults, additive migrations, telemetry-only changes).
+### 4.5b. Skip condition — before creating anything
 
-**Pre-1.0 caveat.** While `PREV_TAG` is `0.x.y`, everything shifts down one slot: what would be MAJOR becomes MINOR (`0.MINOR.0` → `0.MINOR+1.0`); MINOR and PATCH map to themselves. Per the [semver §4 unstable-release convention](https://semver.org/#spec-item-4).
+The only legitimate skip: this merge commit was already tagged + released (a prior crashed session, or a manual recovery). Check **before** 4.5e/4.5f so a re-entry can't double-tag:
+
+```bash
+# with a remote, fetch tags first so a tag pushed by a crashed session is visible
+git remote get-url origin >/dev/null 2>&1 && git fetch --tags --quiet origin
+EXISTING=$(git tag --points-at "$MERGE_SHA" 'v[0-9]*')
+```
+
+The check is tag-based on both paths: `gh release list`'s `targetCommitish` holds a **branch name**, not the merge SHA, for releases created against a pushed tag, so filtering it by `$MERGE_SHA` fails open and re-tags an already-released merge on re-entry.
+
+Non-empty → ask "Release `$EXISTING` already exists for merge $MERGE_SHA. Skip tag + create?" Default: skip — record `tag`/`releaseUrl` in the state file and go to Phase 5. Don't double-tag. A tag that exists but has no Release (forge case: `${GH_PREFIX}gh release view "$EXISTING"` fails) → resume at 4.5f only.
+
+### 4.5c. Find the previous release tag
+
+```bash
+PREV_TAG=$(git tag --list 'v[0-9]*' --merged "$MERGE_SHA" --sort=-v:refname | head -1)
+```
+
+`--merged "$MERGE_SHA"` restricts the search to tags reachable from the commit being released — a repo-wide `--sort` happily returns a higher tag from an unmerged experiment branch, which yields a wrong `PREV_TAG` and a wrong next version. Non-empty → regular case, bump per 4.5d. No `v*` tags (or only non-semver checkpoint tags) → bootstrap: surface the existing tags and propose **v0.1.0** ("pre-1.0; the MAJOR-bump decision is deferred until the platform is declared 1.0-stable. Override?"). Never silently jump to `v1.0.0` — 0.x → 1.0 is a product statement, not a mechanical one.
+
+### 4.5d. Decide MAJOR / MINOR / PATCH
+
+Apply the "Version bump signals" table in `CHANGELOG.md` (including its pre-1.0 caveat and ambiguity calls) to the buckets Phase 1 produced, top-down, stopping at the first match.
 
 Surface the proposal *with its evidence*, not just the verdict:
 
@@ -189,20 +232,18 @@ Override? (M/m/p — uppercase for major, lowercase for minor/patch; or a litera
 
 One round only: if the user confirms or doesn't respond, proceed. In `--auto`, proceed without prompting — the categorisation is deterministic and a wrong tag is one re-tag away.
 
-### 4.5c. Tag the merge commit
+### 4.5e. Tag the merge commit
 
 ```bash
-NEXT_VERSION=v1.4.0   # from 4.5b
-MERGE_SHA=$(${GH_PREFIX}gh pr view <pr-num> --json mergeCommit -q .mergeCommit.oid)
-# single-branch / kind=none case: MERGE_SHA=$(git rev-parse origin/<default>)
+NEXT_VERSION=v1.4.0   # from 4.5d
 
 git tag -a "$NEXT_VERSION" "$MERGE_SHA" -m "release: $NEXT_VERSION — <one-line scope from PR title>"
-${GH_PREFIX}git push origin "$NEXT_VERSION"
+${GH_PREFIX}git push origin "$NEXT_VERSION"   # skip the push when kind == none
 ```
 
-Annotated (`-a`), not lightweight — `git describe` and `gh release` expect the message/author/date. Pass `MERGE_SHA` explicitly rather than relying on `HEAD`: Phase 4 deliberately left the local checkout alone, so `HEAD` is whatever branch the user was on.
+Annotated (`-a`), not lightweight — `git describe` and `gh release` expect the message/author/date. Pass `MERGE_SHA` explicitly rather than relying on `HEAD`: Phase 4 deliberately left the local checkout alone, so `HEAD` is whatever branch the user was on. Persist `tag` to the state file as soon as `git tag` succeeds.
 
-### 4.5d. Create the GitHub Release
+### 4.5f. Create the GitHub Release
 
 ```bash
 PR_BODY=$(${GH_PREFIX}gh pr view <pr-num> --json body -q .body)
@@ -218,32 +259,21 @@ rm /tmp/release-notes-$NEXT_VERSION.md
 
 `--notes-file`, never inline `--notes`: the body carries code fences, backticks, and quoted JSON that shells mangle. (In the single-branch case with no PR, write the Phase 1 body straight to the file.) Skip `--prerelease` — `v0.x.y` is pre-1.0 by the spec but not a GitHub prerelease (alpha/beta/rc). Skip `--draft` — this skill ships.
 
-### 4.5e. Verify
+### 4.5g. Verify
 
 ```bash
 ${GH_PREFIX}gh release view "$NEXT_VERSION" --json url,tagName,createdAt,isLatest -q .
 ```
 
-`tagName == "$NEXT_VERSION"` and `isLatest == true`. Capture `.url` for Phase 6.
+`tagName == "$NEXT_VERSION"` and `isLatest == true`. Capture `.url` for Phase 6 and persist `releaseUrl` to the state file.
 
 If `gh release create` fails, the usual causes are a rejected tag push (branch/tag protection) or a token without `contents: write`. Surface the actual error; don't silently continue to Phase 5. It's recoverable — but only if the user knows it happened.
 
-### 4.5f. Skip condition
-
-The only legitimate skip: the user already manually tagged + released this merge commit during a recovery.
-
-```bash
-EXISTING=$(${GH_PREFIX}gh release list --limit 5 --json tagName,targetCommitish -q \
-  ".[] | select(.targetCommitish == \"$MERGE_SHA\") | .tagName")
-```
-
-Non-empty → ask "Release `$EXISTING` already exists for merge $MERGE_SHA. Skip tag + create?" Default: skip. Don't double-tag.
-
 ## Phase 5 — Watch deploy
 
-**Skip this entire phase when `deploy.adapter == none`** (the default): Phase 4.5 already tagged and published, so go to Phase 6 and report "merged + tagged; no deploy adapter configured". Do not invent a deploy step the project doesn't have.
+**Skip this entire phase when `deploy.adapter == none`** (the default): Phase 4.5 already tagged and published, so set `deployState: none` in the state file, go to Phase 6 and report "merged + tagged; no deploy adapter configured". Do not invent a deploy step the project doesn't have.
 
-Otherwise this phase enforces the load-bearing invariant of the whole skill:
+Otherwise set `deployState: watching` on entry (`done` when every watched service verifies) — this phase enforces the load-bearing invariant of the whole skill:
 
 > **Verify the production service is actually running the merge SHA at a SUCCESS status. A health-200 is never proof.** A platform can report a deploy `FAILED` and silently keep serving an older build; a health probe against that older build still returns 200. Match the *running commit* to `MERGE_SHA` **and** require a terminal SUCCESS status before declaring the release live.
 
@@ -285,7 +315,7 @@ For any other adapter, follow the same 5a–5c shape using the verbs in `deploy.
 
 ### 5e. Wakeup prompt
 
-Wake with `prompt: "/ship-release <pr-num>"` (or whatever the user originally invoked) — nothing longer. Re-entering at the top replays Phases 0–4 idempotently; the handler should notice "PR merged, services pending" and jump to Phase 5.
+Wake with `prompt: "/ship-release <pr-num>"` (or whatever the user originally invoked) — nothing longer. Re-entering at the top hits the Phase 0 resume check, which reads the durable state ("released, `deployState: watching`") and jumps straight back here.
 
 ## Phase 6 — Report
 
@@ -307,11 +337,11 @@ Deploy (adapter: <adapter>, env: <env>):
 Next: monitor the service health probe and the platform dashboards for the next ~15 min.
 ```
 
-That last line is a reminder, not a phase. Don't keep polling after the report unless asked.
+That last line is a reminder, not a phase. Don't keep polling after the report unless asked. Delete `.superpowers/workflows/ship-release/state.json` after the report — a present file always means an unfinished release.
 
 ## Notes
 
-- **Standing release-publishing authorization.** Invoking this skill authorises `git tag -a`, `git push origin v*`, and `gh release create`. The proposed bump in 4.5b is the one confirmation round. Standing *local-commit* authorization does not extend to pushing `<default>`, `<integration>`, or any tag — those are the explicit Phase 4 / 4.5 operations covered here.
+- **Standing release-publishing authorization.** Invoking this skill authorises `git tag -a`, `git push origin v*`, and `gh release create`. The proposed bump in 4.5d is the one confirmation round. Standing *local-commit* authorization does not extend to pushing `<default>`, `<integration>`, or any tag — those are the explicit Phase 4 / 4.5 operations covered here.
 - **The `Co-Authored-By` trailer follows `commit.coAuthoredBy`** (default: include). Rarely relevant — the only artefacts this skill produces are the forge's merge commit and the annotated tag.
 - **A failed release's tag stays.** If Phase 5 surfaces that the merge shipped something broken, the fix is a hotfix `ship-issue` on the integration branch then a new PATCH release — not a force-redeploy of old code. The tag is a permanent record that v1.4.0 was attempted; v1.4.1 supersedes it. Don't delete tags.
 - **Invoked standalone with no argument**: infer scope from the merges in Phase 1 — the synthesised summary *is* the scope hint.

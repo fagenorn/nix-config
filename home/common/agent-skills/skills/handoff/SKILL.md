@@ -9,6 +9,10 @@ Write a handoff document summarising the current conversation so a fresh agent c
 By default, save it to a temp file whose name you generate portably — e.g.
 `mktemp "${TMPDIR:-/tmp}/handoff-XXXXXX.md"` (the explicit `XXXXXX` template
 works on both macOS/BSD and Linux). This remains the default for interactive use.
+`mktemp` creates the (empty) file as it generates the name: write the document
+straight into it and report the path — do not read the just-created empty file
+back first. The verify-and-replace protocol below exists for caller-provided
+durable destinations only, never for this default.
 
 A caller-provided destination with the current `run_id` is accepted only under
 that run's `.superpowers/workflows/<run-id>/handoffs/` directory. Require
@@ -17,7 +21,8 @@ no-follow directory opens. Reject every path escape, symlink component, or
 non-directory parent. Inspect the destination leaf without following it; reject
 an existing symlink or non-regular file, but allow a missing destination.
 
-Write and fsync a sibling temporary regular file without following any leaf.
+For that caller-provided destination: write and fsync a sibling temporary
+regular file without following any leaf.
 When the destination is missing, install it with an exclusive atomic operation
 (for example, hard-link the temporary file to the destination) that will fail if
 the leaf appeared concurrently; never overwrite that race. The missing

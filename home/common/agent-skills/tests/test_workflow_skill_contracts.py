@@ -12,7 +12,19 @@ HANDOFF = REPO_ROOT / "home/common/agent-skills/skills/handoff/SKILL.md"
 COLLABORATION = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md"
 )
+CERTIFICATION = (
+    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/CERTIFICATION.md"
+)
 RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
+WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
+SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
+FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
+
+
+def nested_workflow_documents():
+    for directory in (FROM_ISSUE_DIR, SDD_DIR):
+        for path in sorted(directory.glob("*.md")):
+            yield path, path.read_text(encoding="utf-8")
 
 
 class WorkflowSkillContractsTest(unittest.TestCase):
@@ -23,7 +35,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.auto = AUTO.read_text(encoding="utf-8")
         cls.handoff = HANDOFF.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
+        cls.certification = CERTIFICATION.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
+        cls.worktrees = WORKTREES.read_text(encoding="utf-8")
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -97,6 +111,81 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("refuses a third fresh attempt", retry_section)
         self.assertIn("retains the worktree", self.orchestrate)
         self.assertIn("not automatically relaunch", self.orchestrate)
+
+    def test_dispatcher_resumes_recorded_attempt_before_fresh_launch(self):
+        retry_section = self.section(
+            self.orchestrate, "## 5. Failure policy", "## 6. Final report"
+        )
+        self.assert_ordered(
+            retry_section,
+            "workflow-state reconcile",
+            "resume before fresh",
+            "--resume-handoff",
+            "same owner, same worktree",
+            "resume is impossible",
+            "fresh owner/worktree",
+        )
+
+    def test_dispatcher_deadline_has_one_bounded_wake_path(self):
+        self.assert_ordered(
+            self.orchestrate,
+            "Deadline wake path",
+            "exactly one",
+            "deadline observer",
+            "workflow-state reconcile",
+        )
+        self.assertIn("never a poll loop", self.orchestrate)
+        self.assertIn("never repeated short sleeps", self.orchestrate)
+
+    def test_background_dispatch_flag_appears_only_in_orchestrate_issues(self):
+        self.assertIn("run_in_background=true", self.orchestrate)
+        for path, text in nested_workflow_documents():
+            with self.subTest(path=str(path)):
+                self.assertNotIn("run_in_background", text)
+
+    def test_nested_dispatches_stay_unnamed_and_foreground(self):
+        for path, text in nested_workflow_documents():
+            for line_number, line in enumerate(text.splitlines(), 1):
+                if "Agent(" not in line:
+                    continue
+                with self.subTest(path=f"{path}:{line_number}"):
+                    self.assertNotIn("name=", line)
+                    self.assertNotIn("run_in_background", line)
+
+    def test_sdd_resume_by_identity_instruction_exists(self):
+        sdd_root = (SDD_DIR / "SKILL.md").read_text(encoding="utf-8")
+        fix_loop = (SDD_DIR / "fix-loop.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "Record the implementer's agent identity — fix rounds 1–3 resume it",
+            sdd_root,
+        )
+        self.assertIn("resume the original implementer", fix_loop)
+
+    def test_preflight_worktree_deletion_requires_proof_of_disposability(self):
+        self.assertNotIn("one, clean → remove it", self.from_issue)
+        phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
+        self.assert_ordered(
+            phase_zero,
+            "inspect before touching",
+            "unpushed commits",
+            "workflow-state ledger",
+            "spec/plan artifacts",
+            "resume that worktree",
+            "provably disposable",
+        )
+        self.assertIn("prefer resume", phase_zero)
+        self.assertIn("stop as blocked", phase_zero)
+        self.assertIn("never delete on ambiguity", self.auto)
+
+    def test_worktrees_isolation_failure_reports_blocked_not_in_place(self):
+        self.assertNotIn("say so and work in place", self.worktrees)
+        self.assertIn("never silently work in place", self.worktrees)
+        self.assert_ordered(
+            self.worktrees,
+            "creation fails",
+            "Report blocked",
+            "ask for direction",
+        )
 
     def test_owner_persists_exact_terminal_result_before_return(self):
         owner_return_section = self.section(
@@ -209,13 +298,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("Do not duplicate lifecycle JSON", self.handoff)
 
     def test_collaboration_requires_fresh_validated_bridge_evidence(self):
-        evidence = " ".join(
-            self.section(
-                self.collaboration,
-                "## Live bridge certification evidence",
-                "## Validate and fall back",
-            ).split()
-        )
+        # The certification block lives in CERTIFICATION.md, referenced from
+        # SKILL.md's Launch section.
+        self.assertIn("CERTIFICATION.md", self.collaboration)
+        evidence = " ".join(self.certification.split())
         for fragment in (
             "`schema_version`",
             "`bridge-smoke`",

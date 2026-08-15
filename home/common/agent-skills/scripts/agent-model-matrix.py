@@ -26,14 +26,17 @@ DISPATCH_FIELDS = {
     "requires",
 }
 EVENT_FIELDS = {"workflow", "dispatch", "role", "model", "effort", "requires"}
-REVIEWER_LITE_REQUIREMENTS = {"named-prior-findings", "bounded-fix-diff"}
+REVIEWER_LITE_REREVIEW_REQUIREMENTS = {"named-prior-findings", "bounded-fix-diff"}
+REVIEWER_LITE_LANE_REQUIREMENTS = {"risk-lane-mechanical-or-low", "bounded-task-diff"}
 EXPECTED_ROLE_TIERS = {
     "issue-owner": ("opus", "high"),
     "ship-owner": ("opus", "high"),
     "implementer": ("opus", "high"),
     "reviewer": ("opus", "high"),
+    "conformance-reviewer": ("sonnet", "high"),
     "reviewer-lite": ("sonnet", "medium"),
-    "mechanic": ("sonnet", "medium"),
+    "mechanic": ("sonnet", "high"),
+    "bookkeeper": ("haiku", "low"),
     "explorer": ("haiku", "medium"),
     "researcher": ("sonnet", "medium"),
     "codex-transport": ("sonnet", "medium"),
@@ -43,8 +46,10 @@ ALLOWED_SUBAGENT_TYPES = {
     "ship-owner": {"general-purpose"},
     "implementer": {"implementer"},
     "reviewer": {"reviewer"},
+    "conformance-reviewer": {"reviewer"},
     "reviewer-lite": {"reviewer-lite"},
     "mechanic": {"mechanic"},
+    "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
     "codex-transport": {"codex:rescue", "codex:codex-reviewer"},
@@ -158,10 +163,17 @@ def _validate_selection(
     requirement_errors = _string_list(requirements, f"{label}.requires")
     errors.extend(requirement_errors)
     if role == "reviewer-lite" and not requirement_errors:
-        missing = REVIEWER_LITE_REQUIREMENTS - set(requirements)
-        if missing:
+        supplied = set(requirements)
+        if not (
+            REVIEWER_LITE_REREVIEW_REQUIREMENTS <= supplied
+            or REVIEWER_LITE_LANE_REQUIREMENTS <= supplied
+        ):
             errors.append(
-                f"{label}: reviewer-lite requires " + ", ".join(sorted(missing))
+                f"{label}: reviewer-lite requires "
+                + ", ".join(sorted(REVIEWER_LITE_REREVIEW_REQUIREMENTS))
+                + " (scoped re-review) or "
+                + ", ".join(sorted(REVIEWER_LITE_LANE_REQUIREMENTS))
+                + " (mechanical/low-risk lane verification)"
             )
     return errors
 
@@ -400,15 +412,38 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
                         f"{event_label}: selection must match dispatch {dispatch!r}"
                     )
             errors.extend(_validate_selection(event, event_label, roles))
-            if event.get("role") == "reviewer-lite" and isinstance(workflow, str):
+            if (
+                event.get("role") == "reviewer-lite"
+                and isinstance(workflow, str)
+                and isinstance(event.get("requires"), list)
+                and "named-prior-findings" in event["requires"]
+            ):
+                # An axis-named re-verdict (…-conformance-… / …-correctness-…)
+                # must trace to a first pass on the SAME axis, not be
+                # satisfied vacuously by an unrelated reviewer event; a
+                # re-review whose dispatch names no axis accepts any prior.
+                lite_dispatch = event.get("dispatch")
+                lite_axis = next(
+                    (
+                        axis
+                        for axis in ("conformance", "correctness")
+                        if isinstance(lite_dispatch, str)
+                        and axis in lite_dispatch
+                    ),
+                    None,
+                )
                 prior_full_review = any(
                     prior.get("workflow") == workflow
-                    and prior.get("role") == "reviewer"
+                    and prior.get("role")
+                    in ("reviewer", "conformance-reviewer")
                     and isinstance(prior.get("dispatch"), str)
                     and (
                         "first-pass" in prior["dispatch"]
                         or "full-" in prior["dispatch"]
+                        or "final-conformance" in prior["dispatch"]
+                        or "final-correctness" in prior["dispatch"]
                     )
+                    and (lite_axis is None or lite_axis in prior["dispatch"])
                     for prior in events[:index]
                     if isinstance(prior, dict)
                 )

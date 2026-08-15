@@ -1,11 +1,11 @@
 ---
 name: grill-with-docs
-description: Stress-test a plan against the project's domain docs — challenges terminology and decisions, updates the glossary and ADRs inline as decisions crystallise.
+description: Stress-test a spec or design against the project's domain docs — challenges terminology and decisions, updates the glossary and ADRs inline as decisions crystallise.
 ---
 
 <what-to-do>
 
-Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Model the design as a tree of decisions; the **frontier** is every question whose prerequisites are already settled.
+Interview me relentlessly about every aspect of this spec (the design under discussion — `from-issue` invokes this skill on the spec, not the plan) until we reach a shared understanding. Model the design as a tree of decisions; the **frontier** is every question whose prerequisites are already settled.
 
 Ask the whole frontier as one numbered round of `❓ question / ➡️ recommended answer` pairs. A question whose answer depends on another question still open in this round belongs to a later round. The round's answers reshape the tree — recompute the frontier and ask the next round; done when it's empty.
 
@@ -42,26 +42,7 @@ During codebase exploration, also look for existing documentation. Read a long o
 
 ### File structure
 
-The steady state is contained in `docs/`: a map plus one directory per area under `areas/`:
-
-```
-/
-└── docs/
-    ├── README.md                     ← routing index for everything in docs/
-    ├── CONTEXT-MAP.md                ← index: areas, governs globs, term → area
-    └── areas/
-        ├── system/                   ← decisions no single area owns
-        │   ├── CONTEXT.md            ←   a stub; its map row governs `*`
-        │   └── adr/
-        ├── ordering/
-        │   ├── CONTEXT.md            ← glossary for this area only
-        │   └── adr/                  ← this area's decisions, NNN-kebab.md
-        └── billing/
-            ├── CONTEXT.md
-            └── adr/
-```
-
-`standards/`, `operations/`, `guides/` and `archive/` are the other reserved directories — see [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md) for the full tree. ADR numbering is **per directory** (`ADR-<slug>-NNN`), so an area's records never collide with another's.
+The steady state is contained in `docs/`: a map plus one directory per area under `areas/` — the full tree, reserved directories, and budgets live in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md); read it before creating any doc file. ADR numbering is **per directory** (`ADR-<slug>-NNN`), so an area's records never collide with another's.
 
 A young repo may still be a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md`) with no map; that is fine, and the first split creates the map.
 
@@ -115,5 +96,16 @@ Only offer to create an ADR when all three are true:
 3. **The result of a real trade-off** — there were genuine alternatives and you picked one for specific reasons
 
 If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md).
+
+## Report on return
+
+When the grilling ends (frontier empty, or the user stops it), report — to the caller when invoked from another skill, to the user when standalone:
+
+- The decisions that crystallised, one line each, and where each was recorded (spec's decision ledger row, ADR path, glossary entry).
+- Doc files created or updated (glossary/area files, map rows, ADRs), by path.
+- Questions still open, with why each could not be settled.
+- ≤500 characters of notes for the next phase.
+
+Details stay in the committed files. Do not invoke the next skill or start implementing — the caller owns what happens next.
 
 </supporting-info>

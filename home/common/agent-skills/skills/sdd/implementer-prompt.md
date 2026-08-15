@@ -6,8 +6,8 @@ access to them.
 
 For deterministic transcription or single-file mechanical work:
 
-<!-- agent-dispatch: id=sdd-mechanic-implementation role=mechanic model=sonnet effort=medium -->
-Agent(subagent_type="mechanic", model="sonnet", effort="medium") executes the task from this prompt.
+<!-- agent-dispatch: id=sdd-mechanic-implementation role=mechanic model=sonnet effort=high -->
+Agent(subagent_type="mechanic", model="sonnet", effort="high") executes the task from this prompt.
 
 For every non-mechanical implementation task:
 

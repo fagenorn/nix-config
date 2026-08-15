@@ -1,0 +1,43 @@
+{
+  "skill_name": "doc-grounded-questions",
+  "notes": "Eval 1 is a cheap pipeline run: no worktree, no commits — it grades the printed question against the tinytask fixture's docs (CONTEXT-MAP.md, docs/areas/backlog/CONTEXT.md listing multi-machine sync as deliberately out of scope pending an ADR, and the two ADRs). The GROUNDING.md cache-file location is deliberately NOT asserted: a single ad-hoc question may not constitute a 'phase', and the cache lives under the git dir where a fresh sandbox may never create it. Eval 2 is plan-only and guards the settled-question behavior (state the ADR's answer, don't re-ask).",
+  "evals": [
+    {
+      "id": 1,
+      "name": "question-grounded-in-fixture-docs",
+      "mode": "pipeline",
+      "prompt": "I'm thinking about making tinytask keep its backlog in sync between my laptop and my desktop.\n\nInvoke the `doc-grounded-questions` skill first, ground yourself in this project's docs, and then ask me the single most important design question about this idea — one question, nothing else after it.\n\nHard rules for this session: read-only with respect to the repository — do not create, edit, or delete any file in the working tree, do not create branches or worktrees, do not commit. Your output is the grounded question itself.",
+      "expected_output": "The printed question leads with the constraints the docs pass found — it names the project's context docs and/or an ADR (the backlog area's CONTEXT.md lists cross-machine sync as deliberately out of scope pending an ADR; the system area pins standard-library-only and the single-JSON-file store) — and only then asks the genuinely open part. The repository is untouched: no worktree, no commits, clean status.",
+      "asserts": [
+        {
+          "name": "the output names a grounding source (CONTEXT doc, context map, or ADR)",
+          "shell": "out_matches 'CONTEXT[-. ]|context[- ]map|ADR[- ]?[0-9]|docs/areas/'"
+        },
+        {
+          "name": "the output surfaces the documented out-of-scope-pending-ADR constraint",
+          "shell": "out_matches 'out of scope|pending an ADR|needs an ADR|requires an ADR|before (any )?code'"
+        },
+        {
+          "name": "a question is actually asked",
+          "shell": "out_matches '\\?'"
+        },
+        {
+          "name": "the working tree is untouched and nothing was committed",
+          "shell": "[ -z \"$(git -C \"$REPO\" status --porcelain)\" ] && [ \"$(git -C \"$REPO\" rev-parse HEAD)\" = \"$(git -C \"$REPO\" rev-parse origin/main)\" ] || fail \"repository was modified: $(git -C \"$REPO\" status --porcelain | head -3)\""
+        },
+        {
+          "name": "no worktree was created",
+          "shell": "[ \"$WT_COUNT\" -eq 0 ] || fail \"created $WT_COUNT worktree(s) for a read-only question\""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "settled-question-stated-not-reasked",
+      "mode": "plan-only",
+      "prompt": "Quick design check on tinytask (the repo you're in): for the new import feature, should we keep the standard-library-only rule or is this finally the moment to pull in a YAML parsing dependency? Use the doc-grounded-questions skill before you answer me.",
+      "expected_output": "The grounding pass finds the system-area ADR pinning standard-library-only. Because the question is already settled by a decision log entry, the response does NOT present a fresh options menu: it states the existing decision with its source (the ADR), and either moves on ('per ADR-001, std-lib only, so import parses without third-party YAML — continuing') or asks only whether anything has CHANGED since that decision — that narrow delta is the one legitimate question left. Failures: asking the original either/or question as if undecided, presenting a YAML-dependency option without noting it violates the recorded decision, or answering from memory without citing the ADR.",
+      "files": []
+    }
+  ]
+}
