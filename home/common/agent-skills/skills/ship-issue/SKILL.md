@@ -284,9 +284,11 @@ gh pr merge <pr-num> --merge --subject "<rendered mergeSubjectTemplate>" --delet
 
 **Do not pass `--no-ff`** — recent `gh` (≥ 2.83) rejects it (`unknown flag: --no-ff`), and `--merge` alone already produces a true merge commit (no squash, no rebase, no fast-forward).
 
+**Judge success by the verify below, never by the exit code.** In a worktree checkout, `gh pr merge` runs local post-merge steps (check out the default branch, delete the local branch) that fail with `failed to run git: fatal: '<branch>' is already used by worktree at '<main-root>'` — a non-zero exit **after the merge already landed on the remote**. Retrying the merge or reporting failure on that exit code is wrong; run the verify first, and treat the exit code as meaningless until it disagrees with `gh pr view`.
+
 `--delete-branch` may fail or silently no-op on the remote branch while the worktree still has it checked out. The remote merge still succeeds. After verifying the merge, if `gh pr view <pr-num> --json headRefName` still resolves the branch, run `git push origin --delete <branch>` (actual branch name, including `branchNaming.worktreePrefix` if present).
 
-Verify: `gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid` means it landed.
+Verify: `gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid` means it landed. (`merged` is not a valid `--json` field — use `state`/`mergeCommit`/`mergedAt`.)
 
 ## Phase 8 — Cleanup
 

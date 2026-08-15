@@ -120,6 +120,13 @@ in
       "orbstack" # Fast Docker Desktop alternative & Linux VMs
       # AI / Machine Learning Tools
       # "lm-studio"          # UI for running local Large Language Models (LLMs)
+      # Codex desktop app (incl. computer use). The standalone Codex.app was renamed
+      # into ChatGPT.app in July 2026 and the `codex-app` cask was discontinued with
+      # `chatgpt` as its official replacement — do not add `codex-app`. Computer use
+      # is a plugin enabled inside the app and needs Screen Recording + Accessibility
+      # grants in System Settings (TCC prompts on first use; not settable from nix).
+      # Independent of the nix-managed codex CLI (home/common/codex/default.nix).
+      "chatgpt"
       # Utilities
       #"wireshark",         # Network protocol analyzer
 
