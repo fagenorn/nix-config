@@ -61,20 +61,17 @@ verbatim from the spec. Every task's requirements implicitly include this sectio
 <The seams the spec agreed on, one line each. Implementers test at these and
 nowhere else; a task needing a new seam is a plan bug, not an implementer's call.>
 
-## Auto-resolved decisions
+## Decisions
 
-<One entry per question you answered instead of the user — mandatory when the
-caller runs autonomously, expected otherwise, since task granularity, test
-framing, verification gates and commit boundaries are all your calls:
-
-### <decision title>
-- **Question:** what would have been asked
-- **Choice:** what you picked
-- **Grounding:** the docs / code / spec references that justify it
-- **Alternative considered:** what you rejected and why
-
-Never consolidate entries — a later phase extends this section rather than
-rewriting it, so the design stays traceable in order.>
+<The spec owns the single issue-level decision ledger — a `## Decision ledger`
+table of `| ID | Choice | Grounding | Rejected alternative |` rows. Never
+duplicate its rows here: cite them by ID ("per D3") wherever a task rests on
+one. When planning itself forces a NEW non-obvious decision — scope, interface,
+behavioral, test-seam, irreversible, or user-preference — append a row to the
+spec's ledger and cite its ID. Do NOT log routine task splits, commit
+boundaries, obvious verification commands, or mechanical pattern-following.
+Consolidation is permitted and encouraged: merge related decisions into one
+row.>
 
 ---
 ```

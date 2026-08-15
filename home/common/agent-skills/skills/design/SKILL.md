@@ -35,7 +35,7 @@ Don't block on it: an in-flight lookup is an unsettled prerequisite, so only the
 
 ## Autonomous mode
 
-When the caller runs autonomously (`from-issue --auto`), **the `➡️` recommendation is the answer.** Don't post the round and don't wait: resolve each question with its recommendation and write one `## Auto-resolved decisions` entry per question — the question as it would have been asked, the choice, the grounding that justifies it, and the alternative rejected. Rounds still run in order; the frontier is what keeps dependent decisions from being settled out of sequence.
+When the caller runs autonomously (`from-issue --auto`), **the `➡️` recommendation is the answer.** Don't post the round and don't wait: resolve each question with its recommendation and record it in the spec's `## Decision ledger` (see Output). Log only non-obvious decisions — scope, interface, behavioral, test-seam, irreversible, user-preference; skip routine task splits, commit boundaries, obvious verification commands, and mechanical pattern-following. Consolidation is permitted and encouraged: related decisions merge into one row. Rounds still run in order; the frontier is what keeps dependent decisions from being settled out of sequence.
 
 ## Guards
 
@@ -48,7 +48,15 @@ When the caller runs autonomously (`from-issue --auto`), **the `➡️` recommen
 
 Write the design to `<specDir>/<YYYY-MM-DD>-<topic>-design.md` (`specDir` from `.claude/skills.config.json`, default `.claude/specs`) and commit it in the worktree you were called in — never on the integration branch.
 
-Sections: **Problem** (from the user's perspective) · **Solution** · **Decisions** (modules and interfaces touched, schema and API contracts, behavior — no file paths or line numbers; they rot) · **Test seams** (the agreed seams and the prior art they follow) · **Out of scope** (mandatory, and real) · **Auto-resolved decisions** (whenever a question was self-answered).
+Sections: **Problem** (from the user's perspective) · **Solution** · **Decisions** (modules and interfaces touched, schema and API contracts, behavior — no file paths or line numbers; they rot) · **Test seams** (the agreed seams and the prior art they follow) · **Out of scope** (mandatory, and real) · **Decision ledger** — the issue's single decision store, a table later phases cite by row ID instead of restating rationale:
+
+```markdown
+| ID | Choice | Grounding | Rejected alternative |
+|----|--------|-----------|----------------------|
+| D1 | <what was decided, one line> | <doc/standard/user statement it rests on> | <the alternative and why not, one line> |
+```
+
+Only non-obvious decisions earn a row (scope, interface, behavioral, test-seam, irreversible, user-preference — self-answered or user-answered); plans and task briefs cite "per D3" rather than duplicating the row.
 
 Then read the file once with fresh eyes and fix inline: placeholders (`TBD`, "handle edge cases"), sections that contradict each other, requirements that can be read two ways, scope that needs decomposing. No reviewer dispatch — this is your own pass.
 

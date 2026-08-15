@@ -196,8 +196,12 @@ The parent Claude agent owns the result:
 2. Apply verified Blocking findings to the plan. Apply verified Should-fix items
    in `--auto`; otherwise present them to the user. Raise Discussion items at the
    normal checkpoint, or apply the documented autonomous decision rule.
-3. Preserve one `Auto-resolved decisions` entry per applied finding using the
-   caller's required template. Never collapse several findings into one entry.
+3. Record applied findings in the spec's decision ledger (`| ID | Choice |
+   Grounding | Rejected alternative |`) — only the non-obvious ones (scope,
+   interface, behavioral, test-seam, irreversible, user-preference); the plan
+   cites row IDs ("per D3") instead of restating rationale. Consolidation is
+   permitted and encouraged: related findings merge into one row. Routine
+   mechanical dispositions get no row.
 4. Add or update a concise `## Standards review provenance` section in the plan:
    reviewer (`Codex` or `Claude fallback`), base SHA, isolated/read-only mode,
    optional focus, counts accepted/rejected/deferred, and fallback reason when
