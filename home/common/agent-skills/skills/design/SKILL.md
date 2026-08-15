@@ -24,7 +24,7 @@ Ask the whole frontier in one numbered round:
 - The round's answers reshape the tree — settled decisions push the frontier outward. Recompute it and ask the next round.
 - Done when the frontier is empty: every branch visited, nothing silently assumed.
 
-**Facts are your job, never the user's.** When a frontier question needs a sharply bounded fact from the environment — filesystem, tooling, library behavior, prior art in the codebase — use the read-only explorer below. When the answer needs cited primary sources, invoke `research`; that skill owns its own marked background launch.
+**Facts are your job, never the user's.** When a frontier question needs a sharply bounded fact from the environment — filesystem, tooling, library behavior, prior art in the codebase — resolve it yourself. Keep a small direct grep or file check inline: a trivial repository fact (does the file exist, what is the symbol's signature) is answered locally, not delegated. Only when the result set needs a sharply bounded read-only exploration pass, use the explorer below. When the answer needs cited primary sources, invoke `research`; that skill owns its own marked background launch.
 
 <!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=haiku effort=medium -->
 Agent(subagent_type="Explore", model="haiku", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.

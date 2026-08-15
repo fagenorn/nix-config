@@ -37,7 +37,7 @@ Determine where issues live and which backend creates them:
 
 ### 1. Gather context
 
-Work from whatever is already in the conversation context. If the user passes an issue reference (issue number, URL, or path) as an argument, fetch it from the issue tracker and read its full body and comments.
+Work from whatever is already in the conversation context. If the user passes an issue reference (issue number, URL, or path) as an argument, fetch it from the issue tracker and read its full body. Load the comment thread only when it is likely to matter — the body references a discussion, the issue shows review activity, or the body alone leaves an open question; otherwise skip it.
 
 ### 2. Explore the codebase (optional)
 
@@ -63,7 +63,7 @@ Slices may be human-required or autonomous/agent-executable. Human-required slic
 - Prefer many thin slices over few thick ones
 </vertical-slice-rules>
 
-**Wide refactors are the exception to vertical slicing.** A wide refactor is one mechanical change — rename a column, retype a shared symbol — whose blast radius fans across the whole codebase, so a single edit breaks thousands of call sites at once and no vertical slice can land green. Don't force it into a tracer bullet; sequence it as **expand–contract**. First expand: add the new form beside the old so nothing breaks. Then migrate the call sites in batches sized by blast radius (per package, per directory), each batch its own slice blocked by the expand, keeping CI green batch to batch because the old form still exists. Finally contract: delete the old form once no caller remains, in a slice blocked by every migrate batch. When even the batches can't stay green alone, keep the sequence but let them share an integration branch that all block a final integrate-and-verify slice — green is promised only there.
+**Wide refactors are the exception to vertical slicing.** One mechanical change with codebase-wide blast radius (rename a column, retype a shared symbol) can't land green as a tracer bullet — sequence it as expand–contract per [WIDE-REFACTORS.md](./WIDE-REFACTORS.md); read that file when such a slice candidate appears.
 
 ### 4. Quiz the user
 
