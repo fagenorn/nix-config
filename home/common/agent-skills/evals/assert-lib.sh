@@ -55,6 +55,26 @@ section_has_entries() {
   ' "$file"
 }
 
+# ledger_has_rows <file> <heading> — the heading exists and is followed (before the
+# next `## `) by at least one data row: a `|`-table row with >= 4 cells that is not
+# the header/separator, or a legacy `### ` entry. Case-insensitive like above.
+ledger_has_rows() {
+  local file="$1" heading="$2"
+  [ -f "$file" ] || fail "not a file: $file" || return 1
+  awk -v heading="$heading" '
+    BEGIN { heading = tolower(heading) }
+    index(tolower($0), heading) == 1 { inside = 1; found = 1; next }
+    inside && /^## / { inside = 0 }
+    inside && /^### / { entries++ }
+    inside && /^\|/ && split($0, cells, "|") >= 5 \
+      && tolower($0) !~ /\| *id *\|/ && $0 !~ /^[|: -]+$/ { entries++ }
+    END {
+      if (!found) { print "heading not found: " heading; exit 1 }
+      if (entries < 1) { print "heading present but has no ledger rows or `### ` entries: " heading; exit 1 }
+    }
+  ' "$file"
+}
+
 # plan_tasks_verifiable <file> — every `### Task N` section carries at least one
 # falsifiable verification line (Expected/Verify/Acceptance/Assert).
 plan_tasks_verifiable() {

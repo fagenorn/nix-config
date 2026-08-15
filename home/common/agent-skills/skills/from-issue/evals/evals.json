@@ -18,8 +18,8 @@
           "shell": "has_file \"$WT/$SPEC_DIR\"/*.md"
         },
         {
-          "name": "spec logs at least one auto-resolved decision",
-          "shell": "section_has_entries \"$(first_file \"$WT/$SPEC_DIR\"/*.md)\" '## Auto-resolved decisions'"
+          "name": "spec logs at least one decision (ledger row or legacy auto-resolved entry)",
+          "shell": "f=$(first_file \"$WT/$SPEC_DIR\"/*.md); ledger_has_rows \"$f\" '## Decision ledger' || ledger_has_rows \"$f\" '## Auto-resolved decisions'"
         },
         {
           "name": "plan file exists under planDir",
