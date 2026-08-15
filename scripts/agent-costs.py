@@ -11,6 +11,23 @@ Two counting rules are load-bearing (see the transcript-mining report):
     over-counts tokens ~2.5x.
   * Subagent transcripts hold ~64% of all tokens. They are attributed to the
     root session that spawned them.
+
+Interpretation note — this is comparative telemetry, NOT billing data. The
+dominant token bucket, cache reads, measures logical context processing: every
+turn re-reads the session prefix from cache, so cache_read counts the tokens
+the model attended to, priced at the list cache-read rate. The estimated $
+figures apply public list prices per family and exist so runs can be compared
+against each other and against the 35-day baseline; they are not what anyone
+was billed.
+
+Beyond the per-issue cost table this also derives (heuristically where noted):
+issue outcome (completed/blocked/abandoned from each root session's final
+assistant message), turns per textual "Phase N" marker and per attributionSkill,
+subagent launches by type with prompt/result byte distributions, exact
+model+effort mix per group, per-session peak context (max input+cache tokens of
+a single turn), stop_reason counts plus lingering agents killed at exit, and
+short user "proceed" nudges. `--artifacts DIR` adds a filesystem pass over
+spec/plan markdown: bytes, fenced-code share, and decision-section share.
 """
 
 import argparse
@@ -35,10 +52,36 @@ PRICING = {
 
 TOKEN_FIELDS = ("fresh", "cache_create", "cache_read", "output")
 SUM_FIELDS = TOKEN_FIELDS + ("cost", "turns")
+# Scalar extras summed (or maxed, for peak_ctx) across a group's transcripts.
+EXTRA_INT_FIELDS = ("agents_killed", "interventions")
+# Counter-valued extras merged across a group's transcripts.
+COUNTER_FIELDS = ("models", "efforts", "stop_reasons", "phase_turns", "attr_turns",
+                  "agents_by_type", "agent_statuses")
+LIST_FIELDS = ("agent_prompt_bytes", "agent_result_bytes")
 
 ISSUE_RE = re.compile(r"(?:^|[-/])(?:worktree-)?issue-(\d+)")
 MULTI_ISSUE = "*"  # root session that roamed across several issue worktrees
 HOME = os.path.expanduser("~")
+
+# Textual phase marker in assistant narration ("Phase 3", "## Phase 3 — grill").
+PHASE_RE = re.compile(r"\bPhase\s+(\d+)\b")
+
+# Short user messages that only nudge the agent onward ("proceed", "ok continue").
+PROCEED_RE = re.compile(
+    r"^(?:(?:sorry|please|ok(?:ay)?|yes|yep|yeah)[\s,!.]*)*"
+    r"(?:proceed|continue|go ahead|go on|keep going|keep at it|resume|carry on|"
+    r"do it|lgtm|approved?|sounds good|yes|yep|ok(?:ay)?|y|go)[\s,!.]*$"
+)
+
+# Outcome classification of a root session's final assistant message (heuristic).
+STRONG_DONE_RE = re.compile(
+    r"\b(merged|shipped|landed|released|issue\s+(?:#\d+\s+)?closed|closed\s+issue|"
+    r"review_state:\s*clean|all\s+tasks?\s+complete)", re.I)
+BLOCKED_RE = re.compile(
+    r"\b(blocked|blocker|cannot\s+proceed|can't\s+proceed|"
+    r"stopp(?:ed|ing)\s+(?:here|before|at)|waiting\s+(?:for|on)\s+(?:you|input|human|user)|"
+    r"needs?\s+(?:your|human|user)\s+(?:input|decision|review|call)|abort(?:ed|ing)?)", re.I)
+WEAK_DONE_RE = re.compile(r"\b(complete[d.!]?|done[.!]?|finished|succeeded|passes)\b", re.I)
 
 
 def model_family(model):
@@ -51,14 +94,42 @@ def model_family(model):
     return "opus"
 
 
+def classify_outcome(final_text):
+    """completed | blocked | abandoned from a session's final assistant message."""
+    if STRONG_DONE_RE.search(final_text):
+        return "completed"
+    if BLOCKED_RE.search(final_text):
+        return "blocked"
+    if WEAK_DONE_RE.search(final_text):
+        return "completed"
+    return "abandoned"
+
+
 def scan_file(path):
-    """Parse one transcript. Returns per-file usage, cost, turns, skills, cwds."""
+    """Parse one transcript. Returns per-file usage, cost, turns, skills, cwds,
+    plus the extended telemetry fields (models, efforts, agents, phases, ...)."""
     fresh = cache_create = cache_read = output = 0
     cost = 0.0
     turns = 0
     skills = Counter()
     cwds = Counter()
-    seen = set()
+    seen = set()             # message ids — usage is duplicated per content block
+    seen_tool_ids = set()    # assistant tool_use block ids — guard against replays
+    seen_result_ids = set()  # user tool_result ids — same guard for agent results
+    models = Counter()
+    efforts = Counter()
+    stop_reasons = Counter()
+    phase_turns = Counter()
+    attr_turns = Counter()
+    agents_by_type = Counter()
+    agent_statuses = Counter()
+    agent_prompt_bytes = []
+    agent_result_bytes = []
+    agents_killed = 0
+    interventions = 0
+    peak_ctx = 0
+    current_phase = None
+    final_text = ""
 
     try:
         fh = open(path, "r", errors="replace")
@@ -66,29 +137,101 @@ def scan_file(path):
         return None
     with fh:
         for line in fh:
-            # Cheap prefilter: only assistant records carry usage and tool_use.
-            if '"type":"assistant"' not in line:
+            # Cheap prefilter. Assistant records carry usage and tool_use; user
+            # records matter only when short (a possible "proceed" nudge) or when
+            # they carry an Agent result; system records only for agents_killed.
+            if '"type":"assistant"' in line:
+                pass
+            elif '"type":"user"' in line:
+                if '"agentType"' not in line and len(line) > 4096:
+                    continue
+            elif '"type":"system"' in line:
+                if '"subtype":"agents_killed"' not in line:
+                    continue
+            else:
                 continue
             try:
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if rec.get("type") != "assistant":
+            rtype = rec.get("type")
+
+            if rtype == "system":
+                if rec.get("subtype") == "agents_killed":
+                    agents_killed += 1
+                continue
+
+            if rtype == "user":
+                msg = rec.get("message") or {}
+                content = msg.get("content")
+                tur = rec.get("toolUseResult")
+                if isinstance(tur, dict) and "agentType" in tur:
+                    # An Agent subagent's result. Dedup by the tool_result id.
+                    rid = None
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "tool_result":
+                                rid = block.get("tool_use_id")
+                                break
+                    if rid:
+                        if rid in seen_result_ids:
+                            continue
+                        seen_result_ids.add(rid)
+                    agent_statuses[str(tur.get("status") or "?")] += 1
+                    rcontent = tur.get("content")
+                    if rcontent is not None:
+                        agent_result_bytes.append(
+                            len(rcontent) if isinstance(rcontent, str) else len(str(rcontent))
+                        )
+                elif (
+                    isinstance(content, str)
+                    and not rec.get("isSidechain")
+                    and not rec.get("isMeta")
+                ):
+                    text = content.strip().lower()
+                    if len(text) <= 48 and PROCEED_RE.match(text):
+                        interventions += 1
+                continue
+
+            if rtype != "assistant":
                 continue
             msg = rec.get("message") or {}
             if rec.get("cwd"):
                 cwds[rec["cwd"]] += 1
 
-            # tool_use blocks are NOT duplicated (one content block per record).
+            # tool_use blocks are NOT duplicated (one content block per record),
+            # but guard by block id anyway so a replayed record can't double-count.
             content = msg.get("content")
             if isinstance(content, list):
                 for block in content:
-                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    if not isinstance(block, dict):
                         continue
-                    if block.get("name") == "Skill":
-                        name = (block.get("input") or {}).get("skill")
-                        if name:
-                            skills[name] += 1
+                    btype = block.get("type")
+                    if btype == "tool_use":
+                        bid = block.get("id")
+                        if bid:
+                            if bid in seen_tool_ids:
+                                continue
+                            seen_tool_ids.add(bid)
+                        name = block.get("name")
+                        binput = block.get("input") or {}
+                        if name == "Skill":
+                            sname = binput.get("skill")
+                            if sname:
+                                skills[sname] += 1
+                        elif name in ("Agent", "Task"):
+                            agents_by_type[str(binput.get("subagent_type") or "general-purpose")] += 1
+                            prompt = binput.get("prompt")
+                            if isinstance(prompt, str):
+                                agent_prompt_bytes.append(len(prompt))
+                    elif btype == "text":
+                        text = block.get("text") or ""
+                        if "Phase" in text:
+                            markers = PHASE_RE.findall(text)
+                            if markers:
+                                current_phase = markers[-1]
+                        if text.strip():
+                            final_text = text[-500:]
 
             # usage IS duplicated across the records of one message -> dedupe.
             key = msg.get("id") or rec.get("requestId") or rec.get("uuid")
@@ -99,6 +242,21 @@ def scan_file(path):
             if not isinstance(usage, dict):
                 continue
             turns += 1
+
+            model = msg.get("model")
+            if model:
+                models[model] += 1
+            effort = rec.get("effort")
+            if effort:
+                efforts[str(effort)] += 1
+            sreason = msg.get("stop_reason")
+            if sreason:
+                stop_reasons[str(sreason)] += 1
+            askill = rec.get("attributionSkill")
+            if askill:
+                attr_turns[str(askill)] += 1
+            if current_phase is not None:
+                phase_turns[current_phase] += 1
 
             f_in = usage.get("input_tokens") or 0
             c_out = usage.get("output_tokens") or 0
@@ -114,8 +272,11 @@ def scan_file(path):
             output += c_out
             cache_read += c_read
             cache_create += c_create
+            ctx = f_in + c_read + c_create
+            if ctx > peak_ctx:
+                peak_ctx = ctx
 
-            p_in, p_out, p_1h, p_5m, p_read = PRICING[model_family(msg.get("model"))]
+            p_in, p_out, p_1h, p_5m, p_read = PRICING[model_family(model)]
             cost += (
                 f_in * p_in + c_out * p_out + cw_1h * p_1h + cw_5m * p_5m + c_read * p_read
             ) / 1e6
@@ -129,6 +290,19 @@ def scan_file(path):
         "turns": turns,
         "skills": dict(skills),
         "cwds": dict(cwds),
+        "models": dict(models),
+        "efforts": dict(efforts),
+        "stop_reasons": dict(stop_reasons),
+        "phase_turns": dict(phase_turns),
+        "attr_turns": dict(attr_turns),
+        "agents_by_type": dict(agents_by_type),
+        "agent_statuses": dict(agent_statuses),
+        "agent_prompt_bytes": agent_prompt_bytes,
+        "agent_result_bytes": agent_result_bytes,
+        "agents_killed": agents_killed,
+        "interventions": interventions,
+        "peak_ctx": peak_ctx,
+        "final_text": final_text,
     }
 
 
@@ -217,6 +391,27 @@ def human(n):
     return f"{n:,}"
 
 
+def percentile(values, p):
+    """Nearest-rank percentile; 0 for an empty list."""
+    if not values:
+        return 0
+    ordered = sorted(values)
+    k = max(0, min(len(ordered) - 1, int(round(p / 100 * (len(ordered) - 1)))))
+    return ordered[k]
+
+
+def counter_mix(counter, top=2, strip_prefix=""):
+    """'a 61%|b 39%' for the top entries of a Counter."""
+    total = sum(counter.values())
+    if not total:
+        return "-"
+    parts = []
+    for name, count in counter.most_common(top):
+        label = name[len(strip_prefix):] if strip_prefix and name.startswith(strip_prefix) else name
+        parts.append(f"{label} {100 * count // total}%")
+    return "|".join(parts)
+
+
 def print_table(rows, headers, aligns):
     widths = [
         max(len(headers[i]), max((len(r[i]) for r in rows), default=0))
@@ -235,6 +430,111 @@ def print_table(rows, headers, aligns):
         print(fmt(row))
 
 
+def new_group():
+    g = dict.fromkeys(
+        SUM_FIELDS + EXTRA_INT_FIELDS
+        + ("subagents", "skill_loads", "repeats", "sessions", "peak_ctx"),
+        0,
+    )
+    for field in COUNTER_FIELDS:
+        g[field] = Counter()
+    for field in LIST_FIELDS:
+        g[field] = []
+    g["outcomes"] = []
+    return g
+
+
+def group_outcome(g):
+    """Roll session outcomes up to the group (heuristic, from final messages)."""
+    outcomes = g["outcomes"]
+    if not outcomes:
+        return "-"
+    if "completed" in outcomes:
+        return "completed"
+    if "blocked" in outcomes:
+        return "blocked"
+    return "abandoned"
+
+
+def artifact_stats(paths):
+    """Filesystem pass over spec/plan markdown artifacts.
+
+    For every .md under each path: size, share of bytes inside ``` fences, and
+    share of bytes inside sections whose heading mentions 'decision' (the
+    decision ledger), plus a count of compact ledger table rows (>=3 '|'
+    separators) inside those sections.
+    """
+    per_class = defaultdict(lambda: {"files": 0, "bytes": 0, "sizes": [],
+                                     "fenced": 0, "decision": 0, "ledger_rows": 0})
+    for base in paths:
+        base = Path(os.path.expanduser(base))
+        files = [base] if base.is_file() else sorted(base.rglob("*.md")) if base.is_dir() else []
+        if not files:
+            print(f"  (no markdown artifacts under {base})")
+            continue
+        for f in files:
+            try:
+                text = f.read_text(errors="replace")
+            except OSError:
+                continue
+            low = str(f).lower()
+            cls = "spec" if "spec" in low else "plan" if "plan" in low else "other"
+            st = per_class[cls]
+            st["files"] += 1
+            st["bytes"] += len(text)
+            st["sizes"].append(len(text))
+            in_fence = False
+            in_decision = False
+            decision_level = 0
+            for line in text.splitlines(keepends=True):
+                stripped = line.strip()
+                if stripped.startswith("```"):
+                    in_fence = not in_fence
+                    st["fenced"] += len(line)
+                    continue
+                if in_fence:
+                    st["fenced"] += len(line)
+                    continue
+                if stripped.startswith("#"):
+                    level = len(stripped) - len(stripped.lstrip("#"))
+                    if "decision" in stripped.lower():
+                        in_decision = True
+                        decision_level = level
+                    elif in_decision and level <= decision_level:
+                        in_decision = False
+                if in_decision:
+                    st["decision"] += len(line)
+                    if stripped.count("|") >= 3 and not set(stripped) <= set("|-: "):
+                        st["ledger_rows"] += 1
+    return per_class
+
+
+def print_artifact_stats(per_class):
+    if not per_class:
+        return
+    rows = []
+    for cls in ("spec", "plan", "other"):
+        st = per_class.get(cls)
+        if not st or not st["files"]:
+            continue
+        total = st["bytes"] or 1
+        rows.append([
+            cls,
+            f"{st['files']:,}",
+            human(st["bytes"]),
+            human(percentile(st["sizes"], 50)),
+            f"{100 * st['fenced'] // total}%",
+            f"{100 * st['decision'] // total}%",
+            f"{st['ledger_rows']:,}",
+        ])
+    if rows:
+        print_table(
+            rows,
+            ["class", "files", "bytes", "p50", "fenced", "decision", "ledger rows"],
+            ["l", "r", "r", "r", "r", "r", "r"],
+        )
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=35, help="window in days by file mtime (0 = all)")
@@ -244,6 +544,14 @@ def main():
         "--projects-dir",
         default=os.path.expanduser("~/.claude/projects"),
         help="transcript root",
+    )
+    ap.add_argument(
+        "--artifacts",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="also analyze spec/plan markdown under PATH (repeatable): bytes, "
+             "fenced-code share, decision-ledger share",
     )
     args = ap.parse_args()
 
@@ -285,16 +593,24 @@ def main():
         kept_sessions += 1
         kept_files += len(entries)
         issue = issue_key(dir_name, root_cwds)
-        g = groups.setdefault(
-            (project, issue),
-            dict.fromkeys(SUM_FIELDS + ("subagents", "skill_loads", "repeats", "sessions"), 0),
-        )
+        g = groups.setdefault((project, issue), new_group())
         g["sessions"] += 1
         g["subagents"] += len(sub_files)
         session_skills = Counter()
-        for _is_root, r in entries:
+        for is_root, r in entries:
             for field in SUM_FIELDS:
                 g[field] += r[field]
+            for field in COUNTER_FIELDS:
+                g[field].update(r[field])
+            for field in LIST_FIELDS:
+                g[field].extend(r[field])
+            g["agents_killed"] += r["agents_killed"]
+            if r["peak_ctx"] > g["peak_ctx"]:
+                g["peak_ctx"] = r["peak_ctx"]
+            if is_root:
+                g["interventions"] += r["interventions"]
+                if r["final_text"]:
+                    g["outcomes"].append(classify_outcome(r["final_text"]))
             session_skills.update(r["skills"])
         loads = sum(session_skills.values())
         g["skill_loads"] += loads
@@ -308,11 +624,13 @@ def main():
         groups.items(), key=lambda kv: (kv[1]["cost"], total_tokens(kv[1])), reverse=True
     )
 
+    def issue_label(issue):
+        return "(no issue)" if issue is None else "(multi-issue)" if issue == MULTI_ISSUE else f"#{issue}"
+
     rows = []
     for (project, issue), g in ordered[: args.top]:
-        label = "(no issue)" if issue is None else "(multi-issue)" if issue == MULTI_ISSUE else f"#{issue}"
         rows.append([
-            label,
+            issue_label(issue),
             project,
             human(total_tokens(g)),
             f"${g['cost']:,.0f}",
@@ -359,6 +677,94 @@ def main():
             f"\nPer issue ({len(issue_costs)} {plural}): median ${statistics.median(issue_costs):,.0f}  "
             f"mean ${statistics.fmean(issue_costs):,.0f}  max ${max(issue_costs):,.0f}"
         )
+
+    # ---- extended telemetry ------------------------------------------------
+
+    print("\nOutcome, model & context per group (outcome is a final-message heuristic;"
+          "\npeak-ctx = largest single-turn input+cache footprint in any of the group's transcripts):\n")
+    ext_rows = []
+    for (project, issue), g in ordered[: args.top]:
+        ext_rows.append([
+            issue_label(issue),
+            project,
+            group_outcome(g),
+            counter_mix(g["models"], top=2, strip_prefix="claude-"),
+            counter_mix(g["efforts"], top=2),
+            human(g["peak_ctx"]),
+            f"{sum(g['agents_by_type'].values()):,}",
+            f"{g['interventions']:,}",
+            f"{g['agents_killed']:,}",
+        ])
+    print_table(
+        ext_rows,
+        ["issue", "project", "outcome", "models", "effort", "peak-ctx", "agents", "nudges", "killed"],
+        ["l", "l", "l", "l", "l", "r", "r", "r", "r"],
+    )
+
+    all_models = Counter()
+    all_efforts = Counter()
+    all_stops = Counter()
+    all_phases = Counter()
+    all_attr = Counter()
+    all_agents = Counter()
+    all_statuses = Counter()
+    prompt_bytes = []
+    result_bytes = []
+    outcome_counts = Counter()
+    killed = nudges = 0
+    for g in groups.values():
+        all_models.update(g["models"])
+        all_efforts.update(g["efforts"])
+        all_stops.update(g["stop_reasons"])
+        all_phases.update(g["phase_turns"])
+        all_attr.update(g["attr_turns"])
+        all_agents.update(g["agents_by_type"])
+        all_statuses.update(g["agent_statuses"])
+        prompt_bytes.extend(g["agent_prompt_bytes"])
+        result_bytes.extend(g["agent_result_bytes"])
+        outcome_counts[group_outcome(g)] += 1
+        killed += g["agents_killed"]
+        nudges += g["interventions"]
+
+    def counter_line(counter, top=8):
+        return " | ".join(f"{k} {v:,}" for k, v in counter.most_common(top)) or "-"
+
+    print(f"\nOutcomes (groups): {counter_line(outcome_counts)}")
+    print(f"Models (turns): {counter_line(all_models)}")
+    print(f"Effort (turns): {counter_line(all_efforts)}")
+    print(f"Stop reasons (turns): {counter_line(all_stops)}; sessions with agents killed at exit: {killed:,}")
+    print(f"Agent launches by type: {counter_line(all_agents)}")
+    print(f"Agent result statuses: {counter_line(all_statuses)}")
+    if prompt_bytes:
+        print(
+            f"Agent prompt bytes (n={len(prompt_bytes):,}): "
+            f"p50 {human(percentile(prompt_bytes, 50))}  p90 {human(percentile(prompt_bytes, 90))}  "
+            f"max {human(max(prompt_bytes))}"
+        )
+    if result_bytes:
+        print(
+            f"Agent result bytes (n={len(result_bytes):,}): "
+            f"p50 {human(percentile(result_bytes, 50))}  p90 {human(percentile(result_bytes, 90))}  "
+            f"max {human(max(result_bytes))}"
+        )
+    if all_phases:
+        ordered_phases = " | ".join(
+            f"P{k} {v:,}" for k, v in sorted(all_phases.items(), key=lambda kv: int(kv[0]))
+        )
+        print(f"Turns by textual phase marker (sessions that narrate 'Phase N'): {ordered_phases}")
+    if all_attr:
+        print(f"Turns by skill attribution: {counter_line(all_attr, top=10)}")
+    print(f"User 'proceed' nudges (short continue-style messages): {nudges:,}")
+
+    if args.artifacts:
+        print("\nArtifact pass (spec/plan markdown under --artifacts paths):\n")
+        print_artifact_stats(artifact_stats(args.artifacts))
+
+    print(
+        "\nNOTE: cache reads measure logical context re-processing (tokens the model"
+        "\nattended to via prompt cache), and est $ applies public list prices — this is"
+        "\ncomparative telemetry for run-over-run analysis, NOT billing data."
+    )
 
 
 if __name__ == "__main__":
