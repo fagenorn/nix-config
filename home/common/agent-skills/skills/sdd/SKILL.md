@@ -20,7 +20,7 @@ Conversation memory does not survive compaction; controllers that lost their pla
 - Create the ledger with its identity as the first line: `# SDD ledger — plan: <plan file path>`.
 - After compaction, trust the ledger and `git log` over your own recollection. (`git clean -fdx` destroys the workspace; recover from `git log`.)
 
-Read the plan once, note its Global Constraints and Test seams, create a todo per task. Then scan once for conflicts — tasks that contradict each other or the constraints, or anything the plan mandates that the review rubric treats as a defect — and present findings as one batched question (each beside the plan text mandating it, asking which governs) before execution begins. Clean scan → proceed without comment.
+**Initial validation is the only whole-plan read.** Read the plan once now and scan for conflicts — tasks that contradict each other or the constraints, or anything the plan mandates that the review rubric treats as a defect — and present findings as one batched question (each beside the plan text mandating it, asking which governs) before execution begins. Clean scan → proceed without comment. After that, the controller holds only the plan **header** — summary, Global Constraints, Test seams, and the `## Task index` (ID, title, files touched, risk lane per task) — plus the current task's brief from `scripts/task-brief`; never re-read the whole plan. Build the todo list from the task index.
 
 ## Agent tiers
 
@@ -62,12 +62,17 @@ If the implementer asks questions — before or during — answer completely; do
 
 ### 3. Review the task
 
-Per-task reviews are task-scoped gates; never skip one, and never accept a report missing either verdict (spec compliance AND quality). Implementer self-review never substitutes.
+Per-task review is a task-scoped gate; never skip it, and never accept a report missing either verdict (spec compliance AND quality). Implementer self-review never substitutes. The gate's **form** follows the task's risk lane from the plan's task index:
 
-For a task the plan's task index routes to the **mechanical or low-risk lane**, the first-pass gate is a scoped lane verification instead of the full reviewer — the dispatch must name the declared lane and the bounded task diff:
+- **full lane** — the full first-pass reviewer below, always.
+- **mechanical / low-risk lane** — scoped verification: dispatch reviewer-lite with the declared lane and the bounded task diff. For a mechanical microtask whose verify commands are deterministic, the controller may instead verify inline (run the commands, inspect the diff) and ledger `Task <N>: verified inline (mechanical)`.
+- **Batching** — adjacent same-lane microtasks in the same file neighborhood may share one verification context when isolation adds nothing; ledger the batch.
+- A lane verification that surfaces ambiguity, semantic doubt, or anything beyond its lane escalates to the full reviewer — never adjudicate inside the cheap gate, and never route a lane the plan didn't declare.
 
 <!-- agent-dispatch: id=sdd-lane-task-verification role=reviewer-lite model=sonnet effort=medium -->
 Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies the bounded mechanical/low-risk lane task diff against its brief.
+
+For the full-lane review:
 
 - The reviewer gets three paths — brief, report, review package — plus the global constraints copied **verbatim** from the plan (exact values, formats, stated relationships). The template carries the process rules; the constraints block is what THIS project's spec demands.
 - Don't add open-ended directives ("check all uses") without a concrete task-specific reason; don't ask it to re-run tests the implementer already ran; and never pre-judge — if your prompt contains "do not flag" or "at most Minor", stop: adjudication happens in the loop, not the dispatch.
@@ -131,7 +136,7 @@ Clean review — or everything parked-with-ruling at the cap — appends `Task <
 
 ## Final review — two axes
 
-Run `scripts/review-package PLAN_FILE MERGE_BASE HEAD` (MERGE_BASE = `git merge-base <integration-branch> HEAD`) once, then review the branch on two axes **in parallel, as isolated subagents** over that same package:
+This gate runs for **every** risk lane — lanes narrow per-task review, never this one. Run `scripts/review-package PLAN_FILE MERGE_BASE HEAD` (MERGE_BASE = `git merge-base <integration-branch> HEAD`) once, then review the branch on two axes **in parallel, as isolated subagents** over that same package:
 
 - **Conformance axis** — did the diff deliver what issue + spec + plan promised, honoring the project's ADRs, context docs, and standards. Native `reviewer`, model per Agent tiers, template [conformance-reviewer-prompt.md](conformance-reviewer-prompt.md).
 - **Correctness axis** — is it built right: bugs, boundary error handling, dead branches, assertions that pin the documented contract, DRY, cross-task integration. When the `codex-collaboration` skill is available, invoke its `diff-review` operation for this axis; that skill solely owns the isolated Codex transport launch and one-time native fallback, while the external Codex reviewer keeps its independently configured model. Unavailable → use the Opus/high native reviewer selected in [correctness-reviewer-prompt.md](correctness-reviewer-prompt.md). Either way the axis is never skipped.
