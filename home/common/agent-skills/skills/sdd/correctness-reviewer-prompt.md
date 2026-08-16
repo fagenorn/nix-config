@@ -35,13 +35,17 @@ Subagent (reviewer, Opus/high for the native path selected above):
     Read the diff file once; when checking a finding, read the live file at HEAD,
     not a snapshot. If no diff file was supplied, fetch the range yourself:
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
-    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`. Inspect code outside the diff only to
-    evaluate a concrete risk you can name — cross-task contract drift, changed lock
-    ordering, shared mutable state — one focused check per named risk, named in your
-    report. Your review is read-only on this checkout: do not mutate the working
-    tree, the index, HEAD, or branch state in any way. Do not re-run the full test
-    suite — the implementers' reported runs are the evidence; run at most one
-    focused test to resolve a specific doubt reading the code raised.
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]` — unless the packet states the review
+    is scoped and lists the paths under review, in which case those listed paths
+    are the whole of the range to fetch: run
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- <path>` once per listed path and
+    fetch nothing wider. Inspect code outside the diff only to evaluate a concrete
+    risk you can name — cross-task contract drift, changed lock ordering, shared
+    mutable state — one focused check per named risk, named in your report. Your
+    review is read-only on this checkout: do not mutate the working tree, the
+    index, HEAD, or branch state in any way. Do not re-run the full test suite —
+    the implementers' reported runs are the evidence; run at most one focused test
+    to resolve a specific doubt reading the code raised.
 
     ## What to Check
 
@@ -62,6 +66,10 @@ Subagent (reviewer, Opus/high for the native path selected above):
 
     ≤400 words total. Your FIRST line is the axis verdict:
     `**Correctness:** Clean | Findings — 1–2 sentence assessment.`
+    When the packet supplied to you states the review is scoped, that assessment
+    clause opens with `scoped to <N> of <M> product files;` — after the em dash,
+    never between the verdict word and the dash. When the packet says nothing about
+    scoping, write the verdict exactly as above.
     Then exactly three top-level sections — every line a finding or a check you
     ran; no preamble, no closing summary. Every finding carries a stable ID,
     live `path:line` evidence, confidence (`high` / `medium` / `low`), and

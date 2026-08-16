@@ -383,6 +383,51 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.collaboration,
         )
 
+    def test_correctness_rubric_discloses_scope_only_when_the_packet_says_so(self):
+        rubric = (SDD_DIR / "correctness-reviewer-prompt.md").read_text(
+            encoding="utf-8"
+        )
+        # Stop at the Placeholders paragraph: it sits outside the fenced prompt
+        # and legitimately names Codex, so including it would make the
+        # reviewer-agnostic assertion below unfalsifiable.
+        output_format = rubric[
+            rubric.index("## Output Format") : rubric.index("**Placeholders:**")
+        ]
+        # The collection branch sits earlier, in its own section.
+        diff_under_review = rubric[
+            rubric.index("## Diff Under Review") : rubric.index("## What to Check")
+        ]
+        for fragment in (
+            "When the packet supplied to you states the review is scoped",
+            "scoped to <N> of <M> product files;",
+            "never between the verdict word and the dash",
+            "When the packet says nothing about scoping, write the verdict exactly",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, " ".join(output_format.split()))
+        # The scoped packet bounds what is fetched, not only what is graded
+        # (D16) — and the unconditional branch survives beside it.
+        for fragment in (
+            "Read the diff file once",
+            "If no diff file was supplied, fetch the range yourself",
+            "unless the packet states the review is scoped and lists the paths "
+            "under review",
+            "those listed paths are the whole of the range to fetch",
+            "`git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- <path>` once per listed path "
+            "and fetch nothing wider",
+            # The named-risk carve-out survives scoping untouched (D13). Pinned
+            # whitespace-normalized: inserting the clause above re-wraps this
+            # paragraph, and the wrap is not the contract — the words are.
+            "one focused check per named risk, named in your report.",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, " ".join(diff_under_review.split()))
+        # Reviewer-agnostic: both clauses key off the packet, not the reader (D11).
+        for reader in ("Codex", "Claude", "native"):
+            with self.subTest(reader=reader):
+                self.assertNotIn(reader, output_format)
+                self.assertNotIn(reader, diff_under_review)
+
     def test_collaboration_requires_fresh_validated_bridge_evidence(self):
         # The certification block lives in CERTIFICATION.md, referenced from
         # SKILL.md's Launch section.
