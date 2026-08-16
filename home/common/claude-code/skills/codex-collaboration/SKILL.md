@@ -58,6 +58,14 @@ command is missing, take the capability fallback above — use the native
 reviewer flow immediately and record it as such. Never convert a missing
 runtime into a timed-out Codex attempt.
 
+Every invocation of an operation pre-flights fresh and gets its own attempt.
+"Codex already failed earlier in this run" is not a reason to skip the
+pre-flight or go straight to native: the no-retry rule scopes to a single
+operation invocation, not to the pipeline or the session. An operator or
+dispatcher advisory does not narrow this contract — if skipping is right, the
+caller records the deviation as such rather than treating the advisory as the
+rule.
+
 Build the operation's packet per its reference file, then dispatch the plugin
 agent once with the complete packet using this transport selection:
 
