@@ -30,8 +30,9 @@ The caller currently has no idea how large the change is when it dispatches. It 
 Before dispatching `diff-review`, the packet builder measures the range in product terms with the
 shared `diff-scope` helper.
 
-- **At or under the budget** (20 product files, parent D4): dispatch exactly as today. The packet
-  is byte-identical to the current contract. This is the invariant acceptance criterion 2 pins.
+- **At or under the budget** (20 product files, parent D4): dispatch exactly as today. The
+  dispatched packet is identical to what today's contract produces. This is the invariant
+  acceptance criterion 2 pins.
 - **Over the budget**: dispatch a review of the 20 highest-churn product files, and say so — in the
   packet, in the axis verdict, and in the calling controller's provenance.
 - **No measurement available**: dispatch exactly as today and record that the coverage was not
@@ -51,6 +52,14 @@ new selector component (parent D3).
 `diff-review` gains a second pre-flight, ordered **after** the shared runtime's capability
 pre-flight. If `command -v codex-companion` fails we take the capability fallback and never
 dispatch, so measuring first would be wasted work; and the native flow is unscoped by construction.
+A layered pre-flight is already the runtime's shape — the bridge agent runs its own
+`command -v codex-companion` check after the skill has run one — so an operation-owned third check
+is idiomatic here, not novel.
+
+Two sentences of existing prose currently say the shared file owns *the* pre-flight: `SKILL.md`'s
+"pre-flight first, one sub-second call", and `DIFF-REVIEW.md`'s own header listing "pre-flight"
+among the shared runtime contract's parts. Both must be narrowed to the **capability** pre-flight,
+or the two contracts contradict each other the moment a second one exists.
 
 The invocation shape, run from the worktree, by bare name with the anchored path as the fallback
 for shells that skip profile init (the convention every other `~/.agents/bin` helper follows):
@@ -62,6 +71,10 @@ diff-scope <base-sha>..<head-sha> \
   --format json
 ```
 
+`specDir` and `planDir` come from the caller's already-resolved bindings; a dispatcher that has none
+uses the documented defaults `.claude/specs` and `.claude/plans` rather than passing no
+`--artifact-path` at all, so the run's own artifacts never consume review budget by accident.
+
 Fields read from the JSON, and only these:
 
 - `product.changed_files` — the budget comparison, and `M` in every disclosure.
@@ -72,7 +85,9 @@ Fields read from the JSON, and only these:
 gate's business, not this pre-flight's; naming them here as unread is what keeps a later reader from
 wiring the gate's thresholds into the scoping decision.
 
-The budget comparison is strict: `changed_files > 20` scopes, `== 20` does not.
+The budget comparison is strict: `changed_files > 20` scopes, `== 20` does not. A range that
+measures zero product files — everything excluded — is under budget and dispatches whole, which is
+today's behaviour.
 
 ### What the scoped packet carries
 
@@ -103,6 +118,25 @@ means *what to review for*. This design does not rename it and does not create a
 a scope line. The new disclosure is the **coverage sentence**, and the value that travels to the
 caller is the **scope** (`full` | `scoped: <N> of <M> product files` | `unmeasured`).
 
+Two objections this shape has to answer:
+
+- *Item 7 makes the "light packet" heavier.* It adds roughly twenty lines, and it removes the
+  instruction to inspect an entire range. The packet grows slightly; what the reviewer is asked to
+  read shrinks by design. That is the trade the light-packet rule was always making.
+- *A list does not stop a model fanning out anyway.* Correct, and not claimed. Layer 2 instructs;
+  it does not enforce. Enforcement of collection volume is Layer 1's job inside the plugin patch
+  (issue #24), which is precisely why parent D1 requires both.
+
+Scoping bounds what is **graded**, not what may be **consulted**. The rubric's existing carve-out —
+inspect code outside the diff only to evaluate a concrete named risk, one focused check per risk —
+survives untouched, so cross-task integration findings that reach into an unlisted file remain
+legal and remain reportable. What the reviewer may not do is silently grade the unlisted files or
+imply they were covered.
+
+Packet shape is safe to extend: the bridge agent writes the delegation prompt unchanged to a
+temporary file and enqueues it, so the packet is opaque prose to the transport and no numbered-item
+count is parsed anywhere in the runtime.
+
 ### The verdict discloses coverage — inside the assessment clause
 
 `agent-evidence.py` validates a `diff-review` terminal result by `re.fullmatch` against the first
@@ -121,9 +155,18 @@ assessment clause passes. The coverage therefore opens the assessment clause:
 **Correctness:** Findings — scoped to <N> of <M> product files; <1–2 sentence assessment>.
 ```
 
+Verified against the live regex: `Clean — scoped to 20 of 44 product files; …` and
+`Findings — scoped to 20 of 44 product files; …` both match, while
+`Clean (scoped: 20 of 44) — …` and `Scoped Clean — 20 of 44 …` both fail. The two most natural
+alternative phrasings are the two that break.
+
 Unscoped verdicts keep today's format exactly, including the bare `**Correctness:** Clean` form the
 regex still permits. A scoped review may not use the bare form: without the clause there is nowhere
 for the coverage to go.
+
+(Unrelated and untouched: the same validator matches section headings by exact text, while the
+rubric template writes `### Critical (Must Fix)`. That mismatch predates this change, sits in the
+heading check rather than the first-line check D6 rests on, and is not addressed here.)
 
 The rubric that defines this format, `correctness-reviewer-prompt.md`, is deliberately
 reviewer-agnostic and is also the native reviewer's own prompt. Its new clause is therefore
@@ -132,6 +175,11 @@ the assessment clause opens with `scoped to N of M product files;`*. On the nati
 ever says so, and the clause is inert.
 
 ### Provenance in both calling controllers
+
+The skill hands the fact over, the controllers record it. `DIFF-REVIEW.md`'s disposition contract
+today returns the validated result unmodified "plus the reviewer identity … for the caller's
+ledger"; it now returns the **scope** alongside it, using the three fixed values above. That return
+is the single hand-off point — neither controller re-derives the measurement.
 
 "The calling controller" is whichever one dispatched `diff-review`, and both do.
 
@@ -198,6 +246,24 @@ reader does not mistake them for oversights.
   under-count product files, which can only make a review less scoped, never more. Scoping in the
   safe direction is the right failure for a coverage bound.
 
+### Contract changes by file
+
+Seven product files (six prose, one JSON fixture) plus one test file. Nothing under `patches/`,
+nothing under `lib/`, no `.nix` change. That is one or two files above the issue's ~4–6 estimate,
+because ship-issue turned out to need two files rather than one and the contract-test seam is
+additive (per D10).
+
+| File | Change |
+|------|--------|
+| `codex-collaboration/DIFF-REVIEW.md` | Owns it all: the size pre-flight and its invocation, the scoped variant of item 2 with the coverage sentence, item 7, the three scope values, the fallback-preservation rule, the unmeasured degrade path. Header narrowed to "capability pre-flight". Disposition returns the scope beside the reviewer identity. |
+| `codex-collaboration/SKILL.md` | One narrowing only: "pre-flight first, one sub-second call" becomes the *capability* pre-flight, and an operation may define its own additional pre-flight in its reference file. Failure classes, fallback rule, and no-retry rule untouched. |
+| `sdd/correctness-reviewer-prompt.md` | Output Format gains the packet-conditional coverage clause opening the assessment clause. Body stays reviewer-agnostic; the named-risk carve-out is untouched. |
+| `sdd/final-review.md` | The existing "record both verdicts plus the correctness axis's reviewer identity … in the ledger" sentence gains the scope as a fourth recorded value. |
+| `ship-issue/REVIEW.md` | The full two-axis section gains one sentence: the correctness axis's scope is recorded in the PR body beside its verdict. Authoritative for the mechanics. |
+| `ship-issue/SKILL.md` (Phase 5) | One clause beside "Axis reports are never merged", pointing at REVIEW.md for the scope record. No dispatch selection changes, so no `agent-dispatch` comment is added or altered. |
+| `codex-collaboration/evals/evals.json` | New eval 3 for the over-budget contract; one permissive clause added to eval 2. |
+| `agent-skills/tests/test_workflow_skill_contracts.py` | A `DIFF-REVIEW.md` constant and one test pinning the new prose (test seam, not product). |
+
 ## Test seams
 
 Existing seams; no new harness.
@@ -252,7 +318,7 @@ gate to block on.
 |----|--------|-----------|----------------------|
 | D1 | Both calling controllers record the scope — sdd's final review and ship-issue's Phase 5 | "The calling controller" is whichever dispatched `diff-review`, and ship-issue's full two-axis path dispatches it directly; parent D7 puts the fact in the caller's provenance, not in one caller's | sdd only — leaves a scoped Clean undisclosed on the ship path, which is the exact hazard parent D7 exists to close |
 | D2 | The scoped packet carries paths plus per-file churn, taken as the first 20 entries of `files[]` verbatim, including binary rows | The shared runtime contract is "packet by paths"; the helper's churn-descending, path-tie-broken order is already a total order, and binary rows sort last so they never displace a text file (parent D3: no new selector component) | Embed per-file diffs (reintroduces the bloat parent D8 declined); filter binary rows (a new selector component, zero coverage gain) |
-| D3 | The pre-flight passes `--artifact-path <specDir> --artifact-path <planDir>` from the resolved bindings | Matches the gate's "this run's own artifacts" exclusion; the helper takes repository-relative values and both bindings already are | Pass nothing (lets the run's own spec and plan consume review budget); enumerate individual artifact files (needs a plan, breaks for non-plan reviews) |
+| D3 | The pre-flight passes `--artifact-path <specDir> --artifact-path <planDir>` from the resolved bindings, falling back to the documented `.claude/specs` / `.claude/plans` defaults when the dispatcher has none | Matches the gate's "this run's own artifacts" exclusion; the helper takes repository-relative values and both bindings already are; a dispatcher without bindings must not silently drop the exclusion | Pass nothing (lets the run's own spec and plan consume review budget); enumerate individual artifact files (needs a plan, breaks for non-plan reviews) |
 | D4 | Add a new eval for the over-budget contract; amend eval 2 only with a permissive clause about naming the pre-flight | Acceptance criterion 2 requires eval 2's under-budget in/out boundaries to stay unchanged, but a plan-only grader would otherwise read a correct pre-flight mention as a deviation | Extend eval 2 to cover both cases (dilutes the boundary it exists to grade); leave eval 2 wholly untouched (invites a false grading failure) |
 | D5 | A helper that is absent, exits non-zero, or emits unparsable output yields "no measurement": dispatch exactly as today and record `scope: unmeasured` | Matches the skill's existing capability-fallback posture — a missing runtime is never converted into a Codex attempt or a failure; `diff-scope` reaches `~/.agents/bin` only after a rebuild, so absence is a real state | Treat it as a Codex failure (spends the one-time fallback on a measurement problem); block the dispatch (skips the axis, which the never-skip rule forbids) |
 | D6 | The coverage disclosure opens the verdict's em-dash assessment clause, never sits between `Clean` and the dash | `agent-evidence.py` `re.fullmatch`es the first line as `**Correctness:** (Clean( — .+)?\|Findings — .+)`; it is a live, test-covered consumer, so any other position breaks bridge certification | `**Correctness:** Clean (scoped: 20 of 44) — …` — reads well and fails the regex |
@@ -261,4 +327,5 @@ gate to block on.
 | D9 | ship-issue records the scope in the PR body beside the correctness verdict; reviewer-identity recording is not added to ship-issue | ship-issue records no reviewer identity today, so "alongside the reviewer identity it already records" cannot be followed literally there; the PR body is where REVIEW.md already narrates review outcomes | Add reviewer identity to ship-issue too (a contract it does not have, beyond this issue); record nothing on the ship path (leaves a scoped Clean silent) |
 | D10 | Add `DIFF-REVIEW.md` prose assertions to `test_workflow_skill_contracts.py` alongside the new eval | The eval is plan-only and human-graded; the repo already pins skill-prose contracts in exactly this module for exactly these skills, and prose is the entire deliverable here | Eval only — satisfies the issue's letter, leaves nothing that fails in CI or in `just agent-workflow-tests` when the prose is lost |
 | D11 | The rubric's coverage clause is conditional on what the packet says, not on who is reading | `correctness-reviewer-prompt.md` is deliberately reviewer-agnostic and doubles as the native reviewer's prompt; a packet-conditional clause is inert on the never-scoped native path | An unconditional coverage requirement (forces a meaningless clause on unscoped native reviews); leaving the rubric untouched (the reviewer's authoritative output-format source would not mention the obligation) |
-| D12 | The size pre-flight is defined in `DIFF-REVIEW.md` and runs after the shared capability pre-flight; `SKILL.md` is amended only to say an operation may add its own pre-flight | Measuring before the capability check is wasted when the capability is missing, and the native flow is unscoped anyway; the shared file currently reads "pre-flight first, one sub-second call", which a second pre-flight would contradict | Put the size pre-flight in `SKILL.md` (it is diff-review-only; `plan-review` has no range to measure); add it without amending `SKILL.md` (leaves two contradicting pre-flight contracts) |
+| D12 | The size pre-flight is defined in `DIFF-REVIEW.md` and runs after the shared capability pre-flight; both places that call the shared check *the* pre-flight — `SKILL.md`'s "one sub-second call" and `DIFF-REVIEW.md`'s own header — are narrowed to the *capability* pre-flight | Measuring before the capability check is wasted when the capability is missing, and the native flow is unscoped anyway; leaving either sentence unnarrowed puts two contracts in direct contradiction | Put the size pre-flight in `SKILL.md` (it is diff-review-only; `plan-review` has no range to measure); add it without narrowing the existing prose (silently contradictory contracts) |
+| D13 | Scoping bounds what is graded, not what may be consulted: the rubric's named-risk carve-out for reading outside the diff survives untouched | Cross-task integration is one of the axis's five checks, and killing it to bound input would trade a dead slot for a blind spot; the reviewer may reach into an unlisted file for a named risk but may not grade or imply coverage of unlisted files | Restrict the reviewer to the listed files absolutely (loses the cross-file findings the correctness axis exists for); say nothing (leaves the reviewer to guess whether the list is a wall or a focus) |
