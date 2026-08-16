@@ -1009,20 +1009,32 @@ require exactly two parts, and require both non-empty. Each rejection raises
 `value.encode("utf-8", errors="surrogateescape")`. Values are repository-root-relative
 because git reports numstat paths root-relative even from a subdirectory (D8).
 
-`parse_numstat(payload)` — split on `b"\0"`, drop a trailing empty token, then walk:
+`parse_numstat(payload)` — split on `b"\0"`, drop a trailing empty token, then walk the
+token list **by index**, never with a plain `for token in tokens`: a rename record is
+followed by two path-only tokens that are part of *that* record and must be consumed with
+it, not visited as records of their own (D21).
 
 ```python
-    fields = token.split(b"\t")
-    # A count record is exactly <add>\t<del>\t<path>; anything else is corrupt.
-    additions_text, deletions_text, path = fields
-    if path == b"":
-        # Rename or copy: the destination is the second of the two tokens that follow.
-        path = tokens[index + 1]
+    index = 0
+    while index < len(tokens):
+        # split(b"\t", 2) — a tab is a legal filename byte and -z emits path bytes
+        # verbatim, so only the first two tabs are field separators (D22).
+        fields = tokens[index].split(b"\t", 2)
+        # A count record is exactly <add>\t<del>\t<path>; anything else is corrupt.
+        additions_text, deletions_text, path = fields
+        if path == b"":
+            # Rename or copy: git emits <record>\0<old>\0<new>\0. The destination is
+            # the SECOND following token -- tokens[index + 1] is the OLD path (D21).
+            path = tokens[index + 2]
+            index += 3
+        else:
+            index += 1
 ```
 
 A count of `b"-"` becomes `None` (binary); any other non-integer raises `DiffScopeError`.
 A record that does not split into three fields, or a rename record whose two path tokens
-are not both present, raises `DiffScopeError` — fail loud rather than guess.
+are not both present (`index + 2 >= len(tokens)`), raises `DiffScopeError` — fail loud
+rather than guess.
 
 `parse_name_status(payload)` — split the same way; a status token beginning with `R` or `C`
 consumes two path tokens and is keyed by the **second** (the destination), every other
@@ -1047,12 +1059,23 @@ response to `_parse_batch`, zipped back onto the requested paths.
         if newline < 0:
             raise DiffScopeError("truncated cat-file batch response")
         header = payload[position:newline]
-        if header.endswith(b" missing"):
+        # Parse defensively and raise DiffScopeError for ANYTHING unparsable (D23).
+        # A `missing` answer echoes the request verbatim, so for a path holding a
+        # newline the find() above stops inside the path and `header` is a fragment
+        # that neither ends with b" missing" nor rsplits into three parts. Letting
+        # that reach the unpack raises ValueError, which escapes main's
+        # `except DiffScopeError` and dies with a traceback instead of the
+        # `diff-scope: ...` message every CLI error test asserts on.
+        parts = header.rsplit(b" ", 2)
+        if header.endswith(b" missing") or len(parts) != 3:
             # We only ever ask for a side git's own --name-status said exists,
             # so a missing answer is a hard error, never a fallback (D7).
             raise DiffScopeError(f"git reported missing content for {header!r}")
-        object_type, size_text = header.rsplit(b" ", 2)[1:]
-        size = int(size_text)
+        object_type, size_text = parts[1:]
+        try:
+            size = int(size_text)
+        except ValueError:
+            raise DiffScopeError(f"unparsable cat-file header {header!r}") from None
         start = newline + 1
         end = start + size
         if end > len(payload):
