@@ -40,6 +40,13 @@ its own.
 The two changes are coupled because they touch the same sentence, and because raising a threshold on
 top of an unreliable measurement raises an unreliable number.
 
+Raising the cap does not thin the review of a 900-line branch as much as the number suggests, and it is
+worth being explicit about why, because it is the first objection a reader raises. Degradation is not
+"review less of this branch" — it is "review only what the branch's own two-axis sdd review could not
+have seen", which is the merge delta from the Phase-1 sync. The prerequisites the change leaves alone are
+what earn that: `review_state` clean means both axes already came back clean on the whole branch. A
+branch that never got that review carries `unknown` and never degrades at any size.
+
 ## Solution
 
 Rewrite the gate's size prerequisite as **a policy statement plus a call**.
@@ -73,13 +80,14 @@ Line 134 of `home/common/agent-skills/skills/ship-issue/SKILL.md`, inside the
   (executable `~/.agents/bin/diff-scope`; use the full path if the bare name does not resolve) — its first
   line reads `product: <lines> lines, <files> files`, after the helper drops lockfiles, generated-header
   files, and the artifact paths you named. The gate measures PRODUCT changes, not process artifacts, so
-  name **this run's own spec and plan files** — never `<specDir>`/`<planDir>` themselves, which hold every
-  artifact this repo has ever accepted; a historical artifact that is itself the requested product still
-  counts. No measurement — helper missing, or a non-zero exit — is not a small diff: run the full
-  two-axis review.
+  pass one `--artifact-path` per **file this run wrote** — `<spec_path>`, `<plan_path>`, plus anything
+  else it put there (a `research` findings file) — and never `<specDir>`/`<planDir>` themselves, which
+  hold every artifact this repo has ever accepted; a historical artifact that is itself the requested
+  product still counts. No measurement — helper missing, or a non-zero exit — is not a small diff: run
+  the full two-axis review.
 ```
 
-The implementer may adjust wording for flow; the content above is the contract. Three things about it
+The implementer may adjust wording for flow; the content above is the contract. Four things about it
 are load-bearing.
 
 **`$BASE_SHA..$HEAD_SHA` is already correct and already in scope.** Phase 5 opens by defining both
@@ -91,6 +99,13 @@ refuses to infer.
 paragraph already receives both from the `from-issue` handoff, and the standalone path already derives
 them (`ls <specDir>/ | grep "issue-<num>"`). Phase 5 holds both file paths before the gate runs; no new
 plumbing, no new binding.
+
+**The flag is repeatable and the list is "what this run wrote", not "the two handoff fields".** The
+handoff names `spec_path` and `plan_path` because those are the artifacts every run produces, but
+`research/SKILL.md` writes its findings under `specDir` too, and a run that did a research pass and named
+only two paths would count its own findings file as product. Naming an extra path is free — an
+`--artifact-path` matching no row is deliberately not an error (diff-scope D8) — while naming too few
+inflates the measurement, so the instruction points at the safe direction.
 
 **The `--format text` first line is a documented output**, verified against the current helper on a real
 range in this worktree:
@@ -108,6 +123,25 @@ excluded: 0 lockfile, 0 generated, 1 artifact
 That run is also the clearest available illustration of why the artifact flag takes files: another run's
 plan (`2026-08-16-codex-collection-budget.md`) sits under `<planDir>` and correctly counts as 440 product
 lines, because this run did not write it.
+
+The quoted `product: <lines> lines, <files> files` is a **reading aid, not a parser contract**. The gate
+asks an agent to read two labelled integers, so a cosmetic change to the helper's text form would not
+break the instruction, and the real line is already pinned where it is observable —
+`test_diff_scope.py:567` asserts `lines[0] == "product: 5 lines, 7 files"` against a live CLI run. The
+gate's contract test therefore does not reach into `diff-scope.py` to compare format strings; that would
+assert an implementation detail from the wrong suite, and the helper's own CLI-layer test already fails
+first if the line is renamed.
+
+### Terminology: "product lines", not "changed lines"
+
+The gate's old wording ("≤400 changed lines") and the helper's vocabulary disagree, and the rewrite adopts
+the helper's: `diff-scope` labels its output `product:` precisely because the number is *after* the three
+exclusions. Every surface this change touches uses **product lines** and **product files** — the gate
+bullet, eval 1's `expected_output`, and the test constants — so that one phrase is greppable across all
+three and a grader reading "product" is reading the same word the tool prints. No glossary file records
+this: the repo has no context map or area tree (only an eval fixture's), and creating one for a single
+term would invent a convention here for the surface the `agent-skills` README says belongs to *consuming*
+projects.
 
 ### What the gate no longer says, and why the carve-out sentence is not one of them
 
@@ -159,6 +193,13 @@ switched since, so the symlink does not exist yet. Until the next `just switch`,
 new prose will find neither the bare name nor the full path. The rule has to be stated because it will be
 exercised on day one.
 
+The same activation lag settles a question about this change's own delivery: a skill is read through the
+**activated** generation's `~/.claude/skills` link, not from the worktree, so `ship-issue`'s Phase 5 will
+grade *this* branch under the gate that is currently activated (400 lines, hand-counted). That is fine —
+the branch is small either way — but it means no run can demonstrate the new gate until a switch, which is
+why the issue's behavioural criteria are graded by eval 1 and a recorded helper run rather than by
+observing a live degradation.
+
 Two alternatives were considered. Falling back to the prose arithmetic restores precisely the drift this
 change exists to remove, and would do so on exactly the runs where nobody notices. Blocking the phase
 lets a review-thoroughness optimisation stop a ship — a gate whose *failure* mode is worse than its
@@ -182,17 +223,23 @@ So the criterion splits across the two instruments the repo actually has:
    stylistic difference. This is the manual-grade instrument.
 2. **`home/common/agent-skills/tests/test_workflow_skill_contracts.py`** — the deterministic instrument,
    already run by `just agent-workflow-tests`. It is where this repo pins skill-markdown invariants, and
-   it does not read `ship-issue/SKILL.md` yet; the change adds a `SHIP_ISSUE` constant and:
+   it does not read `ship-issue/SKILL.md` yet; the change adds a `SHIP_ISSUE` path constant, a
+   `SHIP_ISSUE_EVALS` path constant, and **the boundary as two module-level string constants** — the one
+   place in the test file where the numbers are spelled out, reused by both tests below. That matters:
+   without it the retune would leave three literal copies of "1,000" (skill, eval, test) and the test's
+   copy would be a third home rather than the pin. With it, one constant asserts the policy *and* asserts
+   that the two documents agree with it, so a future retune touches the skill, the eval, and exactly one
+   line of test.
 
-   - **A gate-contract test** over the section between `**Pick the path first.**` and
-     `**Merge-delta check (degraded path).**` (the existing `section()` helper): the boundary fragments
-     `≤1,000 product lines` and `≤20 product files` are present; `diff-scope $BASE_SHA..$HEAD_SHA` and
-     `--artifact-path` are present; `--numstat` and `400` are absent; and `assert_ordered` pins all four
-     prerequisites still in their order (`review_state` → conflict → the size clause → `risky` /
-     `criticalPaths`), which is what makes "every non-size prerequisite is unchanged" a check rather than
-     a promise.
-   - **A SKILL↔eval agreement test**: `evals/evals.json` carries the same boundary fragment and no longer
-     carries `≤400`. Two restatements of one boundary exist (verified by repo-wide grep: exactly
+   - **`test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary`** — over the section
+     between `**Pick the path first.**` and `**Merge-delta check (degraded path).**` (the existing
+     `section()` helper): both boundary constants are present; `diff-scope $BASE_SHA..$HEAD_SHA`,
+     `--artifact-path` and the no-measurement clause are present; `--numstat` and `400` are absent; and
+     `assert_ordered` pins all four prerequisites still in their order (`review_state` → conflict → the
+     size clause → `risky` / `criticalPaths`), which is what makes "every non-size prerequisite is
+     unchanged" a check rather than a promise.
+   - **`test_ship_issue_eval_restates_the_gate_boundary_it_grades`** — `evals/evals.json` carries the same
+     boundary constants and no longer carries `≤400`. Two restatements of one boundary exist (verified by repo-wide grep: exactly
      `SKILL.md:134` and `evals.json:10`, no others); this test is what stops them separating again.
    - **One row added to `test_helper_binaries_resolve_from_bare_names`**, asserting `ship-issue` anchors
      `~/.agents/bin/diff-scope`. The anchor is asserted only there — its existing home — so no fragment is
@@ -205,6 +252,12 @@ The rejected option was updating eval 1 only. It satisfies "asserts" and leaves 
 a criterion no command can check is a criterion that decays. Converting eval 1 to a pipeline eval was also
 rejected: per the eval file's own notes it needs a throwaway GitHub repo, which is a different and much
 larger slice than retuning one gate.
+
+Eval 1's edit stays **one clause long**. It grades a whole nine-phase walk, and the degradation gate is
+one sub-clause of a paragraph; expanding it into the flag list would make a correct walk fail for omitting
+detail the eval never set out to grade. The clause carries the two numbers and the delegation — nothing
+about `--format`, `--root`, or which paths get named. Those belong to the skill, which is where an agent
+reads them, and to the contract test, which is where they are checked.
 
 Note what the deterministic seam does **not** claim. It pins the gate's *prose contract* — the numbers,
 the delegation, the surviving prerequisites. It cannot execute the issue's behavioural criteria (a
@@ -235,7 +288,15 @@ since. This spec is the record.
 Existing seams only; no new harness.
 
 1. **`just agent-workflow-tests`** — the deterministic gate, covering all three assertions above. It
-   already runs `test_workflow_skill_contracts.py` and must stay green on the six other suites it runs.
+   already runs `test_workflow_skill_contracts.py` and must stay green on the six other suites it runs;
+   baseline verified at this branch's base: **156 tests, OK**.
+
+   The section anchors and the ordering were executed against the *current* `SKILL.md` before being
+   written down: `section("**Pick the path first.**", "**Merge-delta check (degraded path).**")` yields a
+   1,108-character section in which `review_state` → `conflict` → the size clause → `risky` →
+   `criticalPaths` appear in that order, and in which `400` and `--numstat` are both **present**. That last
+   part is the point — the two `assertNotIn`s fail against today's file and pass only after the rewrite,
+   so they are assertions rather than decoration.
 2. **`just evals ship-issue 1`** — prints the prompt and the updated `expected_output` for manual grading.
    Green/red is not available here and the plan must not pretend otherwise; the gate is "the printed
    expected output states the retuned boundary and the delegation".
@@ -253,14 +314,15 @@ Each maps to a command the plan phase can run, or is explicitly marked as eviden
 | # | Criterion | Gate |
 |---|-----------|------|
 | A1 | The gate obtains product line and file counts from `diff-scope`, and restates no numstat arithmetic | `just agent-workflow-tests` — gate-contract test: `diff-scope $BASE_SHA..$HEAD_SHA` and `--artifact-path` present in the Phase-5 gate section, `--numstat` absent |
-| A2 | The boundary is ≤1,000 product lines AND ≤20 product files | same test: `≤1,000 product lines` and `≤20 product files` present, `400` absent from the section |
-| A3 | The invocation names this run's own spec and plan **files**, and the historical-artifact carve-out survives | same test: `<spec_path>`/`<plan_path>` in the command, the carve-out sentence present; reviewed by eye against diff-scope D8 |
+| A2 | The boundary is ≤1,000 product lines AND ≤20 product files | same test: both boundary constants present, `400` absent from the section |
+| A3 | The invocation names the **files** this run wrote, and the historical-artifact carve-out survives | same test: `<spec_path>`/`<plan_path>` in the command, the carve-out sentence present; reviewed by eye against diff-scope D8 |
 | A4 | An unmeasurable diff takes the full two-axis review | same test: the no-measurement clause is present in the gate section |
 | A5 | Every non-size prerequisite is unchanged (`review_state` clean, conflict-free sync, no `risky` label, no `criticalPaths` hit) | same test: `assert_ordered` over the four prerequisites; plus `git diff` touching exactly one bullet in `SKILL.md` |
 | A6 | The eval suite asserts the retuned boundary, and passes | `just agent-workflow-tests` (mechanical: SKILL↔eval agreement test) **and** `just evals ship-issue 1` printing the retuned `expected_output` (manual grade) |
 | A7 | `ship-issue` anchors the helper's full path | `just agent-workflow-tests` — `test_helper_binaries_resolve_from_bare_names` gains the `ship-issue` / `~/.agents/bin/diff-scope` row |
 | A8 | The generation still evaluates | `just build` |
-| A9 | *Evidence, not a gate:* the prescribed invocation produces the two integers on a real range | one recorded `diff-scope` run over the branch's own `$BASE_SHA..$HEAD_SHA`, quoted in the PR body — which is also the issue's demo |
+| A9 | The boundary is spelled out exactly once in the test file, and both documents are checked against that one spelling | code review of the test module: two module-level boundary constants, no other literal `1,000` / `20 product files` in the file |
+| A10 | *Evidence, not a gate:* the prescribed invocation produces the two integers on a real range | one recorded `diff-scope` run over the branch's own `$BASE_SHA..$HEAD_SHA`, quoted in the PR body — which is also the issue's demo |
 
 ## Out of scope
 
@@ -281,10 +343,13 @@ Each maps to a command the plan phase can run, or is explicitly marked as eviden
 
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
-| D1 | Split the gate sentence in two: the thresholds (≤1,000 lines, ≤20 files) stay in `ship-issue/SKILL.md` as their only authoritative home, and the accounting is delegated wholly to `diff-scope` | the-bar's DRY rule ("every policy, format, constant and contract has exactly one authoritative home"); the codex-review-input-bound spec's D6 for the numbers and D3 for one shared accounting implementation; diff-scope's D9 keeps the helper threshold-free so the gate is the only home available | Push the thresholds into the helper as defaults — fuses the gate's ≤20 files with the scoped-review budget's 20-file cap, two decisions the codex spec's D4 requires to move independently |
+| D1 | Split the gate sentence in two: the thresholds (≤1,000 lines, ≤20 files) stay in `ship-issue/SKILL.md` as their only authoritative home, and the accounting is delegated wholly to `diff-scope` | the-bar's DRY rule ("every policy, format, constant and contract has exactly one authoritative home"); the codex-review-input-bound spec's D6 for the numbers and its D3 for one shared accounting implementation; diff-scope's D9 keeps the helper threshold-free so the gate is the only home available | Push the thresholds into the helper as defaults — fuses the gate's ≤20 files with the scoped-review budget's 20-file cap, two decisions the codex spec's D4 requires to move independently |
 | D2 | Prescribe `diff-scope $BASE_SHA..$HEAD_SHA --format text --artifact-path <spec_path> --artifact-path <plan_path>`, called by bare name with a `~/.agents/bin/diff-scope` full-path anchor and no `--root` | diff-scope's D11 justifies the text form by naming the gate consumer, and its first line carries both integers plus quotable exclusion counts; the-bar's Token economy (few parameters, forms a model emits reliably, defaults absorb the common case); the bare-name-plus-anchor convention is already enforced by `test_helper_binaries_resolve_from_bare_names` | `--format json` piped to `jq -r '.product.changed_lines'` — `jq` is installed, but it puts a pipe, a filter and two field paths into prose an agent copies literally, and JSON is the default so a dropped `--format` silently changes the shape |
-| D3 | The gate names **this run's own spec and plan files** as `--artifact-path` values, never `<specDir>`/`<planDir>`, and keeps the carve-out sentence as the instruction that justifies it | diff-scope's D8: directory granularity cannot express "this run's own artifacts" and would drop a historical spec that is itself the product; `ship-issue`'s "Invocation paths" already carries `spec_path`/`plan_path`; verified live — another run's plan under `<planDir>` correctly counted 440 product lines | Pass the two directories (silently breaks the carve-out the issue requires to survive); pass nothing (over-counts every run that wrote a spec, so the gate is wrong in the safe direction on every real run) |
+| D3 | The gate passes one `--artifact-path` per **file this run wrote** — `<spec_path>`, `<plan_path>`, and anything else it put under those directories — never `<specDir>`/`<planDir>` themselves, and keeps the carve-out sentence as the instruction that justifies it | diff-scope's D8: directory granularity cannot express "this run's own artifacts" and would drop a historical spec that is itself the product; `ship-issue`'s "Invocation paths" already carries `spec_path`/`plan_path`, but `research/SKILL.md` also writes findings under `specDir`, so a two-field list under-names; an unmatched value is deliberately not an error, so naming extra is free while naming too few inflates the count; verified live — another run's plan under `<planDir>` correctly counted 440 product lines | Pass the two directories (silently breaks the carve-out the issue requires to survive); pass exactly the two handoff fields (misses a research findings file the same run wrote); pass nothing (over-counts on every run that wrote a spec) |
 | D4 | No measurement — helper absent or a non-zero exit — is not a small diff: the gate takes the full two-axis review, and never falls back to hand-executed `--numstat` | the-bar's Fail loud and Truthful terminal states; verified: `~/.agents/bin/diff-scope` does **not** exist on this host until the next `just switch`, so the path is live on day one rather than hypothetical | Fall back to the prose arithmetic — restores exactly the drift this change removes, on the runs where nobody notices; block the phase — lets a review-thoroughness optimisation stop a ship |
 | D5 | "The eval suite asserts the boundary … and passes" lands in two instruments: eval 1's `expected_output` for the manual grade, and two new tests plus one new row in `test_workflow_skill_contracts.py` for the mechanical one | All three ship-issue evals are `plan-only` and `run-eval.sh` only prints them for grading (the eval file's own `notes` explains why: real execution needs a throwaway GitHub repo), so "passes" has no executable referent there; the contracts suite is where this repo pins skill-markdown invariants and it already runs under `just agent-workflow-tests` | Update eval 1 alone — leaves "and passes" unfalsifiable; convert eval 1 to a pipeline eval — needs a throwaway GitHub repo, a far larger slice than retuning one gate |
 | D6 | The deterministic seam pins the gate's *prose contract* (numbers, delegation, surviving prerequisites) and explicitly does not claim to execute the issue's behavioural criteria, which eval 1 grades and one recorded `diff-scope` run demonstrates | the-bar's "tests that can fail" — the gate is prose an agent follows, so a test named for the behaviour would assert something it cannot observe, and a test whose name overstates its coverage is worse than an honest one | Name the test for the behaviour (a 900-line branch degrades) — implies coverage no unittest over markdown can have |
-| D7 | `from-issue/investigate.md`'s C4 note stays verbatim; it is recorded as a residual, not resolved | C4 carries no threshold, so it is not the "sibling restatement of the same boundary" this issue's scope admits; its primary moment is a Phase-0 estimate of unwritten work, where no range exists for the helper to measure | Rewrite C4 to call `diff-scope` in the same change — widens the slice into a second skill, and needs its own judgement call about the no-range case, for zero movement on any acceptance criterion |
+| D7 | The boundary lives in the test file as two module-level string constants, asserted against both `SKILL.md` and `evals.json`; the test spells the numbers exactly once | Otherwise the retune leaves three literal copies (skill, eval, test) and the test's copy is a third home rather than the pin; one constant lets the same line assert the policy value *and* that the two documents agree with it — the-bar's DRY rule ("deduplicate when the copies must change together") applied to the enforcement, not just the prose | Two independent literals in the two tests (a retune then edits four places and can half-land); derive the boundary from `SKILL.md` by regex and assert only agreement (nothing then pins the value, so a stray edit back to 400 stays green) |
+| D8 | The gate quotes `product: <lines> lines, <files> files` as a reading aid, and no test compares that quote against `diff-scope.py`'s format string | The line is already pinned where it is observable — `test_diff_scope.py:567` asserts it from a live CLI run — and the gate's instruction is "read two labelled integers", which survives a cosmetic reformat; a contracts-suite grep into the helper's source would assert an implementation detail from the wrong suite | Assert the `product: ` prefix appears in `scripts/diff-scope.py` from the contracts test — couples two suites through a source string for a failure the helper's own test already catches first |
+| D9 | Every surface uses **product lines** / **product files** (the helper's own `product:` vocabulary), replacing the old "changed lines"; no glossary or context-map file is created for the term | The number is post-exclusion, so "changed" was already wrong, and one phrase greppable across skill, eval and test is what makes the three checkable against each other; the repo has no context map or area tree outside an eval fixture, and the `agent-skills` README frames that surface as belonging to *consuming* projects, so creating one here invents a convention for a single term (the diff-scope design's D16 settled the same question the same way) | Keep "changed lines" (contradicts the helper's own label and the exclusions); open `docs/CONTEXT-MAP.md` plus an area file for the term |
+| D10 | `from-issue/investigate.md`'s C4 note stays verbatim; it is recorded as a residual, not resolved | C4 carries no threshold, so it is not the "sibling restatement of the same boundary" this issue's scope admits; its primary moment is a Phase-0 estimate of unwritten work, where no range exists for the helper to measure | Rewrite C4 to call `diff-scope` in the same change — widens the slice into a second skill, and needs its own judgement call about the no-range case, for zero movement on any acceptance criterion |
