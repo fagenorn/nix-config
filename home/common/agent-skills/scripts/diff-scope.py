@@ -408,8 +408,11 @@ def _validate_root(root: Path) -> None:
         raise DiffScopeError(message)
     try:
         answer = _git(root, "rev-parse", "--is-inside-work-tree")
-    except DiffScopeError:
-        raise DiffScopeError(message) from None
+    except DiffScopeError as error:
+        # Keep git's own diagnostic: git-not-on-PATH, an unreadable .git and a
+        # corrupt object store are not --root mistakes, and collapsing them into
+        # this sentence would point the operator at the wrong thing.
+        raise DiffScopeError(f"{message} ({error})") from None
     if answer.strip() != b"true":
         raise DiffScopeError(message)
 
