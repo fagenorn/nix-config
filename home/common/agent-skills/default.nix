@@ -74,6 +74,11 @@ in
       executable = true;
     };
 
+    ".agents/bin/diff-scope" = {
+      source = ./scripts/diff-scope.py;
+      executable = true;
+    };
+
     # Claude accepts Home Manager's recursive file links, so its generated
     # multi-file skill can continue to use that layout.
     ".claude/skills/ui-ux-pro-max" = {
