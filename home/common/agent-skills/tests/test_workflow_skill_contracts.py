@@ -15,6 +15,9 @@ COLLABORATION = (
 CERTIFICATION = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/CERTIFICATION.md"
 )
+DIFF_REVIEW = (
+    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/DIFF-REVIEW.md"
+)
 RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
 WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
 SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
@@ -35,6 +38,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.auto = AUTO.read_text(encoding="utf-8")
         cls.handoff = HANDOFF.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
+        cls.diff_review = DIFF_REVIEW.read_text(encoding="utf-8")
         cls.certification = CERTIFICATION.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
@@ -296,6 +300,88 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("non-symlink parent path", self.handoff)
         self.assertIn("mktemp", self.handoff)
         self.assertIn("Do not duplicate lifecycle JSON", self.handoff)
+
+    def test_diff_review_scopes_oversized_ranges_and_discloses_coverage(self):
+        # Whitespace-normalized: these are wrapped prose contracts, so line
+        # breaks must not be part of what is pinned. The blockquote markers go
+        # first — without that, a naive split() leaves a stray ">" inside the
+        # coverage sentence and no fragment spanning its line wrap can match.
+        contract = " ".join(self.diff_review.replace("\n> ", "\n").split())
+        for fragment in (
+            "resolve policy, capability pre-flight, packet by paths",
+            "the size pre-flight below",
+            "`~/.agents/bin/diff-scope`",
+            "--artifact-path <specDir> --artifact-path <planDir>",
+            "--format json",
+            "`.claude/specs` and `.claude/plans`",
+            "`product.changed_files`",
+            "`files[].path`",
+            "`files[].changed_lines`",
+            "`product.changed_lines` and `excluded` are deliberately not read",
+            "`changed_files > 20` scopes the packet, `changed_files == 20` does not",
+            "no filtering, no re-ranking",
+            # Cardinality and selection order — acceptance criteria 3 and 4 rest
+            # on these two, and "no filtering, no re-ranking" pins neither.
+            "taken as the first 20 entries in the emitted order",
+            "ranks churn descending with a raw-path-bytes tie-break",
+            "the same range always yields the same 20 paths",
+            "selected as the highest-churn files",
+            "yields no measurement — never a failure",
+            "adds no fourth failure class",
+            "never spends the one-time native fallback and never triggers a retry",
+            "receives the same packet, item 7 and coverage sentence intact",
+            "`full` | `scoped: <N> of <M> product files` | `unmeasured`",
+            "This is a scoped review:",
+            "do not treat their absence from the list as evidence they are clean",
+            # The bound is on input, not only on grading (D16): item 4's
+            # full-range package leaves a scoped packet, and item 7 is the
+            # collection instruction that replaces it.
+            "Under budget — or unmeasured — the packet is exactly the six items above",
+            "Over budget it differs in exactly three places and nowhere else",
+            "Item 4 drops the diff-package path",
+            "`[DIFF_FILE]` has no value on a scoped dispatch",
+            "do not change `scripts/review-package`: the conformance axis reads that "
+            "same package whole",
+            "Item 7 exists only when scoped",
+            "one bounded read per listed path",
+            "treat that set as the whole of the range under review",
+            "one focused check per named risk",
+            "it never embeds per-file diffs",
+            "scoped to <N> of <M> product files;",
+            "A scoped review may not use the bare",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, contract)
+
+        # The capability check is named as running first, and the size
+        # pre-flight is defined before the packet it changes.
+        self.assertIn(
+            "capability pre-flight and runs first", contract
+        )
+        self.assert_ordered(
+            contract,
+            "## Size pre-flight",
+            "## Packet",
+            "### When the range is over budget",
+            "## Reviewer output contract",
+            "## Disposition",
+        )
+        # The header no longer claims the shared file owns *the* pre-flight.
+        self.assertNotIn("resolve policy, pre-flight, packet by paths", contract)
+
+        # SKILL.md is narrowed in the same breath, or the two contracts
+        # contradict each other (D12).
+        self.assertIn(
+            "Capability pre-flight first, one sub-second call", self.collaboration
+        )
+        self.assertNotIn(
+            "Pre-flight first, one sub-second call", self.collaboration
+        )
+        self.assertIn("skip the capability pre-flight", self.collaboration)
+        self.assertIn(
+            "an additional pre-flight of its own in its reference file",
+            self.collaboration,
+        )
 
     def test_collaboration_requires_fresh_validated_bridge_evidence(self):
         # The certification block lives in CERTIFICATION.md, referenced from

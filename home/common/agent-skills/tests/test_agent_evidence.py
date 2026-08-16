@@ -220,6 +220,31 @@ class AgentEvidenceTest(unittest.TestCase):
                     "BRIDGE_MEDIATED_RESULT_INVALID",
                 )
 
+    def test_scoped_correctness_verdict_passes_and_misplaced_scope_does_not(self):
+        # DIFF-REVIEW.md puts the coverage inside the em-dash assessment clause
+        # because this validator fullmatches the first line (D6). Both halves
+        # already hold at the base commit; this is a regression lock, so a later
+        # edit to the verdict regex cannot break the disclosure silently.
+        original = self.fixture("bridge-fresh-end-to-end.json")
+        sections = "\n\n## Critical\nNone.\n\n## Important\nNone.\n\n## Minor\nNone."
+
+        accepted = deepcopy(original)
+        accepted["operations"][1]["agent_mediated"]["result"] = (
+            "**Correctness:** Clean — scoped to 20 of 44 product files; "
+            "no defects in the reviewed subset." + sections
+        )
+        completed = self.run_document("bridge", accepted)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        rejected = deepcopy(original)
+        rejected["operations"][1]["agent_mediated"]["result"] = (
+            "**Correctness:** Clean (scoped: 20 of 44) — "
+            "no defects in the reviewed subset." + sections
+        )
+        self.assert_diagnostic(
+            self.run_document("bridge", rejected), "BRIDGE_MEDIATED_RESULT_INVALID"
+        )
+
     def test_single_research_failure_passes_as_transient(self):
         completed = run_validator("research", "research-single-failure.json")
 
