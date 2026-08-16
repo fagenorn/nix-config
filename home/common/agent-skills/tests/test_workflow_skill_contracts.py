@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import unittest
 
@@ -20,6 +21,9 @@ WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
 SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
+SHIP_ISSUE_EVALS = (
+    REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json"
+)
 
 # The Phase-5 degradation boundary, spelled once for the whole module: the skill
 # and its eval are both checked against these two strings so they cannot drift.
@@ -45,6 +49,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.research = RESEARCH.read_text(encoding="utf-8")
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
+        cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -390,6 +395,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "`risky` label",
             "`review.criticalPaths` glob",
         )
+
+    def test_ship_issue_eval_restates_the_gate_boundary_it_grades(self):
+        # Eval 1 grades a whole phase walk; its one degradation clause must
+        # quote the same boundary the skill states, or a graded walk can be
+        # "correct" against a number the skill no longer carries.
+        expected = next(
+            case for case in self.ship_issue_evals["evals"] if case["id"] == 1
+        )["expected_output"]
+        for fragment in (GATE_LINE_BOUNDARY, GATE_FILE_BOUNDARY, "diff-scope"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, expected)
+        self.assertNotIn("≤400", expected)
 
     def test_helper_binaries_resolve_from_bare_names(self):
         # Skills invoke workflow-state/agent-evidence by bare name. The Nix
