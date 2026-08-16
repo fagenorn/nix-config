@@ -1419,6 +1419,19 @@ index fead00c..aee30f2 100644
 @@ -1159 +1157 @@ export async function runAppServerTurn(cwd, options = {}) {
 -  });
 +  }, { reviewerJobId: options.reviewerJobId, env: options.env });
+diff --git a/plugins/codex/scripts/lib/git.mjs b/plugins/codex/scripts/lib/git.mjs
+index c401f0c..6639e67 100644
+--- a/plugins/codex/scripts/lib/git.mjs
++++ b/plugins/codex/scripts/lib/git.mjs
+@@ -297 +297,7 @@ function buildAdversarialCollectionGuidance(options = {}) {
+-  return "The repository context below is a lightweight summary. Inspect the target diff yourself with read-only git commands before finalizing findings.";
++  return [
++    "The repository context below is a lightweight summary, so collect the rest of the evidence yourself with read-only git commands, on a budget.",
++    "Survey first: the changed-file list and diff stat included below show what changed; if they do not break the sizes down per file, get that with a single stat-level command before you read any file's diff.",
++    "Then take targeted per-file diffs, at default context, for at most 8 files — the largest changes and anything the user's focus area names.",
++    "Never take the full diff in one command, never widen the diff context, never fan out across every changed file, and never pull one very large file's diff whole.",
++    "If the change is bigger than that budget covers, review what it does cover properly and state in your summary which parts of the change you did not read."
++  ].join("\n");
 diff --git a/plugins/codex/scripts/lib/job-control.mjs b/plugins/codex/scripts/lib/job-control.mjs
 index ad152c1..af979e7 100644
 --- a/plugins/codex/scripts/lib/job-control.mjs
@@ -3327,6 +3340,36 @@ index f83c96a..6920c62 100644
 @@ -314,0 +317,2 @@ rl.on("line", (line) => {
 +        state.lastThreadStart = message.params;
 +        saveState(state);
+diff --git a/tests/git.test.mjs b/tests/git.test.mjs
+index 5b5c266..11b94e3 100644
+--- a/tests/git.test.mjs
++++ b/tests/git.test.mjs
+@@ -114,0 +115,2 @@ test("collectReviewContext keeps inline diffs for tiny adversarial reviews", ()
++  assert.doesNotMatch(context.collectionGuidance, /at most 8 files/i);
++  assert.strictEqual(context.collectionGuidance, "Use the repository context below as primary evidence.");
+@@ -173,0 +176,22 @@ test("collectReviewContext falls back to lightweight context for larger adversar
++test("collectReviewContext budgets self-collection guidance for over-cap adversarial reviews", () => {
++  const cwd = makeTempDir();
++  initGitRepo(cwd);
++  for (const name of ["a.js", "b.js", "c.js"]) {
++    fs.writeFileSync(path.join(cwd, name), `export const value = "${name}-v1";\n`);
++  }
++  run("git", ["add", "a.js", "b.js", "c.js"], { cwd });
++  run("git", ["commit", "-m", "init"], { cwd });
++  for (const name of ["a.js", "b.js", "c.js"]) {
++    fs.writeFileSync(path.join(cwd, name), `export const value = "${name}-v2";\n`);
++  }
++
++  const target = resolveReviewTarget(cwd, {});
++  const context = collectReviewContext(cwd, target);
++
++  assert.equal(context.inputMode, "self-collect");
++  assert.match(context.collectionGuidance, /at most 8 files/i);
++  assert.match(context.collectionGuidance, /survey/i);
++  assert.match(context.collectionGuidance, /stat/i);
++  assert.match(context.collectionGuidance, /never fan out/i);
++});
++
 diff --git a/tests/helpers.mjs b/tests/helpers.mjs
 index d698119..55f28fb 100644
 --- a/tests/helpers.mjs
