@@ -226,15 +226,18 @@ Add the new test method (place it immediately before
         for fragment in (
             GATE_LINE_BOUNDARY,
             GATE_FILE_BOUNDARY,
-            "diff-scope $BASE_SHA..$HEAD_SHA",
-            "--artifact-path",
+            # the whole invocation, not its pieces: a gate that named only
+            # <spec_path> would satisfy a bare "--artifact-path" check while
+            # under-naming this run's artifacts and inflating the count (D3).
+            "diff-scope $BASE_SHA..$HEAD_SHA --format text"
+            " --artifact-path <spec_path> --artifact-path <plan_path>",
             "No measurement",
             "is not a small diff",
             "a historical artifact that is itself the requested product still counts",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, gate)
-        for absent in ("--numstat", "400"):
+        for absent in ("--numstat", "400", "--root"):
             with self.subTest(absent=absent):
                 self.assertNotIn(absent, gate)
         self.assert_ordered(
@@ -262,9 +265,10 @@ Run: `just agent-workflow-tests 2>&1 | tail -30`
 Expected: **FAIL**, 157 tests run, and the failures come from exactly two test methods —
 `test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary` and
 `test_helper_binaries_resolve_from_bare_names` (`skill='ship-issue'`). `unittest` reports one
-block per failing `subTest`, so expect many blocks from the first method: all seven `fragment=`
-subTests, both `absent=` subTests (`--numstat` and `400` are in today's section — that is the
-point), and the un-subTested `assert_ordered` raising on the missing
+block per failing `subTest`, so expect many blocks from the first method: all six `fragment=`
+subTests, and the `absent=` subTests for `--numstat` and `400` (both are in today's section —
+that is the point; `--root` is already absent and its subTest passes from the start), and the
+un-subTested `assert_ordered` raising on the missing
 `≤1,000 product lines` anchor. What must hold: **no ERROR** anywhere, and no other test method
 in the failure list. An error means the constants or the `setUpClass` line went in wrong — fix
 that before touching `SKILL.md`.
@@ -297,20 +301,23 @@ arithmetic back, or split the bullet across lines.
 - [ ] **Step 4: Verify**
 
 ```bash
+set -o pipefail   # without it a pipeline returns tail's status and a failing gate reads as 0
 just agent-workflow-tests 2>&1 | tail -5
-git diff --numstat "$(git merge-base HEAD origin/main)"..HEAD -- home/common/agent-skills/skills/ship-issue/SKILL.md
+git diff --numstat "$(git merge-base HEAD origin/main)" -- home/common/agent-skills/skills/ship-issue/SKILL.md
 grep -c "1,000" home/common/agent-skills/tests/test_workflow_skill_contracts.py
 just build 2>&1 | tail -3
 ```
 
 Expected, in order:
 - `Ran 157 tests` … `OK` (156 baseline + 1 new method; the bare-names row is a subTest and adds
-  no count).
+  no count), **and the pipeline exits 0** — with `pipefail` set, that status is the test run's.
 - `1	1	home/common/agent-skills/skills/ship-issue/SKILL.md` — one line out, one line in. Any
   other numbers mean the bullet was reflowed or a neighbouring bullet was edited (A5).
+  The range is deliberately `<base>` with **no `..HEAD`**: this step runs before Step 5's commit,
+  so the edit is still in the working tree and a `base..HEAD` comparison would print nothing.
 - `1` — the boundary is spelled once in the test module (A9). `2` or more means a test
   re-spelled it inline instead of using the constant.
-- `just build` exits 0 (A8). Warm ≈3 min.
+- `just build` exits 0 (A8) — again a real status only because `pipefail` is set. Warm ≈3 min.
 
 - [ ] **Step 5: Commit**
 
@@ -422,14 +429,18 @@ helper prints and the skill now uses (per D9).
 - [ ] **Step 4: Verify**
 
 ```bash
+set -o pipefail   # without it a pipeline returns tail's status and a failing gate reads as 0
 just agent-workflow-tests 2>&1 | tail -5
-git diff --numstat "$(git merge-base HEAD origin/main)"..HEAD -- home/common/agent-skills/skills/ship-issue/evals/evals.json
+git diff --numstat "$(git merge-base HEAD origin/main)" -- home/common/agent-skills/skills/ship-issue/evals/evals.json
 python3 -c "import json;print(len(json.load(open('home/common/agent-skills/skills/ship-issue/evals/evals.json'))['evals']))"
 grep -c "1,000" home/common/agent-skills/tests/test_workflow_skill_contracts.py
 grep -c "20 product files" home/common/agent-skills/tests/test_workflow_skill_contracts.py
 just evals ship-issue 1 | grep -c "≤1,000 product lines"
 just build 2>&1 | tail -3
 ```
+
+As in Task 1, the numstat range carries **no `..HEAD`** — this step runs before the commit, so the
+edit is still in the working tree.
 
 Expected, in order: `Ran 158 tests` … `OK`; `1	1	…/evals.json`; `3` (the JSON still parses and
 still holds three evals); `1`; `1` (A9 — the boundary is spelled exactly once in the test
@@ -507,8 +518,10 @@ a number from this plan):
 - [ ] **Step 2: Write the evidence document**
 
 Create `.claude/specs/2026-08-16-ship-issue-degradation-gate-evidence.md` with this structure —
-prose as written, and the fenced block filled with the **verbatim stdout** of Step 1 (command
-line included) rather than any transcription:
+prose as written, the command reproduced as typed, and beneath it the **verbatim stdout** of
+Step 1 rather than any transcription. Stdout does not echo the command, so write the two as
+separate blocks (or one block with the command on a `$`-prefixed line) and never claim the
+copied command is part of the captured output:
 
 ```markdown
 # Degradation gate retune — A10 evidence
@@ -526,11 +539,15 @@ the range and the reading are identical to what the gate prescribes.
 Recorded <date>, on `<branch>` at `<HEAD_SHA>` with `BASE_SHA=<BASE_SHA>`
 (`git merge-base HEAD origin/main`).
 
-<the verbatim command and stdout from Step 1, in a fenced block>
+<the command as typed, then the verbatim stdout from Step 1>
 
 Reading it the way the gate does: `<lines>` product lines and `<files>` product files, both
 under ≤1,000 / ≤20, so this branch's own size prerequisite is satisfied. The `excluded: …
-<n> artifact` count is this run's spec, plan and evidence file — named one path per file, never
+<n> artifact` count is the spec and the plan — the two artifact files this run had committed when
+the range was measured. The invocation also names this evidence file, which is still uncommitted
+at that moment and so matches no row and contributes nothing; naming it costs nothing (an
+unmatched `--artifact-path` is deliberately not an error, per D3) and it starts counting on any
+re-run made after this document is committed. One path per file throughout, never
 `<specDir>`/`<planDir>`.
 
 **Re-run this command fresh at ship time.** These integers are a snapshot at the SHA above;
@@ -541,6 +558,7 @@ made after the branch's final commit, not this one.
 - [ ] **Step 3: Sweep every gate**
 
 ```bash
+set -o pipefail   # without it a pipeline returns tail's status and a failing gate reads as 0
 just agent-workflow-tests 2>&1 | tail -5
 git diff --numstat "$(git merge-base HEAD origin/main)"..HEAD -- home/
 just evals ship-issue 1 | grep -c "≤1,000 product lines"
@@ -566,6 +584,14 @@ EOF
 )"
 ```
 
+- [ ] **Step 5: Route the evidence to the ship phase**
+
+The ship handoff carries `spec_path`, `plan_path` and a free-form summary — it has no field for
+this document, so nothing delivers it automatically. This task is not complete until its report
+back to the executing skill names, in that summary, **the evidence file's path and the obligation
+to re-run its command fresh after the branch's final commit**. Without that line the ship owner
+quotes stale integers or omits the A10 evidence entirely.
+
 **Criteria covered:** A10, and a final re-check of A1–A9.
 
 ---
@@ -576,9 +602,9 @@ Criteria IDs are the spec's (`## Acceptance criteria`, A1–A10).
 
 | # | Task | Gate that observes it |
 |---|------|-----------------------|
-| A1 | 1 | `just agent-workflow-tests` — `diff-scope $BASE_SHA..$HEAD_SHA` and `--artifact-path` present in the gate section, `--numstat` absent |
+| A1 | 1 | `just agent-workflow-tests` — the whole prescribed invocation present as one span in the gate section, `--numstat` and `--root` absent |
 | A2 | 1 | same test — `GATE_LINE_BOUNDARY` / `GATE_FILE_BOUNDARY` present, `400` absent |
-| A3 | 1 | same test — the carve-out sentence present, `--artifact-path <spec_path> --artifact-path <plan_path>` in the quoted command; demonstrated in Task 3's recorded run |
+| A3 | 1 | same test — the carve-out sentence present, and the asserted span carries `--artifact-path <spec_path> --artifact-path <plan_path>` in full, so a gate naming only one path fails; demonstrated in Task 3's recorded run |
 | A4 | 1 | same test — `No measurement` / `is not a small diff` present |
 | A5 | 1 | same test — `assert_ordered` over the four prerequisites; plus `git diff --numstat … -- SKILL.md` = `1	1` |
 | A6 | 2 | `just agent-workflow-tests` (SKILL↔eval agreement test) **and** `just evals ship-issue 1 \| grep -c "≤1,000 product lines"` = 1 (manual-grade leg; plan-only, so the grep is the observation) |
@@ -591,6 +617,22 @@ Criteria IDs are the spec's (`## Acceptance criteria`, A1–A10).
 1,100-line branch does not). The gate is prose an agent follows, so no unittest over markdown
 can execute them (per D6); eval 1 grades them by hand and Task 3's run demonstrates the
 measurement they rest on.
+
+## Standards review provenance
+
+- Reviewer: **Codex** (`codex-collaboration` `plan-review`, isolated fresh runtime, approval
+  policy `never`, sandbox `read-only`). No fallback used.
+- Base SHA reviewed: `fc498cb732ce8378711739c62463e5285e36133c`; plan at commit `1f07435`.
+- Focus: none configured (`codex.planReview.focus` unset).
+- Findings: **3 Blocking, 2 Should-fix, 0 Discussion — 5 accepted and applied, 0 rejected,
+  0 deferred.** All five were re-verified against the live plan and worktree before being applied.
+  - Blocking: pre-commit numstat checks compared `base..HEAD` and so could not see the working-tree
+    edit they gate (Tasks 1, 2); piped `tail` discarded the producer's exit status, so the
+    "`just build` exits 0" gate was unobserved (all tasks); Task 3's evidence prose asserted an
+    artifact count that is impossible at the moment it is measured.
+  - Should-fix: the gate-contract test asserted fragments the acceptance map claimed as a whole
+    invocation (per D13); the evidence document had no route to the ship owner (per D14).
+- Raw reviewer transcript is deliberately not stored in this repository.
 
 ## Residuals carried out of this plan
 
