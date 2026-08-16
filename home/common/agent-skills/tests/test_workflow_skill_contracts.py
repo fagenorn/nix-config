@@ -387,12 +387,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for absent in ("--numstat", "400", "--root"):
             with self.subTest(absent=absent):
                 self.assertNotIn(absent, gate)
+        # Each anchor carries its prerequisite's polarity: bare "manual conflict
+        # escalation" / "`risky` label" would still match a gate that demanded
+        # the opposite condition, so an inverted prerequisite would pass.
         self.assert_ordered(
             gate,
             "`review_state` is `clean`",
-            "manual conflict escalation",
+            "needed no manual conflict escalation",
             GATE_LINE_BOUNDARY,
-            "`risky` label",
+            "does NOT carry the `risky` label",
             "`review.criticalPaths` glob",
         )
 
@@ -403,7 +406,16 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         expected = next(
             case for case in self.ship_issue_evals["evals"] if case["id"] == 1
         )["expected_output"]
-        for fragment in (GATE_LINE_BOUNDARY, GATE_FILE_BOUNDARY, "diff-scope"):
+        # The delegation is pinned as a whole affirmative clause: a bare
+        # "diff-scope" token also matches a clause saying the boundary is *not*
+        # measured with the helper, which is the inversion this test guards.
+        for fragment in (
+            GATE_LINE_BOUNDARY,
+            GATE_FILE_BOUNDARY,
+            f"the diff is small ({GATE_LINE_BOUNDARY} / {GATE_FILE_BOUNDARY},"
+            " measured with `diff-scope` rather than hand-counted numstat"
+            " arithmetic)",
+        ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, expected)
         self.assertNotIn("≤400", expected)
