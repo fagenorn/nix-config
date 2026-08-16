@@ -245,6 +245,22 @@ def parse_range(text: str) -> tuple[str, str]:
     return base, head
 
 
+def resolve_revision(root: Path, revision: str) -> str:
+    """Peel one revision to its object id before it is spliced into `<rev>:<path>`.
+
+    `cat-file --batch` reads content by `<rev>:<path>`, so a revision that is
+    itself path-shaped -- `:/subject-regex` above all -- makes that splice
+    ambiguous: git accepts the revision in the range and then fails to find the
+    content. Resolving once here keeps the content read pointed at exactly the
+    objects the diff reported.
+    """
+    object_id = _git(root, "rev-parse", "--verify", revision).decode("utf-8").strip()
+    # The peel runs on the resolved id, never on the caller's spelling: `:/regex`
+    # swallows a trailing `^{commit}` as part of its own pattern.
+    peeled = _git(root, "rev-parse", "--verify", f"{object_id}^{{commit}}")
+    return peeled.decode("utf-8").strip()
+
+
 def normalize_artifact_path(value: str) -> bytes:
     """Normalise one --artifact-path to repository-root-relative raw bytes.
 
@@ -392,6 +408,8 @@ def read_headers(
     """
     requests: list[bytes] = []
     paths: list[bytes] = []
+    # At most two sides are ever needed, and each is resolved at most once.
+    resolved: dict[str, bytes] = {}
     for row in rows:
         if row.binary or _is_lockfile(row.path):
             continue
@@ -401,9 +419,9 @@ def read_headers(
         # The content side comes from the status, never from a guess: a deletion
         # exists only on the base side.
         revision = base if status[:1] == b"D" else head
-        requests.append(
-            revision.encode("utf-8", errors="surrogateescape") + b":" + row.path + b"\0"
-        )
+        if revision not in resolved:
+            resolved[revision] = resolve_revision(root, revision).encode("ascii")
+        requests.append(resolved[revision] + b":" + row.path + b"\0")
         paths.append(row.path)
     if not requests:
         return {}
