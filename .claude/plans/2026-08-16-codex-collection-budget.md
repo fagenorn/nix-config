@@ -212,7 +212,7 @@ The five strings are dictated verbatim by the spec's *The guidance string, verba
 ```js
   return [
     "The repository context below is a lightweight summary, so collect the rest of the evidence yourself with read-only git commands, on a budget.",
-    "Survey first: the diff stat and changed-file list already included below tell you which files changed and how large each change is.",
+    "Survey first: the changed-file list and diff stat included below show what changed; if they do not break the sizes down per file, get that with a single stat-level command before you read any file's diff.",
     "Then take targeted per-file diffs, at default context, for at most 8 files — the largest changes and anything the user's focus area names.",
     "Never take the full diff in one command, never widen the diff context, never fan out across every changed file, and never pull one very large file's diff whole.",
     "If the change is bigger than that budget covers, review what it does cover properly and state in your summary which parts of the change you did not read."
@@ -395,3 +395,46 @@ Expected: the first command lists both files with non-zero changes; the second p
 3. `just build` succeeds (acceptance criterion 6).
 4. The branch changes only `lib/agent-plugins.nix`, `patches/agent-plugins/codex-plugin-cc.patch`, and the plan/spec artifacts; `flake.lock` is untouched.
 5. No `just switch` was run and no live-behaviour claim is made — the change is inert until a `claude` process is launched after a switch.
+
+## Standards review corrections (binding on execution)
+
+The Codex plan review found the gates below under-specified. These corrections override the
+command blocks written above wherever they conflict; apply them as part of the task they name.
+
+- **Every gate asserts its producing command's exit status (per D11).** The blocks above pipe
+  `node --test` and `just build` into `tail`, which in zsh discards the producer's status. Run each
+  success gate under `set -o pipefail`, or capture `${PIPESTATUS[1]}` / `$pipestatus[1]`, and fail
+  the step on non-zero. For the expected-red run in Task 1 Step 5, assert the status is **non-zero**
+  and that the failure is the new assertion — a red for any other reason is not the gate passing.
+  Turn the store-path, `diff --git` header-count, threshold, and `patchRevision` expectations into
+  commands that exit non-zero on mismatch rather than printing a number for a human to compare.
+- **Assert the under-cap string by equality (per D12).** In addition to the planned
+  `assert.doesNotMatch(..., /at most 8 files/i)`, add
+  `assert.strictEqual(context.collectionGuidance, "Use the repository context below as primary evidence.");`
+  to the existing inline-diff test. Both additions are additive; line 114's existing
+  `/primary evidence/i` assertion and lines 168-169 stay verbatim (per D3).
+- **Hygiene and scope compare identity sets, not counts (per D13).** Snapshot the exact
+  `codex-plugin-test-*` directory names and the broker / `codex app-server` PID sets immediately
+  before *and* immediately after each full-suite run — including the final one, which must not be
+  compared against the stale p8-baseline snapshot — and diff the sets. Any delta this run cannot be
+  shown to have caused is investigated, not averaged away. For the terminal branch audit, enumerate
+  **all** changed paths against the fixed base SHA `969f357bf019ba0eeab6bb9fd4a2c00beba9c744` (not
+  the mutable `origin/main`, which sibling agents may advance) and compare them against an explicit
+  whitelist: `plugins/codex/scripts/lib/git.mjs`, `tests/git.test.mjs`,
+  `patches/agent-plugins/codex-plugin-cc.patch`, `lib/agent-plugins.nix`, and this branch's spec and
+  plan files. Also confirm no uncommitted files remain.
+
+## Standards review provenance
+
+- **Reviewer:** Codex, isolated read-only runtime (fresh `CODEX_HOME`, approval policy `never`,
+  sandbox `read-only`), via the `codex-collaboration` `plan-review` operation. No native fallback.
+- **Base SHA:** `969f357bf019ba0eeab6bb9fd4a2c00beba9c744`; plan reviewed at HEAD `3a0f8fa`.
+- **Configured focus:** none.
+- **Dispositions:** 5 findings, 5 accepted, 0 rejected, 0 deferred. Blocking B-01 (guidance claimed
+  per-file sizes the working-tree packet does not carry) and B-02 (piped gates masked failing exit
+  status); should-fix S-01 (under-cap equality), S-02 (hygiene snapshot bracketing), S-03 (scope
+  audit breadth). Each was re-verified against live source before being applied: B-01 against
+  `git.mjs:242-249` versus `:264`, the rest against the plan text cited. Logged as spec ledger rows
+  D11-D13, with D4 revised to match the corrected guidance.
+- The reviewer could not refresh the live issue (`gh` had no network); the supplied issue body was
+  used. That affects no finding — the acceptance criteria were supplied verbatim in the packet.
