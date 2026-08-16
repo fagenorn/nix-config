@@ -22,6 +22,8 @@ RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
 WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
 SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
+SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
+SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
 
 
 def nested_workflow_documents():
@@ -532,6 +534,56 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "exits 0",
             "return a standing conclusion",
         )
+
+    def test_calling_controllers_record_the_correctness_scope(self):
+        final_review = " ".join(
+            (SDD_DIR / "final-review.md").read_text(encoding="utf-8").split()
+        )
+        ship_review = " ".join(
+            SHIP_ISSUE_REVIEW.read_text(encoding="utf-8").split()
+        )
+        ship_skill = " ".join(SHIP_ISSUE.read_text(encoding="utf-8").split())
+
+        # sdd: the scope is a fourth recorded value beside both verdicts and the
+        # correctness axis's reviewer identity (D1) — but only on the diff-review
+        # path. The capability fallback dispatches the native reviewer directly
+        # and returns no scope, so the sentence must not demand one there.
+        self.assertIn(
+            "When that axis came through `codex-collaboration`'s `diff-review`, "
+            "record the scope it returned as well (`full` | `scoped: <N> of <M> "
+            "product files` | `unmeasured`)",
+            final_review,
+        )
+        self.assertIn(
+            "the native reviewer dispatched directly returns no scope, so record "
+            "none there",
+            final_review,
+        )
+        self.assertIn("Never merge the two reports", final_review)
+        self.assertIn("`Codex` | `native` | `fallback` + failure class", final_review)
+
+        # ship-issue: the PR body is the provenance surface, and no reviewer
+        # identity is added there (D9).
+        self.assertIn(
+            "Record that scope in the PR body beside the correctness verdict",
+            ship_review,
+        )
+        self.assertIn(
+            "ship-issue records no reviewer identity; this records the scope only.",
+            ship_review,
+        )
+        self.assertIn(
+            "the correctness axis's scope is recorded in the PR body per REVIEW.md",
+            ship_skill,
+        )
+        # Dispatch selection is untouched: the Phase 5 dispatch ids stay as they are.
+        for dispatch_id in (
+            "ship-issue-full-conformance-review",
+            "ship-issue-full-correctness-fallback",
+            "ship-issue-scoped-fix-rereview",
+        ):
+            with self.subTest(dispatch_id=dispatch_id):
+                self.assertIn(dispatch_id, ship_skill)
 
 
 if __name__ == "__main__":
