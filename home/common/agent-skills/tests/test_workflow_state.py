@@ -478,6 +478,50 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIsNone(state["outcome"])
         self.assertEqual(state["attempts"][0]["state"], "stopped")
 
+    def test_backward_launch_clock_cannot_corrupt_the_prior_attempt(self):
+        self.init_run(now="2026-08-13T19:00:00Z")
+        self.launch(
+            issue=14,
+            owner="owner-a",
+            worktree=self.root / "wt-a",
+            budget_minutes=30,
+        )
+        first_started = self.read_state()["issues"]["14"]["attempts"][0]["started_at"]
+        self.assertEqual(first_started, DEFAULT_NOW)
+
+        before = self.state_path.read_bytes()
+        refused = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T19:30:00Z",
+            budget_minutes=30,
+            ok=False,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        self.reconcile(now="2026-08-13T20:31:00Z")
+        stopped = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual(stopped["result_source"], "expiry")
+        self.assertGreaterEqual(stopped["finished_at"], stopped["started_at"])
+
+        retried = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T20:32:00Z",
+            budget_minutes=30,
+        )
+        self.assertEqual(retried["attempt"], 2)
+        rejected = self.progress(
+            issue=14, attempt=1, now="2026-08-13T20:33:00Z", ok=False
+        )
+        self.assertNotIn("invalid attempt finish time order", rejected.stderr)
+        again = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertGreaterEqual(again["finished_at"], again["started_at"])
+
     def test_fresh_retry_may_reuse_the_prior_attempt_worktree(self):
         self.init_run()
         shared = self.root / "wt-issue-14"

@@ -108,7 +108,7 @@ result. Surface it for inspection. It is not automatically relaunched: first app
 the failure policy, then let `workflow-state launch` enforce the fresh-attempt cap.
 
 **Deadline wake path.** Triggers are event-only, so without a wake path a
-silent agent's expired budget is discovered only when some unrelated
+silent agent's expired attempt budget is discovered only when some unrelated
 notification lands. When a dispatch or resume arms a deadline, arm
 **exactly one** deadline observer for the wave: a single detached background command
 that sleeps until the earliest armed deadline plus a small grace and then

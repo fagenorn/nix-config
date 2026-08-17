@@ -66,6 +66,8 @@ class ResolveBindingsTest(unittest.TestCase):
                 if bad is not None:
                     self.assertIn("resolve-bindings:", err)
                     self.assertIn("agentBudgetMinutes", err)
+                else:
+                    self.assertEqual(err, "")
 
     def test_adding_the_config_does_not_disturb_the_other_bindings(self):
         plain = self.make_root(None)

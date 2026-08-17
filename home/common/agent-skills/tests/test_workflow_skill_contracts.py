@@ -327,6 +327,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.from_issue,
             "Obey the returned action exactly",
             "attempt budget's deadline has passed",
+            "cannot record progress at or after attempt deadline",
+            "progress requires an active attempt",
             "terminal return procedure",
             "Persistence precedes notification",
         )

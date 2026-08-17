@@ -670,6 +670,19 @@ def retain_worktree(notes: str, worktree: str) -> str:
     return f"{prefix}{separator}{suffix}" if prefix else suffix
 
 
+def finish_time(attempt: dict[str, Any], now: str) -> str:
+    """Clamp a terminal finish instant to at least the attempt's own start.
+
+    ``launch`` deliberately leaves its ``--now`` unguarded, so a dispatcher may
+    hand a terminal writer an instant earlier than the attempt it is closing
+    began. Clamping keeps the record truthful — the attempt ended no earlier
+    than it began — and keeps the ``finished_at >= started_at`` invariant
+    satisfiable instead of bricking every later read of the run.
+    """
+    started_at = parse_utc(attempt["started_at"], "attempt start time")
+    return now if parse_utc(now, "finish time") >= started_at else attempt["started_at"]
+
+
 def stop_attempt(
     attempt: dict[str, Any], *, reason: str, now: str, source: str
 ) -> dict[str, Any]:
@@ -685,7 +698,7 @@ def stop_attempt(
     )
     attempt["state"] = "stopped"
     attempt["result"] = result
-    attempt["finished_at"] = now
+    attempt["finished_at"] = finish_time(attempt, now)
     attempt["result_source"] = source
     return result
 
@@ -802,7 +815,7 @@ def command_launch(args: argparse.Namespace) -> int:
             latest = attempts[-1]
             latest["state"] = "failed"
             latest["result"] = failed
-            latest["finished_at"] = now
+            latest["finished_at"] = finish_time(latest, now)
             latest["result_source"] = "refused"
             issue_state["outcome"] = failed
             state["updated_at"] = now

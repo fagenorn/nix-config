@@ -64,7 +64,7 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 **Never hard-fail on a missing sibling** — run the phase inline: brainstorm as intent + requirements + ≥2 options; grill against the map's areas and `adr/` dirs; plan as numbered tasks with a verification gate each; execute task-by-task with the verify commands; ship per the Phase-7 fallback.
 
-## Dispatch and budget rules
+## Dispatch, phase-budget and attempt-budget rules
 
 **Structured report-backs.** A subagent's final message is re-read by its caller on every later turn, so every `Agent` dispatch states a fixed return schema: artifact paths, a one-word verdict/state, ≤500 characters of notes; details live in worktree files. Prefer the tiered agent types over `general-purpose`.
 
@@ -98,17 +98,22 @@ Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger
    Give it the exact commands, identities, and paths inline; it decides nothing and edits nothing.
 
 If `workflow-state progress` is rejected because the
-attempt budget's deadline has passed, that is not a harness fault and not a
-reason to retry it: go straight to the terminal return procedure and record your
+attempt budget's deadline has passed — either
+`cannot record progress at or after attempt deadline`, or
+`progress requires an active attempt` when the dispatcher's deadline observer
+reconciled the attempt to `stopped` first — that is one verdict, not a harness
+fault and not a reason to retry it or to doubt your identity: go straight to
+the terminal return procedure and record your
 truthful state with `workflow-state finish`, which preserves a result reported at
-or after the deadline. Persistence precedes notification.
+or after the deadline and supersedes a provisional expiry.
+Persistence precedes notification.
 
 Without lifecycle identity, apply the same action order locally with the
 120-turn/150000-token ceilings and default interactive handoff behavior.
 
 ## Terminal return procedure
 
-Use this one procedure for Phase-0 content stops, budget stops, execution failure,
+Use this one procedure for Phase-0 content stops, attempt budget stops, execution failure,
 and Phase-7 success whenever lifecycle identity exists. Assemble a temporary JSON
 file with exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`,
 `discussion_items`, and `notes` (≤500 characters). Pass it with
