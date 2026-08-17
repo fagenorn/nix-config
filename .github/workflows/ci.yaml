@@ -1,0 +1,56 @@
+# Adapted from https://github.com/wimpysworld/nix-config/blob/main/.github/workflows/flake-checker.yml
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  schedule:
+    # l33t o'clock
+    - cron: '37 13 * * *'
+  workflow_dispatch:
+
+# One run per pull request; a new push to a PR supersedes that PR's in-flight run.
+# Runs on `main` and on the cron are keyed by ref and are never cancelled, so every
+# commit that lands on `main` keeps its own reported result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  flake-checker:
+    name: Flake Checker
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v4
+      - uses: DeterminateSystems/flake-checker-action@v5
+
+  # `Nix Eval` is the required status check on `main`; the same string is the sole
+  # entry in .github/branch-protection.json. Renaming this job — or giving it a
+  # `strategy:` or a `uses:`, which make GitHub report it under a different name —
+  # leaves that required context unreportable and blocks every merge to `main` with
+  # no error pointing at the cause. tests/test_branch_protection.py pins both files
+  # together; run `just agent-workflow-tests` after editing either.
+  nix-eval:
+    name: Nix Eval
+    # The daily cron is flake-checker's; flake.lock is pinned, so a scheduled
+    # re-evaluation of an unchanged tree is not expected to report anything the
+    # push run did not already report (D5).
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v4
+      - name: Evaluate nixosConfigurations.anis-desktop
+        run: |
+          nix eval --show-trace \
+            --extra-experimental-features 'nix-command flakes' \
+            --raw '.#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath'
