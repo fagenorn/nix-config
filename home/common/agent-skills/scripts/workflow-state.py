@@ -17,6 +17,7 @@ from typing import Any, Callable
 SCHEMA_VERSION = 1
 ATTEMPT_STATES = frozenset({"active", "handed_off", "stopped", "failed", "merged"})
 RESULT_STATES = frozenset({"merged", "stopped", "failed"})
+RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused"})
 RESULT_FIELDS = (
     "issue",
     "state",
@@ -57,6 +58,8 @@ ATTEMPT_FIELDS = frozenset(
         "launches",
         "prior_attempt",
         "result",
+        "finished_at",
+        "result_source",
         "handoff_path",
         "phase",
         "last_progress_at",
@@ -259,6 +262,24 @@ def validate_attempt(value: Any, *, issue: int, expected_number: int) -> None:
             raise WorkflowError("nonterminal attempt must not carry a terminal result")
     elif result is None or result["state"] != value["state"]:
         raise WorkflowError("terminal attempt state and result must match")
+    result_source = value["result_source"]
+    if (result is None) != (value["finished_at"] is None) or (result is None) != (
+        result_source is None
+    ):
+        raise WorkflowError(
+            "attempt result, finish time and result source must all be null "
+            "or all be set"
+        )
+    if result is not None:
+        if not isinstance(result_source, str) or result_source not in RESULT_SOURCES:
+            raise WorkflowError("invalid attempt result source")
+        finished_at = parse_utc(value["finished_at"], "attempt finish time")
+        if finished_at < started_at:
+            raise WorkflowError("invalid attempt finish time order")
+        if result_source == "expiry" and finished_at < deadline_at:
+            raise WorkflowError(
+                "expiry finish time must not precede the attempt deadline"
+            )
     if value["handoff_path"] is not None:
         if not isinstance(value["handoff_path"], str) or not Path(
             value["handoff_path"]
@@ -639,12 +660,23 @@ def retain_worktree(notes: str, worktree: str) -> str:
     return f"{prefix}{separator}{suffix}" if prefix else suffix
 
 
-def stop_attempt(attempt: dict[str, Any], *, reason: str) -> dict[str, Any]:
+def stop_attempt(
+    attempt: dict[str, Any], *, reason: str, now: str, source: str
+) -> dict[str, Any]:
+    """Stamp a terminal stopped record.
+
+    ``source`` says who ended the attempt and must be a member of ``RESULT_SOURCES``;
+    ``now`` is the already-formatted RFC3339 UTC instant at which the record was
+    written, which for an ``expiry`` is at or after the attempt budget's
+    ``deadline_at``.
+    """
     result = terminal_result(
         attempt["issue"], "stopped", f"{reason}; worktree: {attempt['worktree']}"
     )
     attempt["state"] = "stopped"
     attempt["result"] = result
+    attempt["finished_at"] = now
+    attempt["result_source"] = source
     return result
 
 
@@ -706,7 +738,12 @@ def command_launch(args: argparse.Namespace) -> int:
                         "resume handoff path does not match stored exact path"
                     )
                 if now_value >= parse_utc(latest["deadline_at"], "attempt deadline"):
-                    outcome = stop_attempt(latest, reason="attempt deadline expired")
+                    outcome = stop_attempt(
+                        latest,
+                        reason="attempt deadline expired",
+                        now=now,
+                        source="expiry",
+                    )
                     issue_state["outcome"] = outcome
                     state["updated_at"] = now
                     return outcome, True
@@ -727,7 +764,12 @@ def command_launch(args: argparse.Namespace) -> int:
                 raise WorkflowError("attempt does not have a resumable handoff")
             if same_identity and latest["state"] == "active":
                 if now_value >= parse_utc(latest["deadline_at"], "attempt deadline"):
-                    outcome = stop_attempt(latest, reason="attempt deadline expired")
+                    outcome = stop_attempt(
+                        latest,
+                        reason="attempt deadline expired",
+                        now=now,
+                        source="expiry",
+                    )
                     issue_state["outcome"] = outcome
                     state["updated_at"] = now
                     return outcome, True
@@ -750,6 +792,8 @@ def command_launch(args: argparse.Namespace) -> int:
             latest = attempts[-1]
             latest["state"] = "failed"
             latest["result"] = failed
+            latest["finished_at"] = now
+            latest["result_source"] = "refused"
             issue_state["outcome"] = failed
             state["updated_at"] = now
             return {
@@ -762,7 +806,12 @@ def command_launch(args: argparse.Namespace) -> int:
 
         prior_attempt = attempts[-1]["attempt"] if attempts else None
         if attempts and attempts[-1]["state"] in {"active", "handed_off"}:
-            stop_attempt(attempts[-1], reason="superseded by fresh retry")
+            stop_attempt(
+                attempts[-1],
+                reason="superseded by fresh retry",
+                now=now,
+                source="superseded",
+            )
         issue_state["outcome"] = None
         attempt_number = len(attempts) + 1
         deadline = format_utc(now_value + timedelta(minutes=args.budget_minutes))
@@ -784,6 +833,8 @@ def command_launch(args: argparse.Namespace) -> int:
             "launches": [event],
             "prior_attempt": prior_attempt,
             "result": None,
+            "finished_at": None,
+            "result_source": None,
             "handoff_path": None,
             "phase": 0,
             "last_progress_at": now,
@@ -896,12 +947,16 @@ def command_finish(args: argparse.Namespace) -> int:
         if attempt["state"] != "active":
             raise WorkflowError("finish requires an active attempt")
         if now_value >= parse_utc(attempt["deadline_at"], "attempt deadline"):
-            expired = stop_attempt(attempt, reason="attempt deadline expired")
+            expired = stop_attempt(
+                attempt, reason="attempt deadline expired", now=now, source="expiry"
+            )
             issue_state["outcome"] = copy.deepcopy(expired)
             state["updated_at"] = now
             return expired, True
         attempt["state"] = result["state"]
         attempt["result"] = copy.deepcopy(result)
+        attempt["finished_at"] = now
+        attempt["result_source"] = "owner"
         issue_state["outcome"] = copy.deepcopy(result)
         state["updated_at"] = now
         return result, True
@@ -926,7 +981,12 @@ def command_reconcile(args: argparse.Namespace) -> int:
                     continue
                 deadline = parse_utc(attempt["deadline_at"], "attempt deadline")
                 if now_value >= deadline:
-                    outcome = stop_attempt(attempt, reason="attempt deadline expired")
+                    outcome = stop_attempt(
+                        attempt,
+                        reason="attempt deadline expired",
+                        now=now,
+                        source="expiry",
+                    )
                     issue_state["outcome"] = outcome
                     changed = True
         if changed:

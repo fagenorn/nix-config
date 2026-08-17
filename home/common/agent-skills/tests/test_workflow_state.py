@@ -281,6 +281,39 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual((attempt["state"], outcome["state"]), ("stopped", "stopped"))
         self.assertIn(str(worktree.resolve()), outcome["notes"])
         self.assertLessEqual(len(outcome["notes"]), 500)
+        self.assertEqual(attempt["result_source"], "expiry")
+        self.assertEqual(attempt["finished_at"], "2026-08-13T20:10:00Z")
+        self.assertGreaterEqual(attempt["finished_at"], attempt["deadline_at"])
+
+    def test_superseding_retry_and_refusal_stamp_their_result_source(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T20:10:00Z",
+        )
+        attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual(attempts[0]["state"], "stopped")
+        self.assertEqual(attempts[0]["result_source"], "superseded")
+        self.assertEqual(attempts[0]["finished_at"], "2026-08-13T20:10:00Z")
+        self.assertIsNone(attempts[1]["finished_at"])
+        self.assertIsNone(attempts[1]["result_source"])
+
+        refused = self.launch(
+            issue=14,
+            owner="owner-c",
+            worktree=self.root / "wt-c",
+            now="2026-08-13T20:20:00Z",
+            ok=False,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("attempts 1 and 2 already consumed", refused.stderr)
+        attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual(attempts[1]["state"], "failed")
+        self.assertEqual(attempts[1]["result_source"], "refused")
+        self.assertEqual(attempts[1]["finished_at"], "2026-08-13T20:20:00Z")
 
     def test_late_merged_finish_persists_canonical_stopped_expiry(self):
         self.init_run()
@@ -799,51 +832,120 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_cross_field_lifecycle_corruption_is_rejected_without_changes(self):
         terminal = self.merged_result()
+        stopped = {
+            **terminal,
+            "state": "stopped",
+            "pr_url": None,
+            "merge_sha": None,
+            "issue_closed": False,
+            "notes": "stopped",
+        }
         corruptions = (
             (
                 "active-with-result",
                 lambda attempt: attempt.__setitem__("result", terminal),
+                None,
             ),
             (
                 "terminal-without-result",
                 lambda attempt: attempt.__setitem__("state", "merged"),
+                None,
             ),
             (
                 "terminal-state-mismatch",
                 lambda attempt: attempt.update(
                     {"state": "failed", "result": terminal}
                 ),
+                None,
             ),
             (
                 "launch-kind-mismatch",
                 lambda attempt: attempt.__setitem__("launch_kind", "resume"),
+                None,
             ),
             (
                 "start-after-progress",
                 lambda attempt: attempt.__setitem__(
                     "started_at", "2026-08-13T20:01:00Z"
                 ),
+                None,
             ),
             (
                 "progress-after-deadline",
                 lambda attempt: attempt.__setitem__(
                     "last_progress_at", "2026-08-13T20:31:00Z"
                 ),
+                None,
             ),
             (
                 "launch-before-start",
                 lambda attempt: attempt["launches"][0].__setitem__(
                     "at", "2026-08-13T19:59:00Z"
                 ),
+                None,
             ),
             (
                 "launch-after-deadline",
                 lambda attempt: attempt["launches"][0].__setitem__(
                     "at", "2026-08-13T20:31:00Z"
                 ),
+                None,
+            ),
+            (
+                "terminal-without-finished-at",
+                lambda attempt: attempt.update(
+                    {
+                        "state": "merged",
+                        "result": terminal,
+                        "finished_at": None,
+                        "result_source": "owner",
+                    }
+                ),
+                "must all be null or all be set",
+            ),
+            (
+                "nonterminal-with-result-source",
+                lambda attempt: attempt.__setitem__("result_source", "owner"),
+                "must all be null or all be set",
+            ),
+            (
+                "unknown-result-source",
+                lambda attempt: attempt.update(
+                    {
+                        "state": "merged",
+                        "result": terminal,
+                        "finished_at": "2026-08-13T20:05:00Z",
+                        "result_source": "reaper",
+                    }
+                ),
+                "invalid attempt result source",
+            ),
+            (
+                "finished-at-before-start",
+                lambda attempt: attempt.update(
+                    {
+                        "state": "merged",
+                        "result": terminal,
+                        "finished_at": "2026-08-13T19:59:59Z",
+                        "result_source": "owner",
+                    }
+                ),
+                "invalid attempt finish time order",
+            ),
+            (
+                "expiry-finished-before-deadline",
+                lambda attempt: attempt.update(
+                    {
+                        "state": "stopped",
+                        "result": stopped,
+                        "finished_at": "2026-08-13T20:29:59Z",
+                        "result_source": "expiry",
+                    }
+                ),
+                "expiry finish time must not precede the attempt deadline",
             ),
         )
-        for label, corrupt in corruptions:
+        for label, corrupt, message in corruptions:
             with self.subTest(label=label):
                 self.init_run()
                 self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
@@ -854,6 +956,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 before = self.state_path.read_bytes()
                 completed = self.reconcile(ok=False)
                 self.assertNotEqual(completed.returncode, 0)
+                if message is not None:
+                    self.assertIn(message, completed.stderr)
                 self.assertEqual(self.state_path.read_bytes(), before)
                 self.state_path.unlink()
 
