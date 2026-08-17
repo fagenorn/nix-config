@@ -33,19 +33,19 @@ Subagent (reviewer, Opus/high for the native path selected above):
     **Diff file:** [DIFF_FILE]
 
     Read the diff file once; when checking a finding, read the live file at HEAD,
-    not a snapshot. If no diff file was supplied, fetch the range yourself:
+    not a snapshot. If no diff file was supplied, fetch the range yourself with
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
-    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]` — unless the packet states the review
-    is scoped and lists the paths under review, in which case those listed paths
-    are the whole of the range to fetch: run
-    `git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- <path>` once per listed path and
-    fetch nothing wider. Inspect code outside the diff only to evaluate a concrete
-    risk you can name — cross-task contract drift, changed lock ordering, shared
-    mutable state — one focused check per named risk, named in your report. Your
-    review is read-only on this checkout: do not mutate the working tree, the
-    index, HEAD, or branch state in any way. Do not re-run the full test suite —
-    the implementers' reported runs are the evidence; run at most one focused test
-    to resolve a specific doubt reading the code raised.
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]` — both of them, unless the packet
+    states the review is scoped and lists the paths under review, in which case
+    neither of those two commands runs: those listed paths are the whole of the
+    range to fetch, so run `git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- <path>` once
+    per listed path and fetch nothing wider. Inspect code outside the diff only
+    to evaluate a concrete risk you can name — cross-task contract drift, changed
+    lock ordering, shared mutable state — one focused check per named risk, named
+    in your report. Your review is read-only on this checkout: do not mutate the
+    working tree, the index, HEAD, or branch state in any way. Do not re-run the
+    full test suite — the implementers' reported runs are the evidence; run at
+    most one focused test to resolve a specific doubt reading the code raised.
 
     ## What to Check
 

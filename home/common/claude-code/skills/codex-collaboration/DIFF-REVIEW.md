@@ -84,7 +84,8 @@ not that packet plus tweaks. It contains exactly:
    instruct the reviewer not to grade it.
 3. The caller's correctness rubric by absolute path (sdd's
    `correctness-reviewer-prompt.md`), with concrete values supplied for every
-   placeholder it names.
+   placeholder it names. `[DIFF_FILE]` is the one exception: it is left
+   unsupplied when the range is scoped — see *When the range is over budget*.
 4. The diff-package path when the caller built one, and the plan path (routing
    context for what the tasks were). The diff-package path is dropped when the
    range is scoped — see *When the range is over budget*.
@@ -109,14 +110,17 @@ conformance. Then, in substance:
 
 > This is a scoped review: `<N>` of `<M>` changed product files, selected as the
 > highest-churn files. Files outside the list are not under review in this pass — do
-> not report on them, and do not treat their absence from the list as evidence they
-> are clean.
+> not treat their absence from the list as evidence they are clean. Every finding you
+> report must be anchored in a listed file. An unlisted file may be consulted and
+> cited as evidence for such a finding; a defect lying wholly within an unlisted file
+> is outside this pass and is not reported.
 
 Scoping bounds what is supplied and what is graded, not what may be consulted. The
 rubric's carve-out for inspecting code outside the diff to evaluate a concrete named
 risk stands untouched — one focused check per named risk — so a cross-file finding
-that reaches into an unlisted file is legal and reportable. Silently grading an
-unlisted file, or implying it was covered, is not.
+that reaches into an unlisted file is legal and reportable, as long as it is anchored
+in a listed file. Silently grading an unlisted file, reporting a defect that lies
+wholly inside one, or implying it was covered, is not.
 
 **Item 4 drops the diff-package path.** That package is sdd's `scripts/review-package`
 output: an unconditional full-range `git diff -U10 <base>..<head>`, which the rubric
@@ -132,8 +136,17 @@ conformance axis reads that same package whole.
 not only a disclosure: the selected paths, worktree-root-relative, one per line, in
 the helper's emitted order, each with its `files[].changed_lines` count. Direct the
 reviewer to collect the diff for exactly those paths, one bounded read per listed
-path (`git diff <base>..<head> -- <path>`), and to treat that set as the whole of the
-range under review. An unscoped packet has no item 7.
+path (`git diff <base>..<head> -- ':(literal)<path>'`), and to treat that set as the
+whole of the range under review. An unscoped packet has no item 7.
+
+Spell that invocation protocol out in item 7 rather than leaving it to the reviewer:
+**one invocation per path**, the path passed as a **single literal argument after
+`--`**, never shell-joined with the other listed paths into one command line, and
+pathspec magic disabled by the `:(literal)` prefix. `diff-scope` emits whatever bytes
+Git records, so a listed path may carry a space, a newline, a non-UTF-8 byte, or a
+leading `:`; treated as anything but one literal argument it splits or is
+reinterpreted, and the reviewer silently reads a diff that is not the one this packet
+bounded.
 
 The packet stays a paths packet either way: it never embeds per-file diffs.
 
@@ -159,6 +172,13 @@ than a style: `**Correctness:** Clean (scoped: 20 of 44) — …` fails validati
 scoped review may not use the bare `**Correctness:** Clean` form, because that form
 has nowhere to put the coverage. An unscoped or unmeasured review keeps today's
 format exactly, bare form included.
+
+The coverage disclosure is mandatory on a scoped dispatch — state it in the packet as
+a requirement, not a preference; a scoped result that omits it does not satisfy this
+operation's output contract. Nothing downstream catches that omission:
+`agent-evidence.py` fullmatches the shape of the first line and never sees whether
+the packet was scoped, so a bare `**Correctness:** Clean` returned from a scoped
+dispatch validates. The obligation lives in the packet and nowhere else.
 
 ## Disposition
 

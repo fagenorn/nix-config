@@ -347,7 +347,21 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "Item 7 exists only when scoped",
             "one bounded read per listed path",
             "treat that set as the whole of the range under review",
+            # The argv protocol for item 7: `diff-scope` preserves arbitrary Git
+            # path bytes, so paths interpolated into one shell command line split
+            # or are reinterpreted as pathspec magic.
+            "**one invocation per path**",
+            "**single literal argument after `--`**",
+            "never shell-joined with the other listed paths into one command line",
+            "pathspec magic disabled by the `:(literal)` prefix",
             "one focused check per named risk",
+            # Scoping bounds what is graded, not what may be consulted (D13), so
+            # the coverage sentence and the cross-file allowance need the
+            # boundary that tells them apart.
+            "Every finding you report must be anchored in a listed file",
+            "a defect lying wholly within an unlisted file is outside this pass "
+            "and is not reported",
+            "legal and reportable, as long as it is anchored in a listed file",
             "it never embeds per-file diffs",
             "scoped to <N> of <M> product files;",
             "A scoped review may not use the bare",
@@ -384,6 +398,24 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "an additional pre-flight of its own in its reference file",
             self.collaboration,
         )
+
+    def test_diff_review_makes_the_scoped_coverage_disclosure_mandatory(self):
+        # The omission case can only be pinned here. `agent-evidence.py` sees a
+        # result, never the packet that produced it, so it cannot tell a scoped
+        # dispatch that dropped its coverage from an unscoped one — its own test
+        # covers placement only. The obligation therefore has to be stated in
+        # DIFF-REVIEW.md, and this is what holds it there.
+        contract = " ".join(self.diff_review.replace("\n> ", "\n").split())
+        for fragment in (
+            "The coverage disclosure is mandatory on a scoped dispatch",
+            "a requirement, not a preference",
+            "does not satisfy this operation's output contract",
+            "never sees whether the packet was scoped",
+            "a bare `**Correctness:** Clean` returned from a scoped dispatch "
+            "validates",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, contract)
 
     def test_correctness_rubric_discloses_scope_only_when_the_packet_says_so(self):
         rubric = (SDD_DIR / "correctness-reviewer-prompt.md").read_text(
@@ -572,8 +604,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "ship-issue records no reviewer identity; this records the scope only.",
             ship_review,
         )
+        # SKILL.md carries REVIEW.md's condition too: the native correctness
+        # fallback dispatched from this same paragraph returns no scope, so an
+        # unconditional sentence would send a reader looking for one.
         self.assertIn(
-            "the correctness axis's scope is recorded in the PR body per REVIEW.md",
+            "when the correctness axis came through `diff-review`, its scope is "
+            "recorded in the PR body per REVIEW.md",
             ship_skill,
         )
         # Dispatch selection is untouched: the Phase 5 dispatch ids stay as they are.
