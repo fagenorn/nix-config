@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -345,9 +346,32 @@ class DiffScopeClassifierTest(unittest.TestCase):
         )
 
 
+GIT_LOCATION_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+)
+
+
 def git_env():
-    """A hermetic git environment: no user or system config, no signing."""
+    """A hermetic git environment: no user or system config, no signing.
+
+    Every variable that relocates git's repository, work tree, index or object
+    store is dropped, so an invoking session exporting one of them cannot
+    redirect a scratch-repo command at an unrelated repository (issue 31's D7).
+    The criterion is relocation, not the prefix: a blanket GIT_* sweep is
+    rejected because it would also drop GIT_EXEC_PATH and GIT_TEMPLATE_DIR,
+    which a Nix-provided git may rely on. The scrub pops from a copy of
+    os.environ rather than building an allowlist, so PATH and HOME survive and
+    both `git` and sys.executable keep resolving.
+    """
     env = dict(os.environ)
+    for name in GIT_LOCATION_VARS:
+        env.pop(name, None)
     env.update(
         {
             "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -557,6 +581,26 @@ class DiffScopeCommandTest(unittest.TestCase):
         second = run_helper(self.root, self.range, "--artifact-path", self.ARTIFACT)
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(first.stdout, second.stdout)
+
+    def test_the_suite_git_environment_is_immune_to_an_inherited_git_dir(self):
+        # An invoking session exporting GIT_DIR redirects every scratch-repo git
+        # call and every helper subprocess at an unrelated repository (issue
+        # 31's D7).
+        poison = {
+            "GIT_DIR": "/nonexistent/other.git",
+            "GIT_WORK_TREE": "/nonexistent/tree",
+            "GIT_INDEX_FILE": "/nonexistent/index",
+        }
+        baseline = self.measure("--artifact-path", self.ARTIFACT)
+        with unittest.mock.patch.dict(os.environ, poison):
+            env = git_env()
+            for name in poison:
+                self.assertNotIn(name, env)
+            completed = run_helper(
+                self.root, self.range, "--artifact-path", self.ARTIFACT
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout.decode("utf-8")), baseline)
 
     def test_text_format_reports_the_same_totals(self):
         completed = run_helper(
