@@ -34,6 +34,16 @@ GREEN_WITHOUT_WORK_RE = re.compile(
 )
 TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z]")
 
+# The evaluation `Nix Eval` exists to perform. The keys above all let the job
+# conclude success without its steps running; this is the other road to the same
+# place — steps that run fine but no longer evaluate anything. Pinned as the
+# command plus the attribute it resolves, because evaluating some *other* flake
+# attribute is as green and as worthless as evaluating none.
+NIX_EVAL_COMMAND_RE = re.compile(r"\bnix\s+eval\b")
+EVALUATED_ATTRIBUTE = (
+    ".#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath"
+)
+
 REQUIRED_PAYLOAD_KEYS = {
     "required_status_checks",
     "enforce_admins",
@@ -72,6 +82,19 @@ def job_blocks():
         elif current is not None:
             blocks[current].append(line)
     return blocks
+
+
+def job_body(key):
+    """The job's block with comment lines dropped.
+
+    A `#`-leading line is a YAML comment at job level and a shell comment inside a
+    `run: |` body — under neither reading is it something the runner executes, so a
+    comment quoting the evaluation must not satisfy an assertion that the job still
+    runs it.
+    """
+    return "\n".join(
+        line for line in job_blocks()[key] if not line.lstrip().startswith("#")
+    )
 
 
 def job_names():
@@ -237,6 +260,36 @@ class WorkflowShape(unittest.TestCase):
                 f"running its evaluation, so the gate would report green on a tree "
                 f"nothing checked",
             )
+
+    def test_required_job_still_runs_the_evaluation_it_exists_for(self):
+        """The pin above catches a job that concludes success without running its
+        steps. This catches the inverse of *that*: steps that run fine and evaluate
+        nothing. Replacing the step's `run:` body with `true` — or pointing it at a
+        different flake attribute — leaves every other assertion in this file green
+        while `Nix Eval` keeps certifying a tree it never looked at."""
+        contexts = required_contexts()
+        # Ties this assertion to the required context rather than to a job that
+        # merely happens to be named this. D2 pins `contexts` to exactly this one;
+        # if that ever widens, this test must be rewritten rather than extended,
+        # because a second required context would not be a Nix evaluation.
+        self.assertEqual(["Nix Eval"], contexts)
+        names = job_names()
+        self.assertIn("Nix Eval", names)
+        body = job_body(names["Nix Eval"])
+        self.assertRegex(
+            body,
+            NIX_EVAL_COMMAND_RE,
+            f"job {names['Nix Eval']!r} backs the required context 'Nix Eval' but "
+            f"runs no `nix eval`; the gate would report green without evaluating "
+            f"anything",
+        )
+        self.assertIn(
+            EVALUATED_ATTRIBUTE,
+            body,
+            f"job {names['Nix Eval']!r} no longer evaluates "
+            f"{EVALUATED_ATTRIBUTE!r}; whatever it evaluates instead, a PR that "
+            f"breaks the NixOS host config would still merge green",
+        )
 
 
 class RequiredContexts(unittest.TestCase):
