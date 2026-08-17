@@ -47,15 +47,23 @@ run by `just agent-workflow-tests`; the `codex-collaboration` plan-only eval sui
   item 4 (the diff-package path is dropped, the plan path stays, and item 3 correspondingly leaves
   `[DIFF_FILE]` unsupplied), and the added item 7.
 - Item 7 is a **collection instruction**, not only a disclosure: it directs the reviewer to fetch
-  `git diff <base>..<head> -- <path>` for exactly the listed paths and to treat that set as the
-  whole of the range under review (per D16).
+  `git diff <base>..<head> -- ':(literal)<path>'` for exactly the listed paths and to treat that
+  set as the whole of the range under review (per D16) — one invocation per path, the path a
+  single literal argument after `--`, never shell-joined, pathspec magic disabled by the
+  `:(literal)` prefix, in item 7 and verbatim in the rubric's scoped-fetch branch (per D18).
+- Item 2's boundary is an **anchoring** rule, not a reporting ban: a reported finding must be
+  anchored in a listed file, an unlisted file may be consulted and cited as evidence for one, and
+  a defect lying wholly within an unlisted file is not reported (per D19, which supersedes D7's
+  item-2 wording, and D13).
 - `home/common/agent-skills/skills/sdd/scripts/review-package` is **not modified** by any task, and
   neither is the package it produces: both axes share it and the conformance axis must keep full
   input. Layer 2 changes only what the correctness packet points at.
 - The coverage disclosure opens the verdict's em-dash assessment clause and never sits between
   the verdict word and the dash (per D6).
 - Codex failure classes stay a closed list of three. An oversized diff is not one, adds no
-  fourth, never spends the one-time native fallback, and never triggers a retry (per D5).
+  fourth, never spends the one-time native fallback, and never triggers a retry (per D5). Nor does
+  a selected path item 7's listing cannot represent — an embedded newline — become a fourth class
+  or a fourth scope value: it takes the same `unmeasured` degrade (per D18).
 - The helper is invoked by bare name `diff-scope`, with `~/.agents/bin/diff-scope` named as the
   anchored fallback — the phrasing every other `~/.agents/bin` helper contract uses.
 - No `.nix` file, nothing under `lib/` or `patches/`, no `patchRevision` bump.
@@ -100,7 +108,9 @@ passing live run does not generalise across diff sizes).
   `home/common/agent-skills/skills/ship-issue/SKILL.md`,
   `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — **full**
 - **Task 4 — Eval coverage for the over-budget contract** —
-  `home/common/claude-code/skills/codex-collaboration/evals/evals.json` — **low-risk**
+  `home/common/claude-code/skills/codex-collaboration/evals/evals.json`,
+  `home/common/agent-skills/skills/sdd/evals/evals.json` (added during execution, not at
+  planning time) — **low-risk**
 - **Final step (not a task) — manually grade eval 3 and record the grade** — no file in
   `home/`; appends to this plan's `## Execution log`. Owner: the controller executing this plan.
 
@@ -113,10 +123,14 @@ is not dispatched to an implementer.
 
 ## Decisions
 
-The spec owns the ledger. Tasks cite rows by ID (D1–D17). Planning appended D14 and D15, both
+The spec owns the ledger. Tasks cite rows by ID (D1–D19). Planning appended D14 and D15, both
 about where the prose is pinned mechanically; the Phase-5 standards review appended D16 (a scoped
 packet bounds input, not only grading — narrows D7) and D17 (`plan-only` evals are manually
-graded, and the grade needs a named owner). Nothing else in this plan required a new decision.
+graded, and the grade needs a named owner). The final two-axis review, after execution, appended
+D18 (the `:(literal)` argv protocol for listed paths, and the one path shape that folds into D5's
+unmeasured degrade instead of scoping) and D19 (item 2's boundary is an anchoring rule —
+supersedes D7's item-2 wording); the step text below was rewritten to match. Nothing else in this
+plan required a new decision.
 
 ## Standards review provenance (Phase 5)
 
@@ -357,10 +371,11 @@ same range always yields the same 20 paths. Binary rows carry a churn of zero an
 sort after every text row, so one enters the subset only once every text product file
 is already in it.
 
-**No measurement.** A helper that is absent, exits non-zero, or emits output this
-operation cannot parse yields no measurement — never a failure. Dispatch exactly as
-an under-budget range does, six items and today's verdict format, and report
-`unmeasured` to the calling controller. `diff-scope` reaches `~/.agents/bin` only
+**No measurement.** A helper that is absent, exits non-zero, emits output this
+operation cannot parse, or selects a path this operation cannot represent in item 7's
+listing (see *When the range is over budget*) yields no measurement — never a failure.
+Dispatch exactly as an under-budget range does, six items and today's verdict format,
+and report `unmeasured` to the calling controller. `diff-scope` reaches `~/.agents/bin` only
 after a rebuild, so absence is a real state on a machine that has this skill.
 
 An oversized diff is not a Codex failure and scoping adds no fourth failure class —
@@ -375,21 +390,30 @@ of: `full` | `scoped: <N> of <M> product files` | `unmeasured`.
 
 Grounding: the pre-flight ordering and both narrowings are D12; the flags and the binding
 fallback are D3; the verbatim `files[]` subset including binary rows is D2; the no-measurement
-degrade and the failure-class rule are D5; the fallback inheriting the scoped packet is D8.
+degrade and the failure-class rule are D5, which D18 extends to a path item 7's listing cannot
+represent; the fallback inheriting the scoped packet is D8.
 
 - [ ] **Step 4: Make item 4 conditional and add the over-budget packet variant**
 
 Two edits inside `## Packet`, and nothing else in that section.
 
-First, item 4 gains a pointer to its conditional half. Replace the numbered item 4:
+First, items 3 and 4 each gain a pointer to their conditional half. Replace the numbered items 3
+and 4:
 
 ~~~markdown
+3. The caller's correctness rubric by absolute path (sdd's
+   `correctness-reviewer-prompt.md`), with concrete values supplied for every
+   placeholder it names. `[DIFF_FILE]` is the one exception: it is left
+   unsupplied when the range is scoped — see *When the range is over budget*.
 4. The diff-package path when the caller built one, and the plan path (routing
    context for what the tasks were). The diff-package path is dropped when the
    range is scoped — see *When the range is over budget*.
 ~~~
 
-Leave items 1–3, 5 and 6 and the `Nothing else rides along` paragraph exactly as they are. Then
+Item 3's carve-out matters as much as item 4's: a packet builder reading "concrete values supplied
+for every placeholder" hands `[DIFF_FILE]` over and the bound degrades to grading-only (D16).
+
+Leave items 1–2, 5 and 6 and the `Nothing else rides along` paragraph exactly as they are. Then
 append this subsection to the end of `## Packet`:
 
 ~~~markdown
@@ -405,14 +429,17 @@ conformance. Then, in substance:
 
 > This is a scoped review: `<N>` of `<M>` changed product files, selected as the
 > highest-churn files. Files outside the list are not under review in this pass — do
-> not report on them, and do not treat their absence from the list as evidence they
-> are clean.
+> not treat their absence from the list as evidence they are clean. Every finding you
+> report must be anchored in a listed file. An unlisted file may be consulted and
+> cited as evidence for such a finding; a defect lying wholly within an unlisted file
+> is outside this pass and is not reported.
 
 Scoping bounds what is supplied and what is graded, not what may be consulted. The
 rubric's carve-out for inspecting code outside the diff to evaluate a concrete named
 risk stands untouched — one focused check per named risk — so a cross-file finding
-that reaches into an unlisted file is legal and reportable. Silently grading an
-unlisted file, or implying it was covered, is not.
+that reaches into an unlisted file is legal and reportable, as long as it is anchored
+in a listed file. Silently grading an unlisted file, reporting a defect that lies
+wholly inside one, or implying it was covered, is not.
 
 **Item 4 drops the diff-package path.** That package is sdd's `scripts/review-package`
 output: an unconditional full-range `git diff -U10 <base>..<head>`, which the rubric
@@ -428,17 +455,37 @@ conformance axis reads that same package whole.
 not only a disclosure: the selected paths, worktree-root-relative, one per line, in
 the helper's emitted order, each with its `files[].changed_lines` count. Direct the
 reviewer to collect the diff for exactly those paths, one bounded read per listed
-path (`git diff <base>..<head> -- <path>`), and to treat that set as the whole of the
-range under review. An unscoped packet has no item 7.
+path (`git diff <base>..<head> -- ':(literal)<path>'`), and to treat that set as the
+whole of the range under review. An unscoped packet has no item 7.
+
+Spell that invocation protocol out in item 7 rather than leaving it to the reviewer:
+**one invocation per path**, the path passed as a **single literal argument after
+`--`**, never shell-joined with the other listed paths into one command line, and
+pathspec magic disabled by the `:(literal)` prefix. `diff-scope` emits whatever bytes
+Git records, so a selected path may carry a space, a newline, a non-UTF-8 byte, or a
+leading `:`; treated as anything but one literal argument it splits or is
+reinterpreted, and the reviewer silently reads a diff that is not the one this packet
+bounded.
+
+Item 7's listing is line-delimited, which carries every one of those byte classes
+intact except one: a path whose bytes include a newline has no unambiguous one-per-line
+form, and splitting the listing on newlines would hand the reviewer two paths that are
+neither of them the selected file. That case does not scope. It takes the
+no-measurement path above — dispatch the range whole, report `unmeasured` — rather than
+list a path this packet cannot represent or quietly drop it from the subset. Dropping is
+the outcome the bound exists to prevent: a silently shorter list still discloses `<N>`
+of `<M>` and reads as covered.
 
 The packet stays a paths packet either way: it never embeds per-file diffs.
 ~~~
 
 Grounding: item 2 keeps its name and meaning and item 7 is conditional per D7; item 4's
 conditionality, the unsupplied `[DIFF_FILE]`, and item 7 as a collection instruction are D16,
-which narrows D7's "exactly two places" to three; the consult-vs-grade boundary is D13; the
-paths-only rule is D2. Task 2 writes the matching branch into the rubric — without it this item 7
-is advisory and the reviewer still fetches the whole range.
+which narrows D7's "exactly two places" to three; the coverage sentence's anchoring boundary is
+D19, which supersedes D7's item-2 wording; the argv protocol and the unrepresentable-path degrade
+are D18; the consult-vs-grade boundary is D13; the paths-only rule is D2. Task 2 writes the
+matching branch into the rubric — without it this item 7 is advisory and the reviewer still
+fetches the whole range.
 
 - [ ] **Step 5: Add the scoped verdict format and the scope return**
 
@@ -589,8 +636,11 @@ git commit -m "feat(issue-23): scope oversized diff-review dispatches and disclo
 - The unconditional branch is preserved: an unscoped dispatch still reads the supplied diff file
   once, or fetches the whole range when none was supplied. Nothing here is made unconditional.
 - On the native path no packet ever states a scope, so both clauses are inert there.
-- `sdd/scripts/review-package` is not touched, and no placeholder is added to the
+- `sdd/scripts/review-package` is not touched, and no new placeholder is added to the
   `**Placeholders:**` list — `[DIFF_FILE]` being unsupplied is a state that list already covers.
+  Its prose does name the scoped dispatch's deliberate exception, though: left saying the
+  `diff-review` packet "supplies the same values", it reads to a packet builder as an instruction
+  to hand `[DIFF_FILE]` over, which degrades the bound to grading-only — the failure D16 closes.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -628,8 +678,8 @@ Add this test method to `WorkflowSkillContractsTest` in
             "unless the packet states the review is scoped and lists the paths "
             "under review",
             "those listed paths are the whole of the range to fetch",
-            "`git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- <path>` once per listed path "
-            "and fetch nothing wider",
+            "`git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'` once per "
+            "listed path and fetch nothing wider",
             # The named-risk carve-out survives scoping untouched (D13). Pinned
             # whitespace-normalized: inserting the clause above re-wraps this
             # paragraph, and the wrap is not the contract — the words are.
@@ -673,20 +723,31 @@ word, including the named-risk carve-out and the read-only rules, is carried ove
 
 ~~~
     Read the diff file once; when checking a finding, read the live file at HEAD,
-    not a snapshot. If no diff file was supplied, fetch the range yourself:
+    not a snapshot. If no diff file was supplied, fetch the range yourself with
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
-    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]` — unless the packet states the review
-    is scoped and lists the paths under review, in which case those listed paths
-    are the whole of the range to fetch: run
-    `git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- <path>` once per listed path and
-    fetch nothing wider. Inspect code outside the diff only to evaluate a concrete
-    risk you can name — cross-task contract drift, changed lock ordering, shared
-    mutable state — one focused check per named risk, named in your report. Your
-    review is read-only on this checkout: do not mutate the working tree, the
-    index, HEAD, or branch state in any way. Do not re-run the full test suite —
-    the implementers' reported runs are the evidence; run at most one focused test
-    to resolve a specific doubt reading the code raised.
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]` — both of them, unless the packet
+    states the review is scoped and lists the paths under review, in which case
+    neither of those two commands runs: those listed paths are the whole of the
+    range to fetch, so run
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'` once per listed
+    path and fetch nothing wider — one invocation per path, the path passed as a
+    single literal argument after `--`, never shell-joined with the other listed
+    paths into one command line, and pathspec magic disabled by the `:(literal)`
+    prefix. A listed path carries whatever bytes Git records, so it may hold a
+    space, a newline, a non-UTF-8 byte, or a leading `:`; treated as anything but
+    one literal argument it splits or is reinterpreted, and you silently read a
+    diff that is not the one the packet bounded. Inspect code outside the diff only
+    to evaluate a concrete risk you can name — cross-task contract drift, changed
+    lock ordering, shared mutable state — one focused check per named risk, named
+    in your report. Your review is read-only on this checkout: do not mutate the
+    working tree, the index, HEAD, or branch state in any way. Do not re-run the
+    full test suite — the implementers' reported runs are the evidence; run at
+    most one focused test to resolve a specific doubt reading the code raised.
 ~~~
+
+The scoped condition governs **both** `git diff` commands, not just the last one, and the argv
+protocol is item 7's wording verbatim so the two documents cannot drift (D18): once `[DIFF_FILE]`
+is unsupplied this branch — not item 7 — is the text the reviewer actually collects from.
 
 The clause hangs off the "no diff file was supplied" branch on purpose: Task 1's scoped packet
 leaves `[DIFF_FILE]` unsupplied precisely so the reviewer lands here. It is conditional on what
@@ -694,9 +755,12 @@ the packet declares, so an unscoped dispatch — and every native dispatch, wher
 anything — reaches the unchanged `git diff [MERGE_BASE_SHA]..[HEAD_SHA]` (per D11).
 
 Change nothing else in the file: not the preamble, not the `agent-dispatch` comment, not the
-`## What to Check` list, and not the `**Placeholders:**` list — both clauses are
+`## What to Check` list, and no entry in the `**Placeholders:**` list — both clauses are
 packet-conditional, so neither introduces a new placeholder, and `[DIFF_FILE]` being unsupplied is
-a state that list already contemplates.
+a state that list already contemplates. That paragraph's closing sentence does say so explicitly
+(the `diff-review` packet supplies the same values *except* `[DIFF_FILE]` on a scoped dispatch,
+which is what routes the reviewer into the fallback branch), so a packet builder cannot read
+"supplies the same values" as a reason to hand the full-range package over anyway (D16).
 
 - [ ] **Step 4: Verify**
 
@@ -816,7 +880,8 @@ Add this test method to `WorkflowSkillContractsTest`:
             ship_review,
         )
         self.assertIn(
-            "the correctness axis's scope is recorded in the PR body per REVIEW.md",
+            "when the correctness axis came through `diff-review`, its scope is "
+            "recorded in the PR body per REVIEW.md",
             ship_skill,
         )
         # Dispatch selection is untouched: the Phase 5 dispatch ids stay as they are.
@@ -884,8 +949,11 @@ Then in `home/common/agent-skills/skills/ship-issue/SKILL.md`, Phase 5, replace
 
 with
 
-> Axis reports are never merged, and the correctness axis's scope is recorded in the PR body per
-> REVIEW.md.
+> Axis reports are never merged, and when the correctness axis came through `diff-review`, its
+> scope is recorded in the PR body per REVIEW.md.
+
+The condition is REVIEW.md's own: the native correctness fallback is dispatched from this same
+paragraph and returns no scope, so an unconditional sentence would send a reader looking for one.
 
 That sentence opens the paragraph beginning `Axis reports are never merged. Apply findings
 through REVIEW.md's severity mapping`; leave the rest of that paragraph and every
@@ -924,6 +992,13 @@ git commit -m "feat(issue-23): record the correctness scope in both calling cont
 
 **Files:**
 - Modify: `home/common/claude-code/skills/codex-collaboration/evals/evals.json`
+- Modify: `home/common/agent-skills/skills/sdd/evals/evals.json` — **not in this task's original
+  brief.** It entered during execution as a controller-supplied cross-task item: Task 3 added the
+  recorded scope to `sdd/final-review.md`'s ledger sentence, which left this suite's eval 2
+  `expected_output` describing a ledger clause the skill no longer has. The fix extends only that
+  clause, mirroring `final-review.md`'s conditionality (scope recorded only when the axis came
+  through `diff-review`; the capability-fallback native dispatch returns none) and its scope
+  spelling. Committed separately as `6e55103`, after Task 4's own commit.
 
 **Interfaces:**
 - Consumes: every contract Tasks 1–3 wrote — the pre-flight order and invocation, the three scoped
@@ -940,7 +1015,10 @@ git commit -m "feat(issue-23): record the correctness scope in both calling cont
   `OUT —`, output-shape, disposition and `Failures:` clauses are edited in no way other than the
   one added permissive clause (acceptance criterion 2, per D4).
 - Eval 3 grades the over-budget contract only; it does not restate eval 2's boundaries.
-- The file stays valid JSON that `jq` and `run-eval.sh` can read.
+- Both files stay valid JSON that `jq` and `run-eval.sh` can read.
+- In `sdd/evals/evals.json` only eval 2's ledger clause moves — its `mode`, `prompt`, and every
+  other graded clause are untouched, and no eval is added to that suite. It follows
+  `sdd/final-review.md`, which is the contract; it never states a scope rule of its own.
 - This task's gate proves the eval **exists, is well-formed, and renders**, and that eval 2 was
   extended rather than rewritten. It does not and cannot prove the eval passes: `run-eval.sh`
   records `PRINTED` and exits 0 for `mode: plan-only` (per D17). The grade is the plan's final
@@ -984,10 +1062,15 @@ Append this object to `.evals`, after eval 2:
   "name": "diff-review-oversized-range-scoped-packet",
   "mode": "plan-only",
   "prompt": "sdd's final review is dispatching you for the correctness axis: operation diff-review over `aaa1111..bbb2222` in this worktree, a branch that changes 44 product files. **Plan-only: launch nothing.** Tell me: which pre-flights you run and in what order, with the exact command for any helper you call; what this packet contains that an under-budget packet would not, and what it no longer contains; how the reviewer is told to obtain the diff it reviews; what the reviewer's first line must look like; what you hand back to the calling controller; and what you do in each of these situations: (a) `diff-scope` is not installed on this machine; (b) Codex comes back `CODEX_REVIEW_FAILURE: job timed out` on this dispatch.",
-  "expected_output": "Pre-flights, in this order: first the shared capability pre-flight `command -v codex-companion`; then diff-review's own size pre-flight, run from the worktree root as `diff-scope <base>..<head> --root <absolute worktree root> --artifact-path <specDir> --artifact-path <planDir> --format json` (helper at `~/.agents/bin/diff-scope`; defaults `.claude/specs` / `.claude/plans` when the dispatcher has no bindings, never omitting the flags). Exactly three fields are read — `product.changed_files`, `files[].path`, `files[].changed_lines`; `product.changed_lines` and `excluded` are deliberately not read, they belong to the degradation gate. 44 > 20, so the packet is scoped to the first 20 entries of `files[]` taken verbatim — no filtering and no re-ranking, the helper's churn-descending, path-tie-broken order is already a total order, so the same range always yields the same 20 paths, and binary rows (churn zero) sort last so they never displace a text file. The scoped packet differs from the six-item packet in exactly three places: item 2 changes subject to the listed product files as changed across the range and gains a coverage sentence in substance — this is a scoped review, 20 of 44 changed product files, selected as the highest-churn files, files outside the list are not under review in this pass, do not report on them and do not treat their absence from the list as evidence they are clean; item 4 DROPS the diff-package path and carries the plan path alone, because that package is `scripts/review-package`'s unconditional full-range `git diff -U10 base..head` and handing it over would leave the entire range to be read — item 3's rubric therefore travels with `[DIFF_FILE]` unsupplied, which is what routes the reviewer into the rubric's 'no diff file was supplied' branch; and a new item 7 lists the 20 paths, worktree-root-relative, one per line, in the helper's order, each with its changed-line count, as a collection instruction: fetch `git diff <base>..<head> -- <path>` once per listed path and treat that set as the whole of the range under review. Nothing else changes; no per-file diffs are embedded, the packet stays a paths packet, and `scripts/review-package` itself is not touched or regenerated — the conformance axis reads that same package whole. Scoping bounds what is supplied and what is graded, not what may be consulted: the rubric's carve-out for one focused check per concrete named risk survives, so a cross-file finding reaching into an unlisted file is legal and reportable. First line: `**Correctness:** Clean — scoped to 20 of 44 product files; <assessment>` or `**Correctness:** Findings — scoped to 20 of 44 product files; <assessment>` — the coverage opens the em-dash assessment clause, never sitting between the verdict word and the dash (agent-evidence.py fullmatches that line), and a scoped review never uses the bare `**Correctness:** Clean` form. Hand-off: the validated three-section result unmodified, plus the reviewer identity and the scope `scoped: 20 of 44 product files`, for the calling controller's ledger — the controller records what it is given and never re-derives the measurement. Case (a): a missing, non-zero-exiting or unparsable helper is no measurement, never a failure — dispatch exactly as today (six items including item 4's diff-package path, today's verdict format) and report `unmeasured`; it never spends the one-time native fallback and never triggers a retry. Case (b): that IS a real Codex failure — exactly one fresh native reviewer gets the SAME scoped packet, item 7 and coverage sentence intact, the failure class is recorded, Codex is not retried. Failures: treating the oversized diff as a Codex failure or spending the one-time fallback on it; leaving the full-range diff-package path in item 4, or supplying `[DIFF_FILE]`, on a scoped dispatch — the reviewer is then handed the whole range and only the grading was bounded; regenerating a pathspec-limited diff package or editing `scripts/review-package`, whose output the conformance axis shares; embedding per-file diffs; putting the coverage between `Clean` and the dash; filtering binary rows or re-ranking the helper's output; reading `product.changed_lines` or `excluded` into the scoping decision; scoping a range that measures exactly 20 product files; measuring before the capability pre-flight.",
+  "expected_output": "Pre-flights, in this order: first the shared capability pre-flight `command -v codex-companion`; then diff-review's own size pre-flight, run from the worktree root as `diff-scope <base>..<head> --root <absolute worktree root> --artifact-path <specDir> --artifact-path <planDir> --format json` (helper at `~/.agents/bin/diff-scope`; defaults `.claude/specs` / `.claude/plans` when the dispatcher has no bindings, never omitting the flags). Exactly three fields are read — `product.changed_files`, `files[].path`, `files[].changed_lines`; `product.changed_lines` and `excluded` are deliberately not read, they belong to the degradation gate. 44 > 20, so the packet is scoped to the first 20 entries of `files[]` taken verbatim — no filtering and no re-ranking, the helper's churn-descending, path-tie-broken order is already a total order, so the same range always yields the same 20 paths, and binary rows (churn zero) sort last so they never displace a text file. The scoped packet differs from the six-item packet in exactly three places: item 2 changes subject to the listed product files as changed across the range and gains a coverage sentence in substance — this is a scoped review, 20 of 44 changed product files, selected as the highest-churn files, files outside the list are not under review in this pass, do not treat their absence from the list as evidence they are clean, and every reported finding must be anchored in a listed file; item 4 DROPS the diff-package path and carries the plan path alone, because that package is `scripts/review-package`'s unconditional full-range `git diff -U10 base..head` and handing it over would leave the entire range to be read — item 3's rubric therefore travels with `[DIFF_FILE]` unsupplied, which is what routes the reviewer into the rubric's 'no diff file was supplied' branch; and a new item 7 lists the 20 paths, worktree-root-relative, one per line, in the helper's order, each with its changed-line count, as a collection instruction: fetch `git diff <base>..<head> -- ':(literal)<path>'` once per listed path and treat that set as the whole of the range under review, with the invocation protocol spelled out — one invocation per path, the path passed as a single literal argument after `--`, never shell-joined with the other listed paths into one command line, and pathspec magic disabled by the `:(literal)` prefix, because the helper emits whatever bytes Git records (spaces, newlines, non-UTF-8, a leading `:`). Nothing else changes; no per-file diffs are embedded, the packet stays a paths packet, and `scripts/review-package` itself is not touched or regenerated — the conformance axis reads that same package whole. Scoping bounds what is supplied and what is graded, not what may be consulted: the rubric's carve-out for one focused check per concrete named risk survives, so a cross-file finding reaching into an unlisted file is legal and reportable, provided the finding is anchored in a listed file — an unlisted file may be consulted and cited as evidence, but a defect lying wholly within an unlisted file is outside this pass and is not reported. First line: `**Correctness:** Clean — scoped to 20 of 44 product files; <assessment>` or `**Correctness:** Findings — scoped to 20 of 44 product files; <assessment>` — the coverage opens the em-dash assessment clause, never sitting between the verdict word and the dash (agent-evidence.py fullmatches that line), and a scoped review never uses the bare `**Correctness:** Clean` form. Hand-off: the validated three-section result unmodified, plus the reviewer identity and the scope `scoped: 20 of 44 product files`, for the calling controller's ledger — the controller records what it is given and never re-derives the measurement. Case (a): a missing, non-zero-exiting or unparsable helper is no measurement, never a failure — dispatch exactly as today (six items including item 4's diff-package path, today's verdict format) and report `unmeasured`; it never spends the one-time native fallback and never triggers a retry. Case (b): that IS a real Codex failure — exactly one fresh native reviewer gets the SAME scoped packet, item 7 and coverage sentence intact, the failure class is recorded, Codex is not retried. Failures: treating the oversized diff as a Codex failure or spending the one-time fallback on it; leaving the full-range diff-package path in item 4, or supplying `[DIFF_FILE]`, on a scoped dispatch — the reviewer is then handed the whole range and only the grading was bounded; regenerating a pathspec-limited diff package or editing `scripts/review-package`, whose output the conformance axis shares; embedding per-file diffs; shell-joining the listed paths into a single `git diff` invocation or interpolating them without the `:(literal)` prefix; putting the coverage between `Clean` and the dash, or omitting it altogether on a scoped dispatch (nothing downstream catches that — `agent-evidence.py` never sees whether the packet was scoped); filtering binary rows or re-ranking the helper's output; reading `product.changed_lines` or `excluded` into the scoping decision; scoping a range that measures exactly 20 product files; measuring before the capability pre-flight.",
   "files": []
 }
 ```
+
+Eval 3 grades the contract, so it follows it: the post-execution review's changes (item 2's
+anchoring boundary per D19, item 7's `:(literal)` argv protocol per D18, and the two matching
+`Failures:` clauses) are carried in the text above. It does not grade the unrepresentable-path
+degrade — that case is pinned in `test_workflow_skill_contracts.py`, not here.
 
 - [ ] **Step 4: Verify the eval file**
 
