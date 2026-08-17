@@ -336,6 +336,21 @@ class DiffScopeClassifierTest(unittest.TestCase):
             "  1  a\\tb\\rc\\x01d\\\\e.txt",
         )
 
+    def test_unicode_line_separators_in_a_path_are_escaped_in_text_output(self):
+        # str.splitlines() breaks on ten characters; seven are C0 and already
+        # escaped, and these three close the set (issue 31's D1). Four hex
+        # digits keep the form disjoint from the two-digit \xNN escapes above.
+        for character, escape in (
+            ("\x85", "\\u0085"),
+            ("\u2028", "\\u2028"),
+            ("\u2029", "\\u2029"),
+        ):
+            with self.subTest(character=character):
+                path = f"we{character}ird.txt".encode("utf-8")
+                payload = self.module.format_text(self.scope([self.row(path, 1, 0)]))
+                self.assertEqual(len(payload.splitlines()), 3)
+                self.assertEqual(payload.splitlines()[2], f"  1  we{escape}ird.txt")
+
     def test_a_non_utf8_path_is_not_escaped_by_the_text_formatter(self):
         # Escaping is for line-breaking bytes only; an undecodable byte rides
         # through as its surrogate and is written back out verbatim by _emit.
@@ -456,6 +471,7 @@ def build_fixture_repo(root):
     write(root, b".claude/specs/this-run.md", b"new spec\n")
     write(root, b"we\nird.txt", b"newline path\n")
     write(root, b'qu"ote.txt', b"quote path\n")
+    write(root, "ls\u2028path.txt".encode("utf-8"), b"separator path\n")
     git(root, "add", "-A")
     git(root, "commit", "-qm", "head")
 
@@ -463,11 +479,11 @@ def build_fixture_repo(root):
 class DiffScopeCommandTest(unittest.TestCase):
     """The git layer and the CLI, against a real scratch repository.
 
-    The fixture range HEAD~1..HEAD holds eleven rows: one lockfile, two
+    The fixture range HEAD~1..HEAD holds twelve rows: one lockfile, two
     generated (one of them a deletion, readable only on its base side), one
-    binary, one pure rename, one spec artifact, and five ordinary product
-    files -- two of which carry equal churn, and two of which carry a newline
-    and a double quote in their names.
+    binary, one pure rename, one spec artifact, and six ordinary product
+    files -- two of which carry equal churn, and three of which carry a
+    newline, a double quote and a U+2028 line separator in their names.
     """
 
     ARTIFACT = ".claude/specs/this-run.md"
@@ -491,7 +507,7 @@ class DiffScopeCommandTest(unittest.TestCase):
     def test_product_totals_exclude_every_class(self):
         payload = self.measure("--artifact-path", self.ARTIFACT)
         self.assertEqual(payload["range"], "HEAD~1..HEAD")
-        self.assertEqual(payload["product"], {"changed_lines": 5, "changed_files": 7})
+        self.assertEqual(payload["product"], {"changed_lines": 6, "changed_files": 8})
         self.assertEqual(
             payload["excluded"], {"lockfile": 1, "generated": 2, "artifact": 1}
         )
@@ -508,7 +524,7 @@ class DiffScopeCommandTest(unittest.TestCase):
         # One count record per row; a rename adds two further path-only tokens.
         # No fixture path contains a tab, so a tab identifies a count record.
         rows = sum(1 for token in raw.split(b"\0") if token and b"\t" in token)
-        self.assertEqual(rows, 11)
+        self.assertEqual(rows, 12)
         self.assertEqual(
             len(payload["files"]) + sum(payload["excluded"].values()), rows
         )
@@ -550,10 +566,11 @@ class DiffScopeCommandTest(unittest.TestCase):
             {"path": "assets/logo.png", "changed_lines": 0, "binary": True},
         )
 
-    def test_paths_holding_a_newline_or_a_quote_survive_end_to_end(self):
+    def test_paths_holding_a_newline_a_quote_or_a_separator_survive_end_to_end(self):
         paths = {entry["path"] for entry in self.measure()["files"]}
         self.assertIn("we\nird.txt", paths)
         self.assertIn('qu"ote.txt', paths)
+        self.assertIn("ls\u2028path.txt", paths)
 
     def test_ties_rank_by_path(self):
         paths = [entry["path"] for entry in self.measure()["files"]]
@@ -570,7 +587,7 @@ class DiffScopeCommandTest(unittest.TestCase):
     def test_an_artifact_path_matching_nothing_is_not_an_error(self):
         payload = self.measure("--artifact-path", ".claude/plans/never-written.md")
         self.assertEqual(payload["excluded"]["artifact"], 0)
-        self.assertEqual(payload["product"]["changed_files"], 8)
+        self.assertEqual(payload["product"]["changed_files"], 9)
 
     def test_a_leading_dot_slash_and_a_trailing_slash_are_stripped(self):
         payload = self.measure("--artifact-path", "./.claude/specs/")
@@ -608,7 +625,7 @@ class DiffScopeCommandTest(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         lines = completed.stdout.decode("utf-8").splitlines()
-        self.assertEqual(lines[0], "product: 5 lines, 7 files")
+        self.assertEqual(lines[0], "product: 6 lines, 8 files")
         self.assertEqual(lines[1], "excluded: 1 lockfile, 2 generated, 1 artifact")
         self.assertIn("  0  assets/logo.png (binary)", lines)
 
@@ -620,9 +637,11 @@ class DiffScopeCommandTest(unittest.TestCase):
         text = completed.stdout.decode("utf-8")
         # we\nird.txt adds one line and deletes none, so its churn is 1.
         self.assertIn("  1  we\\nird.txt\n", text)
-        # Two header lines plus one line per product file (7), and nothing else:
-        # an unescaped newline path splits one of them and makes this ten.
-        self.assertEqual(len(text.splitlines()), 2 + 7)
+        # The separator path is one added line, and one physical line.
+        self.assertIn("  1  ls\\u2028path.txt\n", text)
+        # Two header lines plus one line per product file (8), and nothing else:
+        # an unescaped newline or U+2028 path splits one of them.
+        self.assertEqual(len(text.splitlines()), 2 + 8)
 
     def test_an_empty_range_measures_zero_and_succeeds(self):
         completed = run_helper(self.root, "HEAD..HEAD")
