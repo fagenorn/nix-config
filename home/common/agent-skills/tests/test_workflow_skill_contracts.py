@@ -9,6 +9,7 @@ ORCHESTRATE = (
 )
 FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
 AUTO = REPO_ROOT / "home/common/agent-skills/skills/from-issue/AUTO.md"
+INVESTIGATE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/investigate.md"
 HANDOFF = REPO_ROOT / "home/common/agent-skills/skills/handoff/SKILL.md"
 COLLABORATION = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md"
@@ -47,6 +48,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.orchestrate = ORCHESTRATE.read_text(encoding="utf-8")
         cls.from_issue = FROM_ISSUE.read_text(encoding="utf-8")
         cls.auto = AUTO.read_text(encoding="utf-8")
+        cls.investigate = INVESTIGATE.read_text(encoding="utf-8")
         cls.handoff = HANDOFF.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
         cls.diff_review = DIFF_REVIEW.read_text(encoding="utf-8")
@@ -645,6 +647,37 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, expected)
         self.assertNotIn("≤400", expected)
+
+    def test_phase0_size_note_delegates_counting_to_diff_scope(self):
+        # Issues #21-#22 made diff-scope the accounting authority and retired the
+        # hand-counted numstat arithmetic; this note is the only restatement of
+        # the C4 artifact carve-out in any skill, so it is where that drift hid.
+        note = " ".join(self.investigate.split())
+        for fragment in (
+            # Whole affirmative clauses, not a bare "diff-scope" token: a bare
+            # token also matches a clause saying the counting is *not* delegated
+            # to the helper, which is the inversion this test guards.
+            "`diff-scope` is the accounting authority",
+            "measure, never hand-count",
+            # Both directions of the carve-out: this run's artifacts are named
+            # one file at a time, and the directories themselves never are.
+            "one `--artifact-path` per file",
+            "never `<specDir>`/`<planDir>` themselves",
+            "still count",
+            # The estimate/count split: Phase 0 has no range, so its number is an
+            # estimate; the helper is authoritative only once a range exists.
+            # Collapsing these two moments is the defect issue 32 fixed.
+            "the Phase-0 number is an *estimate*",
+            "Once the branch has a range",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, note)
+        # The retired tool must not survive anywhere in the file, and the gate's
+        # two boundaries stay spelled once, in ship-issue's Phase-5 gate: this
+        # line states the policy and points there rather than restating numbers.
+        for absent in ("numstat", "1,000", "≤20"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, note)
 
     def test_helper_binaries_resolve_from_bare_names(self):
         # Skills invoke workflow-state/agent-evidence by bare name. The Nix
