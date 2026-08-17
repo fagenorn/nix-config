@@ -96,9 +96,17 @@ under the first class it matches in the fixed order lockfile → generated → a
 invariant the suite asserts. `ensure_ascii` keeps a non-UTF-8 path printable as escaped
 surrogates rather than crashing the write.
 
-**stdout, `--format text`.** The same content for a human or an agent quoting it into
-prose: a `product:` line, an `excluded:` line, then one indented `<churn>  <path>` line
-per ranked file, binaries suffixed ` (binary)`.
+**stdout, `--format text`.** The same *measurement* for a human or an agent quoting it
+into prose, minus the range identity: a `product:` line, an `excluded:` line, then one
+indented `<churn>  <path>` line per ranked file, binaries suffixed ` (binary)`.
+(**amended by issue 32's alignment spec, D2** —
+`.claude/specs/2026-08-17-issue-32-spec-doc-alignment-design.md`; this paragraph
+originally read "the same content", which was never true of the shipped helper.) The
+omission is deliberate: every line of the text form is measured output, whereas the range
+is caller-supplied *input*, and a quoter carries it in the invocation printed above the
+output — the pattern `.claude/specs/2026-08-16-ship-issue-degradation-gate-evidence.md`
+already demonstrates. `--format json` echoes `range` because it is the machine record and
+must stay self-describing once detached from the command that produced it.
 
 ### How the range is read
 
@@ -230,7 +238,10 @@ Two seams, both existing.
 
 **1. `home/common/agent-skills/tests/test_diff_scope.py`**, stdlib `unittest`, registered
 in `just agent-workflow-tests`. It follows `test_agent_model_matrix.py`'s two-layer
-precedent verbatim:
+precedent (**amended by D20** — this sentence originally read "precedent verbatim", which
+D20 found to be exactly the bug: `load_module()` must additionally register the module in
+`sys.modules` before `spec.loader.exec_module`, or every classifier-layer test errors in
+`setUpClass`):
 
 - *Classifier layer* — `importlib.util.spec_from_file_location` loads
   `scripts/diff-scope.py` and the tests call the pure classifier over synthetic rows.
