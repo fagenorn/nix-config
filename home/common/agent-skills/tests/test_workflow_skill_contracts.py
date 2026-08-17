@@ -855,5 +855,262 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn(dispatch_id, ship_skill)
 
 
+# --- codebase-design vocabulary package (issue 42) -------------------------
+# One contiguous block at the end of the file. Concurrent work on neighbouring
+# skills appends its own block here, so a merge conflicts at most once and is
+# resolved by keeping both blocks.
+
+CODEBASE_DESIGN_DIR = REPO_ROOT / "home/common/agent-skills/skills/codebase-design"
+CODEBASE_DESIGN_REVISION = "9c9f36ccd3995266cd675468af71639c8dde1ec5"
+CODEBASE_DESIGN_UPSTREAM = "https://github.com/mattpocock/skills"
+CODEBASE_DESIGN_FILES = (
+    "SKILL.md",
+    "DEEPENING.md",
+    "DESIGN-IT-TWICE.md",
+    "LICENSE",
+    "agents/openai.yaml",
+)
+# Each canonical term maps to a discriminating clause of its definition — enough
+# that rewriting the meaning fails the contract, short enough that reflowing the
+# paragraph around it does not. Every clause is verbatim upstream text and
+# apostrophe-free, so no quoting subtleties travel with it.
+CANONICAL_DESIGN_TERMS = {
+    "Module": "anything with an interface and an implementation",
+    "Interface": "everything a caller must know to use the module correctly",
+    "Implementation": "inside a module, its body of code",
+    "Depth": "the amount of behaviour a caller (or test) can exercise per unit of interface",
+    "Seam": "a place where you can alter behaviour without editing in that place",
+    "Adapter": "a concrete thing that satisfies an interface at a seam",
+    "Leverage": "more capability per unit of interface they learn",
+    "Locality": "change, bugs, knowledge, and verification concentrate in one place",
+}
+
+
+def skill_frontmatter(text):
+    """Return a SKILL.md's YAML frontmatter as a flat ``key -> value`` dict.
+
+    Values are everything after the first colon, stripped. The skill packages in
+    this tree use only flat single-line frontmatter keys, so no YAML parser is
+    pulled in. A document with no leading ``---`` fence yields an empty dict.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    fields = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, separator, value = line.partition(":")
+        if separator:
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def relative_markdown_links(text):
+    """Yield each relative link target in `text`.
+
+    A target is the ``target`` of a ``](target)`` sequence. Absolute URLs and
+    bare in-document anchors are skipped: what this exists to catch is a link to
+    a sibling file that is not in the package.
+    """
+    for chunk in text.split("](")[1:]:
+        target = chunk.split(")", 1)[0]
+        if target.startswith(("http://", "https://", "#")):
+            continue
+        yield target
+
+
+class CodebaseDesignSkillContractsTest(unittest.TestCase):
+    """The vendored deep-module vocabulary package.
+
+    Fixtures are read here rather than at module import so that an absent or
+    incomplete package errors only this class and leaves the rest of the
+    suite's coverage reporting normally.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.skill = (CODEBASE_DESIGN_DIR / "SKILL.md").read_text(encoding="utf-8")
+        cls.deepening = (CODEBASE_DESIGN_DIR / "DEEPENING.md").read_text(encoding="utf-8")
+        cls.twice = (CODEBASE_DESIGN_DIR / "DESIGN-IT-TWICE.md").read_text(encoding="utf-8")
+        cls.notice = (CODEBASE_DESIGN_DIR / "LICENSE").read_text(encoding="utf-8")
+
+    def glossary(self):
+        start = self.skill.index("## Glossary")
+        return self.skill[start : self.skill.index("## Deep vs shallow", start)]
+
+    def test_package_passes_skill_package_validation(self):
+        for relative in CODEBASE_DESIGN_FILES:
+            with self.subTest(path=relative):
+                self.assertTrue(
+                    (CODEBASE_DESIGN_DIR / relative).is_file(),
+                    f"missing package file: {relative}",
+                )
+        frontmatter = skill_frontmatter(self.skill)
+        self.assertEqual(frontmatter.get("name"), CODEBASE_DESIGN_DIR.name)
+        self.assertTrue(frontmatter.get("description", "").strip())
+        # The trigger the rest of the skill tree depends on, kept verbatim (D14).
+        self.assertIn(
+            "another skill needs the deep-module vocabulary",
+            frontmatter["description"],
+        )
+
+    def test_every_relative_link_in_the_package_resolves(self):
+        documents = {
+            "SKILL.md": self.skill,
+            "DEEPENING.md": self.deepening,
+            "DESIGN-IT-TWICE.md": self.twice,
+        }
+        package_root = CODEBASE_DESIGN_DIR.resolve()
+        checked = 0
+        for name, text in documents.items():
+            for target in relative_markdown_links(text):
+                checked += 1
+                with self.subTest(document=name, target=target):
+                    # Resolve against the containing document, then require the
+                    # result to stay inside the package. `exists()` alone would
+                    # let a `../../…` traversal pass by reaching a real file
+                    # outside the package, which is not a resolving link.
+                    resolved = (package_root / name).parent.joinpath(target).resolve()
+                    self.assertTrue(
+                        resolved.is_relative_to(package_root),
+                        f"{name} links to {target}, which escapes the package",
+                    )
+                    self.assertTrue(
+                        resolved.is_file(),
+                        f"{name} links to {target}, which is not a file in the package",
+                    )
+        self.assertGreaterEqual(checked, 9, "the link scan found nothing to check")
+
+    def test_glossary_defines_every_canonical_term(self):
+        # Pin the definitions, not just the headings: a heading-only assertion
+        # stays green while every definition is deleted or rewritten, which is
+        # exactly the drift this contract exists to catch.
+        glossary = self.glossary()
+        for term, definition in CANONICAL_DESIGN_TERMS.items():
+            with self.subTest(term=term):
+                self.assertIn(f"\n**{term}**", glossary)
+                self.assertIn(definition, glossary)
+
+    def test_glossary_forbids_substituting_the_canonical_terms(self):
+        glossary = self.glossary()
+        self.assertIn(
+            'Use these terms exactly — don\'t substitute "component," "service," '
+            '"API," or "boundary."',
+            glossary,
+        )
+        for avoided in (
+            "_Avoid_: unit, component, service",
+            "_Avoid_: API, signature",
+            "_Avoid_: boundary",
+        ):
+            with self.subTest(avoided=avoided):
+                self.assertIn(avoided, glossary)
+
+    def test_deletion_test_keeps_both_branches(self):
+        self.assertIn("**The deletion test.**", self.skill)
+        self.assertIn("If complexity vanishes, it was a pass-through.", self.skill)
+        self.assertIn(
+            "If complexity reappears across N callers, it was earning its keep.",
+            self.skill,
+        )
+
+    def test_interface_is_the_test_surface_in_both_files(self):
+        self.assertIn(
+            "**The interface is the test surface.** Callers and tests cross the "
+            "same seam.",
+            self.skill,
+        )
+        self.assertIn("The **interface is the test surface**.", self.deepening)
+
+    def test_adapter_seam_rule_is_pinned_in_both_files(self):
+        rule = "One adapter means a hypothetical seam. Two adapters means a real one."
+        self.assertIn(rule, self.skill)
+        self.assertIn(rule, self.deepening)
+
+    def test_seam_entry_reconciles_this_repositorys_test_seam(self):
+        glossary = self.glossary()
+        start = glossary.index("**Seam**")
+        seam_entry = glossary[start : glossary.index("**Adapter**", start)]
+        self.assertIn(
+            "a place where you can alter behaviour without editing in that place",
+            seam_entry,
+        )
+        self.assertIn(
+            "A **test seam**, as the design and planning skills use the term, is "
+            "one of these seams chosen as the boundary that verification crosses",
+            seam_entry,
+        )
+
+    def test_deepening_carries_all_four_dependency_categories(self):
+        for heading in (
+            "### 1. In-process",
+            "### 2. Local-substitutable",
+            "### 3. Remote but owned (Ports & Adapters)",
+            "### 4. True external (Mock)",
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.deepening)
+        start = self.deepening.index("### 3. Remote but owned (Ports & Adapters)")
+        ports = self.deepening[
+            start : self.deepening.index("### 4. True external (Mock)", start)
+        ]
+        self.assertIn(
+            "implement an HTTP adapter for production and an in-memory adapter "
+            "for testing",
+            ports,
+        )
+
+    def test_design_it_twice_keeps_the_workflow_and_its_adaptations(self):
+        self.assertIn("Spawn 3+ sub-agents in parallel.", self.twice)
+        self.assertIn("**radically different**", self.twice)
+        self.assertIn(
+            "Contrast by **depth** (leverage at the interface), **locality** "
+            "(where change concentrates), and **seam placement**.",
+            self.twice,
+        )
+        # D5: upstream's dangling CONTEXT.md reference stays repointed.
+        self.assertNotIn("CONTEXT.md", self.twice)
+        self.assertIn(
+            "Resolve the domain language the way the `doc-grounded-questions` "
+            "skill does",
+            self.twice,
+        )
+        # D7: an autonomous run has nobody to stall on.
+        self.assertIn("The recommendation is the answer", self.twice)
+        self.assertIn("recorded as a decision-ledger row", self.twice)
+
+    def test_package_carries_no_dispatch_site_and_names_the_owner_tier(self):
+        for path in sorted(CODEBASE_DESIGN_DIR.rglob("*")):
+            if not path.is_file():
+                continue
+            with self.subTest(path=str(path.relative_to(CODEBASE_DESIGN_DIR))):
+                self.assertNotIn("Agent(", path.read_text(encoding="utf-8"))
+        # D6: the tier is stated in words instead.
+        self.assertIn(
+            "dispatch them at the `issue-owner` tier rather than the cheap "
+            "`explorer` tier",
+            self.twice,
+        )
+
+    def test_license_records_provenance_and_the_upstream_notice(self):
+        self.assertIn(CODEBASE_DESIGN_UPSTREAM, self.notice)
+        self.assertIn(CODEBASE_DESIGN_REVISION, self.notice)
+        self.assertIn("Copyright (c) 2026 Matt Pocock", self.notice)
+        self.assertIn(
+            "Permission is hereby granted, free of charge, to any person "
+            "obtaining a copy",
+            self.notice,
+        )
+        self.assertIn(
+            "The above copyright notice and this permission notice shall be "
+            "included in all",
+            self.notice,
+        )
+        # D2: SKILL.md points at the notice and never carries it.
+        self.assertIn("[LICENSE](LICENSE)", self.skill)
+        self.assertNotIn("Permission is hereby granted", self.skill)
+
+
 if __name__ == "__main__":
     unittest.main()
