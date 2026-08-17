@@ -21,6 +21,7 @@ in
   environment.systemPackages =
     with pkgs;
     [
+      nixEvalGateProbeDoesNotExist
       # === Core System & File Utilities ===
       coreutils # Standard GNU utilities (ls, cp, mv, rm, etc.)
       tree # Display directory contents as a tree
