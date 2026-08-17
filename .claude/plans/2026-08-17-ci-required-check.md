@@ -64,8 +64,8 @@ Existing seams only. A task that wants a new one has found a plan bug.
 
 1. **`just agent-workflow-tests`** — the repo's only deterministic test entry point
    (`python3 -m unittest -v` over seven suites, run from the worktree root). Baseline verified
-   at this branch's tip `124c84d`: **164 tests, OK**. This plan adds one suite of five tests →
-   **169** at the end. Accepted friction, per D12: the recipe is named for agent workflows and
+   at this branch's tip `124c84d`: **164 tests, OK**. This plan adds one suite of six tests →
+   **170** at the end. Accepted friction, per D12: the recipe is named for agent workflows and
    this is CI config, and renaming it would touch every plan and skill that cites it.
 2. **Offline file-shape gates** — `python3 -m json.tool`, `ruby -ryaml -e 'YAML.load_file(…)'`
    (an independent YAML parser; **PyYAML is not installed on this host**, verified, which is
@@ -424,8 +424,8 @@ Claude-Session: https://claude.ai/code/session_011BW621YtNATjTJfsJSJXnB"
 **Interfaces:**
 - Consumes: `Nix Eval` as a four-space-indented `name:` in `ci.yaml`, and
   `required_status_checks.contexts` in the payload.
-- Produces: five `unittest` tests, wired into `just agent-workflow-tests`. Task 4's sweep
-  expects the recipe to report **169 tests, OK** (baseline at `124c84d` is 164).
+- Produces: six `unittest` tests, wired into `just agent-workflow-tests`. Task 4's sweep
+  expects the recipe to report **170 tests, OK** (baseline at `124c84d` is 164).
 
 **Invariants:**
 - The test asserts only what a `unittest` over YAML text and JSON can observe: that the two
@@ -464,6 +464,7 @@ PROTECTION = REPO_ROOT / ".github" / "branch-protection.json"
 # guaranteed dependency on this host, so the convention is the parser.
 JOB_KEY_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 JOB_NAME_RE = re.compile(r"^    name:\s*(\S.*?)\s*$")
+JOB_IF_RE = re.compile(r"^    if:\s*(\S.*?)\s*$")
 RENAMING_KEY_RE = re.compile(r"^    (strategy|uses):")
 TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z]")
 
@@ -550,6 +551,15 @@ def trigger_branches(name):
     return out
 
 
+def job_if_expression(key):
+    """The job's four-space `if:` expression, or None when it has none."""
+    for line in job_blocks()[key]:
+        match = JOB_IF_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
 def payload():
     return json.loads(PROTECTION.read_text(encoding="utf-8"))
 
@@ -583,6 +593,55 @@ class WorkflowShape(unittest.TestCase):
             branches, f"{WORKFLOW}'s `pull_request:` trigger has no `branches:` list"
         )
         self.assertEqual(["main"], branches)
+        block = trigger_block("pull_request")
+        # Matched by prefix rather than by whole line: `paths: ['**.nix']` and
+        # `types: [opened, synchronize]` are both legal inline YAML, and an
+        # exact-line comparison would wave either of them through.
+        def narrowing_lines(key):
+            return [line for line in block if line.startswith(key)]
+
+        # A `paths:` or `paths-ignore:` filter makes the workflow skip pull
+        # requests that touch no matching file. The required context then never
+        # reports on those PRs and they can never merge, with nothing in the UI
+        # naming the cause.
+        for narrowing in ("    paths:", "    paths-ignore:"):
+            self.assertEqual(
+                [],
+                narrowing_lines(narrowing),
+                f"{WORKFLOW.name}'s `pull_request:` trigger carries "
+                f"`{narrowing.strip()}`, so a PR touching nothing it matches "
+                f"gets no {WORKFLOW.name} run and can never satisfy the "
+                f"required context",
+            )
+        # No `types:` key means GitHub's default set applies, and `reopened` is
+        # in it. The rollout unblocks a stranded PR with close+reopen, which
+        # re-fires the workflow only while that default holds.
+        self.assertEqual(
+            [],
+            narrowing_lines("    types:"),
+            f"{WORKFLOW.name}'s `pull_request:` trigger carries an explicit "
+            f"`types:` list; the default set (which includes `reopened`) no "
+            f"longer applies and close+reopen may not re-fire the workflow",
+        )
+
+    def test_required_jobs_are_not_gated_off_pull_requests(self):
+        """A job-level `if:` decides whether the required check reports at all.
+        Pinned by value: the expression is as load-bearing as the job name, so a
+        change to it has to be made deliberately here as well as in the workflow."""
+        contexts = required_contexts()
+        self.assertTrue(contexts, "branch protection requires at least one context")
+        names = job_names()
+        for context in contexts:
+            self.assertIn(context, names)
+            expression = job_if_expression(names[context])
+            self.assertIn(
+                expression,
+                (None, "github.event_name != 'schedule'"),
+                f"job {names[context]!r} backs required context {context!r} and "
+                f"carries an unreviewed `if:` ({expression!r}); if it can skip a "
+                f"pull request, that PR blocks forever on a context that never "
+                f"reports",
+            )
 
 
 class RequiredContexts(unittest.TestCase):
@@ -707,7 +766,7 @@ In `justfile`, add `tests/test_branch_protection.py` as the final path of the
 just agent-workflow-tests 2>&1 | tail -3
 ```
 
-Expected: `Ran 169 tests`, `OK`. The baseline at `124c84d` is **164 tests, OK** — a run that
+Expected: `Ran 170 tests`, `OK`. The baseline at `124c84d` is **164 tests, OK** — a run that
 still reports 164 means the recipe edit did not take.
 
 - [ ] **Step 5: Commit**
@@ -789,7 +848,7 @@ git diff --stat 124c84d -- .github/ justfile tests/test_branch_protection.py CLA
 ```
 
 Expected: the first two `grep -c` print `0` (exit 1 for zero matches is expected); the next
-two print `1` each; `Ran 169 tests` / `OK`; `json OK`; `yaml OK`; `justfile OK`; and the
+two print `1` each; `Ran 170 tests` / `OK`; `json OK`; `yaml OK`; `justfile OK`; and the
 `git diff --stat` names exactly five paths — `.github/branch-protection.json`,
 `.github/workflows/ci.yaml` (with `.github/workflows/flake-checker.yaml` as its rename
 source), `justfile`, `tests/test_branch_protection.py`, `CLAUDE.md`.
