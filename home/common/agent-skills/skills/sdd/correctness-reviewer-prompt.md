@@ -38,8 +38,15 @@ Subagent (reviewer, Opus/high for the native path selected above):
     `git diff [MERGE_BASE_SHA]..[HEAD_SHA]` — both of them, unless the packet
     states the review is scoped and lists the paths under review, in which case
     neither of those two commands runs: those listed paths are the whole of the
-    range to fetch, so run `git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- <path>` once
-    per listed path and fetch nothing wider. Inspect code outside the diff only
+    range to fetch, so run
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'` once per listed
+    path and fetch nothing wider — one invocation per path, the path passed as a
+    single literal argument after `--`, never shell-joined with the other listed
+    paths into one command line, and pathspec magic disabled by the `:(literal)`
+    prefix. A listed path carries whatever bytes Git records, so it may hold a
+    space, a newline, a non-UTF-8 byte, or a leading `:`; treated as anything but
+    one literal argument it splits or is reinterpreted, and you silently read a
+    diff that is not the one the packet bounded. Inspect code outside the diff only
     to evaluate a concrete risk you can name — cross-task contract drift, changed
     lock ordering, shared mutable state — one focused check per named risk, named
     in your report. Your review is read-only on this checkout: do not mutate the

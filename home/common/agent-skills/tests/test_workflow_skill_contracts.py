@@ -447,8 +447,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "unless the packet states the review is scoped and lists the paths "
             "under review",
             "those listed paths are the whole of the range to fetch",
-            "`git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- <path>` once per listed path "
-            "and fetch nothing wider",
+            "`git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'` once per "
+            "listed path and fetch nothing wider",
             # The named-risk carve-out survives scoping untouched (D13). Pinned
             # whitespace-normalized: inserting the clause above re-wraps this
             # paragraph, and the wrap is not the contract — the words are.
@@ -461,6 +461,46 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(reader=reader):
                 self.assertNotIn(reader, output_format)
                 self.assertNotIn(reader, diff_under_review)
+
+    def test_correctness_rubric_pins_the_scoped_fetch_quoting_protocol(self):
+        # K1's argv protocol has to land in the rubric, not only in
+        # DIFF-REVIEW.md item 7. A scoped dispatch leaves `[DIFF_FILE]`
+        # unsupplied, so this fallback branch is the one the reviewer actually
+        # runs — an unquoted `-- <path>` here is the live defect, and the packet
+        # contract cannot reach it. Mirrored wording, so the two cannot drift.
+        rubric = (SDD_DIR / "correctness-reviewer-prompt.md").read_text(
+            encoding="utf-8"
+        )
+        branch = " ".join(
+            rubric[
+                rubric.index("If no diff file was supplied") : rubric.index(
+                    "Inspect code outside the diff"
+                )
+            ].split()
+        )
+        for fragment in (
+            "one invocation per path",
+            "the path passed as a single literal argument after `--`",
+            "never shell-joined with the other listed paths into one command line",
+            "pathspec magic disabled by the `:(literal)` prefix",
+            # Why the protocol exists: the listed paths carry raw Git bytes.
+            "a space, a newline, a non-UTF-8 byte, or a leading `:`",
+            "treated as anything but one literal argument it splits or is "
+            "reinterpreted",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, branch)
+        # No unquoted interpolation survives anywhere in the branch.
+        self.assertNotIn("[HEAD_SHA] -- <path>", branch)
+        # The same wording, verbatim, in DIFF-REVIEW.md item 7 (whitespace
+        # normalized there too, since both are wrapped prose).
+        packet = " ".join(self.diff_review.split())
+        for fragment in (
+            "never shell-joined with the other listed paths into one command line",
+            "pathspec magic disabled by the `:(literal)` prefix",
+        ):
+            with self.subTest(mirror=fragment):
+                self.assertIn(fragment, packet)
 
     def test_collaboration_requires_fresh_validated_bridge_evidence(self):
         # The certification block lives in CERTIFICATION.md, referenced from
