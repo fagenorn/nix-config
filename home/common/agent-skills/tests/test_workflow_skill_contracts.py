@@ -376,6 +376,16 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "it never embeds per-file diffs",
             "scoped to <N> of <M> product files;",
             "A scoped review may not use the bare",
+            # Item 7's listing is line-delimited, so it carries every byte class
+            # `diff-scope` can emit except an embedded newline. That one case
+            # folds into the existing no-measurement degrade rather than
+            # shortening the subset: a silently dropped path would still be
+            # disclosed as `<N>` of `<M>` and read as covered.
+            "selects a path this operation cannot represent in item 7's listing",
+            "has no unambiguous one-per-line form",
+            "That case does not scope",
+            "a silently shorter list still discloses `<N>` of `<M>` and reads as "
+            "covered",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, contract)
@@ -472,6 +482,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(reader=reader):
                 self.assertNotIn(reader, output_format)
                 self.assertNotIn(reader, diff_under_review)
+        # The Placeholders paragraph tells a packet builder what `diff-review`
+        # supplies. Left flat ("the same values"), it directs the builder to hand
+        # over `[DIFF_FILE]` — the full-range package — and the bound degrades to
+        # grading-only, which is the failure D16 exists to close.
+        placeholders = " ".join(rubric[rubric.index("**Placeholders:**") :].split())
+        for fragment in (
+            "on a scoped dispatch that packet leaves `[DIFF_FILE]` unsupplied",
+            "the full-range package it names is exactly what scoping bounds",
+            "routes the reviewer into the fallback branch above",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, placeholders)
 
     def test_correctness_rubric_pins_the_scoped_fetch_quoting_protocol(self):
         # K1's argv protocol has to land in the rubric, not only in

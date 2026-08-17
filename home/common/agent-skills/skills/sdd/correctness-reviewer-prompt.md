@@ -92,4 +92,8 @@ Subagent (reviewer, Opus/high for the native path selected above):
 manifest detection), `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[DIFF_FILE]` (from
 `scripts/review-package`; a dispatcher without the sdd scripts omits it, and the
 reviewer fetches the range itself per the body's fallback). When this file rides as
-the Codex rubric, the `diff-review` packet supplies the same values.
+the Codex rubric, the `diff-review` packet supplies the same values — with one
+deliberate exception: on a scoped dispatch that packet leaves `[DIFF_FILE]`
+unsupplied, because the full-range package it names is exactly what scoping bounds.
+That is what routes the reviewer into the fallback branch above, where the packet's
+listed paths are the whole of the range to fetch.

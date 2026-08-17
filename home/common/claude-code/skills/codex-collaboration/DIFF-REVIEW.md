@@ -55,10 +55,11 @@ same range always yields the same 20 paths. Binary rows carry a churn of zero an
 sort after every text row, so one enters the subset only once every text product file
 is already in it.
 
-**No measurement.** A helper that is absent, exits non-zero, or emits output this
-operation cannot parse yields no measurement — never a failure. Dispatch exactly as
-an under-budget range does, six items and today's verdict format, and report
-`unmeasured` to the calling controller. `diff-scope` reaches `~/.agents/bin` only
+**No measurement.** A helper that is absent, exits non-zero, emits output this
+operation cannot parse, or selects a path this operation cannot represent in item 7's
+listing (see *When the range is over budget*) yields no measurement — never a failure.
+Dispatch exactly as an under-budget range does, six items and today's verdict format,
+and report `unmeasured` to the calling controller. `diff-scope` reaches `~/.agents/bin` only
 after a rebuild, so absence is a real state on a machine that has this skill.
 
 An oversized diff is not a Codex failure and scoping adds no fourth failure class —
@@ -143,10 +144,19 @@ Spell that invocation protocol out in item 7 rather than leaving it to the revie
 **one invocation per path**, the path passed as a **single literal argument after
 `--`**, never shell-joined with the other listed paths into one command line, and
 pathspec magic disabled by the `:(literal)` prefix. `diff-scope` emits whatever bytes
-Git records, so a listed path may carry a space, a newline, a non-UTF-8 byte, or a
+Git records, so a selected path may carry a space, a newline, a non-UTF-8 byte, or a
 leading `:`; treated as anything but one literal argument it splits or is
 reinterpreted, and the reviewer silently reads a diff that is not the one this packet
 bounded.
+
+Item 7's listing is line-delimited, which carries every one of those byte classes
+intact except one: a path whose bytes include a newline has no unambiguous one-per-line
+form, and splitting the listing on newlines would hand the reviewer two paths that are
+neither of them the selected file. That case does not scope. It takes the
+no-measurement path above — dispatch the range whole, report `unmeasured` — rather than
+list a path this packet cannot represent or quietly drop it from the subset. Dropping is
+the outcome the bound exists to prevent: a silently shorter list still discloses `<N>`
+of `<M>` and reads as covered.
 
 The packet stays a paths packet either way: it never embeds per-file diffs.
 
