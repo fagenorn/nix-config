@@ -28,11 +28,20 @@ that ledger names issue #21 explicitly, because the two ledgers reuse the same I
 - `--format json` output must be byte-identical to the base commit for any given range.
   Issue #21's D11 fixes that payload; only the text branch may move.
 - Product changes go **only** in `home/common/agent-skills/scripts/diff-scope.py`; test
-  changes **only** in `home/common/agent-skills/tests/test_diff_scope.py`.
+  changes **only** in `home/common/agent-skills/tests/test_diff_scope.py` and — for Task 1's
+  environment scrub alone — `home/common/agent-skills/tests/test_ship_release_contracts.py`
+  (per D10). No other suite in the `just agent-workflow-tests` recipe spawns git, so the
+  scrub widens no further.
 - `home/common/agent-skills/default.nix` and `justfile` are **not edited** — both already
   register the helper and its suite (issue #21's D15).
 - No `.nix` file is edited, so `just build` is not part of any gate.
 - `patches/agent-plugins/` is untouched; no `patchRevision` bump.
+- **Every decision citation written into source (comments, docstrings) names its document**
+  (per D12): `issue #21's D3`, `issue 31's D2`. `diff-scope.py`'s existing comments cite issue
+  #21's ledger bare — `(D25)` at :146/:195, `(D8)` :269, `(D23)` :364, `(D7)` :374, `(D3)` :437,
+  `(D19)` :467 — so a bare new `(D2)` would read as issue #21's D2 ("three-dot ranges out of
+  scope"), which is a different decision. Leave the existing bare citations alone; qualify every
+  citation this issue adds.
 - Commits are SSH-signed by default. Never pass `--no-gpg-sign` or
   `-c commit.gpgsign=false`; surface a signing failure instead.
 - Every commit message ends with:
@@ -85,13 +94,14 @@ is green at every task boundary, never between them.
 |------|--------|-------------------------------|
 | `home/common/agent-skills/scripts/diff-scope.py` | modify | Adds `UNICODE_LINE_SEPARATORS` + one `_escape_text` branch (T2); `--no-relative` on both `measure` diff calls (T3); `import tempfile`, `DISCARD_CHUNK_BYTES`, `_read_exactly`, `_discard_exactly`, `_stderr_text`, `_read_response`, `_batch_headers` replacing `_parse_batch` (T5). |
 | `home/common/agent-skills/tests/test_diff_scope.py` | modify | Adds `import unittest.mock` + `import tracemalloc`; `GIT_LOCATION_VARS` + the `git_env()` scrub and its test (T1); the U+2028 fixture path and its six updated assertions (T2); `DiffScopeRelativeConfigTest` (T3); `build_no_candidate_repo` + `DiffScopeAllExcludedRangeTest` + the patched-`_git` test (T4); `build_large_blob_repo` + `DiffScopeHeaderScanBoundTest` (T5). |
-| `.claude/specs/2026-08-17-diff-scope-residuals-design.md` | already modified | Owns the ledger; D9 was appended during planning. Tasks cite it, they do not edit it. |
+| `home/common/agent-skills/tests/test_ship_release_contracts.py` | modify (T1 only) | Gains the same `GIT_LOCATION_VARS` tuple and pop loop in its own independent `git_env()` (per D10). It is the only other suite in the `just agent-workflow-tests` recipe that spawns git, and AC5's whole-suite gate cannot pass without it. Nothing else in this file changes. |
+| `.claude/specs/2026-08-17-diff-scope-residuals-design.md` | already modified | Owns the ledger; D9 was appended during planning, D10–D12 during the Phase-5 standards review. Tasks cite it, they do not edit it. |
 
 ## Task index
 
 | Task | Title | Files touched | Risk lane |
 |------|-------|---------------|-----------|
-| Task 1 | Scrub the inherited git environment (R5) | `home/common/agent-skills/tests/test_diff_scope.py` | low-risk |
+| Task 1 | Scrub the inherited git environment (R5) | `home/common/agent-skills/tests/test_diff_scope.py`, `home/common/agent-skills/tests/test_ship_release_contracts.py` | low-risk |
 | Task 2 | Escape the three Unicode line separators (R1) | `home/common/agent-skills/scripts/diff-scope.py`, `home/common/agent-skills/tests/test_diff_scope.py` | full |
 | Task 3 | Neutralise `diff.relative` (R2) | `home/common/agent-skills/scripts/diff-scope.py`, `home/common/agent-skills/tests/test_diff_scope.py` | full |
 | Task 4 | Cover the header-scan early return (R3) | `home/common/agent-skills/tests/test_diff_scope.py` | low-risk |
@@ -237,14 +247,24 @@ the ones that relocate git's repository, work tree, index or object store; a bla
 sweep is rejected because it would also drop `GIT_EXEC_PATH` and `GIT_TEMPLATE_DIR`, which a
 Nix-provided git may rely on (D7).
 
+Then apply the **same** scrub to the second git-spawning suite in the recipe,
+`home/common/agent-skills/tests/test_ship_release_contracts.py`, which defines its own
+independent `git_env()` (that file's `git_env`, `env = dict(os.environ)`) and whose `sh()`
+helper runs real `git init`/`git commit`. Add the identical `GIT_LOCATION_VARS` tuple and pop
+loop there — duplicated rather than imported, because the two suites share no helper module
+and this plan adds no new file (D10). Without it, AC5's whole-suite gate below fails: at the
+base commit `GIT_DIR=/nonexistent/other.git` reddens 2 of that file's 10 tests with
+`fatal: Invalid path '/nonexistent'`.
+
 - [ ] **Step 4: Verify**
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_diff_scope.py -k immune_to_an_inherited_git_dir`
 Expected: PASS, 1 test.
 
-Then the AC's literal wording — the whole suite under a poisoned environment. Only
-`test_diff_scope.py` in that recipe invokes git, and the other suites were confirmed
-unaffected during planning:
+Then the AC's literal wording — the whole suite under a poisoned environment. Two suites in
+that recipe invoke git: `test_diff_scope.py` and `test_ship_release_contracts.py`. Both must
+be scrubbed for this gate to pass (per D10); the remaining suites were verified not to spawn
+git:
 
 ```sh
 GIT_DIR=/nonexistent/other.git just agent-workflow-tests
@@ -256,8 +276,9 @@ Then the plain project gate: `just agent-workflow-tests` → OK.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add home/common/agent-skills/tests/test_diff_scope.py
-git commit -m "test(diff-scope): scrub inherited git location vars from the suite env"
+git add home/common/agent-skills/tests/test_diff_scope.py \
+        home/common/agent-skills/tests/test_ship_release_contracts.py
+git commit -m "test(agent-skills): scrub inherited git location vars from the suite env"
 ```
 
 ---
@@ -354,8 +375,12 @@ Run: `python3 -m unittest home/common/agent-skills/tests/test_diff_scope.py -k s
 Expected: FAIL — `4 != 3` on the `splitlines()` length, for the first subtest.
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_diff_scope.py -k text_format_gives_each_ranked_file`
-Expected: FAIL — `11 != 10` on the line count (the raw U+2028 splits one ranked file in two),
-and the `assertIn` for `  1  ls\u2028path.txt\n` does not match.
+Expected: FAIL — the **`assertIn` added by item 6 is what reddens first**, because item 6
+inserts it above the count assertion (`test_diff_scope.py:581`), which is therefore never
+reached at base. The defect the count assertion guards is still real and still the point
+(`11 != 10` — the raw U+2028 splits one ranked file in two); it simply is not the message you
+will see. Do not reorder the assertions to chase the count message — either failure proves the
+same base defect (the escaped `assertIn` line item 6 adds cannot match while the path is emitted raw).
 
 - [ ] **Step 3: Write the minimal implementation**
 
@@ -406,9 +431,15 @@ JSON stability, since this task is the one that could disturb it — the asserti
 content, not on a commit range:
 
 ```sh
-git diff -- home/common/agent-skills/scripts/diff-scope.py | grep -c 'format_json\|ensure_ascii'
+git diff -U0 -- home/common/agent-skills/scripts/diff-scope.py \
+  | grep -c '^[+-].*\(format_json\|ensure_ascii\)' || true
 ```
-Expected: `0` — no line of the diff touches the JSON branch.
+Expected: `0` — no *changed* line touches the JSON branch. The `-U0` and the `^[+-]` anchor
+matter: with default context this task's own `format_text` docstring edit drags the neighbouring
+`ensure_ascii` sentence (`diff-scope.py:194-195`) into the diff window and the gate
+false-positives; `|| true` keeps `grep -c`'s exit 1 on a zero count from reading as a failure.
+`test_json_output_is_compact_key_sorted_and_ascii` (`test_diff_scope.py:277-288`) is the real
+guarantee here — this grep is only a fast smoke check.
 
 Then: `just agent-workflow-tests` → OK.
 
@@ -990,6 +1021,24 @@ Expected: OK. The error-path tests inherited from issue #21 —
 `diff-scope:` on stderr and exit 1 rather than hanging or tracing back; treat a hang here as a
 teardown-ordering bug in `_batch_headers`, not a flake.
 
+**Re-arm Task 4's early-return assertion (D11).** Task 4's
+`test_read_headers_returns_without_spawning_git` proves "no subprocess" by patching
+`self.module._git`, which is load-bearing only while `read_headers` reaches `cat-file`
+*through* `_git`. This task replaces that call with `_batch_headers(root, requests)`, which
+opens its own `subprocess.Popen`, so the patch would stop covering the spawn: with the early
+return deleted, `_batch_headers(root, [])` spawns `cat-file` with zero requests, exits 0,
+returns `[]`, and `dict(zip([], []))` is still `{}` — the test would pass green over a real
+regression. Extend that test's context manager to patch **both** names, e.g. add
+`unittest.mock.patch.object(self.module, "_batch_headers", side_effect=AssertionError("cat-file must not run"))`
+alongside the existing `_git` patch. This is a Task 5 invariant, not an optional tidy.
+
+Then re-run Task 4's Mutation A under the new implementation — delete the two
+`if not requests: return {}` lines from `read_headers`, run
+`python3 -m unittest home/common/agent-skills/tests/test_diff_scope.py -k read_headers_returns_without_spawning_git`,
+expect FAIL with `AssertionError: cat-file must not run`, then restore with
+`git checkout -- home/common/agent-skills/scripts/diff-scope.py`. A green run here means the
+assertion has gone hollow and the task is not done.
+
 Falsifiability:
 
 ```sh
@@ -1033,3 +1082,29 @@ git commit -m "perf(diff-scope): stream the header scan in lockstep instead of b
 | Header scanning of a non-binary candidate reads no more than the scan budget of its content | Task 5 | `test_measuring_a_multi_megabyte_blob_stays_under_one_megabyte` (peak ~4.5 MiB vs 1 MiB) |
 | The suite passes with `GIT_DIR` pointing at an unrelated repository | Task 1 | `test_the_suite_git_environment_is_immune_to_an_inherited_git_dir`, plus `GIT_DIR=… just agent-workflow-tests` |
 | Demo: the suite passes with new tests named for each residual, one embedding U+2028 | Tasks 1–5 | `just agent-workflow-tests` after Task 5 |
+
+## Standards review provenance
+
+| Field | Value |
+|-------|-------|
+| Reviewer | Native fresh plan reviewer (`reviewer`, Opus/high), no inherited context |
+| Fallback used | Yes — the Codex `plan-review` path was skipped deliberately |
+| Fallback rationale | `codex-collaboration` budgets ~15 min for one isolated pass; at the Phase-5 boundary ~54 min of the attempt deadline remained for review + execution + ship. Issue #21's D24 set the precedent: prefer the native dispatch over waiting when the margin would starve execution. Logged here rather than as a ledger row because it is a process choice, not a design decision. |
+| Base SHA reviewed | `b59ff22bf35ae172d78a686c0b3f55b4ac800f62` |
+| Contract | `/Users/anis/.claude/skills/from-issue/REVIEW-CONTRACT.md` |
+| Verdict | blocking (2 blocking, 3 should-fix, 3 discussion) |
+
+Dispositions — every finding re-verified against the live worktree before it was applied:
+
+| ID | Finding | Disposition |
+|----|---------|-------------|
+| B1 | AC5's whole-suite gate fails after Task 1; `test_ship_release_contracts.py` has its own unscrubbed `git_env()` | **Applied.** Re-verified live: 2 of 10 tests redden under `GIT_DIR=/nonexistent/other.git`, and the file is in the `just agent-workflow-tests` recipe. Global Constraints, Task index, File structure, Task 1 Step 3 and Step 5 updated; ledger row D10. |
+| B2 | Task 5 silently guts Task 4's early-return assertion by moving the spawn off `_git` | **Applied.** Task 5 Step 4 now requires patching `_batch_headers` too and re-running Mutation A; ledger row D11. |
+| S1 | In-script `(D2)` citations collide with issue #21's bare-cited ledger | **Applied.** New Global Constraint; ledger row D12. |
+| S2 | Task 2's JSON-stability grep false-positives on its own docstring edit | **Applied.** Gate is now `git diff -U0 … \| grep -c '^[+-].*\(format_json\|ensure_ascii\)' \|\| true`, with the real guarantee named. |
+| S3 | Task 2 Step 2's predicted failure message is the wrong assertion | **Applied.** Step 2 now names the `assertIn` as the first failure and forbids reordering to chase the count message. |
+| Discussion: T4 mutation gate needs a clean `diff-scope.py` before it starts | **Accepted, no plan edit.** Task 4 Step 4 already checks `git status --short` after restoring, and `sdd` commits each task before the next begins. Noted here so a reviewer need not re-derive it. |
+| Discussion: D8 (`.//x`) not blocking | **Accepted.** Stays out of scope; surfaced as a discussion item on the issue result. |
+| Discussion: D4 measures what it claims | **Accepted, no action.** Reviewer confirmed `subprocess.run`'s buffering is Python-heap and therefore `tracemalloc`-visible, with 4x/24x margins. |
+
+Findings verified as **sound, no change needed**: D2's completeness (all five `_git` call sites walked; only `measure`'s two diffs consult `diff.relative`), D3's deadlock-freedom, and Task 2's six-assertion count audit.
