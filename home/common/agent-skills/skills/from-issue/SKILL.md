@@ -97,6 +97,12 @@ Agent(subagent_type="general-purpose", model="opus", effort="high") delegates th
 Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.
    Give it the exact commands, identities, and paths inline; it decides nothing and edits nothing.
 
+If `workflow-state progress` is rejected because the
+attempt budget's deadline has passed, that is not a harness fault and not a
+reason to retry it: go straight to the terminal return procedure and record your
+truthful state with `workflow-state finish`, which preserves a result reported at
+or after the deadline. Persistence precedes notification.
+
 Without lifecycle identity, apply the same action order locally with the
 120-turn/150000-token ceilings and default interactive handoff behavior.
 
@@ -137,12 +143,22 @@ exists: write a `stopped` or `failed` result through `workflow-state finish` bef
 
 Create the workspace before any spec/plan/grill commit lands; those commits go *in the worktree*, never on the integration branch.
 
-When a lifecycle envelope exists, use its exact absolute `worktree` as the
-attempt workspace. Re-check that it is absent from the filesystem and from
-`git worktree list`, then create the worktree at that exact path from
-`origin/<integration-branch>`. If the path is occupied or mismatched, fail the attempt
-through the terminal return procedure; never remove unknown contents and never choose another path.
-The envelope identity stays bound to this path through shipping and cleanup.
+When a lifecycle envelope exists, use its exact absolute `worktree`, and decide by
+what is actually there:
+
+- **Absent** from both the filesystem and `git worktree list` → create it from
+  `origin/<integration-branch>`.
+- **Already a git worktree checked out on this issue's branch** → **adopt it**:
+  `cd` in and continue. Do not re-create it, do not move it, do not reset it. This
+  is the normal shape of a retry, whose dispatcher hands back the prior attempt's
+  worktree. Phase 0's resume-signal inspection governs what to do with its contents.
+- **Anything else** — occupied by a non-worktree path, or a worktree checked out on
+  a different branch → fail the attempt through the terminal return procedure,
+  naming both the envelope path and what was found, so the dispatcher can correct
+  the reservation.
+
+Never remove unknown contents and never choose another path. The envelope identity
+stays bound to this path through shipping and cleanup.
 Direct standalone invocation keeps the standard `worktrees` flow:
 
 1. `git fetch origin`. Invoke `worktrees` (it encodes the destructive-ops carve-out, the prefix contract, and the position checks before `EnterWorktree`/`ExitWorktree`). For lifecycle use, invoke it only if it accepts the envelope's exact path; otherwise `git worktree add -b <branch> <exact-envelope-path> origin/<integration-branch>`. Branch = `branchNaming.pattern`; the on-disk branch carries `branchNaming.worktreePrefix` — both forms are accepted downstream, don't strip it.

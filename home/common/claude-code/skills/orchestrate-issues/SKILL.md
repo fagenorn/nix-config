@@ -19,7 +19,8 @@ flat (~10-20k tokens) regardless of issue count.
   `<tracker-cli> issue list --label X --json number,title` call
   (tracker CLI and `unsetGithubToken` come from `.claude/skills.config.json`,
   same bindings from-issue uses).
-- Read `orchestration.maxParallel` from the config (default **2**). More
+- Resolve `maxParallel` from `~/.agents/bin/resolve-bindings` (default **2**;
+  `orchestration.maxParallel` in `.claude/skills.config.json` overrides). More
   parallelism mostly buys merge conflicts: every ship-issue merge serializes
   on the integration branch anyway.
 
@@ -64,7 +65,11 @@ for this attempt by verifying the path is absent from both the filesystem and
 the lifecycle-aware owner creates it in Phase 1. Then call `workflow-state launch --repo-root <ledger_repo_root> --run-id
 <run-id> --issue <num> --owner <owner> --worktree <absolute-worktree>
 --budget-minutes <budget> --now <RFC3339-now>` before spawning. Spawn only when
-the returned attempt is active.
+the returned attempt is active. `<budget>` is the **attempt budget** — the
+wall-clock allowance for one attempt — and comes from `agentBudgetMinutes` in
+`~/.agents/bin/resolve-bindings` (`orchestration.agentBudgetMinutes` in
+`.claude/skills.config.json`, default 90). Do not restate a number here; read
+the resolver.
 
 <!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
@@ -93,11 +98,14 @@ when a newer attempt or terminal outcome is recorded.
 Record `discussion_items` from the durable compact outcome verbatim and dispatch
 the next queued issue only after reconciliation frees a slot.
 
-**Budget guard:** if an agent has been silent past a wall-clock budget
-(default 90 min; `orchestration.agentBudgetMinutes` overrides), `workflow-state
-reconcile` persists a `stopped` outcome that retains the worktree. Surface it for
-inspection. It is not automatically relaunched: first apply the failure policy,
-then let `workflow-state launch` enforce the fresh-attempt cap.
+**Attempt-budget guard:** if an agent has been silent past its attempt budget (the
+wall-clock allowance resolved as `agentBudgetMinutes`; see §3 — the resolver is the
+single source, so no number is repeated here), `workflow-state reconcile` persists a
+provisional `stopped` outcome that retains the worktree and carries
+`result_source: "expiry"`. A later `finish` from that attempt's own owner supersedes
+it, so a `stopped` outcome seen here may still be replaced by the owner's real
+result. Surface it for inspection. It is not automatically relaunched: first apply
+the failure policy, then let `workflow-state launch` enforce the fresh-attempt cap.
 
 **Deadline wake path.** Triggers are event-only, so without a wake path a
 silent agent's expired budget is discovered only when some unrelated
@@ -131,10 +139,23 @@ never repeated short sleeps.
      envelope; committed artifacts and the worktree are the resumed owner's
      memory.
   3. Only when resume is impossible — the attempt is terminal and the durable
-     outcome still permits a retry — call `workflow-state launch` with a
-     fresh owner/worktree and spawn only from its accepted result. The helper allows
-     attempts 1 and 2 only and refuses a third fresh attempt; record its durable
-     failed outcome instead of counting in prose.
+     outcome still permits a retry — launch a fresh attempt with a
+     **fresh owner identity**. The workspace does not decide fresh-vs-resume;
+     the owner handle does. Choose the worktree like this:
+     - Read the prior attempt's recorded `worktree` from the reconciled ledger
+       (`reconcile`, which §5 already mandates before every retry, prints it).
+     - Check whether that exact path is still a live git worktree checked out on
+       this issue's branch — one `git worktree list --porcelain` scan. This is
+       worktree metadata, not issue content, so the role boundary holds; the
+       deeper resume-signal inspection stays the owner's Phase-0 job.
+     - Live → pass that exact path as `--worktree`, so the retry owner reaches
+       the existing work instead of an empty tree.
+     - Not live (removed, or checked out on another branch) → reserve a fresh
+       collision-free path exactly as §3 does for a first attempt.
+
+     Either way, spawn only from the accepted attempt. The helper allows attempts
+     1 and 2 only and refuses a third fresh attempt; record its durable failed
+     outcome instead of counting in prose.
 - A failed issue never blocks unrelated issues.
 
 ## 6. Final report
