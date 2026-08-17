@@ -18,6 +18,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 import unittest.mock
 
@@ -159,8 +160,17 @@ class DiffScopeClassifierTest(unittest.TestCase):
             self.row(b"pnpm-lock.yaml", 40, 2),
         ]
         statuses = {b"assets/blob.bin": b"M", b"pnpm-lock.yaml": b"M"}
+        # Both names, not just _git: read_headers reaches cat-file through
+        # _batch_headers, which opens its own Popen (issue 31's D11). Patching
+        # _git alone would leave the assertion hollow -- with the early return
+        # deleted, _batch_headers(root, []) spawns cat-file, exits 0, returns
+        # [], and dict(zip([], [])) is still {}.
         with unittest.mock.patch.object(
             self.module, "_git", side_effect=AssertionError("cat-file must not run")
+        ), unittest.mock.patch.object(
+            self.module,
+            "_batch_headers",
+            side_effect=AssertionError("cat-file must not run"),
         ):
             headers = self.module.read_headers(
                 Path("/nonexistent"), "base", "head", rows, statuses
@@ -784,6 +794,63 @@ class DiffScopeRelativeConfigTest(unittest.TestCase):
         # strings ("app.py" for "src/app.py"), and a totals-only assertion can
         # stay green while every path is wrong.
         self.assertEqual(subject, baseline)
+
+
+LARGE_BLOB_LINE = b"lorem ipsum dolor sit amet, consectetur adipiscing\n"  # 50 bytes
+LARGE_BLOB_LINES = 90_000  # 4.29 MiB, comfortably over the 4 MiB the design names
+
+
+def build_large_blob_repo(root):
+    """Two commits whose head side adds one plain-text blob well over 4 MiB.
+
+    No NUL byte and no generated marker, so the big file is a genuine content
+    candidate: read_headers must fetch a header window for it.
+    """
+    git(root, "init", "-q", "-b", "main", ".")
+    write(root, b"seed.txt", b"seed\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "base")
+
+    write(root, b"big.txt", LARGE_BLOB_LINE * LARGE_BLOB_LINES)
+    write(root, b"small.txt", b"small\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "head")
+
+
+class DiffScopeHeaderScanBoundTest(unittest.TestCase):
+    """The header scan retains a window, not a blob.
+
+    measure() runs in process because tracemalloc cannot see across a
+    subprocess boundary (issue 31's D4), and under a scrubbed environment
+    because an in-process call reaches os.environ directly rather than through
+    git_env() (issue 31's D9).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.root = cls.temporary.name
+        build_large_blob_repo(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def test_measuring_a_multi_megabyte_blob_stays_under_one_megabyte(self):
+        with unittest.mock.patch.dict(os.environ, git_env(), clear=True):
+            tracemalloc.start()
+            try:
+                result = self.module.measure(Path(self.root), "HEAD~1", "HEAD", ())
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        # The measurement must still be right: a bound met by reading nothing
+        # would be no bound at all.
+        churn = {row.path: row.churn for row in result.files}
+        self.assertEqual(churn[b"big.txt"], LARGE_BLOB_LINES)
+        self.assertEqual(result.changed_files, 2)
+        self.assertLess(peak, 1 * 1024 * 1024)
 
 
 if __name__ == "__main__":
