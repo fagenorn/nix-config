@@ -27,7 +27,7 @@ dependency, no `.nix` change, no new flake input.
 
 ## Global Constraints
 
-- **Exactly four product paths change** across Tasks 1–4:
+- **Exactly five product paths change** across Tasks 1–4:
   `.github/workflows/ci.yaml` (renamed from `.github/workflows/flake-checker.yaml`),
   `.github/branch-protection.json` (create), `justfile` (modify),
   `tests/test_branch_protection.py` (create), plus `CLAUDE.md` (modify). No `.nix` file is
@@ -51,6 +51,8 @@ dependency, no `.nix` change, no new flake input.
 - **Commit trailers**, on every commit:
   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>` and
   `Claude-Session: https://claude.ai/code/session_011BW621YtNATjTJfsJSJXnB`
+  Each task's `git commit` command below spells both trailers out; they are part of the
+  message, not optional garnish. If you rewrite a message, carry both trailers over.
 - **Never run `just switch`**, `just build`, or any activation. Nothing here enters a
   home-manager generation, so `just build` is not a gate for this plan (per D18).
 - **Payload discipline.** Summarise test output to failing lines plus the final `Ran N tests`
@@ -110,6 +112,29 @@ the spec in this plan's commit):
   PR-only `cancel-in-progress` are fixed here.
 - **D19** — `tests/` at the repo root is the home for the new suite, next to
   `test_agent_costs.py`.
+
+The standards review then added D20–D24, all of them about this plan's own text: the
+conditional `CLAUDE.md` wording (D20), the Phase-7 handoff contract (D21), the rollout's
+failure transitions (D22), the divergent-`main` reconciliation (D23), and the named AC4 red
+edit (D24).
+
+## Standards review provenance
+
+- **Reviewer:** Codex — isolated, read-only runtime; job `reviewer-mswznipz-5s50mz`.
+- **Base SHA reviewed:** `9d99fb2` (branch base
+  `b59ff22bf35ae172d78a686c0b3f55b4ac800f62`).
+- **Focus:** none configured.
+- **Counts:** 10 accepted (6 blocking, 4 should-fix) / 0 rejected / 0 deferred. One
+  discussion-level item was an artifact-readability report and needed no action.
+- **Fallback used:** no.
+
+Applied in the dispositions commit: the post-merge `main` reconciliation (D23), the Phase-7
+handoff contract and non-closing PR reference (D21), the rollout's rollback and bounded-retry
+transitions (D22), the concrete AC4 red/green demo (D24), Task 2's endpoint-scoped `{branch}`
+gate, Task 4's base-to-working-tree diff gate, exact `branches`/`contexts`/null assertions in
+the new suite, the mutation-test framing and scoped `git status`, the five-path count, the
+commit trailers in every commit command, and the qualified IFD/runtime and `CLAUDE.md` wording
+(D20).
 
 ---
 
@@ -195,7 +220,8 @@ jobs:
   nix-eval:
     name: Nix Eval
     # The daily cron is flake-checker's; flake.lock is pinned, so a scheduled
-    # re-evaluation of an unchanged tree cannot report anything new.
+    # re-evaluation of an unchanged tree is not expected to report anything the
+    # push run did not already report (D5).
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
@@ -212,10 +238,13 @@ jobs:
 
 Per D3 this evaluates only the NixOS host: it forces `lib/`, `home/default.nix`,
 `home/common/**` and `hosts/common/**` through the evaluator, while `nix flake check` would
-also reach `darwinConfigurations.mbp`, which has no aarch64-darwin builder here. Evaluation
-reaches import-from-derivation, so the runner must be a native `x86_64-linux` *builder* — the
-reason for `ubuntu-24.04` rather than a bare evaluator (per D18, `--show-trace` is on so the
-first failure is diagnosable from the log alone).
+also reach `darwinConfigurations.mbp`, which has no aarch64-darwin builder here. Evaluation is
+*expected* to reach import-from-derivation (catppuccin's starship module builds during eval,
+per D3), which is why the runner is `ubuntu-24.04` — a native `x86_64-linux` builder rather
+than a bare evaluator. That expectation is unverified on this darwin host: the first real CI
+run is what confirms it, and if the job fails for a missing builder the runner choice is the
+first thing to re-read. Per D18, `--show-trace` is on so that first failure is diagnosable
+from the log alone.
 
 - [ ] **Step 3: Verify — the file parses, and every invariant above is observable**
 
@@ -253,7 +282,10 @@ Nix Eval evaluates nixosConfigurations.anis-desktop to a derivation path on
 ubuntu-24.04 and runs on pull requests; Flake Checker keeps its advisory role.
 Drops the retired magic-nix-cache-action.
 
-Refs https://github.com/fagenorn/nix-config/issues/29"
+Refs https://github.com/fagenorn/nix-config/issues/29
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011BW621YtNATjTJfsJSJXnB"
 ```
 
 ---
@@ -347,13 +379,18 @@ just --list | grep -E 'protect-main|unprotect-main|show-protection'
 just --dry-run protect-main
 just --dry-run unprotect-main
 just --dry-run show-protection
-grep -c '{branch}' justfile
+grep -c 'branches/{branch}/protection' justfile
 ```
 
 Expected: `json OK`; `payload OK`; three recipes listed; each `--dry-run` prints its `gh api
 …` line to stderr and **executes nothing** (`--dry-run` is `just`'s no-op mode — confirm no
 `gh` network output appears); `grep -c` prints `0` (exit 1 is the expected exit for zero
 matches).
+
+The grep pins the **endpoint**, not the bare token: per D13 the `protect-main` comment
+deliberately names `{branch}` in prose to explain why it is not used, so a bare
+`grep -c '{branch}' justfile` would print at least `1` on a correct file and fail this gate
+for the wrong reason.
 
 **This gate could fail at the base commit and must:** at `124c84d`,
 `.github/branch-protection.json` does not exist and `just --list` has no `protect-main`.
@@ -368,7 +405,10 @@ protect-main / unprotect-main / show-protection apply, remove and inspect classi
 protection on main from .github/branch-protection.json. Not applied here — the
 rollout is a post-merge step.
 
-Refs https://github.com/fagenorn/nix-config/issues/29"
+Refs https://github.com/fagenorn/nix-config/issues/29
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011BW621YtNATjTJfsJSJXnB"
 ```
 
 ---
@@ -395,7 +435,7 @@ Refs https://github.com/fagenorn/nix-config/issues/29"
   extracted by indentation depth, per D12.
 - Paths resolve from `__file__`, so the suite passes from any cwd.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the test**
 
 Create `tests/test_branch_protection.py` with exactly this content:
 
@@ -492,6 +532,23 @@ def trigger_block(name):
     return out
 
 
+def trigger_branches(name):
+    """The `branches:` list of a trigger, or None if the trigger or the key is absent.
+
+    Scoped to the `branches:` subtree on purpose: a bare `- main` anywhere under the
+    trigger would also satisfy a `paths:` or `paths-ignore:` list, which gates nothing.
+    """
+    block = trigger_block(name)
+    if block is None or "    branches:" not in block:
+        return None
+    out = []
+    for line in block[block.index("    branches:") + 1:]:
+        if not re.match(r"^      - ", line):
+            break
+        out.append(line.strip()[2:].strip())
+    return out
+
+
 def payload():
     return json.loads(PROTECTION.read_text(encoding="utf-8"))
 
@@ -517,9 +574,14 @@ class WorkflowShape(unittest.TestCase):
     def test_pull_request_on_main_is_a_trigger(self):
         """Without this trigger a PR head carries zero check runs and the required
         context can never report."""
-        block = trigger_block("pull_request")
-        self.assertIsNotNone(block, f"{WORKFLOW} has no `pull_request:` trigger")
-        self.assertIn("- main", [line.strip() for line in block])
+        self.assertIsNotNone(
+            trigger_block("pull_request"), f"{WORKFLOW} has no `pull_request:` trigger"
+        )
+        branches = trigger_branches("pull_request")
+        self.assertIsNotNone(
+            branches, f"{WORKFLOW}'s `pull_request:` trigger has no `branches:` list"
+        )
+        self.assertEqual(["main"], branches)
 
 
 class RequiredContexts(unittest.TestCase):
@@ -563,20 +625,27 @@ class ProtectionPayload(unittest.TestCase):
         self.assertEqual(REQUIRED_PAYLOAD_KEYS, set(data))
         self.assertIs(True, data["enforce_admins"])
         self.assertIs(False, data["required_status_checks"]["strict"])
+        # D2: exactly one required context. A second one doubles the brick surface.
+        self.assertEqual(["Nix Eval"], data["required_status_checks"]["contexts"])
+        # D10: present and explicitly null. A non-null value here would block every
+        # solo and unattended merge, which is the opposite of the issue's ask.
+        self.assertIsNone(data["required_pull_request_reviews"])
+        self.assertIsNone(data["restrictions"])
 
 
 if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run the test and watch it fail — then prove it is not vacuous**
+- [ ] **Step 2: Mutation-test the suite — break each pin, see red, revert**
 
 ```bash
 python3 -m unittest -v tests.test_branch_protection
 ```
 
-Expected at this point: **PASS, 5 tests** (Tasks 1 and 2 already landed the files it reads).
-That is not yet evidence, so demonstrate each edge in turn — make the edit, see red, revert:
+Expected at this point: **PASS, 5 tests** — Tasks 1 and 2 already landed the files it reads, so
+a green first run is correct here and is *not* the evidence. The evidence is that each pin can
+go red on demand. Demonstrate each edge in turn — make the edit, see red, revert:
 
 ```bash
 # a) required context renamed on one side only
@@ -603,11 +672,14 @@ PY
 python3 -m unittest tests.test_branch_protection 2>&1 | tail -3   # expect: FAILED (failures=1)
 git checkout -- .github/workflows/ci.yaml
 
-git status --porcelain   # expect: empty for these two paths
+git status --porcelain -- .github/workflows/ci.yaml .github/branch-protection.json
 ```
 
 Record the three `FAILED` lines in the task report — they are AC5's evidence. If any of the
-three prints `OK`, the suite is vacuous and the task is not done.
+three prints `OK`, the suite is vacuous and the task is not done. The final `git status` is
+**scoped to the two mutated paths on purpose**: `tests/test_branch_protection.py` is untracked
+until Step 5, so an unrestricted `git status --porcelain` cannot be empty here and would read
+as a failure. Expect no output from the scoped command — every revert took.
 
 - [ ] **Step 3: Wire the suite into the repo's test entry point**
 
@@ -639,7 +711,10 @@ Five stdlib assertions: job names are extractable at all, pull_request on main i
 a trigger, every required context matches a job name, no required job is a matrix
 or reusable-workflow job, and the payload carries all four API-required keys.
 
-Refs https://github.com/fagenorn/nix-config/issues/29"
+Refs https://github.com/fagenorn/nix-config/issues/29
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011BW621YtNATjTJfsJSJXnB"
 ```
 
 ---
@@ -658,6 +733,10 @@ Refs https://github.com/fagenorn/nix-config/issues/29"
 - The paragraph describes only what is in the tree at this commit. Per D14 it lands here and
   not in the design commit, precisely so it is true at `HEAD`. It makes no claim about
   runtime, timing, or caching.
+- **The protection clause is conditional.** Protection is not applied until Task 5, which runs
+  after this branch merges, so a flat "`Nix Eval` is a required status check" would be false
+  at this commit. The wording below says the payload *makes it* the required context **once
+  `just protect-main` has been run** — true at `HEAD`, and still true afterwards (D20).
 - The stale first clause ("no test/lint suite") is corrected in the same edit — the repo has
   eight Python suites behind `just agent-workflow-tests` as of Task 3.
 - The two honest holes stay named rather than hidden: darwin is not evaluated in CI (D3) and
@@ -674,9 +753,10 @@ from the spec's *The `CLAUDE.md` sentence* section; do not paraphrase, do not re
 > `just build` before claiming success; switch only when asked. CI
 > (`.github/workflows/ci.yaml`) runs on pull requests, on push to `main`, and daily:
 > `Flake Checker` annotates `flake.lock` health without failing, and **`Nix Eval` evaluates
-> `nixosConfigurations.anis-desktop` on Linux and is a required status check on `main`** —
-> with `enforce_admins` on, `gh pr merge` (including `--admin`) and direct pushes to `main`
-> are refused until it is green. CI does not build or deploy, does not evaluate
+> `nixosConfigurations.anis-desktop` on Linux and is the status check `main`'s branch
+> protection requires** — once `just protect-main` has been applied, with `enforce_admins` on,
+> `gh pr merge` (including `--admin`) and direct pushes to `main` are refused until it is
+> green. CI does not build or deploy, does not evaluate
 > `darwinConfigurations.mbp`, and does not run `just agent-workflow-tests`; the mac and the
 > Python suites are still the author's local responsibility. `just protect-main` /
 > `just unprotect-main` / `just show-protection` manage that protection from
@@ -696,7 +776,7 @@ just agent-workflow-tests 2>&1 | tail -3
 python3 -m json.tool .github/branch-protection.json > /dev/null && echo "json OK"
 ruby -ryaml -e 'YAML.load_file(".github/workflows/ci.yaml"); puts "yaml OK"'
 just --list > /dev/null && echo "justfile OK"
-git diff --stat 124c84d..HEAD -- .github/ justfile tests/test_branch_protection.py CLAUDE.md
+git diff --stat 124c84d -- .github/ justfile tests/test_branch_protection.py CLAUDE.md
 ```
 
 Expected: the first two `grep -c` print `0` (exit 1 for zero matches is expected); the next
@@ -704,6 +784,12 @@ two print `1` each; `Ran 169 tests` / `OK`; `json OK`; `yaml OK`; `justfile OK`;
 `git diff --stat` names exactly five paths — `.github/branch-protection.json`,
 `.github/workflows/ci.yaml` (with `.github/workflows/flake-checker.yaml` as its rename
 source), `justfile`, `tests/test_branch_protection.py`, `CLAUDE.md`.
+
+The diff is **base-to-working-tree**, not `124c84d..HEAD`: Step 1's `CLAUDE.md` edit is not
+committed until Step 3, so a `..HEAD` range cannot contain it and would name only four paths.
+If you would rather grade committed content, `git add CLAUDE.md` first and use
+`git diff --stat --cached 124c84d -- …`; do not "fix" a missing `CLAUDE.md` by committing early
+and re-running, which hides the same mistake.
 
 The pathspec is deliberate: the range also carries this plan and the spec, and a ship-time
 sync merge would pull in whatever `main` advanced by. Do not grade the raw range.
@@ -722,10 +808,35 @@ CLAUDE.md now names ci.yaml, the required Nix Eval context and the three
 protection recipes, and stops claiming the repo has no test suite. Names the two
 holes: darwin is not evaluated in CI and agent-workflow-tests does not run there.
 
-Refs https://github.com/fagenorn/nix-config/issues/29"
+Refs https://github.com/fagenorn/nix-config/issues/29
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011BW621YtNATjTJfsJSJXnB"
 ```
 
 **Phase 6 ends here.** Do not proceed to Task 5 during plan execution.
+
+### Phase-7 handoff contract (binding on whoever runs `ship-issue`)
+
+Task 5 is the rollout, and `ship-issue` has no post-merge rollout hook of its own: its Phase 7
+goes straight from merge verification to Phase 8's issue close and worktree removal. Left
+alone it would close issue 29 and delete the worktree with the gate still switched off. Three
+requirements close that gap (D21):
+
+1. **The PR body must not carry a closing keyword for issue 29.** Reference it as the full URL
+   `https://github.com/fagenorn/nix-config/issues/29` with no `Closes`/`Fixes`/`Resolves` in
+   front. The base here *is* the default branch, so a `Closes #29` trailer would auto-close the
+   issue at merge — before protection exists, before the demo, before any evidence. Overriding
+   `ship-issue`'s default body is deliberate, not an oversight.
+2. **Run Task 5 between Phase 7 and Phase 8**, in that order: verify the merge landed
+   (`gh pr view --json state,mergeCommit`), then run every step of Task 5, then and only then
+   close issue 29 and remove the worktree. If the issue is closed anyway (auto-close, or a
+   `gh issue close` fired early), `gh issue reopen 29` and continue — it stays open until
+   Task 5's evidence comment is posted.
+3. **An incomplete rollout is not a success.** If any Task 5 step cannot be completed or
+   recovered, leave issue 29 open, report a **failed/stopped** terminal state naming the step
+   and the state `main` was left in, and do not report the issue shipped. "Merged" is not
+   "shipped" for this issue; the gate being live and demonstrated is.
 
 ---
 
@@ -738,7 +849,9 @@ live `issues-29-33-20260817` orchestration run. The ordering is the design (per 
 implementation detail.
 
 **Owner:** whoever runs `ship-issue` for https://github.com/fagenorn/nix-config/issues/29,
-after the merge completes. **Prerequisite:** `.github/workflows/ci.yaml` is on `main`.
+under the Phase-7 handoff contract above — after Phase 7's merge verification and **before**
+Phase 8's issue close and worktree removal. **Prerequisite:** `.github/workflows/ci.yaml` is on
+`main` and the merge is verified.
 
 **Invariants:**
 - Protection is applied **last**, and only after every pending direct-to-`main` commit is
@@ -748,6 +861,10 @@ after the merge completes. **Prerequisite:** `.github/workflows/ci.yaml` is on `
   can merge. GitHub never retroactively triggers workflows and a `pull_request` run cannot be
   started with `workflow_dispatch`.
 - `just unprotect-main` is the undo and must be proven to work before it is needed in anger.
+- **Every step from 3 onward has a defined failure transition** (D22). Protection is applied
+  before a destructive multi-run demo and before the siblings can report, so any step that
+  cannot be completed or retried ends with `just unprotect-main`, a verified 404 readback, and
+  a truthful failed/stopped report — never a half-applied gate left in place unannounced.
 
 - [ ] **Step 1: This branch's PR merges first**
 
@@ -755,20 +872,46 @@ Ship normally. The PR itself is the first demonstration that check runs now appe
 head: `gh pr checks <n>` should list `Nix Eval` and `Flake Checker`, where the same command
 at base commit `b59ff22` prints "no checks reported" (AC1). Nothing is required yet, so the PR
 merges whatever the checks say — but record their outcome, and if `Nix Eval` is red, fix it on
-this branch before continuing. **Do not apply protection to make this PR gate itself**: the
-context cannot report until `ci.yaml` is on `main`, so the PR would block on a check that does
-not exist.
+this branch before continuing. **Do not apply protection to make this PR gate itself**:
+protection is repo-wide, so flipping it here would immediately block all four sibling PRs of
+the live orchestration run, whose heads carry no `Nix Eval` run and cannot acquire one without
+a fresh `pull_request` event (Step 6) — and it would land before Step 2's push, which D11 puts
+first. The order is the design; this PR merges ungated on purpose.
 
-- [ ] **Step 2: Push every pending direct-to-`main` commit — unconditionally, before Step 3**
+- [ ] **Step 2: Reconcile local `main` with the post-merge `origin/main`, then push —
+      unconditionally, before Step 3**
+
+Local `main` at planning time is `c560008` (the out-of-scope record), a commit whose parent is
+`b59ff22` and which has never been pushed. Step 1's merge advances `origin/main` along *this
+branch's* history, also from `b59ff22`. The two therefore **diverge**: a bare
+`git push origin main` is a non-fast-forward and will be rejected. Integrate first (D23).
 
 ```bash
-git -C /Users/anis/tmp/nix-config log --oneline origin/main..main
-git -C /Users/anis/tmp/nix-config push origin main
+cd /Users/anis/tmp/nix-config
+git fetch origin
+git log --oneline origin/main..main    # what is local-only  (expect: c560008)
+git log --oneline main..origin/main    # what the merge added (expect: the PR merge commit)
 ```
 
-Local `main` is one commit ahead of `origin/main` at planning time (`c560008`, the
-out-of-scope record). If the range is empty, this step is already satisfied. Do not skip it on
-the theory that protection may be laxer than expected — if it is, nothing was lost.
+If `origin/main..main` is empty, local `main` is already contained and you can skip to the
+verification below. Otherwise merge — **never** rebase or force-push, `main` is shared:
+
+```bash
+git switch main
+git merge --no-edit origin/main        # fast-forward or a merge commit; both are fine
+git log --oneline -1 c560008 --not origin/main   # empty => c560008 is now in origin/main's ancestry
+git merge-base --is-ancestor origin/main main && echo "remote tip contained"
+git merge-base --is-ancestor c560008 main && echo "c560008 contained"
+git push origin main
+git fetch origin && git rev-parse main origin/main   # the two SHAs must match
+```
+
+Both `contained` lines and matching SHAs are the gate. Resolve any merge conflict here by
+hand; if it cannot be resolved cleanly, **stop** — do not proceed to Step 3, and report the
+divergence. Protection stays **off** until this step has printed a matching `origin/main`:
+`enforce_admins: true` plus a required context means an unpushed `main` commit can no longer be
+pushed at all afterwards. Do not skip this on the theory that protection may be laxer than
+expected — if it is, nothing was lost.
 
 - [ ] **Step 3: Apply protection and read back what actually landed**
 
@@ -782,42 +925,168 @@ gh api repos/fagenorn/nix-config/branches/main/protection \
 Expected: `[["Nix Eval"], false, true]` (AC2). Note the API asymmetry — `enforce_admins` goes
 in as a boolean and comes back as `{"enabled": true}`.
 
-- [ ] **Step 4: Demonstrate the gate on a throwaway PR, then prove the undo**
-
-On a scratch branch off `main`, open a PR and record:
-- `gh pr view <n> --json mergeStateStatus` reporting `BLOCKED` while `Nix Eval` is pending or
-  red, with `gh pr merge <n>` **and** `gh pr merge <n> --admin` both exiting non-zero (AC3).
-- A commit that breaks evaluation of a shared module turning `Nix Eval` red, and its revert
-  turning it green — capture both run URLs (AC4).
-- `just unprotect-main` followed by `gh api repos/fagenorn/nix-config/branches/main/protection`
-  returning 404 "Branch not protected" (AC6) — then `just protect-main` again and re-confirm
-  Step 3's output, which also demonstrates the recipe's idempotence.
-
-Close the throwaway PR and delete its branch.
-
-- [ ] **Step 5: Unblock the sibling PRs**
-
-Every PR open at Step 3 now shows `Expected — Waiting for status to be reported` and cannot
-merge until `Nix Eval` reports on its head. Re-fire `pull_request` on each with zero commits
-(`reopened` is in the default trigger type set, which Task 1's invariants preserve):
+**On any other readback — mandatory rollback, immediately:**
 
 ```bash
-gh pr list --state open --json number,title
-# for each open sibling PR (issues 30-33):
-gh pr close <n> && gh pr reopen <n>
-gh pr checks <n>
+just unprotect-main
+gh api repos/fagenorn/nix-config/branches/main/protection   # expect 404 Branch not protected
 ```
 
-Siblings do **not** need `ci.yaml` on their own branch — a `pull_request` run executes the
-workflow from the base/head merge commit. An empty commit on the head branch works equally
-well if close/reopen is undesirable for a given PR.
+Then stop and report a failed rollout with the readback you actually got. A wrong readback
+means either the payload or the API's interpretation of it is not what this plan assumes, and
+the failure mode of guessing here is every merge to `main` blocked on a context that will never
+report. Do not "fix it forward" against the live repo with `gh api -f` flags: correct
+`.github/branch-protection.json` in a follow-up PR and re-run `just protect-main`.
 
-- [ ] **Step 6: Record the evidence**
+- [ ] **Step 4: Demonstrate red → blocked → green on a throwaway PR (AC3 + AC4)**
 
-Capture Steps 1–5's command output as the issue's closing comment: the AC1 before/after, the
-AC2 `--jq` line, the AC3 refusals, the AC4 run URLs, the AC5 three red runs from Task 3
-Step 2, the AC6 404, and the AC7 `CLAUDE.md` grep. Do not claim an acceptance criterion
-without its output.
+All commands from `/Users/anis/tmp/nix-config`, on a scratch branch cut from the merged
+`main`. The failing edit is named here rather than left to judgement (D24): an undefined
+identifier inside `environment.systemPackages` in `hosts/common/common-packages.nix`, which
+`nixosConfigurations.anis-desktop`'s `toplevel.drvPath` forces, so `Nix Eval` fails on an
+evaluation error and nothing else does.
+
+```bash
+git switch -c ci-gate-demo origin/main
+git commit --allow-empty -m "chore(issue-29): CI gate demo — do not merge"
+git push -u origin ci-gate-demo
+DEMO=$(gh pr create --base main --head ci-gate-demo \
+  --title "CI gate demo (do not merge)" \
+  --body "Throwaway PR demonstrating the Nix Eval gate for https://github.com/fagenorn/nix-config/issues/29. Closed, never merged." \
+  --json number --jq .number 2>/dev/null || gh pr view ci-gate-demo --json number --jq .number)
+```
+
+**Red.** Break evaluation deterministically, push, and prove *`Nix Eval` specifically* failed:
+
+```bash
+python3 - <<'PY'
+import pathlib
+p = pathlib.Path("hosts/common/common-packages.nix")
+t = p.read_text()
+anchor = "  environment.systemPackages =\n    with pkgs;\n    [\n"
+assert anchor in t, "anchor moved — re-read the file and pick a new one inside the list"
+p.write_text(t.replace(anchor, anchor + "      nixEvalGateProbeDoesNotExist\n", 1))
+PY
+git commit -am "test(issue-29): break evaluation on purpose (reverted in the next commit)"
+git push
+gh run list --branch ci-gate-demo --workflow ci.yaml --limit 1 --json databaseId --jq '.[0].databaseId'
+RUN_RED=<that id>
+gh run watch $RUN_RED --exit-status; echo "exit=$?"   # non-zero is expected here
+gh run view $RUN_RED --json jobs --jq '[.jobs[] | {name, conclusion}]'
+gh run view $RUN_RED --json url --jq .url             # record: AC4 red run URL
+```
+
+Expected: the jobs list shows `{"name":"Nix Eval","conclusion":"failure"}` — and
+`Flake Checker` still `success`, which is the point of D1/D2. If `Nix Eval` is absent or green,
+the gate is not doing what this plan claims: stop and follow the rollback below.
+
+**Blocked (AC3), while red:**
+
+```bash
+gh pr view $DEMO --json mergeStateStatus --jq .mergeStateStatus   # expect BLOCKED
+gh pr merge $DEMO --merge;         echo "exit=$?"                 # expect non-zero + refusal
+gh pr merge $DEMO --merge --admin; echo "exit=$?"                 # expect non-zero + refusal
+```
+
+Both refusals are AC3's evidence; record the messages, not just the exit codes. A zero exit
+from either means `enforce_admins` is not doing its job — roll back and report.
+
+**Green.** Revert, push, prove the same job now passes:
+
+```bash
+git revert --no-edit HEAD
+git push
+gh run list --branch ci-gate-demo --workflow ci.yaml --limit 1 --json databaseId --jq '.[0].databaseId'
+RUN_GREEN=<that id>
+gh run watch $RUN_GREEN --exit-status; echo "exit=$?"   # expect 0
+gh run view $RUN_GREEN --json jobs --jq '[.jobs[] | {name, conclusion}]'
+gh run view $RUN_GREEN --json url --jq .url             # record: AC4 green run URL
+gh pr view $DEMO --json mergeStateStatus --jq .mergeStateStatus   # no longer BLOCKED
+```
+
+**Cleanup — on every exit path, including every failure above:**
+
+```bash
+gh pr close $DEMO --delete-branch
+git switch main
+git branch -D ci-gate-demo
+git ls-remote --heads origin ci-gate-demo          # expect: empty
+git diff --stat origin/main -- hosts/common/common-packages.nix   # expect: empty
+```
+
+The demo PR is **closed, never merged**, so the probe commit never reaches `main`; the last
+command is the proof. If the branch survives deletion, delete it explicitly with
+`git push origin --delete ci-gate-demo`.
+
+- [ ] **Step 5: Prove the undo, then re-protect (AC6)**
+
+```bash
+just unprotect-main
+gh api repos/fagenorn/nix-config/branches/main/protection; echo "exit=$?"
+```
+
+Expected: 404 `Branch not protected` and a non-zero exit — that is AC6.
+
+```bash
+just protect-main
+gh api repos/fagenorn/nix-config/branches/main/protection \
+  --jq '[.required_status_checks.contexts, .required_status_checks.strict, .enforce_admins.enabled]'
+```
+
+Expected: `[["Nix Eval"], false, true]` again, which also demonstrates `protect-main`'s
+idempotence. **The window between the `DELETE` and a matching readback is the only moment
+`main` is ungated**: run nothing else in it, and do not mark this step done until the readback
+matches. If the re-`PUT` fails, retry it; if it keeps failing, stop and report a failed rollout
+that explicitly states `main` is currently unprotected. Silently leaving the demo's `DELETE` as
+the final state is the one outcome this step exists to prevent.
+
+- [ ] **Step 6: Unblock the sibling PRs — bounded, per PR**
+
+Every PR open at Step 3 now shows `Expected — Waiting for status to be reported` and cannot
+merge until `Nix Eval` reports **on its current head**. Re-fire `pull_request` with zero commits
+(`reopened` is in the default trigger type set, which Task 1's invariants preserve). Siblings do
+**not** need `ci.yaml` on their own branch — a `pull_request` run executes the workflow from the
+base/head merge commit.
+
+```bash
+gh pr list --state open --json number,title,headRefOid
+```
+
+For each open sibling (issues 30-33), run this bounded procedure and record its last line:
+
+```bash
+N=<pr-number>
+HEAD_OID=$(gh pr view $N --json headRefOid --jq .headRefOid)
+gh pr close $N && gh pr reopen $N
+for i in $(seq 1 20); do
+  gh api repos/fagenorn/nix-config/commits/$HEAD_OID/check-runs \
+    --jq '[.check_runs[] | select(.name=="Nix Eval") | .status] | @tsv' | grep -q . && break
+  sleep 15
+done
+gh api repos/fagenorn/nix-config/commits/$HEAD_OID/check-runs \
+  --jq '[.check_runs[] | select(.name=="Nix Eval") | {status, conclusion}]'
+gh pr view $N --json mergeStateStatus --jq .mergeStateStatus
+```
+
+The check-runs query is against the PR's **current head SHA**, so it cannot be satisfied by a
+stale run on an older commit — `gh pr checks` fired immediately after `reopen` usually returns
+before the run is even queued. The loop is bounded at 20 × 15s ≈ 5 minutes.
+
+If `Nix Eval` still does not appear on that SHA after the bound, escalate once: push an empty
+commit to that PR's head branch (`git commit --allow-empty` + `git push`) and repeat the loop
+against the new head OID. If it still does not appear, **the gate is blocking PRs it cannot
+unblock** — run `just unprotect-main`, confirm the 404, and report a stopped rollout naming
+every PR left blocked. Do not leave a sibling permanently unmergeable and report success.
+
+- [ ] **Step 7: Record the evidence, then hand back to `ship-issue`**
+
+Post Steps 1–6's command output as a comment on issue 29: the AC1 before/after, the AC2 `--jq`
+line, the AC3 refusals, the AC4 red and green run URLs, the AC5 three red runs from Task 3
+Step 2, the AC6 404, and the AC7 `CLAUDE.md` grep. Do not claim an acceptance criterion without
+its output.
+
+Only after that comment exists does the Phase-7 handoff contract permit closing issue 29 and
+removing the worktree.
 
 ---
 
