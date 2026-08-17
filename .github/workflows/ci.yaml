@@ -14,10 +14,11 @@ on:
   workflow_dispatch:
 
 # One run per pull request; a new push to a PR supersedes that PR's in-flight run.
-# Runs on `main` and on the cron are keyed by ref and are never cancelled, so every
-# commit that lands on `main` keeps its own reported result.
+# Every other trigger is keyed by commit SHA, so each commit that lands on `main`
+# gets its own group and keeps its own reported result — a later push or the cron
+# can neither cancel it in flight nor supersede it while it is queued.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
