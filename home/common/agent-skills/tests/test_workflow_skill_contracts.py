@@ -891,7 +891,9 @@ def skill_frontmatter(text):
 
     Values are everything after the first colon, stripped. The skill packages in
     this tree use only flat single-line frontmatter keys, so no YAML parser is
-    pulled in. A document with no leading ``---`` fence yields an empty dict.
+    pulled in. Parsing fails closed: a document with no leading ``---`` fence and
+    a document whose fence is never closed both yield an empty dict, so malformed
+    frontmatter cannot satisfy a contract by accident.
     """
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -899,25 +901,50 @@ def skill_frontmatter(text):
     fields = {}
     for line in lines[1:]:
         if line.strip() == "---":
-            break
+            return fields
         key, separator, value = line.partition(":")
         if separator:
             fields[key.strip()] = value.strip()
-    return fields
+    return {}
 
 
 def relative_markdown_links(text):
     """Yield each relative link target in `text`.
 
-    A target is the ``target`` of a ``](target)`` sequence. Absolute URLs and
-    bare in-document anchors are skipped: what this exists to catch is a link to
-    a sibling file that is not in the package.
+    A target is the ``target`` of a ``](target)`` sequence, with any ``#fragment``
+    stripped so that ``DEEPENING.md#dependency-categories`` is yielded as the path
+    it addresses rather than as a literal filename containing a ``#``. Absolute
+    URLs and bare in-document anchors (which strip down to nothing) are skipped:
+    what this exists to catch is a link to a sibling file not in the package.
     """
     for chunk in text.split("](")[1:]:
-        target = chunk.split(")", 1)[0]
-        if target.startswith(("http://", "https://", "#")):
+        target, _, _fragment = chunk.split(")", 1)[0].partition("#")
+        if not target or target.startswith(("http://", "https://")):
             continue
         yield target
+
+
+def glossary_entries(glossary):
+    """Split a glossary into ``term -> entry`` for the canonical terms.
+
+    An entry runs from its own ``**Term**`` marker at the start of a line to the
+    start of the next canonical term's entry, or to the end of the glossary for
+    the last one. Only line-leading markers open an entry, so a term named inside
+    another entry's prose (``Distinct from **Adapter**``) does not split it. A
+    term with no entry is absent from the result rather than mapped to an empty
+    string, so a caller can tell "no entry" from "entry says nothing".
+    """
+    markers = sorted(
+        (glossary.find(f"\n**{term}**"), term)
+        for term in CANONICAL_DESIGN_TERMS
+        if glossary.find(f"\n**{term}**") != -1
+    )
+    entries = {}
+    for position, (start, term) in enumerate(markers):
+        following = markers[position + 1 :]
+        end = following[0][0] if following else len(glossary)
+        entries[term] = glossary[start:end]
+    return entries
 
 
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
@@ -985,12 +1012,19 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
     def test_glossary_defines_every_canonical_term(self):
         # Pin the definitions, not just the headings: a heading-only assertion
         # stays green while every definition is deleted or rewritten, which is
-        # exactly the drift this contract exists to catch.
-        glossary = self.glossary()
+        # exactly the drift this contract exists to catch. Each clause is required
+        # inside its own term's entry, not merely somewhere in the glossary —
+        # searching the whole glossary lets a gutted entry pass so long as its
+        # clause survives in the section intro or in a neighbouring entry.
+        entries = glossary_entries(self.glossary())
         for term, definition in CANONICAL_DESIGN_TERMS.items():
             with self.subTest(term=term):
-                self.assertIn(f"\n**{term}**", glossary)
-                self.assertIn(definition, glossary)
+                self.assertIn(term, entries, f"the glossary has no **{term}** entry")
+                self.assertIn(
+                    definition,
+                    entries[term],
+                    f"the **{term}** entry does not define {term.lower()}",
+                )
 
     def test_glossary_forbids_substituting_the_canonical_terms(self):
         glossary = self.glossary()
