@@ -71,6 +71,25 @@ agent-model-matrix:
   python3 home/common/agent-skills/scripts/agent-model-matrix.py validate
   python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
 
+## branch protection
+# Apply the committed protection payload to `main`. Idempotent: the API replaces the
+# whole protection object, so re-running after a job rename converges. `main` is
+# written literally on purpose — gh's {branch} placeholder expands to the *current*
+# branch, which would point this at whatever branch you are standing on.
+protect-main:
+  gh api --method PUT repos/{owner}/{repo}/branches/main/protection \
+    --input .github/branch-protection.json
+
+# Remove branch protection from `main`. This is the documented undo for protect-main
+# and the escape hatch if the required context is ever wrong.
+unprotect-main:
+  gh api --method DELETE repos/{owner}/{repo}/branches/main/protection
+
+# Show the protection actually applied to `main`. Note the API asymmetry: PUT takes
+# enforce_admins as a plain boolean, GET returns it as an object, {"enabled": true}.
+show-protection:
+  gh api repos/{owner}/{repo}/branches/main/protection
+
 ## remote nix vm installation
 install IP:
   ssh -o "StrictHostKeyChecking no" nixos@{{IP}} "sudo bash -c '\
