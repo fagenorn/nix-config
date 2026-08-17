@@ -65,12 +65,38 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_diff_scope.py \
     home/common/agent-skills/tests/test_resolve_bindings.py \
-    tests/test_agent_costs.py
+    tests/test_agent_costs.py \
+    tests/test_branch_protection.py
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
 agent-model-matrix:
   python3 home/common/agent-skills/scripts/agent-model-matrix.py validate
   python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
+
+## branch protection
+# Idempotent: the API replaces the whole protection object, so re-running after a job
+# rename converges. `main` is written literally in all three recipes on purpose —
+# gh's {branch} placeholder expands to the *current* branch, which would point these
+# at whatever branch you happen to be standing on.
+#
+# `just` shows only the LAST comment line of a block in `just --list`, so each recipe
+# keeps its one-line summary immediately above it.
+
+# Apply .github/branch-protection.json to `main`, making `Nix Eval` a required check.
+protect-main:
+  gh api --method PUT repos/{owner}/{repo}/branches/main/protection \
+    --input .github/branch-protection.json
+
+# Remove all branch protection from `main` — the documented undo for protect-main.
+unprotect-main:
+  gh api --method DELETE repos/{owner}/{repo}/branches/main/protection
+
+# Note the API asymmetry when reading the output: GET returns enforce_admins as an object,
+# {"enabled": true}, where PUT takes a plain boolean.
+
+# Print `main`'s live branch protection as GitHub currently has it.
+show-protection:
+  gh api repos/{owner}/{repo}/branches/main/protection
 
 ## remote nix vm installation
 install IP:

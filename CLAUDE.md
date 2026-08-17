@@ -19,7 +19,7 @@ just gc 5             # delete old generations (keep 5) + nix-store --gc
 just install <IP>     # remote-provision a fresh NixOS box over SSH
 ```
 
-There is **no test/lint suite** — `just build` (a successful Nix evaluation + build) is the verification step. After editing any `.nix`, run `just build` before claiming success; switch only when asked. CI (`.github/workflows/flake-checker.yaml`) only runs DeterminateSystems flake-checker on push/daily — it does not build or deploy.
+There is **no unit-test suite for the Nix configs** — `just build` (a successful Nix evaluation + build) is the local verification step. After editing any `.nix`, run `just build` before claiming success; switch only when asked. CI (`.github/workflows/ci.yaml`) runs on pull requests and on push to `main`, plus daily (where only `Flake Checker` runs): `Flake Checker` annotates `flake.lock` health without failing, and **`Nix Eval` evaluates `nixosConfigurations.anis-desktop` on Linux and is the context `.github/branch-protection.json` makes required on `main`** — once `just protect-main` has been applied, with `enforce_admins` on, `gh pr merge` (including `--admin`) is refused until `Nix Eval` is green, and direct pushes to `main` are refused outright (a commit that has never reached the remote can carry no status). CI does not build or deploy, does not evaluate `darwinConfigurations.mbp`, and does not run `just agent-workflow-tests`; the mac and the Python suites are still the author's local responsibility. `just protect-main` / `just unprotect-main` / `just show-protection` manage that protection from `.github/branch-protection.json`.
 
 ## Architecture
 
