@@ -315,29 +315,132 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(attempts[1]["result_source"], "refused")
         self.assertEqual(attempts[1]["finished_at"], "2026-08-13T20:20:00Z")
 
-    def test_late_merged_finish_persists_canonical_stopped_expiry(self):
+    def test_late_merged_finish_preserves_the_owner_result(self):
         self.init_run()
         worktree = self.root / "late-owner"
         launched = self.launch(
             issue=14, owner="owner-a", worktree=worktree, budget_minutes=10
         )
-        persisted = self.finish(
+        reported = self.merged_result()
+        stdout_json = self.finish(
             launched["attempt"],
-            self.merged_result(),
+            reported,
             now="2026-08-13T20:10:00Z",
         )
-        state = self.read_state()["issues"]["14"]
-        self.assertEqual(persisted["state"], "stopped")
-        self.assertEqual(persisted, state["outcome"])
-        self.assertEqual(persisted, state["attempts"][0]["result"])
-        self.assertEqual(state["attempts"][0]["state"], "stopped")
-        self.assertEqual(persisted["pr_url"], None)
-        self.assertEqual(persisted["merge_sha"], None)
-        self.assertFalse(persisted["issue_closed"])
-        self.assertEqual(
-            persisted["notes"],
-            f"attempt deadline expired; worktree: {worktree.resolve()}",
+        state = self.read_state()
+        attempt = state["issues"]["14"]["attempts"][0]
+        outcome = state["issues"]["14"]["outcome"]
+        self.assertEqual(attempt["state"], "merged")
+        self.assertEqual(attempt["result"]["state"], "merged")
+        self.assertEqual(attempt["result"]["pr_url"], reported["pr_url"])
+        self.assertEqual(attempt["result"]["merge_sha"], reported["merge_sha"])
+        self.assertIs(attempt["result"]["issue_closed"], True)
+        self.assertEqual(attempt["result"]["notes"], "")
+        self.assertEqual(attempt["finished_at"], "2026-08-13T20:10:00Z")
+        self.assertGreaterEqual(attempt["finished_at"], attempt["deadline_at"])
+        self.assertEqual(attempt["result_source"], "owner")
+        self.assertEqual(outcome, attempt["result"])
+        self.assertEqual(stdout_json, attempt["result"])
+
+    def test_expiry_result_is_provisional_until_the_owner_reports(self):
+        self.init_run()
+        self.launch(
+            issue=14,
+            owner="owner-a",
+            worktree=self.root / "wt-a",
+            budget_minutes=10,
         )
+        self.reconcile(now="2026-08-13T20:10:00Z")
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(attempt["state"], "stopped")
+        self.assertEqual(attempt["result_source"], "expiry")
+
+        merged = {
+            **self.merged_result(),
+            "notes": "merged after the deadline",
+        }
+        stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
+        state = self.read_state()
+        attempt = state["issues"]["14"]["attempts"][0]
+        self.assertEqual(attempt["state"], "merged")
+        self.assertEqual(attempt["result_source"], "owner")
+        self.assertEqual(attempt["finished_at"], "2026-08-13T20:20:00Z")
+        self.assertEqual(attempt["result"]["notes"], "merged after the deadline")
+        self.assertEqual(state["issues"]["14"]["outcome"], attempt["result"])
+        self.assertEqual(stdout_json, attempt["result"])
+
+        before = self.state_path.read_bytes()
+        other = {
+            **self.merged_result(),
+            "state": "failed",
+            "pr_url": None,
+            "merge_sha": None,
+            "issue_closed": False,
+            "notes": "conflicting",
+        }
+        rejected = self.finish(1, other, now="2026-08-13T20:30:00Z", ok=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("conflicting terminal result", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_expired_older_attempt_cannot_supersede_after_a_fresh_retry(self):
+        self.init_run()
+        self.launch(
+            issue=14,
+            owner="owner-a",
+            worktree=self.root / "wt-a",
+            budget_minutes=10,
+        )
+        self.reconcile(now="2026-08-13T20:10:00Z")
+        self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-a",
+            now="2026-08-13T20:15:00Z",
+        )
+        before = self.state_path.read_bytes()
+        rejected = self.finish(
+            1, self.merged_result(), now="2026-08-13T20:20:00Z", ok=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("conflicting terminal result", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_refused_third_attempt_result_is_not_supersedable(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T20:10:00Z",
+        )
+        self.launch(
+            issue=14,
+            owner="owner-c",
+            worktree=self.root / "wt-c",
+            now="2026-08-13T20:20:00Z",
+            ok=False,
+        )
+        before = self.state_path.read_bytes()
+        rejected = self.finish(
+            2, self.merged_result(), now="2026-08-13T20:25:00Z", ok=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("conflicting terminal result", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_finish_rejects_time_before_last_progress(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.progress(issue=14, attempt=1, phase=3, now="2026-08-13T20:05:00Z")
+        before = self.state_path.read_bytes()
+        rejected = self.finish(
+            1, self.merged_result(), now="2026-08-13T20:02:00Z", ok=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("finish time must not move backward", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_handed_off_finish_rejects_without_changing_state(self):
         self.init_run()

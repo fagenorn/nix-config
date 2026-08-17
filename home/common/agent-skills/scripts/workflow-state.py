@@ -920,6 +920,15 @@ def command_progress(args: argparse.Namespace) -> int:
 
 
 def command_finish(args: argparse.Namespace) -> int:
+    """Record an owner's reported terminal result for one attempt.
+
+    A finish at or after the attempt budget's ``deadline_at`` records the reported
+    result rather than a synthetic expiry: the wall clock bounds how long an owner
+    may keep working, not whether the work it finished is real. The stopped record
+    that ``reconcile`` (or ``launch``) writes when the attempt budget runs out is
+    therefore provisional — ``result_source == "expiry"`` on the issue's latest
+    attempt, and only there, is overwritten by the owner's own report.
+    """
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
     result = load_result_file(args.result_file, args.issue)
@@ -936,23 +945,30 @@ def command_finish(args: argparse.Namespace) -> int:
         attempt = issue_state["attempts"][args.attempt - 1]
         if result["state"] in {"stopped", "failed"}:
             result["notes"] = retain_worktree(result["notes"], attempt["worktree"])
+        if now_value < parse_utc(attempt["last_progress_at"], "attempt progress time"):
+            raise WorkflowError("finish time must not move backward")
         existing = attempt["result"]
         outcome = issue_state["outcome"]
+        if existing == result and outcome == result:
+            return result, False
+        if (
+            args.attempt == len(issue_state["attempts"])
+            and attempt["result_source"] == "expiry"
+            and outcome == existing
+        ):
+            attempt["state"] = result["state"]
+            attempt["result"] = copy.deepcopy(result)
+            attempt["finished_at"] = now
+            attempt["result_source"] = "owner"
+            issue_state["outcome"] = copy.deepcopy(result)
+            state["updated_at"] = now
+            return result, True
         if existing is not None or outcome is not None:
-            if existing == result and outcome == result:
-                return result, False
             raise WorkflowError(
                 f"conflicting terminal result for issue {args.issue} attempt {args.attempt}"
             )
         if attempt["state"] != "active":
             raise WorkflowError("finish requires an active attempt")
-        if now_value >= parse_utc(attempt["deadline_at"], "attempt deadline"):
-            expired = stop_attempt(
-                attempt, reason="attempt deadline expired", now=now, source="expiry"
-            )
-            issue_state["outcome"] = copy.deepcopy(expired)
-            state["updated_at"] = now
-            return expired, True
         attempt["state"] = result["state"]
         attempt["result"] = copy.deepcopy(result)
         attempt["finished_at"] = now
