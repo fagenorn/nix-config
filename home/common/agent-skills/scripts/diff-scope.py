@@ -390,6 +390,22 @@ def _stderr_text(handle) -> str:
     return handle.read().decode("utf-8", errors="replace").strip()
 
 
+def _exit_detail(returncode: int, detail: str) -> str:
+    """Describe a dead cat-file: git's own stderr, else its exit status.
+
+    A signalled death writes nothing to stderr, so the plain read yields an
+    empty string and a `... failed: ` message ends in a colon with nothing
+    after it -- the diagnostic this reader exists to preserve, lost to the very
+    case that needs it most. Falling back to the status keeps every death
+    self-describing.
+    """
+    if detail:
+        return detail
+    if returncode < 0:
+        return f"killed by signal {-returncode}"
+    return f"exited with status {returncode}"
+
+
 def _read_response(stream) -> bytes:
     """Consume one cat-file --batch response and return its header window.
 
@@ -487,14 +503,24 @@ def _batch_headers(root: Path, requests: Sequence[bytes]) -> list[bytes]:
             # closing stdin ends it with status 0.
             process.stdout.close()
             returncode = process.wait()
-        detail = _stderr_text(errors)
+        detail = _exit_detail(returncode, _stderr_text(errors))
         if died_early:
             raise DiffScopeError(f"git cat-file --batch exited early: {detail}")
-        if returncode != 0:
-            raise DiffScopeError(f"git cat-file --batch failed: {detail}")
         if read_failure is not None:
+            # A held read failure is the more specific diagnostic, so its text
+            # leads and survives verbatim -- every header-validation rule from
+            # issue #21's D23 keeps its exact message. When git ALSO exited
+            # non-zero its own account is appended, never substituted: a kill
+            # that writes no stderr would otherwise replace "git reported
+            # missing content for ..." with a bare "failed:".
+            if returncode != 0:
+                raise DiffScopeError(
+                    f"{read_failure}; git cat-file --batch {detail}"
+                )
             # git exited 0, so this is a genuine protocol desync, not a death.
             raise read_failure
+        if returncode != 0:
+            raise DiffScopeError(f"git cat-file --batch failed: {detail}")
     return windows
 
 

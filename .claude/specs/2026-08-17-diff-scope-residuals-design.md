@@ -6,8 +6,11 @@ Prior art (binding): `.claude/specs/2026-08-16-diff-scope-helper-design.md` — 
 ## Intent
 
 Issue #21 shipped `home/common/agent-skills/scripts/diff-scope.py` and its suite. Its final
-review **deferred** — did not reject — five residuals. Nothing consumes the helper yet
-(issue #21's D14/D17), so this is the last cheap moment to fix them: every one of them is a
+review **deferred** — did not reject — five residuals. No consumer binds the helper's
+contract yet (issue #21's D14/D17): `ship-issue`'s degradation gate and
+`codex-collaboration`'s `diff-review` size pre-flight already *invoke* it, but only through
+the JSON keys and the text first line that this slice leaves byte-identical, so no consumer
+edit falls out of these five. That makes this the last cheap moment to fix them: every one of them is a
 correctness or hygiene gap that becomes a caller-visible bug the moment `ship-issue`'s
 degradation gate and the scoped-review packet builder bind to the contract.
 
@@ -324,8 +327,10 @@ mutates another test's fixture config. Per D6.
   `.//x` normalises to a value no git path can match, which over-counts and never
   under-counts. Issue #21's D8 already establishes over-counting as the acceptable failure
   direction for this flag.
-- **Any skill prose or consumer change.** Nothing binds `diff-scope` yet — issue #21's
-  D14/D17 stand unchanged, and this slice does not create the first caller.
+- **Any skill prose or consumer change.** The two existing callers — `ship-issue`'s
+  degradation gate and `codex-collaboration`'s `diff-review` size pre-flight — read only
+  surfaces this slice holds byte-identical, so none of the five reaches them; issue #21's
+  D14/D17 stand unchanged, and this slice does not widen the bound contract.
 - **The JSON output contract.** Issue #21's D11 fixes it byte-for-byte; R1 touches only the
   text branch, and R2/R4 must leave the JSON bytes for any given range identical.
 - **New exclusion classes, thresholds, verdicts, or any exit status meaning "too big."**
@@ -355,6 +360,7 @@ explicitly.
 | D10 | Task 1's `git_env()` scrub also lands in `home/common/agent-skills/tests/test_ship_release_contracts.py`, as a duplicated `GIT_LOCATION_VARS` tuple + pop loop rather than a shared import | Phase-5 standards review (native reviewer, base `b59ff22`), verified live: that file defines its **own** unscrubbed `git_env()` and its `sh()` helper runs real `git init`/`git commit`, so `GIT_DIR=/nonexistent/other.git python3 .../test_ship_release_contracts.py` reddens 2 of 10 tests with `fatal: Invalid path '/nonexistent'`. It is in the `just agent-workflow-tests` recipe (`justfile:57-65`), and R5's acceptance criterion is that **the suite** passes under a poisoned environment — so the original "test changes only in `test_diff_scope.py`" constraint made that AC unreachable. No other suite in the recipe spawns git, so the widening stops there | Extracting a shared test-helper module — this plan adds no new file and the two suites share no helper today, so a new import surface costs more than seven duplicated lines; leaving it unscrubbed and narrowing the AC to `test_diff_scope.py` alone — rewrites the issue's acceptance criterion to match the plan instead of the reverse |
 | D11 | Task 5 extends Task 4's `test_read_headers_returns_without_spawning_git` to patch **`_batch_headers`** as well as `_git`, and re-runs Task 4's Mutation A as part of Task 5's own gate | Phase-5 standards review. Task 4's assertion proves "no subprocess" by patching `_git`, which only works while `read_headers` reaches `cat-file` *through* `_git`. Task 5 replaces that call with `_batch_headers`, which opens its own `subprocess.Popen`; after T5, deleting the early return would let `_batch_headers(root, [])` spawn `cat-file` with zero requests, exit 0, return `[]`, and `dict(zip([], []))` is still `{}` — so the test would stay green over a real regression and D5's only load-bearing assertion would go hollow, invisibly, because Mutation A is otherwise run only at Task 4 time | Leaving the `_git`-only patch — ships a test that asserts nothing; deleting the test at T5 as superseded — drops AC3's coverage entirely; asserting on process tables instead — slow, racy, and platform-specific |
 | D12 | Every decision citation this issue writes into source (comments, docstrings) names its document — `issue #21's D3`, `issue 31's D2` — while the existing bare citations are left untouched | Phase-5 standards review. `diff-scope.py` cites issue #21's ledger bare throughout (`(D25)` :146/:195, `(D8)` :269, `(D23)` :364, `(D7)` :374, `(D3)` :437, `(D19)` :467), so a bare new `(D2)` for **this** issue's D2 would read as issue #21's D2 ("three-dot ranges out of scope") — a different decision entirely. This matches the rule the plan already states for its own prose | Renumbering this issue's ledger to start past D25 — couples two independent documents forever; rewriting the existing bare citations to be qualified — churns lines this issue has no other reason to touch, inflating a contract-bearing diff |
+| D13 | The lockstep reader owns a **read-side death path** the reader pseudo-code above does not show, with a fixed error precedence: `died_early` (the request write hit `BrokenPipeError`) first, then a held `read_failure` whose text **leads and survives verbatim**, then a bare non-zero exit. When a held `read_failure` coincides with a non-zero exit, git's account is *appended* (`<D23 message>; git cat-file --batch <detail>`), never substituted. `<detail>` is git's stderr when it wrote any, else `killed by signal N` / `exited with status N` | PR-review findings on `ef868f7` (correctness axis COR-001, conformance axis): git can die *between* the write and the read, so EOF arrives before the pipe reports broken — the buffered `_git` call this reader replaced surfaced stderr for free, and losing it makes a corrupt object store read as a bare `truncated`. The first cut of `ef868f7` inverted the precedence, so a `SIGKILL` (which writes no stderr) replaced `git reported missing content for ...` with a message ending in a colon and nothing after it — erasing the only useful diagnostic in exactly the case that needs one. `DiffScopeBatchDeathTest` pins all four orderings against a scripted `Popen` stand-in | Preferring git's exit over the held failure — discards the specific message for a generic one; reporting only the held failure — loses git's stderr, the regression `ef868f7` was written to fix; racing a real `git` into a signal to test it — no portable test can do that deterministically |
 
 ## Verification
 

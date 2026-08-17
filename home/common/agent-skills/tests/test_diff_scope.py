@@ -12,6 +12,7 @@ talks to no network and touches no repository but its own.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -644,11 +645,9 @@ class DiffScopeCommandTest(unittest.TestCase):
         # An invoking session exporting GIT_DIR redirects every scratch-repo git
         # call and every helper subprocess at an unrelated repository (issue
         # 31's D7).
-        poison = {
-            "GIT_DIR": "/nonexistent/other.git",
-            "GIT_WORK_TREE": "/nonexistent/tree",
-            "GIT_INDEX_FILE": "/nonexistent/index",
-        }
+        # Poison every variable in the constant, not a sample: a subset leaves
+        # the untested scrubs free to be deleted with the suite still green.
+        poison = {name: f"/nonexistent/{name.lower()}" for name in GIT_LOCATION_VARS}
         baseline = self.measure("--artifact-path", self.ARTIFACT)
         with unittest.mock.patch.dict(os.environ, poison):
             env = git_env()
@@ -851,6 +850,76 @@ class DiffScopeHeaderScanBoundTest(unittest.TestCase):
         self.assertEqual(churn[b"big.txt"], LARGE_BLOB_LINES)
         self.assertEqual(result.changed_files, 2)
         self.assertLess(peak, 1 * 1024 * 1024)
+
+
+class _DeadCatFile:
+    """A cat-file stand-in whose stdout, exit status and stderr are scripted.
+
+    _batch_headers only ever touches stdin.write/flush/close, stdout.read*/close
+    and wait(), so a pair of BytesIO handles plus a canned status reproduces
+    every death the real subprocess can hand it -- without racing a real git
+    into a signal, which no portable test can do deterministically.
+    """
+
+    def __init__(self, stdout_bytes, returncode, broken_stdin=False):
+        self.stdin = _BrokenPipe() if broken_stdin else io.BytesIO()
+        self.stdout = io.BytesIO(stdout_bytes)
+        self._returncode = returncode
+
+    def wait(self):
+        return self._returncode
+
+
+class _BrokenPipe(io.BytesIO):
+    def write(self, data):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+class DiffScopeBatchDeathTest(unittest.TestCase):
+    """A cat-file that dies mid-batch still reports something actionable.
+
+    The reader replaced a buffered _git call whose stderr reached the message
+    for free; these pin that nothing is lost on the way back out, in all four
+    orderings of (write died, read died, git's exit status, git's stderr).
+    """
+
+    def setUp(self):
+        self.module = load_module()
+
+    def _failure(self, stdout_bytes, returncode, stderr_bytes=b"", broken_stdin=False):
+        def fake_popen(argv, **kwargs):
+            kwargs["stderr"].write(stderr_bytes)
+            return _DeadCatFile(stdout_bytes, returncode, broken_stdin)
+
+        with unittest.mock.patch.object(
+            self.module.subprocess, "Popen", fake_popen
+        ), self.assertRaises(self.module.DiffScopeError) as caught:
+            self.module._batch_headers(Path("/nonexistent"), (b"deadbeef\x00",))
+        return str(caught.exception)
+
+    def test_gits_own_stderr_survives_a_death_between_write_and_read(self):
+        message = self._failure(b"", 128, b"fatal: bad object deadbeef\n")
+        self.assertIn("fatal: bad object deadbeef", message)
+
+    def test_a_signalled_death_with_empty_stderr_still_names_the_signal(self):
+        # SIGKILL writes no stderr, so without the status fallback this message
+        # degrades to a colon with nothing after it.
+        message = self._failure(b"", -9)
+        self.assertIn("killed by signal 9", message)
+
+    def test_a_held_read_failure_leads_and_is_not_replaced_by_the_exit(self):
+        # Issue #21's D23 messages must survive a concurrent non-zero exit.
+        message = self._failure(b"deadbeef missing\n", 128, b"fatal: bad object\n")
+        self.assertTrue(message.startswith("git reported missing content for"), message)
+        self.assertIn("fatal: bad object", message)
+
+    def test_a_protocol_desync_on_a_clean_exit_surfaces_verbatim(self):
+        self.assertEqual(self._failure(b"", 0), "truncated cat-file batch response")
+
+    def test_a_broken_pipe_on_the_request_reports_gits_diagnostic(self):
+        message = self._failure(b"", 128, b"fatal: not a git repository\n", True)
+        self.assertIn("exited early", message)
+        self.assertIn("fatal: not a git repository", message)
 
 
 if __name__ == "__main__":
