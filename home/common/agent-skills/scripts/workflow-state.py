@@ -170,8 +170,16 @@ def select_phase_action(
     artifacts_sufficient: bool,
     remainder_self_contained: bool,
 ) -> str:
-    if remainder_self_contained:
-        return "delegate"
+    """Select the phase-boundary action from the phase budget and the three booleans.
+
+    The phase budget is the turn and context ceilings with their headrooms; this
+    function never sees the attempt budget's wall clock, and ``delegate`` does not
+    reset it. ``fresh_start`` comes first because a disposable conversation with
+    sufficient artifacts is the cheapest transition at any budget level. Unknown
+    usage and at-ceiling usage both yield ``handoff`` before ``delegate`` is
+    considered, so a persisted ``delegate`` implies measured usage strictly below
+    both ceilings.
+    """
     if not next_needs_context and artifacts_sufficient:
         return "fresh_start"
     if turn_count is None or context_tokens is None:
@@ -181,6 +189,8 @@ def select_phase_action(
         or context_tokens >= context_ceiling - context_headroom
     ):
         return "handoff"
+    if remainder_self_contained:
+        return "delegate"
     if not next_needs_context:
         return "handoff"
     return "continue"

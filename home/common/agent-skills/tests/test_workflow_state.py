@@ -487,7 +487,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                     "turn_count": 119,
                     "context_tokens": 149000,
                 },
-                "delegate",
+                "handoff",
             ),
             (
                 {
@@ -559,6 +559,61 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 self.assertEqual(persisted["phase"], index)
                 self.assertEqual(persisted["last_progress_at"], DEFAULT_NOW)
                 self.assertEqual(persisted["phase_inputs"], expected_inputs)
+
+    def test_delegate_requires_measured_usage_below_both_ceilings(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        delegated = self.progress(
+            issue=14,
+            attempt=1,
+            phase=3,
+            now="2026-08-13T20:05:00Z",
+            turn_count=10,
+            context_tokens=20000,
+            next_needs_context=True,
+            artifacts_sufficient=False,
+            remainder_self_contained=True,
+        )
+        self.assertEqual(delegated["phase_action"], "delegate")
+
+        unknown_usage = self.progress(
+            issue=14,
+            attempt=1,
+            phase=4,
+            now="2026-08-13T20:10:00Z",
+            turn_count=None,
+            context_tokens=None,
+            next_needs_context=True,
+            artifacts_sufficient=False,
+            remainder_self_contained=True,
+        )
+        self.assertEqual(unknown_usage["phase_action"], "handoff")
+
+        at_context_ceiling = self.progress(
+            issue=14,
+            attempt=1,
+            phase=5,
+            now="2026-08-13T20:15:00Z",
+            turn_count=10,
+            context_tokens=140000,
+            next_needs_context=True,
+            artifacts_sufficient=False,
+            remainder_self_contained=True,
+        )
+        self.assertEqual(at_context_ceiling["phase_action"], "handoff")
+
+        at_turn_ceiling = self.progress(
+            issue=14,
+            attempt=1,
+            phase=6,
+            now="2026-08-13T20:20:00Z",
+            turn_count=118,
+            context_tokens=20000,
+            next_needs_context=True,
+            artifacts_sufficient=False,
+            remainder_self_contained=True,
+        )
+        self.assertEqual(at_turn_ceiling["phase_action"], "handoff")
 
     def test_durable_handoff_requires_safe_file_and_resumes_same_attempt(self):
         self.init_run()
