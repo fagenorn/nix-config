@@ -150,6 +150,23 @@ class DiffScopeClassifierTest(unittest.TestCase):
         self.assertEqual([row.path for row in result.files], [b"src/app.py"])
         self.assertEqual(result.excluded["generated"], 0)
 
+    def test_read_headers_returns_without_spawning_git(self):
+        # The early return makes two separable claims. This one -- that no
+        # cat-file subprocess runs -- is invisible end to end, so patching _git
+        # is what turns it into an assertion (issue 31's D5).
+        rows = [
+            self.row(b"assets/blob.bin", None, None),
+            self.row(b"pnpm-lock.yaml", 40, 2),
+        ]
+        statuses = {b"assets/blob.bin": b"M", b"pnpm-lock.yaml": b"M"}
+        with unittest.mock.patch.object(
+            self.module, "_git", side_effect=AssertionError("cat-file must not run")
+        ):
+            headers = self.module.read_headers(
+                Path("/nonexistent"), "base", "head", rows, statuses
+            )
+        self.assertEqual(headers, {})
+
     # --- artifact class and the carve-out --------------------------------
 
     def test_only_the_named_artifact_is_excluded(self):
@@ -476,6 +493,20 @@ def build_fixture_repo(root):
     git(root, "commit", "-qm", "head")
 
 
+def build_no_candidate_repo(root):
+    """Two commits whose every row is binary or a lockfile: no content candidate."""
+    git(root, "init", "-q", "-b", "main", ".")
+    write(root, b"assets/blob.bin", b"\x00\x01\x02binary\x00")
+    write(root, b"pnpm-lock.yaml", b"lock\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "base")
+
+    write(root, b"assets/blob.bin", b"\x00\x01\x02BINARY CHANGED\x00\x00")
+    write(root, b"pnpm-lock.yaml", b"lock\nmore\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "head")
+
+
 class DiffScopeCommandTest(unittest.TestCase):
     """The git layer and the CLI, against a real scratch repository.
 
@@ -682,6 +713,39 @@ class DiffScopeCommandTest(unittest.TestCase):
                 completed = run_helper(self.root, self.range, "--artifact-path", bad)
                 self.assertEqual(completed.returncode, 1, completed.stdout)
                 self.assertIn(b"diff-scope:", completed.stderr)
+
+
+class DiffScopeAllExcludedRangeTest(unittest.TestCase):
+    """A range that produces rows but no content candidate still measures.
+
+    read_headers returns an empty mapping without spawning cat-file when every
+    row is binary or a lockfile. The binary row is product (issue #21's D5) and
+    is skipped for being binary, not for being excluded, so the answer is one
+    product file carrying zero lines plus one excluded lockfile.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.root = cls.temporary.name
+        build_no_candidate_repo(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def test_a_range_with_no_content_candidate_still_measures(self):
+        completed = run_helper(self.root, "HEAD~1..HEAD")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout.decode("utf-8"))
+        self.assertEqual(payload["product"], {"changed_lines": 0, "changed_files": 1})
+        self.assertEqual(
+            payload["excluded"], {"lockfile": 1, "generated": 0, "artifact": 0}
+        )
+        self.assertEqual(
+            payload["files"],
+            [{"path": "assets/blob.bin", "changed_lines": 0, "binary": True}],
+        )
 
 
 class DiffScopeRelativeConfigTest(unittest.TestCase):
