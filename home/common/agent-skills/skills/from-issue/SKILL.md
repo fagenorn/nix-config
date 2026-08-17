@@ -64,7 +64,7 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 **Never hard-fail on a missing sibling** — run the phase inline: brainstorm as intent + requirements + ≥2 options; grill against the map's areas and `adr/` dirs; plan as numbered tasks with a verification gate each; execute task-by-task with the verify commands; ship per the Phase-7 fallback.
 
-## Dispatch and budget rules
+## Dispatch, phase-budget and attempt-budget rules
 
 **Structured report-backs.** A subagent's final message is re-read by its caller on every later turn, so every `Agent` dispatch states a fixed return schema: artifact paths, a one-word verdict/state, ≤500 characters of notes; details live in worktree files. Prefer the tiered agent types over `general-purpose`.
 
@@ -97,12 +97,23 @@ Agent(subagent_type="general-purpose", model="opus", effort="high") delegates th
 Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.
    Give it the exact commands, identities, and paths inline; it decides nothing and edits nothing.
 
+If `workflow-state progress` is rejected because the
+attempt budget's deadline has passed — either
+`cannot record progress at or after attempt deadline`, or
+`progress requires an active attempt` when the dispatcher's deadline observer
+reconciled the attempt to `stopped` first — that is one verdict, not a harness
+fault and not a reason to retry it or to doubt your identity: go straight to
+the terminal return procedure and record your
+truthful state with `workflow-state finish`, which preserves a result reported at
+or after the deadline and supersedes a provisional expiry.
+Persistence precedes notification.
+
 Without lifecycle identity, apply the same action order locally with the
 120-turn/150000-token ceilings and default interactive handoff behavior.
 
 ## Terminal return procedure
 
-Use this one procedure for Phase-0 content stops, budget stops, execution failure,
+Use this one procedure for Phase-0 content stops, attempt budget stops, execution failure,
 and Phase-7 success whenever lifecycle identity exists. Assemble a temporary JSON
 file with exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`,
 `discussion_items`, and `notes` (≤500 characters). Pass it with
@@ -137,12 +148,22 @@ exists: write a `stopped` or `failed` result through `workflow-state finish` bef
 
 Create the workspace before any spec/plan/grill commit lands; those commits go *in the worktree*, never on the integration branch.
 
-When a lifecycle envelope exists, use its exact absolute `worktree` as the
-attempt workspace. Re-check that it is absent from the filesystem and from
-`git worktree list`, then create the worktree at that exact path from
-`origin/<integration-branch>`. If the path is occupied or mismatched, fail the attempt
-through the terminal return procedure; never remove unknown contents and never choose another path.
-The envelope identity stays bound to this path through shipping and cleanup.
+When a lifecycle envelope exists, use its exact absolute `worktree`, and decide by
+what is actually there:
+
+- **Absent** from both the filesystem and `git worktree list` → create it from
+  `origin/<integration-branch>`.
+- **Already a git worktree checked out on this issue's branch** → **adopt it**:
+  `cd` in and continue. Do not re-create it, do not move it, do not reset it. This
+  is the normal shape of a retry, whose dispatcher hands back the prior attempt's
+  worktree. Phase 0's resume-signal inspection governs what to do with its contents.
+- **Anything else** — occupied by a non-worktree path, or a worktree checked out on
+  a different branch → fail the attempt through the terminal return procedure,
+  naming both the envelope path and what was found, so the dispatcher can correct
+  the reservation.
+
+Never remove unknown contents and never choose another path. The envelope identity
+stays bound to this path through shipping and cleanup.
 Direct standalone invocation keeps the standard `worktrees` flow:
 
 1. `git fetch origin`. Invoke `worktrees` (it encodes the destructive-ops carve-out, the prefix contract, and the position checks before `EnterWorktree`/`ExitWorktree`). For lifecycle use, invoke it only if it accepts the envelope's exact path; otherwise `git worktree add -b <branch> <exact-envelope-path> origin/<integration-branch>`. Branch = `branchNaming.pattern`; the on-disk branch carries `branchNaming.worktreePrefix` — both forms are accepted downstream, don't strip it.

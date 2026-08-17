@@ -12,13 +12,16 @@ talks to no network and touches no repository but its own.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
+import unittest.mock
 
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -148,6 +151,32 @@ class DiffScopeClassifierTest(unittest.TestCase):
         result = self.scope([self.row(b"src/app.py", 2, 0, header=None)])
         self.assertEqual([row.path for row in result.files], [b"src/app.py"])
         self.assertEqual(result.excluded["generated"], 0)
+
+    def test_read_headers_returns_without_spawning_git(self):
+        # The early return makes two separable claims. This one -- that no
+        # cat-file subprocess runs -- is invisible end to end, so patching _git
+        # is what turns it into an assertion (issue 31's D5).
+        rows = [
+            self.row(b"assets/blob.bin", None, None),
+            self.row(b"pnpm-lock.yaml", 40, 2),
+        ]
+        statuses = {b"assets/blob.bin": b"M", b"pnpm-lock.yaml": b"M"}
+        # Both names, not just _git: read_headers reaches cat-file through
+        # _batch_headers, which opens its own Popen (issue 31's D11). Patching
+        # _git alone would leave the assertion hollow -- with the early return
+        # deleted, _batch_headers(root, []) spawns cat-file, exits 0, returns
+        # [], and dict(zip([], [])) is still {}.
+        with unittest.mock.patch.object(
+            self.module, "_git", side_effect=AssertionError("cat-file must not run")
+        ), unittest.mock.patch.object(
+            self.module,
+            "_batch_headers",
+            side_effect=AssertionError("cat-file must not run"),
+        ):
+            headers = self.module.read_headers(
+                Path("/nonexistent"), "base", "head", rows, statuses
+            )
+        self.assertEqual(headers, {})
 
     # --- artifact class and the carve-out --------------------------------
 
@@ -335,6 +364,21 @@ class DiffScopeClassifierTest(unittest.TestCase):
             "  1  a\\tb\\rc\\x01d\\\\e.txt",
         )
 
+    def test_unicode_line_separators_in_a_path_are_escaped_in_text_output(self):
+        # str.splitlines() breaks on ten characters; seven are C0 and already
+        # escaped, and these three close the set (issue 31's D1). Four hex
+        # digits keep the form disjoint from the two-digit \xNN escapes above.
+        for character, escape in (
+            ("\x85", "\\u0085"),
+            ("\u2028", "\\u2028"),
+            ("\u2029", "\\u2029"),
+        ):
+            with self.subTest(character=character):
+                path = f"we{character}ird.txt".encode("utf-8")
+                payload = self.module.format_text(self.scope([self.row(path, 1, 0)]))
+                self.assertEqual(len(payload.splitlines()), 3)
+                self.assertEqual(payload.splitlines()[2], f"  1  we{escape}ird.txt")
+
     def test_a_non_utf8_path_is_not_escaped_by_the_text_formatter(self):
         # Escaping is for line-breaking bytes only; an undecodable byte rides
         # through as its surrogate and is written back out verbatim by _emit.
@@ -345,9 +389,32 @@ class DiffScopeClassifierTest(unittest.TestCase):
         )
 
 
+GIT_LOCATION_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+)
+
+
 def git_env():
-    """A hermetic git environment: no user or system config, no signing."""
+    """A hermetic git environment: no user or system config, no signing.
+
+    Every variable that relocates git's repository, work tree, index or object
+    store is dropped, so an invoking session exporting one of them cannot
+    redirect a scratch-repo command at an unrelated repository (issue 31's D7).
+    The criterion is relocation, not the prefix: a blanket GIT_* sweep is
+    rejected because it would also drop GIT_EXEC_PATH and GIT_TEMPLATE_DIR,
+    which a Nix-provided git may rely on. The scrub pops from a copy of
+    os.environ rather than building an allowlist, so PATH and HOME survive and
+    both `git` and sys.executable keep resolving.
+    """
     env = dict(os.environ)
+    for name in GIT_LOCATION_VARS:
+        env.pop(name, None)
     env.update(
         {
             "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -432,6 +499,21 @@ def build_fixture_repo(root):
     write(root, b".claude/specs/this-run.md", b"new spec\n")
     write(root, b"we\nird.txt", b"newline path\n")
     write(root, b'qu"ote.txt', b"quote path\n")
+    write(root, "ls\u2028path.txt".encode("utf-8"), b"separator path\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "head")
+
+
+def build_no_candidate_repo(root):
+    """Two commits whose every row is binary or a lockfile: no content candidate."""
+    git(root, "init", "-q", "-b", "main", ".")
+    write(root, b"assets/blob.bin", b"\x00\x01\x02binary\x00")
+    write(root, b"pnpm-lock.yaml", b"lock\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "base")
+
+    write(root, b"assets/blob.bin", b"\x00\x01\x02BINARY CHANGED\x00\x00")
+    write(root, b"pnpm-lock.yaml", b"lock\nmore\n")
     git(root, "add", "-A")
     git(root, "commit", "-qm", "head")
 
@@ -439,11 +521,11 @@ def build_fixture_repo(root):
 class DiffScopeCommandTest(unittest.TestCase):
     """The git layer and the CLI, against a real scratch repository.
 
-    The fixture range HEAD~1..HEAD holds eleven rows: one lockfile, two
+    The fixture range HEAD~1..HEAD holds twelve rows: one lockfile, two
     generated (one of them a deletion, readable only on its base side), one
-    binary, one pure rename, one spec artifact, and five ordinary product
-    files -- two of which carry equal churn, and two of which carry a newline
-    and a double quote in their names.
+    binary, one pure rename, one spec artifact, and six ordinary product
+    files -- two of which carry equal churn, and three of which carry a
+    newline, a double quote and a U+2028 line separator in their names.
     """
 
     ARTIFACT = ".claude/specs/this-run.md"
@@ -467,7 +549,7 @@ class DiffScopeCommandTest(unittest.TestCase):
     def test_product_totals_exclude_every_class(self):
         payload = self.measure("--artifact-path", self.ARTIFACT)
         self.assertEqual(payload["range"], "HEAD~1..HEAD")
-        self.assertEqual(payload["product"], {"changed_lines": 5, "changed_files": 7})
+        self.assertEqual(payload["product"], {"changed_lines": 6, "changed_files": 8})
         self.assertEqual(
             payload["excluded"], {"lockfile": 1, "generated": 2, "artifact": 1}
         )
@@ -484,7 +566,7 @@ class DiffScopeCommandTest(unittest.TestCase):
         # One count record per row; a rename adds two further path-only tokens.
         # No fixture path contains a tab, so a tab identifies a count record.
         rows = sum(1 for token in raw.split(b"\0") if token and b"\t" in token)
-        self.assertEqual(rows, 11)
+        self.assertEqual(rows, 12)
         self.assertEqual(
             len(payload["files"]) + sum(payload["excluded"].values()), rows
         )
@@ -526,10 +608,11 @@ class DiffScopeCommandTest(unittest.TestCase):
             {"path": "assets/logo.png", "changed_lines": 0, "binary": True},
         )
 
-    def test_paths_holding_a_newline_or_a_quote_survive_end_to_end(self):
+    def test_paths_holding_a_newline_a_quote_or_a_separator_survive_end_to_end(self):
         paths = {entry["path"] for entry in self.measure()["files"]}
         self.assertIn("we\nird.txt", paths)
         self.assertIn('qu"ote.txt', paths)
+        self.assertIn("ls\u2028path.txt", paths)
 
     def test_ties_rank_by_path(self):
         paths = [entry["path"] for entry in self.measure()["files"]]
@@ -546,7 +629,7 @@ class DiffScopeCommandTest(unittest.TestCase):
     def test_an_artifact_path_matching_nothing_is_not_an_error(self):
         payload = self.measure("--artifact-path", ".claude/plans/never-written.md")
         self.assertEqual(payload["excluded"]["artifact"], 0)
-        self.assertEqual(payload["product"]["changed_files"], 8)
+        self.assertEqual(payload["product"]["changed_files"], 9)
 
     def test_a_leading_dot_slash_and_a_trailing_slash_are_stripped(self):
         payload = self.measure("--artifact-path", "./.claude/specs/")
@@ -558,13 +641,31 @@ class DiffScopeCommandTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(first.stdout, second.stdout)
 
+    def test_the_suite_git_environment_is_immune_to_an_inherited_git_dir(self):
+        # An invoking session exporting GIT_DIR redirects every scratch-repo git
+        # call and every helper subprocess at an unrelated repository (issue
+        # 31's D7).
+        # Poison every variable in the constant, not a sample: a subset leaves
+        # the untested scrubs free to be deleted with the suite still green.
+        poison = {name: f"/nonexistent/{name.lower()}" for name in GIT_LOCATION_VARS}
+        baseline = self.measure("--artifact-path", self.ARTIFACT)
+        with unittest.mock.patch.dict(os.environ, poison):
+            env = git_env()
+            for name in poison:
+                self.assertNotIn(name, env)
+            completed = run_helper(
+                self.root, self.range, "--artifact-path", self.ARTIFACT
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout.decode("utf-8")), baseline)
+
     def test_text_format_reports_the_same_totals(self):
         completed = run_helper(
             self.root, self.range, "--format", "text", "--artifact-path", self.ARTIFACT
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         lines = completed.stdout.decode("utf-8").splitlines()
-        self.assertEqual(lines[0], "product: 5 lines, 7 files")
+        self.assertEqual(lines[0], "product: 6 lines, 8 files")
         self.assertEqual(lines[1], "excluded: 1 lockfile, 2 generated, 1 artifact")
         self.assertIn("  0  assets/logo.png (binary)", lines)
 
@@ -576,9 +677,11 @@ class DiffScopeCommandTest(unittest.TestCase):
         text = completed.stdout.decode("utf-8")
         # we\nird.txt adds one line and deletes none, so its churn is 1.
         self.assertIn("  1  we\\nird.txt\n", text)
-        # Two header lines plus one line per product file (7), and nothing else:
-        # an unescaped newline path splits one of them and makes this ten.
-        self.assertEqual(len(text.splitlines()), 2 + 7)
+        # The separator path is one added line, and one physical line.
+        self.assertIn("  1  ls\\u2028path.txt\n", text)
+        # Two header lines plus one line per product file (8), and nothing else:
+        # an unescaped newline or U+2028 path splits one of them.
+        self.assertEqual(len(text.splitlines()), 2 + 8)
 
     def test_an_empty_range_measures_zero_and_succeeds(self):
         completed = run_helper(self.root, "HEAD..HEAD")
@@ -619,6 +722,204 @@ class DiffScopeCommandTest(unittest.TestCase):
                 completed = run_helper(self.root, self.range, "--artifact-path", bad)
                 self.assertEqual(completed.returncode, 1, completed.stdout)
                 self.assertIn(b"diff-scope:", completed.stderr)
+
+
+class DiffScopeAllExcludedRangeTest(unittest.TestCase):
+    """A range that produces rows but no content candidate still measures.
+
+    read_headers returns an empty mapping without spawning cat-file when every
+    row is binary or a lockfile. The binary row is product (issue #21's D5) and
+    is skipped for being binary, not for being excluded, so the answer is one
+    product file carrying zero lines plus one excluded lockfile.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.root = cls.temporary.name
+        build_no_candidate_repo(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def test_a_range_with_no_content_candidate_still_measures(self):
+        completed = run_helper(self.root, "HEAD~1..HEAD")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout.decode("utf-8"))
+        self.assertEqual(payload["product"], {"changed_lines": 0, "changed_files": 1})
+        self.assertEqual(
+            payload["excluded"], {"lockfile": 1, "generated": 0, "artifact": 0}
+        )
+        self.assertEqual(
+            payload["files"],
+            [{"path": "assets/blob.bin", "changed_lines": 0, "binary": True}],
+        )
+
+
+class DiffScopeRelativeConfigTest(unittest.TestCase):
+    """diff.relative must not reach the measurement, whatever --root points at.
+
+    git's diff.relative both strips the leading directory from every reported
+    path and drops the rows outside the cwd, so an unneutralised measurement
+    taken from a subdirectory answers a different question in a different frame
+    (issue 31's D2).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.root = cls.temporary.name
+        build_fixture_repo(cls.root)
+        git(cls.root, "config", "diff.relative", "true")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def payload(self, root_argument):
+        completed = run_helper(self.root, "HEAD~1..HEAD", "--root", root_argument)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout.decode("utf-8"))
+
+    def test_a_subdirectory_root_measures_the_same_range_as_the_work_tree_root(self):
+        # At the work-tree root diff.relative is a no-op, so the baseline IS the
+        # unconfigured answer -- one fixture, one variable (cwd depth).
+        baseline = self.payload(self.root)
+        # src/ is created by build_fixture_repo and is inside the work tree, so
+        # _validate_root passes.
+        subject = self.payload(os.path.join(self.root, "src"))
+        # Whole payloads, not totals: the skew's first symptom is in the path
+        # strings ("app.py" for "src/app.py"), and a totals-only assertion can
+        # stay green while every path is wrong.
+        self.assertEqual(subject, baseline)
+
+
+LARGE_BLOB_LINE = b"lorem ipsum dolor sit amet, consectetur adipiscing\n"  # 50 bytes
+LARGE_BLOB_LINES = 90_000  # 4.29 MiB, comfortably over the 4 MiB the design names
+
+
+def build_large_blob_repo(root):
+    """Two commits whose head side adds one plain-text blob well over 4 MiB.
+
+    No NUL byte and no generated marker, so the big file is a genuine content
+    candidate: read_headers must fetch a header window for it.
+    """
+    git(root, "init", "-q", "-b", "main", ".")
+    write(root, b"seed.txt", b"seed\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "base")
+
+    write(root, b"big.txt", LARGE_BLOB_LINE * LARGE_BLOB_LINES)
+    write(root, b"small.txt", b"small\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "head")
+
+
+class DiffScopeHeaderScanBoundTest(unittest.TestCase):
+    """The header scan retains a window, not a blob.
+
+    measure() runs in process because tracemalloc cannot see across a
+    subprocess boundary (issue 31's D4), and under a scrubbed environment
+    because an in-process call reaches os.environ directly rather than through
+    git_env() (issue 31's D9).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.root = cls.temporary.name
+        build_large_blob_repo(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def test_measuring_a_multi_megabyte_blob_stays_under_one_megabyte(self):
+        with unittest.mock.patch.dict(os.environ, git_env(), clear=True):
+            tracemalloc.start()
+            try:
+                result = self.module.measure(Path(self.root), "HEAD~1", "HEAD", ())
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        # The measurement must still be right: a bound met by reading nothing
+        # would be no bound at all.
+        churn = {row.path: row.churn for row in result.files}
+        self.assertEqual(churn[b"big.txt"], LARGE_BLOB_LINES)
+        self.assertEqual(result.changed_files, 2)
+        self.assertLess(peak, 1 * 1024 * 1024)
+
+
+class _DeadCatFile:
+    """A cat-file stand-in whose stdout, exit status and stderr are scripted.
+
+    _batch_headers only ever touches stdin.write/flush/close, stdout.read*/close
+    and wait(), so a pair of BytesIO handles plus a canned status reproduces
+    every death the real subprocess can hand it -- without racing a real git
+    into a signal, which no portable test can do deterministically.
+    """
+
+    def __init__(self, stdout_bytes, returncode, broken_stdin=False):
+        self.stdin = _BrokenPipe() if broken_stdin else io.BytesIO()
+        self.stdout = io.BytesIO(stdout_bytes)
+        self._returncode = returncode
+
+    def wait(self):
+        return self._returncode
+
+
+class _BrokenPipe(io.BytesIO):
+    def write(self, data):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+class DiffScopeBatchDeathTest(unittest.TestCase):
+    """A cat-file that dies mid-batch still reports something actionable.
+
+    The reader replaced a buffered _git call whose stderr reached the message
+    for free; these pin that nothing is lost on the way back out, in all four
+    orderings of (write died, read died, git's exit status, git's stderr).
+    """
+
+    def setUp(self):
+        self.module = load_module()
+
+    def _failure(self, stdout_bytes, returncode, stderr_bytes=b"", broken_stdin=False):
+        def fake_popen(argv, **kwargs):
+            kwargs["stderr"].write(stderr_bytes)
+            return _DeadCatFile(stdout_bytes, returncode, broken_stdin)
+
+        with unittest.mock.patch.object(
+            self.module.subprocess, "Popen", fake_popen
+        ), self.assertRaises(self.module.DiffScopeError) as caught:
+            self.module._batch_headers(Path("/nonexistent"), (b"deadbeef\x00",))
+        return str(caught.exception)
+
+    def test_gits_own_stderr_survives_a_death_between_write_and_read(self):
+        message = self._failure(b"", 128, b"fatal: bad object deadbeef\n")
+        self.assertIn("fatal: bad object deadbeef", message)
+
+    def test_a_signalled_death_with_empty_stderr_still_names_the_signal(self):
+        # SIGKILL writes no stderr, so without the status fallback this message
+        # degrades to a colon with nothing after it.
+        message = self._failure(b"", -9)
+        self.assertIn("killed by signal 9", message)
+
+    def test_a_held_read_failure_leads_and_is_not_replaced_by_the_exit(self):
+        # Issue #21's D23 messages must survive a concurrent non-zero exit.
+        message = self._failure(b"deadbeef missing\n", 128, b"fatal: bad object\n")
+        self.assertTrue(message.startswith("git reported missing content for"), message)
+        self.assertIn("fatal: bad object", message)
+
+    def test_a_protocol_desync_on_a_clean_exit_surfaces_verbatim(self):
+        self.assertEqual(self._failure(b"", 0), "truncated cat-file batch response")
+
+    def test_a_broken_pipe_on_the_request_reports_gits_diagnostic(self):
+        message = self._failure(b"", 128, b"fatal: not a git repository\n", True)
+        self.assertIn("exited early", message)
+        self.assertIn("fatal: not a git repository", message)
 
 
 if __name__ == "__main__":

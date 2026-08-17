@@ -7,8 +7,12 @@ REPO_ROOT = Path(__file__).parents[4]
 ORCHESTRATE = (
     REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/SKILL.md"
 )
+ORCHESTRATE_EVALS = (
+    REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/evals/evals.json"
+)
 FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
 AUTO = REPO_ROOT / "home/common/agent-skills/skills/from-issue/AUTO.md"
+INVESTIGATE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/investigate.md"
 HANDOFF = REPO_ROOT / "home/common/agent-skills/skills/handoff/SKILL.md"
 COLLABORATION = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md"
@@ -47,6 +51,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.orchestrate = ORCHESTRATE.read_text(encoding="utf-8")
         cls.from_issue = FROM_ISSUE.read_text(encoding="utf-8")
         cls.auto = AUTO.read_text(encoding="utf-8")
+        cls.investigate = INVESTIGATE.read_text(encoding="utf-8")
         cls.handoff = HANDOFF.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
         cls.diff_review = DIFF_REVIEW.read_text(encoding="utf-8")
@@ -55,6 +60,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
         cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
+        cls.orchestrate_evals = json.loads(
+            ORCHESTRATE_EVALS.read_text(encoding="utf-8")
+        )
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -140,8 +148,16 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "--resume-handoff",
             "same owner, same worktree",
             "resume is impossible",
-            "fresh owner/worktree",
+            # The retry's identity is the owner handle; the workspace is chosen
+            # separately, and preferring the prior attempt's live worktree is
+            # what lets a retry reach the work it must resume.
+            "fresh owner identity",
+            "prior attempt's recorded `worktree`",
+            "git worktree list --porcelain",
+            "reserve a fresh",
+            "refuses a third fresh attempt",
         )
+        self.assertNotIn("fresh owner/worktree", retry_section)
 
     def test_dispatcher_deadline_has_one_bounded_wake_path(self):
         self.assert_ordered(
@@ -266,17 +282,70 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_lifecycle_phase_one_uses_exact_reserved_attempt_worktree(self):
         phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")
+        # Three-way on the envelope's exact path. The middle branch is the one a
+        # retry actually lands on — the dispatcher hands back the prior attempt's
+        # worktree, so re-creating or resetting it would erase the work being
+        # resumed; only "anything else" is a failure.
         self.assert_ordered(
             phase_one,
             "lifecycle envelope exists",
-            "exact absolute `worktree`",
-            "create the worktree at that exact path",
+            "use its exact absolute `worktree`",
+            "**Absent** from both the filesystem",
+            "checked out on this issue's branch",
+            "adopt it",
+            "Do not re-create it, do not move it, do not reset it",
+            "a different branch",
+            "fail the attempt through the terminal return procedure",
             "never choose another path",
         )
-        self.assertIn("occupied or mismatched", phase_one)
+        self.assertNotIn("occupied or mismatched", phase_one)
         self.assertIn("fail the attempt", phase_one)
         self.assertIn("Direct standalone", phase_one)
         self.assertIn("standard `worktrees` flow", phase_one)
+
+    def test_orchestrate_resolves_the_attempt_budget_from_the_resolver(self):
+        # `--budget-minutes` is the attempt budget — the wall clock for one
+        # attempt — and the resolver is its single home, so the dispatcher must
+        # not carry a second copy of the number.
+        self.assert_ordered(
+            self.orchestrate,
+            "--budget-minutes <budget>",
+            "attempt budget",
+            "agentBudgetMinutes",
+            "resolve-bindings",
+        )
+        self.assertIn(
+            "Resolve `maxParallel` from `~/.agents/bin/resolve-bindings`",
+            self.orchestrate,
+        )
+
+    def test_from_issue_routes_a_deadline_rejected_progress_to_the_terminal_return(self):
+        # A progress call rejected past the attempt budget's deadline is a
+        # verdict, not a harness fault: the owner persists its truthful state
+        # rather than retrying the checkpoint.
+        self.assert_ordered(
+            self.from_issue,
+            "Obey the returned action exactly",
+            "attempt budget's deadline has passed",
+            "cannot record progress at or after attempt deadline",
+            "progress requires an active attempt",
+            "terminal return procedure",
+            "Persistence precedes notification",
+        )
+
+    def test_orchestrate_eval_grades_the_prior_worktree_retry(self):
+        # The eval is the graded statement of correct behaviour, so a stale one
+        # actively fails a correct run: it must grade a fresh owner identity
+        # reaching the prior attempt's live worktree, not a fresh workspace.
+        expected = " ".join(
+            case["expected_output"] for case in self.orchestrate_evals["evals"]
+        )
+        self.assertNotIn("fresh worktree", expected)
+        self.assertIn("fresh owner identity", expected)
+        self.assertIn("prior attempt's recorded worktree", expected)
+        self.assertIn("resolve-bindings", expected)
+        # The first-attempt reservation is unchanged and stays graded.
+        self.assertIn("reserve a collision-free absolute worktree path", expected)
 
     def test_auto_mode_never_skips_durable_checkpoints_or_terminal_writes(self):
         self.assertIn("never skips `workflow-state progress`", self.auto)
@@ -645,6 +714,37 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, expected)
         self.assertNotIn("≤400", expected)
+
+    def test_phase0_size_note_delegates_counting_to_diff_scope(self):
+        # Issues #21-#22 made diff-scope the accounting authority and retired the
+        # hand-counted numstat arithmetic; this note is the only restatement of
+        # the C4 artifact carve-out in any skill, so it is where that drift hid.
+        note = " ".join(self.investigate.split())
+        for fragment in (
+            # Whole affirmative clauses, not a bare "diff-scope" token: a bare
+            # token also matches a clause saying the counting is *not* delegated
+            # to the helper, which is the inversion this test guards.
+            "`diff-scope` is the accounting authority",
+            "measure, never hand-count",
+            # Both directions of the carve-out: this run's artifacts are named
+            # one file at a time, and the directories themselves never are.
+            "one `--artifact-path` per file",
+            "never `<specDir>`/`<planDir>` themselves",
+            "still count",
+            # The estimate/count split: Phase 0 has no range, so its number is an
+            # estimate; the helper is authoritative only once a range exists.
+            # Collapsing these two moments is the defect issue 32 fixed.
+            "the Phase-0 number is an *estimate*",
+            "Once the branch has a range",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, note)
+        # The retired tool must not survive anywhere in the file, and the gate's
+        # two boundaries stay spelled once, in ship-issue's Phase-5 gate: this
+        # line states the policy and points there rather than restating numbers.
+        for absent in ("numstat", "1,000", "≤20"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, note)
 
     def test_helper_binaries_resolve_from_bare_names(self):
         # Skills invoke workflow-state/agent-evidence by bare name. The Nix
