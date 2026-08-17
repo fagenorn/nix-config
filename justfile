@@ -64,6 +64,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_diff_scope.py \
+    home/common/agent-skills/tests/test_resolve_bindings.py \
     tests/test_agent_costs.py
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
