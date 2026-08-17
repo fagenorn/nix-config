@@ -281,30 +281,166 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual((attempt["state"], outcome["state"]), ("stopped", "stopped"))
         self.assertIn(str(worktree.resolve()), outcome["notes"])
         self.assertLessEqual(len(outcome["notes"]), 500)
+        self.assertEqual(attempt["result_source"], "expiry")
+        self.assertEqual(attempt["finished_at"], "2026-08-13T20:10:00Z")
+        self.assertGreaterEqual(attempt["finished_at"], attempt["deadline_at"])
 
-    def test_late_merged_finish_persists_canonical_stopped_expiry(self):
+    def test_superseding_retry_and_refusal_stamp_their_result_source(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T20:10:00Z",
+        )
+        attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual(attempts[0]["state"], "stopped")
+        self.assertEqual(attempts[0]["result_source"], "superseded")
+        self.assertEqual(attempts[0]["finished_at"], "2026-08-13T20:10:00Z")
+        self.assertIsNone(attempts[1]["finished_at"])
+        self.assertIsNone(attempts[1]["result_source"])
+
+        refused = self.launch(
+            issue=14,
+            owner="owner-c",
+            worktree=self.root / "wt-c",
+            now="2026-08-13T20:20:00Z",
+            ok=False,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("attempts 1 and 2 already consumed", refused.stderr)
+        attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual(attempts[1]["state"], "failed")
+        self.assertEqual(attempts[1]["result_source"], "refused")
+        self.assertEqual(attempts[1]["finished_at"], "2026-08-13T20:20:00Z")
+
+    def test_late_merged_finish_preserves_the_owner_result(self):
         self.init_run()
         worktree = self.root / "late-owner"
         launched = self.launch(
             issue=14, owner="owner-a", worktree=worktree, budget_minutes=10
         )
-        persisted = self.finish(
+        reported = self.merged_result()
+        stdout_json = self.finish(
             launched["attempt"],
-            self.merged_result(),
+            reported,
             now="2026-08-13T20:10:00Z",
         )
-        state = self.read_state()["issues"]["14"]
-        self.assertEqual(persisted["state"], "stopped")
-        self.assertEqual(persisted, state["outcome"])
-        self.assertEqual(persisted, state["attempts"][0]["result"])
-        self.assertEqual(state["attempts"][0]["state"], "stopped")
-        self.assertEqual(persisted["pr_url"], None)
-        self.assertEqual(persisted["merge_sha"], None)
-        self.assertFalse(persisted["issue_closed"])
-        self.assertEqual(
-            persisted["notes"],
-            f"attempt deadline expired; worktree: {worktree.resolve()}",
+        state = self.read_state()
+        attempt = state["issues"]["14"]["attempts"][0]
+        outcome = state["issues"]["14"]["outcome"]
+        self.assertEqual(attempt["state"], "merged")
+        self.assertEqual(attempt["result"]["state"], "merged")
+        self.assertEqual(attempt["result"]["pr_url"], reported["pr_url"])
+        self.assertEqual(attempt["result"]["merge_sha"], reported["merge_sha"])
+        self.assertIs(attempt["result"]["issue_closed"], True)
+        self.assertEqual(attempt["result"]["notes"], "")
+        self.assertEqual(attempt["finished_at"], "2026-08-13T20:10:00Z")
+        self.assertGreaterEqual(attempt["finished_at"], attempt["deadline_at"])
+        self.assertEqual(attempt["result_source"], "owner")
+        self.assertEqual(outcome, attempt["result"])
+        self.assertEqual(stdout_json, attempt["result"])
+
+    def test_expiry_result_is_provisional_until_the_owner_reports(self):
+        self.init_run()
+        self.launch(
+            issue=14,
+            owner="owner-a",
+            worktree=self.root / "wt-a",
+            budget_minutes=10,
         )
+        self.reconcile(now="2026-08-13T20:10:00Z")
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(attempt["state"], "stopped")
+        self.assertEqual(attempt["result_source"], "expiry")
+
+        merged = {
+            **self.merged_result(),
+            "notes": "merged after the deadline",
+        }
+        stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
+        state = self.read_state()
+        attempt = state["issues"]["14"]["attempts"][0]
+        self.assertEqual(attempt["state"], "merged")
+        self.assertEqual(attempt["result_source"], "owner")
+        self.assertEqual(attempt["finished_at"], "2026-08-13T20:20:00Z")
+        self.assertEqual(attempt["result"]["notes"], "merged after the deadline")
+        self.assertEqual(state["issues"]["14"]["outcome"], attempt["result"])
+        self.assertEqual(stdout_json, attempt["result"])
+
+        before = self.state_path.read_bytes()
+        other = {
+            **self.merged_result(),
+            "state": "failed",
+            "pr_url": None,
+            "merge_sha": None,
+            "issue_closed": False,
+            "notes": "conflicting",
+        }
+        rejected = self.finish(1, other, now="2026-08-13T20:30:00Z", ok=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("conflicting terminal result", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_expired_older_attempt_cannot_supersede_after_a_fresh_retry(self):
+        self.init_run()
+        self.launch(
+            issue=14,
+            owner="owner-a",
+            worktree=self.root / "wt-a",
+            budget_minutes=10,
+        )
+        self.reconcile(now="2026-08-13T20:10:00Z")
+        self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-a",
+            now="2026-08-13T20:15:00Z",
+        )
+        before = self.state_path.read_bytes()
+        rejected = self.finish(
+            1, self.merged_result(), now="2026-08-13T20:20:00Z", ok=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("conflicting terminal result", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_refused_third_attempt_result_is_not_supersedable(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T20:10:00Z",
+        )
+        self.launch(
+            issue=14,
+            owner="owner-c",
+            worktree=self.root / "wt-c",
+            now="2026-08-13T20:20:00Z",
+            ok=False,
+        )
+        before = self.state_path.read_bytes()
+        rejected = self.finish(
+            2, self.merged_result(), now="2026-08-13T20:25:00Z", ok=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("conflicting terminal result", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_finish_rejects_time_before_last_progress(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.progress(issue=14, attempt=1, phase=3, now="2026-08-13T20:05:00Z")
+        before = self.state_path.read_bytes()
+        rejected = self.finish(
+            1, self.merged_result(), now="2026-08-13T20:02:00Z", ok=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("finish time must not move backward", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_handed_off_finish_rejects_without_changing_state(self):
         self.init_run()
@@ -342,6 +478,95 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIsNone(state["outcome"])
         self.assertEqual(state["attempts"][0]["state"], "stopped")
 
+    def test_backward_launch_clock_cannot_corrupt_the_prior_attempt(self):
+        self.init_run(now="2026-08-13T19:00:00Z")
+        self.launch(
+            issue=14,
+            owner="owner-a",
+            worktree=self.root / "wt-a",
+            budget_minutes=30,
+        )
+        first_started = self.read_state()["issues"]["14"]["attempts"][0]["started_at"]
+        self.assertEqual(first_started, DEFAULT_NOW)
+
+        before = self.state_path.read_bytes()
+        refused = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T19:30:00Z",
+            budget_minutes=30,
+            ok=False,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        self.reconcile(now="2026-08-13T20:31:00Z")
+        stopped = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual(stopped["result_source"], "expiry")
+        self.assertGreaterEqual(stopped["finished_at"], stopped["started_at"])
+
+        retried = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=self.root / "wt-b",
+            now="2026-08-13T20:32:00Z",
+            budget_minutes=30,
+        )
+        self.assertEqual(retried["attempt"], 2)
+        rejected = self.progress(
+            issue=14, attempt=1, now="2026-08-13T20:33:00Z", ok=False
+        )
+        self.assertNotIn("invalid attempt finish time order", rejected.stderr)
+        again = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertGreaterEqual(again["finished_at"], again["started_at"])
+
+    def test_fresh_retry_may_reuse_the_prior_attempt_worktree(self):
+        self.init_run()
+        shared = self.root / "wt-issue-14"
+        resolved = str(shared.resolve())
+        self.launch(issue=14, owner="owner-a", worktree=shared, budget_minutes=10)
+        self.reconcile(now="2026-08-13T20:10:00Z")
+        first = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(first["state"], "stopped")
+        self.assertEqual(first["result_source"], "expiry")
+        self.assertEqual(first["worktree"], resolved)
+
+        retried = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=shared,
+            now="2026-08-13T20:15:00Z",
+        )
+        self.assertEqual(retried["attempt"], 2)
+        self.assertEqual(retried["worktree"], resolved)
+        self.assertEqual(retried["prior_attempt"], 1)
+        self.assertEqual(retried["state"], "active")
+        attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[1]["worktree"], attempts[0]["worktree"])
+
+        blocked = {
+            **self.merged_result(),
+            "state": "stopped",
+            "pr_url": None,
+            "merge_sha": None,
+            "issue_closed": False,
+            "notes": "blocked",
+        }
+        self.finish(2, blocked, now="2026-08-13T20:30:00Z")
+        before = self.state_path.read_bytes()
+        resumed = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=shared,
+            now="2026-08-13T20:40:00Z",
+        )
+        self.assertEqual(resumed["state"], "stopped")
+        self.assertEqual(len(self.read_state()["issues"]["14"]["attempts"]), 2)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
     def test_progress_action_precedence_and_complete_inputs_are_persisted(self):
         self.init_run()
         cases = [
@@ -351,7 +576,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                     "turn_count": 119,
                     "context_tokens": 149000,
                 },
-                "delegate",
+                "handoff",
             ),
             (
                 {
@@ -423,6 +648,61 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 self.assertEqual(persisted["phase"], index)
                 self.assertEqual(persisted["last_progress_at"], DEFAULT_NOW)
                 self.assertEqual(persisted["phase_inputs"], expected_inputs)
+
+    def test_delegate_requires_measured_usage_below_both_ceilings(self):
+        self.init_run()
+        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        delegated = self.progress(
+            issue=14,
+            attempt=1,
+            phase=3,
+            now="2026-08-13T20:05:00Z",
+            turn_count=10,
+            context_tokens=20000,
+            next_needs_context=True,
+            artifacts_sufficient=False,
+            remainder_self_contained=True,
+        )
+        self.assertEqual(delegated["phase_action"], "delegate")
+
+        unknown_usage = self.progress(
+            issue=14,
+            attempt=1,
+            phase=4,
+            now="2026-08-13T20:10:00Z",
+            turn_count=None,
+            context_tokens=None,
+            next_needs_context=True,
+            artifacts_sufficient=False,
+            remainder_self_contained=True,
+        )
+        self.assertEqual(unknown_usage["phase_action"], "handoff")
+
+        at_context_ceiling = self.progress(
+            issue=14,
+            attempt=1,
+            phase=5,
+            now="2026-08-13T20:15:00Z",
+            turn_count=10,
+            context_tokens=140000,
+            next_needs_context=True,
+            artifacts_sufficient=False,
+            remainder_self_contained=True,
+        )
+        self.assertEqual(at_context_ceiling["phase_action"], "handoff")
+
+        at_turn_ceiling = self.progress(
+            issue=14,
+            attempt=1,
+            phase=6,
+            now="2026-08-13T20:20:00Z",
+            turn_count=118,
+            context_tokens=20000,
+            next_needs_context=True,
+            artifacts_sufficient=False,
+            remainder_self_contained=True,
+        )
+        self.assertEqual(at_turn_ceiling["phase_action"], "handoff")
 
     def test_durable_handoff_requires_safe_file_and_resumes_same_attempt(self):
         self.init_run()
@@ -799,51 +1079,120 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_cross_field_lifecycle_corruption_is_rejected_without_changes(self):
         terminal = self.merged_result()
+        stopped = {
+            **terminal,
+            "state": "stopped",
+            "pr_url": None,
+            "merge_sha": None,
+            "issue_closed": False,
+            "notes": "stopped",
+        }
         corruptions = (
             (
                 "active-with-result",
                 lambda attempt: attempt.__setitem__("result", terminal),
+                None,
             ),
             (
                 "terminal-without-result",
                 lambda attempt: attempt.__setitem__("state", "merged"),
+                None,
             ),
             (
                 "terminal-state-mismatch",
                 lambda attempt: attempt.update(
                     {"state": "failed", "result": terminal}
                 ),
+                None,
             ),
             (
                 "launch-kind-mismatch",
                 lambda attempt: attempt.__setitem__("launch_kind", "resume"),
+                None,
             ),
             (
                 "start-after-progress",
                 lambda attempt: attempt.__setitem__(
                     "started_at", "2026-08-13T20:01:00Z"
                 ),
+                None,
             ),
             (
                 "progress-after-deadline",
                 lambda attempt: attempt.__setitem__(
                     "last_progress_at", "2026-08-13T20:31:00Z"
                 ),
+                None,
             ),
             (
                 "launch-before-start",
                 lambda attempt: attempt["launches"][0].__setitem__(
                     "at", "2026-08-13T19:59:00Z"
                 ),
+                None,
             ),
             (
                 "launch-after-deadline",
                 lambda attempt: attempt["launches"][0].__setitem__(
                     "at", "2026-08-13T20:31:00Z"
                 ),
+                None,
+            ),
+            (
+                "terminal-without-finished-at",
+                lambda attempt: attempt.update(
+                    {
+                        "state": "merged",
+                        "result": terminal,
+                        "finished_at": None,
+                        "result_source": "owner",
+                    }
+                ),
+                "must all be null or all be set",
+            ),
+            (
+                "nonterminal-with-result-source",
+                lambda attempt: attempt.__setitem__("result_source", "owner"),
+                "must all be null or all be set",
+            ),
+            (
+                "unknown-result-source",
+                lambda attempt: attempt.update(
+                    {
+                        "state": "merged",
+                        "result": terminal,
+                        "finished_at": "2026-08-13T20:05:00Z",
+                        "result_source": "reaper",
+                    }
+                ),
+                "invalid attempt result source",
+            ),
+            (
+                "finished-at-before-start",
+                lambda attempt: attempt.update(
+                    {
+                        "state": "merged",
+                        "result": terminal,
+                        "finished_at": "2026-08-13T19:59:59Z",
+                        "result_source": "owner",
+                    }
+                ),
+                "invalid attempt finish time order",
+            ),
+            (
+                "expiry-finished-before-deadline",
+                lambda attempt: attempt.update(
+                    {
+                        "state": "stopped",
+                        "result": stopped,
+                        "finished_at": "2026-08-13T20:29:59Z",
+                        "result_source": "expiry",
+                    }
+                ),
+                "expiry finish time must not precede the attempt deadline",
             ),
         )
-        for label, corrupt in corruptions:
+        for label, corrupt, message in corruptions:
             with self.subTest(label=label):
                 self.init_run()
                 self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
@@ -854,6 +1203,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 before = self.state_path.read_bytes()
                 completed = self.reconcile(ok=False)
                 self.assertNotEqual(completed.returncode, 0)
+                if message is not None:
+                    self.assertIn(message, completed.stderr)
                 self.assertEqual(self.state_path.read_bytes(), before)
                 self.state_path.unlink()
 

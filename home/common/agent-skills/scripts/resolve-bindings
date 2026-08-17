@@ -6,6 +6,8 @@ from the current directory, or from --repo-root), fills absent keys by
 auto-detection (issue tracker from the origin remote URL), and falls back to the
 shared defaults. Output is deterministic `key=value` lines, one per binding, so
 skills read one small command result instead of re-deriving the set in prose.
+`agentBudgetMinutes` is the attempt budget — the wall-clock allowance for one
+orchestrated attempt — and `maxParallel` bounds concurrent attempts.
 
 No network access; auto-detection uses only local git metadata.
 """
@@ -30,6 +32,8 @@ DEFAULTS = {
     "worktreePrefix": "worktree-",
     "coAuthoredBy": "true",
     "unsetGithubToken": "false",
+    "agentBudgetMinutes": "90",
+    "maxParallel": "2",
 }
 
 
@@ -84,6 +88,25 @@ def as_bool_str(value: object, default: str) -> str:
     return default
 
 
+def positive_int_str(value: object, default: str, *, key: str) -> str:
+    """Return a positive int as a string, else the default with one diagnostic.
+
+    A present-but-invalid value degrades to the documented default and keeps exit
+    status 0: one bad optional orchestration key must not break binding resolution
+    for every skill.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        print(
+            f"resolve-bindings: ignoring invalid orchestration.{key} "
+            f"{value!r}; using {default}",
+            file=sys.stderr,
+        )
+        return default
+    return str(value)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, help="repository root override")
@@ -104,6 +127,7 @@ def main() -> int:
 
     naming = config.get("branchNaming") or {}
     commit = config.get("commit") or {}
+    orchestration = config.get("orchestration") or {}
 
     bindings = {
         "repoRoot": str(root),
@@ -122,6 +146,16 @@ def main() -> int:
         ),
         "unsetGithubToken": as_bool_str(
             config.get("unsetGithubToken"), DEFAULTS["unsetGithubToken"]
+        ),
+        "agentBudgetMinutes": positive_int_str(
+            orchestration.get("agentBudgetMinutes"),
+            DEFAULTS["agentBudgetMinutes"],
+            key="agentBudgetMinutes",
+        ),
+        "maxParallel": positive_int_str(
+            orchestration.get("maxParallel"),
+            DEFAULTS["maxParallel"],
+            key="maxParallel",
         ),
     }
 

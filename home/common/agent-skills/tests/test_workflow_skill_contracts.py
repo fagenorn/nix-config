@@ -7,6 +7,9 @@ REPO_ROOT = Path(__file__).parents[4]
 ORCHESTRATE = (
     REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/SKILL.md"
 )
+ORCHESTRATE_EVALS = (
+    REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/evals/evals.json"
+)
 FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
 AUTO = REPO_ROOT / "home/common/agent-skills/skills/from-issue/AUTO.md"
 INVESTIGATE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/investigate.md"
@@ -57,6 +60,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
         cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
+        cls.orchestrate_evals = json.loads(
+            ORCHESTRATE_EVALS.read_text(encoding="utf-8")
+        )
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -142,8 +148,16 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "--resume-handoff",
             "same owner, same worktree",
             "resume is impossible",
-            "fresh owner/worktree",
+            # The retry's identity is the owner handle; the workspace is chosen
+            # separately, and preferring the prior attempt's live worktree is
+            # what lets a retry reach the work it must resume.
+            "fresh owner identity",
+            "prior attempt's recorded `worktree`",
+            "git worktree list --porcelain",
+            "reserve a fresh",
+            "refuses a third fresh attempt",
         )
+        self.assertNotIn("fresh owner/worktree", retry_section)
 
     def test_dispatcher_deadline_has_one_bounded_wake_path(self):
         self.assert_ordered(
@@ -268,17 +282,70 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_lifecycle_phase_one_uses_exact_reserved_attempt_worktree(self):
         phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")
+        # Three-way on the envelope's exact path. The middle branch is the one a
+        # retry actually lands on — the dispatcher hands back the prior attempt's
+        # worktree, so re-creating or resetting it would erase the work being
+        # resumed; only "anything else" is a failure.
         self.assert_ordered(
             phase_one,
             "lifecycle envelope exists",
-            "exact absolute `worktree`",
-            "create the worktree at that exact path",
+            "use its exact absolute `worktree`",
+            "**Absent** from both the filesystem",
+            "checked out on this issue's branch",
+            "adopt it",
+            "Do not re-create it, do not move it, do not reset it",
+            "a different branch",
+            "fail the attempt through the terminal return procedure",
             "never choose another path",
         )
-        self.assertIn("occupied or mismatched", phase_one)
+        self.assertNotIn("occupied or mismatched", phase_one)
         self.assertIn("fail the attempt", phase_one)
         self.assertIn("Direct standalone", phase_one)
         self.assertIn("standard `worktrees` flow", phase_one)
+
+    def test_orchestrate_resolves_the_attempt_budget_from_the_resolver(self):
+        # `--budget-minutes` is the attempt budget — the wall clock for one
+        # attempt — and the resolver is its single home, so the dispatcher must
+        # not carry a second copy of the number.
+        self.assert_ordered(
+            self.orchestrate,
+            "--budget-minutes <budget>",
+            "attempt budget",
+            "agentBudgetMinutes",
+            "resolve-bindings",
+        )
+        self.assertIn(
+            "Resolve `maxParallel` from `~/.agents/bin/resolve-bindings`",
+            self.orchestrate,
+        )
+
+    def test_from_issue_routes_a_deadline_rejected_progress_to_the_terminal_return(self):
+        # A progress call rejected past the attempt budget's deadline is a
+        # verdict, not a harness fault: the owner persists its truthful state
+        # rather than retrying the checkpoint.
+        self.assert_ordered(
+            self.from_issue,
+            "Obey the returned action exactly",
+            "attempt budget's deadline has passed",
+            "cannot record progress at or after attempt deadline",
+            "progress requires an active attempt",
+            "terminal return procedure",
+            "Persistence precedes notification",
+        )
+
+    def test_orchestrate_eval_grades_the_prior_worktree_retry(self):
+        # The eval is the graded statement of correct behaviour, so a stale one
+        # actively fails a correct run: it must grade a fresh owner identity
+        # reaching the prior attempt's live worktree, not a fresh workspace.
+        expected = " ".join(
+            case["expected_output"] for case in self.orchestrate_evals["evals"]
+        )
+        self.assertNotIn("fresh worktree", expected)
+        self.assertIn("fresh owner identity", expected)
+        self.assertIn("prior attempt's recorded worktree", expected)
+        self.assertIn("resolve-bindings", expected)
+        # The first-attempt reservation is unchanged and stays graded.
+        self.assertIn("reserve a collision-free absolute worktree path", expected)
 
     def test_auto_mode_never_skips_durable_checkpoints_or_terminal_writes(self):
         self.assertIn("never skips `workflow-state progress`", self.auto)

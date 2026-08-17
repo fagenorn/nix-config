@@ -83,6 +83,8 @@ Every attempt contains:
 
 Attempt number is the fresh-launch ordinal, not a process count. Every accepted launch appends a `launches` event and updates `launch_kind`, making fresh-versus-resume reconstructable after either process exits. A launch with the same issue, owner, and normalized worktree as the current nonterminal attempt is `resume`: it appends a resume event to the existing attempt and does not change its original start or fixed deadline. A different owner or worktree is `fresh`; it creates attempt 2 and links `prior_attempt: 1`. Any request for attempt 3 is refused, the issue outcome becomes `failed`, and the terminal result identifies both prior attempts. The latest attempt together with the issue `outcome` is authoritative; each attempt stores its own terminal data in `result`. Resuming a terminal attempt returns its stored result instead of relaunching work and does not append an event.
 
+(**amended by issue 33's workflow-lifecycle-hardening spec, D1/D2** — every attempt also carries `finished_at` and `result_source`, and a fresh retry may reuse the prior attempt's worktree path; the identity that distinguishes a resume from a fresh retry is the owner handle, not the workspace.)
+
 The deadline is fixed at fresh launch (`started_at + agentBudgetMinutes`). Progress changes `last_progress_at`, never the deadline. This prevents activity from extending an abandoned run indefinitely.
 
 ### Lifecycle state machine
@@ -99,6 +101,8 @@ Allowed transitions are:
 - overdue `active` or `handed_off` → `stopped` through `reconcile`
 
 All terminal transitions preserve the worktree path. The helper never removes a worktree. `finish` requires the compact result schema and stores it before printing the exact same normalized JSON for the caller to send. A second identical `finish` is idempotent; a conflicting terminal result fails loudly.
+
+(**amended by issue 33's workflow-lifecycle-hardening spec, D2/D4** — a `finish` at or after the deadline records the owner's reported result rather than a synthetic expiry; the expiry result written by `reconcile` is provisional and is superseded by a later owner report on the same latest attempt.)
 
 The compact terminal result is:
 
@@ -125,6 +129,7 @@ On startup, after any owner notification, and before any retry, the dispatcher c
 - A delayed notification for an older attempt cannot replace a newer authoritative terminal result.
 - An active or handed-off attempt before its deadline remains recoverable and is neither retried nor marked complete.
 - An active or handed-off attempt at/after its deadline becomes `stopped`, with the worktree in its result notes for inspection. A stopped handoff retains its durable handoff path.
+  (**amended by issue 33's workflow-lifecycle-hardening spec, D4** — this stopped result is provisional: it carries `result_source: "expiry"` and a later `finish` from that attempt's owner replaces it.)
 - An explicit matching late resume reaches the same stopped result; after either expiry path, the dispatcher can apply its one-fresh-retry policy.
 
 Only after reconciliation reports a recoverable transient terminal failure may the dispatcher request one fresh attempt. The helper, not the prompt, enforces the cap.
@@ -146,6 +151,8 @@ It returns exactly one action before either ceiling is crossed:
 2. `fresh_start` when all required state already lives in committed artifacts and a new session can reconstruct it;
 3. `handoff` when non-artifact state must travel; the caller invokes `handoff` at the ledger's durable path and then persists `handed_off`;
 4. `delegate` when the entire remainder is self-contained for a fresh subagent.
+
+(**amended by issue 33's workflow-lifecycle-hardening spec, D5** — this list originally evaluated `delegate` first; the ceiling and unknown-usage checks now precede it, so `delegate` is selected only with measured usage below both ceilings. The fixed wall deadline is unchanged: `delegate` does not reset it.)
 
 The default headroom is one orchestration turn plus the next phase's dispatch/report boundary, represented as a conservative configurable integer in the helper rather than an implicit “near the limit” judgment. At or above the threshold, `continue` is invalid. Missing usage data selects a durable `handoff` rather than assuming room. The decision and measured inputs are stored on the attempt for audit.
 
