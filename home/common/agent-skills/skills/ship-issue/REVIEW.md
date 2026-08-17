@@ -36,6 +36,14 @@ correctness rubric (bugs, boundary error handling, dead branches,
 assertions-that-pin, DRY, cross-task integration); same output contract, reports
 kept separate.
 
+When the correctness axis came through `codex-collaboration`'s `diff-review`, it returns
+a scope alongside its verdict: `full` | `scoped: <N> of <M> product files` |
+`unmeasured`. Record that scope in the PR body beside the correctness verdict — the
+same surface a degraded run uses for "merge-delta empty, nothing to review". A scoped
+Clean that reaches the PR body without its scope reads as full coverage, which is
+exactly what this record prevents. ship-issue records no reviewer identity; this records
+the scope only.
+
 ## Severity mapping (full path)
 
 The apply/push flow below speaks Blocking / Should-fix; map per axis, never

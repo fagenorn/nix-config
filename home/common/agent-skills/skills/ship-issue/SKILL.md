@@ -151,7 +151,7 @@ Run it in parallel with the correctness axis via `codex-collaboration`'s `diff-r
 <!-- agent-dispatch: id=ship-issue-full-correctness-fallback role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs the full correctness fallback review.
 
-Axis reports are never merged. Apply findings through REVIEW.md's severity mapping and five-step apply/push flow. After the fix lands, re-review only a named finding and the bounded fix diff — never as a first-pass, merge-delta, or whole-branch review:
+Axis reports are never merged, and when the correctness axis came through `diff-review`, its scope is recorded in the PR body per REVIEW.md. Apply findings through REVIEW.md's severity mapping and five-step apply/push flow. After the fix lands, re-review only a named finding and the bounded fix diff — never as a first-pass, merge-delta, or whole-branch review:
 
 <!-- agent-dispatch: id=ship-issue-scoped-fix-rereview role=reviewer-lite model=sonnet effort=medium -->
 Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-reviews named prior findings against the bounded fix diff.

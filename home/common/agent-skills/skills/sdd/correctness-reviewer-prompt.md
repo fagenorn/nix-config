@@ -33,15 +33,26 @@ Subagent (reviewer, Opus/high for the native path selected above):
     **Diff file:** [DIFF_FILE]
 
     Read the diff file once; when checking a finding, read the live file at HEAD,
-    not a snapshot. If no diff file was supplied, fetch the range yourself:
+    not a snapshot. If no diff file was supplied, fetch the range yourself with
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
-    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`. Inspect code outside the diff only to
-    evaluate a concrete risk you can name — cross-task contract drift, changed lock
-    ordering, shared mutable state — one focused check per named risk, named in your
-    report. Your review is read-only on this checkout: do not mutate the working
-    tree, the index, HEAD, or branch state in any way. Do not re-run the full test
-    suite — the implementers' reported runs are the evidence; run at most one
-    focused test to resolve a specific doubt reading the code raised.
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]` — both of them, unless the packet
+    states the review is scoped and lists the paths under review, in which case
+    neither of those two commands runs: those listed paths are the whole of the
+    range to fetch, so run
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'` once per listed
+    path and fetch nothing wider — one invocation per path, the path passed as a
+    single literal argument after `--`, never shell-joined with the other listed
+    paths into one command line, and pathspec magic disabled by the `:(literal)`
+    prefix. A listed path carries whatever bytes Git records, so it may hold a
+    space, a newline, a non-UTF-8 byte, or a leading `:`; treated as anything but
+    one literal argument it splits or is reinterpreted, and you silently read a
+    diff that is not the one the packet bounded. Inspect code outside the diff only
+    to evaluate a concrete risk you can name — cross-task contract drift, changed
+    lock ordering, shared mutable state — one focused check per named risk, named
+    in your report. Your review is read-only on this checkout: do not mutate the
+    working tree, the index, HEAD, or branch state in any way. Do not re-run the
+    full test suite — the implementers' reported runs are the evidence; run at
+    most one focused test to resolve a specific doubt reading the code raised.
 
     ## What to Check
 
@@ -62,6 +73,10 @@ Subagent (reviewer, Opus/high for the native path selected above):
 
     ≤400 words total. Your FIRST line is the axis verdict:
     `**Correctness:** Clean | Findings — 1–2 sentence assessment.`
+    When the packet supplied to you states the review is scoped, that assessment
+    clause opens with `scoped to <N> of <M> product files;` — after the em dash,
+    never between the verdict word and the dash. When the packet says nothing about
+    scoping, write the verdict exactly as above.
     Then exactly three top-level sections — every line a finding or a check you
     ran; no preamble, no closing summary. Every finding carries a stable ID,
     live `path:line` evidence, confidence (`high` / `medium` / `low`), and
@@ -77,4 +92,8 @@ Subagent (reviewer, Opus/high for the native path selected above):
 manifest detection), `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[DIFF_FILE]` (from
 `scripts/review-package`; a dispatcher without the sdd scripts omits it, and the
 reviewer fetches the range itself per the body's fallback). When this file rides as
-the Codex rubric, the `diff-review` packet supplies the same values.
+the Codex rubric, the `diff-review` packet supplies the same values — with one
+deliberate exception: on a scoped dispatch that packet leaves `[DIFF_FILE]`
+unsupplied, because the full-range package it names is exactly what scoping bounds.
+That is what routes the reviewer into the fallback branch above, where the packet's
+listed paths are the whole of the range to fetch.
