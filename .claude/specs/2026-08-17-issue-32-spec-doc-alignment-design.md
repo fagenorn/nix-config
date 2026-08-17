@@ -58,7 +58,8 @@ correction is made, and they are what keeps this from being a silent rewrite of 
 
 Per D3 below, issue 32 adds **no rows to the diff-scope spec's ledger**. That ledger runs
 D1–D25 and belongs to issue 21; the amendment markers this work inserts cite either an
-existing row of it (item 1 → its own D20) or a row of *this* spec (item 2 → D2 here).
+existing row of it (item 1 → its own D20, unqualified) or a row of *this* spec (item 2 →
+D2 here, qualified by issue and spec name per D9, because that ledger has a D2 of its own).
 
 ### Item 1 — mark the reversed loader precedent
 
@@ -70,12 +71,14 @@ sentence that today reads:
 becomes:
 
 > It follows `test_agent_model_matrix.py`'s two-layer precedent (**amended by D20** — this
-> sentence originally read "precedent **verbatim**", which D20 found to be exactly the
-> bug: `load_module()` must additionally register the module in `sys.modules` before
+> sentence originally read "precedent verbatim", which D20 found to be exactly the bug:
+> `load_module()` must additionally register the module in `sys.modules` before
 > `spec.loader.exec_module`, or every classifier-layer test errors in `setUpClass`):
 
 Nothing else in the section changes. The two sub-bullets describing the classifier layer
-and the CLI layer are accurate and stay.
+and the CLI layer are accurate and stay. Note the live sentence is wrapped mid-phrase
+("…two-layer" / "precedent verbatim:"), so the edit spans two physical lines; `verbatim`
+carries no emphasis in the source and none is added.
 
 Why this shape: it matches D19's inline parenthetical exactly — bolded `**amended by
 Dnn**`, an em-dash, the original wording quoted, then the reason. It cites the row that
@@ -97,10 +100,10 @@ becomes:
 
 > The same *measurement* for a human or an agent quoting it into prose, minus the range
 > identity: a `product:` line, an `excluded:` line, then one indented `<churn>  <path>`
-> line per ranked file, binaries suffixed ` (binary)`. (**amended by D2 of
-> `.claude/specs/2026-08-17-issue-32-spec-doc-alignment-design.md`** — this paragraph
-> originally read "the same content", which was never true of the shipped helper.) The
-> omission is deliberate: every line of the text form is a measured row, whereas the range
+> line per ranked file, binaries suffixed ` (binary)`. (**amended by issue 32's alignment
+> spec, D2** — `.claude/specs/2026-08-17-issue-32-spec-doc-alignment-design.md`; this
+> paragraph originally read "the same content", which was never true of the shipped
+> helper.) The omission is deliberate: every line of the text form is a measured row, whereas the range
 > is caller-supplied *input*, and a quoter carries it in the invocation printed above the
 > output — the pattern `.claude/specs/2026-08-16-ship-issue-degradation-gate-evidence.md`
 > already demonstrates. `--format json` echoes `range` because it is the machine record
@@ -108,8 +111,14 @@ becomes:
 
 The grounding for choosing doc-only over adding a `range:` line is in D1; the short form
 is that the range is already in the caller's hand at every documented call site, and the
-alternative costs seven assertions, a second skill document, and a contract pin to buy a
+alternative costs six tests, a second skill document, and a contract pin to buy a
 value the quoting agent typed itself.
+
+The marker leads with **issue 32's alignment spec** rather than a bare `D2` for a reason
+that is not stylistic: the diff-scope spec's own ledger already contains a D2 (the row
+that removed the stdin seam), so a bare "amended by D2" inside that document points at the
+wrong row on a skim. Per D9. This is the only cross-spec citation in the slice; item 1's
+marker cites the same spec's own D20 and needs no qualifier.
 
 ### Item 3 — preserve the snapshot, add a post-merge addendum
 
@@ -120,10 +129,14 @@ In `.claude/specs/2026-08-16-ship-issue-degradation-gate-evidence.md`:
   2026-08-17 … at 224954b3…` line, and the `Re-run this command fresh at ship time`
   closing paragraph all stay **exactly as they are**. They are a true record of a real run
   at a named commit.
-- The sentence beginning "Reading it the way the gate does: `64` product lines and `3`
-  product files…" is scoped so it cannot be read as a claim about what shipped — e.g.
-  "Reading the snapshot above the way the gate does: at `224954b3`, `64` product lines and
-  `3` product files…".
+- Exactly one sentence is re-scoped so it cannot be read as a claim about what shipped.
+  `Reading it the way the gate does: \`64\` product lines and \`3\` product files, both
+  under ≤1,000 / ≤20, so this branch's own size prerequisite is satisfied.` becomes
+  `Reading the snapshot the way the gate does: at \`224954b3\`, \`64\` product lines and
+  \`3\` product files, both under ≤1,000 / ≤20, so this branch's own size prerequisite is
+  satisfied — see the post-merge reading below for the figure at the merged tip.` The rest
+  of that paragraph (the `2 artifact` explanation, the uncommitted-evidence-file note, the
+  "one path per file throughout" closer) is unchanged and stays true of the snapshot.
 - A new final section is appended, titled `## Post-merge reading (the figure that
   shipped)`, recording: PR #27 merged with head `b83e618e898ba80372756d0542f8872ded0e1672`
   (merge commit `5aa2834f10796c7c71ae7c6f377610d1e63f3f36`);
@@ -176,8 +189,11 @@ Three properties this wording must keep, in priority order:
 3. **It states policy and does not restate accounting.** Per the degradation-gate spec's
    established split — "the gate states a policy and calls the helper; the accounting
    itself lives in `diff-scope.py` and is not restated here" — this line names the helper
-   and the carve-out but carries **no threshold numbers** and no full invocation. Those
-   live in ship-issue's gate, spelled once.
+   and the carve-out but carries **no threshold numbers** and no runnable invocation. It
+   names exactly one flag, `--artifact-path`, because that flag *is* how the carve-out is
+   expressed and the policy is unstatable without it; the range arguments, the format flag
+   and the two boundaries stay spelled once, in ship-issue's gate, which this line points
+   at by name.
 
 The word `numstat` disappears from the file entirely (per D5): the line tells the agent
 what to do, and ship-issue's own phrasing for the same instruction is "Measure, never
@@ -204,11 +220,44 @@ is the verification step *after editing any `.nix`*; no `.nix` is edited, so
 `just agent-workflow-tests` is the load-bearing gate. Running `just build` anyway is cheap
 and harmless, but it is not what proves this slice.
 
-**No ADR, no context-map area.** Settled twice already for this exact area — D16 of the
-diff-scope design spec and the degradation-gate spec's "No ADR, no context-map area"
-section: the ADR gate needs hard-to-reverse **and** surprising **and** a real trade-off,
-and this repo has no `adr/` tree or context map outside an eval fixture, so one record
-would invent a whole convention for itself. Nothing has changed. This spec is the record.
+**Facts verified during design and grill, so the planner need not re-derive them.** The
+implementer should still re-read the live text before editing, but these are settled:
+
+- `just agent-workflow-tests` at base `de83938`: **175 tests, OK**.
+- The merged-head measurement for item 3 was executed, not inferred; its stdout is quoted
+  verbatim in the Item 3 section.
+- PR #27 (`Retune the degradation gate to 1,000 product lines`) is `MERGED` with
+  `headRefOid = b83e618e898ba80372756d0542f8872ded0e1672` and merge commit
+  `5aa2834f10796c7c71ae7c6f377610d1e63f3f36`; `git merge-base b83e618e fc498cb7` is
+  `fc498cb7…`, the base the snapshot used.
+- The gate lives under `## Phase 5 — Review the PR` in `ship-issue/SKILL.md`, so item 4's
+  "ship-issue's Phase-5 gate" cross-reference is correct.
+- `"the same content"` at the `--format text` paragraph is the **only** text/JSON parity
+  claim in the diff-scope spec; no sibling passage repeats it, so item 2's single-paragraph
+  fix is complete.
+- `investigate.md`'s line is the **only** restatement of the C4 artifact carve-out in any
+  skill (`from-issue/SKILL.md`'s `specDir`/`planDir` mention governs worktree
+  disposability, a different subject), so item 4's fix is complete and the new pin is
+  correctly scoped to one file.
+
+**No ADR, no context-map area, no glossary.** Settled twice already for this exact area —
+D16 of the diff-scope design spec and the degradation-gate spec's "No ADR, no context-map
+area" section: the ADR gate needs hard-to-reverse **and** surprising **and** a real
+trade-off, and this repo has no `adr/` tree or context map outside an eval fixture, so one
+record would invent a whole convention for itself. Re-checked during the grill pass: the
+repo root has no `docs/`, no `CONTEXT.md`, no `GLOSSARY.md`, and no decision-record
+directory; `CLAUDE.md` is the standing guidance doc. Every decision here is reversible by
+editing a sentence, which is the opposite of the ADR gate's first condition. This spec is
+the record.
+
+**Canonical terms are unchanged.** The slice introduces no new domain vocabulary. It uses
+the repo's established terms as-is — *product lines* / *product files* (spelled once in
+`test_workflow_skill_contracts.py` as `GATE_LINE_BOUNDARY` / `GATE_FILE_BOUNDARY`),
+*artifact* for a `specDir`/`planDir` file, and *range* for the two-dot `<base>..<head>`
+argument. The one phrase that reads as new — `diff-scope` is "the accounting authority" —
+is a compression of the degradation-gate spec's own sentence, "the gate states a policy
+and calls the helper; the accounting itself lives in `diff-scope.py`", and introduces no
+concept that spec does not already carry.
 
 ## Test seams
 
@@ -217,7 +266,9 @@ Existing seams only; no new harness, no new file.
 **1. `just agent-workflow-tests`** — baseline verified at this branch's base:
 **175 tests, OK**. One new method joins
 `home/common/agent-skills/tests/test_workflow_skill_contracts.py`, the file that already
-pins ship-issue's `diff-scope` invocation, and it is the seam for **item 4** (per D6):
+pins ship-issue's `diff-scope` invocation, and it is the seam for **item 4** (per D6).
+Suggested name, matching the suite's "what the doc must guarantee" naming:
+`test_phase0_size_note_delegates_counting_to_diff_scope`. It:
 
 - Reads `from-issue/investigate.md` (the module already resolves `FROM_ISSUE_DIR`; add a
   sibling constant for the file and read it in `setUpClass`, matching how every other
@@ -242,8 +293,8 @@ pins ship-issue's `diff-scope` invocation, and it is the seam for **item 4** (pe
 The suite must end green with **176 tests**.
 
 **2. The existing `test_diff_scope.py` text-format assertions** are the standing pin that
-makes **item 2**'s corrected prose true, and no new test is needed. Seven assertions
-already fix the text form's exact shape — `format_text` equality over a full payload,
+makes **item 2**'s corrected prose true, and no new test is needed. Six tests already fix
+the text form's exact shape — `format_text` equality over a full payload,
 `lines[0] == "product: 6 lines, 8 files"`, and
 `assertEqual(len(text.splitlines()), 2 + 8)` ("two header lines plus one line per product
 file, and nothing else"). A `range:` line cannot be added without breaking all of them,
@@ -287,11 +338,12 @@ reading the four passages, which is the issue's own stated demo.
 
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
-| D1 | Item 2 resolves **doc-only**: the spec prose is corrected to say the text form deliberately omits the range identity, and `diff-scope.py` is not touched | The issue's title ("Align the shipped specs and skill docs with what merged") and demo ("reading each of the four passages shows text consistent with the merged behavior") both point at the prose; the shipped `format_text` docstring already documents the omission as intentional ("the text form omits the range"), so behaviour and code-comment already agree and only the spec dissents. The gate-agent-quoting argument does not survive contact: at every documented call site the caller *constructs* the range (`$BASE_SHA..$HEAD_SHA`, computed two lines earlier in ship-issue's own snippet), so the helper would be echoing a value the quoter typed, and the repo's own evidence spec already shows the pattern of printing the invocation above the output. Cost asymmetry seals it: `test_diff_scope.py` fixes the text shape in seven assertions including `len(text.splitlines()) == 2 + 8`, ship-issue's gate prose says "its first line reads `product: …`", and `test_workflow_skill_contracts.py` pins that gate string — a `range:` line breaks all three layers. Smaller, more reversible, more idiomatic per the `--auto` tiebreak | Prepend a `range:` line to `format_text` — a behavioural change to a twice-merged contract, inside an issue whose four items are otherwise pure documentation, cascading into `diff-scope.py`, seven test assertions, `ship-issue/SKILL.md` and its contract pin, to supply a value the caller already holds |
-| D2 | The `--format text` paragraph keeps an inline `(**amended by D2 of <this spec>** — this paragraph originally read "the same content", …)` marker and states *why* the range is absent (text lines are measured rows; the range is caller-supplied input; the machine record is JSON) | Historical specs are the accepted record of past decisions and the repo's convention for correcting one is an inline amendment marker, not a silent rewrite (D19/D25 of the diff-scope spec). Recording the *reason* is what stops the next reader re-opening the same question and "fixing" the helper | Silently replace the sentence — erases that the spec ever misdescribed the format, and the next reviewer re-derives the whole question; state the correction with no reason — invites exactly the behavioural change D1 rejected |
+| D1 | Item 2 resolves **doc-only**: the spec prose is corrected to say the text form deliberately omits the range identity, and `diff-scope.py` is not touched | The issue's title ("Align the shipped specs and skill docs with what merged") and demo ("reading each of the four passages shows text consistent with the merged behavior") both point at the prose; the shipped `format_text` docstring already documents the omission as intentional ("the text form omits the range"), so behaviour and code-comment already agree and only the spec dissents. The gate-agent-quoting argument does not survive contact: at every documented call site the caller *constructs* the range (`$BASE_SHA..$HEAD_SHA`, computed two lines earlier in ship-issue's own snippet), so the helper would be echoing a value the quoter typed, and the repo's own evidence spec already shows the pattern of printing the invocation above the output. Cost asymmetry seals it: `test_diff_scope.py` fixes the text shape across six tests including `len(text.splitlines()) == 2 + 8`, ship-issue's gate prose says "its first line reads `product: …`", and `test_workflow_skill_contracts.py` pins that gate string — a `range:` line breaks all three layers. Smaller, more reversible, more idiomatic per the `--auto` tiebreak | Prepend a `range:` line to `format_text` — a behavioural change to a twice-merged contract, inside an issue whose four items are otherwise pure documentation, cascading into `diff-scope.py`, seven test assertions, `ship-issue/SKILL.md` and its contract pin, to supply a value the caller already holds |
+| D2 | The `--format text` paragraph keeps an inline `(**amended by issue 32's alignment spec, D2** — …, this paragraph originally read "the same content", …)` marker (**amended by D9** — the citation originally led with a bare `D2`, which collides with the diff-scope spec's own D2) and states *why* the range is absent (text lines are measured rows; the range is caller-supplied input; the machine record is JSON) | Historical specs are the accepted record of past decisions and the repo's convention for correcting one is an inline amendment marker, not a silent rewrite (D19/D25 of the diff-scope spec). Recording the *reason* is what stops the next reader re-opening the same question and "fixing" the helper | Silently replace the sentence — erases that the spec ever misdescribed the format, and the next reviewer re-derives the whole question; state the correction with no reason — invites exactly the behavioural change D1 rejected |
 | D3 | Issue 32 appends **no rows** to the diff-scope spec's D1–D25 ledger; item 1's marker cites that spec's existing D20, item 2's cites D2 of this spec by qualified path | The ledger contract is one issue-level table per spec, cited by later phases rather than duplicated; D20 already records item 1's decision in full, so a new row would restate it, and item 2's decision is being made *now*, by this issue, so it belongs to this issue's store. Qualifying the cross-spec citation keeps the two ledgers from blurring | Add D26/D27 to the diff-scope ledger — appends issue-32 decisions to issue-21's record and makes "per D26" ambiguous across two tables; add nothing anywhere and just edit prose — loses the trail entirely |
 | D4 | Item 3 **preserves** the `224954b3` snapshot verbatim and appends a `## Post-merge reading (the figure that shipped)` section carrying the merged-head run (76/3, 3 artifact), the two intervening commits that explain the delta, the shared merge-base, and the unchanged verdict; only the one sentence that reads as a claim about what shipped is re-scoped to the snapshot | The file is *evidence* — a recorded observation at a named commit, with a stated `Re-run this command fresh at ship time` caveat. Overwriting the integers would falsify a real measurement and destroy the record of what was true when the branch was reviewed, against the same no-silent-rewrite convention as D2. The addendum satisfies both halves of the issue's acceptance criterion at once (the figure matches the merged tip **and** the measurement commit is named) and discharges the document's own caveat: the addendum *is* the fresh run at the branch's final commit | Overwrite 64→76 and 2→3 in place — falsifies a recorded observation and leaves the `224954b3` annotation attached to numbers never produced there; annotate only ("measured one commit early") — the doc still never states what shipped, and the issue's "figure matches the merged tip" branch stays unmet |
 | D5 | Item 4's rewritten line **drops the word `numstat` entirely** rather than keeping it in a contrasting clause, and echoes ship-issue's own "measure, never hand-count" | The suite's existing precedent splits exactly this way: the ship-issue *skill section* is pinned `assertNotIn("--numstat")` while the *eval's* expected output carries the contrasting "rather than hand-counted numstat arithmetic" phrasing. `investigate.md` is a skill document, so it takes the skill-side treatment. It also makes the new pin a clean `assertNotIn("numstat", …)` with no escape hatch | Keep "never a hand-counted `git diff --numstat`" — the contrast is mildly informative but forces the pin to become a fragile whole-clause negative-context match, and leaves the retired tool's name in an instruction an agent reads every Phase 0 |
 | D6 | Item 4 **does** get a contract-test pin in `test_workflow_skill_contracts.py` — a single new method with a fail-at-base `assertNotIn("numstat")`, whole-clause affirmative pins for the delegation, both directions of the carve-out, the estimate/count split, and `assertNotIn` guards on the thresholds | Load-bearing skill-doc wording is pinned in this suite by established precedent (it already pins ship-issue's whole `diff-scope` invocation, its two boundary strings, and the historical-artifact clause). This issue exists because doc/tool drift went unnoticed; leaving the fixed line unpinned reproduces the exact failure mode one file over. It is also the only item with a genuine automated seam available, and without it item 4's acceptance criterion is verified only by re-reading the file that was just edited | No pin, verify by reading — cheapest, but the drift recurs silently and the AC is unfalsifiable; a broader sweep pinning every from-issue phase note — ossifies wording nobody has seen drift, the YAGNI objection |
 | D7 | Items 1–3 (the two `.claude/specs/` documents) get **no** automated seam; verification is reading, per the issue's own demo | No suite reads `.claude/specs/**`, and building one for three sentences invents a convention for itself — D16 of the diff-scope spec and the degradation-gate spec's "No ADR, no context-map area" both settled this shape of question the same way. A spec-prose linter would additionally have to encode which historical sentence is still true, which is the human judgement being exercised | Add a spec-linting suite — new harness, new convention, and it cannot express the actual invariant; assert the evidence figures from a test that shells out to git — pins a historical measurement to network-free repo state and breaks on any future rewrite of that range |
 | D8 | Specs are amended inline; skill docs are rewritten in place with no marker (items 1–3 carry markers/addenda, item 4 does not) | A spec is a durable record whose value is that a reader can see what was decided and when — hence D19/D25's inline form. `investigate.md` is an operating instruction loaded into an agent's context every Phase 0; an "originally read" clause there is dead weight the agent must read past on every run, and git history already carries the provenance | Mark item 4 too, for uniformity — pays context cost on every from-issue run for provenance no executor needs; drop the markers everywhere for brevity — silently rewrites the record, the thing D19/D25 exists to prevent |
+| D9 | Cross-spec amendment markers lead with the amending **issue and spec name** before the row ID (`**amended by issue 32's alignment spec, D2**`); same-spec markers keep D19/D25's bare `**amended by Dnn**` form | Grill pass, verified: the diff-scope spec's ledger already holds its own D2 (the row that removed the stdin seam), so a bare "amended by D2" written into that document resolves to the wrong row on a skim — the precise failure that the "qualify cross-ledger citations" rule exists to prevent, and it would land in the very document this issue is fixing for ambiguity | Bare `**amended by D2**` — points a reader of the diff-scope spec at that spec's own D2; cite the amending spec by bare file path only — accurate but forces a file-open to learn which decision applies, where the issue number alone is resolvable from the tracker |
