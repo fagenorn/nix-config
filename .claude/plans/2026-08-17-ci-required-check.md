@@ -70,7 +70,17 @@ Existing seams only. A task that wants a new one has found a plan bug.
 1. **`just agent-workflow-tests`** — the repo's only deterministic test entry point
    (`python3 -m unittest -v` over seven suites, run from the worktree root). Baseline verified
    at this branch's tip `124c84d`: **164 tests, OK**. This plan adds one suite of seven tests →
-   **171** at the end. Accepted friction, per D12: the recipe is named for agent workflows and
+   **171** at the end.
+
+   **The absolute totals below are pre-merge figures**, measured against this branch's base
+   `b59ff22`, and they are what the Phase-6 gates were run against. At ship time the branch
+   merged the current `origin/main`, which brought `test_resolve_bindings.py` from issue 33's
+   branch, so the recipe now reports **199 tests, OK** and the pre-merge numbers no longer
+   match a fresh run. What has to hold either way is the delta: this plan's suite contributes
+   seven tests, and the recipe is green. Re-measure rather than matching a number written here
+   — that is the same failure mode D23 was amended for.
+
+   Accepted friction, per D12: the recipe is named for agent workflows and
    this is CI config, and renaming it would touch every plan and skill that cites it.
 2. **Offline file-shape gates** — `python3 -m json.tool`, `ruby -ryaml -e 'YAML.load_file(…)'`
    (an independent YAML parser; **PyYAML is not installed on this host**, verified, which is
@@ -457,7 +467,7 @@ Claude-Session: https://claude.ai/code/session_011BW621YtNATjTJfsJSJXnB"
 - Consumes: `Nix Eval` as a four-space-indented `name:` in `ci.yaml`, and
   `required_status_checks.contexts` in the payload.
 - Produces: six `unittest` tests, wired into `just agent-workflow-tests`. Task 4's sweep
-  expects the recipe to report **171 tests, OK** (baseline at `124c84d` is 164).
+  expects the recipe to report **171 tests, OK** pre-merge (baseline at `124c84d` is 164); after the ship-time merge of `origin/main` it reports 199 — re-measure, see *Test seams*.
 
 **Invariants:**
 - The test asserts only what a `unittest` over YAML text and JSON can observe: that the two
@@ -847,7 +857,7 @@ In `justfile`, add `tests/test_branch_protection.py` as the final path of the
 just agent-workflow-tests 2>&1 | tail -3
 ```
 
-Expected: `Ran 171 tests`, `OK`. The baseline at `124c84d` is **164 tests, OK** — a run that
+Expected pre-merge: `Ran 171 tests`, `OK` (199 after the ship-time merge of `origin/main` — re-measure, see *Test seams*). The baseline at `124c84d` is **164 tests, OK** — a run that
 still reports 164 means the recipe edit did not take.
 
 - [ ] **Step 5: Commit**
@@ -931,7 +941,7 @@ git diff --stat 124c84d -- .github/ justfile tests/test_branch_protection.py CLA
 ```
 
 Expected: the first two `grep -c` print `0` (exit 1 for zero matches is expected); the next
-two print `1` each; `Ran 171 tests` / `OK`; `json OK`; `yaml OK`; `justfile OK`; and the
+two print `1` each; `Ran 171 tests` / `OK` (pre-merge; 199 after the ship-time merge); `json OK`; `yaml OK`; `justfile OK`; and the
 `git diff --stat` names exactly five paths — `.github/branch-protection.json`,
 `.github/workflows/ci.yaml` (with `.github/workflows/flake-checker.yaml` as its rename
 source), `justfile`, `tests/test_branch_protection.py`, `CLAUDE.md`.
