@@ -5,7 +5,7 @@
 
 Issue: https://github.com/fagenorn/nix-config/issues/29
 Spec: `.claude/specs/2026-08-17-ci-required-check-design.md` — its `## Decision ledger`
-(D1–D19) is the source of truth. This plan cites rows by ID and never restates them.
+(D1–D31) is the source of truth. This plan cites rows by ID and never restates them.
 
 **Goal:** A pull request against `main` cannot merge until a CI job that actually evaluates
 the Nix configuration reports green, and that gate is version-controlled, agent-runnable,
@@ -32,10 +32,15 @@ dependency, no `.nix` change, no new flake input.
   `.github/branch-protection.json` (create), `justfile` (modify),
   `tests/test_branch_protection.py` (create), plus `CLAUDE.md` (modify). No `.nix` file is
   touched. No file under `home/` is touched.
-- **`Nix Eval` is a byte-exact contract string.** It appears in exactly two places:
-  `name: Nix Eval` in `ci.yaml` and `"Nix Eval"` in `.github/branch-protection.json`. Any
-  task that edits either must leave `python3 -m unittest tests/test_branch_protection.py`
-  green. Per D2 there is exactly one required context; do not add a second.
+- **`Nix Eval` is a byte-exact contract string.** The two occurrences that *are* the contract
+  are `name: Nix Eval` in `ci.yaml` and `"Nix Eval"` in `.github/branch-protection.json`; a
+  coordinated rename must also update the two deliberate literals inside
+  `tests/test_branch_protection.py` (the `assertIn` in `test_job_names_are_extractable` and the
+  `assertEqual` in `test_payload_carries_every_key_the_api_requires`), which exist so a rename
+  has to be stated in the pin as well as in the pinned files, plus the prose mentions in
+  `CLAUDE.md` and `ci.yaml`'s job comment. Any task that edits any of them must leave
+  `python3 -m unittest tests/test_branch_protection.py` green. Per D2 there is exactly one
+  required context; do not add a second.
 - **The job backing the required context stays a plain job** (per D16): no `strategy:`, no
   `uses:` at job level, no reusable workflow. Both silently rename the check run.
 - **`Nix Eval`'s runtime behaviour is unverified** — no Nix evaluation of a NixOS host is
@@ -64,8 +69,8 @@ Existing seams only. A task that wants a new one has found a plan bug.
 
 1. **`just agent-workflow-tests`** — the repo's only deterministic test entry point
    (`python3 -m unittest -v` over seven suites, run from the worktree root). Baseline verified
-   at this branch's tip `124c84d`: **164 tests, OK**. This plan adds one suite of six tests →
-   **170** at the end. Accepted friction, per D12: the recipe is named for agent workflows and
+   at this branch's tip `124c84d`: **164 tests, OK**. This plan adds one suite of seven tests →
+   **171** at the end. Accepted friction, per D12: the recipe is named for agent workflows and
    this is CI config, and renaming it would touch every plan and skill that cites it.
 2. **Offline file-shape gates** — `python3 -m json.tool`, `ruby -ryaml -e 'YAML.load_file(…)'`
    (an independent YAML parser; **PyYAML is not installed on this host**, verified, which is
@@ -118,6 +123,22 @@ conditional `CLAUDE.md` wording (D20), the Phase-7 handoff contract (D21), the r
 failure transitions (D22), the divergent-`main` reconciliation (D23), and the named AC4 red
 edit (D24).
 
+The between-task reviews added D25–D27, each against code this plan had dictated: the
+SHA-keyed non-PR `concurrency` group (D25, Task 1), the non-vacuity guard in
+`test_required_jobs_are_plain_jobs` (D26, Task 3), and the reachability pins on the
+`pull_request` trigger and the job `if:` (D27, Task 3).
+
+The final two-axis review added D28–D31 and amended two earlier rows. **Anything below that
+contradicts them is superseded by the ledger:** the `concurrency` fallback now keys on event
+name *and* SHA, because the cron resolves `github.sha` to the tip of `main` and would evict
+that commit's own push run (D28, amending D25); the suite also pins that the required job
+carries no `needs:`, no `continue-on-error:` and no step-level `if:`, closing the
+green-but-empty path (D29); `actions/checkout` moved to `@v4` (D30); and the "the check *is*
+required" phrasing was corrected in `ci.yaml` and the test docstring as well as `CLAUDE.md`
+(D31, amending D20). D23 was rewritten: its `c560008` ancestry gate can never pass now that
+the same content sits on `origin/main` as `d5b0d84`, so Task 5 Step 2 measures
+`git log origin/main..main` instead of naming a SHA.
+
 ## Standards review provenance
 
 - **Reviewer:** Codex — isolated, read-only runtime; job `reviewer-mswznipz-5s50mz`.
@@ -159,7 +180,12 @@ commit trailers in every commit command, and the qualified IFD/runtime and `CLAU
   decouples the reported name from the required context with no error anywhere.
 - `pull_request` carries **no** `types:` key, so GitHub's default set applies. `reopened` is
   in that default set and Task 5's sibling-unblock procedure depends on it.
-- The rename is a `git mv` so history follows the file.
+- The rename is staged with `git mv`. Note what that does and does not buy: because this task
+  rewrites the file's contents in the same commit, the similarity index falls below Git's
+  rename threshold and `git log --follow -- .github/workflows/ci.yaml` does **not** cross back
+  into `flake-checker.yaml`. `git mv` keeps the working tree and the index honest; it does not
+  preserve `--follow` history here. Splitting the move and the rewrite into two commits would,
+  if that link is ever judged worth the extra commit.
 
 - [ ] **Step 1: Rename the file and confirm git records a rename**
 
@@ -178,7 +204,6 @@ Checker` job keeps its existing steps minus `DeterminateSystems/magic-nix-cache-
 (retired upstream — per D6, no replacement cache is added).
 
 ```yaml
-# Adapted from https://github.com/wimpysworld/nix-config/blob/main/.github/workflows/flake-checker.yml
 name: CI
 
 on:
@@ -194,11 +219,14 @@ on:
   workflow_dispatch:
 
 # One run per pull request; a new push to a PR supersedes that PR's in-flight run.
-# Every other trigger is keyed by commit SHA, so each commit that lands on `main`
-# gets its own group and keeps its own reported result — a later push or the cron
-# can neither cancel it in flight nor supersede it while it is queued.
+# Every other trigger is keyed by event name *and* commit SHA. The SHA alone is not
+# enough: the daily cron resolves `github.sha` to the tip of `main`, so a scheduled
+# run would join the same group as that commit's own push run and evict it while it
+# is still queued — and the cron skips `Nix Eval` (see below), leaving that commit
+# with no reported result at all. Keying the event name in as well gives each
+# commit's push run a group no other trigger can enter.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -206,18 +234,22 @@ jobs:
     name: Flake Checker
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v4
       - uses: DeterminateSystems/flake-checker-action@v5
 
-  # `Nix Eval` is the required status check on `main`; the same string is the sole
-  # entry in .github/branch-protection.json. Renaming this job — or giving it a
-  # `strategy:` or a `uses:`, which make GitHub report it under a different name —
-  # leaves that required context unreportable and blocks every merge to `main` with
-  # no error pointing at the cause. tests/test_branch_protection.py pins both files
-  # together; run `just agent-workflow-tests` after editing either.
+  # `Nix Eval` is the context `.github/branch-protection.json` requires on `main`
+  # once `just protect-main` has been applied; the same string is the sole entry in
+  # that file. Renaming this job — or giving it a `strategy:` or a `uses:`, which
+  # make GitHub report it under a different name — leaves that required context
+  # unreportable and blocks every merge to `main` with no error pointing at the
+  # cause. The inverse failure is quieter: a `needs:`, a `continue-on-error:`, or an
+  # `if:` on a step lets the job report green without evaluating anything.
+  # tests/test_branch_protection.py pins all of that against
+  # .github/branch-protection.json; run `just agent-workflow-tests` after editing
+  # either file.
   nix-eval:
     name: Nix Eval
     # The daily cron is flake-checker's; flake.lock is pinned, so a scheduled
@@ -226,7 +258,7 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v4
@@ -425,7 +457,7 @@ Claude-Session: https://claude.ai/code/session_011BW621YtNATjTJfsJSJXnB"
 - Consumes: `Nix Eval` as a four-space-indented `name:` in `ci.yaml`, and
   `required_status_checks.contexts` in the payload.
 - Produces: six `unittest` tests, wired into `just agent-workflow-tests`. Task 4's sweep
-  expects the recipe to report **170 tests, OK** (baseline at `124c84d` is 164).
+  expects the recipe to report **171 tests, OK** (baseline at `124c84d` is 164).
 
 **Invariants:**
 - The test asserts only what a `unittest` over YAML text and JSON can observe: that the two
@@ -443,8 +475,9 @@ Create `tests/test_branch_protection.py` with exactly this content:
 ```python
 """Pin the CI required-status-check contract.
 
-The context required by branch protection and the job name GitHub reports are the
-same string held in two files that GitHub will never reconcile for us. A rename on
+The context `.github/branch-protection.json` requires and the job name GitHub
+reports are the same string held in two files that GitHub will never reconcile for
+us — and once `just protect-main` has been applied, a rename on
 either side raises no error anywhere: it leaves `main` waiting forever on a context
 that never reports, with nothing in the UI pointing at the cause. These tests are
 the only offline place that failure can surface.
@@ -466,6 +499,14 @@ JOB_KEY_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 JOB_NAME_RE = re.compile(r"^    name:\s*(\S.*?)\s*$")
 JOB_IF_RE = re.compile(r"^    if:\s*(\S.*?)\s*$")
 RENAMING_KEY_RE = re.compile(r"^    (strategy|uses):")
+# Keys that let a required job report success without its steps having run. A
+# step-level `if:` sits at six or eight spaces (`      - if:` as a step's first key,
+# `        if:` after one); `continue-on-error:` and `needs:` are checked at every
+# depth inside the job. Shell never writes `if:` with a colon, so `run:` bodies do
+# not collide, and a false positive here fails loudly rather than passing silently.
+GREEN_WITHOUT_WORK_RE = re.compile(
+    r"^(?:\s{6,}(?:- )?if:\s|\s{4,}(?:- )?continue-on-error:\s|    needs:)"
+)
 TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z]")
 
 REQUIRED_PAYLOAD_KEYS = {
@@ -644,6 +685,35 @@ class WorkflowShape(unittest.TestCase):
             )
 
 
+    def test_required_jobs_cannot_report_green_without_evaluating(self):
+        """The job-name and job-`if:` pins both catch a context that stops
+        reporting. This catches the inverse, which is worse: a context that keeps
+        reporting *success* while the evaluation it exists to run was skipped. A
+        `needs:` on a failed job, a `continue-on-error:`, or an `if:` on the
+        evaluating step each produce exactly that, and each leaves every other
+        assertion in this file green."""
+        contexts = required_contexts()
+        self.assertTrue(contexts, "branch protection requires at least one context")
+        names = job_names()
+        blocks = job_blocks()
+        for context in contexts:
+            self.assertIn(context, names)
+            key = names[context]
+            offenders = [
+                line.strip()
+                for line in blocks[key]
+                if GREEN_WITHOUT_WORK_RE.match(line)
+            ]
+            self.assertEqual(
+                [],
+                offenders,
+                f"job {key!r} backs required context {context!r} and carries "
+                f"{offenders}; each of these lets the job conclude success without "
+                f"running its evaluation, so the gate would report green on a tree "
+                f"nothing checked",
+            )
+
+
 class RequiredContexts(unittest.TestCase):
     def test_every_required_context_is_a_job_name(self):
         contexts = required_contexts()
@@ -711,7 +781,7 @@ if __name__ == "__main__":
 python3 -m unittest -v tests.test_branch_protection
 ```
 
-Expected at this point: **PASS, 5 tests** — Tasks 1 and 2 already landed the files it reads, so
+Expected at this point: **PASS, 7 tests** — Tasks 1 and 2 already landed the files it reads, so
 a green first run is correct here and is *not* the evidence. The evidence is that each pin can
 go red on demand. Demonstrate each edge in turn — make the edit, see red, revert:
 
@@ -721,7 +791,7 @@ python3 - <<'PY'
 import pathlib; p = pathlib.Path(".github/branch-protection.json")
 p.write_text(p.read_text().replace("Nix Eval", "Nix Evaluate"))
 PY
-python3 -m unittest tests.test_branch_protection 2>&1 | tail -3   # expect: FAILED (failures=3)
+python3 -m unittest tests.test_branch_protection 2>&1 | tail -3   # expect: FAILED (failures=5)
 git checkout -- .github/branch-protection.json
 
 # b) the job backing a required context becomes a matrix job
@@ -740,11 +810,22 @@ PY
 python3 -m unittest tests.test_branch_protection 2>&1 | tail -3   # expect: FAILED (failures=1)
 git checkout -- .github/workflows/ci.yaml
 
+# d) the evaluating step is gated off pull requests while the job still reports green
+python3 - <<'PY'
+import pathlib; p = pathlib.Path(".github/workflows/ci.yaml")
+p.write_text(p.read_text().replace("      - name: Evaluate nixosConfigurations.anis-desktop\n", "      - name: Evaluate nixosConfigurations.anis-desktop\n        if: github.event_name == 'push'\n"))
+PY
+python3 -m unittest tests.test_branch_protection 2>&1 | tail -3   # expect: FAILED (failures=1)
+git checkout -- .github/workflows/ci.yaml
+
 git status --porcelain -- .github/workflows/ci.yaml .github/branch-protection.json
 ```
 
-Record the three `FAILED` lines in the task report — they are AC5's evidence. If any of the
-three prints `OK`, the suite is vacuous and the task is not done. The final `git status` is
+Record the four `FAILED` lines in the task report — they are AC5's evidence. If any of the
+four prints `OK`, the suite is vacuous and the task is not done. Mutation (d) is the one that
+matters most and the one D29 was written for: it leaves the required context reporting
+`success` on a PR whose tree nothing evaluated, so a suite that passes it is worse than no
+suite at all. The final `git status` is
 **scoped to the two mutated paths on purpose**: `tests/test_branch_protection.py` is untracked
 until Step 5, so an unrestricted `git status --porcelain` cannot be empty here and would read
 as a failure. Expect no output from the scoped command — every revert took.
@@ -766,7 +847,7 @@ In `justfile`, add `tests/test_branch_protection.py` as the final path of the
 just agent-workflow-tests 2>&1 | tail -3
 ```
 
-Expected: `Ran 170 tests`, `OK`. The baseline at `124c84d` is **164 tests, OK** — a run that
+Expected: `Ran 171 tests`, `OK`. The baseline at `124c84d` is **164 tests, OK** — a run that
 still reports 164 means the recipe edit did not take.
 
 - [ ] **Step 5: Commit**
@@ -775,9 +856,11 @@ still reports 164 means the recipe edit did not take.
 git add tests/test_branch_protection.py justfile
 git commit -m "test(issue-29): pin the required context to the ci.yaml job name
 
-Five stdlib assertions: job names are extractable at all, pull_request on main is
-a trigger, every required context matches a job name, no required job is a matrix
-or reusable-workflow job, and the payload carries all four API-required keys.
+Seven stdlib assertions: job names are extractable at all, pull_request on main is
+a trigger and carries no paths/types narrowing, the required job is not gated off
+pull requests and cannot report green without evaluating, every required context
+matches a job name, no required job is a matrix or reusable-workflow job, and the
+payload carries all four API-required keys.
 
 Refs https://github.com/fagenorn/nix-config/issues/29
 
@@ -848,7 +931,7 @@ git diff --stat 124c84d -- .github/ justfile tests/test_branch_protection.py CLA
 ```
 
 Expected: the first two `grep -c` print `0` (exit 1 for zero matches is expected); the next
-two print `1` each; `Ran 170 tests` / `OK`; `json OK`; `yaml OK`; `justfile OK`; and the
+two print `1` each; `Ran 171 tests` / `OK`; `json OK`; `yaml OK`; `justfile OK`; and the
 `git diff --stat` names exactly five paths — `.github/branch-protection.json`,
 `.github/workflows/ci.yaml` (with `.github/workflows/flake-checker.yaml` as its rename
 source), `justfile`, `tests/test_branch_protection.py`, `CLAUDE.md`.
@@ -949,32 +1032,38 @@ first. The order is the design; this PR merges ungated on purpose.
 - [ ] **Step 2: Reconcile local `main` with the post-merge `origin/main`, then push —
       unconditionally, before Step 3**
 
-Local `main` at planning time is `c560008` (the out-of-scope record), a commit whose parent is
-`b59ff22` and which has never been pushed. Step 1's merge advances `origin/main` along *this
-branch's* history, also from `b59ff22`. The two therefore **diverge**: a bare
-`git push origin main` is a non-fast-forward and will be rejected. Integrate first (D23).
+**Measure this; do not carry a SHA forward from the plan.** When this step was written, local
+`main` was `c560008` (the out-of-scope record), an unpushed commit whose parent was `b59ff22`,
+and this step existed to merge it before the switch was flipped. That content has since reached
+`origin/main` under a *different* SHA, `d5b0d84` — `c560008` is no longer an ancestor of `main`
+at all, so the gate this step originally printed (`git merge-base --is-ancestor c560008 main`)
+can never succeed. A shared branch is exactly the thing that moves between planning and
+rollout, which is why the step is now a measurement (D23, amended).
+
+The hazard the step guards is unchanged: once protection is on, `enforce_admins: true` plus a
+required context means an unpushed direct-to-`main` commit can no longer be pushed at all.
+Whatever is local-only at rollout time has exactly this one window.
 
 ```bash
 cd /Users/anis/tmp/nix-config
 git fetch origin
-git log --oneline origin/main..main    # what is local-only  (expect: c560008)
+git log --oneline origin/main..main    # what is local-only — read it, do not assume
 git log --oneline main..origin/main    # what the merge added (expect: the PR merge commit)
 ```
 
-If `origin/main..main` is empty, local `main` is already contained and you can skip to the
-verification below. Otherwise merge — **never** rebase or force-push, `main` is shared:
+If `origin/main..main` is **empty**, there is nothing local-only, this step is satisfied, and
+you skip to the verification below. That is the expected case today. Otherwise merge —
+**never** rebase or force-push, `main` is shared:
 
 ```bash
 git switch main
 git merge --no-edit origin/main        # fast-forward or a merge commit; both are fine
-git log --oneline -1 c560008 --not origin/main   # empty => c560008 is now in origin/main's ancestry
 git merge-base --is-ancestor origin/main main && echo "remote tip contained"
-git merge-base --is-ancestor c560008 main && echo "c560008 contained"
 git push origin main
 git fetch origin && git rev-parse main origin/main   # the two SHAs must match
 ```
 
-Both `contained` lines and matching SHAs are the gate. Resolve any merge conflict here by
+The `remote tip contained` line, an empty `origin/main..main`, and matching SHAs are the gate. Resolve any merge conflict here by
 hand; if it cannot be resolved cleanly, **stop** — do not proceed to Step 3, and report the
 divergence. Protection stays **off** until this step has printed a matching `origin/main`:
 `enforce_admins: true` plus a required context means an unpushed `main` commit can no longer be
@@ -1018,10 +1107,13 @@ evaluation error and nothing else does.
 git switch -c ci-gate-demo origin/main
 git commit --allow-empty -m "chore(issue-29): CI gate demo — do not merge"
 git push -u origin ci-gate-demo
-DEMO=$(gh pr create --base main --head ci-gate-demo \
+# `gh pr create` has no --json/--jq (verified against gh 2.93.0): passing them fails flag
+# parsing *before* the PR is created, so create first and read the number back separately.
+gh pr create --base main --head ci-gate-demo \
   --title "CI gate demo (do not merge)" \
-  --body "Throwaway PR demonstrating the Nix Eval gate for https://github.com/fagenorn/nix-config/issues/29. Closed, never merged." \
-  --json number --jq .number 2>/dev/null || gh pr view ci-gate-demo --json number --jq .number)
+  --body "Throwaway PR demonstrating the Nix Eval gate for https://github.com/fagenorn/nix-config/issues/29. Closed, never merged."
+DEMO=$(gh pr view ci-gate-demo --json number --jq .number)
+test -n "$DEMO" || { echo "demo PR number not resolved — stop, do not continue the rollout"; exit 1; }
 ```
 
 **Red.** Break evaluation deterministically, push, and prove *`Nix Eval` specifically* failed:

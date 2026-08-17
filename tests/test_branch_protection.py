@@ -1,7 +1,8 @@
 """Pin the CI required-status-check contract.
 
-The context required by branch protection and the job name GitHub reports are the
-same string held in two files that GitHub will never reconcile for us. A rename on
+The context `.github/branch-protection.json` requires and the job name GitHub
+reports are the same string held in two files that GitHub will never reconcile for
+us — and once `just protect-main` has been applied, a rename on
 either side raises no error anywhere: it leaves `main` waiting forever on a context
 that never reports, with nothing in the UI pointing at the cause. These tests are
 the only offline place that failure can surface.
@@ -23,6 +24,14 @@ JOB_KEY_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 JOB_NAME_RE = re.compile(r"^    name:\s*(\S.*?)\s*$")
 JOB_IF_RE = re.compile(r"^    if:\s*(\S.*?)\s*$")
 RENAMING_KEY_RE = re.compile(r"^    (strategy|uses):")
+# Keys that let a required job report success without its steps having run. A
+# step-level `if:` sits at six or eight spaces (`      - if:` as a step's first key,
+# `        if:` after one); `continue-on-error:` and `needs:` are checked at every
+# depth inside the job. Shell never writes `if:` with a colon, so `run:` bodies do
+# not collide, and a false positive here fails loudly rather than passing silently.
+GREEN_WITHOUT_WORK_RE = re.compile(
+    r"^(?:\s{6,}(?:- )?if:\s|\s{4,}(?:- )?continue-on-error:\s|    needs:)"
+)
 TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z]")
 
 REQUIRED_PAYLOAD_KEYS = {
@@ -198,6 +207,35 @@ class WorkflowShape(unittest.TestCase):
                 f"carries an unreviewed `if:` ({expression!r}); if it can skip a "
                 f"pull request, that PR blocks forever on a context that never "
                 f"reports",
+            )
+
+
+    def test_required_jobs_cannot_report_green_without_evaluating(self):
+        """The job-name and job-`if:` pins both catch a context that stops
+        reporting. This catches the inverse, which is worse: a context that keeps
+        reporting *success* while the evaluation it exists to run was skipped. A
+        `needs:` on a failed job, a `continue-on-error:`, or an `if:` on the
+        evaluating step each produce exactly that, and each leaves every other
+        assertion in this file green."""
+        contexts = required_contexts()
+        self.assertTrue(contexts, "branch protection requires at least one context")
+        names = job_names()
+        blocks = job_blocks()
+        for context in contexts:
+            self.assertIn(context, names)
+            key = names[context]
+            offenders = [
+                line.strip()
+                for line in blocks[key]
+                if GREEN_WITHOUT_WORK_RE.match(line)
+            ]
+            self.assertEqual(
+                [],
+                offenders,
+                f"job {key!r} backs required context {context!r} and carries "
+                f"{offenders}; each of these lets the job conclude success without "
+                f"running its evaluation, so the gate would report green on a tree "
+                f"nothing checked",
             )
 
 

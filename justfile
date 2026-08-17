@@ -73,21 +73,27 @@ agent-model-matrix:
   python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
 
 ## branch protection
-# Apply the committed protection payload to `main`. Idempotent: the API replaces the
-# whole protection object, so re-running after a job rename converges. `main` is
-# written literally on purpose — gh's {branch} placeholder expands to the *current*
-# branch, which would point this at whatever branch you are standing on.
+# Idempotent: the API replaces the whole protection object, so re-running after a job
+# rename converges. `main` is written literally in all three recipes on purpose —
+# gh's {branch} placeholder expands to the *current* branch, which would point these
+# at whatever branch you happen to be standing on.
+#
+# `just` shows only the LAST comment line of a block in `just --list`, so each recipe
+# keeps its one-line summary immediately above it.
+
+# Apply .github/branch-protection.json to `main`, making `Nix Eval` a required check.
 protect-main:
   gh api --method PUT repos/{owner}/{repo}/branches/main/protection \
     --input .github/branch-protection.json
 
-# Remove branch protection from `main`. This is the documented undo for protect-main
-# and the escape hatch if the required context is ever wrong.
+# Remove all branch protection from `main` — the documented undo for protect-main.
 unprotect-main:
   gh api --method DELETE repos/{owner}/{repo}/branches/main/protection
 
-# Show the protection actually applied to `main`. Note the API asymmetry: PUT takes
-# enforce_admins as a plain boolean, GET returns it as an object, {"enabled": true}.
+# Note the API asymmetry when reading the output: GET returns enforce_admins as an object,
+# {"enabled": true}, where PUT takes a plain boolean.
+
+# Print `main`'s live branch protection as GitHub currently has it.
 show-protection:
   gh api repos/{owner}/{repo}/branches/main/protection
 
