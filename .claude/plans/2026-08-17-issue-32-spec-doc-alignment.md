@@ -174,7 +174,7 @@ indented `<churn>  <path>` line per ranked file, binaries suffixed ` (binary)`.
 (**amended by issue 32's alignment spec, D2** —
 `.claude/specs/2026-08-17-issue-32-spec-doc-alignment-design.md`; this paragraph
 originally read "the same content", which was never true of the shipped helper.) The
-omission is deliberate: every line of the text form is a measured row, whereas the range
+omission is deliberate: every line of the text form is measured output, whereas the range
 is caller-supplied *input*, and a quoter carries it in the invocation printed above the
 output — the pattern `.claude/specs/2026-08-16-ship-issue-degradation-gate-evidence.md`
 already demonstrates. `--format json` echoes `range` because it is the machine record and
@@ -205,8 +205,8 @@ present = [
     "(**amended by issue 32's alignment spec, D2** —"
     " `.claude/specs/2026-08-17-issue-32-spec-doc-alignment-design.md`; this paragraph"
     ' originally read "the same content", which was never true of the shipped helper.)',
-    "The omission is deliberate: every line of the text form is a measured row, whereas"
-    " the range is caller-supplied *input*",
+    "The omission is deliberate: every line of the text form is measured output,"
+    " whereas the range is caller-supplied *input*",
     "`--format json` echoes `range` because it is the machine record",
 ]
 absent = [
@@ -231,7 +231,8 @@ git diff --stat -- .claude/specs/2026-08-16-diff-scope-helper-design.md
 ```
 
 Expected: exactly one file, and the insertions/deletions confined to the two passages (roughly
-`+13 -4`; the two sub-bullets and the ledger table must not appear in `git diff -U0` output).
+`+15 -4` — item 1 replaces one line with four, item 2 replaces three with eleven; the two
+sub-bullets and the ledger table must not appear in `git diff -U0` output).
 
 - [ ] **Step 5: Commit**
 
@@ -281,19 +282,20 @@ Reading it the way the gate does: `64` product lines and `3` product files, both
 under ≤1,000 / ≤20, so this branch's own size prerequisite is satisfied. The `excluded: …
 ```
 
-**Apply verbatim** — replace only that first sentence, then re-flow the paragraph at the file's
-~90-column width without altering any other word:
+**Apply verbatim** — replace the whole paragraph (its eight original lines, 32–39). Only the
+first sentence changes wording; every later word is preserved exactly, but the paragraph is
+re-flowed at the file's ~90-column width, so every one of its lines moves:
 
 ```
 Reading the snapshot the way the gate does: at `224954b3`, `64` product lines and `3`
 product files, both under ≤1,000 / ≤20, so this branch's own size prerequisite is
 satisfied — see the post-merge reading below for the figure at the merged tip. The
-`excluded: … 2 artifact` count is the spec and the plan — the two artifact files this run had committed when
-the range was measured. The invocation also names this evidence file, which is still uncommitted
-at that moment and so matches no row and contributes nothing; naming it costs nothing (an
-unmatched `--artifact-path` is deliberately not an error, per D3) and it starts counting on any
-re-run made after this document is committed. One path per file throughout, never
-`<specDir>`/`<planDir>`.
+`excluded: … 2 artifact` count is the spec and the plan — the two artifact files this run
+had committed when the range was measured. The invocation also names this evidence file,
+which is still uncommitted at that moment and so matches no row and contributes nothing;
+naming it costs nothing (an unmatched `--artifact-path` is deliberately not an error, per
+D3) and it starts counting on any re-run made after this document is committed. One path
+per file throughout, never `<specDir>`/`<planDir>`.
 ```
 
 - [ ] **Step 2: Append the post-merge section**
@@ -342,7 +344,8 @@ git diff -U0 -- .claude/specs/2026-08-16-ship-issue-degradation-gate-evidence.md
   | grep '^-' | grep -v '^---'
 ```
 
-Expected: **only** the removed lines of the one re-scoped sentence's original wrapping. If any
+Expected: **only** lines belonging to the `Reading it the way the gate does: …` paragraph —
+all eight of them, because re-scoping its first sentence re-flows the whole paragraph. If any
 line of the fenced command, the fenced `64 lines` output, or the `Recorded 2026-08-17` /
 `Re-run this command fresh at ship time` paragraphs appears as a `-` line, the D4 invariant is
 broken — restore it before continuing.
@@ -432,7 +435,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Produces: module constant
   `INVESTIGATE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/investigate.md"` and
   class attribute `cls.investigate: str` on `WorkflowSkillContractsTest`, plus the method
-  `test_phase0_size_note_delegates_counting_to_diff_scope(self) -> None`. No later task
+  `test_phase0_size_note_delegates_counting_to_diff_scope(self)` — no return annotation,
+  matching every other method in that file. No later task
   consumes them.
 
 **Invariants:**
@@ -494,7 +498,7 @@ degradation-gate contracts:
             # The estimate/count split: Phase 0 has no range, so its number is an
             # estimate; the helper is authoritative only once a range exists.
             # Collapsing these two moments is the defect issue 32 fixed.
-            "estimate",
+            "the Phase-0 number is an *estimate*",
             "Once the branch has a range",
         ):
             with self.subTest(fragment=fragment):
@@ -517,10 +521,11 @@ python3 -m unittest -v \
   -k test_phase0_size_note_delegates_counting_to_diff_scope
 ```
 
-Expected: **FAIL**, on the `assertIn` subtests for
-`` "`diff-scope` is the accounting authority" `` and `"measure, never hand-count"` and on the
-`assertNotIn` subtest for `numstat` — the base line reads
-`when estimating or later counting scope via \`git diff --numstat\`, …`. A run that passes here
+Expected: **FAIL**, on exactly seven subtests (verified at `de83938`) — six `assertIn`
+fragments, which is every one of them except `"still count"`, a clause the base line already
+carries verbatim; plus the `assertNotIn` subtest for `numstat`, because the base line reads
+`when estimating or later counting scope via \`git diff --numstat\`, …`. The `1,000` and `≤20`
+absence subtests pass at base and must keep passing after the rewrite. Fewer failures than that
 means the doc edit was applied out of order; revert it and re-run before continuing.
 
 - [ ] **Step 3: Rewrite the C4 note**
@@ -602,3 +607,25 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
   this pathspec is scoped to the files the plan owns.)
 - No `.nix` file, no `diff-scope.py`, no `test_diff_scope.py`, and no `patches/` file appears in
   the branch's diff.
+
+---
+
+## Standards review (Phase 5)
+
+**Provenance.** One fresh `reviewer` pass on Opus/high with no inherited context, run against
+worktree HEAD `6a8c636` on base `de83938`, grading the plan alone (read-only) against
+`from-issue`'s `REVIEW-CONTRACT.md`. The native reviewer was used in place of the Codex
+`plan-review` path as a deliberate timebox fallback, per D10 — not a Codex failure. Verdict:
+findings, **zero blocking**.
+
+**Dispositions.** Every finding was re-verified against the live worktree before the plan was
+touched; none was applied on the reviewer's word alone.
+
+| Finding | Disposition |
+|---------|-------------|
+| Should-fix: Task 3 Step 1's `assertIn("estimate")` is vacuous — `investigate.md` step 5 already reads `**Scope-size estimate**` | **Applied.** Confirmed by executing the fragment list against the base file. Pin widened to the whole clause; per D11 |
+| Should-fix: Task 3 Step 2 mis-states the fail-at-base expectation as three subtests | **Applied.** Executed the amended fragment list at `de83938`: seven subtests fail (six `assertIn`, all but `"still count"`, plus `assertNotIn("numstat")`); `1,000` and `≤20` pass at base. Step 2 now states that count |
+| Should-fix: Task 2 Step 1's dictated block leaves a ~112-column line and silently deletes original line 34, contradicting Step 3's expectation | **Applied.** Block re-flowed so every line clears ~90 columns; Step 1 now says all eight original lines are replaced, and Step 3's expectation widened to the whole paragraph; per D12 |
+| Discussion: Task 1's dictated "every line of the text form is a measured row" is inaccurate — the `product:` and `excluded:` lines are not rows | **Applied.** This slice exists to stop specs asserting false things, so the same bar applies to the prose it writes. Changed to "is measured output" in both the dictated block and the gate's assertion string |
+| Discussion: Task 1 Step 4's `git diff --stat` expectation of `+13 -4` is off | **Applied.** Corrected to `+15 -4` (item 1 one line to four, item 2 three to eleven) |
+| Discussion: Task 3's Interfaces block annotates the new method `-> None`, unlike every other method in that file | **Applied.** Annotation dropped so the implementer copies the file's style |
