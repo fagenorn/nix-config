@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import unittest
 
@@ -24,6 +25,14 @@ SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
+SHIP_ISSUE_EVALS = (
+    REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json"
+)
+
+# The Phase-5 degradation boundary, spelled once for the whole module: the skill
+# and its eval are both checked against these two strings so they cannot drift.
+GATE_LINE_BOUNDARY = "≤1,000 product lines"
+GATE_FILE_BOUNDARY = "≤20 product files"
 
 
 def nested_workflow_documents():
@@ -44,6 +53,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.certification = CERTIFICATION.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
+        cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
+        cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -555,6 +566,64 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "call the bridge current",
         )
 
+    def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
+        # The gate states a policy and calls the helper; the accounting itself
+        # lives in diff-scope.py and is not restated here.
+        gate = self.section(
+            self.ship_issue,
+            "**Pick the path first.**",
+            "**Merge-delta check (degraded path).**",
+        )
+        for fragment in (
+            GATE_LINE_BOUNDARY,
+            GATE_FILE_BOUNDARY,
+            # the whole invocation, not its pieces: a gate that named only
+            # <spec_path> would satisfy a bare "--artifact-path" check while
+            # under-naming this run's artifacts and inflating the count (D3).
+            "diff-scope $BASE_SHA..$HEAD_SHA --format text"
+            " --artifact-path <spec_path> --artifact-path <plan_path>",
+            "No measurement",
+            "is not a small diff",
+            "a historical artifact that is itself the requested product still counts",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, gate)
+        for absent in ("--numstat", "400", "--root"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, gate)
+        # Each anchor carries its prerequisite's polarity: bare "manual conflict
+        # escalation" / "`risky` label" would still match a gate that demanded
+        # the opposite condition, so an inverted prerequisite would pass.
+        self.assert_ordered(
+            gate,
+            "`review_state` is `clean`",
+            "needed no manual conflict escalation",
+            GATE_LINE_BOUNDARY,
+            "does NOT carry the `risky` label",
+            "`review.criticalPaths` glob",
+        )
+
+    def test_ship_issue_eval_restates_the_gate_boundary_it_grades(self):
+        # Eval 1 grades a whole phase walk; its one degradation clause must
+        # quote the same boundary the skill states, or a graded walk can be
+        # "correct" against a number the skill no longer carries.
+        expected = next(
+            case for case in self.ship_issue_evals["evals"] if case["id"] == 1
+        )["expected_output"]
+        # The delegation is pinned as a whole affirmative clause: a bare
+        # "diff-scope" token also matches a clause saying the boundary is *not*
+        # measured with the helper, which is the inversion this test guards.
+        for fragment in (
+            GATE_LINE_BOUNDARY,
+            GATE_FILE_BOUNDARY,
+            f"the diff is small ({GATE_LINE_BOUNDARY} / {GATE_FILE_BOUNDARY},"
+            " measured with `diff-scope` rather than hand-counted numstat"
+            " arithmetic)",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, expected)
+        self.assertNotIn("≤400", expected)
+
     def test_helper_binaries_resolve_from_bare_names(self):
         # Skills invoke workflow-state/agent-evidence by bare name. The Nix
         # module must put ~/.agents/bin on PATH, and each contract must anchor
@@ -569,6 +638,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for name, text in (("research", self.research), ("certification", self.certification)):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/agent-evidence", text)
+        with self.subTest(skill="ship-issue"):
+            self.assertIn("~/.agents/bin/diff-scope", self.ship_issue)
 
     def test_research_requires_corroborated_validated_observations(self):
         heading = "## Live availability and blocking evidence"
