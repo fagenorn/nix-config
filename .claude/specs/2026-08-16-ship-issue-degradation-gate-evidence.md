@@ -64,8 +64,10 @@ excluded: 0 lockfile, 0 generated, 3 artifact
   2  home/common/agent-skills/skills/ship-issue/evals/evals.json
 ```
 
-The gate's conclusion is unchanged: `76` ≤ 1,000 and `3` ≤ 20 — the same verdict by the same
-margin. The third excluded artifact is this evidence file itself, now committed, exactly as the
-snapshot's own prose predicted ("it starts counting on any re-run made after this document is
-committed"). This addendum is also the fresh run the paragraph above asks for, made at the
-branch's final commit.
+The gate's conclusion is unchanged: `76` ≤ 1,000 and `3` ≤ 20 — the same verdict, still
+with room to spare: the file margin is identical (17 of 20 free) and the line margin is
+twelve lines narrower than the snapshot's (924 of 1,000 free, not 936). The third excluded
+artifact is this evidence file itself, now committed, exactly as the snapshot's own prose
+predicted ("it starts counting on any re-run made after this document is committed"). This
+addendum is also the fresh run the paragraph above asks for, made at the branch's final
+commit.
