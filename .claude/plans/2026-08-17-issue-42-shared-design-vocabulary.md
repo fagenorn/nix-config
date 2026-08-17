@@ -140,23 +140,39 @@ row, cited inline. Rows load-bearing per task:
 Run from the worktree root, before creating anything:
 
 ```sh
-test ! -e home/common/agent-skills/skills/codebase-design && echo "ABSENT AT BASE"
+set -euo pipefail
+test ! -e home/common/agent-skills/skills/codebase-design
+echo "ABSENT AT BASE: no repository-managed package"
 ```
 
-Expected: prints `ABSENT AT BASE` — no repository-managed package exists yet.
+Expected: prints `ABSENT AT BASE: no repository-managed package` — no package exists yet.
 
 Then build the generation from the current tree and confirm neither agent surface carries the skill:
 
 ```sh
+set -euo pipefail
 GEN0=$(nix --extra-experimental-features 'nix-command flakes' build \
   '.#darwinConfigurations.mbp.config.home-manager.users.anis.home-files' \
-  --no-link --print-out-paths 2>/dev/null | tail -1)
-ls "$GEN0/.agents/skills/" | grep -qx codebase-design || echo "CODEX SURFACE: ABSENT AT BASE"
-ls "$GEN0/.claude/skills/" | grep -qx codebase-design || echo "CLAUDE SURFACE: ABSENT AT BASE"
+  --no-link --print-out-paths | tail -1)
+test -n "$GEN0" && test -d "$GEN0"
+# The parent surfaces must exist, or "the skill is absent" would be vacuously
+# true of an empty or failed generation.
+test -d "$GEN0/.agents/skills"
+test -d "$GEN0/.claude/skills"
+for surface in .agents/skills .claude/skills; do
+  if test -e "$GEN0/$surface/codebase-design"; then
+    echo "UNEXPECTEDLY PRESENT AT BASE: $surface/codebase-design" >&2; exit 1
+  fi
+done
+echo "BOTH SURFACES: ABSENT AT BASE (parents present)"
 ```
 
-Expected: both lines print. (`anis` in that attribute path is `myvars.username` from
-`vars/default.nix`; `mbp` is the darwin host.)
+Expected: prints `BOTH SURFACES: ABSENT AT BASE (parents present)` and exits 0. (`anis` in that
+attribute path is `myvars.username` from `vars/default.nix`; `mbp` is the darwin host.)
+
+This block **fails closed**: Nix stderr is not suppressed, `pipefail` propagates a build failure
+through `tail`, and the generation and both parent directories are asserted to exist before absence
+is claimed. A failed or empty build aborts the step rather than printing a false "absent".
 
 Paste both observations into the task record — they are the evidence for two acceptance criteria.
 
@@ -313,35 +329,57 @@ notice. The preamble deliberately says "licence" in prose so it does not collide
 
 - [ ] **Step 6: Verify the fidelity invariants**
 
-```sh
-# Byte-identical files
-diff <(git -C "$UPSTREAM" show "$REV:$SRC/DEEPENING.md")       "$DEST/DEEPENING.md"       && echo "DEEPENING: IDENTICAL"
-diff <(git -C "$UPSTREAM" show "$REV:$SRC/agents/openai.yaml") "$DEST/agents/openai.yaml" && echo "OPENAI: IDENTICAL"
+Every invariant below is **asserted**, not printed: the block exits non-zero the moment one fails.
+Do not replace an assertion with an `echo` of its status — a reported count is not a gate.
 
-# Exactly the named adaptations, counted
-echo "SKILL removed: $(diff <(git -C "$UPSTREAM" show "$REV:$SRC/SKILL.md") "$DEST/SKILL.md" | grep -c '^<')"
-echo "SKILL added:   $(diff <(git -C "$UPSTREAM" show "$REV:$SRC/SKILL.md") "$DEST/SKILL.md" | grep -c '^>')"
-echo "TWICE removed: $(diff <(git -C "$UPSTREAM" show "$REV:$SRC/DESIGN-IT-TWICE.md") "$DEST/DESIGN-IT-TWICE.md" | grep -c '^<')"
-echo "TWICE added:   $(diff <(git -C "$UPSTREAM" show "$REV:$SRC/DESIGN-IT-TWICE.md") "$DEST/DESIGN-IT-TWICE.md" | grep -c '^>')"
+```sh
+set -euo pipefail
+
+# Byte-identical files (diff itself is the assertion)
+diff <(git -C "$UPSTREAM" show "$REV:$SRC/DEEPENING.md")       "$DEST/DEEPENING.md"
+diff <(git -C "$UPSTREAM" show "$REV:$SRC/agents/openai.yaml") "$DEST/agents/openai.yaml"
+echo "DEEPENING + OPENAI: IDENTICAL"
+
+# Exactly the named adaptations, asserted
+assert_count() {  # <label> <expected> <actual>
+  test "$3" -eq "$2" || { echo "FIDELITY: $1 expected $2, got $3" >&2; exit 1; }
+}
+skill_diff=$(diff <(git -C "$UPSTREAM" show "$REV:$SRC/SKILL.md") "$DEST/SKILL.md" || true)
+twice_diff=$(diff <(git -C "$UPSTREAM" show "$REV:$SRC/DESIGN-IT-TWICE.md") "$DEST/DESIGN-IT-TWICE.md" || true)
+assert_count "SKILL removed" 1 "$(printf '%s\n' "$skill_diff" | grep -c '^<' || true)"
+assert_count "SKILL added"   3 "$(printf '%s\n' "$skill_diff" | grep -c '^>' || true)"
+assert_count "TWICE removed" 1 "$(printf '%s\n' "$twice_diff" | grep -c '^<' || true)"
+assert_count "TWICE added"   5 "$(printf '%s\n' "$twice_diff" | grep -c '^>' || true)"
+echo "ADAPTATION COUNTS: EXACT"
 
 # The upstream notice is reproduced verbatim from the `MIT License` anchor onward
-diff <(git -C "$UPSTREAM" show "$REV:LICENSE") \
-     <(sed -n "$(grep -n '^MIT License$' "$DEST/LICENSE" | cut -d: -f1),\$p" "$DEST/LICENSE") \
-  && echo "LICENSE NOTICE: VERBATIM"
+anchor=$(grep -n '^MIT License$' "$DEST/LICENSE" | cut -d: -f1)
+test "$(printf '%s\n' "$anchor" | wc -l)" -eq 1   # exactly one anchor line
+diff <(git -C "$UPSTREAM" show "$REV:LICENSE") <(sed -n "$anchor,\$p" "$DEST/LICENSE")
+echo "LICENSE NOTICE: VERBATIM"
 
-# Prohibitions
-grep -rn 'Agent(' "$DEST" ; echo "Agent( status: $?"
-grep -n 'CONTEXT\.md' "$DEST"/*.md ; echo "CONTEXT.md status: $?"
-grep -c 'Permission is hereby granted' "$DEST/SKILL.md"
+# Prohibitions — each must match nothing; a match prints the offender and aborts.
+if grep -rn 'Agent(' "$DEST"; then
+  echo "PROHIBITED: a literal Agent( appears in the package (D6)" >&2; exit 1
+fi
+if grep -n 'CONTEXT\.md' "$DEST"/*.md; then
+  echo "PROHIBITED: a markdown file still references CONTEXT.md (D5)" >&2; exit 1
+fi
+if grep -q 'Permission is hereby granted' "$DEST/SKILL.md"; then
+  echo "PROHIBITED: MIT notice text appears in SKILL.md (D2)" >&2; exit 1
+fi
+echo "PROHIBITIONS: CLEAN"
 ```
 
-Expected, exactly:
-- `DEEPENING: IDENTICAL`, `OPENAI: IDENTICAL`, `LICENSE NOTICE: VERBATIM`
-- `SKILL removed: 1`, `SKILL added: 3`
-- `TWICE removed: 1`, `TWICE added: 5`
-- both `grep` calls print no matching lines, then `status: 1`. The `CONTEXT.md` grep is deliberately
-  scoped to `*.md`: `LICENSE` names the repointed reference on purpose and must not be caught here.
-- the last `grep -c` prints `0`
+Expected: `DEEPENING + OPENAI: IDENTICAL`, `ADAPTATION COUNTS: EXACT`, `LICENSE NOTICE: VERBATIM`,
+`PROHIBITIONS: CLEAN`, and exit 0. Any other outcome is a real failure.
+
+Two shell details matter here and are not stylistic. First, a bare `grep -c` that finds nothing
+exits 1 while one that finds forbidden text exits 0, so `grep …; echo $?` reports the *inverse* of
+the invariant — never write the prohibitions that way. Second, `set -e` deliberately does **not**
+abort on a command whose status is inverted with `!`, so `! grep …` would also fail open; the `if …
+then exit 1; fi` form above is what actually gates. The `CONTEXT.md` grep stays scoped to `*.md`:
+`LICENSE` names the repointed reference on purpose and must not be caught here.
 
 Then read the two non-empty diffs and confirm by eye that each hunk is one of the four adaptations in
 Step 4 and nothing else.
@@ -355,24 +393,29 @@ just build
 Expected: the darwin configuration evaluates and builds, exit 0.
 
 ```sh
+set -euo pipefail
 GEN=$(nix --extra-experimental-features 'nix-command flakes' build \
   '.#darwinConfigurations.mbp.config.home-manager.users.anis.home-files' \
   --no-link --print-out-paths | tail -1)
+test -n "$GEN" && test -d "$GEN"
 
 for surface in .agents/skills/codebase-design .claude/skills/codebase-design; do
   for f in SKILL.md DEEPENING.md DESIGN-IT-TWICE.md LICENSE agents/openai.yaml; do
-    test -f "$GEN/$surface/$f" || echo "MISSING $surface/$f"
+    test -f "$GEN/$surface/$f" || { echo "MISSING $surface/$f" >&2; exit 1; }
   done
 done
-test -L "$GEN/.agents/skills/codebase-design" || echo "CODEX SURFACE IS NOT A WHOLE-DIRECTORY LINK"
+test -L "$GEN/.agents/skills/codebase-design" \
+  || { echo "CODEX SURFACE IS NOT A WHOLE-DIRECTORY LINK" >&2; exit 1; }
 { test -d "$GEN/.claude/skills/codebase-design" && test ! -L "$GEN/.claude/skills/codebase-design"; } \
-  || echo "CLAUDE SURFACE IS NOT A REAL DIRECTORY"
-echo "DEPLOYMENT SEAM CHECKED"
+  || { echo "CLAUDE SURFACE IS NOT A REAL DIRECTORY" >&2; exit 1; }
+echo "DEPLOYMENT SEAM VERIFIED"
 ```
 
-Expected: no `MISSING` and no `NOT A` lines — only `DEPLOYMENT SEAM CHECKED`. That shows all five
-files, including the `agents/` subdirectory, reaching both surfaces: Codex as one symlink to the whole
-store directory, Claude Code as a real directory of individual store links.
+Expected: `DEPLOYMENT SEAM VERIFIED` and exit 0. Like Step 1 this block **fails closed** — every
+check aborts the block instead of printing a diagnostic and continuing, so the success line can only
+be reached when all twelve assertions held. That shows all five files, including the `agents/`
+subdirectory, reaching both surfaces: Codex as one symlink to the whole store directory, Claude Code
+as a real directory of individual store links.
 
 `just build` alone is not sufficient here and must not be claimed as sufficient: its `result` symlink
 is the system derivation and the home tree is not navigable from it, which is why the generation is
@@ -387,12 +430,15 @@ CI's `Nix Eval` job (which evaluates `nixosConfigurations.anis-desktop` and is t
 - [ ] **Step 8: Confirm no Nix file moved**
 
 ```sh
-git status --porcelain
+git status --porcelain --untracked-files=all
 ```
 
-Expected: exactly five new untracked/added paths under
-`home/common/agent-skills/skills/codebase-design/` and nothing else. If any `.nix` file appears here,
-stop and report it as a defect — the constraint is that no Nix edit is needed (per spec, Solution).
+Expected: exactly five new paths, all under `home/common/agent-skills/skills/codebase-design/`
+(`SKILL.md`, `DEEPENING.md`, `DESIGN-IT-TWICE.md`, `LICENSE`, `agents/openai.yaml`), and nothing
+else. `--untracked-files=all` is required: plain `git status --porcelain` collapses a wholly
+untracked directory to the single entry `?? …/codebase-design/`, which would not show the five
+files and would hide a stray sixth. If any `.nix` file appears here, stop and report it as a
+defect — the constraint is that no Nix edit is needed (per spec, Solution).
 
 - [ ] **Step 9: Commit**
 
@@ -454,16 +500,20 @@ CODEBASE_DESIGN_FILES = (
     "LICENSE",
     "agents/openai.yaml",
 )
-CANONICAL_DESIGN_TERMS = (
-    "Module",
-    "Interface",
-    "Implementation",
-    "Depth",
-    "Seam",
-    "Adapter",
-    "Leverage",
-    "Locality",
-)
+# Each canonical term maps to a discriminating clause of its definition — enough
+# that rewriting the meaning fails the contract, short enough that reflowing the
+# paragraph around it does not. Every clause is verbatim upstream text and
+# apostrophe-free, so no quoting subtleties travel with it.
+CANONICAL_DESIGN_TERMS = {
+    "Module": "anything with an interface and an implementation",
+    "Interface": "everything a caller must know to use the module correctly",
+    "Implementation": "inside a module, its body of code",
+    "Depth": "the amount of behaviour a caller (or test) can exercise per unit of interface",
+    "Seam": "a place where you can alter behaviour without editing in that place",
+    "Adapter": "a concrete thing that satisfies an interface at a seam",
+    "Leverage": "more capability per unit of interface they learn",
+    "Locality": "change, bugs, knowledge, and verification concentrate in one place",
+}
 
 
 def skill_frontmatter(text):
@@ -541,22 +591,36 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
             "DEEPENING.md": self.deepening,
             "DESIGN-IT-TWICE.md": self.twice,
         }
+        package_root = CODEBASE_DESIGN_DIR.resolve()
         checked = 0
         for name, text in documents.items():
             for target in relative_markdown_links(text):
                 checked += 1
                 with self.subTest(document=name, target=target):
+                    # Resolve against the containing document, then require the
+                    # result to stay inside the package. `exists()` alone would
+                    # let a `../../…` traversal pass by reaching a real file
+                    # outside the package, which is not a resolving link.
+                    resolved = (package_root / name).parent.joinpath(target).resolve()
                     self.assertTrue(
-                        (CODEBASE_DESIGN_DIR / target).exists(),
-                        f"{name} links to {target}, which is not in the package",
+                        resolved.is_relative_to(package_root),
+                        f"{name} links to {target}, which escapes the package",
+                    )
+                    self.assertTrue(
+                        resolved.is_file(),
+                        f"{name} links to {target}, which is not a file in the package",
                     )
         self.assertGreaterEqual(checked, 9, "the link scan found nothing to check")
 
     def test_glossary_defines_every_canonical_term(self):
+        # Pin the definitions, not just the headings: a heading-only assertion
+        # stays green while every definition is deleted or rewritten, which is
+        # exactly the drift this contract exists to catch.
         glossary = self.glossary()
-        for term in CANONICAL_DESIGN_TERMS:
+        for term, definition in CANONICAL_DESIGN_TERMS.items():
             with self.subTest(term=term):
                 self.assertIn(f"\n**{term}**", glossary)
+                self.assertIn(definition, glossary)
 
     def test_glossary_forbids_substituting_the_canonical_terms(self):
         glossary = self.glossary()
@@ -684,9 +748,13 @@ This reproduces the starting-commit condition: the class exists, the package doe
 
 ```sh
 HIDE=$(mktemp -d)
-mv home/common/agent-skills/skills/codebase-design "$HIDE/" \
-  && python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py 2>&1 | tail -20
+# The trap restores the package even if the run is interrupted, so an aborted
+# falsification cannot leave the committed package sitting in a temp directory.
+trap 'test -e "$HIDE/codebase-design" && mv "$HIDE/codebase-design" home/common/agent-skills/skills/' EXIT
+mv home/common/agent-skills/skills/codebase-design "$HIDE/"
+python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py 2>&1 | tail -20
 mv "$HIDE/codebase-design" home/common/agent-skills/skills/
+trap - EXIT
 git status --porcelain home/common/agent-skills/skills/codebase-design
 ```
 
@@ -726,10 +794,13 @@ Expected: `Ran 212 tests` … `OK` (the baseline is 200), and `agent-model-matri
 output unchanged. A diff to `home/common/agent-skills/model-matrix.json` would mean D6 was violated:
 
 ```sh
-git diff --stat b344aaf..HEAD -- home/common/agent-skills/model-matrix.json
+git diff --stat b344aaf -- home/common/agent-skills/model-matrix.json
 ```
 
-Expected: no output.
+Expected: no output. Note the single `b344aaf`, not the range `b344aaf..HEAD`: this step runs
+*before* the task's commit, so a range comparison would compare committed history only and miss a
+staged or unstaged edit sitting in the worktree. `git diff <base>` compares the base against the
+working tree and therefore covers committed, staged, and unstaged state together.
 
 - [ ] **Step 5: Commit**
 
@@ -782,7 +853,8 @@ A directory under `skills/` may be a **vendored adaptation** of an upstream skil
 authored one. Such a directory carries the upstream `LICENSE` inside it as its provenance record: the
 upstream URL, the pinned revision, the date it was inspected, and every way the adaptation departs
 from upstream, followed by the upstream notice reproduced unmodified. Keeping the notice in that file
-and out of `SKILL.md` keeps it out of every context that loads the skill.
+and out of `SKILL.md` keeps it out of the body that loads with the skill, while `SKILL.md` still
+links to it so the provenance is one hop away.
 
 Nothing fetches or refreshes these at build time — there is no flake input for the upstream and no
 synchronisation. A refresh is a manual comparison against a newer revision: re-apply the recorded
@@ -812,7 +884,7 @@ just agent-model-matrix 2>&1 | tail -5
 Expected: build exits 0; `Ran 212 tests` … `OK`; model matrix passes.
 
 ```sh
-git diff --stat b344aaf..HEAD -- \
+git diff --stat b344aaf -- \
   home/common/agent-skills/default.nix \
   home/common/claude-code/default.nix \
   home/common/codex/default.nix \
@@ -820,8 +892,10 @@ git diff --stat b344aaf..HEAD -- \
 ```
 
 Expected: **no output.** This is the acceptance criterion "no special-case distribution logic added
-for this skill" — the whole distribution change was creating a directory. Run this gate on the branch
-before any ship-time sync merge; the pathspec keeps the plan and spec artifacts out of the range.
+for this skill" — the whole distribution change was creating a directory. As in Task 2, the base is
+given as a single commit rather than the range `b344aaf..HEAD`, so the gate sees uncommitted edits
+too; this step runs before the task's commit. Run it on the branch before any ship-time sync merge;
+the pathspec keeps the plan and spec artifacts out of the comparison.
 
 - [ ] **Step 5: Commit**
 
@@ -829,3 +903,22 @@ before any ship-time sync merge; the pathspec keeps the plan and spec artifacts 
 git add home/common/agent-skills/README.md
 git commit -m "docs(agent-skills): record the vendored-skill convention"
 ```
+
+---
+
+## Standards review provenance
+
+- **Reviewer:** Codex, in an isolated read-only runtime (fresh `CODEX_HOME`, approval policy
+  `never`, sandbox `read-only`). No native fallback was needed.
+- **Base SHA:** `b344aaf527920dce8a47c2b9a11244234f2383d0`; plan reviewed at `14eafc1`.
+- **Focus:** none configured (`codex.planReview.focus` unset).
+- **Findings:** 3 Blocking, 4 Should-fix, 3 Discussion. **7 accepted and applied** (all Blocking and
+  all Should-fix), **0 rejected**, **0 deferred**. Of the Discussion items, one was a read-status
+  report, one recommended a shell `trap` around the temporary-removal falsification and was applied,
+  and one confirmed the scope and activation boundaries with no action.
+- **Verification:** every finding was re-checked against the live plan and spec at `14eafc1` before
+  being applied; none were stale. The reviewer could not reach `api.github.com`, so it worked from
+  the supplied issue body and verbatim acceptance criteria rather than a live fetch.
+- **Ledger:** the two non-obvious dispositions are recorded as spec rows **D15** (gates fail closed
+  and compare against the working tree) and **D16** (the contract pins definitions and package
+  containment). The remaining applied findings were routine corrections and get no row.
