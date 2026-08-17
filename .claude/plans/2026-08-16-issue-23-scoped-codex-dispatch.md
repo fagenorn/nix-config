@@ -1095,7 +1095,7 @@ Filled in as the plan executes. The eval-3 grade is required (D17); the rest is 
 
 | What | Result |
 |---|---|
-| Eval 3 manual grade (`just evals codex-collaboration 3`, plan-only) | _pending — record verdict, model, date, missed clauses_ |
+| Eval 3 manual grade (`just evals codex-collaboration 3`, plan-only) | **PASS** — 2026-08-17. Graded against `expected_output` at `5bb2c2d`. Subject: a fresh Opus agent given only the eval `prompt` plus the repo, barred from opening any `evals/` file, so it never saw the answer key; grader: a separate Opus reviewer. 13 of 13 load-bearing clauses HIT, 0 MISS, 0 PARTIAL, and nothing contradicting `DIFF-REVIEW.md`/`SKILL.md` at HEAD. No eval defects found. Caveat: subject and grader are both agents, not humans — D17 asks for a human read, so this records an agent-performed grade, not a human one. |
 
 ---
 
