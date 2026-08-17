@@ -4,8 +4,11 @@ Issue: https://github.com/fagenorn/nix-config/issues/30
 
 Grounding (cited, not re-litigated): `CLAUDE.md` — `~/.claude/settings.json` is generated from the
 `settings` attrset in `home/common/claude-code/default.nix` and materialised as a writable copy by an
-activation script, so the module is the only supported edit site; verification for this repo is
-`just build` (exit 0); "All workflows go through the `justfile`".
+activation script, so the module is the only supported edit site; `just build` (a successful Nix
+evaluation + build) is the **local** verification step and there is no unit-test suite for the Nix
+configs, while `Nix Eval` in `.github/workflows/ci.yaml` "is the context `.github/branch-protection.json`
+makes required on `main`" and CI does not evaluate `darwinConfigurations.mbp`; "All workflows go through
+the `justfile`", which is where `protect-main` / `unprotect-main` / `show-protection` already live.
 `~/.agents/standards/the-bar.md` — *Production-grade by default*, *DRY*, *YAGNI*, *Fail loud*,
 *Truthful terminal states*, *Defense in depth*, *Verify before claiming done*.
 `.out-of-scope/ungated-agent-merges.md` — the standing rejection this issue is the positive half of.
@@ -162,16 +165,24 @@ reach that shape — it would be a rule that looks safer and does nothing, which
 broader rule because it also removes the pressure to think about what actually gates the merge.
 
 The consequence is that `--admin` is reachable. That is admissible, and only because of a fact
-established elsewhere and verified there: `.github/branch-protection.json` sets `enforce_admins: true`
-with `Nix Eval` as a required context, and under that setting `gh pr merge` **including `--admin`** is
-refused by GitHub until the check is green. So the merge is gated by the server, not by the
-classifier — which is exactly the disposition `.out-of-scope/ungated-agent-merges.md` recorded:
-"Merge safety must come from a required status check on the PR, not from the permission classifier or
-skill-internal gates alone."
+established elsewhere and verified there: with `enforce_admins: true` and `Nix Eval` as a required
+context, `gh pr merge` **including `--admin`** is refused by GitHub until the check is green. So the
+merge is gated by the server, not by the classifier — which is exactly the disposition
+`.out-of-scope/ungated-agent-merges.md` recorded: "Merge safety must come from a required status check
+on the PR, not from the permission classifier or skill-internal gates alone."
 
-This entry is therefore coupled to that gate, and the coupling is one-directional and load-bearing:
-**if `main`'s branch protection is ever removed or `enforce_admins` is set to `false`, this entry must
-be removed in the same change.** The module comment says so at the entry.
+One distinction is load-bearing and easy to blur. `.github/branch-protection.json` is the *desired*
+state; it is a file in this repo and it gates nothing by existing. What gates the merge is the
+protection **applied on GitHub**, which `just protect-main` puts there and `just unprotect-main` takes
+away — the sibling CI work deliberately made that rollout a separate, post-merge step, so the two can
+legitimately disagree. A spec that cited only the committed JSON would be asserting the gate from the
+wrong artifact. The live setting was confirmed at this issue's investigation (2026-08-17: `Nix Eval`
+required, `strict: false`, `enforce_admins: true`); re-confirming it with `just show-protection` is a
+ship-time step, listed under *Test seams*, not a claim this document can carry.
+
+The entry is therefore coupled to the live gate, and the coupling is one-directional: **if `main`'s
+applied protection is ever removed or `enforce_admins` is set to `false`, this entry must be removed
+in the same change.** The module comment says so at the entry.
 
 **`Bash(git worktree remove:*)` — reaches `--force`, and is still bounded.** `git worktree remove`
 deletes a worktree directory and its administrative entry. It does not delete the branch, and it does
@@ -227,6 +238,15 @@ to know which denials it did not fix.
 - **R4 — `git push`, `gh pr create`, `gh issue close`.** All are part of `ship-issue`'s authorized
   chain and none is named by this issue.
 - **R5 — `Agent`.** See below.
+- **R6 — an unquantified risk that some Bash entries are dropped too.** The auto-mode drop is
+  specified by *category*, not by enumeration: blanket `Bash(*)`, wildcarded interpreters such as
+  `Bash(python*)`, package-manager run commands, and `Agent` rules, with "narrow rules like
+  `Bash(npm test)` carry over". None of the fifteen Bash entries here is in a named category — each is
+  a one-subcommand prefix over `git` or `gh`, neither of which is an interpreter or a package manager.
+  But "grants arbitrary code execution" is a description a future engine version could read more
+  widely than today's, and `git diff --ext-diff` is a live example of a nominally read-only command
+  that runs a configured program. This cannot be settled by reading the file, only by watching a real
+  run — which is why the live demo is a required seam rather than a courtesy.
 
 ### The `Agent` entry
 
@@ -343,10 +363,18 @@ Three seams, all of them existing or named by the issue. No new test file, no ne
    this host while live checks are ship-time evidence, and this repo's existing `*-evidence.md`
    companion convention.
 
+Seam 3 also carries one ship-time confirmation that is not about the rules at all: `just
+show-protection` must show `Nix Eval` required with `enforce_admins` enabled, because that is the
+condition under which `Bash(gh pr merge:*)` is admissible. The check belongs at ship time rather than
+in this document precisely because the applied protection can change independently of the committed
+payload — and, incidentally, because GitHub answered 503 to it while this spec was being written,
+which is itself the argument against baking a live reading into prose.
+
 Seams 1 and 2 prove the rules are present and well-formed. Neither can prove they match, because no
-offline check can: there is no rule linter, and a malformed allow rule produces no warning. That
-asymmetry is why seam 3 is mandatory rather than nice-to-have, and why the rule shapes in this design
-were derived from grepped invocation evidence rather than from what reads well.
+offline check can: there is no rule linter, a malformed allow rule produces no warning, and R6 leaves
+open whether the engine drops a rule this design believes it keeps. That asymmetry is why seam 3 is
+mandatory rather than nice-to-have, and why the rule shapes in this design were derived from grepped
+invocation evidence rather than from what reads well.
 
 ## Acceptance criteria
 
