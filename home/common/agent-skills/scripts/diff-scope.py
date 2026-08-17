@@ -453,6 +453,7 @@ def _batch_headers(root: Path, requests: Sequence[bytes]) -> list[bytes]:
         except FileNotFoundError:
             raise DiffScopeError("git executable not found on PATH") from None
         died_early = False
+        read_failure: DiffScopeError | None = None
         try:
             for request in requests:
                 try:
@@ -463,7 +464,17 @@ def _batch_headers(root: Path, requests: Sequence[bytes]) -> list[bytes]:
                     # diagnostic once wait() has reaped it, not a traceback.
                     died_early = True
                     break
-                windows.append(_read_response(process.stdout))
+                try:
+                    windows.append(_read_response(process.stdout))
+                except DiffScopeError as error:
+                    # git can also die *between* the write and the read, in
+                    # which case we hit EOF before the pipe reports broken. Hold
+                    # the protocol error and prefer git's own diagnostic below
+                    # if it exited non-zero; the buffered _git call this reader
+                    # replaced surfaced that stderr, and losing it would make a
+                    # corrupt object store read as a bare "truncated" message.
+                    read_failure = error
+                    break
         finally:
             try:
                 process.stdin.close()
@@ -481,6 +492,9 @@ def _batch_headers(root: Path, requests: Sequence[bytes]) -> list[bytes]:
             raise DiffScopeError(f"git cat-file --batch exited early: {detail}")
         if returncode != 0:
             raise DiffScopeError(f"git cat-file --batch failed: {detail}")
+        if read_failure is not None:
+            # git exited 0, so this is a genuine protocol desync, not a death.
+            raise read_failure
     return windows
 
 
