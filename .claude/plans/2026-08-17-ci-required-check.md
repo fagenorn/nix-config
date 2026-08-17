@@ -603,9 +603,17 @@ class RequiredContexts(unittest.TestCase):
         """A matrix job reports as `name (value)` and a reusable workflow as
         `caller / callee`; either decouples the reported check-run name from the
         required context while a pure string comparison still passes."""
+        contexts = required_contexts()
+        self.assertTrue(contexts, "branch protection requires at least one context")
         names = job_names()
         blocks = job_blocks()
-        for context in required_contexts():
+        for context in contexts:
+            self.assertIn(
+                context,
+                names,
+                f"required context {context!r} matches no job `name:` in "
+                f"{WORKFLOW.name} (found {sorted(names)})",
+            )
             key = names[context]
             offenders = [
                 line.strip() for line in blocks[key] if RENAMING_KEY_RE.match(line)
@@ -654,7 +662,7 @@ python3 - <<'PY'
 import pathlib; p = pathlib.Path(".github/branch-protection.json")
 p.write_text(p.read_text().replace("Nix Eval", "Nix Evaluate"))
 PY
-python3 -m unittest tests.test_branch_protection 2>&1 | tail -3   # expect: FAILED (failures=1)
+python3 -m unittest tests.test_branch_protection 2>&1 | tail -3   # expect: FAILED (failures=3)
 git checkout -- .github/branch-protection.json
 
 # b) the job backing a required context becomes a matrix job
