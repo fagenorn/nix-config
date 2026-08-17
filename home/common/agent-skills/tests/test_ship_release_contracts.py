@@ -24,9 +24,32 @@ EVALS = REPO_ROOT / "home/common/agent-skills/skills/ship-release/evals/evals.js
 STATE_PATH = ".superpowers/workflows/ship-release/state.json"
 
 
+GIT_LOCATION_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+)
+
+
 def git_env():
-    """A hermetic git environment: no user/system config, no signing."""
+    """A hermetic git environment: no user/system config, no signing.
+
+    Every variable that relocates git's repository, work tree, index or object
+    store is dropped, so an invoking session exporting one of them cannot
+    redirect this suite's scratch `git init`/`git commit` at an unrelated
+    repository (issue 31's D7). The tuple is duplicated from
+    test_diff_scope.py rather than imported: the two suites share no helper
+    module (issue 31's D10). A blanket GIT_* sweep is rejected because it would
+    also drop GIT_EXEC_PATH and GIT_TEMPLATE_DIR, which a Nix-provided git may
+    rely on.
+    """
     env = dict(os.environ)
+    for name in GIT_LOCATION_VARS:
+        env.pop(name, None)
     env.update(
         {
             "GIT_CONFIG_GLOBAL": "/dev/null",
