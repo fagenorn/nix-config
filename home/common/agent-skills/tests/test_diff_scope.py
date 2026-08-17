@@ -684,5 +684,43 @@ class DiffScopeCommandTest(unittest.TestCase):
                 self.assertIn(b"diff-scope:", completed.stderr)
 
 
+class DiffScopeRelativeConfigTest(unittest.TestCase):
+    """diff.relative must not reach the measurement, whatever --root points at.
+
+    git's diff.relative both strips the leading directory from every reported
+    path and drops the rows outside the cwd, so an unneutralised measurement
+    taken from a subdirectory answers a different question in a different frame
+    (issue 31's D2).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.root = cls.temporary.name
+        build_fixture_repo(cls.root)
+        git(cls.root, "config", "diff.relative", "true")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def payload(self, root_argument):
+        completed = run_helper(self.root, "HEAD~1..HEAD", "--root", root_argument)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout.decode("utf-8"))
+
+    def test_a_subdirectory_root_measures_the_same_range_as_the_work_tree_root(self):
+        # At the work-tree root diff.relative is a no-op, so the baseline IS the
+        # unconfigured answer -- one fixture, one variable (cwd depth).
+        baseline = self.payload(self.root)
+        # src/ is created by build_fixture_repo and is inside the work tree, so
+        # _validate_root passes.
+        subject = self.payload(os.path.join(self.root, "src"))
+        # Whole payloads, not totals: the skew's first symptom is in the path
+        # strings ("app.py" for "src/app.py"), and a totals-only assertion can
+        # stay green while every path is wrong.
+        self.assertEqual(subject, baseline)
+
+
 if __name__ == "__main__":
     unittest.main()

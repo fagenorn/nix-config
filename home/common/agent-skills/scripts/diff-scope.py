@@ -442,12 +442,19 @@ def measure(
 ) -> ScopeResult:
     """Return the product measurement for base..head, applying the three exclusions."""
     range_argument = f"{base}..{head}"
-    # -M explicitly, so the measurement never depends on the caller's diff.renames (D3).
-    rows = parse_numstat(_git(root, "diff", "--numstat", "-z", "-M", range_argument))
+    # -M and --no-relative explicitly on both diff calls, so the measurement
+    # never depends on the caller's diff.renames (D3) or diff.relative (issue
+    # 31's D2). diff.relative both strips the leading directory from every
+    # reported path and drops the rows outside the cwd, so an unneutralised
+    # run from a subdirectory answers a different question in a different
+    # frame -- and its paths no longer resolve as <oid>:<path> at the root.
+    rows = parse_numstat(
+        _git(root, "diff", "--numstat", "-z", "-M", "--no-relative", range_argument)
+    )
     if not rows:
         return scope_rows((), artifact_paths)
     statuses = parse_name_status(
-        _git(root, "diff", "--name-status", "-z", "-M", range_argument)
+        _git(root, "diff", "--name-status", "-z", "-M", "--no-relative", range_argument)
     )
     headers = read_headers(root, base, head, rows, statuses)
     return scope_rows(
