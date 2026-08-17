@@ -33,3 +33,17 @@ orchestrator context.
 3. Optionally seed `docs/standards/README.md` (empty index) and `.claude/hints/`.
 4. Everything else is machine-global via nix (`home/common/agent-skills/`): the skills, the
    standards layers 0–1, and the linter arrive with the home-manager generation.
+
+## Vendored skills
+
+A directory under `skills/` may be a **vendored adaptation** of an upstream skill rather than an
+authored one. Such a directory carries the upstream `LICENSE` inside it as its provenance record: the
+upstream URL, the pinned revision, the date it was inspected, and every way the adaptation departs
+from upstream, followed by the upstream notice reproduced unmodified. Keeping the notice in that file
+and out of `SKILL.md` keeps it out of the body that loads with the skill, while `SKILL.md` still
+links to it so the provenance is one hop away.
+
+Nothing fetches or refreshes these at build time — there is no flake input for the upstream and no
+synchronisation. A refresh is a manual comparison against a newer revision: re-apply the recorded
+adaptations by hand and move the pin. The contract suite in `tests/` pins each adaptation, so a
+careless refresh fails a test rather than silently reverting one.
