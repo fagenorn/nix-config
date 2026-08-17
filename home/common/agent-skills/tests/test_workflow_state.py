@@ -478,6 +478,51 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIsNone(state["outcome"])
         self.assertEqual(state["attempts"][0]["state"], "stopped")
 
+    def test_fresh_retry_may_reuse_the_prior_attempt_worktree(self):
+        self.init_run()
+        shared = self.root / "wt-issue-14"
+        resolved = str(shared.resolve())
+        self.launch(issue=14, owner="owner-a", worktree=shared, budget_minutes=10)
+        self.reconcile(now="2026-08-13T20:10:00Z")
+        first = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(first["state"], "stopped")
+        self.assertEqual(first["result_source"], "expiry")
+        self.assertEqual(first["worktree"], resolved)
+
+        retried = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=shared,
+            now="2026-08-13T20:15:00Z",
+        )
+        self.assertEqual(retried["attempt"], 2)
+        self.assertEqual(retried["worktree"], resolved)
+        self.assertEqual(retried["prior_attempt"], 1)
+        self.assertEqual(retried["state"], "active")
+        attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[1]["worktree"], attempts[0]["worktree"])
+
+        blocked = {
+            **self.merged_result(),
+            "state": "stopped",
+            "pr_url": None,
+            "merge_sha": None,
+            "issue_closed": False,
+            "notes": "blocked",
+        }
+        self.finish(2, blocked, now="2026-08-13T20:30:00Z")
+        before = self.state_path.read_bytes()
+        resumed = self.launch(
+            issue=14,
+            owner="owner-b",
+            worktree=shared,
+            now="2026-08-13T20:40:00Z",
+        )
+        self.assertEqual(resumed["state"], "stopped")
+        self.assertEqual(len(self.read_state()["issues"]["14"]["attempts"]), 2)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
     def test_progress_action_precedence_and_complete_inputs_are_persisted(self):
         self.init_run()
         cases = [
