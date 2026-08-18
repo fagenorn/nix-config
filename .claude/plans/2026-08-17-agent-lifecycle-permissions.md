@@ -56,8 +56,9 @@ Python `unittest`, Markdown.
 
 1. `just show-claude-settings` emits one JSON document and fails unless the closure has exactly one
    `-claude-code-settings.json` requisite (D4, D5, D15).
-2. `tests/test_claude_permission_guard.py` reads that JSON, resolves the sole Bash `PreToolUse`
-   command, and invokes the built executable with table-driven stdin/exit fixtures (D14, D16).
+2. `tests/test_claude_permission_guard.py` reads that JSON, asserts the exact ordered allow array and
+   30-second Bash hook registration, then invokes the built executable with table-driven stdin/exit
+   and deterministic child-boundary fixtures (D14, D16, D17).
 3. `just build` is the repository's local Nix evaluation/build gate. The one Task-2 build supplies
    the artifact used by seams 1 and 2.
 4. Live PR metadata, applied protection, activation, and no-prompt behavior are Phase-7 evidence,
@@ -76,9 +77,10 @@ Python `unittest`, Markdown.
 
 ## Decisions
 
-The spec owns the issue ledger. This plan implements D1–D2, D4–D6, D8, D10–D16; D13 reverses the
+The spec owns the issue ledger. This plan implements D1–D2, D4–D6, D8, D10–D17; D13 reverses the
 unsafe rationales in D3/D9, D14 reverses D7's no-test choice, and D15 reverses D11/D12's
-zero-match behavior. Planning added D16 for the guard implementation and built-test interface.
+zero-match behavior. Planning added D16 for the guard implementation and built-test interface;
+the second review added D17 for fail-closed timeout/error behavior and deterministic dependencies.
 
 ## Reviewer provenance and disposition
 
@@ -92,6 +94,9 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
   D15 and Task P6-1; zero and multiple matches now fail before `cat`.
 - Test-policy consequence: D14 and Task P6-2 add table-driven contract tests against the built
   executable named by generated settings.
+- Second reviewer: fresh native standards reviewer at review commit `3eab69a`; no fallback reviewer.
+  Its blocking timeout/error finding is applied through D17 and P6-2, its blocking whole-skill merge
+  audit is applied in P6-3, and its exact-array should-fix is applied in P6-2.
 
 ---
 
@@ -170,7 +175,9 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
   guarded call, otherwise exits 0 without emitting a permission decision.
 - Produces: the sixteen-entry `settings.permissions.allow` contract from Global Constraints.
 - Test consumes: `CLAUDE_SETTINGS_PATH=/absolute/generated/settings.json`; it discovers the guard
-  from that JSON and invokes the built executable, never Nix source.
+  from that JSON and invokes the built executable, never Nix source. Test-only argv flags
+  `--git-bin`, `--gh-bin`, `--jq-bin`, and `--child-timeout-seconds` override defaults only for
+  deterministic fixtures; the registered hook passes no arguments.
 
 **Invariants:**
 - If the raw command contains neither `git branch -d` nor `gh pr merge`, the guard returns 0 and
@@ -187,7 +194,8 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
   `--delete-branch`. Every other target, flag, order, repository, or strategy exits 2.
 - For an accepted merge shape, invoke absolute `${pkgs.gh}/bin/gh` by argv to read that numbered PR
   with explicit `--repo fagenorn/nix-config`; use absolute `${pkgs.jq}/bin/jq` by argv to require an
-  open PR with `baseRefName == "main"`. Then read
+  open PR whose `url` belongs to `https://github.com/fagenorn/nix-config/pull/` and whose
+  `baseRefName == "main"`. Then read
   `repos/fagenorn/nix-config/branches/main/protection` and require `Nix Eval` in contexts plus
   `.enforce_admins.enabled == true`. Child failure, invalid JSON, or false predicate exits 2 with
   the failing boundary named.
@@ -195,6 +203,11 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
   branch deletion:`, or `lifecycle guard: unsafe merge:` as applicable. API/dependency reasons name
   `PR lookup`, `PR predicate`, `protection lookup`, or `protection predicate`; syntactic tests can
   therefore prove they rejected before the network boundary.
+- The registered command hook has `timeout = 30`. Every `subprocess.run` uses the selected child
+  timeout, default 5 seconds. Child nonzero/timeout, invalid child JSON, and false predicates all
+  return 2. The executable's top-level `main()` call is inside one outer `except Exception` that
+  prints `lifecycle guard: unexpected failure: <type>: <message>` and exits 2; no ordinary Python
+  exception can fall through with a non-blocking exit.
 - `defaultMode = "auto"`, `ask = [ ]`, and `deny = [ ]` remain unchanged. The adjacent comment says
   the two broad entries are usable only through the guard and bare `Agent` is inert in auto mode.
 
@@ -207,16 +220,27 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
   import os
   from pathlib import Path
   import subprocess
+  import sys
+  import tempfile
   import unittest
 
 
   SETTINGS_PATH = Path(os.environ["CLAUDE_SETTINGS_PATH"])
+  EXPECTED_ALLOW = [
+      "Bash(git fetch:*)", "Bash(git status:*)", "Bash(git log:*)",
+      "Bash(git diff:*)", "Bash(gh pr view:*)", "Bash(gh pr list:*)",
+      "Bash(gh pr checks:*)", "Bash(gh issue view:*)", "Bash(gh issue list:*)",
+      "Bash(git worktree add:*)", "Bash(git worktree list:*)",
+      "Bash(git worktree remove:*)", "Bash(git worktree prune:*)",
+      "Bash(git branch -d:*)", "Bash(gh pr merge:*)", "Agent",
+  ]
 
 
   class ClaudePermissionGuardTest(unittest.TestCase):
       @classmethod
       def setUpClass(cls):
           settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+          cls.settings = settings
           matches = [
               entry
               for entry in settings.get("hooks", {}).get("PreToolUse", [])
@@ -224,26 +248,66 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
           ]
           if len(matches) != 1:
               raise AssertionError(f"expected one Bash PreToolUse matcher, found {len(matches)}")
-          commands = [
-              hook.get("command")
+          command_hooks = [
+              hook
               for hook in matches[0].get("hooks", [])
               if hook.get("type") == "command"
           ]
-          if len(commands) != 1 or not isinstance(commands[0], str):
-              raise AssertionError(f"expected one command hook, found {commands!r}")
-          cls.guard = Path(commands[0])
+          if len(command_hooks) != 1:
+              raise AssertionError(f"expected one command hook, found {command_hooks!r}")
+          command_hook = command_hooks[0]
+          if command_hook.get("timeout") != 30:
+              raise AssertionError(f"expected hook timeout 30, found {command_hook.get('timeout')!r}")
+          command = command_hook.get("command")
+          if not isinstance(command, str) or " " in command:
+              raise AssertionError(f"registered command must be one argument-free path: {command!r}")
+          cls.guard = Path(command)
           if not cls.guard.is_absolute() or not os.access(cls.guard, os.X_OK):
               raise AssertionError(f"guard is not an executable absolute path: {cls.guard}")
 
-      def invoke_raw(self, raw):
+          cls.fixture_dir = tempfile.TemporaryDirectory()
+          cls.fake_gh = Path(cls.fixture_dir.name) / "fake-gh"
+          cls.fake_gh.write_text(f"""#!{sys.executable}
+  import os, sys, time
+  stage = "pr" if sys.argv[1:3] == ["pr", "view"] else "protection"
+  mode = os.environ.get(f"FAKE_{{stage.upper()}}_MODE", "ok")
+  if mode == "nonzero":
+      print(f"fake {{stage}} failure", file=sys.stderr)
+      raise SystemExit(9)
+  if mode == "timeout":
+      time.sleep(1)
+  if mode == "invalid":
+      print("{{")
+      raise SystemExit(0)
+  default = ('{{"state":"OPEN","baseRefName":"main",'
+             '"url":"https://github.com/fagenorn/nix-config/pull/1"}}'
+             if stage == "pr" else
+             '{{"required_status_checks":{{"contexts":["Nix Eval"]}},'
+             '"enforce_admins":{{"enabled":true}}}}')
+  print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
+  """, encoding="utf-8")
+          cls.fake_gh.chmod(0o755)
+
+      @classmethod
+      def tearDownClass(cls):
+          cls.fixture_dir.cleanup()
+
+      def invoke_raw(self, raw, *guard_args, env=None):
+          child_env = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
+          child_env.update(env or {})
           return subprocess.run(
-              [self.guard], input=raw, text=True, capture_output=True, timeout=5, check=False
+              [self.guard, *guard_args], input=raw, text=True, capture_output=True,
+              timeout=5, check=False, env=child_env,
           )
 
-      def invoke_command(self, command):
-          return self.invoke_raw(json.dumps({
-              "tool_name": "Bash", "tool_input": {"command": command}
-          }))
+      def invoke_command(self, command, *guard_args, env=None):
+          return self.invoke_raw(
+              json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+              *guard_args, env=env,
+          )
+
+      def test_generated_allow_surface_is_exact_and_ordered(self):
+          self.assertEqual(EXPECTED_ALLOW, self.settings["permissions"]["allow"])
 
       def test_unrelated_bash_and_exact_branch_delete_pass(self):
           for command in ("git status --short", "git branch -d issue-30-safe"):
@@ -298,6 +362,49 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
                   self.assertEqual(2, result.returncode)
                   self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
 
+      def test_merge_dependency_and_predicate_failures_block(self):
+          command = (
+              "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch"
+          )
+          guard_args = (
+              "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.05",
+          )
+          cases = (
+              ({"FAKE_PR_MODE": "nonzero"}, "PR lookup"),
+              ({"FAKE_PR_MODE": "timeout"}, "PR lookup"),
+              ({"FAKE_PR_MODE": "invalid"}, "PR predicate"),
+              ({"FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"main","url":"https://github.com/other/repo/pull/1"}'}, "PR predicate"),
+              ({"FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"dev","url":"https://github.com/fagenorn/nix-config/pull/1"}'}, "PR predicate"),
+              ({"FAKE_PR_JSON": '{"state":"CLOSED","baseRefName":"main","url":"https://github.com/fagenorn/nix-config/pull/1"}'}, "PR predicate"),
+              ({"FAKE_PROTECTION_MODE": "nonzero"}, "protection lookup"),
+              ({"FAKE_PROTECTION_MODE": "timeout"}, "protection lookup"),
+              ({"FAKE_PROTECTION_MODE": "invalid"}, "protection predicate"),
+              ({"FAKE_PROTECTION_JSON": '{"required_status_checks":{"contexts":[]},"enforce_admins":{"enabled":true}}'}, "protection predicate"),
+              ({"FAKE_PROTECTION_JSON": '{"required_status_checks":{"contexts":["Nix Eval"]},"enforce_admins":{"enabled":false}}'}, "protection predicate"),
+          )
+          for env, reason in cases:
+              with self.subTest(env=env):
+                  result = self.invoke_command(command, *guard_args, env=env)
+                  self.assertEqual(2, result.returncode)
+                  self.assertIn(f"lifecycle guard: {reason}", result.stderr)
+
+      def test_merge_dependency_fixture_can_reach_acceptance(self):
+          result = self.invoke_command(
+              "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch",
+              "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.05",
+          )
+          self.assertEqual(0, result.returncode, result.stderr)
+
+      def test_unexpected_dependency_exception_blocks(self):
+          missing_jq = Path(self.fixture_dir.name) / "missing-jq"
+          result = self.invoke_command(
+              "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch",
+              "--gh-bin", str(self.fake_gh), "--jq-bin", str(missing_jq),
+              "--child-timeout-seconds", "0.05",
+          )
+          self.assertEqual(2, result.returncode)
+          self.assertIn("lifecycle guard: unexpected failure:", result.stderr)
+
 
   if __name__ == "__main__":
       unittest.main()
@@ -319,10 +426,12 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
 
   Before `settings`, define `lifecycleGuard` with `pkgs.writeTextFile`, `executable = true`,
   `destination = "/bin/claude-bash-lifecycle-guard"`, and a shebang fixed to
-  `${pkgs.python3}/bin/python3`. The program uses only stdlib `json`, `shlex`, `subprocess`, and
-  `sys`; define absolute constants for `${pkgs.git}/bin/git`, `${pkgs.gh}/bin/gh`, and
-  `${pkgs.jq}/bin/jq`. Implement the ordered validation algorithm in Interfaces/Invariants, with
-  one `block(reason)` path that prints `lifecycle guard: <reason>` to stderr and returns 2.
+  `${pkgs.python3}/bin/python3`. The program uses only stdlib `argparse`, `json`, `shlex`,
+  `subprocess`, and `sys`; define default absolute constants for `${pkgs.git}/bin/git`,
+  `${pkgs.gh}/bin/gh`, and `${pkgs.jq}/bin/jq`. Parse the four test-only argv flags from Interfaces,
+  defaulting to those store paths and 5 seconds. Implement the ordered validation algorithm in
+  Interfaces/Invariants, with one `block(reason)` path that prints `lifecycle guard: <reason>` to
+  stderr and returns 2, and the one required outer `except Exception` fail-safe.
 
   Register exactly:
 
@@ -334,6 +443,7 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
         {
           type = "command";
           command = "${lifecycleGuard}/bin/claude-bash-lifecycle-guard";
+          timeout = 30;
         }
       ];
     }
@@ -373,8 +483,10 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
 
   Run: `CLAUDE_SETTINGS_PATH="$SETTINGS_JSON" python3 tests/test_claude_permission_guard.py -v`
 
-  Expected: four tests pass; every rejection case returns 2 with nonempty stderr and no test needs
-  network access.
+  Expected: eight tests pass; the artifact's allow array matches all sixteen entries in exact order,
+  the hook timeout is 30, syntactic rejections happen before network, deterministic PR/protection
+  failures and an unexpected missing dependency all return 2, and the fully valid dependency fixture
+  returns 0.
 
   Run:
 
@@ -413,6 +525,9 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
   `--delete-branch` remain.
 - No `-R`, implicit current repository, alternate strategy, `--admin`, or other merge shape is
   documented or emitted. The existing post-merge state verification remains unchanged.
+- Audit the whole skill, not only Phase 7: the flow summary, standing authorization, and executable
+  command are the only three `gh pr merge` occurrences, and all three carry the canonical explicit
+  `--repo <repoSlug>` prefix.
 
 - [ ] **Step 1: Add the failing contract test**
 
@@ -420,13 +535,24 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
 
   ```python
   def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
+      canonical = "gh pr merge <pr-num> --repo <repoSlug> --merge"
+      occurrences = [
+          line.strip()
+          for line in self.ship_issue.splitlines()
+          if "gh pr merge" in line
+      ]
+      self.assertEqual(3, len(occurrences), occurrences)
+      for occurrence in occurrences:
+          with self.subTest(occurrence=occurrence):
+              self.assertIn(canonical, occurrence)
+      self.assertNotIn("gh pr merge --merge", self.ship_issue)
+      self.assertNotIn("gh pr merge <pr-num> --merge", self.ship_issue)
       phase = self.section(self.ship_issue, "## Phase 7 — Merge", "## Phase 8 — Cleanup")
       expected = (
           'gh pr merge <pr-num> --repo <repoSlug> --merge '
           '--subject "<rendered mergeSubjectTemplate>" --delete-branch'
       )
       self.assertIn(expected, phase)
-      self.assertNotIn("gh pr merge <pr-num> --merge", phase)
       self.assertIn("if it's null, omit `--subject` and its value", phase)
   ```
 
@@ -436,11 +562,14 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
 
   Expected: FAIL because the current command omits `--repo <repoSlug>`.
 
-- [ ] **Step 3: Update the skill's one emitted merge shape**
+- [ ] **Step 3: Update and audit every merge shape in the skill**
 
-  In Phase 7, say the command uses the binding resolved in Phase 0, update the null-subject sentence
-  to “omit `--subject` and its value,” and replace the command block with the exact Produces shape.
-  Do not change ship-release or add another merge authority.
+  Update the flow summary's Phase 7 row and Standing authorization so their documented merge shape
+  is `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered
+  mergeSubjectTemplate>"] --delete-branch`. In Phase 7, say the command uses the binding resolved in
+  Phase 0, update the null-subject sentence to “omit `--subject` and its value,” and replace the
+  command block with the exact Produces shape. Run `rg -n 'gh pr merge'` over the whole file and
+  reconcile all three occurrences; do not change ship-release or add another merge authority.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -523,7 +652,7 @@ zero-match behavior. Planning added D16 for the guard implementation and built-t
   CLAUDE_SETTINGS_PATH="$SETTINGS_JSON" python3 tests/test_claude_permission_guard.py -v
   ```
 
-  Expected: recipe and all four tests exit 0. Remove the scratch file.
+  Expected: recipe and all eight tests exit 0. Remove the scratch file.
 
 - [ ] **Step 3: Audit owned scope and terminal state**
 

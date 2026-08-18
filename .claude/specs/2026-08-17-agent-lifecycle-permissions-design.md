@@ -222,9 +222,19 @@ commands for permission matching, while the hook receives the original raw comma
    --delete-branch`. Resolve the PR by number with explicit `--repo`, require an open PR whose base is
    `main`, then require the live protection predicates above. Invoke every child command by argv from
    an absolute Nix-store path.
-6. On every rejection or dependency/API failure, print one actionable reason to stderr and exit 2,
-   the documented `PreToolUse` blocking exit. On acceptance, exit 0 with no permission decision so
-   the mandatory allow rule, rather than the hook, grants the call.
+6. Register the command hook with an explicit 30-second timeout and give every child subprocess a
+   5-second timeout. Claude's hook contract makes **only exit 2 blocking**; any other exit, including
+   the framework killing a timed-out hook, proceeds to permission evaluation. Therefore child
+   timeout, child nonzero, invalid JSON, a false predicate, and every ordinary rejection all print
+   one actionable reason and return 2. One outer `except Exception` is the final fail-safe: it prints
+   an actionable unexpected-failure reason and returns 2. The 30-second hook budget leaves headroom
+   above the bounded child calls; it is not itself the safety mechanism. On acceptance, exit 0 with
+   no permission decision so the mandatory allow rule, rather than the hook, grants the call.
+
+The blocking semantics above are the current official Claude Code contract: a blocking
+`PreToolUse` command hook runs before an allow, but only process exit 2 blocks; other exits and hook
+timeouts are non-blocking ([hooks reference](https://code.claude.com/docs/en/hooks),
+[permissions reference](https://code.claude.com/docs/en/permissions)).
 
 This is deliberately a strict language, not an attempted shell parser. The one emitted branch shape
 and one emitted merge shape are small enough to enumerate; rejecting any other spelling is both
@@ -412,7 +422,11 @@ Four seams, at the highest observable boundaries available:
 2. **The guard executable named by that artifact** — feed hook JSON fixtures directly. Exact safe
    branch deletion returns 0; `-d -f`, `-d --force`, multiple branches, shell composition and malformed
    input exit 2. Wrong-repo, URL/branch/omitted PR targets, `--admin`, alternate strategies and shell
-   expansion exit 2 before any network call. These are table-driven contract cases, not source regexes.
+   expansion exit 2 before any network call. Explicit test-only argv overrides replace store-pinned
+   child executables only when the test invokes the guard; the registered production command passes
+   no overrides. Deterministic fixtures cover PR/protection child nonzero and timeout, invalid JSON,
+   wrong repo/base/state, missing `Nix Eval`, and `enforce_admins` false. These are table-driven
+   contract cases, not source regexes.
 3. **`just build` exit 0** — the repository's required local verification. The settings and guard are
    both in the resulting closure, so the first two seams inspect what the next switch will install.
 4. **Ship-time live evidence** — after a requested switch, a background subagent demonstrates the
@@ -494,3 +508,4 @@ Restated so each names the command that decides it.
 | D14 | **Reverses D7:** test the built guard as a table-driven stdin/exit contract in addition to inspecting the generated JSON; keep external PR/protection confirmation as ship-time evidence | *Defense in depth*, *Tests that can fail*, and *Verify before claiming done*: the guard is now executable policy, so presence in JSON is not evidence that force/repo/base cases block. Direct fixture invocation exercises the installed seam without destructive Git or GitHub actions | Retain artifact-only verification (would prove the unsafe allow and the guard are present, not which wins); parse Nix source (tests the input rather than installed behavior) |
 | D15 | **Reverses D11's fixed body and D12:** `show-claude-settings` counts closure matches and exits nonzero unless there is exactly one before `cat` | Standards reviewer finding plus *Truthful terminal states* and *Fail loud*: `grep \| xargs cat` exits 0 and prints nothing on zero matches, so the named inspection command can falsely succeed. Store paths contain no shell whitespace, making positional-parameter counting portable here | Keep the old pipeline because downstream `jq` fails (the recipe itself still lies); add only `pipefail` (does not reject multiple matches and is shell-dependent) |
 | D16 | Build the guard as one Nix-store Python executable using stdlib JSON/`shlex`/`subprocess`, with absolute store paths for `git`, `gh`, and `jq`; its stdlib contract test accepts the generated settings JSON path and invokes the command registered there | D13 requires tokenisation without evaluation and argv-only child execution, while D14 requires testing the built executable rather than Nix source. Python's stdlib provides both without adding a flake input, and resolving the executable through generated settings tests the hook registration and policy together | A shell parser (quote handling and token boundaries become security-sensitive); a separately named guard path in the test (could pass while the installed hook points elsewhere); wiring the built-artifact test into `agent-workflow-tests` (would make the otherwise fast suite implicitly build a host closure) |
+| D17 | Make fail-closed behavior explicit at both timeout layers: register a 30-second command-hook timeout, cap every child at 5 seconds, and route every rejection, child failure/timeout, parse/predicate failure, and unexpected exception to exit 2; expose dependency paths and a shorter child timeout only as test argv overrides, while the installed hook passes no arguments | Official Claude hooks contract: only exit 2 blocks; non-2 exits and hook timeout continue to permission evaluation. *Defense in depth* and *Tests that can fail* require deterministic coverage of external-boundary failures without weakening the store-pinned production command | Rely on the framework timeout (it is non-blocking); catch only expected subprocess errors (an uncaught parser/runtime error exits non-2); PATH injection or environment-only dependency substitution (could affect production semantics and does not prove the registered command is store-pinned) |
