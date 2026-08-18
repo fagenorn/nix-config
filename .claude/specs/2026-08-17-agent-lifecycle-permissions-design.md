@@ -15,7 +15,11 @@ the `justfile`", which is where `protect-main` / `unprotect-main` / `show-protec
 `.claude/specs/2026-08-17-ci-required-check-design.md` — the gate that rejection demanded, its
 `enforce_admins: true` decision (its D8), its `show-protection` recipe precedent (its D7), and its
 rule that plan gates must be runnable on this host while live checks are ship-time evidence (its
-D18). This repo has no context map, no ADR tree, and no `docs/` directory; the `docs/areas/*/adr/`
+D18). Claude Code 2.1.233 and its current permission/hook reference — permission precedence is
+deny → ask → allow, Bash wildcards span arguments, and a blocking `PreToolUse` hook runs before and
+overrides an allow rule. Live `git branch -h` — `-f` / `--force` forces deletion when combined with
+`-d`. Live `gh pr merge --help` — the target may be a number, URL, or branch and inherited
+`-R` / `--repo` selects another repository. This repo has no context map, no ADR tree, and no `docs/` directory; the `docs/areas/*/adr/`
 trees under `home/common/agent-skills/evals/fixture-repo/` are eval fixtures, not this project's docs.
 
 ## Problem
@@ -52,15 +56,27 @@ if wanted." Nothing has taken it up.
 
 ## Solution
 
-Populate `permissions.allow` in `home/common/claude-code/default.nix` with sixteen entries — fifteen
-narrow Bash rules plus the `Agent` tool entry — covering exactly the lifecycle surface the issue names — read-only git and tracker queries, worktree
-lifecycle, `git branch -d`, the `Agent` tool, and `gh pr merge` — replace the stale comment above
-`permissions` with one that explains what the list is and why each risky member is admissible, and add
-a `just show-claude-settings` recipe that prints the generated artifact so the acceptance criteria are
-checkable by a named command rather than by an incantation.
+Populate the Nix-managed global `permissions.allow` with sixteen entries — fifteen narrow Bash rules
+plus bare `Agent` — covering the lifecycle surface the issue names. Keep the issue-mandated
+`Bash(gh pr merge:*)` spelling, but do not treat that entry as a safety boundary: add one Nix-built,
+fail-closed `PreToolUse` guard for Bash that mediates the two argument-sensitive commands before the
+permission engine sees them. The guard is the inner policy boundary; the allow entries remove prompts
+only after that boundary accepts the exact call.
 
-Three properties do the work, and each is a consequence of how the matcher behaves rather than of how
-carefully the list was written:
+The guard admits only `git branch -d <valid-single-branch>` and the repository-bound merge shape
+`gh pr merge <number> --repo fagenorn/nix-config --merge [--subject <literal>] --delete-branch`.
+It rejects force flags, multiple branches, shell expansion/control syntax, omitted/URL/branch PR
+targets, alternate repositories, and all other merge flags. Before admitting the merge it also reads
+the named PR and live branch protection through absolute Nix-store `gh`/`jq` dependencies and fails
+closed unless the PR belongs to `fagenorn/nix-config`, targets `main`, and live protection reports
+`Nix Eval` required with `enforce_admins.enabled = true`. The shared `ship-issue` command shape gains
+the already-resolved `repoSlug` as explicit `--repo`; no wrapper or second merge authority is added.
+
+Replace the stale permission comment with one that names the guard/allow relationship. Add a
+`show-claude-settings` recipe that builds first and prints the generated artifact, failing unless the
+system closure contains exactly one generated settings file.
+
+Four properties do the work:
 
 1. **Bash rules resolve before the classifier**, including in auto mode. Bash is not among the
    documented exceptions to immediate rule resolution (those are writes to protected paths and
@@ -68,8 +84,11 @@ carefully the list was written:
    probabilistic outcome into a deterministic one.
 2. **Prefixes are literal**, which forces the rule shapes to be derived from the invocations the
    skills actually type rather than from the tidiest way to write them down.
-3. **Prefixes are case-sensitive with no flag normalisation**, which is what makes the issue's
-   negative criteria hold by construction instead of by review vigilance.
+3. **A blocking `PreToolUse` hook precedes and overrides allow rules.** This is the mechanism that
+   makes an argument-sensitive restriction enforceable despite the two mandatory broad prefixes.
+4. **The guard fails closed.** A parse error, unsupported shape, missing `gh` response, wrong repo or
+   base, API failure, or protection mismatch blocks before Bash. Prose and a later ship-time check are
+   evidence, not enforcement.
 
 ## Decisions
 
@@ -83,6 +102,9 @@ carefully the list was written:
   shapes of one command, and a prefix matches at most one of them.
 - **Reach** — a rule *reaches* a shape when the shape's leading bytes are the rule's prefix. Reach is
   the property the design optimises; presence in the file is not.
+- **Guard** — the Nix-built `PreToolUse` policy executable. It receives Claude Code's Bash tool JSON
+  on stdin and exits 2 with a reason when the raw command uses either guarded prefix without meeting
+  its exact contract. Exit 0 with no decision leaves accepted calls to normal permission evaluation.
 - **Residual** — a lifecycle command this list deliberately does not reach, named here so that its
   continued classifier-dependence is a recorded choice rather than an oversight.
 
@@ -100,8 +122,10 @@ reference and against Claude Code 2.1.233. They are design constraints, not open
 - `*` may appear at any position and **matches across spaces**. This is what makes mid-position
   wildcards unsafe here rather than merely imprecise — see *What this list deliberately does not
   reach*.
-- Matching is **case-sensitive** and performs **no flag normalisation**: with `Bash(git branch -d:*)`
-  allowed, `git branch -D` is denied; with `Bash(mkdir -p:*)` allowed, `MKDIR -p` is denied.
+- Matching is **case-sensitive** and performs **no flag normalisation**. That excludes the spelling
+  `git branch -D`, but it does **not** make `Bash(git branch -d:*)` safe: Git also accepts
+  `git branch -d -f <branch>` and `git branch -d --force <branch>`. The guard, not case, closes that
+  path.
 - Evaluation order across the merged rule set is deny → ask → allow, first match wins; specificity
   does not reorder anything. Arrays **union** across settings scopes rather than override, so a deny
   at any scope beats an allow at any other.
@@ -144,7 +168,7 @@ Merge, admissible only behind the CI gate:
 
 | Rule | Shapes it reaches |
 |---|---|
-| `Bash(gh pr merge:*)` | `gh pr merge <n> --merge --subject "…" --delete-branch` |
+| `Bash(gh pr merge:*)` | Guarded shape only: `gh pr merge <n> --repo fagenorn/nix-config --merge [--subject "…"] --delete-branch` |
 
 Tool dispatch:
 
@@ -158,31 +182,64 @@ visually separate.
 
 ### Why each risky member is admissible
 
-**`Bash(gh pr merge:*)` — prefix-only, and that is forced.** `ship-issue` types
-`gh pr merge <pr-num> --merge --subject "…" --delete-branch`: the argument precedes every flag.
-Because prefixes are literal from position 0, a rule written `Bash(gh pr merge --merge:*)` would never
-reach that shape — it would be a rule that looks safer and does nothing, which is worse than the
-broader rule because it also removes the pressure to think about what actually gates the merge.
+**`Bash(gh pr merge:*)` — mandatory, broad, and never trusted alone.** The issue requires this exact
+entry, and `ship-issue` puts the PR argument before its flags, so a superficially narrower prefix such
+as `Bash(gh pr merge --merge:*)` would be inert. Live help proves the mandatory entry also reaches
+`--admin`, `-R` / `--repo`, URL targets, branch targets, and PRs whose base is not protected `main`.
+The old claim that `main`'s server gate makes every command under the prefix safe is therefore false.
 
-The consequence is that `--admin` is reachable. That is admissible, and only because of a fact
-established elsewhere and verified there: with `enforce_admins: true` and `Nix Eval` as a required
-context, `gh pr merge` **including `--admin`** is refused by GitHub until the check is green. So the
-merge is gated by the server, not by the classifier — which is exactly the disposition
-`.out-of-scope/ungated-agent-merges.md` recorded: "Merge safety must come from a required status check
-on the PR, not from the permission classifier or skill-internal gates alone."
+The `PreToolUse` guard closes the gap before permission evaluation. It accepts one positive decimal
+PR number, the explicit repository binding, merge-commit strategy, optional literal subject, and
+branch cleanup; every other token blocks before Bash. It then resolves that number explicitly in
+`fagenorn/nix-config` and requires `baseRefName == "main"`. Finally it reads the **live** protection,
+not merely the committed desired-state JSON, and requires both `Nix Eval` and
+`enforce_admins.enabled == true`. Only then may the direct allow resolve the call. The server remains
+the enforcement for CI completion; the guard enforces that the command actually targets the server
+boundary the sibling issue established.
 
-One distinction is load-bearing and easy to blur. `.github/branch-protection.json` is the *desired*
-state; it is a file in this repo and it gates nothing by existing. What gates the merge is the
-protection **applied on GitHub**, which `just protect-main` puts there and `just unprotect-main` takes
-away — the sibling CI work deliberately made that rollout a separate, post-merge step, so the two can
-legitimately disagree. A spec that cited only the committed JSON would be asserting the gate from the
-wrong artifact. The live setting was confirmed at this issue's investigation (2026-08-17: `Nix Eval`
-required, `strict: false`, `enforce_admins: true`); re-confirming it with `just show-protection` is a
-ship-time step, listed under *Test seams*, not a claim this document can carry.
+There is intentionally no wrapper around `gh pr merge`. A wrapper plus the mandatory direct allow
+would leave the unsafe direct route open; denying the direct route would make the mandatory allow
+dead and fail the issue's intent. One guard around the real command gives the required entry a usable,
+enforceable subset without creating a second merge interface.
 
-The entry is therefore coupled to the live gate, and the coupling is one-directional: **if `main`'s
-applied protection is ever removed or `enforce_admins` is set to `false`, this entry must be removed
-in the same change.** The module comment says so at the entry.
+### The guard contract
+
+The guard is one store-backed executable referenced by one `PreToolUse` matcher for `Bash`. Running
+it for all Bash calls avoids a blind spot in an argument filter: Claude Code can split compound
+commands for permission matching, while the hook receives the original raw command. Its contract is:
+
+1. Read exactly one hook JSON object from stdin and require `tool_name == "Bash"` plus a string
+   `tool_input.command`; malformed input blocks rather than falling through.
+2. If the raw command contains neither literal guarded prefix, return no decision. The guard does
+   not become a second classifier for unrelated Bash calls.
+3. If either prefix occurs, reject shell control, expansion, redirection, globbing, comments,
+   newlines, wrappers, or a second command before tokenising. Tokenise without evaluation; never pass
+   the raw string to a shell.
+4. For branch deletion, require the exact token vector `[git, branch, -d, <branch>]`, reject a value
+   beginning with `-`, and validate the value with `git check-ref-format --branch` invoked by argv.
+5. For merge, require the fixed ordered vector `gh pr merge <positive-decimal> --repo
+   fagenorn/nix-config --merge`, then either `--delete-branch` or `--subject <one-literal-token>
+   --delete-branch`. Resolve the PR by number with explicit `--repo`, require an open PR whose base is
+   `main`, then require the live protection predicates above. Invoke every child command by argv from
+   an absolute Nix-store path.
+6. On every rejection or dependency/API failure, print one actionable reason to stderr and exit 2,
+   the documented `PreToolUse` blocking exit. On acceptance, exit 0 with no permission decision so
+   the mandatory allow rule, rather than the hook, grants the call.
+
+This is deliberately a strict language, not an attempted shell parser. The one emitted branch shape
+and one emitted merge shape are small enough to enumerate; rejecting any other spelling is both
+safer and more maintainable than trying to prove arbitrary shell text equivalent.
+
+Three options were evaluated:
+
+- **Chosen — guard the real commands.** `PreToolUse` is the framework-provided seam that can narrow a
+  direct allow, including argument and live-state checks, before execution.
+- **Rejected — deny-pattern overlays.** Deny wins over allow, but a finite set for `-f`, `--force`,
+  option order, URL/branch targets, and `-R` variants still cannot express “this PR's base is main”;
+  Bash wildcard argument filters are explicitly documented as fragile.
+- **Rejected — wrapper-only commands.** A wrapper can validate well, but the mandatory
+  `Bash(gh pr merge:*)` remains a direct bypass unless a guard or deny also mediates it. A wrapper
+  therefore adds an interface without removing the hard part.
 
 **`Bash(git worktree remove:*)` — reaches `--force`, and is still bounded.** `git worktree remove`
 deletes a worktree directory and its administrative entry. It does not delete the branch, and it does
@@ -190,13 +247,13 @@ not touch commits: anything committed on the branch survives and remains reachab
 a separate command with its own, much narrower rule. `--force` widens what the command tolerates
 (a dirty tree), not what it destroys beyond the working copy.
 
-**`Bash(git branch -d:*)` — the negative criterion holds by construction.** `-d` refuses to delete a
-branch that is not merged into its upstream or into `HEAD`; deleting an unmerged branch requires `-D`.
-Because matching is case-sensitive and performs no flag normalisation, `Bash(git branch -d:*)`
-**cannot** reach `git branch -D` — not "should not", cannot. The issue's "no `branch -D`" criterion is
-thus satisfied by the shape of the rule rather than by anyone remembering to check, and this is worth
-stating explicitly because the reverse assumption — that a permission engine would normalise a flag's
-case — is the assumption a reviewer would reasonably start from.
+**`Bash(git branch -d:*)` — the prefix is broader than the safe Git operation.** `-d` refuses an
+unmerged branch only in the absence of force. Live help documents `-f` / `--force` as forcing
+creation, move, rename, **and deletion**, and Git accepts `git branch -d -f <branch>`. The guard admits
+exactly four shell words — `git`, `branch`, `-d`, and one value accepted by
+`git check-ref-format --branch` that does not begin with `-` — with no expansion, redirection,
+operator, wrapper, second branch, or extra flag. `-D`, `-d -f`, `-d --force`, and rearrangements stay
+outside the pre-authorized subset.
 
 **`Bash(git fetch:*)` — one honest residual.** `git fetch` is read-only with respect to the working
 tree and to every remote, but a forced refspec (`git fetch origin +main:main`) can force-update a
@@ -315,13 +372,17 @@ and nothing that breaks when `vars/default.nix` changes the username.
 ```
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
 show-claude-settings: build
-  @nix-store --query --requisites ./result \
-    | grep -- '-claude-code-settings\.json$' \
-    | xargs cat
+  @set -- $$(nix-store --query --requisites ./result \
+    | grep -- '-claude-code-settings\.json$' || true); \
+    if [ "$$#" -ne 1 ]; then \
+      echo "expected exactly one generated Claude settings artifact; found $$#" >&2; \
+      exit 1; \
+    fi; \
+    cat "$$1"
 ```
 
-Verified: appended to a scratch copy of the justfile and run in this worktree, it built and printed the
-current settings JSON, with the platform-gated `build` dependency resolving correctly.
+Store paths cannot contain shell whitespace, so positional parameters are a portable exact-count
+check on both supported hosts. Zero and multiple matches fail loudly; only one path reaches `cat`.
 
 ### The comment block, and what `CLAUDE.md` gains
 
@@ -331,50 +392,36 @@ baseline, so it is deliberately dropped. Add durable global allows here if wante
 becomes false the moment this change lands, and it is the first thing the next editor reads.
 
 It is replaced by a comment that states what the list is (the agent-lifecycle surface, one narrow rule
-per subcommand), the two engine facts a future editor must not rediscover the hard way (prefixes are
-literal and case-sensitive; a malformed allow rule never warns and never matches), and an inline note
-at each of the two entries that carries a condition: `gh pr merge` is admissible only while `main`'s
-required check and `enforce_admins` are in place, and `Agent` is dropped in auto mode. Rationale lives
-next to the line it explains; the analysis lives here.
+per subcommand), that the two argument-sensitive prefixes are safe only through the adjacent
+`PreToolUse` guard, and that malformed rules or hooks can fail silently. The `Agent` entry retains its
+auto-mode note. Rationale lives next to the line it explains; the analysis lives here.
 
 `CLAUDE.md` gains two small things, both in places that already carry this kind of note: `just
 show-claude-settings` in the Commands block, and one sentence in the existing claude-code bullet list
-recording that `permissions.allow` is the declared agent-lifecycle surface, that it is coupled to
-`main`'s required check, and that a malformed rule fails silently so changes are checked with the
-recipe rather than by reading the diff.
+recording that `permissions.allow` plus its guard form the declared agent-lifecycle surface, that the
+merge subset is repo/base/protection-bound, and that changes are checked through the built artifact
+rather than by reading the diff.
 
 ## Test seams
 
-Three seams, all of them existing or named by the issue. No new test file, no new test runner.
+Four seams, at the highest observable boundaries available:
 
-1. **The generated settings artifact** — the store JSON, reached by `just show-claude-settings`. This
-   is the seam both of the issue's inspection criteria are asserted at, positively (the sixteen
-   entries are present verbatim) and negatively (no entry matches `git config`, `.git`, `branch -D`,
-   `push`, or a blanket/wildcarded-interpreter shape). Asserting on the built artifact rather than on
-   the `.nix` source is the point: it is what Claude Code actually reads, and it survives any
-   refactor of how the attrset is assembled. Prior art: the sibling CI spec's `show-protection`.
-2. **`just build` exit 0** — the repo's only verification step, per `CLAUDE.md`. Both seams 1 and 2
-   are satisfied by one build, since seam 1 depends on it.
-3. **The live demo, as ship-time evidence** — the issue's own demo: after a rebuild, a background
-   subagent removes a scratch worktree and runs `gh pr view` without a permission denial. This is the
-   only seam that can prove a rule *matches* rather than merely *exists*, and it cannot be a plan gate
-   because it requires `just switch` (sudo, and this repo switches only when asked). It is recorded as
-   evidence at ship time, following the sibling CI spec's rule that plan gates must be runnable on
-   this host while live checks are ship-time evidence, and this repo's existing `*-evidence.md`
-   companion convention.
+1. **The generated settings artifact** — `just show-claude-settings` must emit one JSON document and
+   fail unless the closure contains exactly one candidate. Assert the sixteen allow strings, the
+   `Bash` `PreToolUse` matcher, and the store-backed guard command from this artifact, not Nix source.
+2. **The guard executable named by that artifact** — feed hook JSON fixtures directly. Exact safe
+   branch deletion returns 0; `-d -f`, `-d --force`, multiple branches, shell composition and malformed
+   input exit 2. Wrong-repo, URL/branch/omitted PR targets, `--admin`, alternate strategies and shell
+   expansion exit 2 before any network call. These are table-driven contract cases, not source regexes.
+3. **`just build` exit 0** — the repository's required local verification. The settings and guard are
+   both in the resulting closure, so the first two seams inspect what the next switch will install.
+4. **Ship-time live evidence** — after a requested switch, a background subagent demonstrates the
+   read-only/worktree calls without a prompt. A guarded merge dry-run is not available, so invoke the
+   guard directly with a real open PR number and record that it admits only when the PR base and live
+   protection predicates hold; the actual merge remains the ship workflow's server-gated operation.
 
-Seam 3 also carries one ship-time confirmation that is not about the rules at all: `just
-show-protection` must show `Nix Eval` required with `enforce_admins` enabled, because that is the
-condition under which `Bash(gh pr merge:*)` is admissible. The check belongs at ship time rather than
-in this document precisely because the applied protection can change independently of the committed
-payload — and, incidentally, because GitHub answered 503 to it while this spec was being written,
-which is itself the argument against baking a live reading into prose.
-
-Seams 1 and 2 prove the rules are present and well-formed. Neither can prove they match, because no
-offline check can: there is no rule linter, a malformed allow rule produces no warning, and R6 leaves
-open whether the engine drops a rule this design believes it keeps. That asymmetry is why seam 3 is
-mandatory rather than nice-to-have, and why the rule shapes in this design were derived from grepped
-invocation evidence rather than from what reads well.
+The local contract fixtures prove the new safety boundary without mutating a branch or PR. The live
+check proves the two external facts no offline fixture can: current PR metadata and applied protection.
 
 ## Acceptance criteria
 
@@ -385,10 +432,13 @@ Restated so each names the command that decides it.
    entries above. Baseline: at the base commit the list is empty, so the diff is unambiguous.
 2. **The allow list contains no rule matching `git config`, `.git/` edits, `branch -D`, or `push`.**
    Decided by the same output: no entry contains `config`, `.git`, `branch -D`, or `push`, and no
-   entry is `Bash(*)` or a wildcarded interpreter. `git branch -D` additionally cannot be reached by
-   any entry as a matter of case-sensitive matching, not only as a matter of absence.
-3. **The flake still builds.** `just build`, exit 0.
-4. **(Ship-time, evidence not gate.)** After a switch, a background subagent removes a scratch
+   entry is `Bash(*)` or a wildcarded interpreter. Guard fixtures additionally prove that the
+   `git branch -d` entry does not pre-authorize Git's force flags.
+3. **Argument-sensitive direct allows are narrowed before execution.** The built settings contain
+   the Bash `PreToolUse` guard; its fixtures prove unsafe branch and merge shapes exit 2, and the live
+   merge fixture proves repo/base/protection validation fails closed.
+4. **The flake still builds.** `just build`, exit 0.
+5. **(Ship-time, evidence not gate.)** After a switch, a background subagent removes a scratch
    worktree and runs `gh pr view` with no permission denial.
 
 ## Out of scope
@@ -411,9 +461,9 @@ Restated so each names the command that decides it.
 - **Widening to any command the issue does not name** — `git merge-base`, `grep`, `git -C …`,
   `git push`, `gh pr create`, `gh issue close`. R1–R4 record them as residuals; a follow-up issue can
   weigh them on evidence from the next orchestration run.
-- **A test that asserts the rule list.** No offline test can check the property that matters (that a
-  rule matches), and a Python regex over Nix source would add a second, fragile authority for rule
-  shape while catching only the negative criteria a reviewer reads directly off a sixteen-line diff.
+- **A source-text test that parses the Nix.** The built JSON and its referenced guard executable are
+  the public seams. Parsing Nix source would add a second, fragile authority without exercising what
+  Claude Code installs.
 
 ## Discussion items for the issue thread
 
@@ -440,3 +490,6 @@ Restated so each names the command that decides it.
 | D10 | R1–R5 are named as residuals in the spec rather than closed by widening the list — in particular, no mid-position wildcard for the pervasive `git -C <path> <sub>` shape | `*` matches across spaces, so the only rule that would reach `git -C "$WORKTREE" status` — `Bash(git -C * status:*)` — also reaches `git -C /repo push origin status`, breaking the issue's negative criterion outright. A residual that is named is a recorded choice; an unnamed one reads as a fixed problem that quietly is not (*Production-grade by default*: known limitations belong in docs). The right fix for R1 is to change the callers to `cd`, not to widen the rule | Add `Bash(git -C * <sub>:*)` rules to cover the dominant real shape (demonstrably admits `git push`); say nothing and let the next orchestration run rediscover the denials (the issue's premise becomes untrue in a way nobody wrote down) |
 | D11 | Move the two `build` recipes' progress banner to **stderr** (`@echo "…" >&2`, macos and linux) in the same commit that adds `show-claude-settings`; the recipe body itself lands exactly as *Inspecting the generated artifact* writes it | Verified at plan time against the **real** justfile rather than a scratch copy of the recipe alone: `@echo` writes to stdout, so `just show-claude-settings` emitted `Building nix-darwin config...` as its first line and this spec's own AC1 command — `just show-claude-settings \| jq -r '.permissions.allow[]'` — died with `jq: parse error: Invalid numeric literal at line 1, column 9`. With the redirect that command succeeds, the first byte of stdout is `{`, and the banner still reaches the terminal on stderr (`just build 2>&1 >/dev/null` still shows it). Nothing parses `just build`'s stdout, and `trace`/`switch` depend on `build` unchanged. An acceptance criterion whose named command cannot run is not a criterion | Leave `build` alone and strip the banner at every call site (`\| tail -n +2`, `\| sed -n '/^{/,$p'`) — bakes a workaround into the documented command and breaks the moment the banner changes; drop the `build` dependency and run `just build >&2` inside the recipe body (stdout stays clean, but it re-enters `just` from a recipe and hides the dependency from `--dry-run`, contradicting D5) |
 | D12 | Keep the recipe body's `grep … \| xargs cat` shape with no fail-loud guard for the zero-match case | Verified on this host that with no matching requisite the pipeline exits 0 and prints nothing — so a future refactor that drops the settings file from the closure would make a bare `just show-claude-settings` succeed silently. Every assertion that consumes it nonetheless fails closed: `jq -e '.permissions.allow \| length == 16'` exits 4 on empty input and 1 on a false result (both verified). A portable guard would restructure a body this spec fixes, for a failure mode the gate already catches (*YAGNI*) | Add `set -o pipefail` or an explicit count check to the recipe (restructures the fixed body and depends on which `sh` `just` invokes on each platform); accept the silent empty print as the recipe's only signal (a false success — the exact class of verification D4 exists to eliminate) |
+| D13 | **Reverses D3 and D9:** keep the two issue-mandated allow strings, but narrow them with one fail-closed Bash `PreToolUse` guard; branch deletion admits one validated branch and no extra flag, while merge admits only a numeric PR, explicit `repoSlug`, merge strategy, optional literal subject and delete-branch after verifying repo, `main` base, `Nix Eval`, and live `enforce_admins` | Live `git branch -h` proves `-d -f` forces deletion; live `gh pr merge --help` proves the broad entry reaches alternate repos and URL/branch targets; Claude Code 2.1.233 documents that a blocking `PreToolUse` hook runs before and overrides allow. `.out-of-scope/ungated-agent-merges.md` requires the accepted merge to terminate at the server gate, not merely resemble the intended command | Rely on case-sensitive `-d` and `main` protection (both reviewer-disproved); overlay finite deny globs (cannot express PR base/live state and argument filters are fragile); wrapper only (mandatory direct allow bypasses it); declare the issue inconsistent (unnecessary because the hook supplies an enforceable inner boundary) |
+| D14 | **Reverses D7:** test the built guard as a table-driven stdin/exit contract in addition to inspecting the generated JSON; keep external PR/protection confirmation as ship-time evidence | *Defense in depth*, *Tests that can fail*, and *Verify before claiming done*: the guard is now executable policy, so presence in JSON is not evidence that force/repo/base cases block. Direct fixture invocation exercises the installed seam without destructive Git or GitHub actions | Retain artifact-only verification (would prove the unsafe allow and the guard are present, not which wins); parse Nix source (tests the input rather than installed behavior) |
+| D15 | **Reverses D11's fixed body and D12:** `show-claude-settings` counts closure matches and exits nonzero unless there is exactly one before `cat` | Standards reviewer finding plus *Truthful terminal states* and *Fail loud*: `grep \| xargs cat` exits 0 and prints nothing on zero matches, so the named inspection command can falsely succeed. Store paths contain no shell whitespace, making positional-parameter counting portable here | Keep the old pipeline because downstream `jq` fails (the recipe itself still lies); add only `pipefail` (does not reject multiple matches and is shell-dependent) |
