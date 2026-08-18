@@ -529,6 +529,16 @@
       "model": "opus",
       "effort": "high",
       "requires": []
+    },
+    {
+      "id": "improve-architecture-scan-owner",
+      "path": "home/common/agent-skills/skills/improve-codebase-architecture/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=improve-architecture-scan-owner role=issue-owner model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") performs the one read-only architecture scan and returns evidence-backed deepening candidates without writing to the repository.",
+      "role": "issue-owner",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
     }
   ],
   "scenarios": {
@@ -769,6 +779,16 @@
           "named-prior-findings",
           "bounded-fix-diff"
         ]
+      }
+    ],
+    "improve-codebase-architecture": [
+      {
+        "workflow": "improve-codebase-architecture",
+        "dispatch": "improve-architecture-scan-owner",
+        "role": "issue-owner",
+        "model": "opus",
+        "effort": "high",
+        "requires": []
       }
     ],
     "representative": [

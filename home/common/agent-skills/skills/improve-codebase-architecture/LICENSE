@@ -1,0 +1,63 @@
+Provenance
+----------
+
+This skill is a vendored adaptation of the `improve-codebase-architecture`
+skill from Matt Pocock's skills repository.
+
+  Upstream:  https://github.com/mattpocock/skills
+  Path:      skills/engineering/improve-codebase-architecture/
+  Revision:  9c9f36ccd3995266cd675468af71639c8dde1ec5
+  Inspected: 2026-08-17
+
+Upstream's process shape, report shape, editorial voice, frontmatter and Codex
+manifest are preserved. Nine things differ:
+
+  1. Vocabulary invocation — replace the upstream Skill-tool wording with this
+     repository's `codebase-design` invocation idiom.
+  2. Domain grounding repointed — replace hard-coded CONTEXT.md and docs/adr/
+     reads with `doc-grounded-questions` and its project-specific doc discovery.
+  3. Hotspot rule made concrete — inspect the last 50 non-merge commits and
+     widen only when history is scattered or has no meaningful concentration.
+  4. Scan becomes a registered dispatch — use one marked Opus/high issue-owner
+     scan with a seven-item evidence bar, read-only repository access, at most
+     one temporary findings artifact, and an inline fallback.
+  5. Candidate contract stated — render zero to five evidence-backed candidates,
+     never pad, and treat a truthful no-candidate report as successful.
+  6. Report contract extended — add accessible semantic fallbacks and a safe
+     repository-data-to-HTML/Mermaid boundary, make report generation failures
+     fatal, make browser/CDN failures warnings, and always print the absolute
+     report path.
+  7. Downstream step replaced — replace upstream `grilling` and `domain-modeling`
+     with the `wayfind` fog gate, `worktrees`, `design`, `grill-with-docs`, and a
+     stop after recommending the appropriate scope workflow.
+  8. Provenance pointer — close SKILL.md with a link to this notice.
+  9. Package extensions — add this provenance LICENSE and deployed-behaviour
+     evals/evals.json, neither of which exists in the upstream skill directory.
+
+There is no automatic synchronisation with upstream: refreshing this package
+means comparing against a newer revision by hand, re-applying the nine
+adaptations, and moving the revision recorded above.
+
+The upstream licence follows, reproduced unmodified.
+
+MIT License
+
+Copyright (c) 2026 Matt Pocock
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

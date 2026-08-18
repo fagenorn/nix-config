@@ -469,7 +469,7 @@ class AgentModelMatrixTest(unittest.TestCase):
             )
             self.assertIn("Agent(", site["call"], site_id)
 
-    def test_representative_trace_covers_every_workflow_with_safe_rereviews(self):
+    def test_representative_trace_covers_every_issue_delivery_workflow_with_safe_rereviews(self):
         module = load_module()
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         events = data["scenarios"]["representative"]
@@ -905,6 +905,28 @@ class AgentModelMatrixTest(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             module.trace(REPO_ROOT, "does-not-exist")
+
+    def test_improve_codebase_architecture_trace_is_standalone(self):
+        module = load_module()
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        expected_site = {
+            "id": "improve-architecture-scan-owner",
+            "path": "home/common/agent-skills/skills/improve-codebase-architecture/SKILL.md",
+            "marker": "<!-- agent-dispatch: id=improve-architecture-scan-owner role=issue-owner model=opus effort=high -->",
+            "call": 'Agent(subagent_type="general-purpose", model="opus", effort="high") performs the one read-only architecture scan and returns evidence-backed deepening candidates without writing to the repository.',
+            "role": "issue-owner", "model": "opus", "effort": "high", "requires": [],
+        }
+        expected_event = {
+            "workflow": "improve-codebase-architecture",
+            "dispatch": "improve-architecture-scan-owner",
+            "role": "issue-owner", "model": "opus", "effort": "high", "requires": [],
+        }
+        self.assertIn("improve-codebase-architecture", module.WORKFLOW_FAMILIES)
+        sites = {site["id"]: site for site in data["dispatch_sites"]}
+        self.assertEqual(sites["improve-architecture-scan-owner"], expected_site)
+        self.assertEqual(data["scenarios"]["improve-codebase-architecture"], [expected_event])
+        self.assertEqual(module.trace(REPO_ROOT, "improve-codebase-architecture"), [{key: expected_event[key] for key in ("workflow", "dispatch", "role", "model", "effort")}])
+        self.assertEqual({event["workflow"] for event in module.trace(REPO_ROOT, "representative")}, {"orchestration", "from-issue", "sdd", "shipping"})
 
 
 if __name__ == "__main__":

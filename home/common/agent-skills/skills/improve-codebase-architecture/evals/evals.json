@@ -1,0 +1,93 @@
+{
+  "skill_name": "improve-codebase-architecture",
+  "notes": "Pipeline evals for the deployed generation after human activation. The fixture has one non-merge commit, so the unscoped case deterministically exercises the scattered/no-concentration widen path. These evals are authored now but are not run before activation.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "scan-only-renders-a-temporary-report",
+      "mode": "pipeline",
+      "prompt": "/improve-codebase-architecture\n\nRun an explicitly unscoped architecture scan. Do not select or implement a candidate. The fixture history has no meaningful hotspot, so widen the scan as the skill directs. Render the report, attempt to open it, and finish by printing its absolute path. Discovery must remain read-only and no worktree may be created.",
+      "expected_output": "The unscoped run discloses that the history yielded no meaningful concentration and widened the scan, then prints an absolute temporary architecture-review HTML path. The file truthfully contains either evidence-backed before/after candidates and a top recommendation or an explicit no-candidate result. The repository, HEAD, local branches, and linked worktrees remain unchanged.",
+      "asserts": [
+        {
+          "name": "temporary report exists outside repository",
+          "shell": "report=$(printf '%s\\n' \"$OUT\" | grep -Eo '/[^[:space:]]*/architecture-review-[^[:space:]]*\\.html' | tail -1); test -n \"$report\" || fail \"no architecture-review- path in output\"; [ -f \"$report\" ] || fail \"report does not exist: $report\"; case \"$report\" in \"$REPO\"/*) fail \"report was written inside repository\";; esac"
+        },
+        {
+          "name": "report is evidence-backed or truthful",
+          "shell": "report=$(printf '%s\\n' \"$OUT\" | grep -Eo '/[^[:space:]]*/architecture-review-[^[:space:]]*\\.html' | tail -1); python3 - \"$report\" <<'PY'\nfrom html.parser import HTMLParser\nfrom pathlib import Path\nimport sys\n\nREQUIRED_EVIDENCE = {\n    \"module-callers\",\n    \"caller-interface-knowledge\",\n    \"locality-leverage\",\n    \"deletion-test\",\n    \"dependency-adapters\",\n    \"tests-interface-surface\",\n    \"context-decision-conflict\",\n}\nREQUIRED_DIAGRAMS = {\"before\", \"after\"}\nVOID_TAGS = {\"area\", \"base\", \"br\", \"col\", \"embed\", \"hr\", \"img\", \"input\", \"link\", \"meta\", \"param\", \"source\", \"track\", \"wbr\"}\n\nclass ReportParser(HTMLParser):\n    def __init__(self):\n        super().__init__(convert_charrefs=True)\n        self.stack = []\n        self.errors = []\n        self.candidates_section_level = None\n        self.candidates_sections = 0\n        self.candidate_articles = 0\n        self.candidate = None\n        self.candidate_level = None\n        self.candidates = []\n        self.surfaces = []\n        self.no_candidate_level = None\n        self.no_candidate_markers = []\n        self.no_candidate_text = []\n        self.top_level = None\n        self.top_sections = 0\n        self.top_links = []\n\n    def handle_starttag(self, tag, attrs):\n        attributes = dict(attrs)\n        level = len(self.stack) + 1\n        if tag == \"section\" and attributes.get(\"id\") == \"candidates\":\n            self.candidates_sections += 1\n            if self.candidates_sections != 1:\n                self.errors.append(\"duplicate candidates section\")\n            self.candidates_section_level = level\n        in_candidates = self.candidates_section_level is not None\n        if tag == \"article\" and not in_candidates:\n            self.errors.append(\"article outside candidates section\")\n        if in_candidates and tag == \"article\":\n            self.candidate_articles += 1\n            if self.candidate is not None:\n                self.errors.append(\"nested candidate article\")\n            if \"data-architecture-candidate\" not in attributes:\n                self.errors.append(\"unmarked candidate article\")\n            self.candidate = {\"id\": attributes.get(\"id\", \"\"), \"evidence\": {}, \"diagrams\": {}}\n            self.candidate_level = level\n        if self.candidate is not None:\n            if \"data-evidence\" in attributes:\n                name = attributes[\"data-evidence\"]\n                self.candidate[\"evidence\"].setdefault(name, []).append([])\n                self.surfaces.append((level, self.candidate[\"evidence\"][name][-1]))\n            if \"data-diagram-text\" in attributes:\n                name = attributes[\"data-diagram-text\"]\n                self.candidate[\"diagrams\"].setdefault(name, []).append([])\n                self.surfaces.append((level, self.candidate[\"diagrams\"][name][-1]))\n        if attributes.get(\"id\") == \"no-candidates\":\n            if not in_candidates:\n                self.errors.append(\"zero-state marker outside candidates section\")\n            self.no_candidate_level = level\n            self.no_candidate_markers.append(attributes.get(\"data-candidate-count\"))\n            self.no_candidate_text.append([])\n        if tag == \"section\" and attributes.get(\"id\") == \"top-recommendation\":\n            self.top_sections += 1\n            self.top_level = level\n        if self.top_level is not None and tag == \"a\":\n            self.top_links.append(attributes.get(\"href\", \"\"))\n        if tag not in VOID_TAGS:\n            self.stack.append(tag)\n\n    def handle_startendtag(self, tag, attrs):\n        self.handle_starttag(tag, attrs)\n        if tag not in VOID_TAGS:\n            self.handle_endtag(tag)\n\n    def handle_data(self, data):\n        for _level, chunks in self.surfaces:\n            chunks.append(data)\n        if self.no_candidate_level is not None:\n            self.no_candidate_text[-1].append(data)\n\n    def handle_endtag(self, tag):\n        if not self.stack or self.stack[-1] != tag:\n            self.errors.append(f\"mismatched closing tag: {tag}\")\n            return\n        level = len(self.stack)\n        self.surfaces = [(surface_level, chunks) for surface_level, chunks in self.surfaces if surface_level != level]\n        if self.candidate_level == level and tag == \"article\":\n            self.candidates.append(self.candidate)\n            self.candidate = None\n            self.candidate_level = None\n        if self.no_candidate_level == level:\n            self.no_candidate_level = None\n        if self.top_level == level and tag == \"section\":\n            self.top_level = None\n        if self.candidates_section_level == level and tag == \"section\":\n            self.candidates_section_level = None\n        self.stack.pop()\n\nparser = ReportParser()\nparser.feed(Path(sys.argv[1]).read_text(encoding=\"utf-8\"))\nparser.close()\nif parser.stack:\n    parser.errors.append(\"unclosed tags\")\nif parser.candidate is not None:\n    parser.errors.append(\"unclosed candidate article\")\nif parser.candidates_section_level is not None:\n    parser.errors.append(\"unclosed candidates section\")\n\ncandidate_count = len(parser.candidates)\nif parser.candidates_sections != 1:\n    parser.errors.append(\"report requires exactly one candidates section\")\nif candidate_count != parser.candidate_articles:\n    parser.errors.append(\"every candidate article must be marked and closed\")\nif candidate_count == 0:\n    zero_text = \" \".join(\" \".join(\"\".join(chunks).split()) for chunks in parser.no_candidate_text)\n    if parser.no_candidate_markers != [\"0\"] or \"No evidence-backed candidates.\" not in zero_text:\n        parser.errors.append(\"zero candidates require the explicit zero-state marker\")\n    if parser.top_sections != 0:\n        parser.errors.append(\"zero candidates must omit top recommendation\")\nelif 1 <= candidate_count <= 5:\n    if parser.no_candidate_markers:\n        parser.errors.append(\"positive reports must omit the zero-state marker\")\n    candidate_ids = [candidate[\"id\"] for candidate in parser.candidates]\n    if any(not candidate_id for candidate_id in candidate_ids) or len(set(candidate_ids)) != candidate_count:\n        parser.errors.append(\"candidate IDs must be non-empty and unique\")\n    for candidate in parser.candidates:\n        evidence = candidate[\"evidence\"]\n        diagrams = candidate[\"diagrams\"]\n        if set(evidence) != REQUIRED_EVIDENCE or any(len(values) != 1 or not \"\".join(values[0]).strip() for values in evidence.values()):\n            parser.errors.append(f\"candidate {candidate['id']} lacks one complete evidence surface\")\n        if set(diagrams) != REQUIRED_DIAGRAMS or any(len(values) != 1 or not \"\".join(values[0]).strip() for values in diagrams.values()):\n            parser.errors.append(f\"candidate {candidate['id']} lacks before/after diagram text\")\n    if parser.top_sections != 1 or len(parser.top_links) != 1 or parser.top_links[0] not in {f\"#{candidate_id}\" for candidate_id in candidate_ids}:\n        parser.errors.append(\"top recommendation must link exactly once to a candidate\")\nelse:\n    parser.errors.append(\"candidate count must be zero or one to five\")\n\nif parser.errors:\n    raise SystemExit(\"; \".join(parser.errors))\nPY"
+        },
+        {
+          "name": "history miss widened the scan",
+          "shell": "out_matches 'widen'"
+        },
+        {
+          "name": "repository and branches stayed unchanged",
+          "shell": "test \"$WT_COUNT\" -eq 0 || fail \"created $WT_COUNT linked worktree(s)\"; status=$(git -C \"$REPO\" status --porcelain); test -z \"$status\" || fail \"repository changed: $status\"; test \"$(git -C \"$REPO\" rev-parse HEAD)\" = \"$(git -C \"$REPO\" rev-parse origin/main)\" || fail \"HEAD moved\"; branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads); test \"$branches\" = \"main\" || fail \"local branches changed: $branches\""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "clear-selection-reaches-a-design-worktree",
+      "mode": "pipeline",
+      "prompt": "/improve-codebase-architecture tinytask.store\n\nThe selected candidate is concrete: deepen `tinytask.store`. Nobody is present to answer routine questions. Answer only reversible in-scope recommendations yourself. If a question is scope-redrawing, hard to reverse, involves a credential or spending, or you cannot answer it from the repository, stop. Establish an isolated worktree, complete and commit the design, reach the approved `grill-with-docs` review, then recommend `writing-plans` or `to-issues` and stop. Do not create a plan. Do not refactor or change anything under `tinytask/` or `tests/`.",
+      "expected_output": "One isolated worktree contains a committed design spec for the concrete tinytask.store selection. The design reaches grill-with-docs, source and tests remain unchanged, no plan exists, and the final response recommends writing-plans or to-issues while explicitly stopping before either workflow or implementation.",
+      "asserts": [
+        {
+          "name": "one isolated design worktree exists",
+          "shell": "test \"$WT_COUNT\" -eq 1 || fail \"expected one worktree, got $WT_COUNT\"; test -n \"$WT\" || fail \"worktree path missing\""
+        },
+        {
+          "name": "design spec was committed",
+          "shell": "commits_touch \"$WT\" \"$SPEC_DIR\""
+        },
+        {
+          "name": "source and tests stayed unchanged",
+          "shell": "path_unchanged_since \"$REPO\" origin/main tinytask tests; path_unchanged_since \"$WT\" origin/main tinytask tests"
+        },
+        {
+          "name": "no plan was created",
+          "shell": "if has_file \"$REPO/$PLAN_DIR\"/*.md \"$WT/$PLAN_DIR\"/*.md; then fail \"plan created before the scope gate\"; fi"
+        },
+        {
+          "name": "domain review was reached",
+          "shell": "out_matches 'grill-with-docs'"
+        },
+        {
+          "name": "scope workflow was recommended and execution stopped",
+          "shell": "out_matches 'recommend'; out_matches 'writing-plans|to-issues'; out_matches 'stop|stopping|not invok'"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "foggy-selection-routes-to-wayfind",
+      "mode": "pipeline",
+      "prompt": "/improve-codebase-architecture sync between machines\n\nExplore the selected direction `sync between machines`. It is deliberately foggy: route it to `wayfind`, create exactly one new map, then stop and return control. Do not create a worktree, spec, plan, or issue. Do not continue into `to-issues`, `writing-plans`, implementation, or execution, and do not change `tinytask/` or `tests/`. Make your final non-empty output line exactly: `WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.`",
+      "expected_output": "The fog gate invokes wayfind and creates exactly one new map while preserving the existing concurrent-shells map. It stops with the exact final status `WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.` There is no worktree, spec, plan, source/test mutation, issue creation, planning, implementation, or execution.",
+      "asserts": [
+        {
+          "name": "new wayfind map exists and prior map stayed unchanged",
+          "shell": "new_map_count=0; new_map=; for map in \"$REPO\"/.claude/wayfind/*/map.md; do case \"$map\" in */concurrent-shells/map.md) continue;; esac; [ -f \"$map\" ] || continue; relative_map=${map#\"$REPO\"/}; if git -C \"$REPO\" cat-file -e \"origin/main:$relative_map\" 2>/dev/null; then continue; fi; new_map_count=$((new_map_count + 1)); new_map=$map; done; test \"$new_map_count\" -eq 1 || fail \"expected exactly one new wayfind map, found $new_map_count\"; test -n \"$new_map\" || fail \"new wayfind map path missing\"; path_unchanged_since \"$REPO\" origin/main .claude/wayfind/concurrent-shells"
+        },
+        {
+          "name": "no worktree was created",
+          "shell": "test \"$WT_COUNT\" -eq 0 || fail \"created $WT_COUNT linked worktree(s)\""
+        },
+        {
+          "name": "no spec or plan was created",
+          "shell": "if has_file \"$REPO/$SPEC_DIR\"/*.md \"$REPO/$PLAN_DIR\"/*.md; then fail \"created a spec or plan after fog routing\"; fi"
+        },
+        {
+          "name": "source and tests stayed unchanged",
+          "shell": "path_unchanged_since \"$REPO\" origin/main tinytask tests"
+        },
+        {
+          "name": "wayfind returned control without continuation",
+          "shell": "terminal_line=$(printf '%s\\n' \"$OUT\" | sed '/^[[:space:]]*$/d' | tail -n 1); test \"$terminal_line\" = 'WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.' || fail \"missing exact terminal wayfind status\""
+        }
+      ]
+    }
+  ]
+}

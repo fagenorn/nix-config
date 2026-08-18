@@ -55,7 +55,13 @@ ALLOWED_SUBAGENT_TYPES = {
     "codex-transport": {"codex:rescue", "codex:codex-reviewer"},
 }
 CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite", "mechanic"}
-WORKFLOW_FAMILIES = {"orchestration", "from-issue", "sdd", "shipping"}
+WORKFLOW_FAMILIES = {
+    "orchestration",
+    "from-issue",
+    "sdd",
+    "shipping",
+    "improve-codebase-architecture",
+}
 EXPECTED_SCENARIOS = {*WORKFLOW_FAMILIES, "representative"}
 
 
