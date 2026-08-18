@@ -16,6 +16,219 @@ let
     exec ${pkgs.nodejs}/bin/node ${agentPlugins.codex}/plugins/codex/scripts/codex-companion.mjs "$@"
   '';
 
+  lifecycleGuard = pkgs.writeTextFile {
+    name = "claude-bash-lifecycle-guard";
+    executable = true;
+    destination = "/bin/claude-bash-lifecycle-guard";
+    text = ''
+      #!${pkgs.python3}/bin/python3
+      import argparse
+      import json
+      import shlex
+      import subprocess
+      import sys
+
+
+      DEFAULT_GIT_BIN = "${pkgs.git}/bin/git"
+      DEFAULT_GH_BIN = "${pkgs.gh}/bin/gh"
+      DEFAULT_JQ_BIN = "${pkgs.jq}/bin/jq"
+      REPOSITORY = "fagenorn/nix-config"
+      PR_URL_PREFIX = "https://github.com/fagenorn/nix-config/pull/"
+      BRANCH_LITERAL = "git branch -d"
+      MERGE_LITERAL = "gh pr merge"
+      UNSAFE_BRANCH_CHARS = set(";&|<>$`\\\n\r*?[]{}()#~")
+
+
+      def block(reason):
+          print(f"lifecycle guard: {reason}", file=sys.stderr)
+          return 2
+
+
+      def parse_merge_raw(command):
+          prefix = "gh pr merge "
+          if not command.startswith(prefix):
+              return None
+
+          number, separator, remainder = command[len(prefix):].partition(" ")
+          if (
+              not separator
+              or not number
+              or any(character < "0" or character > "9" for character in number)
+              or int(number) <= 0
+          ):
+              return None
+
+          no_subject = "--repo fagenorn/nix-config --merge --delete-branch"
+          if remainder == no_subject:
+              return number, None
+
+          subject_prefix = '--repo fagenorn/nix-config --merge --subject "'
+          subject_suffix = '" --delete-branch'
+          if not remainder.startswith(subject_prefix) or not remainder.endswith(subject_suffix):
+              return None
+
+          subject = remainder[len(subject_prefix):-len(subject_suffix)]
+          forbidden = {'"', "$", "`", "\\", "\0", "\n", "\r"}
+          if (
+              not subject
+              or any(character in forbidden for character in subject)
+              or any(0xD800 <= ord(character) <= 0xDFFF for character in subject)
+          ):
+              return None
+          return number, subject
+
+
+      def main():
+          parser = argparse.ArgumentParser()
+          parser.add_argument("--git-bin", default=DEFAULT_GIT_BIN)
+          parser.add_argument("--gh-bin", default=DEFAULT_GH_BIN)
+          parser.add_argument("--jq-bin", default=DEFAULT_JQ_BIN)
+          parser.add_argument("--child-timeout-seconds", type=float, default=5)
+          args = parser.parse_args()
+
+          try:
+              payload = json.load(sys.stdin)
+          except (json.JSONDecodeError, UnicodeError) as error:
+              return block(f"invalid hook input: malformed JSON: {error}")
+
+          if not isinstance(payload, dict):
+              return block("invalid hook input: expected a JSON object")
+          tool_input = payload.get("tool_input")
+          if payload.get("tool_name") != "Bash" or not isinstance(tool_input, dict):
+              return block("invalid hook input: expected a Bash tool call")
+          command = tool_input.get("command")
+          if not isinstance(command, str):
+              return block("invalid hook input: expected tool_input.command to be a string")
+
+          has_branch_delete = BRANCH_LITERAL in command
+          has_merge = MERGE_LITERAL in command
+          if not has_branch_delete and not has_merge:
+              return 0
+
+          if has_branch_delete:
+              if any(character in UNSAFE_BRANCH_CHARS for character in command):
+                  return block("unsafe branch deletion: forbidden raw command character")
+              try:
+                  command_argv = shlex.split(command)
+              except ValueError as error:
+                  return block(f"unsafe branch deletion: invalid command quoting: {error}")
+              if len(command_argv) != 4 or command_argv[:3] != ["git", "branch", "-d"]:
+                  return block("unsafe branch deletion: expected exactly git branch -d <branch>")
+              branch = command_argv[3]
+              if branch.startswith("-"):
+                  return block("unsafe branch deletion: branch must not begin with '-'")
+              try:
+                  ref_check = subprocess.run(
+                      [args.git_bin, "check-ref-format", "--branch", branch],
+                      capture_output=True,
+                      text=True,
+                      timeout=args.child_timeout_seconds,
+                      check=False,
+                  )
+              except subprocess.TimeoutExpired:
+                  return block("unsafe branch deletion: branch validation timed out")
+              if ref_check.returncode != 0:
+                  return block("unsafe branch deletion: invalid branch name")
+              return 0
+
+          merge_parts = parse_merge_raw(command)
+          if merge_parts is None:
+              return block("unsafe merge: command does not match the guarded merge grammar")
+          number, subject = merge_parts
+          try:
+              command_argv = shlex.split(command)
+          except ValueError as error:
+              return block(f"unsafe merge: invalid command quoting: {error}")
+          expected_argv = [
+              "gh", "pr", "merge", number, "--repo", REPOSITORY, "--merge",
+          ]
+          if subject is not None:
+              expected_argv.extend(["--subject", subject])
+          expected_argv.append("--delete-branch")
+          if command_argv != expected_argv:
+              return block("unsafe merge: tokenised command does not match guarded argv")
+
+          try:
+              pr_lookup = subprocess.run(
+                  [
+                      args.gh_bin, "pr", "view", number, "--repo", REPOSITORY,
+                      "--json", "state,baseRefName,url",
+                  ],
+                  capture_output=True,
+                  text=True,
+                  timeout=args.child_timeout_seconds,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("PR lookup timed out")
+          if pr_lookup.returncode != 0:
+              return block("PR lookup failed")
+
+          try:
+              pr_predicate = subprocess.run(
+                  [
+                      args.jq_bin,
+                      "-e",
+                      '.state == "OPEN" and .baseRefName == "main" and '
+                      '(.url | startswith("https://github.com/fagenorn/nix-config/pull/"))',
+                  ],
+                  input=pr_lookup.stdout,
+                  capture_output=True,
+                  text=True,
+                  timeout=args.child_timeout_seconds,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("PR predicate timed out")
+          if pr_predicate.returncode != 0:
+              return block("PR predicate failed")
+
+          try:
+              protection_lookup = subprocess.run(
+                  [args.gh_bin, "api", "repos/fagenorn/nix-config/branches/main/protection"],
+                  capture_output=True,
+                  text=True,
+                  timeout=args.child_timeout_seconds,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("protection lookup timed out")
+          if protection_lookup.returncode != 0:
+              return block("protection lookup failed")
+
+          try:
+              protection_predicate = subprocess.run(
+                  [
+                      args.jq_bin,
+                      "-e",
+                      '(.required_status_checks.contexts | index("Nix Eval")) != null '
+                      'and .enforce_admins.enabled == true',
+                  ],
+                  input=protection_lookup.stdout,
+                  capture_output=True,
+                  text=True,
+                  timeout=args.child_timeout_seconds,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("protection predicate timed out")
+          if protection_predicate.returncode != 0:
+              return block("protection predicate failed")
+          return 0
+
+
+      if __name__ == "__main__":
+          try:
+              raise SystemExit(main())
+          except Exception as error:
+              print(
+                  f"lifecycle guard: unexpected failure: {type(error).__name__}: {error}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(2)
+    '';
+  };
+
   # Durable, user-authored Claude Code settings (ported from the existing ~/.claude/settings.json).
   # Runtime-mutable noise — the accumulated project-specific permissions.allow list, OAuth,
   # project history, statsig caches — is intentionally NOT frozen here.
@@ -40,12 +253,41 @@ let
       CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
     };
 
-    # defaultMode = "auto" already auto-approves tool use; the large project-specific
-    # allow-list from the old settings.json was accumulated state, not a durable global
-    # baseline, so it is deliberately dropped. Add durable global allows here if wanted.
+    hooks.PreToolUse = [
+      {
+        matcher = "Bash";
+        hooks = [
+          {
+            type = "command";
+            command = "${lifecycleGuard}/bin/claude-bash-lifecycle-guard";
+            timeout = 30;
+          }
+        ];
+      }
+    ];
+
+    # The broad branch-delete and PR-merge entries are usable only through the lifecycle
+    # guard above. Bare `Agent` remains inert while defaultMode is "auto".
     permissions = {
       defaultMode = "auto";
-      allow = [ ];
+      allow = [
+        "Bash(git fetch:*)"
+        "Bash(git status:*)"
+        "Bash(git log:*)"
+        "Bash(git diff:*)"
+        "Bash(gh pr view:*)"
+        "Bash(gh pr list:*)"
+        "Bash(gh pr checks:*)"
+        "Bash(gh issue view:*)"
+        "Bash(gh issue list:*)"
+        "Bash(git worktree add:*)"
+        "Bash(git worktree list:*)"
+        "Bash(git worktree remove:*)"
+        "Bash(git worktree prune:*)"
+        "Bash(git branch -d:*)"
+        "Bash(gh pr merge:*)"
+        "Agent"
+      ];
       ask = [ ];
       deny = [ ];
     };
