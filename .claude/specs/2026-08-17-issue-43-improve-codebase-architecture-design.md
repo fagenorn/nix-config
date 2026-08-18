@@ -235,6 +235,21 @@ to every diagram, colour never the sole carrier of meaning, minimal inline base 
 stays readable when the CDN is unavailable, 4.5:1 contrast on normal text, and a side-by-side layout
 that collapses cleanly at phone width without duplicating content.
 
+Because the report is opened automatically, repository-derived data crosses an explicit inert-data
+boundary (per D21). HTML-escape every such value before inserting it into text or attributes,
+including repository, module, caller and file names, prose, evidence, decision text and diagram text
+equivalents. Mermaid uses opaque generated node IDs and escaped text labels only: no repository text
+becomes graph syntax, directives, link targets, classes or styles, and no raw HTML label is allowed.
+The scaffold keeps `securityLevel: "strict"` and `htmlLabels: false`.
+
+The report also carries D22's machine-checkable structure. It contains exactly one
+`<section id="candidates">`. That section contains either the one explicit zero marker
+`<p id="no-candidates" data-candidate-count="0">No evidence-backed candidates.</p>` with no
+candidate article or top-recommendation section, or one to five unique marked candidate articles.
+Each positive article has all seven non-empty `data-evidence` surfaces and non-empty
+`data-diagram-text="before"` and `"after"` surfaces; exactly one top-recommendation link targets one
+of those candidate IDs.
+
 Failure semantics follow parent D4 exactly: report-generation failure is a failed run; a failed
 browser open or an unreachable CDN is a **disclosed warning**, not a generation failure, because the
 absolute HTML path remains available. The absolute path is printed on every run, warning or not.
@@ -331,14 +346,31 @@ The observable behaviours the class pins:
    rule are all required of a candidate.
 10. **Candidate contract** — the five-candidate ceiling, the never-pad rule, the truthful
     no-candidate outcome, the three strength labels, and the top recommendation.
-11. **Report contract** — temp-directory resolution and the `architecture-review-<timestamp>.html`
-    name; the absolute path is always printed; generation failure fails the run while a
-    browser-open or CDN failure is a disclosed warning; every candidate has before/after evidence;
-    and `HTML-REPORT.md` carries the semantic fallback and text-equivalent requirements.
-12. **Routing** — fog routes to `wayfind` with no worktree; a concrete candidate reuses or creates
+11. **Report and safe-rendering contract** — temp-directory resolution and the
+    `architecture-review-<timestamp>.html` name; the absolute path is always printed; generation
+    failure fails the run while a browser-open or CDN failure is a disclosed warning; and
+    `HTML-REPORT.md` carries the semantic fallback and text-equivalent requirements. The executable
+    regression passes `<img title='repo' onerror="alert(1)">&` through
+    `html.escape(..., quote=True)` and requires
+    `&lt;img title=&#x27;repo&#x27; onerror=&quot;alert(1)&quot;&gt;&amp;`; it also pins opaque Mermaid IDs,
+    escaped text labels, no raw HTML labels,
+    `securityLevel: "strict"`, and `htmlLabels: false` (per D21).
+12. **Eval 1 structural assertion** — the deployed assertion parses HTML rather than searching for
+    words and accepts only the D22 zero branch or one to five complete candidates plus one valid top
+    link. Its executable contract accepts valid zero and one-candidate reports and rejects an
+    out-of-section article, duplicate candidates sections, word-only HTML, mixed zero/top state and
+    six candidates.
+13. **Eval 3 map and terminal assertion** — the deployed assertion counts every non-fixture map
+    absent from `origin/main` and requires exactly one, independently preserves the fixture map,
+    worktree, spec/plan and source/test state, and requires the exact final non-empty
+    `WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.`
+    status. Its executable contract accepts one map and a terminal status, rejects two maps, a
+    generic stop and trailing output, and forecloses the former first-map `break` and broad
+    `out_lacks` checks (per D23).
+14. **Routing** — fog routes to `wayfind` with no worktree; a concrete candidate reuses or creates
     an isolated worktree before `design`, then `grill-with-docs`; and the skill stops at a
     recommendation of `writing-plans` or `to-issues` rather than invoking them.
-13. **Attribution** — `LICENSE` carries the upstream copyright line, the MIT permission notice, the
+15. **Attribution** — `LICENSE` carries the upstream copyright line, the MIT permission notice, the
     pinned revision and the inspection date; each of the nine departures above is recorded in it;
     and `SKILL.md` links to it while containing no notice text.
 
@@ -425,9 +457,9 @@ the correct behaviour — widen the net and say so — becomes gradeable.
 
 | # | Case | Mode | The observable it grades |
 |---|---|---|---|
-| 1 | `scan-only-renders-a-temporary-report` | pipeline | Unscoped run. An absolute path under the temp dir is printed and an `architecture-review-*.html` exists there; the file carries candidate cards with before/after evidence and a top recommendation, or a truthful no-candidate statement; the output discloses that history yielded no hotspot and the scan widened; the repository is untouched — clean `git status`, `HEAD` still at `origin/main`, the branch inventory unchanged, no new worktree, and nothing written under the fixture. |
+| 1 | `scan-only-renders-a-temporary-report` | pipeline | Unscoped run. An absolute path under the temp dir is printed and an `architecture-review-*.html` exists there. The parsed file has exactly one candidates section and either the explicit zero marker with zero candidate articles and no top-recommendation section, or one to five unique complete candidate articles, each with all seven evidence surfaces and both diagram-text surfaces, plus exactly one top link to a candidate (per D22). The output discloses that history yielded no hotspot and the scan widened; the repository is untouched — clean `git status`, `HEAD` still at `origin/main`, the branch inventory exactly `main`, and no linked worktree. |
 | 2 | `clear-selection-reaches-a-design-worktree` | pipeline | Prompt names a concrete area and carries the selection up front. An isolated linked worktree exists off the fixture; `design` was entered and `grill-with-docs` named; `tinytask/` is unchanged in both the fixture and the worktree; no plan file exists; the output recommends `writing-plans` or `to-issues` without invoking either. |
-| 3 | `foggy-selection-routes-to-wayfind` | pipeline | Prompt carries a deliberately unstatable destination (the fixture's documented cross-machine-sync fog). A new effort directory appears under `.claude/wayfind/` beside `concurrent-shells/`, which is left untouched; **no** design worktree was created; the output names `wayfind`; no spec is written. |
+| 3 | `foggy-selection-routes-to-wayfind` | pipeline | Prompt carries a deliberately unstatable destination (the fixture's documented cross-machine-sync fog). Exactly one new non-`concurrent-shells` `map.md` absent from `origin/main` exists; `concurrent-shells` remains unchanged; no worktree, spec or plan exists; and `tinytask/` plus `tests/` remain unchanged. The exact final non-empty output line is `WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.` (per D23). |
 
 Assertions use the harness environment the runner exports — `OUT`, `REPO`, `WT`, `WT_COUNT`,
 `SPEC_DIR`, `PLAN_DIR` — and the `assert-lib.sh` helpers, including `path_unchanged_since` for
