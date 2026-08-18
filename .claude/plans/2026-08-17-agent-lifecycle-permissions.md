@@ -58,7 +58,7 @@ Python `unittest`, Markdown.
    `-claude-code-settings.json` requisite (D4, D5, D15).
 2. `tests/test_claude_permission_guard.py` reads that JSON, asserts the exact ordered allow array and
    30-second Bash hook registration, then invokes the built executable with table-driven stdin/exit
-   and deterministic child-boundary fixtures (D14, D16, D17).
+   and deterministic child-boundary fixtures (D14, D16–D18).
 3. `just build` is the repository's local Nix evaluation/build gate. The one Task-2 build supplies
    the artifact used by seams 1 and 2.
 4. Live PR metadata, applied protection, activation, and no-prompt behavior are Phase-7 evidence,
@@ -77,10 +77,11 @@ Python `unittest`, Markdown.
 
 ## Decisions
 
-The spec owns the issue ledger. This plan implements D1–D2, D4–D6, D8, D10–D17; D13 reverses the
+The spec owns the issue ledger. This plan implements D1–D2, D4–D6, D8, D10–D18; D13 reverses the
 unsafe rationales in D3/D9, D14 reverses D7's no-test choice, and D15 reverses D11/D12's
 zero-match behavior. Planning added D16 for the guard implementation and built-test interface;
 the second review added D17 for fail-closed timeout/error behavior and deterministic dependencies.
+The final review added D18 for quoted-subject compatibility and safe omission fallback.
 
 ## Reviewer provenance and disposition
 
@@ -97,6 +98,9 @@ the second review added D17 for fail-closed timeout/error behavior and determini
 - Second reviewer: fresh native standards reviewer at review commit `3eab69a`; no fallback reviewer.
   Its blocking timeout/error finding is applied through D17 and P6-2, its blocking whole-skill merge
   audit is applied in P6-3, and its exact-array should-fix is applied in P6-2.
+- Final reviewer: fresh native standards reviewer at review commit `24c88a0`; no fallback reviewer.
+  Its blocking quoted-subject grammar finding is applied through D18 and P6-2/P6-3; its registration
+  should-fix is applied in P6-2 by asserting absent/empty args and no override flags in command text.
 
 ---
 
@@ -182,11 +186,14 @@ the second review added D17 for fail-closed timeout/error behavior and determini
 **Invariants:**
 - If the raw command contains neither `git branch -d` nor `gh pr merge`, the guard returns 0 and
   remains outside permission classification.
-- If either literal occurs, reject any raw `;`, `&`, `|`, `<`, `>`, `$`, backtick, backslash,
+- If the branch literal occurs, reject any raw `;`, `&`, `|`, `<`, `>`, `$`, backtick, backslash,
   newline, carriage return, `*`, `?`, `[`, `]`, `{`, `}`, `(`, `)`, `#`, or `~` before
-  tokenisation; these cover control, expansion, redirection, globbing, comments, and second
-  commands. Reject wrappers and malformed quoting after tokenisation. Tokenise with `shlex.split`;
-  never execute raw command text or use `shell=True`.
+  tokenisation. If the merge literal occurs, require exactly one of D18's two full raw grammars:
+  the no-subject form, or the form with `--subject "<literal>"`, where the nonempty literal permits
+  every Unicode scalar except double quote, dollar, backtick, backslash, NUL, LF, and CR. This
+  deliberately admits `feature (#30) [guarded]*?~` only inside the quotes. After the raw match,
+  tokenise with `shlex.split` and validate the vector again; never execute raw command text or use
+  `shell=True`.
 - Branch deletion accepts only `['git', 'branch', '-d', branch]`, rejects a branch beginning `-`,
   and validates it by argv with absolute `${pkgs.git}/bin/git check-ref-format --branch`.
 - Merge accepts only `gh pr merge <positive-decimal> --repo fagenorn/nix-config --merge
@@ -208,6 +215,9 @@ the second review added D17 for fail-closed timeout/error behavior and determini
   return 2. The executable's top-level `main()` call is inside one outer `except Exception` that
   prints `lifecycle guard: unexpected failure: <type>: <message>` and exits 2; no ordinary Python
   exception can fall through with a non-blocking exit.
+- The generated registration has no `args` key (an empty list is also contract-valid), and its
+  `command` is one argument-free absolute path containing none of `--git-bin`, `--gh-bin`,
+  `--jq-bin`, or `--child-timeout-seconds`.
 - `defaultMode = "auto"`, `ask = [ ]`, and `deny = [ ]` remain unchanged. The adjacent comment says
   the two broad entries are usable only through the guard and bare `Agent` is inert in auto mode.
 
@@ -258,9 +268,14 @@ the second review added D17 for fail-closed timeout/error behavior and determini
           command_hook = command_hooks[0]
           if command_hook.get("timeout") != 30:
               raise AssertionError(f"expected hook timeout 30, found {command_hook.get('timeout')!r}")
+          if command_hook.get("args", []) != []:
+              raise AssertionError(f"registered hook must pass no args: {command_hook.get('args')!r}")
           command = command_hook.get("command")
           if not isinstance(command, str) or " " in command:
               raise AssertionError(f"registered command must be one argument-free path: {command!r}")
+          override_flags = ("--git-bin", "--gh-bin", "--jq-bin", "--child-timeout-seconds")
+          if any(flag in command for flag in override_flags):
+              raise AssertionError(f"registered command contains a test override: {command!r}")
           cls.guard = Path(command)
           if not cls.guard.is_absolute() or not os.access(cls.guard, os.X_OK):
               raise AssertionError(f"guard is not an executable absolute path: {cls.guard}")
@@ -355,6 +370,11 @@ the second review added D17 for fail-closed timeout/error behavior and determini
               "gh pr merge 1 --merge --repo fagenorn/nix-config --delete-branch",
               "gh pr merge $PR --repo fagenorn/nix-config --merge --delete-branch",
               "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch | true",
+              'gh pr merge 1 --repo fagenorn/nix-config --merge --subject "bad $HOME" --delete-branch',
+              'gh pr merge 1 --repo fagenorn/nix-config --merge --subject "bad `id`" --delete-branch',
+              'gh pr merge 1 --repo fagenorn/nix-config --merge --subject "bad\\path" --delete-branch',
+              'gh pr merge 1 --repo fagenorn/nix-config --merge --subject "bad "quote"" --delete-branch',
+              'gh pr merge 1 --repo fagenorn/nix-config --merge --subject "bad\nline" --delete-branch',
           )
           for command in cases:
               with self.subTest(command=command):
@@ -391,6 +411,14 @@ the second review added D17 for fail-closed timeout/error behavior and determini
       def test_merge_dependency_fixture_can_reach_acceptance(self):
           result = self.invoke_command(
               "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch",
+              "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.05",
+          )
+          self.assertEqual(0, result.returncode, result.stderr)
+
+      def test_safe_rendered_subject_can_reach_acceptance(self):
+          result = self.invoke_command(
+              'gh pr merge 1 --repo fagenorn/nix-config --merge '
+              '--subject "feature (#30) [guarded]*?~" --delete-branch',
               "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.05",
           )
           self.assertEqual(0, result.returncode, result.stderr)
@@ -483,7 +511,7 @@ the second review added D17 for fail-closed timeout/error behavior and determini
 
   Run: `CLAUDE_SETTINGS_PATH="$SETTINGS_JSON" python3 tests/test_claude_permission_guard.py -v`
 
-  Expected: eight tests pass; the artifact's allow array matches all sixteen entries in exact order,
+  Expected: nine tests pass; the artifact's allow array matches all sixteen entries in exact order,
   the hook timeout is 30, syntactic rejections happen before network, deterministic PR/protection
   failures and an unexpected missing dependency all return 2, and the fully valid dependency fixture
   returns 0.
@@ -518,11 +546,12 @@ the second review added D17 for fail-closed timeout/error behavior and determini
 **Interfaces:**
 - Consumes: the already-resolved `repoSlug` binding.
 - Produces: exactly `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject
-  "<rendered mergeSubjectTemplate>"] --delete-branch`, in that order.
+  "<rendered mergeSubjectTemplate>"] --delete-branch`, in that order. The optional form is emitted
+  only when the rendered template is nonempty and representable by D18's quoted-subject grammar.
 
 **Invariants:**
-- The null-subject branch omits only `--subject` and its value; `--repo`, `--merge`, and
-  `--delete-branch` remain.
+- A null or unrepresentable rendered subject omits only `--subject` and its value and lets the forge
+  default stand; `--repo`, `--merge`, and `--delete-branch` remain.
 - No `-R`, implicit current repository, alternate strategy, `--admin`, or other merge shape is
   documented or emitted. The existing post-merge state verification remains unchanged.
 - Audit the whole skill, not only Phase 7: the flow summary, standing authorization, and executable
@@ -553,7 +582,8 @@ the second review added D17 for fail-closed timeout/error behavior and determini
           '--subject "<rendered mergeSubjectTemplate>" --delete-branch'
       )
       self.assertIn(expected, phase)
-      self.assertIn("if it's null, omit `--subject` and its value", phase)
+      self.assertIn("representable by D18's quoted-subject grammar", phase)
+      self.assertIn("otherwise omit `--subject` and its value", phase)
   ```
 
 - [ ] **Step 2: Watch it fail**
@@ -567,9 +597,11 @@ the second review added D17 for fail-closed timeout/error behavior and determini
   Update the flow summary's Phase 7 row and Standing authorization so their documented merge shape
   is `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered
   mergeSubjectTemplate>"] --delete-branch`. In Phase 7, say the command uses the binding resolved in
-  Phase 0, update the null-subject sentence to “omit `--subject` and its value,” and replace the
-  command block with the exact Produces shape. Run `rg -n 'gh pr merge'` over the whole file and
-  reconcile all three occurrences; do not change ship-release or add another merge authority.
+  Phase 0. Render the subject form only when the result is nonempty and contains none of double
+  quote, dollar, backtick, backslash, NUL, LF, or CR; otherwise omit `--subject` and its value and let
+  the forge default stand. Replace the command block with the exact Produces shape. Run
+  `rg -n 'gh pr merge'` over the whole file and reconcile all three occurrences; do not change
+  ship-release or add another merge authority.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -652,7 +684,7 @@ the second review added D17 for fail-closed timeout/error behavior and determini
   CLAUDE_SETTINGS_PATH="$SETTINGS_JSON" python3 tests/test_claude_permission_guard.py -v
   ```
 
-  Expected: recipe and all eight tests exit 0. Remove the scratch file.
+  Expected: recipe and all nine tests exit 0. Remove the scratch file.
 
 - [ ] **Step 3: Audit owned scope and terminal state**
 

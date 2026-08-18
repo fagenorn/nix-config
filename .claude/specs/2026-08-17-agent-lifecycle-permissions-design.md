@@ -63,8 +63,10 @@ fail-closed `PreToolUse` guard for Bash that mediates the two argument-sensitive
 permission engine sees them. The guard is the inner policy boundary; the allow entries remove prompts
 only after that boundary accepts the exact call.
 
-The guard admits only `git branch -d <valid-single-branch>` and the repository-bound merge shape
-`gh pr merge <number> --repo fagenorn/nix-config --merge [--subject <literal>] --delete-branch`.
+The guard admits only `git branch -d <valid-single-branch>` and two repository-bound raw merge
+grammars: the fixed command without a subject, or the same command with one double-quoted literal
+subject. The literal may contain spaces and safe punctuation (including `#()[]{}*?~`) but no double
+quote, dollar, backtick, backslash, CR, LF, or NUL.
 It rejects force flags, multiple branches, shell expansion/control syntax, omitted/URL/branch PR
 targets, alternate repositories, and all other merge flags. Before admitting the merge it also reads
 the named PR and live branch protection through absolute Nix-store `gh`/`jq` dependencies and fails
@@ -212,13 +214,26 @@ commands for permission matching, while the hook receives the original raw comma
    `tool_input.command`; malformed input blocks rather than falling through.
 2. If the raw command contains neither literal guarded prefix, return no decision. The guard does
    not become a second classifier for unrelated Bash calls.
-3. If either prefix occurs, reject shell control, expansion, redirection, globbing, comments,
-   newlines, wrappers, or a second command before tokenising. Tokenise without evaluation; never pass
-   the raw string to a shell.
+3. If the branch prefix occurs, reject shell control, expansion, redirection, globbing, comments,
+   newlines, wrappers, or a second command before tokenising. If the merge prefix occurs, require one
+   of these two complete raw grammars before tokenising (spaces shown are single ASCII spaces):
+
+   ```text
+   PR            = [1-9][0-9]*
+   SUBJECT_CHAR  = any Unicode scalar except U+0022 (") U+0024 ($) U+0060 (`)
+                   U+005C (backslash) U+0000 (NUL) U+000A (LF) U+000D (CR)
+   NO_SUBJECT    = gh pr merge PR --repo fagenorn/nix-config --merge --delete-branch
+   WITH_SUBJECT  = gh pr merge PR --repo fagenorn/nix-config --merge --subject
+                   U+0022 SUBJECT_CHAR+ U+0022 --delete-branch
+   ```
+
+   This full-command grammar permits literal punctuation inside the quoted subject without letting
+   it become shell syntax. After the raw match, tokenise with `shlex` without evaluation and validate
+   the resulting vector again; never pass the raw string to a shell.
 4. For branch deletion, require the exact token vector `[git, branch, -d, <branch>]`, reject a value
    beginning with `-`, and validate the value with `git check-ref-format --branch` invoked by argv.
 5. For merge, require the fixed ordered vector `gh pr merge <positive-decimal> --repo
-   fagenorn/nix-config --merge`, then either `--delete-branch` or `--subject <one-literal-token>
+   fagenorn/nix-config --merge`, then either `--delete-branch` or `--subject <one-token-literal>
    --delete-branch`. Resolve the PR by number with explicit `--repo`, require an open PR whose base is
    `main`, then require the live protection predicates above. Invoke every child command by argv from
    an absolute Nix-store path.
@@ -424,9 +439,11 @@ Four seams, at the highest observable boundaries available:
    input exit 2. Wrong-repo, URL/branch/omitted PR targets, `--admin`, alternate strategies and shell
    expansion exit 2 before any network call. Explicit test-only argv overrides replace store-pinned
    child executables only when the test invokes the guard; the registered production command passes
-   no overrides. Deterministic fixtures cover PR/protection child nonzero and timeout, invalid JSON,
+   no overrides. Registration tests assert both that no args are present and that the command text
+   contains no override flag. Deterministic fixtures cover PR/protection child nonzero and timeout, invalid JSON,
    wrong repo/base/state, missing `Nix Eval`, and `enforce_admins` false. These are table-driven
-   contract cases, not source regexes.
+   contract cases, not source regexes. A positive fixture admits `feature (#30) [guarded]*?~`; quoted
+   subjects containing dollar, backtick, backslash, embedded quote, or newline exit 2.
 3. **`just build` exit 0** — the repository's required local verification. The settings and guard are
    both in the resulting closure, so the first two seams inspect what the next switch will install.
 4. **Ship-time live evidence** — after a requested switch, a background subagent demonstrates the
@@ -509,3 +526,4 @@ Restated so each names the command that decides it.
 | D15 | **Reverses D11's fixed body and D12:** `show-claude-settings` counts closure matches and exits nonzero unless there is exactly one before `cat` | Standards reviewer finding plus *Truthful terminal states* and *Fail loud*: `grep \| xargs cat` exits 0 and prints nothing on zero matches, so the named inspection command can falsely succeed. Store paths contain no shell whitespace, making positional-parameter counting portable here | Keep the old pipeline because downstream `jq` fails (the recipe itself still lies); add only `pipefail` (does not reject multiple matches and is shell-dependent) |
 | D16 | Build the guard as one Nix-store Python executable using stdlib JSON/`shlex`/`subprocess`, with absolute store paths for `git`, `gh`, and `jq`; its stdlib contract test accepts the generated settings JSON path and invokes the command registered there | D13 requires tokenisation without evaluation and argv-only child execution, while D14 requires testing the built executable rather than Nix source. Python's stdlib provides both without adding a flake input, and resolving the executable through generated settings tests the hook registration and policy together | A shell parser (quote handling and token boundaries become security-sensitive); a separately named guard path in the test (could pass while the installed hook points elsewhere); wiring the built-artifact test into `agent-workflow-tests` (would make the otherwise fast suite implicitly build a host closure) |
 | D17 | Make fail-closed behavior explicit at both timeout layers: register a 30-second command-hook timeout, cap every child at 5 seconds, and route every rejection, child failure/timeout, parse/predicate failure, and unexpected exception to exit 2; expose dependency paths and a shorter child timeout only as test argv overrides, while the installed hook passes no arguments | Official Claude hooks contract: only exit 2 blocks; non-2 exits and hook timeout continue to permission evaluation. *Defense in depth* and *Tests that can fail* require deterministic coverage of external-boundary failures without weakening the store-pinned production command | Rely on the framework timeout (it is non-blocking); catch only expected subprocess errors (an uncaught parser/runtime error exits non-2); PATH injection or environment-only dependency substitution (could affect production semantics and does not prove the registered command is store-pinned) |
+| D18 | Replace the merge-wide metacharacter blacklist with two full raw grammars, allowing a nonempty double-quoted subject to contain spaces and literal safe punctuation while excluding quote/expansion/escape/newline bytes; `ship-issue` emits the quoted subject only when representable and otherwise omits `--subject` so the forge default stands | Final reviewer found the global blacklist rejected the normal rendered subject `feature (#30)`, conflicting with the required ship command. A full-command grammar fixes compatibility without making punctuation outside the quote executable, and post-match `shlex` plus vector validation retain defense in depth | Keep the blacklist (breaks common merge subjects); allow arbitrary quoted shell text (reopens expansion/escape paths); fail shipping on an unrepresentable title (the forge already has a safe default subject, so omission is the smaller reversible fallback) |
