@@ -100,12 +100,18 @@ let
           if not isinstance(command, str):
               return block("invalid hook input: expected tool_input.command to be a string")
 
-          has_branch_delete = BRANCH_LITERAL in command
-          has_merge = MERGE_LITERAL in command
-          if not has_branch_delete and not has_merge:
+          if command.startswith(MERGE_LITERAL):
+              operation = "merge"
+          elif command.startswith(BRANCH_LITERAL):
+              operation = "branch"
+          elif BRANCH_LITERAL in command:
+              operation = "branch"
+          elif MERGE_LITERAL in command:
+              operation = "merge"
+          else:
               return 0
 
-          if has_branch_delete:
+          if operation == "branch":
               if any(character in UNSAFE_BRANCH_CHARS for character in command):
                   return block("unsafe branch deletion: forbidden raw command character")
               try:

@@ -62,7 +62,7 @@ if mode == "nonzero":
     print(f"fake {{stage}} failure", file=sys.stderr)
     raise SystemExit(9)
 if mode == "timeout":
-    time.sleep(1)
+    time.sleep(2)
 if mode == "invalid":
     print("{{")
     raise SystemExit(0)
@@ -159,7 +159,7 @@ print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
             "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch"
         )
         guard_args = (
-            "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.05",
+            "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.5",
         )
         cases = (
             ({"FAKE_PR_MODE": "nonzero"}, "PR lookup"),
@@ -183,24 +183,26 @@ print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
     def test_merge_dependency_fixture_can_reach_acceptance(self):
         result = self.invoke_command(
             "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch",
-            "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.05",
+            "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.5",
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_safe_rendered_subject_can_reach_acceptance(self):
-        result = self.invoke_command(
-            'gh pr merge 1 --repo fagenorn/nix-config --merge '
-            '--subject "feature (#30) [guarded]*?~" --delete-branch',
-            "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.05",
-        )
-        self.assertEqual(0, result.returncode, result.stderr)
+        for subject in ("feature (#30) [guarded]*?~", "git branch -d"):
+            with self.subTest(subject=subject):
+                result = self.invoke_command(
+                    'gh pr merge 1 --repo fagenorn/nix-config --merge '
+                    f'--subject "{subject}" --delete-branch',
+                    "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.5",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
 
     def test_unexpected_dependency_exception_blocks(self):
         missing_jq = Path(self.fixture_dir.name) / "missing-jq"
         result = self.invoke_command(
             "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch",
             "--gh-bin", str(self.fake_gh), "--jq-bin", str(missing_jq),
-            "--child-timeout-seconds", "0.05",
+            "--child-timeout-seconds", "0.5",
         )
         self.assertEqual(2, result.returncode)
         self.assertIn("lifecycle guard: unexpected failure:", result.stderr)
