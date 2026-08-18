@@ -28,8 +28,8 @@
 ## Test seams
 
 - **Shared deployment seam:** build without activation, then assert both generated agent surfaces expose all five files.
-- **Workflow-contract seam:** one appended `ImproveCodebaseArchitectureSkillContractsTest` pins package, report, provenance, routing, and eval contracts; `AgentModelMatrixTest` plus the validator pin the closed family, exact dispatch, standalone trace, and unchanged issue-delivery trace per D6, D7, D15, and D18.
-- **Deployed-behavior seam:** three authored `pipeline` cases grade scan-only, clear-selection, and fog-selection behavior after a later human activation per D12, D16, and D19.
+- **Workflow-contract seam:** one appended `ImproveCodebaseArchitectureSkillContractsTest` pins package, report, provenance, routing, and each eval prompt and terminal shell; `AgentModelMatrixTest` plus the validator pin the closed family, exact dispatch, standalone trace, and unchanged issue-delivery trace per D6, D7, D15, D18, and D20.
+- **Deployed-behavior seam:** three authored `pipeline` cases grade scan-only, clear-selection, and fog-selection behavior after a later human activation per D12, D16, D19, and D20.
 
 ## Task index
 
@@ -37,9 +37,11 @@ Task 1 — Ship the complete architecture-improvement workflow — `home/common/
 
 ## Decisions
 
-The issue spec owns D1–D19. This plan cites those rows and introduces no second ledger.
+The issue spec owns D1–D20. This plan cites those rows and introduces no second ledger.
 
 ## Standards review
+
+### Pass 1
 
 - Reviewer: `/root/issue43_plan_review`
 - Report: `/private/tmp/issue43-plan-review.md`
@@ -55,6 +57,21 @@ The issue spec owns D1–D19. This plan cites those rows and introduces no secon
 - S2: rename the stale representative-trace test without changing its scenario.
 - S3: replace the two-task/four-file intermediate state with one complete five-file task and one commit.
 - S4 → D19: clear-route autonomy is bounded to reversible in-scope recommendations and stops on reserved questions.
+
+### Pass 2
+
+- Reviewer: `/root/issue43_plan_review`
+- Report: `/private/tmp/issue43-plan-review.md`
+- Reviewed HEAD: `82943205bd8119ad28c5d8fba59b28b3b0865f32`
+- Base SHA: `2efb92d6ff600b92eb3c1ed35850141b21d8b85a`
+- Reviewer path: native reviewer
+- Fallback: `false`
+- Findings: 4 Blocking, 1 Should-fix, 0 Discussion; all actionable findings applied.
+- B1 → D15: the embedded notice now matches upstream bytes including paragraph blank lines, and `SKILL.md` is checked for no inline notice text.
+- B2: Step 1 emits named absolute `AUTHORING_DIR` and `IMPLEMENTATION_START` handoff values; Steps 4 and 5 explicitly consume them.
+- B3: package/eval and matrix starting-subject rejection run as independent fail-closed red gates.
+- B4 → D20: each scenario prompt and its exact terminal observables are pinned independently, including negative continuation semantics.
+- S1: forbidden paths are compared with implementation-start HEAD; the post-commit exact allowlist and clean-status gate reject every extra or dirty path.
 
 ---
 
@@ -72,7 +89,7 @@ The issue spec owns D1–D19. This plan cites those rows and introduces no secon
 - Modify: `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 
 **Interfaces:**
-- Consumes: immutable upstream sources listed in Step 1; `codebase-design`; `doc-grounded-questions`, `worktrees`, `design`, `grill-with-docs`, `wayfind`, `writing-plans`, `to-issues`; matrix `dispatch_sites`/`scenarios`; eval variables `OUT`, `REPO`, `WT`, `WT_COUNT`, `SPEC_DIR`, `PLAN_DIR` and existing assertion helpers.
+- Consumes: named Step 1 handoffs `AUTHORING_DIR` and `IMPLEMENTATION_START`; immutable upstream sources listed in Step 1; `codebase-design`; `doc-grounded-questions`, `worktrees`, `design`, `grill-with-docs`, `wayfind`, `writing-plans`, `to-issues`; matrix `dispatch_sites`/`scenarios`; eval variables `OUT`, `REPO`, `WT`, `WT_COUNT`, `SPEC_DIR`, `PLAN_DIR` and existing assertion helpers.
 - Produces: explicit skill `$improve-codebase-architecture`; dispatch `improve-architecture-scan-owner`; workflow/scenario `improve-codebase-architecture`; eval ids 1–3; one complete signed implementation commit.
 
 **Invariants:**
@@ -83,6 +100,7 @@ The issue spec owns D1–D19. This plan cites those rows and introduces no secon
 - Report generation fails the run; browser/CDN failures warn; an absolute temporary path is always printed. Zero candidates succeeds truthfully.
 - Fog returns after `wayfind` with no automatic resumption. Concrete selection uses an isolated worktree, `design`, approved `grill-with-docs`, then recommends a scope workflow and stops.
 - Eval 2's one-shot autonomy answers only reversible in-scope recommendations. Scope-redrawing, hard-to-reverse, credential, spending, or unanswerable questions stop.
+- Each eval prompt and named shell proves its own scenario identity and terminal state: unscoped scan, concrete `tinytask.store`, or `sync between machines`; exact repository/worktree state; allowed recommendation; new fog map; and no continuation per D20.
 - Eval 3 proves map creation and the absence of worktree, spec, plan, source/test mutation, and continuation into issues/planning/execution. Under tracker `kind:none`, no canonical issue artifact exists; stop-semantic output is the issue-creation observable per D16.
 
 - [ ] **Step 1: Fetch the four immutable authoring sources to a temporary directory**
@@ -94,13 +112,15 @@ Exact revision and URLs:
 - `https://raw.githubusercontent.com/mattpocock/skills/9c9f36ccd3995266cd675468af71639c8dde1ec5/skills/engineering/improve-codebase-architecture/agents/openai.yaml`
 - `https://raw.githubusercontent.com/mattpocock/skills/9c9f36ccd3995266cd675468af71639c8dde1ec5/LICENSE`
 
-Run this reproducible authoring-only fetch, or use a web connector that returns and verifies the same four requested URLs:
+Run this reproducible authoring-only fetch:
 
 ```bash
 set -euo pipefail
+implementation_start=$(git rev-parse HEAD)
 upstream_revision=9c9f36ccd3995266cd675468af71639c8dde1ec5
 upstream_root="https://raw.githubusercontent.com/mattpocock/skills/$upstream_revision"
 authoring_dir=$(mktemp -d "${TMPDIR:-/tmp}/improve-architecture-upstream.XXXXXX")
+authoring_dir=$(cd "$authoring_dir" && pwd -P)
 fetch_exact() {
   local relative=$1 destination=$2 expected effective
   expected="$upstream_root/$relative"
@@ -114,9 +134,11 @@ fetch_exact skills/engineering/improve-codebase-architecture/HTML-REPORT.md "$au
 fetch_exact skills/engineering/improve-codebase-architecture/agents/openai.yaml "$authoring_dir/openai.yaml"
 fetch_exact LICENSE "$authoring_dir/LICENSE"
 test "$upstream_revision" = 9c9f36ccd3995266cd675468af71639c8dde1ec5
+printf 'AUTHORING_DIR=%s\n' "$authoring_dir"
+printf 'IMPLEMENTATION_START=%s\n' "$implementation_start"
 ```
 
-Expected: every effective URL equals its commit-addressed requested URL and all four temporary files are non-empty. Nothing under the repository changes; `/private/tmp` is not an input. These files are manual implementation-time references only per D17.
+Expected: every effective URL equals its commit-addressed requested URL and all four temporary files are non-empty. The command prints one resolvable absolute `AUTHORING_DIR` and the exact `IMPLEMENTATION_START` commit. Record those two output lines as the named task handoff and export their values in every later shell that consumes them; do not re-fetch or discover a temporary directory by glob. Nothing under the repository changes; `/private/tmp` is not an input. These files are manual implementation-time references only per D17.
 
 - [ ] **Step 2: Write the complete failing package/eval contract**
 
@@ -140,8 +162,10 @@ in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
+
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
+
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -220,6 +244,7 @@ class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
         for fragment in ("https://github.com/mattpocock/skills", "skills/engineering/improve-codebase-architecture/", IMPROVE_REVISION, "2026-08-17", "no automatic synchronisation"):
             self.assertIn(fragment, provenance)
         self.assertIn("[LICENSE](LICENSE)", self.skill)
+        self.assertNotIn("Permission is hereby granted", self.skill)
 
     def test_dispatch_registration_and_standalone_scenario(self):
         data = json.loads((REPO_ROOT / "home/common/agent-skills/model-matrix.json").read_text(encoding="utf-8"))
@@ -232,9 +257,9 @@ class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
         cases = {case["id"]: case for case in self.evals["evals"]}
         self.assertEqual({i: (c["name"], c["mode"]) for i, c in cases.items()}, {1: ("scan-only-renders-a-temporary-report", "pipeline"), 2: ("clear-selection-reaches-a-design-worktree", "pipeline"), 3: ("foggy-selection-routes-to-wayfind", "pipeline")})
         required_shells = {
-            1: {"temporary report exists outside repository": ('architecture-review-', '[ -f "$report" ]', '$REPO'), "report is evidence-backed or truthful": ("before", "after", "top recommendation", "no.?candidate"), "history miss widened the scan": ("out_matches", "widen"), "repository and branches stayed unchanged": ('test "$WT_COUNT" -eq 0', "status --porcelain", "origin/main")},
-            2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "design spec was committed": ('commits_touch "$WT" "$SPEC_DIR"',), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$REPO/$PLAN_DIR"/*.md "$WT/$PLAN_DIR"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended and execution stopped": ("out_matches", "recommend", "stop|stopping|not invok")},
-            3: {"new wayfind map exists and prior map stayed unchanged": (".claude/wayfind/concurrent-shells", "path_unchanged_since"), "no worktree was created": ('test "$WT_COUNT" -eq 0',), "no spec or plan was created": ('if has_file "$REPO/$SPEC_DIR"/*.md "$REPO/$PLAN_DIR"/*.md; then', "fail"), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests',), "wayfind returned control without continuation": ("out_matches", "stop|return control", "issues|to-issues|writing-plans|implementation|execute")},
+            1: {"temporary report exists outside repository": ('architecture-review-', '[ -f "$report" ]', '$REPO'), "report is evidence-backed or truthful": ("before", "after", "top recommendation", "no.?candidate"), "history miss widened the scan": ("out_matches", "widen"), "repository and branches stayed unchanged": ('test "$WT_COUNT" -eq 0', 'status=$(git -C "$REPO" status --porcelain)', 'test -z "$status"', 'test "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse origin/main)"', "branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads)", 'test "$branches" = "main"')},
+            2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "design spec was committed": ('commits_touch "$WT" "$SPEC_DIR"',), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$REPO/$PLAN_DIR"/*.md "$WT/$PLAN_DIR"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended and execution stopped": ("out_matches", "recommend", "writing-plans|to-issues", "stop|stopping|not invok")},
+            3: {"new wayfind map exists and prior map stayed unchanged": ('for map in "$REPO"/.claude/wayfind/*/map.md; do', "*/concurrent-shells/map.md) continue", 'new_map=$map', 'test -n "$new_map"', 'relative_map=${new_map#"$REPO"/}', 'if git -C "$REPO" cat-file -e "origin/main:$relative_map" 2>/dev/null; then', "fail", 'path_unchanged_since "$REPO" origin/main .claude/wayfind/concurrent-shells'), "no worktree was created": ('test "$WT_COUNT" -eq 0',), "no spec or plan was created": ('if has_file "$REPO/$SPEC_DIR"/*.md "$REPO/$PLAN_DIR"/*.md; then', "fail"), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests',), "wayfind returned control without continuation": ("out_matches", "stop|return control", "out_lacks", "issue|to-issues|writing-plans|implementation|execute")},
         }
         for case_id, case in cases.items():
             self.assertNotIn("expected_today", case)
@@ -250,6 +275,9 @@ class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
                 self.assertIn(name, shells)
                 for fragment in fragments:
                     self.assertIn(fragment, shells[name])
+        self.assertIn("unscoped", cases[1]["prompt"].lower())
+        self.assertIn("tinytask.store", cases[2]["prompt"])
+        self.assertIn("sync between machines", cases[3]["prompt"].lower())
         clear_prompt = cases[2]["prompt"]
         for fragment in ("Nobody is present", "reversible in-scope", "scope-redrawing", "hard to reverse", "credential", "spending", "cannot answer", "stop", "Do not create a plan", "Do not refactor"):
             self.assertIn(fragment, clear_prompt)
@@ -283,15 +311,20 @@ Add this self-contained method inside `AgentModelMatrixTest`. Separately rename 
         self.assertEqual({event["workflow"] for event in module.trace(REPO_ROOT, "representative")}, {"orchestration", "from-issue", "sdd", "shipping"})
 ```
 
-Run the red gate before creating any package or matrix entry:
+Run both red gates independently before creating any package or matrix entry:
 
 ```bash
 set -euo pipefail
 if python3 -m unittest -v \
-  home.common.agent-skills.tests.test_workflow_skill_contracts.ImproveCodebaseArchitectureSkillContractsTest \
+  home.common.agent-skills.tests.test_workflow_skill_contracts.ImproveCodebaseArchitectureSkillContractsTest
+then
+  echo "expected package/eval contract to reject the starting package" >&2
+  exit 1
+fi
+if python3 -m unittest -v \
   home.common.agent-skills.tests.test_agent_model_matrix.AgentModelMatrixTest.test_improve_codebase_architecture_trace_is_standalone
 then
-  echo "expected new contracts to reject the starting subjects" >&2
+  echo "expected matrix contract to reject the starting matrix" >&2
   exit 1
 fi
 ```
@@ -300,12 +333,29 @@ Expected: the package class errors because all five files are absent, and the ma
 
 - [ ] **Step 4: Author the complete five-file package, three evals, and matrix integration**
 
-- Adapt the temporary pinned `SKILL.md` and `HTML-REPORT.md` exactly as D1–D19 require. Put the seven evidence anchors in their tested order. The caller, not scan owner, renders every clearing candidate, up to five. Preserve the no-dispatch inline fallback without a second `Agent(` token.
+Export `AUTHORING_DIR` to the exact absolute path printed by Step 1, then prove the named handoff resolves before editing:
+
+```bash
+set -euo pipefail
+: "${AUTHORING_DIR:?export the exact AUTHORING_DIR printed by Step 1}"
+case "$AUTHORING_DIR" in
+  /*) ;;
+  *) echo "AUTHORING_DIR must be absolute" >&2; exit 1 ;;
+esac
+test -d "$AUTHORING_DIR"
+for relative in SKILL.md HTML-REPORT.md openai.yaml LICENSE; do
+  test -s "$AUTHORING_DIR/$relative"
+done
+```
+
+Consume only those four returned-path files; do not re-fetch or search temporary directories.
+
+- Adapt `$AUTHORING_DIR/SKILL.md` and `$AUTHORING_DIR/HTML-REPORT.md` exactly as D1–D20 require. Put the seven evidence anchors in their tested order. The caller, not scan owner, renders every clearing candidate, up to five. Preserve the no-dispatch inline fallback without a second `Agent(` token.
 - Preserve upstream scaffold, both exact CDN URLs, five diagram patterns, and editorial voice in `HTML-REPORT.md`. Add semantic order, adjacent text alternatives, non-color meaning, inline fallback CSS, 4.5:1 contrast, phone collapse, overflow wrapping/max-width, and prose that explicitly guarantees no clipping under user spacing.
-- Copy upstream `openai.yaml` byte-for-byte. Build `LICENSE` as provenance plus numbered adaptations 1–9 in the tested order, followed immediately by the exact temporary upstream `LICENSE` bytes.
-- Author Eval 1 as the unscoped scan-only case with a real temporary-file assertion, truthful candidate/no-candidate branch, widen disclosure, and unchanged repository/branch inventory.
-- Author Eval 2 with concrete `tinytask.store` selection. Its prompt says nobody is present; recommendations answer only reversible in-scope questions; scope-redrawing, hard-to-reverse, credential, spending, or unanswerable questions stop. It forbids plan/refactor. Named shells prove one worktree, `commits_touch "$WT" "$SPEC_DIR"`, unchanged source/tests in both trees, no plan, reached domain review, and recommendation-plus-stop semantics.
-- Author Eval 3 for cross-machine-sync fog. Named shells prove a new map, unchanged `concurrent-shells`, no worktree/spec/plan, `path_unchanged_since "$REPO" origin/main tinytask tests`, and output that `wayfind` returned control without issues, planning, or execution. No separate issue-file assertion exists because tracker `kind:none` has no canonical issue artifact per D16.
+- Copy `$AUTHORING_DIR/openai.yaml` byte-for-byte. Build `LICENSE` as provenance plus numbered adaptations 1–9 in the tested order, followed immediately by the byte-exact `$AUTHORING_DIR/LICENSE`, including both paragraph-separating blank lines.
+- Author Eval 1 with an explicitly unscoped scan-only prompt, a real temporary-file assertion, truthful candidate/no-candidate branch, widen disclosure, empty `status --porcelain`, `HEAD` at `origin/main`, local branches exactly `main`, and zero linked worktrees.
+- Author Eval 2 with concrete `tinytask.store` selection. Its prompt says nobody is present; recommendations answer only reversible in-scope questions; scope-redrawing, hard-to-reverse, credential, spending, or unanswerable questions stop. It forbids plan/refactor. Named shells prove one worktree, `commits_touch "$WT" "$SPEC_DIR"`, unchanged source/tests in both trees, no plan, reached domain review, and a `writing-plans` or `to-issues` recommendation plus stop semantics.
+- Author Eval 3 for the literal `sync between machines` fog. Named shells prove a newly created non-`concurrent-shells` `map.md`, unchanged `concurrent-shells`, no worktree/spec/plan, `path_unchanged_since "$REPO" origin/main tinytask tests`, and `out_lacks` continuation into issues, `to-issues`, `writing-plans`, implementation, or execution before terminal stop/return-control output. No separate issue-file assertion exists because tracker `kind:none` has no canonical issue artifact per D16.
 - Append the exact dispatch row last, add `improve-codebase-architecture` to `WORKFLOW_FAMILIES`, and add its exact one-event scenario. Change no existing scenario or selection.
 
 - [ ] **Step 5: Verify all contracts, deployment, scope, and the single commit**
@@ -314,6 +364,8 @@ Run:
 
 ```bash
 set -euo pipefail
+: "${IMPLEMENTATION_START:?export the exact IMPLEMENTATION_START printed by Step 1}"
+test "$IMPLEMENTATION_START" = "$(git rev-parse "$IMPLEMENTATION_START")"
 python3 -m json.tool home/common/agent-skills/skills/improve-codebase-architecture/evals/evals.json >/dev/null
 jq -e '.skill_name == "improve-codebase-architecture" and ([.evals[].id] == [1,2,3]) and ([.evals[].mode] | all(. == "pipeline")) and ([.evals[] | has("expected_today")] | all(. == false))' home/common/agent-skills/skills/improve-codebase-architecture/evals/evals.json >/dev/null
 python3 -m unittest -v \
@@ -333,28 +385,34 @@ for relative in SKILL.md HTML-REPORT.md LICENSE agents/openai.yaml evals/evals.j
   test -e "$home_tree/.agents/skills/improve-codebase-architecture/$relative"
   test -e "$home_tree/.claude/skills/improve-codebase-architecture/$relative"
 done
-git diff --check f471376 -- \
+git diff --check "$IMPLEMENTATION_START" -- \
   home/common/agent-skills/skills/improve-codebase-architecture \
   home/common/agent-skills/model-matrix.json \
   home/common/agent-skills/scripts/agent-model-matrix.py \
   home/common/agent-skills/tests/test_agent_model_matrix.py \
   home/common/agent-skills/tests/test_workflow_skill_contracts.py
-git diff --stat f471376 -- \
+git diff --stat "$IMPLEMENTATION_START" -- \
   home/common/agent-skills/skills/improve-codebase-architecture \
   home/common/agent-skills/model-matrix.json \
   home/common/agent-skills/scripts/agent-model-matrix.py \
   home/common/agent-skills/tests/test_agent_model_matrix.py \
   home/common/agent-skills/tests/test_workflow_skill_contracts.py
-git diff --quiet f471376 -- '*.nix' flake.nix justfile \
+git diff --quiet "$IMPLEMENTATION_START" -- '*.nix' flake.nix justfile \
   home/common/agent-skills/README.md \
   home/common/agent-skills/skills/codebase-design \
-  .claude/specs/2026-08-17-improve-codebase-architecture-design.md
+  home/common/agent-skills/evals/run-eval.sh \
+  home/common/agent-skills/evals/assert-lib.sh \
+  home/common/agent-skills/evals/fixture-repo \
+  .claude/specs/2026-08-17-improve-codebase-architecture-design.md \
+  .claude/specs/2026-08-17-issue-43-improve-codebase-architecture-design.md \
+  .claude/plans/2026-08-18-improve-codebase-architecture.md
 ```
 
-Expected: the complete static suite, matrix validation/trace, and unactivated builds pass; both generated agent surfaces expose all five files; scoped diffs name only the nine task-owned files; forbidden paths are unchanged. The new deployed evals are not run before human activation.
+Expected: the complete static suite, matrix validation/trace, and unactivated builds pass; both generated agent surfaces expose all five files; scoped diffs name only the nine task-owned files; every forbidden path is unchanged since implementation-start HEAD. The new deployed evals are not run before human activation.
 
 ```bash
 set -euo pipefail
+: "${IMPLEMENTATION_START:?export the exact IMPLEMENTATION_START printed by Step 1}"
 git add \
   home/common/agent-skills/skills/improve-codebase-architecture \
   home/common/agent-skills/model-matrix.json \
@@ -363,4 +421,21 @@ git add \
   home/common/agent-skills/tests/test_workflow_skill_contracts.py
 git commit -S -m "feat(agent-skills): add architecture improvement workflow (#43)" \
   -m "Co-Authored-By: Codex <noreply@openai.com>"
+expected_paths=$(printf '%s\n' \
+  home/common/agent-skills/model-matrix.json \
+  home/common/agent-skills/scripts/agent-model-matrix.py \
+  home/common/agent-skills/skills/improve-codebase-architecture/HTML-REPORT.md \
+  home/common/agent-skills/skills/improve-codebase-architecture/LICENSE \
+  home/common/agent-skills/skills/improve-codebase-architecture/SKILL.md \
+  home/common/agent-skills/skills/improve-codebase-architecture/agents/openai.yaml \
+  home/common/agent-skills/skills/improve-codebase-architecture/evals/evals.json \
+  home/common/agent-skills/tests/test_agent_model_matrix.py \
+  home/common/agent-skills/tests/test_workflow_skill_contracts.py | LC_ALL=C sort)
+test "$(git rev-parse HEAD^)" = "$IMPLEMENTATION_START"
+actual_paths=$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)
+test "$actual_paths" = "$expected_paths"
+status=$(git status --porcelain)
+test -z "$status"
 ```
+
+Expected: the signed implementation commit has implementation-start HEAD as its sole parent and contains exactly the nine allowlisted product paths, so pre-existing plan/spec commits are excluded; the worktree is clean. Any extra committed or uncommitted path fails this gate.
