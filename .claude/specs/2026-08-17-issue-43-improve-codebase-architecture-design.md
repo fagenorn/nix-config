@@ -243,12 +243,13 @@ becomes graph syntax, directives, link targets, classes or styles, and no raw HT
 The scaffold keeps `securityLevel: "strict"` and `htmlLabels: false`.
 
 The report also carries D22's machine-checkable structure. It contains exactly one
-`<section id="candidates">`. That section contains either the one explicit zero marker
-`<p id="no-candidates" data-candidate-count="0">No evidence-backed candidates.</p>` with no
-candidate article or top-recommendation section, or one to five unique marked candidate articles.
-Each positive article has all seven non-empty `data-evidence` surfaces and non-empty
-`data-diagram-text="before"` and `"after"` surfaces; exactly one top-recommendation link targets one
-of those candidate IDs.
+`<section id="candidates">`. That section contains either the one exact zero marker
+`<p id="no-candidates" data-candidate-count="0">No evidence-backed candidates.</p>` with no other
+element or surrounding non-whitespace text and no candidate article or top-recommendation section,
+or one to five marked candidate articles. Positive articles use opaque IDs `candidate-1` through
+`candidate-N` sequentially in report order, without gaps or duplicates. Each has all seven
+non-empty `data-evidence` surfaces and non-empty `data-diagram-text="before"` and `"after"`
+surfaces; exactly one top-recommendation link targets exactly one of those candidate IDs.
 
 Failure semantics follow parent D4 exactly: report-generation failure is a failed run; a failed
 browser open or an unreachable CDN is a **disclosed warning**, not a generation failure, because the
@@ -271,7 +272,9 @@ which repository mutation may begin, and the ladder is parent D5's, unchanged:
 4. **Domain and decisions.** After the design is approved, invoke `grill-with-docs`.
 5. **Scope gate, then stop.** Recommend `writing-plans` for one cohesive build or `to-issues` for
    several independently shippable slices. Do not invoke either, do not create issues, do not
-   execute.
+   execute. End with the exact final non-empty line
+   `DESIGN_COMPLETE: spec committed and grilled; control returned before planning or implementation.`
+   (per D24).
 
 ### Provenance and the recorded departures
 
@@ -356,10 +359,11 @@ The observable behaviours the class pins:
     escaped text labels, no raw HTML labels,
     `securityLevel: "strict"`, and `htmlLabels: false` (per D21).
 12. **Eval 1 structural assertion** — the deployed assertion parses HTML rather than searching for
-    words and accepts only the D22 zero branch or one to five complete candidates plus one valid top
-    link. Its executable contract accepts valid zero and one-candidate reports and rejects an
-    out-of-section article, duplicate candidates sections, word-only HTML, mixed zero/top state and
-    six candidates.
+    words and accepts only the exact D22 zero branch or one to five complete candidates with opaque
+    sequential `candidate-N` IDs plus one valid top link. Its executable contract accepts valid zero
+    and one-candidate reports and rejects a wrong zero-state element, surrounding or extra text,
+    repository-derived IDs, gaps, duplicates, an invalid top link, an out-of-section article,
+    duplicate candidates sections, word-only HTML, mixed zero/top state and six candidates.
 13. **Eval 3 map and terminal assertion** — the deployed assertion counts every non-fixture map
     absent from `origin/main` and requires exactly one, independently preserves the fixture map,
     worktree, spec/plan and source/test state, and requires the exact final non-empty
@@ -368,8 +372,8 @@ The observable behaviours the class pins:
     generic stop and trailing output, and forecloses the former first-map `break` and broad
     `out_lacks` checks (per D23).
 14. **Routing** — fog routes to `wayfind` with no worktree; a concrete candidate reuses or creates
-    an isolated worktree before `design`, then `grill-with-docs`; and the skill stops at a
-    recommendation of `writing-plans` or `to-issues` rather than invoking them.
+    an isolated worktree before `design`, then `grill-with-docs`; and the skill recommends
+    `writing-plans` or `to-issues` rather than invoking them, ending on D24's exact final status.
 15. **Attribution** — `LICENSE` carries the upstream copyright line, the MIT permission notice, the
     pinned revision and the inspection date; each of the nine departures above is recorded in it;
     and `SKILL.md` links to it while containing no notice text.
@@ -457,13 +461,14 @@ the correct behaviour — widen the net and say so — becomes gradeable.
 
 | # | Case | Mode | The observable it grades |
 |---|---|---|---|
-| 1 | `scan-only-renders-a-temporary-report` | pipeline | Unscoped run. An absolute path under the temp dir is printed and an `architecture-review-*.html` exists there. The parsed file has exactly one candidates section and either the explicit zero marker with zero candidate articles and no top-recommendation section, or one to five unique complete candidate articles, each with all seven evidence surfaces and both diagram-text surfaces, plus exactly one top link to a candidate (per D22). The output discloses that history yielded no hotspot and the scan widened; the repository is untouched — clean `git status`, `HEAD` still at `origin/main`, the branch inventory exactly `main`, and no linked worktree. |
-| 2 | `clear-selection-reaches-a-design-worktree` | pipeline | Prompt names a concrete area and carries the selection up front. An isolated linked worktree exists off the fixture; `design` was entered and `grill-with-docs` named; `tinytask/` is unchanged in both the fixture and the worktree; no plan file exists; the output recommends `writing-plans` or `to-issues` without invoking either. |
+| 1 | `scan-only-renders-a-temporary-report` | pipeline | Unscoped run. An absolute path under the temp dir is printed and an `architecture-review-*.html` exists there. The parsed file has exactly one candidates section and either the exact zero paragraph with no other element or surrounding text, zero candidate articles and no top-recommendation section, or one to five complete candidate articles whose opaque `candidate-N` IDs are sequential in report order, each with all seven evidence surfaces and both diagram-text surfaces, plus exactly one top link to one candidate ID (per D22). The output discloses that history yielded no hotspot and the scan widened; the repository is untouched — clean `git status`, `HEAD` still at `origin/main`, the branch inventory exactly `main`, and no linked worktree. |
+| 2 | `clear-selection-reaches-a-design-worktree` | pipeline | Prompt names a concrete area and carries the selection up front. An isolated linked worktree exists off the fixture; `design` was entered and `grill-with-docs` named; `tinytask/` is unchanged in both the fixture and the worktree; no plan file exists; the output recommends `writing-plans` or `to-issues` without invoking either, and its final non-empty line is exactly `DESIGN_COMPLETE: spec committed and grilled; control returned before planning or implementation.` (per D24). |
 | 3 | `foggy-selection-routes-to-wayfind` | pipeline | Prompt carries a deliberately unstatable destination (the fixture's documented cross-machine-sync fog). Exactly one new non-`concurrent-shells` `map.md` absent from `origin/main` exists; `concurrent-shells` remains unchanged; no worktree, spec or plan exists; and `tinytask/` plus `tests/` remain unchanged. The exact final non-empty output line is `WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.` (per D23). |
 
 Assertions use the harness environment the runner exports — `OUT`, `REPO`, `WT`, `WT_COUNT`,
 `SPEC_DIR`, `PLAN_DIR` — and the `assert-lib.sh` helpers, including `path_unchanged_since` for
-proving no refactor executed.
+proving no refactor executed. `OUT` is the filesystem path of the captured transcript, never the
+transcript text itself; direct extraction and terminal-line assertions read that file.
 
 No lower-level seam. No test for an internal scan helper, no assertion that a particular sub-agent
 method was called, no grading of how a model phrases a candidate. The observable boundaries are
@@ -519,5 +524,6 @@ installation, the authored package's contract, and deployed workflow behaviour (
 | D19 | In the clear-route one-shot eval, let recommendations answer only reversible in-scope questions; stop on scope-redrawing, irreversible, credential, spending, or unanswerable questions | Phase-5 S4; `grill-with-docs` silence rules and the no-human eval environment | Blanket autonomy: can silently decide questions the workflow reserves for a human; blanket waiting: stalls the one-shot eval before its observable route |
 | D20 | Pin each deployed eval prompt and named terminal shell separately: unscoped scan, concrete `tinytask.store`, and `sync between machines`, with exact clean-state, branch, worktree, recommendation, new-map, and no-continuation observables | Phase-5 re-review B4; D12, D16, and D18 define deployed boundaries, while scenario identity and negative continuation must remain directly falsifiable | Generic invocation checks and positive nouns: can pass the wrong scenario or a run that names the right route and then continues |
 | D21 | Treat every repository-derived report value as inert data: HTML-escape text and attributes, use opaque Mermaid node IDs with escaped text labels and no raw HTML labels, and configure Mermaid strict security with `htmlLabels: false`; pin the boundary with a markup-like regression value | Task 1 review Important 1; the report is auto-opened, so the-bar defense in depth requires the authored rendering instructions and executable contract to enforce the same trust boundary | Trusting repository text or Mermaid loose mode: unusual or malicious names and prose can become active markup or graph syntax in the opened local report |
-| D22 | Grade Eval 1 structurally: accept exactly one candidates section containing either the explicit zero state with no candidate/top card, or one to five complete marked candidate articles with all seven evidence surfaces, before/after text surfaces, and exactly one top link to a candidate | Task 1 review Important 2 and the controller ruling that the higher-level scenario-proof invariant governs; the-bar tests-that-can-fail requires report structure rather than coincidental words | Searching for `before`, `after`, `top recommendation`, or `no.?candidate`: malformed or empty reports can false-green |
+| D22 | Grade Eval 1 structurally: accept exactly one candidates section containing either the exact explicit zero paragraph with no other element or surrounding text and no candidate/top card, or one to five complete marked candidate articles with opaque sequential `candidate-N` IDs in report order, all seven evidence surfaces, before/after text surfaces, and exactly one top link to one candidate ID | Task 1 review Important 2, final conformance Critical, correctness COR-002, and the controller ruling that the higher-level scenario-proof invariant governs; the-bar tests-that-can-fail requires exact report grammar rather than coincidental words or merely unique IDs | Searching for keywords or accepting arbitrary unique IDs: malformed, repository-derived, gapped, duplicate, or empty reports can false-green |
 | D23 | Grade Eval 3 with exactly one newly created non-fixture map plus independent unchanged-state checks and require the exact final non-empty status `WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.` | Task 1 review Important 3 and the controller ruling that terminal behavior must be positive and anchored; the-bar truthful terminal states | Stopping at the first map or banning broad words such as `issue` and `implementation`: admits multiple maps and rejects truthful negated stop prose without proving return control |
+| D24 | Grade Eval 2 with the exact final non-empty status `DESIGN_COMPLETE: spec committed and grilled; control returned before planning or implementation.` while retaining separate recommendation-name and repository-state assertions | Final correctness review COR-003; an anchored terminal contract positively proves control returned before either recommended workflow or implementation was invoked | Independent recommendation and stop substrings: contradictory output can contain all required words while admitting that execution continued |

@@ -82,6 +82,6 @@ Selection is the first point at which repository mutation may begin. Follow this
 2. **Isolation.** Reuse the current workspace only if it is already an isolated linked worktree. Otherwise invoke `worktrees` for a candidate-named worktree cut from the configured remote integration-branch ref before writing a spec or domain document.
 3. **Design.** Invoke `design`, carrying the scan evidence as grounding without re-asking what the selection settled.
 4. **Domain and decisions.** After the design is approved, invoke `grill-with-docs`. If the user rejects the candidate for a load-bearing reason that future scans need to know, offer to record that decision through this workflow.
-5. **Scope gate, then stop.** Recommend `writing-plans` for one cohesive build or `to-issues` for several independently shippable slices. Do not invoke either workflow. Do not create issues, plan, implement, or execute the candidate.
+5. **Scope gate, then stop.** Recommend `writing-plans` for one cohesive build or `to-issues` for several independently shippable slices. Do not invoke either workflow. Do not create issues, plan, implement, or execute the candidate. Make the final non-empty output line exactly `DESIGN_COMPLETE: spec committed and grilled; control returned before planning or implementation.` and stop.
 
 This is an attributed adaptation; see [LICENSE](LICENSE) for provenance and the upstream notice.
