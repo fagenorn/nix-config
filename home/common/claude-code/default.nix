@@ -33,7 +33,10 @@ let
       DEFAULT_GH_BIN = "${pkgs.gh}/bin/gh"
       DEFAULT_JQ_BIN = "${pkgs.jq}/bin/jq"
       REPOSITORY = "fagenorn/nix-config"
-      PR_URL_PREFIX = "https://github.com/fagenorn/nix-config/pull/"
+      MAIN_BRANCH = "main"
+      PR_URL_PREFIX = f"https://github.com/{REPOSITORY}/pull/"
+      PROTECTION_ENDPOINT = f"repos/{REPOSITORY}/branches/{MAIN_BRANCH}/protection"
+      CHILD_DIAGNOSTIC_LIMIT = 240
       BRANCH_LITERAL = "git branch -d"
       MERGE_LITERAL = "gh pr merge"
       UNSAFE_BRANCH_CHARS = set(";&|<>$`\\\n\r*?[]{}()#~")
@@ -42,6 +45,30 @@ let
       def block(reason):
           print(f"lifecycle guard: {reason}", file=sys.stderr)
           return 2
+
+
+      def bounded_child_diagnostic(child):
+          parts = []
+          for name, output in (("stderr", child.stderr), ("stdout", child.stdout)):
+              if not output:
+                  continue
+              normalized = "".join(
+                  character if character.isprintable() else " "
+                  for character in output
+              )
+              normalized = " ".join(normalized.split())
+              if normalized:
+                  parts.append(f"{name}={normalized}")
+          if not parts:
+              return "no child output"
+          diagnostic = "; ".join(parts)
+          if len(diagnostic) > CHILD_DIAGNOSTIC_LIMIT:
+              return diagnostic[:CHILD_DIAGNOSTIC_LIMIT - 3] + "..."
+          return diagnostic
+
+
+      def block_child_failure(reason, child):
+          return block(f"{reason}: {bounded_child_diagnostic(child)}")
 
 
       def parse_merge_raw(command):
@@ -58,11 +85,11 @@ let
           ):
               return None
 
-          no_subject = "--repo fagenorn/nix-config --merge --delete-branch"
+          no_subject = f"--repo {REPOSITORY} --merge --delete-branch"
           if remainder == no_subject:
               return number, None
 
-          subject_prefix = '--repo fagenorn/nix-config --merge --subject "'
+          subject_prefix = f'--repo {REPOSITORY} --merge --subject "'
           subject_suffix = '" --delete-branch'
           if not remainder.startswith(subject_prefix) or not remainder.endswith(subject_suffix):
               return None
@@ -168,15 +195,18 @@ let
           except subprocess.TimeoutExpired:
               return block("PR lookup timed out")
           if pr_lookup.returncode != 0:
-              return block("PR lookup failed")
+              return block_child_failure("PR lookup failed", pr_lookup)
 
           try:
+              pr_predicate_query = (
+                  f'.state == "OPEN" and .baseRefName == "{MAIN_BRANCH}" and '
+                  f'(.url | startswith("{PR_URL_PREFIX}"))'
+              )
               pr_predicate = subprocess.run(
                   [
                       args.jq_bin,
                       "-e",
-                      '.state == "OPEN" and .baseRefName == "main" and '
-                      '(.url | startswith("https://github.com/fagenorn/nix-config/pull/"))',
+                      pr_predicate_query,
                   ],
                   input=pr_lookup.stdout,
                   capture_output=True,
@@ -187,11 +217,11 @@ let
           except subprocess.TimeoutExpired:
               return block("PR predicate timed out")
           if pr_predicate.returncode != 0:
-              return block("PR predicate failed")
+              return block_child_failure("PR predicate failed", pr_predicate)
 
           try:
               protection_lookup = subprocess.run(
-                  [args.gh_bin, "api", "repos/fagenorn/nix-config/branches/main/protection"],
+                  [args.gh_bin, "api", PROTECTION_ENDPOINT],
                   capture_output=True,
                   text=True,
                   timeout=args.child_timeout_seconds,
@@ -200,7 +230,7 @@ let
           except subprocess.TimeoutExpired:
               return block("protection lookup timed out")
           if protection_lookup.returncode != 0:
-              return block("protection lookup failed")
+              return block_child_failure("protection lookup failed", protection_lookup)
 
           try:
               protection_predicate = subprocess.run(
@@ -219,7 +249,7 @@ let
           except subprocess.TimeoutExpired:
               return block("protection predicate timed out")
           if protection_predicate.returncode != 0:
-              return block("protection predicate failed")
+              return block_child_failure("protection predicate failed", protection_predicate)
           return 0
 
 

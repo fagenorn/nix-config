@@ -56,7 +56,17 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         cls.fake_gh = Path(cls.fixture_dir.name) / "fake-gh"
         cls.fake_gh.write_text(f"""#!{sys.executable}
 import os, sys, time
-stage = "pr" if sys.argv[1:3] == ["pr", "view"] else "protection"
+expected_argv = {{
+    "pr": ["pr", "view", "1", "--repo", "fagenorn/nix-config",
+           "--json", "state,baseRefName,url"],
+    "protection": ["api", "repos/fagenorn/nix-config/branches/main/protection"],
+}}
+for stage, expected in expected_argv.items():
+    if sys.argv[1:] == expected:
+        break
+else:
+    print(f"unexpected fake-gh argv: {{sys.argv[1:]!r}}", file=sys.stderr)
+    raise SystemExit(64)
 mode = os.environ.get(f"FAKE_{{stage.upper()}}_MODE", "ok")
 if mode == "nonzero":
     print(f"fake {{stage}} failure", file=sys.stderr)
@@ -162,23 +172,25 @@ print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
             "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.5",
         )
         cases = (
-            ({"FAKE_PR_MODE": "nonzero"}, "PR lookup"),
-            ({"FAKE_PR_MODE": "timeout"}, "PR lookup"),
-            ({"FAKE_PR_MODE": "invalid"}, "PR predicate"),
-            ({"FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"main","url":"https://github.com/other/repo/pull/1"}'}, "PR predicate"),
-            ({"FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"dev","url":"https://github.com/fagenorn/nix-config/pull/1"}'}, "PR predicate"),
-            ({"FAKE_PR_JSON": '{"state":"CLOSED","baseRefName":"main","url":"https://github.com/fagenorn/nix-config/pull/1"}'}, "PR predicate"),
-            ({"FAKE_PROTECTION_MODE": "nonzero"}, "protection lookup"),
-            ({"FAKE_PROTECTION_MODE": "timeout"}, "protection lookup"),
-            ({"FAKE_PROTECTION_MODE": "invalid"}, "protection predicate"),
-            ({"FAKE_PROTECTION_JSON": '{"required_status_checks":{"contexts":[]},"enforce_admins":{"enabled":true}}'}, "protection predicate"),
-            ({"FAKE_PROTECTION_JSON": '{"required_status_checks":{"contexts":["Nix Eval"]},"enforce_admins":{"enabled":false}}'}, "protection predicate"),
+            ({"FAKE_PR_MODE": "nonzero"}, "PR lookup", "fake pr failure"),
+            ({"FAKE_PR_MODE": "timeout"}, "PR lookup", None),
+            ({"FAKE_PR_MODE": "invalid"}, "PR predicate", "parse error"),
+            ({"FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"main","url":"https://github.com/other/repo/pull/1"}'}, "PR predicate", None),
+            ({"FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"dev","url":"https://github.com/fagenorn/nix-config/pull/1"}'}, "PR predicate", None),
+            ({"FAKE_PR_JSON": '{"state":"CLOSED","baseRefName":"main","url":"https://github.com/fagenorn/nix-config/pull/1"}'}, "PR predicate", None),
+            ({"FAKE_PROTECTION_MODE": "nonzero"}, "protection lookup", "fake protection failure"),
+            ({"FAKE_PROTECTION_MODE": "timeout"}, "protection lookup", None),
+            ({"FAKE_PROTECTION_MODE": "invalid"}, "protection predicate", "parse error"),
+            ({"FAKE_PROTECTION_JSON": '{"required_status_checks":{"contexts":[]},"enforce_admins":{"enabled":true}}'}, "protection predicate", None),
+            ({"FAKE_PROTECTION_JSON": '{"required_status_checks":{"contexts":["Nix Eval"]},"enforce_admins":{"enabled":false}}'}, "protection predicate", None),
         )
-        for env, reason in cases:
+        for env, reason, diagnostic in cases:
             with self.subTest(env=env):
                 result = self.invoke_command(command, *guard_args, env=env)
                 self.assertEqual(2, result.returncode)
                 self.assertIn(f"lifecycle guard: {reason}", result.stderr)
+                if diagnostic is not None:
+                    self.assertIn(diagnostic, result.stderr)
 
     def test_merge_dependency_fixture_can_reach_acceptance(self):
         result = self.invoke_command(
