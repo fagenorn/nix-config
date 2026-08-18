@@ -76,13 +76,13 @@ agent-model-matrix:
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
 show-claude-settings: build
-  @set -- $$(nix-store --query --requisites ./result \
+  @set -- $(nix-store --query --requisites ./result \
     | grep -- '-claude-code-settings\.json$' || true); \
-    if [ "$$#" -ne 1 ]; then \
-      echo "expected exactly one generated Claude settings artifact; found $$#" >&2; \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one generated Claude settings artifact; found $#" >&2; \
       exit 1; \
     fi; \
-    cat "$$1"
+    cat "$1"
 
 ## branch protection
 # Idempotent: the API replaces the whole protection object, so re-running after a job
