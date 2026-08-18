@@ -68,12 +68,12 @@ Python `unittest`, Markdown.
 
 | ID | Title | Files | Risk lane |
 |----|-------|-------|-----------|
-| P6-1 | Make generated-settings selection fail closed | `justfile` | full |
-| P6-2 | Build, register, and contract-test the lifecycle guard and allow surface | `home/common/claude-code/default.nix`, `tests/test_claude_permission_guard.py` | full |
-| P6-3 | Emit the repository-bound merge shape from `ship-issue` | `home/common/agent-skills/skills/ship-issue/SKILL.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` | full |
-| P6-4 | Document the installed policy truthfully | `CLAUDE.md` | low-risk |
-| P6-5 | Run the bounded Phase-6 acceptance gate | no files | full |
-| P7-1 | Activate and record live evidence during shipping | no repository files; GitHub issue comment | full |
+| 1 | Make generated-settings selection fail closed | `justfile` | full |
+| 2 | Build, register, and contract-test the lifecycle guard and allow surface | `home/common/claude-code/default.nix`, `tests/test_claude_permission_guard.py` | full |
+| 3 | Emit the repository-bound merge shape from `ship-issue` | `home/common/agent-skills/skills/ship-issue/SKILL.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` | full |
+| 4 | Document the installed policy truthfully | `CLAUDE.md` | low-risk |
+| 5 | Run the bounded Phase-6 acceptance gate | no files | full |
+| 6 | Activate and record live evidence during shipping | no repository files; GitHub issue comment | full |
 
 ## Decisions
 
@@ -89,24 +89,24 @@ The final review added D18 for quoted-subject compatibility and safe omission fa
   `b344aaf527920dce8a47c2b9a11244234f2383d0`; no fallback reviewer.
 - Blocking finding: `Bash(git branch -d:*)` admitted `-f`/`--force`, and
   `Bash(gh pr merge:*)` admitted other repositories and non-`main` PRs. Disposition: fully applied
-  through D13 and Tasks P6-2/P6-3; one pre-allow guard accepts only exact shapes and verifies live
+  through D13 and Tasks 2/3; one pre-allow guard accepts only exact shapes and verifies live
   repo/base/protection state.
 - Should-fix finding: zero settings-artifact matches exited 0. Disposition: fully applied through
-  D15 and Task P6-1; zero and multiple matches now fail before `cat`.
-- Test-policy consequence: D14 and Task P6-2 add table-driven contract tests against the built
+  D15 and Task 1; zero and multiple matches now fail before `cat`.
+- Test-policy consequence: D14 and Task 2 add table-driven contract tests against the built
   executable named by generated settings.
 - Second reviewer: fresh native standards reviewer at review commit `3eab69a`; no fallback reviewer.
-  Its blocking timeout/error finding is applied through D17 and P6-2, its blocking whole-skill merge
-  audit is applied in P6-3, and its exact-array should-fix is applied in P6-2.
+  Its blocking timeout/error finding is applied through D17 and Task 2, its blocking whole-skill merge
+  audit is applied in Task 3, and its exact-array should-fix is applied in Task 2.
 - Final reviewer: fresh native standards reviewer at review commit `24c88a0`; no fallback reviewer.
-  Its blocking quoted-subject grammar finding is applied through D18 and P6-2/P6-3; its registration
-  should-fix is applied in P6-2 by asserting absent/empty args and no override flags in command text.
+  Its blocking quoted-subject grammar finding is applied through D18 and Tasks 2/3; its registration
+  should-fix is applied in Task 2 by asserting absent/empty args and no override flags in command text.
 
 ---
 
 ## Phase 6 — implementation and local verification
 
-### Task P6-1: Make generated-settings selection fail closed
+### Task 1: Make generated-settings selection fail closed
 
 **Files:**
 - Modify: `justfile`
@@ -165,7 +165,7 @@ The final review added D18 for quoted-subject compatibility and safe omission fa
   Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
   ```
 
-### Task P6-2: Build, register, and contract-test the lifecycle guard and allow surface
+### Task 2: Build, register, and contract-test the lifecycle guard and allow surface
 
 **Files:**
 - Modify: `home/common/claude-code/default.nix`
@@ -537,7 +537,7 @@ The final review added D18 for quoted-subject compatibility and safe omission fa
   Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
   ```
 
-### Task P6-3: Emit the repository-bound merge shape from `ship-issue`
+### Task 3: Emit the repository-bound merge shape from `ship-issue`
 
 **Files:**
 - Modify: `home/common/agent-skills/skills/ship-issue/SKILL.md`
@@ -618,7 +618,7 @@ The final review added D18 for quoted-subject compatibility and safe omission fa
   Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
   ```
 
-### Task P6-4: Document the installed policy truthfully
+### Task 4: Document the installed policy truthfully
 
 **Files:**
 - Modify: `CLAUDE.md`
@@ -659,7 +659,7 @@ The final review added D18 for quoted-subject compatibility and safe omission fa
   Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
   ```
 
-### Task P6-5: Run the bounded Phase-6 acceptance gate
+### Task 5: Run the bounded Phase-6 acceptance gate
 
 **Files:**
 - Modify: none.
@@ -701,7 +701,7 @@ The final review added D18 for quoted-subject compatibility and safe omission fa
 
 ## Phase 7 — live activation and tracker evidence
 
-### Task P7-1: Activate and record live evidence during shipping
+### Task 6: Activate and record live evidence during shipping
 
 **Files:**
 - Modify: no repository file.
