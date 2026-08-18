@@ -715,6 +715,28 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn(fragment, expected)
         self.assertNotIn("≤400", expected)
 
+    def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
+        canonical = "gh pr merge <pr-num> --repo <repoSlug> --merge"
+        occurrences = [
+            line.strip()
+            for line in self.ship_issue.splitlines()
+            if "gh pr merge" in line
+        ]
+        self.assertEqual(3, len(occurrences), occurrences)
+        for occurrence in occurrences:
+            with self.subTest(occurrence=occurrence):
+                self.assertIn(canonical, occurrence)
+        self.assertNotIn("gh pr merge --merge", self.ship_issue)
+        self.assertNotIn("gh pr merge <pr-num> --merge", self.ship_issue)
+        phase = self.section(self.ship_issue, "## Phase 7 — Merge", "## Phase 8 — Cleanup")
+        expected = (
+            'gh pr merge <pr-num> --repo <repoSlug> --merge '
+            '--subject "<rendered mergeSubjectTemplate>" --delete-branch'
+        )
+        self.assertIn(expected, phase)
+        self.assertIn("representable by D18's quoted-subject grammar", phase)
+        self.assertIn("otherwise omit `--subject` and its value", phase)
+
     def test_phase0_size_note_delegates_counting_to_diff_scope(self):
         # Issues #21-#22 made diff-scope the accounting authority and retired the
         # hand-counted numstat arithmetic; this note is the only restatement of
