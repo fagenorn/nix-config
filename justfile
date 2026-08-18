@@ -7,7 +7,7 @@ hostname := `hostname | cut -d "." -f 1`
 # Build the nix-darwin system configuration without switching to it
 [macos]
 build target_host=hostname flags="":
-  @echo "Building nix-darwin config..."
+  @echo "Building nix-darwin config..." >&2
   nix --extra-experimental-features 'nix-command flakes'  build ".#darwinConfigurations.{{target_host}}.system" {{flags}}
 
 # Build the nix-darwin config with the --show-trace flag set
@@ -24,7 +24,7 @@ switch target_host=hostname: (build target_host)
 # Build the NixOS configuration without switching to it
 [linux]
 build target_host=hostname flags="":
-  @echo "Building NixOS config for {{target_host}}..."
+  @echo "Building NixOS config for {{target_host}}..." >&2
   nixos-rebuild build --flake .#{{target_host}} {{flags}}
 
 # Build the NixOS config with the --show-trace flag set
@@ -72,6 +72,17 @@ agent-workflow-tests:
 agent-model-matrix:
   python3 home/common/agent-skills/scripts/agent-model-matrix.py validate
   python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
+
+## claude code
+# Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
+show-claude-settings: build
+  @set -- $$(nix-store --query --requisites ./result \
+    | grep -- '-claude-code-settings\.json$' || true); \
+    if [ "$$#" -ne 1 ]; then \
+      echo "expected exactly one generated Claude settings artifact; found $$#" >&2; \
+      exit 1; \
+    fi; \
+    cat "$$1"
 
 ## branch protection
 # Idempotent: the API replaces the whole protection object, so re-running after a job
