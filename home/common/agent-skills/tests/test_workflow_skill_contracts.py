@@ -1,5 +1,10 @@
+import html
 import json
+import os
 from pathlib import Path
+import re
+import subprocess
+import tempfile
 import unittest
 
 
@@ -1185,6 +1190,570 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
         # D2: SKILL.md points at the notice and never carries it.
         self.assertIn("[LICENSE](LICENSE)", self.skill)
         self.assertNotIn("Permission is hereby granted", self.skill)
+
+
+IMPROVE_DIR = REPO_ROOT / "home/common/agent-skills/skills/improve-codebase-architecture"
+IMPROVE_REVISION = "9c9f36ccd3995266cd675468af71639c8dde1ec5"
+IMPROVE_FILES = ("SKILL.md", "HTML-REPORT.md", "LICENSE", "agents/openai.yaml", "evals/evals.json")
+IMPROVE_MARKER = "<!-- agent-dispatch: id=improve-architecture-scan-owner role=issue-owner model=opus effort=high -->"
+IMPROVE_CALL = ('Agent(subagent_type="general-purpose", model="opus", effort="high") '
+                "performs the one read-only architecture scan and returns evidence-backed "
+                "deepening candidates without writing to the repository.")
+DESIGN_COMPLETE = (
+    "DESIGN_COMPLETE: spec committed and grilled; control returned before planning or "
+    "implementation."
+)
+MIT_NOTICE = '''MIT License
+
+Copyright (c) 2026 Matt Pocock
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+'''
+
+
+class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.skill = (IMPROVE_DIR / "SKILL.md").read_text(encoding="utf-8")
+        cls.report = (IMPROVE_DIR / "HTML-REPORT.md").read_text(encoding="utf-8")
+        cls.notice = (IMPROVE_DIR / "LICENSE").read_text(encoding="utf-8")
+        cls.manifest = (IMPROVE_DIR / "agents/openai.yaml").read_text(encoding="utf-8")
+        cls.evals = json.loads((IMPROVE_DIR / "evals/evals.json").read_text(encoding="utf-8"))
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            found = text.find(anchor, position + 1)
+            self.assertGreater(found, position, anchor)
+            position = found
+
+    def assertion_shell(self, case_id, name):
+        case = next(case for case in self.evals["evals"] if case["id"] == case_id)
+        return next(item["shell"] for item in case["asserts"] if item["name"] == name)
+
+    def run_assertion_shell(self, shell, *, out="", repo=None, extra_env=None):
+        prelude = r'''
+set -uo pipefail
+fail() { printf '%s\n' "$*" >&2; return 1; }
+out_matches() { grep -Eiq -- "$1" "$OUT" || fail "missing output: $1"; }
+out_lacks() { grep -Eiq -- "$1" "$OUT" && fail "forbidden output: $1"; return 0; }
+path_unchanged_since() { return 0; }
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = Path(temporary) / "output.txt"
+            output_path.write_text(out, encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(
+                {"OUT": str(output_path), "REPO": str(repo or "/nonexistent")}
+            )
+            environment.update(extra_env or {})
+            return subprocess.run(
+                ["bash", "-c", prelude + "\n" + shell],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+
+    def test_structure_links_and_explicit_only_metadata(self):
+        self.assertEqual(sorted(str(p.relative_to(IMPROVE_DIR)) for p in IMPROVE_DIR.rglob("*") if p.is_file()), sorted(IMPROVE_FILES))
+        self.assertEqual(skill_frontmatter(self.skill), {
+            "name": "improve-codebase-architecture",
+            "description": "Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick.",
+            "disable-model-invocation": "true",
+        })
+        self.assertEqual(self.manifest, 'interface:\n  display_name: "Improve Codebase Architecture"\n  short_description: "Find and grill architecture improvements"\npolicy:\n  allow_implicit_invocation: false\n')
+        root = IMPROVE_DIR.resolve()
+        checked = 0
+        for name, text in {"SKILL.md": self.skill, "HTML-REPORT.md": self.report}.items():
+            for target in relative_markdown_links(text):
+                checked += 1
+                resolved = (root / name).parent.joinpath(target).resolve()
+                self.assertTrue(resolved.is_relative_to(root), (name, target))
+                self.assertTrue(resolved.is_file(), (name, target))
+        self.assertGreaterEqual(checked, 2)
+
+    def test_scan_pins_all_evidence_in_order_and_one_dispatch(self):
+        self.assert_ordered(self.skill, "module and callers", "interface knowledge callers currently carry", "where locality or leverage is lost", "deletion-test result", "dependency category", "two justified adapters", "existing tests", "proposed interface-level test surface", "context or decision conflict")
+        for dependency in ("codebase-design", "doc-grounded-questions", "worktrees", "design", "grill-with-docs", "wayfind", "writing-plans", "to-issues"):
+            self.assertIn(f"`{dependency}`", self.skill)
+            self.assertTrue((REPO_ROOT / "home/common/agent-skills/skills" / dependency).is_dir(), dependency)
+        for fragment in ("bypasses inference", "git log --oneline --no-merges -50", "scattered", "History selects where to look", "writes nothing to the repository", "at most one structured findings artifact", "zero to five", "Never pad", "successful run", "Strong", "Worth exploring", "Speculative", "when at least one candidate exists"):
+            self.assertIn(fragment, self.skill)
+        lines = self.skill.splitlines()
+        self.assertEqual([line for line in lines if "Agent(" in line], [IMPROVE_CALL])
+        self.assertEqual(lines.index(IMPROVE_CALL), lines.index(IMPROVE_MARKER) + 1)
+
+    def test_report_pins_scaffold_cdns_and_accessible_fallbacks(self):
+        for fragment in ("<!doctype html>", '<html lang="en">', '<script src="https://cdn.tailwindcss.com"></script>', 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs', '<section id="candidates"', '<section id="top-recommendation"', "Mermaid graph", "Hand-built boxes-and-arrows", "Cross-section", "Mass diagram", "Call-graph collapse", "semantic headings", "text equivalent", "colour is never the sole", "minimal inline base styles", "4.5:1", "phone width", "without duplicating content", "text is not clipped", "user spacing overrides"):
+            self.assertIn(fragment, self.report)
+        for css in ("body {", "font-family:", "line-height: 1.5", "overflow-wrap: anywhere", "max-width: 100%", "height: auto", ".before-after {", "grid-template-columns: repeat(2, minmax(0, 1fr))", "@media (max-width: 640px)", "grid-template-columns: 1fr"):
+            self.assertIn(css, self.report)
+        for fragment in ("$TMPDIR", "/tmp", "%TEMP%", "architecture-review-<timestamp>.html", "absolute path", "generation failure is a failed run", "browser", "CDN", "disclosed warning", "before/after", "Top recommendation"):
+            self.assertIn(fragment, self.skill)
+
+    def test_report_escapes_repository_text_and_uses_strict_mermaid(self):
+        unsafe = '<img title=\'repo\' onerror="alert(1)">&'
+        escaped = html.escape(unsafe, quote=True)
+        for fragment in (
+            "HTML-escape every repository-derived value",
+            "opaque generated node IDs",
+            "escaped text labels",
+            "no raw HTML labels",
+            f"`{unsafe}` becomes `{escaped}`",
+            'securityLevel: "strict"',
+            "htmlLabels: false",
+        ):
+            self.assertIn(fragment, self.report)
+        for fragment in (
+            "HTML-escape every repository-derived value",
+            "opaque generated Mermaid node IDs",
+            "no raw HTML labels",
+        ):
+            self.assertIn(fragment, self.skill)
+        self.assertNotIn('securityLevel: "loose"', self.report)
+
+    def test_routing_and_exact_ordered_provenance(self):
+        self.assert_ordered(self.skill, "`wayfind`", "`worktrees`", "`design`", "`grill-with-docs`", "`writing-plans`")
+        for fragment in ("no design worktree", "do not automatically resume", "Do not invoke", "Selection is the first point"):
+            self.assertIn(fragment, self.skill)
+        self.assertNotIn("from-issue", self.skill)
+        self.assertNotIn("`grilling`", self.skill + self.report)
+        self.assertNotIn("`domain-modeling`", self.skill + self.report)
+        provenance = self.notice[:-len(MIT_NOTICE)]
+        self.assertTrue(self.notice.endswith(MIT_NOTICE))
+        headings = ("Vocabulary invocation", "Domain grounding repointed", "Hotspot rule made concrete", "Scan becomes a registered dispatch", "Candidate contract stated", "Report contract extended", "Downstream step replaced", "Provenance pointer", "Package extensions")
+        self.assertEqual(len(re.findall(r"(?m)^  [1-9]\. ", provenance)), 9)
+        self.assert_ordered(provenance, *(f"  {i}. {heading}" for i, heading in enumerate(headings, 1)))
+        for fragment in ("https://github.com/mattpocock/skills", "skills/engineering/improve-codebase-architecture/", IMPROVE_REVISION, "2026-08-17", "no automatic synchronisation"):
+            self.assertIn(fragment, provenance)
+        self.assertIn("[LICENSE](LICENSE)", self.skill)
+        self.assertNotIn("Permission is hereby granted", self.skill)
+
+    def test_dispatch_registration_and_standalone_scenario(self):
+        data = json.loads((REPO_ROOT / "home/common/agent-skills/model-matrix.json").read_text(encoding="utf-8"))
+        site = {item["id"]: item for item in data["dispatch_sites"]}["improve-architecture-scan-owner"]
+        self.assertEqual((site["path"], site["marker"], site["call"], site["role"], site["model"], site["effort"], site["requires"]), ("home/common/agent-skills/skills/improve-codebase-architecture/SKILL.md", IMPROVE_MARKER, IMPROVE_CALL, "issue-owner", "opus", "high", []))
+        self.assertEqual(data["scenarios"]["improve-codebase-architecture"], [{"workflow": "improve-codebase-architecture", "dispatch": "improve-architecture-scan-owner", "role": "issue-owner", "model": "opus", "effort": "high", "requires": []}])
+
+    def test_eval_assertion_shells_are_unique_and_behavioral(self):
+        self.assertEqual(self.evals["skill_name"], "improve-codebase-architecture")
+        cases = {case["id"]: case for case in self.evals["evals"]}
+        self.assertEqual({i: (c["name"], c["mode"]) for i, c in cases.items()}, {1: ("scan-only-renders-a-temporary-report", "pipeline"), 2: ("clear-selection-reaches-a-design-worktree", "pipeline"), 3: ("foggy-selection-routes-to-wayfind", "pipeline")})
+        required_shells = {
+            1: {"temporary report exists outside repository": ('architecture-review-', '"$OUT"', '[ -f "$report" ]', '$REPO'), "report is evidence-backed or truthful": ('"$OUT"', 'python3 - "$report"', "HTMLParser", "data-architecture-candidate", 'data-evidence', "module-callers", "caller-interface-knowledge", "locality-leverage", "deletion-test", "dependency-adapters", "tests-interface-surface", "context-decision-conflict", "data-diagram-text", "before", "after", "no-candidates", "top-recommendation", "expected_candidate_ids", "zero_text !=", "1 <= candidate_count <= 5"), "history miss widened the scan": ("out_matches", "widen"), "repository and branches stayed unchanged": ('test "$WT_COUNT" -eq 0', 'status=$(git -C "$REPO" status --porcelain)', 'test -z "$status"', 'test "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse origin/main)"', "branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads)", 'test "$branches" = "main"')},
+            2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "design spec was committed": ('commits_touch "$WT" "$SPEC_DIR"',), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$REPO/$PLAN_DIR"/*.md "$WT/$PLAN_DIR"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended": ("out_matches", "recommend", "&&", "writing-plans|to-issues"), "design returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', DESIGN_COMPLETE)},
+            3: {"new wayfind map exists and prior map stayed unchanged": ('new_map_count=0', 'for map in "$REPO"/.claude/wayfind/*/map.md; do', "*/concurrent-shells/map.md) continue", '[ -f "$map" ] || continue', 'relative_map=${map#"$REPO"/}', 'if git -C "$REPO" cat-file -e "origin/main:$relative_map" 2>/dev/null; then', 'new_map_count=$((new_map_count + 1))', 'test "$new_map_count" -eq 1', 'path_unchanged_since "$REPO" origin/main .claude/wayfind/concurrent-shells'), "no worktree was created": ('test "$WT_COUNT" -eq 0',), "no spec or plan was created": ('if has_file "$REPO/$SPEC_DIR"/*.md "$REPO/$PLAN_DIR"/*.md; then', "fail"), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests',), "wayfind returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', "WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.")},
+        }
+        for case_id, case in cases.items():
+            self.assertNotIn("expected_today", case)
+            self.assertIn("/improve-codebase-architecture", case["prompt"])
+            self.assertTrue(case["expected_output"].strip())
+            assertions = case["asserts"]
+            names = [item["name"] for item in assertions]
+            self.assertEqual(len(names), len(set(names)))
+            self.assertTrue(all(item["shell"].strip() for item in assertions))
+            shells = {item["name"]: item["shell"] for item in assertions}
+            self.assertEqual(set(shells), set(required_shells[case_id]))
+            for name, fragments in required_shells[case_id].items():
+                self.assertIn(name, shells)
+                for fragment in fragments:
+                    self.assertIn(fragment, shells[name])
+        self.assertIn("unscoped", cases[1]["prompt"].lower())
+        self.assertIn("tinytask.store", cases[2]["prompt"])
+        self.assertIn("sync between machines", cases[3]["prompt"].lower())
+        clear_prompt = cases[2]["prompt"]
+        for fragment in ("Nobody is present", "reversible in-scope", "scope-redrawing", "hard to reverse", "credential", "spending", "cannot answer", "stop", "Do not create a plan", "Do not refactor"):
+            self.assertIn(fragment, clear_prompt)
+
+    def test_eval_1_report_assertion_rejects_malformed_structure(self):
+        shell = self.assertion_shell(1, "report is evidence-backed or truthful")
+        evidence = (
+            "module-callers",
+            "caller-interface-knowledge",
+            "locality-leverage",
+            "deletion-test",
+            "dependency-adapters",
+            "tests-interface-surface",
+            "context-decision-conflict",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            report = root / "architecture-review-test.html"
+
+            report.write_text(
+                '<section id="candidates"><p id="no-candidates" '
+                'data-candidate-count="0">No evidence-backed candidates.</p></section>',
+                encoding="utf-8",
+            )
+            zero_result = self.run_assertion_shell(shell, out=str(report), repo=repo)
+            self.assertEqual(zero_result.returncode, 0, zero_result.stderr)
+
+            report.write_text(
+                '<section id="candidates"><p id="no-candidates" '
+                'data-candidate-count="0">No evidence-backed candidates.</p></section>'
+                '<article data-architecture-candidate id="candidate-outside">Hidden</article>',
+                encoding="utf-8",
+            )
+            self.assertNotEqual(
+                self.run_assertion_shell(shell, out=str(report), repo=repo).returncode,
+                0,
+            )
+
+            surfaces = "".join(
+                f'<section data-evidence="{name}">{name} evidence</section>'
+                for name in evidence
+            )
+            report.write_text(
+                '<section id="candidates">'
+                '<article data-architecture-candidate id="candidate-1">'
+                f'{surfaces}'
+                '<p data-diagram-text="before">Before text.</p>'
+                '<p data-diagram-text="after">After text.</p>'
+                '</article></section>'
+                '<section id="top-recommendation"><a href="#candidate-1">Pick it</a></section>',
+                encoding="utf-8",
+            )
+            candidate_result = self.run_assertion_shell(
+                shell, out=str(report), repo=repo
+            )
+            self.assertEqual(candidate_result.returncode, 0, candidate_result.stderr)
+
+            malformed_reports = {
+                "wrong zero-state element": (
+                    '<section id="candidates"><div id="no-candidates" '
+                    'data-candidate-count="0">No evidence-backed candidates.</div></section>'
+                ),
+                "zero-state surrounding text": (
+                    '<section id="candidates">Before<p id="no-candidates" '
+                    'data-candidate-count="0">No evidence-backed candidates.</p>After</section>'
+                ),
+                "zero-state extra normalized text": (
+                    '<section id="candidates"><p id="no-candidates" '
+                    'data-candidate-count="0">No evidence-backed candidates. Extra</p></section>'
+                ),
+                "repository-derived candidate id": (
+                    '<section id="candidates">'
+                    '<article data-architecture-candidate id="tinytask-store">'
+                    f'{surfaces}'
+                    '<p data-diagram-text="before">Before text.</p>'
+                    '<p data-diagram-text="after">After text.</p>'
+                    '</article></section>'
+                    '<section id="top-recommendation"><a href="#tinytask-store">Pick it</a></section>'
+                ),
+                "candidate id gap": (
+                    '<section id="candidates">'
+                    '<article data-architecture-candidate id="candidate-2">'
+                    f'{surfaces}'
+                    '<p data-diagram-text="before">Before text.</p>'
+                    '<p data-diagram-text="after">After text.</p>'
+                    '</article></section>'
+                    '<section id="top-recommendation"><a href="#candidate-2">Pick it</a></section>'
+                ),
+                "duplicate candidate ids": (
+                    '<section id="candidates">'
+                    '<article data-architecture-candidate id="candidate-1">'
+                    f'{surfaces}'
+                    '<p data-diagram-text="before">Before text.</p>'
+                    '<p data-diagram-text="after">After text.</p>'
+                    '</article>'
+                    '<article data-architecture-candidate id="candidate-1">'
+                    f'{surfaces}'
+                    '<p data-diagram-text="before">Before text.</p>'
+                    '<p data-diagram-text="after">After text.</p>'
+                    '</article></section>'
+                    '<section id="top-recommendation"><a href="#candidate-1">Pick it</a></section>'
+                ),
+                "candidate id sequence gap": (
+                    '<section id="candidates">'
+                    '<article data-architecture-candidate id="candidate-1">'
+                    f'{surfaces}'
+                    '<p data-diagram-text="before">Before text.</p>'
+                    '<p data-diagram-text="after">After text.</p>'
+                    '</article>'
+                    '<article data-architecture-candidate id="candidate-3">'
+                    f'{surfaces}'
+                    '<p data-diagram-text="before">Before text.</p>'
+                    '<p data-diagram-text="after">After text.</p>'
+                    '</article></section>'
+                    '<section id="top-recommendation"><a href="#candidate-3">Pick it</a></section>'
+                ),
+                "invalid top candidate id": (
+                    '<section id="candidates">'
+                    '<article data-architecture-candidate id="candidate-1">'
+                    f'{surfaces}'
+                    '<p data-diagram-text="before">Before text.</p>'
+                    '<p data-diagram-text="after">After text.</p>'
+                    '</article></section>'
+                    '<section id="top-recommendation"><a href="#candidate-2">Pick it</a></section>'
+                ),
+            }
+            for name, malformed in malformed_reports.items():
+                with self.subTest(name=name):
+                    report.write_text(malformed, encoding="utf-8")
+                    self.assertNotEqual(
+                        self.run_assertion_shell(shell, out=str(report), repo=repo).returncode,
+                        0,
+                    )
+
+            report.write_text(
+                '<section id="candidates"><article data-architecture-candidate '
+                'id="candidate-1">'
+                f'{surfaces}'
+                '<p data-diagram-text="before">Before text.</p>'
+                '<p data-diagram-text="after">After text.</p>'
+                '</article></section>'
+                '<section id="candidates"></section>'
+                '<section id="top-recommendation"><a href="#candidate-1">Pick it</a></section>',
+                encoding="utf-8",
+            )
+            self.assertNotEqual(
+                self.run_assertion_shell(shell, out=str(report), repo=repo).returncode,
+                0,
+            )
+
+            report.write_text(
+                "<html><body>No candidate. Before. After. Top recommendation.</body></html>",
+                encoding="utf-8",
+            )
+            self.assertNotEqual(
+                self.run_assertion_shell(shell, out=str(report), repo=repo).returncode,
+                0,
+            )
+
+            report.write_text(
+                '<section id="candidates"><p id="no-candidates" '
+                'data-candidate-count="0">No evidence-backed candidates.</p></section>'
+                '<section id="top-recommendation"><a href="#candidate-1">Invalid</a></section>',
+                encoding="utf-8",
+            )
+            self.assertNotEqual(
+                self.run_assertion_shell(shell, out=str(report), repo=repo).returncode,
+                0,
+            )
+
+            articles = "".join(
+                '<article data-architecture-candidate id="candidate-{index}">'
+                '{surfaces}'
+                '<p data-diagram-text="before">Before text.</p>'
+                '<p data-diagram-text="after">After text.</p>'
+                '</article>'.format(index=index, surfaces=surfaces)
+                for index in range(1, 7)
+            )
+            report.write_text(
+                f'<section id="candidates">{articles}</section>'
+                '<section id="top-recommendation"><a href="#candidate-1">Pick it</a></section>',
+                encoding="utf-8",
+            )
+            self.assertNotEqual(
+                self.run_assertion_shell(shell, out=str(report), repo=repo).returncode,
+                0,
+            )
+
+    def test_eval_assertions_use_file_backed_output_for_all_three_cases(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            report = root / "architecture-review-test.html"
+            report.write_text(
+                '<section id="candidates"><p id="no-candidates" '
+                'data-candidate-count="0">No evidence-backed candidates.</p></section>',
+                encoding="utf-8",
+            )
+            checks = (
+                (
+                    1,
+                    "temporary report exists outside repository",
+                    f"Scan widened.\n{report}\n",
+                ),
+                (
+                    1,
+                    "report is evidence-backed or truthful",
+                    f"Scan widened.\n{report}\n",
+                ),
+                (1, "history miss widened the scan", "Scan widened.\n"),
+                (2, "domain review was reached", "Reached grill-with-docs.\n"),
+                (
+                    2,
+                    "scope workflow was recommended",
+                    "Recommend writing-plans.\n",
+                ),
+                (
+                    2,
+                    "design returned control without continuation",
+                    f"{DESIGN_COMPLETE}\n",
+                ),
+                (
+                    3,
+                    "wayfind returned control without continuation",
+                    "WAYFIND_COMPLETE: map created; control returned before issue creation, "
+                    "planning, or implementation.\n",
+                ),
+            )
+            for case_id, name, output in checks:
+                with self.subTest(case_id=case_id, name=name):
+                    shell = self.assertion_shell(case_id, name)
+                    self.assertNotIn('printf \'%s\\n\' "$OUT"', shell)
+                    result = self.run_assertion_shell(shell, out=output, repo=repo)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_eval_2_requires_exact_final_design_status(self):
+        case = next(case for case in self.evals["evals"] if case["id"] == 2)
+        self.assertIn(DESIGN_COMPLETE, self.skill)
+        self.assertIn(DESIGN_COMPLETE, case["prompt"])
+        self.assertIn(DESIGN_COMPLETE, case["expected_output"])
+        recommendation_shell = self.assertion_shell(2, "scope workflow was recommended")
+        terminal_shell = self.assertion_shell(
+            2, "design returned control without continuation"
+        )
+        self.assertIn("writing-plans|to-issues", recommendation_shell)
+        self.assertNotIn("terminal_line=", recommendation_shell)
+        self.assertEqual(
+            self.run_assertion_shell(
+                terminal_shell, out=f"Summary.\n{DESIGN_COMPLETE}\n"
+            ).returncode,
+            0,
+        )
+        self.assertNotEqual(
+            self.run_assertion_shell(
+                terminal_shell, out=f"{DESIGN_COMPLETE}\nContinued afterward.\n"
+            ).returncode,
+            0,
+        )
+        contradictory = (
+            "I recommend writing-plans. I did not stop and invoked it before returning.\n"
+        )
+        self.assertEqual(
+            self.run_assertion_shell(
+                recommendation_shell, out=contradictory
+            ).returncode,
+            0,
+        )
+        self.assertNotEqual(
+            self.run_assertion_shell(terminal_shell, out=contradictory).returncode,
+            0,
+        )
+
+    def test_eval_3_counts_one_new_map_and_requires_final_status(self):
+        map_shell = self.assertion_shell(
+            3, "new wayfind map exists and prior map stayed unchanged"
+        )
+        terminal_shell = self.assertion_shell(
+            3, "wayfind returned control without continuation"
+        )
+        self.assertNotIn("break", map_shell)
+        self.assertNotIn("out_lacks", terminal_shell)
+        expected = (
+            "WAYFIND_COMPLETE: map created; control returned before issue creation, "
+            "planning, or implementation."
+        )
+        self.assertEqual(
+            self.run_assertion_shell(terminal_shell, out=f"Summary.\n{expected}\n").returncode,
+            0,
+        )
+        self.assertNotEqual(
+            self.run_assertion_shell(terminal_shell, out="Stopping after wayfind.").returncode,
+            0,
+        )
+        self.assertNotEqual(
+            self.run_assertion_shell(
+                terminal_shell, out=f"{expected}\nContinued afterward."
+            ).returncode,
+            0,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.email", "eval@example.test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.name", "Eval"],
+                check=True,
+            )
+            prior = repo / ".claude/wayfind/concurrent-shells/map.md"
+            prior.parent.mkdir(parents=True)
+            prior.write_text("prior\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"],
+                check=True,
+            )
+
+            first = repo / ".claude/wayfind/sync/map.md"
+            first.parent.mkdir(parents=True)
+            first.write_text("new\n", encoding="utf-8")
+            self.assertEqual(self.run_assertion_shell(map_shell, repo=repo).returncode, 0)
+
+            second = repo / ".claude/wayfind/transport/map.md"
+            second.parent.mkdir(parents=True)
+            second.write_text("also new\n", encoding="utf-8")
+            self.assertNotEqual(self.run_assertion_shell(map_shell, repo=repo).returncode, 0)
+
+    def test_eval_guard_sequences_fail_closed_under_deployed_harness(self):
+        repository_shell = self.assertion_shell(
+            1, "repository and branches stayed unchanged"
+        )
+        worktree_shell = self.assertion_shell(2, "one isolated design worktree exists")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.email", "eval@example.test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.name", "Eval"],
+                check=True,
+            )
+            (repo / "tracked").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"],
+                check=True,
+            )
+            (repo / "untracked").write_text("mutation\n", encoding="utf-8")
+
+            self.assertNotEqual(
+                self.run_assertion_shell(
+                    repository_shell,
+                    repo=repo,
+                    extra_env={"WT_COUNT": "0"},
+                ).returncode,
+                0,
+            )
+
+        self.assertNotEqual(
+            self.run_assertion_shell(
+                worktree_shell,
+                extra_env={"WT_COUNT": "2", "WT": "/tmp/first-worktree"},
+            ).returncode,
+            0,
+        )
 
 
 if __name__ == "__main__":
