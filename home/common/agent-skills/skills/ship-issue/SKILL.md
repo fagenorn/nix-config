@@ -28,13 +28,13 @@ Optional `review.criticalPaths` globs: diffs intersecting any always get Phase 5
 4. Open PR                 → push -u; gh pr create with "Closes #<num>"
 5. Review the PR           → merge-delta check or full two-axis review
 6. Wait for CI             → gh pr checks --watch (one blocking call)
-7. Merge                   → gh pr merge --merge (true merge commit)
+7. Merge                   → gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered mergeSubjectTemplate>"] --delete-branch (true merge commit)
 8. Cleanup                 → issue closed; worktree + branches removed
 ```
 
 ## Standing authorization
 
-This skill IS the chain that "PR-handoff authorization" describes. Don't re-prompt for `git push`, `gh pr create`, `gh pr merge --merge`, branch delete, or worktree remove. Pause only where a phase says to.
+This skill IS the chain that "PR-handoff authorization" describes. Don't re-prompt for `git push`, `gh pr create`, `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered mergeSubjectTemplate>"] --delete-branch`, branch delete, or worktree remove. Pause only where a phase says to.
 
 ## Doc-grounded escalations
 
@@ -176,10 +176,10 @@ timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30
 
 (When `issueTracker.kind=none`, merge the branch into the integration branch locally per the user's instruction instead.)
 
-Build the subject from `mergeSubjectTemplate` (substituting `<feature>`/`<desc>`/`<num>`/`<integrationBranch>`); if it's null, omit `--subject` and let the forge default stand. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
+Use the `repoSlug` binding resolved in Phase 0. Build the subject from `mergeSubjectTemplate` (substituting `<feature>`/`<desc>`/`<num>`/`<integrationBranch>`). Emit the subject form only when the rendered result is nonempty and representable by D18's quoted-subject grammar: it contains none of double quote, dollar, backtick, backslash, NUL, LF, or CR; otherwise omit `--subject` and its value and let the forge default stand. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
 
 ```
-gh pr merge <pr-num> --merge --subject "<rendered mergeSubjectTemplate>" --delete-branch
+gh pr merge <pr-num> --repo <repoSlug> --merge --subject "<rendered mergeSubjectTemplate>" --delete-branch
 ```
 
 **Judge success by the verify below, never by the exit code** — in a worktree checkout the merge can land on the remote while local post-merge steps fail (details: CI-MERGE.md).
