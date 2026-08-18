@@ -23,7 +23,7 @@
         },
         {
           "name": "repository and branches stayed unchanged",
-          "shell": "test \"$WT_COUNT\" -eq 0 || fail \"created $WT_COUNT linked worktree(s)\"; status=$(git -C \"$REPO\" status --porcelain); test -z \"$status\" || fail \"repository changed: $status\"; test \"$(git -C \"$REPO\" rev-parse HEAD)\" = \"$(git -C \"$REPO\" rev-parse origin/main)\" || fail \"HEAD moved\"; branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads); test \"$branches\" = \"main\" || fail \"local branches changed: $branches\""
+          "shell": "test \"$WT_COUNT\" -eq 0 || { fail \"created $WT_COUNT linked worktree(s)\"; exit 1; }; status=$(git -C \"$REPO\" status --porcelain); test -z \"$status\" || { fail \"repository changed: $status\"; exit 1; }; test \"$(git -C \"$REPO\" rev-parse HEAD)\" = \"$(git -C \"$REPO\" rev-parse origin/main)\" || { fail \"HEAD moved\"; exit 1; }; branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads); test \"$branches\" = \"main\" || { fail \"local branches changed: $branches\"; exit 1; }"
         }
       ]
     },
@@ -36,7 +36,7 @@
       "asserts": [
         {
           "name": "one isolated design worktree exists",
-          "shell": "test \"$WT_COUNT\" -eq 1 || fail \"expected one worktree, got $WT_COUNT\"; test -n \"$WT\" || fail \"worktree path missing\""
+          "shell": "test \"$WT_COUNT\" -eq 1 || { fail \"expected one worktree, got $WT_COUNT\"; exit 1; }; test -n \"$WT\" || { fail \"worktree path missing\"; exit 1; }"
         },
         {
           "name": "design spec was committed",
@@ -73,7 +73,7 @@
       "asserts": [
         {
           "name": "new wayfind map exists and prior map stayed unchanged",
-          "shell": "new_map_count=0; new_map=; for map in \"$REPO\"/.claude/wayfind/*/map.md; do case \"$map\" in */concurrent-shells/map.md) continue;; esac; [ -f \"$map\" ] || continue; relative_map=${map#\"$REPO\"/}; if git -C \"$REPO\" cat-file -e \"origin/main:$relative_map\" 2>/dev/null; then continue; fi; new_map_count=$((new_map_count + 1)); new_map=$map; done; test \"$new_map_count\" -eq 1 || fail \"expected exactly one new wayfind map, found $new_map_count\"; test -n \"$new_map\" || fail \"new wayfind map path missing\"; path_unchanged_since \"$REPO\" origin/main .claude/wayfind/concurrent-shells"
+          "shell": "new_map_count=0; new_map=; for map in \"$REPO\"/.claude/wayfind/*/map.md; do case \"$map\" in */concurrent-shells/map.md) continue;; esac; [ -f \"$map\" ] || continue; relative_map=${map#\"$REPO\"/}; if git -C \"$REPO\" cat-file -e \"origin/main:$relative_map\" 2>/dev/null; then continue; fi; new_map_count=$((new_map_count + 1)); new_map=$map; done; test \"$new_map_count\" -eq 1 || { fail \"expected exactly one new wayfind map, found $new_map_count\"; exit 1; }; test -n \"$new_map\" || { fail \"new wayfind map path missing\"; exit 1; }; path_unchanged_since \"$REPO\" origin/main .claude/wayfind/concurrent-shells"
         },
         {
           "name": "no worktree was created",

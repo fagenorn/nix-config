@@ -1247,10 +1247,10 @@ class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
         case = next(case for case in self.evals["evals"] if case["id"] == case_id)
         return next(item["shell"] for item in case["asserts"] if item["name"] == name)
 
-    def run_assertion_shell(self, shell, *, out="", repo=None):
+    def run_assertion_shell(self, shell, *, out="", repo=None, extra_env=None):
         prelude = r'''
-set -euo pipefail
-fail() { printf '%s\n' "$*" >&2; exit 1; }
+set -uo pipefail
+fail() { printf '%s\n' "$*" >&2; return 1; }
 out_matches() { grep -Eiq -- "$1" "$OUT" || fail "missing output: $1"; }
 out_lacks() { grep -Eiq -- "$1" "$OUT" && fail "forbidden output: $1"; return 0; }
 path_unchanged_since() { return 0; }
@@ -1262,6 +1262,7 @@ path_unchanged_since() { return 0; }
             environment.update(
                 {"OUT": str(output_path), "REPO": str(repo or "/nonexistent")}
             )
+            environment.update(extra_env or {})
             return subprocess.run(
                 ["bash", "-c", prelude + "\n" + shell],
                 check=False,
@@ -1710,6 +1711,49 @@ path_unchanged_since() { return 0; }
             second.parent.mkdir(parents=True)
             second.write_text("also new\n", encoding="utf-8")
             self.assertNotEqual(self.run_assertion_shell(map_shell, repo=repo).returncode, 0)
+
+    def test_eval_guard_sequences_fail_closed_under_deployed_harness(self):
+        repository_shell = self.assertion_shell(
+            1, "repository and branches stayed unchanged"
+        )
+        worktree_shell = self.assertion_shell(2, "one isolated design worktree exists")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.email", "eval@example.test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.name", "Eval"],
+                check=True,
+            )
+            (repo / "tracked").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"],
+                check=True,
+            )
+            (repo / "untracked").write_text("mutation\n", encoding="utf-8")
+
+            self.assertNotEqual(
+                self.run_assertion_shell(
+                    repository_shell,
+                    repo=repo,
+                    extra_env={"WT_COUNT": "0"},
+                ).returncode,
+                0,
+            )
+
+        self.assertNotEqual(
+            self.run_assertion_shell(
+                worktree_shell,
+                extra_env={"WT_COUNT": "2", "WT": "/tmp/first-worktree"},
+            ).returncode,
+            0,
+        )
 
 
 if __name__ == "__main__":

@@ -83,7 +83,7 @@ The deployed report assertion reads semantic markers rather than searching for w
 - Each candidate contains exactly one non-empty element for each evidence marker, in scan order: `data-evidence="module-callers"`, `data-evidence="caller-interface-knowledge"`, `data-evidence="locality-leverage"`, `data-evidence="deletion-test"`, `data-evidence="dependency-adapters"`, `data-evidence="tests-interface-surface"`, and `data-evidence="context-decision-conflict"`.
 - Each candidate contains exactly one non-empty adjacent text equivalent for each diagram state: `data-diagram-text="before"` and `data-diagram-text="after"`.
 - A positive report contains one to five candidate articles and exactly one `<section id="top-recommendation">` with exactly one anchor whose `href` names one candidate ID.
-- A zero-candidate report contains zero candidate articles, omits the top-recommendation section, and renders exactly one `<p id="no-candidates" data-candidate-count="0">No evidence-backed candidates.</p>` inside the candidates section.
+- A zero-candidate report contains zero candidate articles, omits the top-recommendation section, and renders exactly one `<p id="no-candidates" data-candidate-count="0">No evidence-backed candidates.</p>` as the only element or non-whitespace text inside the candidates section.
 
 ## Safe rendering boundary
 
