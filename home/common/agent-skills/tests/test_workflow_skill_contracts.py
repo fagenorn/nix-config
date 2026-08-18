@@ -720,6 +720,47 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn(fragment, expected)
         self.assertNotIn("≤400", expected)
 
+    def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
+        optional_subject = (
+            'gh pr merge <pr-num> --repo <repoSlug> --merge '
+            '[--subject "<rendered mergeSubjectTemplate>"] --delete-branch'
+        )
+        rendered_subject = (
+            'gh pr merge <pr-num> --repo <repoSlug> --merge '
+            '--subject "<rendered mergeSubjectTemplate>" --delete-branch'
+        )
+        expected_occurrences = [
+            "7. Merge                   → "
+            f"{optional_subject} (true merge commit)",
+            'This skill IS the chain that "PR-handoff authorization" describes. '
+            "Don't re-prompt for `git push`, `gh pr create`, "
+            f"`{optional_subject}`, branch delete, or worktree remove. "
+            "Pause only where a phase says to.",
+            rendered_subject,
+        ]
+        occurrences = [
+            line.strip()
+            for line in self.ship_issue.splitlines()
+            if "gh pr merge" in line
+        ]
+        self.assertEqual(expected_occurrences, occurrences)
+
+        phase = self.section(self.ship_issue, "## Phase 7 — Merge", "## Phase 8 — Cleanup")
+        phase_lines = [line.strip() for line in phase.splitlines()]
+        self.assertIn(rendered_subject, phase_lines)
+        guard_and_fallback = (
+            "Use the `repoSlug` binding resolved in Phase 0. Build the subject "
+            "from `mergeSubjectTemplate` (substituting "
+            "`<feature>`/`<desc>`/`<num>`/`<integrationBranch>`). Emit the "
+            "subject form only when the rendered result is nonempty and "
+            "representable by D18's quoted-subject grammar: it contains none "
+            "of double quote, dollar, backtick, backslash, NUL, LF, or CR; "
+            "otherwise omit `--subject` and its value and let the forge default "
+            "stand. Never pass `--no-ff` (rejected by recent `gh`; `--merge` "
+            "already produces a true merge commit)."
+        )
+        self.assertIn(guard_and_fallback, phase_lines)
+
     def test_phase0_size_note_delegates_counting_to_diff_scope(self):
         # Issues #21-#22 made diff-scope the accounting authority and retired the
         # hand-counted numstat arithmetic; this note is the only restatement of
