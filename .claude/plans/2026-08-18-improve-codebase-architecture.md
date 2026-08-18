@@ -18,7 +18,9 @@
 - Register exactly one `improve-architecture-scan-owner` dispatch at `issue-owner` / `opus` / `high`, `subagent_type="general-purpose"`, `requires: []`, plus one standalone `improve-codebase-architecture` scenario per D5.
 - Keep the existing four-family `representative` scenario byte-for-byte unchanged; rename only its stale test method per S2.
 - Discovery is repository-read-only, may write at most one findings artifact under the OS temporary directory, and renders zero to five evidence-backed candidates without padding; a zero-candidate report succeeds per D13.
-- Route fog to `wayfind` and stop; otherwise establish an isolated worktree before `design`, then invoke `grill-with-docs`, recommend `writing-plans` or `to-issues`, and stop without planning, issue creation, or execution per D9, D16, and D19.
+- Treat every repository-derived report value as inert: HTML-escape text and attributes; give Mermaid opaque generated IDs, escaped text labels, no raw HTML labels or repository-derived syntax, `securityLevel: "strict"`, and `htmlLabels: false`; keep the markup-like regression executable per D21.
+- Eval 1 accepts only one explicit zero-state report or one to five structurally complete candidate articles plus one valid top-recommendation link per D22.
+- Route fog to `wayfind`, create exactly one new non-fixture map, preserve the independent no-mutation checks, and stop with the exact final non-empty `WAYFIND_COMPLETE` status; otherwise establish an isolated worktree before `design`, then invoke `grill-with-docs`, recommend `writing-plans` or `to-issues`, and stop without planning, issue creation, or execution per D9, D16, D19, and D23.
 - `grilling` and `domain-modeling` occur only in `LICENSE`'s provenance comparison, never as active guidance, per D14.
 - Do not edit `.nix` files, `flake.nix`, `justfile`, `home/common/agent-skills/README.md`, `codebase-design`, either accepted parent design, the eval harness, or the TinyTask fixture.
 - Do not implement a candidate, automatically invoke this skill, activate Home Manager, run the deployed evals before activation, or claim deployed-behavior certification.
@@ -28,8 +30,8 @@
 ## Test seams
 
 - **Shared deployment seam:** build without activation, then assert both generated agent surfaces expose all five files.
-- **Workflow-contract seam:** one appended `ImproveCodebaseArchitectureSkillContractsTest` pins package, report, provenance, routing, and each eval prompt and terminal shell; `AgentModelMatrixTest` plus the validator pin the closed family, exact dispatch, standalone trace, and unchanged issue-delivery trace per D6, D7, D15, D18, and D20.
-- **Deployed-behavior seam:** three authored `pipeline` cases grade scan-only, clear-selection, and fog-selection behavior after a later human activation per D12, D16, D19, and D20.
+- **Workflow-contract seam:** one appended `ImproveCodebaseArchitectureSkillContractsTest` pins package, provenance, routing, safe report rendering, the structure-aware Eval 1 parser, the exact-one-map/anchored-status Eval 3 contract, and each eval prompt and terminal shell; `AgentModelMatrixTest` plus the validator pin the closed family, exact dispatch, standalone trace, and unchanged issue-delivery trace per D6, D7, D15, D18, and D20–D23.
+- **Deployed-behavior seam:** three authored `pipeline` cases grade scan-only, clear-selection, and fog-selection behavior after a later human activation; their authored assertions use the structural and anchored contracts per D12, D16, D19, D20, D22, and D23.
 
 ## Task index
 
@@ -37,7 +39,7 @@ Task 1 — Ship the complete architecture-improvement workflow — `home/common/
 
 ## Decisions
 
-The issue spec owns D1–D20. This plan cites those rows and introduces no second ledger.
+The issue spec owns D1–D23. This plan cites those rows and introduces no second ledger.
 
 ## Standards review
 
@@ -73,6 +75,20 @@ The issue spec owns D1–D20. This plan cites those rows and introduces no secon
 - B4 → D20: each scenario prompt and its exact terminal observables are pinned independently, including negative continuation semantics.
 - S1: forbidden paths are compared with implementation-start HEAD; the post-commit exact allowlist and clean-status gate reject every extra or dirty path.
 
+### Execution review
+
+- First reviewer: `/root/issue43_task_review`
+- Implementation HEAD: `e0938f9`
+- First findings: 0 Critical, 3 Important, 0 Minor.
+- First review artifact: `.superpowers/sdd/2026-08-18-improve-codebase-architecture/task-1-review.md`
+- Controller ruling: all three findings are valid; the higher-level safe-rendering and scenario-proof invariants govern over the earlier weak literal fragments, recorded as D21–D23.
+- Fix report: `.superpowers/sdd/2026-08-18-improve-codebase-architecture/task-1-report.md`, section `Fix round 1`.
+- Amended HEAD: `2350b2d`
+- Scoped reviewer: `/root/issue43_task_rereview`
+- Scoped re-review artifact: `.superpowers/sdd/2026-08-18-improve-codebase-architecture/task-1-rereview-1.md`
+- Verdict: all 3 findings addressed; no new Important or Critical finding in the bounded five-file fix package.
+- Verification remained static/build-only: the focused contract class passed 9/9, the focused package/matrix selection passed 12/12, the full workflow suite passed 222/222, matrix and unactivated builds passed, and no deployed eval was run.
+
 ---
 
 ### Task 1: Ship the complete architecture-improvement workflow
@@ -98,10 +114,12 @@ The issue spec owns D1–D20. This plan cites those rows and introduces no secon
 - Named scope bypasses inference. Unscoped discovery runs `git log --oneline --no-merges -50`, follows the strongest concentration, and widens only for scattered/no concentration; history is never change evidence.
 - The fresh scan owner establishes all seven evidence items in their accepted order and returns findings; the caller renders. Selection is the first possible repository mutation.
 - Report generation fails the run; browser/CDN failures warn; an absolute temporary path is always printed. Zero candidates succeeds truthfully.
+- Before the report is opened, all repository-derived text and attributes are HTML-escaped; Mermaid receives only opaque generated IDs and escaped text labels, never raw HTML labels or repository-derived graph syntax, under strict security with HTML labels disabled per D21.
 - Fog returns after `wayfind` with no automatic resumption. Concrete selection uses an isolated worktree, `design`, approved `grill-with-docs`, then recommends a scope workflow and stops.
 - Eval 2's one-shot autonomy answers only reversible in-scope recommendations. Scope-redrawing, hard-to-reverse, credential, spending, or unanswerable questions stop.
-- Each eval prompt and named shell proves its own scenario identity and terminal state: unscoped scan, concrete `tinytask.store`, or `sync between machines`; exact repository/worktree state; allowed recommendation; new fog map; and no continuation per D20.
-- Eval 3 proves map creation and the absence of worktree, spec, plan, source/test mutation, and continuation into issues/planning/execution. Under tracker `kind:none`, no canonical issue artifact exists; stop-semantic output is the issue-creation observable per D16.
+- Eval 1 parses the report structure and accepts only exactly one `<section id="candidates">` containing either `<p id="no-candidates" data-candidate-count="0">No evidence-backed candidates.</p>` with no candidate article/top section, or one to five unique `<article data-architecture-candidate id="candidate-N">` elements with all seven non-empty `data-evidence` surfaces, non-empty `data-diagram-text="before"` and `"after"` surfaces, and exactly one `#candidate-N` top-recommendation link per D22.
+- Each eval prompt and named shell proves its own scenario identity and terminal state: unscoped scan, concrete `tinytask.store`, or `sync between machines`; exact repository/worktree state; allowed recommendation; and terminal routing per D20–D23.
+- Eval 3 proves exactly one new non-`concurrent-shells` map and independently proves the prior map, worktree, spec/plan, and source/test state. Its final non-empty line is exactly `WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.`; no broad output-word ban remains. Under tracker `kind:none`, this anchored status is the issue-creation/continuation observable per D16 and D23.
 
 - [ ] **Step 1: Fetch the four immutable authoring sources to a temporary directory**
 
@@ -142,7 +160,7 @@ Expected: every effective URL equals its commit-addressed requested URL and all 
 
 - [ ] **Step 2: Write the complete failing package/eval contract**
 
-Add `import re`, then append one contiguous block before the final `unittest.main()` guard in `test_workflow_skill_contracts.py`, reusing `skill_frontmatter` and `relative_markdown_links`. The full test contract is:
+Add `import html`, `import os`, `import re`, `import subprocess`, and `import tempfile`, then append one contiguous block before the final `unittest.main()` guard in `test_workflow_skill_contracts.py`, reusing `skill_frontmatter` and `relative_markdown_links`. The core static contract and exact shell-fragment maps are:
 
 ```python
 IMPROVE_DIR = REPO_ROOT / "home/common/agent-skills/skills/improve-codebase-architecture"
@@ -229,6 +247,27 @@ class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
         for fragment in ("$TMPDIR", "/tmp", "%TEMP%", "architecture-review-<timestamp>.html", "absolute path", "generation failure is a failed run", "browser", "CDN", "disclosed warning", "before/after", "Top recommendation"):
             self.assertIn(fragment, self.skill)
 
+    def test_report_escapes_repository_text_and_uses_strict_mermaid(self):
+        unsafe = '<img title=\'repo\' onerror="alert(1)">&'
+        escaped = html.escape(unsafe, quote=True)
+        for fragment in (
+            "HTML-escape every repository-derived value",
+            "opaque generated node IDs",
+            "escaped text labels",
+            "no raw HTML labels",
+            f"`{unsafe}` becomes `{escaped}`",
+            'securityLevel: "strict"',
+            "htmlLabels: false",
+        ):
+            self.assertIn(fragment, self.report)
+        for fragment in (
+            "HTML-escape every repository-derived value",
+            "opaque generated Mermaid node IDs",
+            "no raw HTML labels",
+        ):
+            self.assertIn(fragment, self.skill)
+        self.assertNotIn('securityLevel: "loose"', self.report)
+
     def test_routing_and_exact_ordered_provenance(self):
         self.assert_ordered(self.skill, "`wayfind`", "`worktrees`", "`design`", "`grill-with-docs`", "`writing-plans`")
         for fragment in ("no design worktree", "do not automatically resume", "Do not invoke", "Selection is the first point"):
@@ -257,9 +296,9 @@ class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
         cases = {case["id"]: case for case in self.evals["evals"]}
         self.assertEqual({i: (c["name"], c["mode"]) for i, c in cases.items()}, {1: ("scan-only-renders-a-temporary-report", "pipeline"), 2: ("clear-selection-reaches-a-design-worktree", "pipeline"), 3: ("foggy-selection-routes-to-wayfind", "pipeline")})
         required_shells = {
-            1: {"temporary report exists outside repository": ('architecture-review-', '[ -f "$report" ]', '$REPO'), "report is evidence-backed or truthful": ("before", "after", "top recommendation", "no.?candidate"), "history miss widened the scan": ("out_matches", "widen"), "repository and branches stayed unchanged": ('test "$WT_COUNT" -eq 0', 'status=$(git -C "$REPO" status --porcelain)', 'test -z "$status"', 'test "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse origin/main)"', "branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads)", 'test "$branches" = "main"')},
+            1: {"temporary report exists outside repository": ('architecture-review-', '[ -f "$report" ]', '$REPO'), "report is evidence-backed or truthful": ('python3 - "$report"', "HTMLParser", "data-architecture-candidate", "data-evidence", "module-callers", "caller-interface-knowledge", "locality-leverage", "deletion-test", "dependency-adapters", "tests-interface-surface", "context-decision-conflict", "data-diagram-text", "before", "after", "no-candidates", "top-recommendation", "1 <= candidate_count <= 5"), "history miss widened the scan": ("out_matches", "widen"), "repository and branches stayed unchanged": ('test "$WT_COUNT" -eq 0', 'status=$(git -C "$REPO" status --porcelain)', 'test -z "$status"', 'test "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse origin/main)"', "branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads)", 'test "$branches" = "main"')},
             2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "design spec was committed": ('commits_touch "$WT" "$SPEC_DIR"',), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$REPO/$PLAN_DIR"/*.md "$WT/$PLAN_DIR"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended and execution stopped": ("out_matches", "recommend", "writing-plans|to-issues", "stop|stopping|not invok")},
-            3: {"new wayfind map exists and prior map stayed unchanged": ('for map in "$REPO"/.claude/wayfind/*/map.md; do', "*/concurrent-shells/map.md) continue", 'new_map=$map', 'test -n "$new_map"', 'relative_map=${new_map#"$REPO"/}', 'if git -C "$REPO" cat-file -e "origin/main:$relative_map" 2>/dev/null; then', "fail", 'path_unchanged_since "$REPO" origin/main .claude/wayfind/concurrent-shells'), "no worktree was created": ('test "$WT_COUNT" -eq 0',), "no spec or plan was created": ('if has_file "$REPO/$SPEC_DIR"/*.md "$REPO/$PLAN_DIR"/*.md; then', "fail"), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests',), "wayfind returned control without continuation": ("out_matches", "stop|return control", "out_lacks", "issue|to-issues|writing-plans|implementation|execute")},
+            3: {"new wayfind map exists and prior map stayed unchanged": ('new_map_count=0', 'for map in "$REPO"/.claude/wayfind/*/map.md; do', "*/concurrent-shells/map.md) continue", '[ -f "$map" ] || continue', 'relative_map=${map#"$REPO"/}', 'if git -C "$REPO" cat-file -e "origin/main:$relative_map" 2>/dev/null; then', 'new_map_count=$((new_map_count + 1))', 'test "$new_map_count" -eq 1', 'path_unchanged_since "$REPO" origin/main .claude/wayfind/concurrent-shells'), "no worktree was created": ('test "$WT_COUNT" -eq 0',), "no spec or plan was created": ('if has_file "$REPO/$SPEC_DIR"/*.md "$REPO/$PLAN_DIR"/*.md; then', "fail"), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests',), "wayfind returned control without continuation": ("terminal_line=", "WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.")},
         }
         for case_id, case in cases.items():
             self.assertNotIn("expected_today", case)
@@ -282,6 +321,11 @@ class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
         for fragment in ("Nobody is present", "reversible in-scope", "scope-redrawing", "hard to reverse", "credential", "spending", "cannot answer", "stop", "Do not create a plan", "Do not refactor"):
             self.assertIn(fragment, clear_prompt)
 ```
+
+The same class owns two executable shell-regression methods, using an `assertion_shell(case_id, name)` lookup and a `run_assertion_shell(shell, out="", repo=None)` subprocess helper so the deployed assertions themselves are the subjects:
+
+- `test_eval_1_report_assertion_rejects_malformed_structure` accepts the exact explicit zero report and a one-candidate report with all seven evidence markers, both diagram-text markers, and a top link. It rejects a candidate outside the candidates section, duplicate candidates sections, word-only HTML, a zero marker mixed with a top section, and six candidates. These cases pin the parser branches and the zero-or-1–5 cardinality per D22.
+- `test_eval_3_counts_one_new_map_and_requires_final_status` accepts one new non-fixture map and rejects a second. It accepts the exact `WAYFIND_COMPLETE` line only when it is the final non-empty output line, rejects a generic wayfind stop, rejects output after that status, asserts the map shell contains no early `break`, and asserts the terminal shell contains no broad `out_lacks` ban per D23.
 
 - [ ] **Step 3: Write the failing matrix contract and adjacent test rename**
 
@@ -350,12 +394,12 @@ done
 
 Consume only those four returned-path files; do not re-fetch or search temporary directories.
 
-- Adapt `$AUTHORING_DIR/SKILL.md` and `$AUTHORING_DIR/HTML-REPORT.md` exactly as D1–D20 require. Put the seven evidence anchors in their tested order. The caller, not scan owner, renders every clearing candidate, up to five. Preserve the no-dispatch inline fallback without a second `Agent(` token.
-- Preserve upstream scaffold, both exact CDN URLs, five diagram patterns, and editorial voice in `HTML-REPORT.md`. Add semantic order, adjacent text alternatives, non-color meaning, inline fallback CSS, 4.5:1 contrast, phone collapse, overflow wrapping/max-width, and prose that explicitly guarantees no clipping under user spacing.
+- Adapt `$AUTHORING_DIR/SKILL.md` and `$AUTHORING_DIR/HTML-REPORT.md` exactly as D1–D23 require. Put the seven evidence anchors in their tested order. The caller, not scan owner, renders every clearing candidate, up to five. Preserve the no-dispatch inline fallback without a second `Agent(` token.
+- Preserve upstream scaffold, both exact CDN URLs, five diagram patterns, and editorial voice in `HTML-REPORT.md`. Add semantic order, adjacent text alternatives, non-color meaning, inline fallback CSS, 4.5:1 contrast, phone collapse, overflow wrapping/max-width, and prose that explicitly guarantees no clipping under user spacing. At the auto-open boundary, require HTML escaping for every repository-derived text/attribute value; opaque generated Mermaid IDs; escaped text labels; no raw HTML labels or repository-derived graph syntax; `securityLevel: "strict"`; and `htmlLabels: false`. Include the exact markup-like escaping example that the D21 contract derives with `html.escape(..., quote=True)`.
 - Copy `$AUTHORING_DIR/openai.yaml` byte-for-byte. Build `LICENSE` as provenance plus numbered adaptations 1–9 in the tested order, followed immediately by the byte-exact `$AUTHORING_DIR/LICENSE`, including both paragraph-separating blank lines.
-- Author Eval 1 with an explicitly unscoped scan-only prompt, a real temporary-file assertion, truthful candidate/no-candidate branch, widen disclosure, empty `status --porcelain`, `HEAD` at `origin/main`, local branches exactly `main`, and zero linked worktrees.
+- Author Eval 1 with an explicitly unscoped scan-only prompt, a real temporary-file assertion, widen disclosure, empty `status --porcelain`, `HEAD` at `origin/main`, local branches exactly `main`, and zero linked worktrees. Its `HTMLParser` assertion fails closed unless there is exactly one candidates section containing either the exact zero marker with no candidate/top section, or one to five unique marked candidate articles, each with exactly one non-empty instance of all seven evidence markers and both diagram-text markers, plus exactly one top-recommendation link to a candidate per D22.
 - Author Eval 2 with concrete `tinytask.store` selection. Its prompt says nobody is present; recommendations answer only reversible in-scope questions; scope-redrawing, hard-to-reverse, credential, spending, or unanswerable questions stop. It forbids plan/refactor. Named shells prove one worktree, `commits_touch "$WT" "$SPEC_DIR"`, unchanged source/tests in both trees, no plan, reached domain review, and a `writing-plans` or `to-issues` recommendation plus stop semantics.
-- Author Eval 3 for the literal `sync between machines` fog. Named shells prove a newly created non-`concurrent-shells` `map.md`, unchanged `concurrent-shells`, no worktree/spec/plan, `path_unchanged_since "$REPO" origin/main tinytask tests`, and `out_lacks` continuation into issues, `to-issues`, `writing-plans`, implementation, or execution before terminal stop/return-control output. No separate issue-file assertion exists because tracker `kind:none` has no canonical issue artifact per D16.
+- Author Eval 3 for the literal `sync between machines` fog. Count every non-`concurrent-shells` `map.md` absent from `origin/main` and require exactly one; independently prove unchanged `concurrent-shells`, no worktree/spec/plan, and `path_unchanged_since "$REPO" origin/main tinytask tests`. Require the final non-empty output line to equal `WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.` and use no broad word ban. No separate issue-file assertion exists because tracker `kind:none` has no canonical issue artifact per D16 and D23.
 - Append the exact dispatch row last, add `improve-codebase-architecture` to `WORKFLOW_FAMILIES`, and add its exact one-event scenario. Change no existing scenario or selection.
 
 - [ ] **Step 5: Verify all contracts, deployment, scope, and the single commit**
