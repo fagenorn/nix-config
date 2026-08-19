@@ -11,9 +11,9 @@
 - Modify: `Justfile`
 
 **Interfaces:**
-- Consumes: Task 1's installed/source `artifact-budget` CLI and its fixed implementation-plan metrics/result; D3, D5, D6, and D8.
+- Consumes: Task 1's executable `artifact-budget` wrapper, installed/source module, fixed implementation-plan metrics/result, and report validator; D3, D5, D6, D8, and D11.
 - Produces: root `<planDir>/<stem>.md`; members `<planDir>/<stem>.tasks/task-1.md` through `task-N.md`; one Task-index row per member ending exactly in `[task-N.md](<stem>.tasks/task-N.md)`; `task-brief PLAN_FILE N [OUTFILE]` that validates the package and copies only the indexed member into the brief.
-- The planning report keeps `plan_path` and `open_items`, adds `state: complete | decompose_required | failed`, and adds one `artifact` object with `kind`, root `path`, four `metrics`, and `budget_status`; over-budget adds the closed `violations` array.
+- The planning report has exactly `state`, one `artifact` object, and policy-bounded `notes`. The artifact root replaces `plan_path`; `open_items` is removed, with unresolved blocking state expressed by `state` and bounded notes pointing to the plan/spec. Over-budget adds the closed `violations` array inside `artifact`.
 
 **Invariants:**
 - The root contains goal, architecture, technology, Global Constraints, Test seams, Task index, decision-ID citations, and task-member links; it contains no numbered task bodies or copied ledger rationale.
@@ -22,6 +22,7 @@
 - `task-brief` fails before writing its output when the checker exits 2/3, when task N has no exact indexed link, or when its resolved link is not the convention path. Its output is byte-identical to that member and contains no other task.
 - SDD validates the complete plan package once at setup, retains the root header plus its four checker metrics, and passes the root path/metrics plus the current brief path to implementers and reviewers. A missing/unreadable member is a contract failure, never a fallback to monolithic parsing.
 - Phase-5 plan review validates the package first and reads root plus every member from discovery order. Review findings identify the member task or root section; accepted edits remeasure the complete plan.
+- Planning and its callers validate the exact D11 report object; legacy `open_items`, `decisions`, `adr_paths`, or `summary` fields are contract errors.
 
 - [ ] **Step 1: Write failing task-brief and plan-contract tests**
 
@@ -40,6 +41,7 @@ import unittest
 ROOT = Path(__file__).parents[4]
 TASK_BRIEF = ROOT / "home/common/agent-skills/skills/sdd/scripts/task-brief"
 BUDGET = ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
+WRAPPER = ROOT / "home/common/agent-skills/scripts/artifact-budget"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 
 
@@ -48,13 +50,16 @@ class TaskBriefPackageTest(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(directory)], check=True)
         bin_dir = directory / "bin"
         bin_dir.mkdir()
-        (bin_dir / "artifact-budget").symlink_to(BUDGET)
+        (bin_dir / "artifact-budget").symlink_to(WRAPPER)
         env = os.environ.copy()
         env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
         home = directory / "home"
         policy_dir = home / ".agents/share"
         policy_dir.mkdir(parents=True)
         (policy_dir / "artifact-budget-policy.json").symlink_to(POLICY)
+        module_dir = home / ".agents/lib/python"
+        module_dir.mkdir(parents=True)
+        (module_dir / "artifact_budget.py").symlink_to(BUDGET)
         env["HOME"] = str(home)
         return directory / "plan.md", env
 
@@ -113,6 +118,7 @@ class TaskBriefPackageTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 3)
             self.assertEqual(out.read_bytes(), b"valid-old-brief")
+            self.assertNotIn("Permission denied", result.stderr)
 ```
 
 Add workflow contract tests with these exact assertions, using the test module's existing loaded `writing-plans`, SDD, Phase-5 review-contract, and Codex plan-review texts:
@@ -125,6 +131,8 @@ def test_plan_package_contract_is_root_only_and_fail_closed(self):
                         "compact repeated prose", "split only where both results are independently testable",
                         "decompose_required")
     self.assertIn("report only the root path and four metrics", self.writing_plans)
+    for forbidden in ("open_items:", "decisions:", "adr_paths:", "summary:"):
+        self.assertNotRegex(self.writing_plans, rf"(?m)^\s*{re.escape(forbidden)}")
 
 def test_sdd_validates_plan_before_extracting_a_member(self):
     setup = self.section(self.sdd, "## Setup", "## Agent tiers")
@@ -144,7 +152,7 @@ Expected: FAIL because `task-brief` still extracts headings from one monolithic 
 
 - [ ] **Step 3: Implement the package producer, reader, and plan-review contracts**
 
-Rewrite `writing-plans` so the root header shape remains the current plan header but numbered tasks live only in the sibling directory. State the exact link suffix from D8, contiguous numbering, max eight members, final measurement order, two remediation states, and fixed planning report. Preserve its existing test-first, no-placeholder, gate-scoping, lane, and self-review requirements. Its self-review checks root/member reference equality, per-member completeness, and both root/spec remeasurement when it appended a ledger row.
+Rewrite `writing-plans` so the root header shape remains the current plan header but numbered tasks live only in the sibling directory. State the exact link suffix from D8, contiguous numbering, max eight members, final measurement order, two remediation states, and exact D11 planning report with no producer-specific fields. Preserve its existing test-first, no-placeholder, gate-scoping, lane, and self-review requirements. Its self-review checks root/member reference equality, per-member completeness, and both root/spec remeasurement when it appended a ledger row.
 
 Change `task-brief` to validate arguments and task number, run `artifact-budget check --kind implementation-plan --root "$plan" --format json`, propagate exit 2/3, parse the exact Task-index link for N without accepting arbitrary Markdown, then copy through a sibling temporary file and atomic rename so an existing valid brief survives failure. Reject multiple links for N. Preserve default workspace naming.
 

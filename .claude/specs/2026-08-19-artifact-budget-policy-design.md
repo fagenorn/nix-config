@@ -135,6 +135,17 @@ exceeds the member limit, or the member-count/aggregate limit would be exceeded,
 `decompose_required`; it does not emit a successful partial package. Task and final reviewers receive
 the manifest path and compact package metrics, never an inlined diff or shard list. Review rubrics
 read the manifest and its shards in manifest order and must report unreadable shards explicitly.
+Every manifest integer rejects booleans. Git numstat `-` for a binary file contributes zero to both
+the insertion and deletion totals, matching the existing `diff-scope` convention, while the file
+still contributes to `files_changed` and its complete binary patch remains in the diff stream.
+
+Generation happens under a unique sibling staging directory and is fully shape-validated and
+measured there before publication. A regular manifest or member directory already at the requested
+root makes the retry fail without touching either path; symlink and non-regular collisions also fail.
+First publication renames the staged member directory into place and publishes the manifest last; a
+manifest-publication failure removes only that just-published member directory. A successful run
+leaves no staging entry or orphan shard, and a failed retry preserves a prior valid package
+byte-identically.
 
 ### Producer behavior and timing
 
@@ -159,8 +170,8 @@ decomposition checkpoints decide what work resumes; this policy does not create 
 
 ### Phase and agent result contract
 
-Producer reports add `state: complete | decompose_required | stopped | failed` and one `artifact`
-object to their existing phase-specific fields. A successful report has exactly this budget shape:
+Producer reports use exactly three top-level fields: `state: complete | decompose_required | stopped |
+failed`, one `artifact` object, and `notes`. A successful report has exactly this shape:
 
 ```yaml
 state: complete
@@ -174,9 +185,11 @@ notes: <at most 500 characters>
 
 The path is the artifact root; consumers discover members from the root rather than receiving a
 potentially growing path list. Metrics use the four fixed non-negative integers returned by the
-checker. Reports never include artifact contents, diff fragments, raw logs, policy copies, or the
-spec's decision-ledger rows. Existing phase-specific fields such as ADR paths, verdicts, commit
-ranges, and review scope remain, but they stay bounded by their existing schemas.
+checker. Reports never include artifact contents, diff fragments, raw logs, policy copies, the
+spec's decision-ledger rows, ADR-path lists, decision lists, open-item lists, member lists, or
+free-form summaries. Those details remain behind the artifact root, spec ledger, or workflow's
+existing durable ledger. No producer-specific extra key is accepted. The only free text is `notes`,
+whose maximum comes from `phase_reports.notes_max_characters` in the shared policy.
 
 An over-budget report uses the same artifact object with `over_budget`, adds the checker's closed
 violation codes, and uses the producer's terminal state from the table above. A failed measurement
@@ -185,13 +198,26 @@ caller treats `state: complete` without `within_budget` and all four checker met
 error. A caller never recomputes metrics from prose or trusts a producer's claim without the checker
 result.
 
+Cross-phase and ship handoffs carry fixed scalar lifecycle fields, current artifact root/metrics,
+and policy-bounded `notes`; they do not restore removed lists under a new name. The Phase-7
+one-paragraph summary becomes `notes`. The legacy terminal lifecycle field `discussion_items`
+remains for schema compatibility but is always the empty list; Discussion/Minor detail stays in its
+review or ledger artifact and only a bounded pointer or synopsis travels in `notes`.
+
+The shared module validates the exact non-producer boundaries too. SDD returns closed state,
+review-state, two axis-verdict, and verification-state scalars, fixed base/head SHAs, at most one
+ledger/report path, and bounded notes. The Phase-7 ship handoff has fixed lifecycle scalars, one spec
+artifact, one plan artifact, and bounded notes. The terminal ship summary keeps its existing fixed
+scalar keys, requires the compatibility `discussion_items` list to be empty, and bounds notes from
+the same policy. Unknown fields or legacy lists/summaries are contract errors at each boundary.
+
 ## Decisions
 
 ### Module and interface
 
 The artifact-budget module owns policy loading, strict schema validation, package-member discovery,
 byte measurement, aggregate calculation, closed violation classification, bounded JSON rendering,
-and exit semantics. Producers
+producer-report, SDD-report, ship-handoff, and ship-summary validation, and exit semantics. Producers
 own content-specific compaction and package construction because only they know what text can be
 removed or which tasks/diffs can be split safely. Consumers know only the root path, metrics, and
 terminal state.
@@ -222,9 +248,9 @@ fractions, negative values, unknown keys, missing kinds, inconsistent one-file l
 limits smaller than the root limit.
 
 The 500-character notes rule remains in policy because it is part of the same repeated-artifact
-cost model and already has repository evidence and precedent. The checker does not attempt to
-measure an agent's transport message; workflow contract tests pin that every producer schema carries
-the rule and the fixed artifact object.
+cost model and already has repository evidence and precedent. The module validates the exact
+producer-report object and rejects extra legacy list/summary fields or notes beyond the policy value;
+it does not attempt to estimate transport tokens.
 
 ### Compatibility and publication
 
@@ -241,17 +267,21 @@ diff-scope product gates, or CI wiring.
 
 ## Test seams
 
-The primary seam is the artifact-budget command. Table-driven tests invoke it with repository-owned
-small and oversized issue fixture descriptors and temporary byte payloads. They assert exact-boundary success,
+The primary seam is the artifact-budget command. Table-driven tests materialize every repository-owned
+small and oversized issue fixture descriptor into temporary byte payloads and invoke the CLI. They assert exact-boundary success,
 boundary-plus-one exit 3 and violation code, aggregate and member-count failures, deterministic JSON,
 Unicode measured as encoded bytes, package-member auto-discovery, orphan/index/manifest mismatch and
-unreadable-path rejection, unknown-policy fail-loud behavior, and that no over-budget result has a
-successful status.
+unreadable-path rejection, unknown-policy fail-loud behavior, exact fixture metrics/status/exit code,
+canonical violations, and that no over-budget result has a successful status. Descriptor metadata is
+never accepted as its own proof.
 
 The second seam is the review-package command. A temporary Git fixture proves that a small range
 produces one within-budget manifest, a multi-file oversized monolith becomes ordered bounded shards,
 and a single-file oversize returns `decompose_required` without a success line or truncated coverage.
-Tests inspect the manifest and reconstructed shard sequence, not implementation functions.
+A binary range proves zero insertion/deletion aggregation, malformed manifests prove booleans are not
+integers, a refused retry preserves a prior package byte-for-byte, and successful first publication
+leaves no staging entries or orphan shards. Tests inspect the manifest and reconstructed shard
+sequence, not implementation functions.
 
 The highest workflow seam remains `just agent-workflow-tests`. Contract fixtures represent one normal
 small issue and one oversized issue. They pin that design, planning, handoff, review, and later writers
@@ -306,3 +336,6 @@ Concrete grill scenarios that must remain green:
 | D8 | Freeze machine-readable package references and shared policy discovery: each plan Task-index row ends in exactly one Markdown link to its convention-named task member; review manifests use the strict version-1 `interface_version`, `kind`, `range`, `commits`, `stat`, `shards`, `total_diff_bytes`, and `coverage` fields; install the one Python budget module at both `~/.agents/bin/artifact-budget` and importable `~/.agents/lib/python/artifact_budget.py`, with its default policy at `~/.agents/share/artifact-budget-policy.json` | The checker must prove root/member agreement without trusting caller lists, `task-brief` must resolve one member deterministically, and `review-package` needs the authoritative member ceiling before it can group whole-file diffs; the repository already publishes stable agent tools through Home Manager, while an importable copy lets the generator reuse policy loading and checks rather than restating them | Infer arbitrary Markdown links or accept an extensible manifest, which makes membership ambiguous; let the generator parse policy independently or duplicate the 64 KiB ceiling, which splits D1's authority; place the policy beside repository source, which is absent in consumer projects |
 | D9 | Preserve the existing 20-product-file correctness scope when the full-range review package is larger than that gate: conformance and every unscoped reviewer read the manifest and shards in order, while a scoped correctness packet receives the manifest root and metrics only as truthful range-coverage evidence and fetches exactly the selected file diffs instead of reading its shards | Issue 49 explicitly excludes changing the product diff-size gate, while D4/D6 require a bounded root-and-metrics handoff and truthful full-range coverage; keeping the full package visible but its shards out of the scoped correctness evidence preserves both contracts | Give the scoped reviewer all full-range shards, which silently defeats the existing 20-file scope; omit the manifest and metrics, which breaks the new review-package handoff contract |
 | D10 | Expand an implementation-plan root to its checker-validated task members only at ship time when supplying process-artifact exclusions to `diff-scope`; all public workflow handoffs continue to carry the root and metrics only | D3 makes task members committed process artifacts, D6 forbids growing public member lists, and the existing product-size gate requires every process artifact written by the run to be excluded explicitly | Pass only the root, which miscounts task members as product changes; pass member lists through every phase report, which makes report size grow with package shape; change `diff-scope`'s product gate, which is out of scope |
+| D11 | Replace producer-specific report fields with the exact `state` + one root `artifact` + policy-bounded `notes` envelope; cross-phase and ship handoffs use fixed scalars/root metrics plus the same bounded notes, and legacy terminal `discussion_items` is always empty | Phase-5 review B1 verified that live `decisions`, `open_items`, `adr_paths`, and the Phase-7 paragraph summary are unbounded despite the spec's former claim; D6 already makes the artifact and durable ledgers authoritative | Add per-list count/item limits, which introduces more repeated numeric policy and still grows transport with artifact complexity; retain the lists because they are “existing,” which leaves the acceptance gap intact |
+| D12 | Refuse a review-package retry when its regular root or member directory already exists; generate in sibling staging, validate completely, publish members then manifest, and clean only newly published members if final publication fails | Phase-5 review S2 found that range-derived names collide on resume and stale shards can corrupt discovery; refusal is deterministic, preserves valid prior evidence byte-for-byte, and avoids pretending two filesystem renames are one atomic package swap | Overwrite in place, which can destroy a valid package or leave stale shards; multi-path replacement with rollback, which adds concurrency/state machinery for transient evidence when safe refusal suffices |
+| D13 | Make small/oversized descriptors executable test inputs, reject booleans for every policy/result/manifest integer, and count Git binary numstat `-` as zero insertions/deletions while retaining full binary diff bytes | Phase-5 review S1/S3 found static fixture self-assertion and Python's `bool`/`int` overlap; `diff-scope` already defines binary rows as zero churn, so matching it keeps one repository meaning | Treat descriptor expectations as proof, which cannot catch mismatched payloads; accept booleans through `isinstance(int)` or invent a different binary-stat convention, both of which create silent schema/accounting drift |
