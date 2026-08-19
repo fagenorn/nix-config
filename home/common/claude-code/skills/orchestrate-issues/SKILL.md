@@ -4,170 +4,168 @@ description: Dispatch a set of tracker issues through from-issue --auto as indep
 argument-hint: "<issue numbers... | --label X | --milestone Y>"
 ---
 
-# orchestrate-issues — a dispatcher, not a manager
+# orchestrate-issues — a control adapter, not a manager
 
-You are a dispatcher. You hold a ledger of issue → state; you never hold
-specs, plans, diffs, or review content. If you find yourself reading code,
-a spec, or a review finding, you have left your role — the intelligence
-belongs inside each issue's own agent, not here. Your context should stay
-flat (~10-20k tokens) regardless of issue count.
+You are an external adapter around `workflow-state`. You resolve bindings,
+normalize tracker, host-owner, and worktree facts, invoke the helper, and execute
+its typed actions. You never read issue content, code, specs, plans, diffs, or
+review findings. Do not retain a second task ledger or reconstruct lifecycle
+policy. Context stays flat regardless of issue count.
 
-## 1. Resolve the issue set
+Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
+`workflow-state` name does not resolve on PATH, use that full path.
 
-- Explicit numbers → use them, in the given order.
-- `--label X` / `--milestone Y` → resolve with ONE
-  `<tracker-cli> issue list --label X --json number,title` call
-  (tracker CLI and `unsetGithubToken` come from `.claude/skills.config.json`,
-  same bindings from-issue uses).
-- Resolve `maxParallel` from `~/.agents/bin/resolve-bindings` (default **2**;
-  `orchestration.maxParallel` in `.claude/skills.config.json` overrides). More
-  parallelism mostly buys merge conflicts: every ship-issue merge serializes
-  on the integration branch anyway.
+## 1. Resolve issue set and bindings
 
-## 2. Order
+- Explicit numbers: preserve the caller's order.
+- `--label X` / `--milestone Y`: resolve the ordered issue numbers with one
+  configured tracker-list call. The tracker CLI and `unsetGithubToken` come from
+  `.claude/skills.config.json`, through the same bindings used by `from-issue`.
+- Call `~/.agents/bin/resolve-bindings` once for both orchestration limits. Put
+  the resolved `agentBudgetMinutes` as request `attempt_budget_minutes` and the
+  resolved `maxParallel` as request `max_parallel`. Do not copy either default
+  or calculate capacity in this adapter.
+- Choose or accept a stable `run_id`. Resolve the dispatcher's absolute
+  repository root once as `ledger_repo_root`; it remains the exact immutable
+  value for the run, independent of any issue worktree.
 
-Respect tracker `blocked_by` edges when they exist (query them; to-issues
-emits them) — dispatch only issues whose blockers are closed, and re-check
-the frontier as issues complete. No edges → the given order. Never serialize
-by reading code yourself; overlap risk is the edges' job.
+## 2. Bootstrap and observe
 
-## 3. Dispatch
+At the start of a run or after adapter restart, call:
 
-**Fog pre-check first — one query for the whole set.** List the repo's open
-`wayfinder:*` decision tickets once (GitHub: `gh issue list --state open
---search 'label:wayfinder:grilling,wayfinder:research,wayfinder:prototype,wayfinder:task'
---json number,url`) and intersect them with the `blocked_by` numbers §2 already
-read. An issue blocked by any of them is **fogged**: a human has to decide
-before an agent can spec it. Record it `fogged` in the ledger with the count
-and links of the open decisions, dispatch nothing for it, and carry that link
-list into the final report. from-issue's Phase-0 fog gate stays the deep check
-for fog nobody has charted yet; this only avoids paying a whole agent run to
-rediscover fog already declared on a map.
+```text
+workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> --now <RFC3339-now>
+```
 
-### Durable run ledger
+Consume only the strict version-1 response's bounded `requirements`. Never
+print, read, retain, or reconstruct raw ledger state. Each requirement supplies
+the exact `issue`, `attempt`, lifecycle `owner`, `action_id`, and
+`recorded_worktree` needed to rebuild external observations. Inspect exactly
+every returned `recorded_worktree`: report it as a normalized matching recorded
+path only when it is the live worktree for that issue's branch. When a returned
+path is absent or mismatched, verify a collision-free absent path and report
+that replacement candidate instead.
 
-Before dispatch, choose a stable `run_id` for this issue set (or resume the one
-supplied by the caller). Resolve the dispatcher's absolute repository root once
-as `ledger_repo_root`; it is the exact immutable value used by every lifecycle
-command and is independent of any issue worktree. Lifecycle commands run the
-helper at `~/.agents/bin/workflow-state`; if the bare `workflow-state` name
-does not resolve on PATH, use that full path. Run `workflow-state init-run
+In addition, for every requested issue without a bootstrap requirement, reserve
+a harmless verified absent candidate. This is path validation, not scheduling:
+do not assign a readiness label or interpret tracker state. Pass the candidate
+even when it will not be used; `control ignores unused candidates`.
+Candidate paths must be pairwise distinct, absent from both the filesystem and
+`git worktree list --porcelain`, and disjoint from every returned durable path.
+
+Use one tracker read for the requested set to normalize, per issue, only
+`state`, `open_blockers`, and `decision_blockers` (decision blockers carry issue
+and URL). The adapter does not decide what those facts mean. Correlate a current
+host owner notification only with the returned lifecycle owner and `action_id`;
+then normalize it as the bounded owner event for that exact issue, attempt, and
+launch identity. Host task IDs are correlation data outside the lifecycle
+contract. Ignore unrelated or stale host notifications rather than inventing
+an owner result.
+
+For every control call, write one temporary absolute JSON request containing
+exactly the version-1 fields `interface_version`, `now`, `max_parallel`,
+`attempt_budget_minutes`, ordered `issues`, and the normalized `tracker`,
+`owners`, and `worktrees` arrays. Do not add raw issue text or helper history.
+At start/resume and after each current owner notification, tracker change, or
+current wait-ID wake, refresh the external facts needed by that request.
+
+On a full dispatcher restart, the host reaps or cancels inherited detached wait observers
+before the restarted adapter can rearm from a returned wait ID. The
+two wait fields below are process-local and cannot discover or adopt an
+inherited handle.
+
+## 3. Decide
+
+Invoke the helper with the request file:
+
+```text
+workflow-state control --repo-root <ledger_repo_root> --run-id <run-id> --request-file <absolute-json-path>
+```
+
+Call `workflow-state control` at start/resume and for every normalized current
+owner, tracker, or current wait-ID event. Its response is the only source of action order, kind, and lifecycle identity.
+Do not infer, reorder, omit, or add another action. The helper owns readiness, precedence, retryability, capacity,
+deadline, and completion decisions; the dispatcher only applies the returned
+envelopes.
+
+Accept only the strict version-1 control response with its bounded `run_id`,
+`now`, summaries, deltas, actions, and next-deadline fields. It omits `attempts`,
+`launches`, `phase_inputs`, and older results. Use those values only for
+rendering and action execution; do not rebuild policy from them.
+
+## 4. Execute control actions
+
+Validate each action as one of the closed kinds `spawn`, `resume`, `retry`,
+`wait`, or `finalize`, and execute actions in returned order. Any other kind is a contract error: stop without executing it and surface the unknown kind; fail loudly.
+
+For `spawn`, `resume`, and `retry`, dispatch the returned owner in the background
+using the action's identity and paths verbatim. Pass the helper-issued action ID
+and owner token unchanged; never substitute a host task ID. The owner dispatch
+envelope is:
+
+```text
 --repo-root <ledger_repo_root>
---run-id <run-id> --now <RFC3339-now>`, then `workflow-state reconcile` with the
-same `--repo-root <ledger_repo_root>`, run identity, and current time. The returned
-ledger is authoritative; rebuild the local task ledger from it before deciding
-what is queued or active.
+ledger_repo_root=<ledger_repo_root>
+run_id=<run-id>
+issue=<issue>
+attempt=<attempt>
+owner=<owner-token>
+action_id=<action-id>
+worktree=<absolute-worktree>
+handoff_path=<exact-handoff-path>  # only when non-null
+from-issue <num> --auto
+```
 
-For each remaining issue: `TaskCreate` a ledger entry and choose the owner
-identity. Under the configured worktree root, reserve a collision-free exact absolute worktree path
-for this attempt by verifying the path is absent from both the filesystem and
-`git worktree list`. Reservation selects the path but does not create the worktree;
-the lifecycle-aware owner creates it in Phase 1. Then call `workflow-state launch --repo-root <ledger_repo_root> --run-id
-<run-id> --issue <num> --owner <owner> --worktree <absolute-worktree>
---budget-minutes <budget> --now <RFC3339-now>` before spawning. Spawn only when
-the returned attempt is active. `<budget>` is the **attempt budget** — the
-wall-clock allowance for one attempt — and comes from `agentBudgetMinutes` in
-`~/.agents/bin/resolve-bindings` (`orchestration.agentBudgetMinutes` in
-`.claude/skills.config.json`, default 90). Do not restate a number here; read
-the resolver.
+The `ledger_repo_root` line carries the exact immutable value resolved for the
+run and is independent of any issue worktree. The worktree is the exact returned
+path. For `resume`, include the returned `handoff_path` when present. Record the
+host task handle beside the returned action ID only for later notification
+correlation; it is never an owner token or action identity.
 
 <!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
 
-> Lifecycle envelope: `ledger_repo_root=<ledger_repo_root>`, `run_id=<run-id>`,
-> `attempt=<attempt>`, `owner=<owner>`, `worktree=<absolute-worktree>`. Invoke the `from-issue` skill via the Skill tool
-> with the literal arguments `from-issue <num> --auto`, in <repo-root>. Persist
-> the normalized compact result before returning it, then return exactly the JSON
-> printed by `workflow-state finish` and nothing else.
+> Invoke the `from-issue` skill via the Skill tool with the literal arguments
+> `from-issue <num> --auto`. Preserve the lifecycle identity and exact worktree.
+> Persist the compact result with `workflow-state finish`, then return exactly
+> its JSON stdout and nothing else.
 
-Never inline issue bodies, specs, or plans into a dispatch prompt — the
-child fetches its own issue; the worktree is the shared memory. Pass only the
-`ledger_repo_root`, `run_id`, attempt, owner, worktree, and literal invocation above.
+Never inline issue bodies or any content artifact in that prompt.
 
-## 4. Wait on notifications and reconcile durable state
+For `wait`, adapter state consists only of `current_wait_id` and
+`current_wait_handle`:
 
-Background agents notify on exit. Never poll continuously: do not `sleep`, run
-no-op commands, or re-check task state on a loop. Reconciliation is event-driven
-and mandatory on **dispatcher resume**, **notification receipt**, **before retry**,
-and **before final drain**: call `workflow-state reconcile`, then update the local
-ledger from the durable result before acting. This reconstructs completion after
-a delayed or missing notification.
+- If the response carries the same wait ID as `current_wait_id`, keep the
+  installed handle; the adapter does not arm another observer.
+- For a different ID, save the old `current_wait_id` and `current_wait_handle` pair,
+  publish the new wait ID with the handle marked uninstalled, cancel the old handle,
+  then arm and store the new one-shot observer. This ordering must never leave the new wait ID paired with the old handle.
+- A missing or already exited old handle is an idempotent cancellation outcome;
+  continue to arm the replacement.
+- On unexpected cancellation failure, restore the old `current_wait_id` and `current_wait_handle` pair,
+  do not arm the replacement, and fail loudly. The next identical response retries replacement.
+- If arming fails after cancellation, clear `current_wait_id`, clear `current_wait_handle`,
+  surface that no wake is installed, and fail loudly.
+- Each wake carries its wait ID; ignore it unless it equals `current_wait_id`;
+  a stale wake cannot trigger control or disturb the replacement observer.
 
-The durable result takes precedence over notification text. Ignore a stale older-attempt notification
-when a newer attempt or terminal outcome is recorded.
-Record `discussion_items` from the durable compact outcome verbatim and dispatch
-the next queued issue only after reconciliation frees a slot.
+Arm the one-shot observer for the returned wake conditions and optional
+deadline. No polling or repeated short sleeps are allowed.
 
-**Attempt-budget guard:** if an agent has been silent past its attempt budget (the
-wall-clock allowance resolved as `agentBudgetMinutes`; see §3 — the resolver is the
-single source, so no number is repeated here), `workflow-state reconcile` persists a
-provisional `stopped` outcome that retains the worktree and carries
-`result_source: "expiry"`. A later `finish` from that attempt's own owner supersedes
-it, so a `stopped` outcome seen here may still be replaced by the owner's real
-result. Surface it for inspection. It is not automatically relaunched: first apply
-the failure policy, then let `workflow-state launch` enforce the fresh-attempt cap.
+For `finalize`, first clear `current_wait_id`, then cancel the outstanding handle
+(a missing/already-exited handle is harmless), and clear
+`current_wait_handle`. Do not issue another control call merely to prepare the
+report.
 
-**Deadline wake path.** Triggers are event-only, so without a wake path a
-silent agent's expired attempt budget is discovered only when some unrelated
-notification lands. When a dispatch or resume arms a deadline, arm
-**exactly one** deadline observer for the wave: a single detached background command
-that sleeps until the earliest armed deadline plus a small grace and then
-exits, re-invoking you for one `workflow-state reconcile` pass. While an
-observer is pending, never arm a second. Re-arm exactly one observer
-whenever there is none pending and an armed, unfired deadline remains —
-both when a new deadline is armed and after an observer fires and its
-reconcile pass leaves later deadlines still outstanding. This is one
-scheduled re-check per armed deadline horizon — never a poll loop,
-never repeated short sleeps.
+## 5. Final report
 
-## 5. Failure policy
-
-- **Content-level stops are verdicts, not errors** — wrong issue type,
-  existing PR/worktree found in pre-flight, fog-gate abort. Record the
-  child's stated reason verbatim in the ledger and never retry.
-- **`fogged` is a verdict too** — never retried in this run; it clears when
-  the decision tickets blocking it close.
-- **Transient failures** (CI flake, network, harness death) → call
-  `workflow-state reconcile` first, then **resume before fresh**:
-  1. Recorded attempt `handed_off` → relaunch the **same owner identity** with
-     `workflow-state launch --resume-handoff <stored exact handoff path>` —
-     same owner, same worktree — and re-spawn the owner with the same
-     lifecycle envelope plus the resume instruction.
-  2. Recorded attempt still `active` (the harness died without a terminal
-     write) → relaunch the same identity with `workflow-state launch` (it
-     records a resume event on the same attempt) and re-spawn with the same
-     envelope; committed artifacts and the worktree are the resumed owner's
-     memory.
-  3. Only when resume is impossible — the attempt is terminal and the durable
-     outcome still permits a retry — launch a fresh attempt with a
-     **fresh owner identity**. The workspace does not decide fresh-vs-resume;
-     the owner handle does. Choose the worktree like this:
-     - Read the prior attempt's recorded `worktree` from the reconciled ledger
-       (`reconcile`, which §5 already mandates before every retry, prints it).
-     - Check whether that exact path is still a live git worktree checked out on
-       this issue's branch — one `git worktree list --porcelain` scan. This is
-       worktree metadata, not issue content, so the role boundary holds; the
-       deeper resume-signal inspection stays the owner's Phase-0 job.
-     - Live → pass that exact path as `--worktree`, so the retry owner reaches
-       the existing work instead of an empty tree.
-     - Not live (removed, or checked out on another branch) → reserve a fresh
-       collision-free path exactly as §3 does for a first attempt.
-
-     Either way, spawn only from the accepted attempt. The helper allows attempts
-     1 and 2 only and refuses a third fresh attempt; record its durable failed
-     outcome instead of counting in prose.
-- A failed issue never blocks unrelated issues.
-
-## 6. Final report
-
-When the set drains: a per-issue table (issue, state, PR, one-line reason
-for any non-merge), then every `discussion_items` entry grouped by issue,
-then anything needing a human. Re-running `/orchestrate-issues` with the
-same set is safe — from-issue's pre-flight detects merged/open PRs and
-no-ops at the cost of one tracker call per issue.
+Render a `finalize` action from the bounded summaries in the same control response.
+Produce a per-issue table with issue, state, PR, and one-line reason,
+then group every `discussion_items` entry by issue and call out anything needing
+a human. Do not perform a second ledger read or reconstruct omitted history.
 
 ## Notes
 
-Claude-only skill (depends on background agents + task notifications; the
-Codex harness lacks both) — it lives outside the shared skills tree, and
-Codex users run `/from-issue` per issue as today.
+Claude-only skill: it depends on background agents and host task notifications,
+so it lives outside the shared skills tree. Codex users continue to run
+`/from-issue` per issue.

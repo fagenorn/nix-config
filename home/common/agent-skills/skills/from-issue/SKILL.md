@@ -23,9 +23,23 @@ Treat all five as one identity; never guess a missing field. Preserve the
 immutable ledger_repo_root exactly as supplied, and keep it distinct from the
 separate owner worktree recorded on the attempt. Every `workflow-state` command in
 this owner or its delegated remainder uses `--repo-root <ledger_repo_root>`;
-never substitute the current checkout or owner worktree. A direct standalone invocation remains compatible
-and does not require a ledger; it may `workflow-state init-run` its own run only when
-the user explicitly requests durable orchestration, carrying that root as `ledger_repo_root`.
+never substitute the current checkout or owner worktree.
+
+Direct standalone invocation remains ledger-free. Use the ordinary worktree
+flow and compact direct return. Only when the user explicitly requests durable standalone orchestration,
+resolve an immutable
+`ledger_repo_root` and stable run ID, call bounded `workflow-state init-run`, and
+consume only its bounded `requirements`. Gather normalized tracker facts and a
+verified worktree observation for this one issue, then write a strict version-1
+request with `max_parallel: 1` and the resolved attempt budget and call
+`workflow-state control`. Require exactly one dispatch action and require that
+the first `spawn` envelope is for this issue, then adopt its run, issue, attempt,
+owner token, action ID, and exact worktree as this invocation's lifecycle
+identity; do not spawn another owner. Missing, wrong-kind, wrong-issue, or
+multiple dispatch actions fail loudly before Phase 1. The helper may also return
+its one trailing `wait` action; this already-running owner does not install the
+dispatcher's observer.
+
 The `workflow-state` executable is `~/.agents/bin/workflow-state`; if the bare
 name does not resolve on PATH, invoke it by that full path.
 
@@ -86,8 +100,9 @@ defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
    `handoff` skill owns safe first-file creation). Invoke `handoff` with a
    destination beneath `.superpowers/workflows/<run-id>/handoffs/`, repeat
    `workflow-state progress` with `--handoff-path <exact-path>` to finalize
-   `handed_off` on the same attempt, and stop. Resume later with `workflow-state
-   launch --resume-handoff <exact-path>` and the same identity.
+   `handed_off` on the same attempt, persist the handoff, and stop. The dispatcher
+   later relaunches the same lifecycle owner, exact worktree, and handoff path
+   only from a returned `resume` envelope.
 4. **`delegate`** —
 <!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
