@@ -594,6 +594,24 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 self.assertIn(message, completed.stderr)
                 self.assertEqual(self.state_path.read_bytes(), before)
 
+    def test_control_rejects_nonpositive_max_parallel(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        before = self.state_path.read_bytes()
+        for max_parallel in (0, -1):
+            with self.subTest(max_parallel=max_parallel):
+                completed = self.control_raw(
+                    now="2026-08-19T12:00:00Z",
+                    issues=[47],
+                    max_parallel=max_parallel,
+                    tracker=[self.tracker_fact(47)],
+                    worktrees=[],
+                    ok=False,
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(completed.stdout, "")
+                self.assertIn("invalid max_parallel", completed.stderr)
+                self.assertEqual(self.state_path.read_bytes(), before)
+
     def test_control_rejects_bad_request_files_and_recorded_path_mismatch(self):
         self.init_run(now="2026-08-19T12:00:00Z")
         for request_path, message in (
@@ -694,6 +712,87 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         }])
         self.assertIsNone(response["next_deadline"])
         self.assertEqual(self.read_state()["issues"], {})
+
+    def test_control_consumed_candidate_replay_is_strictly_bounded(self):
+        now = "2026-08-19T12:00:00Z"
+        path = str(self.root / "wt-47")
+        self.init_run(now=now)
+        original = self.control(
+            now=now, issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": path, "state": "absent"})],
+        )
+        self.assertEqual([action["kind"] for action in original["actions"]],
+                         ["spawn", "wait"])
+        active = self.state_path.read_bytes()
+
+        rejected = {
+            "wrong instant": self.control_request(
+                now="2026-08-19T12:00:01Z", issues=[47],
+                tracker=[self.tracker_fact(47)],
+                worktrees=[self.worktree_fact(
+                    47, candidate={"path": path, "state": "absent"})],
+            ),
+            "wrong path": self.control_request(
+                now=now, issues=[47],
+                tracker=[self.tracker_fact(47)],
+                worktrees=[self.worktree_fact(47, candidate={
+                    "path": str(self.root / "other-47"), "state": "absent",
+                })],
+            ),
+            "current unavailable": self.control_request(
+                now=now, issues=[47],
+                tracker=[self.tracker_fact(47)],
+                owners=[self.owner_fact(
+                    event_id="unavailable-47-1-1", issue=47, attempt=1, launch=1,
+                )],
+                worktrees=[self.worktree_fact(
+                    47, candidate={"path": path, "state": "absent"})],
+            ),
+            "new dispatch": self.control_request(
+                now=now, issues=[47, 51],
+                tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+                worktrees=[
+                    self.worktree_fact(
+                        47, candidate={"path": path, "state": "absent"}),
+                    self.worktree_fact(51, candidate={
+                        "path": str(self.root / "wt-51"), "state": "absent",
+                    }),
+                ],
+            ),
+        }
+        for case, request in rejected.items():
+            with self.subTest(case=case):
+                completed = self.control_raw(request=request, ok=False)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(completed.stdout, "")
+                self.assertIn("recorded worktree observation", completed.stderr)
+                self.assertEqual(self.state_path.read_bytes(), active)
+
+        replayed = self.control(
+            now=now, issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": path, "state": "absent"})],
+        )
+        self.assertEqual(replayed["deltas"], [])
+        self.assertEqual([action["kind"] for action in replayed["actions"]], ["wait"])
+        self.assertEqual(self.state_path.read_bytes(), active)
+
+        self.finish(1, self.merged_result(47), issue=47, now=now)
+        terminal = self.state_path.read_bytes()
+        completed = self.control_raw(
+            now=now, issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": path, "state": "absent"})],
+            ok=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("recorded worktree observation", completed.stderr)
+        self.assertEqual(self.state_path.read_bytes(), terminal)
 
     def test_delayed_notification_recovers_durable_terminal_result(self):
         self.init_run()

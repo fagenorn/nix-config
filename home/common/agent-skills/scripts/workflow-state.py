@@ -902,7 +902,7 @@ def validate_control_request(value: Any) -> dict[str, Any]:
     if not isinstance(request["now"], str):
         raise WorkflowError("invalid control now: expected an RFC3339 UTC timestamp")
     request["now"] = format_utc(parse_utc(request["now"], "control now"))
-    require_plain_int(request["max_parallel"], "max_parallel")
+    require_plain_int(request["max_parallel"], "max_parallel", minimum=1)
     require_plain_int(
         request["attempt_budget_minutes"], "attempt_budget_minutes", minimum=1
     )
@@ -1192,13 +1192,17 @@ def command_control(args: argparse.Namespace) -> int:
             if issue_state is None or not issue_state["attempts"]:
                 continue
             latest = issue_state["attempts"][-1]
-            if latest["state"] not in {"active", "handed_off"}:
-                continue
             observation = worktree_by_issue.get(issue)
             recorded = None if observation is None else observation["recorded"]
             if recorded is not None:
                 continue
             candidate = None if observation is None else observation["candidate"]
+            if candidate is None:
+                if latest["state"] in {"active", "handed_off"}:
+                    raise WorkflowError(
+                        "current control action requires a recorded worktree observation"
+                    )
+                continue
             identity = (issue, latest["attempt"], len(latest["launches"]))
             tracker = tracker_by_issue[issue]
             replay = (
