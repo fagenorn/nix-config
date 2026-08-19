@@ -334,7 +334,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             if summary["result"] is not None:
                 self.assertEqual(set(summary["result"]), {
                     "issue", "state", "pr_url", "merge_sha", "issue_closed",
-                    "discussion_items", "notes",
+                    "discussion_items", "detail_state", "report_path", "notes",
                 })
                 self.assertIs(type(summary["result"]["issue"]), int)
                 self.assertIn(summary["result"]["state"], {"merged", "stopped", "failed"})
@@ -391,9 +391,11 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "issue": issue,
             "state": "merged",
             "pr_url": "https://github.com/fagenorn/nix-config/pull/15",
-            "merge_sha": "abc123",
+            "merge_sha": "abc123abc123abc123abc123abc123abc123abcd",
             "issue_closed": True,
             "discussion_items": [],
+            "detail_state": "none",
+            "report_path": None,
             "notes": "",
         }
 
@@ -1452,7 +1454,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         summary = next(s for s in refused["summaries"] if s["issue"] == 51)
         self.assertEqual(set(summary["result"]), {
             "issue", "state", "pr_url", "merge_sha", "issue_closed",
-            "discussion_items", "notes",
+            "discussion_items", "detail_state", "report_path", "notes",
         })
         self.assertEqual(summary["result"]["state"], "failed")
         self.assertIn("attempts 1 and 2", summary["result"]["notes"])
@@ -2768,6 +2770,58 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn(nullable["notes"], normalized["notes"])
         self.assertIn(os.path.abspath(self.root / "wt-a"), normalized["notes"])
         self.assertLessEqual(len(normalized["notes"]), 500)
+
+    def test_terminal_result_report_path_is_one_validated_durable_scalar(self):
+        self.init_run()
+        attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
+        detail = ".superpowers/issue-delivery/14/run-1/ship-review-a.json"
+        valid = {**self.merged_result(), "detail_state": "present", "report_path": detail,
+                 "notes": f"details: {detail}"}
+        invalid = (
+            {key: value for key, value in valid.items() if key != "report_path"},
+            {**valid, "report_path": [detail]},
+            {**valid, "report_path": "/tmp/outside.json"},
+            {**valid, "report_path": "../outside.json"},
+            {**valid, "notes": "detail omitted"},
+            {**valid, "discussion_items": ["not durably moved"]},
+        )
+        for candidate in invalid:
+            before = self.state_path.read_bytes()
+            self.finish(attempt, candidate, ok=False)
+            self.assertEqual(self.state_path.read_bytes(), before)
+        normalized = self.finish(attempt, valid)
+        self.assertEqual(normalized["report_path"], detail)
+        self.assertIn(detail, normalized["notes"])
+
+    def test_unpublished_ship_detail_retains_a_readable_candidate(self):
+        self.init_run()
+        worktree = self.root / "wt-a"
+        attempt = self.spawn(issue=14, worktree=worktree)["attempt"]
+        relative = ".superpowers/ship-review/14/retained-detail.json"
+        retained = worktree / relative
+        payload = ('{"interface_version":1,"findings":[{"axis":"ship","ruling":null,'
+                   '"severity":"Minor","status":"minor","text":"kept"}]}')
+        result = {**self.merged_result(), "state": "stopped", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False,
+                  "detail_state": "unpublished", "report_path": relative,
+                  "discussion_items": [],
+                  "notes": f"publication failed; retained: {relative}"}
+        before = self.state_path.read_bytes()
+        self.finish(attempt, result, ok=False)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        retained.parent.mkdir(parents=True)
+        invalid_payloads = ("", "{", '{"interface_version":2,"findings":[]}',
+                            '{"interface_version":1,"items":[]}',
+                            '{"interface_version":1,"findings":[]}')
+        for invalid in invalid_payloads:
+            retained.write_text(invalid, encoding="utf-8")
+            before = self.state_path.read_bytes()
+            self.finish(attempt, result, ok=False)
+            self.assertEqual(self.state_path.read_bytes(), before)
+        retained.write_text(payload, encoding="utf-8")
+        normalized = self.finish(attempt, result)
+        self.assertEqual(normalized["detail_state"], "unpublished")
+        self.assertEqual(retained.read_text(encoding="utf-8"), payload)
 
     def test_workflows_gitignore_contains_wildcard(self):
         self.init_run()

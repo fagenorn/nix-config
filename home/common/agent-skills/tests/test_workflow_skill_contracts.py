@@ -36,6 +36,12 @@ SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
+SMALL_BUDGET_FIXTURE = (
+    REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/small-issue.json"
+)
+OVERSIZED_BUDGET_FIXTURE = (
+    REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/oversized-issue.json"
+)
 SHIP_ISSUE_EVALS = (
     REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json"
 )
@@ -74,11 +80,24 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.research = RESEARCH.read_text(encoding="utf-8")
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
+        cls.ship_review = SHIP_ISSUE_REVIEW.read_text(encoding="utf-8")
         cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
         cls.writing_plans = WRITING_PLANS.read_text(encoding="utf-8")
         cls.sdd = SDD.read_text(encoding="utf-8")
         cls.phase_5_review_contract = PHASE_5_REVIEW_CONTRACT.read_text(encoding="utf-8")
         cls.codex_plan_review = CODEX_PLAN_REVIEW.read_text(encoding="utf-8")
+        cls.standards_review = (FROM_ISSUE_DIR / "standards-review.md").read_text(
+            encoding="utf-8"
+        )
+        cls.ship_handoff = (FROM_ISSUE_DIR / "ship-handoff.md").read_text(
+            encoding="utf-8"
+        )
+        cls.small_budget_fixture = json.loads(
+            SMALL_BUDGET_FIXTURE.read_text(encoding="utf-8")
+        )
+        cls.oversized_budget_fixture = json.loads(
+            OVERSIZED_BUDGET_FIXTURE.read_text(encoding="utf-8")
+        )
         cls.orchestrate_evals = json.loads(
             ORCHESTRATE_EVALS.read_text(encoding="utf-8")
         )
@@ -356,6 +375,114 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("never inline artifact contents", producer)
             for forbidden in ("spec_path:", "adr_paths:", "decisions:", "open_items:", "summary:"):
                 self.assertNotRegex(producer, rf"(?m)^\s*{re.escape(forbidden)}")
+
+    def test_from_issue_validates_artifacts_before_every_phase_advance(self):
+        self.assert_ordered(self.from_issue, "validate the returned state", "artifact-budget check",
+                            "compare all four metrics", "workflow-state progress")
+        self.assertIn("complete with anything other than within_budget", self.from_issue)
+        self.assertIn("missing or non-integer metric", self.from_issue)
+        self.assertIn("checker exit 2", self.from_issue)
+        self.assertIn("independently run the checker", self.from_issue)
+
+    def test_autonomous_reports_and_ship_handoff_are_root_plus_metrics(self):
+        for text in (self.auto, self.ship_handoff):
+            for field in ("state", "artifact", "kind", "path", "metrics", "budget_status"):
+                self.assertIn(field, text)
+        self.assertIn("spec_artifact", self.ship_handoff)
+        self.assertIn("plan_artifact", self.ship_handoff)
+        self.assertIn("never carry task member paths", self.ship_handoff)
+        self.assertIn("never inline artifact contents", self.auto)
+        for forbidden in ("decisions:", "open_items:", "adr_paths:", "summary:"):
+            self.assertNotRegex(self.auto, rf"(?m)^\s*{re.escape(forbidden)}")
+            self.assertNotRegex(self.ship_handoff, rf"(?m)^\s*{re.escape(forbidden)}")
+        self.assertIn("discussion_items: []", self.ship_handoff)
+        self.assertIn("report_path", self.ship_handoff)
+        self.assertIn("phase_reports.notes_max_characters", self.ship_handoff)
+        self.assertIn("validate-report --boundary ship-handoff", self.ship_handoff)
+        self.assertIn("validate-report --boundary ship-summary", self.ship_handoff)
+
+    def test_sdd_report_is_exact_and_mechanically_validated(self):
+        for field in ("state", "review_state", "conformance_verdict",
+                      "correctness_verdict", "verification_state", "base_sha",
+                      "head_sha", "detail_state", "report_path", "notes"):
+            self.assertIn(field, self.sdd)
+        self.assertIn("validate-report --boundary sdd", self.sdd)
+        for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
+            self.assertNotRegex(self.sdd, rf"(?m)^\s*{re.escape(forbidden)}")
+
+    def test_received_reports_cross_the_same_json_wire_seam(self):
+        self.assert_ordered(self.from_issue, "received stdout bytes",
+                            "validate-report --boundary producer --input -", "decode JSON")
+        self.assert_ordered(self.from_issue, "validate-report --boundary sdd --input -",
+                            "construct the Phase-7 handoff")
+        self.assertIn("return only validated stdout bytes", self.auto)
+
+    def test_both_plan_review_routes_revalidate_received_reports_in_the_caller(self):
+        for text in (self.from_issue, self.standards_review):
+            self.assertIn("Codex", text)
+            self.assertIn("native", text)
+            self.assertIn("validate-report --boundary producer --input -", text)
+            self.assertIn("before any state access or reviewer dispatch", text)
+
+    def test_durable_review_detail_precedes_every_removable_cleanup(self):
+        self.assertIn(".superpowers/issue-delivery/", self.sdd)
+        self.assert_ordered(self.sdd, "delivery-detail", "artifact-budget check",
+                            "validate-report --boundary sdd", "delete this plan's workspace")
+        self.assertIn(".superpowers/issue-delivery/", self.ship_review)
+        self.assertIn("Minor/Discussion", self.ship_review)
+        self.assert_ordered(self.ship_issue, "delivery-detail", "artifact-budget check",
+                            "validate-report --boundary ship-summary", "remove the worktree")
+        for text in (self.sdd, self.ship_review, self.ship_issue, self.ship_handoff):
+            self.assertIn("report_path", text)
+            self.assertIn("keep the worktree", text)
+        self.assertIn("primary worktree", self.ship_handoff)
+        self.assertIn("never inline the report", self.from_issue)
+
+    def test_review_package_failure_before_dispatch_has_no_fabricated_detail(self):
+        self.assert_ordered(self.sdd, "base_sha and head_sha", "review-package",
+                            "exit 2", 'detail_state: "none"', "report_path: null",
+                            "validate-report --boundary sdd")
+        self.assertIn("before reviewer dispatch", self.sdd)
+        self.assertIn("do not dispatch", self.sdd)
+
+    def test_unpublished_detail_keeps_readable_sources_and_forbids_cleanup(self):
+        self.assert_ordered(self.sdd, "write the retained candidate", "validate-detail-input",
+                            "consume canonical stdout", 'detail_state: "unpublished"',
+                            "validate-report --boundary sdd", "keep the workspace")
+        self.assert_ordered(self.ship_review, "write the retained candidate", "validate-detail-input",
+                            "consume canonical stdout",
+                            'detail_state: "unpublished"', "keep the worktree")
+        for text in (self.sdd, self.ship_review, self.ship_issue):
+            self.assertIn("non-empty findings", text)
+            self.assertIn("do not remove", text)
+
+    def test_phase_five_remeasures_every_artifact_it_mutates(self):
+        self.assert_ordered(self.standards_review, "apply blocking fixes", "final mutation",
+                            "artifact-budget check", "decompose_required")
+        self.assertIn("check the spec too when its decision ledger changed", self.standards_review)
+        self.assertIn("do not dispatch SDD", self.standards_review)
+
+    def test_ship_expands_validated_plan_only_for_diff_scope_exclusion(self):
+        self.assert_ordered(self.ship_issue, "artifact-budget check", "discover the plan members",
+                            "diff-scope", "--artifact-path")
+        self.assertIn("one argument for the plan root and each discovered member", self.ship_issue)
+        self.assertIn("≤1,000 product lines", self.ship_issue)
+        self.assertIn("≤20 product files", self.ship_issue)
+        self.assertIn("do not put the member list in the handoff", self.ship_issue)
+
+    def test_fixture_producer_states_supplement_behavioral_cli_cases(self):
+        self.assertTrue(all(item["expected"]["producer_state"] == "complete"
+                            for item in self.small_budget_fixture["artifacts"]))
+        expected = {(item["kind"], item["case"]): item["expected"]["producer_state"]
+                    for item in self.oversized_budget_fixture["artifacts"]}
+        self.assertEqual(expected[("design-spec", "design-root-plus-one")], "decompose_required")
+        self.assertEqual(expected[("implementation-plan", "plan-ninth-member")], "decompose_required")
+        self.assertEqual(expected[("handoff", "handoff-root-plus-one")], "stopped")
+        self.assertEqual(expected[("review-package", "review-member-plus-one")], "decompose_required")
+        for text in (self.from_issue, self.auto, self.sdd):
+            self.assertIn("complete", text)
+            self.assertIn("within_budget", text)
+            self.assertIn("contract error", text)
 
     def test_sdd_validates_plan_before_extracting_a_member(self):
         setup = self.section(self.sdd, "## Setup", "## Agent tiers")

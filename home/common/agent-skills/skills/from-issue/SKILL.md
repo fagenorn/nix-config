@@ -80,7 +80,23 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 ## Dispatch, phase-budget and attempt-budget rules
 
-**Structured report-backs.** A subagent's final message is re-read by its caller on every later turn, so every `Agent` dispatch states a fixed return schema: artifact paths, a one-word verdict/state, ≤500 characters of notes; details live in worktree files. Prefer the tiered agent types over `general-purpose`.
+**Structured report-backs.** A subagent's final message is re-read by its caller on every later turn, so every `Agent` dispatch states the applicable fixed JSON return schema; details live in budgeted worktree files. Prefer the tiered agent types over `general-purpose`.
+
+**Artifact report boundary (D5, D6, D11, D14).** At every producer boundary,
+preserve the received stdout bytes and pipe them unchanged through
+`artifact-budget validate-report --boundary producer --input -`; only after that
+succeeds may you decode JSON or validate the returned state. For both the native
+and Codex Phase-5 plan-review routes, this validation happens before any state access or reviewer dispatch.
+For a non-null artifact, independently run the checker
+as `artifact-budget check --kind <reported-kind> --root <reported-path> --format
+json`, require the reported kind/path, and compare all four metrics byte-for-byte
+by integer value. A missing or non-integer metric (booleans included), checker exit 2,
+validator exit 2, path/kind/metric mismatch, or complete with anything other than within_budget
+is a contract error and becomes `failed`. An accepted
+over-budget state follows only its owning producer's remediation and never
+advances. The orchestrator retains only the root and compact metrics: never a
+member list and never artifact contents. Perform this entire gate before the
+corresponding `workflow-state progress` call.
 
 **Executable phase gate.** At every phase boundary, including Phase 0 through
 Phase 7, call `workflow-state progress` when lifecycle identity exists. Pass the
@@ -131,7 +147,10 @@ Without lifecycle identity, apply the same action order locally with the
 Use this one procedure for Phase-0 content stops, attempt budget stops, execution failure,
 and Phase-7 success whenever lifecycle identity exists. Assemble a temporary JSON
 file with exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`,
-`discussion_items`, and `notes` (≤500 characters). Pass it with
+`discussion_items`, `detail_state`, `report_path`, and `notes`. Validate the
+candidate with `artifact-budget validate-report --boundary ship-summary`; use
+only its canonical stdout as the `--result-file` bytes. The policy's
+`phase_reports.notes_max_characters` is authoritative. Pass it with
 `--result-file <path>` to `workflow-state finish` using the exact run, issue,
 attempt, and current time. Capture stdout; only after that durable write succeeds,
 send the exact JSON from stdout unchanged to the caller.
@@ -211,6 +230,10 @@ Invoke `writing-plans` for a plan under `planDir`, committed in the worktree. Th
 
 Read `standards-review.md` and follow it: Codex `plan-review` when enabled and available, the native reviewer dispatch otherwise, the mechanical-only self-grade, and the finding-disposition rules (verify against the live worktree; ledger rows for applied findings; contract by path, never inlined).
 
+Both routes consume the planning producer's received stdout bytes through the
+Artifact report boundary above before decoding JSON or dispatching. This caller
+validation is required even when the producer already validated its own candidate.
+
 **CHECKPOINT** — Confirm standards review is clean.
 
 ## Phase 6 — Execute
@@ -226,9 +249,15 @@ Agent(subagent_type="reviewer", model="opus", effort="high") performs its first-
 
 **CHECKPOINT** — Confirm the implementation is committed on the feature branch.
 
-sdd's report includes `review_state` (`clean | residuals | unknown`) from its two-axis
-final review; carry it verbatim into the Phase-7 handoff — ship-issue's Phase-5
-degradation decision reads it.
+sdd returns only canonical JSON. Pipe the received bytes through
+`artifact-budget validate-report --boundary sdd --input -` before decoding any
+field. Revalidate a `present` delivery-detail package with `artifact-budget check
+--kind review-package`; for `unpublished`, validate the named retained source
+with `artifact-budget validate-detail-input`, consume canonical stdout, keep the
+workspace and worktree, and fail without Phase 7. Never inline the report.
+After these gates, sdd's `review_state` (`clean | residuals | unknown`) and
+`report_path` may be used to construct the Phase-7 handoff — ship-issue's Phase-5
+degradation decision reads them.
 
 ## Phase 7 — Ship
 
@@ -237,8 +266,13 @@ Agent(subagent_type="general-purpose", model="opus", effort="high") launches `sh
 
 Read `ship-handoff.md` for the exact subagent prompt — it carries the lifecycle envelope (`ledger_repo_root`, run, attempt, owner), branch, worktree, artifact paths, `review_state`, and the fixed report schema. When `ship-issue` is absent, the same file's inline fallback applies.
 
-After receiving the ship report, from-issue owns the terminal durable write:
-assemble its compact result, call `workflow-state finish`, then send the exact JSON
+After receiving the ship report, from-issue owns the terminal durable write.
+Pipe its received bytes through `artifact-budget validate-report --boundary
+ship-summary --input -`, decode only canonical stdout, consume a durable
+`report_path` before advancing, and never inline either durable or retained
+detail; never inline the report. For `unpublished`, independently re-read the retained candidate through
+`validate-detail-input`, require non-empty findings, keep the worktree, and accept
+only `stopped`/`failed`. Then call `workflow-state finish` and send the exact JSON
 printed on stdout unchanged. A fresh ship agent never writes the owner's final
 ledger result. Apply the same procedure to any Phase-6 execution
 failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating so the two sequences stay distinguishable.

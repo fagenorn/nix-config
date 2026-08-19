@@ -16,7 +16,26 @@ Degrade gracefully: never read a configured doc/hints path that doesn't exist, n
 
 Optional `review.criticalPaths` globs: diffs intersecting any always get Phase 5's full two-axis review; absent = the `risky` label is the only always-full trigger.
 
-**Invocation paths.** From `from-issue`, the bootstrapping prompt carries `issue_number`, `branch`, `worktree_path`, `spec_path`, `plan_path`, `head_sha`, `review_state`, `auto`, `summary` — use those instead of re-deriving. Standalone (`/ship-issue <num>`): `review_state` is `unknown` unless the user supplies evidence of a completed sdd two-axis review; derive the issue number from the branch name, and spec/plan from `ls <specDir>/ | grep "issue-<num>"` (same in `<planDir>`; latest date prefix wins). Either way, the worktree state — not the handoff — is ground truth.
+**Invocation paths.** From `from-issue`, treat the handoff as received stdin
+bytes: pass them through `artifact-budget validate-report --boundary
+ship-handoff --input -` before decoding any field. It carries the fixed lifecycle
+scalars, `spec_artifact`, `plan_artifact`, `head_sha`, `review_state`, `auto`, one
+optional durable `report_path`, and notes. On entry, independently run
+`artifact-budget check` for the design-spec and implementation-plan roots,
+compare all four metrics, and recheck a non-null SDD detail root as a
+review-package. Exit 2/3, stale metrics, a mismatch, or over-budget input stops
+before Phase 0. After any later writer changes either artifact, repeat the same
+checks before continuing. Standalone (`/ship-issue <num>`): `review_state` is
+`unknown` unless the user supplies validated evidence of a completed sdd
+two-axis review; derive the issue number and artifacts, then establish the same
+checker-valid root/metric objects. The worktree state — not the handoff — is
+ground truth.
+
+Only after the plan's successful artifact-budget check, discover the plan members
+locally from its validated index for `diff-scope` exclusion. Supply one argument for the plan root and each discovered member.
+Keep that private
+list inside ship-issue: do not put the member list in the handoff, report, or
+review prompt.
 
 ## The flow
 
@@ -131,7 +150,7 @@ The branch normally arrives already reviewed on two axes by sdd's final review (
 
 - `review_state` is `clean` (handoff / sdd report: both axis verdicts clean, or every residual parked-with-ruling). `unknown` never degrades.
 - The Phase-1 sync needed no manual conflict escalation (allowlist auto-resolves count as clean).
-- The branch diff is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: `diff-scope $BASE_SHA..$HEAD_SHA --format text --artifact-path <spec_path> --artifact-path <plan_path>` (executable `~/.agents/bin/diff-scope`; use the full path if the bare name does not resolve) — its first line reads `product: <lines> lines, <files> files`, after the helper drops lockfiles, generated-header files, and the artifact paths you named. The gate measures PRODUCT changes, not process artifacts, so pass one `--artifact-path` per **file this run wrote** — `<spec_path>`, `<plan_path>`, plus anything else it put there (a `research` findings file) — and never `<specDir>`/`<planDir>` themselves, which hold every artifact this repo has ever accepted; a historical artifact that is itself the requested product still counts. No measurement — helper missing, or a non-zero exit — is not a small diff: run the full two-axis review.
+- The branch diff is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: start with `diff-scope $BASE_SHA..$HEAD_SHA --format text --artifact-path <spec_path> --artifact-path <plan_path>`, then append one argument for each discovered plan member and any other process artifact this run wrote. Each exclusion is an individual `--artifact-path <path>` argument (executable `~/.agents/bin/diff-scope`; use the full path if the bare name does not resolve). Its first line reads `product: <lines> lines, <files> files`, after the helper drops lockfiles, generated-header files, and those exact artifacts. The gate measures PRODUCT changes, not process artifacts; never exclude `<specDir>`/`<planDir>` themselves, which hold every artifact this repo has ever accepted, and a historical artifact that is itself the requested product still counts. No measurement — helper missing, invalid plan discovery, or non-zero exit — is not a small diff: run the full two-axis review.
 - The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num> --json labels`; with `issueTracker.kind=none` the condition passes), and no path from `git diff --name-only $BASE_SHA..$HEAD_SHA` matches a `review.criticalPaths` glob.
 
 **Merge-delta check (degraded path).** Scope and checklist per REVIEW.md; over exactly the non-empty merge delta, dispatch:
@@ -190,6 +209,17 @@ After verifying the merge, ask the REMOTE whether the branch still exists — `g
 
 ## Phase 8 — Cleanup
 
+Before cleanup, take every non-empty Minor/Discussion finding retained per
+REVIEW.md and invoke review-package in `delivery-detail` mode. Independently run
+`artifact-budget check --kind review-package` on the returned durable root and
+compare metrics. Build the exact ship result with `detail_state` and one
+`report_path`, validate its candidate through `artifact-budget validate-report --boundary ship-summary`,
+and use only canonical stdout. With non-empty findings,
+publication failure may return `unpublished` only after the no-follow retained
+source passes `validate-detail-input`; keep the worktree and do not remove it.
+Otherwise fail closed. Only `none` or a checker-valid `present` detail can proceed
+to remove the worktree.
+
 1. `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (the real close mechanism when `integrationBranch != defaultBranch` — see Phase 4).
 
 2. Remove the worktree from the main repo root, never from inside the worktree:
@@ -203,7 +233,9 @@ After verifying the merge, ask the REMOTE whether the branch still exists — `g
 
 3. If `git worktree remove` refuses on the rebased-branch case (see `docPaths.gitWorktrees`): confirm the PR landed via `gh pr view`, then retry with `ExitWorktree action: "remove", discard_changes: true` — the "discarded N commits" wording is misleading; the content is on the integration branch.
 
-Report final state: PR URL, merge commit SHA, issue closed.
+Report the validated ship-summary stdout only: `issue`, `state`, `pr_url`, full
+`merge_sha`, `issue_closed`, `discussion_items: []`, `detail_state`,
+`report_path`, and notes. A fresh ship owner never writes workflow-state itself.
 
 ## Notes
 

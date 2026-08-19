@@ -76,3 +76,24 @@ the cheap re-review and return to the appropriate full Opus/high axis.
 In `--auto`, apply Should-fix items inline through the same five steps and log
 each as a PR comment with a one-line rationale. Only Discussion items stay
 user-facing — surface those with a doc-grounded prompt. Then continue.
+
+## Durable Minor/Discussion detail
+
+Before Phase 8 may remove anything, collect every Minor/Discussion item from
+either review path as the strict non-empty findings input. First, write the retained candidate
+at `.superpowers/ship-review/<issue>/retained-detail.json` in the
+feature worktree. Run `artifact-budget validate-detail-input` on that no-follow
+file and consume canonical stdout before invoking review-package's
+`delivery-detail` mode. Supply issue/branch/run/head identity only; the producer
+derives the per-run leaf beneath the primary checkout's
+`.superpowers/issue-delivery/` home and enforces no-clobber publication.
+
+On success, independently check the returned review-package root, set
+`detail_state: "present"`, put its single main-root-relative path in
+`report_path` and notes, and return no inline items. On publication failure,
+re-read the retained source with `validate-detail-input`, consume canonical
+stdout, compare it with the submitted candidate, and require non-empty findings
+before setting `detail_state: "unpublished"`. Then keep the worktree and do not remove
+it; return only `stopped` or `failed`. Missing, unreadable, malformed,
+wrong-schema, or empty findings cannot support unpublished detail. With no
+Minor/Discussion items, use `detail_state: "none"` and a null path.

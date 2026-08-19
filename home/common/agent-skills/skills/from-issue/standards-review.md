@@ -2,6 +2,19 @@
 
 Loaded from `SKILL.md` at Phase 5. A plan reviewed only by its author risks blind spots, and you are the author. Unless Phase 0 marked the issue `mechanical-only`:
 
+## Caller input gate
+
+Before selecting either route, pipe the planning producer's received stdout bytes
+through `artifact-budget validate-report --boundary producer --input -`. Consume
+only validated stdout bytes, then decode JSON and read `state`. Require
+`state: complete`, an implementation-plan artifact, and `budget_status:
+within_budget`; independently run `artifact-budget check --kind
+implementation-plan --root <reported-root> --format json` and compare the root
+plus all four metrics. Validator/checker exit 2, exit 3, malformed metrics, or a
+claim mismatch fails before any reviewer dispatch. This caller-side validation
+is mandatory for both the Codex plan-review route and the native reviewer route;
+neither may trust the producer's validation. It happens before any state access or reviewer dispatch.
+
 1. Resolve `codex.planReview.enabled` (default `true`) and `.focus` (default `null`; when set, pass its emphasis alongside `projectHints`).
 2. **Enabled and `codex-collaboration` available** → invoke its `plan-review` operation. It assembles the packet itself (its SKILL.md enumerates the contents) and owns foreground execution, isolation, read-only enforcement, validation, and a one-time native fallback on a real Codex failure — a busy or concurrent reviewer is never a fallback condition. Supply the issue and acceptance criteria, the Phase-0 investigation and open questions, the worktree base SHA, the spec and plan paths, the optional focus, and — as the review contract — **the absolute path to `REVIEW-CONTRACT.md` beside `SKILL.md`**, which it reads into the packet.
 3. **Disabled or unavailable** (including when this skill runs natively in Codex) →
@@ -18,3 +31,16 @@ Agent(subagent_type="reviewer", model="opus", effort="high") launches one fresh 
 Verify every actionable finding against the live worktree before touching the plan; stale or unsupported ones are recorded as rejected, not silently applied. Record provenance in the plan (reviewer, job id, base SHA, whether fallback was used) plus each disposition, and never copy a raw reviewer transcript into project artifacts.
 
 Apply blocking fixes inline to the plan (standing local-commit authorization). Bring should-fix items to the user; in `--auto`, apply them too. Append one ledger row per applied **non-obvious** finding — Choice = the edit, Grounding = the reviewer's rationale plus any doc cite, Rejected alternative = what you weighed (or "reviewer's call accepted as-is") — and a row that reverses an earlier decision names it.
+
+## Accepted-edit remeasurement
+
+After apply blocking fixes (and every accepted should-fix), treat the last plan or
+ledger write as the final mutation. Run `artifact-budget check --kind
+implementation-plan` over the full plan package. If an accepted finding appended
+or changed the decision ledger, check the spec too when its decision ledger changed
+with `artifact-budget check --kind design-spec`. Compare every result with the
+previous report; stale measurements never advance. Apply the owning producer's
+existing compact/split remediation once and recheck after its final mutation.
+If either final check remains over budget, return `decompose_required` to the
+decomposition checkpoint and do not dispatch SDD. Only final `within_budget`
+results may advance (D5, D14).
