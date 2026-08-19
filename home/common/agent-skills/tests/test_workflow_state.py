@@ -53,36 +53,6 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         return json.loads(completed.stdout)
 
-    def launch(
-        self,
-        *,
-        issue,
-        owner,
-        worktree,
-        now=DEFAULT_NOW,
-        budget_minutes=30,
-        ok=True,
-    ):
-        completed = self.run_cli(
-            "launch",
-            "--repo-root",
-            self.root,
-            "--run-id",
-            self.run_id,
-            "--issue",
-            issue,
-            "--owner",
-            owner,
-            "--worktree",
-            worktree,
-            "--now",
-            now,
-            "--budget-minutes",
-            budget_minutes,
-            ok=ok,
-        )
-        return json.loads(completed.stdout) if ok else completed
-
     def progress(
         self,
         *,
@@ -175,19 +145,6 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         return json.loads(completed.stdout) if ok else completed
 
-    def reconcile(self, *, now=DEFAULT_NOW, ok=True):
-        completed = self.run_cli(
-            "reconcile",
-            "--repo-root",
-            self.root,
-            "--run-id",
-            self.run_id,
-            "--now",
-            now,
-            ok=ok,
-        )
-        return json.loads(completed.stdout) if ok else completed
-
     @staticmethod
     def tracker_fact(issue, *, state="open", open_blockers=None,
                      decision_blockers=None):
@@ -242,6 +199,102 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def control(self, **request_fields):
         return json.loads(self.control_raw(**request_fields).stdout)
+
+    @staticmethod
+    def dispatch_action(response, kind):
+        return next(action for action in response["actions"] if action["kind"] == kind)
+
+    def spawn(self, *, issue, worktree, now=DEFAULT_NOW, budget_minutes=30):
+        canonical_worktree = os.path.abspath(worktree)
+        response = self.control(
+            now=now,
+            issues=[issue],
+            tracker=[self.tracker_fact(issue)],
+            worktrees=[self.worktree_fact(
+                issue,
+                candidate={"path": canonical_worktree, "state": "absent"},
+            )],
+            max_parallel=100,
+            attempt_budget_minutes=budget_minutes,
+        )
+        return self.dispatch_action(response, "spawn")
+
+    def resume(self, *, issue, worktree, now, owner_unavailable=False):
+        state = self.read_state()["issues"][str(issue)]
+        attempt = state["attempts"][-1]
+        self.assertEqual(os.path.abspath(worktree), attempt["worktree"])
+        owners = None
+        if owner_unavailable:
+            owners = [self.owner_fact(
+                event_id=f"{issue}-owner-unavailable",
+                issue=issue,
+                attempt=attempt["attempt"],
+                launch=len(attempt["launches"]),
+            )]
+        response = self.control(
+            now=now,
+            issues=[issue],
+            tracker=[self.tracker_fact(issue)],
+            owners=owners,
+            worktrees=[self.worktree_fact(issue, recorded={
+                "path": attempt["worktree"],
+                "state": "matching_issue_branch",
+            })],
+            max_parallel=100,
+        )
+        return self.dispatch_action(response, "resume")
+
+    def retry(self, *, issue, worktree, now, budget_minutes=30):
+        latest = self.read_state()["issues"][str(issue)]["attempts"][-1]
+        canonical_worktree = os.path.abspath(worktree)
+        if canonical_worktree == latest["worktree"]:
+            worktree_fact = self.worktree_fact(issue, recorded={
+                "path": canonical_worktree,
+                "state": "matching_issue_branch",
+            })
+        else:
+            worktree_fact = self.worktree_fact(issue, candidate={
+                "path": canonical_worktree,
+                "state": "absent",
+            })
+        response = self.control(
+            now=now,
+            issues=[issue],
+            tracker=[self.tracker_fact(issue)],
+            worktrees=[worktree_fact],
+            max_parallel=100,
+            attempt_budget_minutes=budget_minutes,
+        )
+        return self.dispatch_action(response, "retry")
+
+    def expire(self, *, issue, worktree, now):
+        latest = self.read_state()["issues"][str(issue)]["attempts"][-1]
+        self.assertEqual(os.path.abspath(worktree), latest["worktree"])
+        return self.control(
+            now=now,
+            issues=[issue],
+            tracker=[self.tracker_fact(issue, state="closed")],
+            worktrees=[self.worktree_fact(issue, recorded={
+                "path": latest["worktree"],
+                "state": "matching_issue_branch",
+            })],
+            max_parallel=100,
+        )
+
+    def fail_owner(self, *, issue, attempt, now=DEFAULT_NOW, notes="owner failed"):
+        return self.finish(
+            attempt,
+            {
+                **self.merged_result(issue),
+                "state": "failed",
+                "pr_url": None,
+                "merge_sha": None,
+                "issue_closed": False,
+                "notes": notes,
+            },
+            issue=issue,
+            now=now,
+        )
 
     def assert_control_response_shape(self, response):
         self.assertEqual(set(response), {
@@ -397,6 +450,16 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return completed
+
+    def test_public_cli_exposes_only_the_four_lifecycle_commands(self):
+        completed = self.run_cli("--help")
+        self.assertIn("{init-run,control,finish,progress}", completed.stdout)
+        self.assertNotIn("launch", completed.stdout)
+        self.assertNotIn("reconcile", completed.stdout)
+        for retired in ("launch", "reconcile"):
+            rejected = self.run_cli(retired, ok=False)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("invalid choice", rejected.stderr)
 
     def test_init_run_returns_only_the_strict_bounded_bootstrap(self):
         fresh = self.init_run(now="2026-08-19T12:00:00Z")
@@ -1335,42 +1398,53 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_delayed_notification_recovers_durable_terminal_result(self):
         self.init_run()
-        first = self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        first = self.spawn(issue=14, worktree=self.root / "wt-a")
         result = self.merged_result()
         persisted = self.finish(first["attempt"], result)
-        recovered = self.reconcile(now="2026-08-13T20:10:00Z")
+        recovered = self.control(
+            now="2026-08-13T20:10:00Z",
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": first["worktree"], "state": "matching_issue_branch",
+            })],
+        )
         self.assertEqual(persisted, result)
-        self.assertEqual(recovered["issues"]["14"]["outcome"], result)
+        self.assert_control_response_shape(recovered)
+        self.assertEqual(recovered["summaries"][0]["result"], result)
+        self.assertEqual(recovered["actions"], [{"id": "finalize", "kind": "finalize"}])
 
-    def test_same_owner_worktree_resume_keeps_attempt_and_deadline(self):
+    def test_unavailable_owner_resume_keeps_attempt_and_deadline(self):
         self.init_run()
         worktree = self.root / "parent" / ".." / "wt-a"
-        first = self.launch(issue=14, owner="owner-a", worktree=worktree)
-        resumed = self.launch(
+        first = self.spawn(issue=14, worktree=worktree)
+        started_at = self.read_state()["issues"]["14"]["attempts"][0]["started_at"]
+        resumed = self.resume(
             issue=14,
-            owner="owner-a",
             worktree=self.root / "wt-a",
             now="2026-08-13T20:20:00Z",
+            owner_unavailable=True,
         )
-        self.assertEqual((resumed["attempt"], resumed["launch_kind"]), (1, "resume"))
+        self.assertEqual((resumed["attempt"], resumed["kind"]), (1, "resume"))
+        self.assertEqual((resumed["owner"], resumed["id"]), ("14:1", "14:1:2"))
         self.assertEqual(resumed["deadline_at"], first["deadline_at"])
-        self.assertEqual(resumed["started_at"], first["started_at"])
 
         persisted = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(persisted["started_at"], started_at)
         self.assertEqual(persisted["issue"], 14)
         self.assertEqual(
             persisted["launches"],
             [
                 {
                     "kind": "fresh",
-                    "owner": "owner-a",
-                    "worktree": str((self.root / "wt-a").resolve()),
+                    "owner": "14:1",
+                    "worktree": os.path.abspath(self.root / "wt-a"),
                     "at": DEFAULT_NOW,
                 },
                 {
                     "kind": "resume",
-                    "owner": "owner-a",
-                    "worktree": str((self.root / "wt-a").resolve()),
+                    "owner": "14:1",
+                    "worktree": os.path.abspath(self.root / "wt-a"),
                     "at": "2026-08-13T20:20:00Z",
                 },
             ],
@@ -1378,70 +1452,85 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_only_one_fresh_retry_and_refusal_links_prior_attempts(self):
         self.init_run()
-        first = self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
-        second = self.launch(issue=14, owner="owner-b", worktree=self.root / "wt-b")
-        refused = self.launch(
-            issue=14, owner="owner-c", worktree=self.root / "wt-c", ok=False
+        first = self.spawn(issue=14, worktree=self.root / "wt-a")
+        self.fail_owner(issue=14, attempt=1, now="2026-08-13T20:01:00Z")
+        second = self.retry(
+            issue=14, worktree=self.root / "wt-b", now="2026-08-13T20:10:00Z"
+        )
+        self.fail_owner(issue=14, attempt=2, now="2026-08-13T20:15:00Z")
+        refused = self.control(
+            now="2026-08-13T20:20:00Z",
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": second["worktree"], "state": "matching_issue_branch",
+            })],
         )
         state = self.read_state()
-        self.assertEqual((second["attempt"], second["prior_attempt"]), (2, 1))
+        self.assertEqual(second["attempt"], 2)
+        self.assertEqual(state["issues"]["14"]["attempts"][1]["prior_attempt"], 1)
         self.assertEqual(first["issue"], 14)
         self.assertEqual(second["issue"], 14)
         self.assertEqual(state["issues"]["14"]["outcome"]["state"], "failed")
-        self.assertIn(str((self.root / "wt-a").resolve()), first["worktree"])
+        self.assertEqual(os.path.abspath(self.root / "wt-a"), first["worktree"])
         self.assertIn(
-            str((self.root / "wt-a").resolve()),
+            os.path.abspath(self.root / "wt-a"),
             state["issues"]["14"]["attempts"][0]["result"]["notes"],
         )
         self.assertIn(
-            str((self.root / "wt-b").resolve()),
+            os.path.abspath(self.root / "wt-b"),
             state["issues"]["14"]["outcome"]["notes"],
         )
-        self.assertEqual(refused.returncode, 3)
-        self.assertIn("attempts 1 and 2", refused.stderr)
+        self.assert_control_response_shape(refused)
+        self.assertEqual(refused["deltas"], [{
+            "issue": 14, "attempt": 2, "kind": "retry_refused", "state": "failed",
+        }])
 
     def test_owner_death_expiry_stops_active_attempt_with_worktree(self):
         self.init_run()
         worktree = self.root / "silent-owner"
-        launched = self.launch(
-            issue=14, owner="owner-a", worktree=worktree, budget_minutes=10
+        launched = self.spawn(issue=14, worktree=worktree, budget_minutes=10)
+        reconciled = self.expire(
+            issue=14, worktree=worktree, now="2026-08-13T20:10:00Z"
         )
-        reconciled = self.reconcile(now="2026-08-13T20:10:00Z")
-        attempt = reconciled["issues"]["14"]["attempts"][0]
-        outcome = reconciled["issues"]["14"]["outcome"]
+        self.assert_control_response_shape(reconciled)
+        self.assertEqual(reconciled["deltas"], [{
+            "issue": 14, "attempt": 1, "kind": "expired", "state": "stopped",
+        }])
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        outcome = self.read_state()["issues"]["14"]["outcome"]
         self.assertEqual(launched["deadline_at"], "2026-08-13T20:10:00Z")
         self.assertEqual((attempt["state"], outcome["state"]), ("stopped", "stopped"))
-        self.assertIn(str(worktree.resolve()), outcome["notes"])
+        self.assertIn(os.path.abspath(worktree), outcome["notes"])
         self.assertLessEqual(len(outcome["notes"]), 500)
         self.assertEqual(attempt["result_source"], "expiry")
         self.assertEqual(attempt["finished_at"], "2026-08-13T20:10:00Z")
         self.assertGreaterEqual(attempt["finished_at"], attempt["deadline_at"])
 
-    def test_superseding_retry_and_refusal_stamp_their_result_source(self):
+    def test_owner_failed_retry_and_refusal_stamp_their_result_source(self):
         self.init_run()
-        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
-        self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=self.root / "wt-b",
-            now="2026-08-13T20:10:00Z",
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+        self.fail_owner(issue=14, attempt=1, now="2026-08-13T20:05:00Z")
+        retry = self.retry(
+            issue=14, worktree=self.root / "wt-b", now="2026-08-13T20:10:00Z"
         )
         attempts = self.read_state()["issues"]["14"]["attempts"]
-        self.assertEqual(attempts[0]["state"], "stopped")
-        self.assertEqual(attempts[0]["result_source"], "superseded")
-        self.assertEqual(attempts[0]["finished_at"], "2026-08-13T20:10:00Z")
+        self.assertEqual(attempts[0]["state"], "failed")
+        self.assertEqual(attempts[0]["result_source"], "owner")
+        self.assertEqual(attempts[0]["finished_at"], "2026-08-13T20:05:00Z")
         self.assertIsNone(attempts[1]["finished_at"])
         self.assertIsNone(attempts[1]["result_source"])
 
-        refused = self.launch(
-            issue=14,
-            owner="owner-c",
-            worktree=self.root / "wt-c",
+        self.fail_owner(issue=14, attempt=2, now="2026-08-13T20:15:00Z")
+        refused = self.control(
             now="2026-08-13T20:20:00Z",
-            ok=False,
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": retry["worktree"], "state": "matching_issue_branch",
+            })],
         )
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("attempts 1 and 2 already consumed", refused.stderr)
+        self.assert_control_response_shape(refused)
         attempts = self.read_state()["issues"]["14"]["attempts"]
         self.assertEqual(attempts[1]["state"], "failed")
         self.assertEqual(attempts[1]["result_source"], "refused")
@@ -1450,9 +1539,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
     def test_late_merged_finish_preserves_the_owner_result(self):
         self.init_run()
         worktree = self.root / "late-owner"
-        launched = self.launch(
-            issue=14, owner="owner-a", worktree=worktree, budget_minutes=10
-        )
+        launched = self.spawn(issue=14, worktree=worktree, budget_minutes=10)
         reported = self.merged_result()
         stdout_json = self.finish(
             launched["attempt"],
@@ -1476,13 +1563,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_expiry_result_is_provisional_until_the_owner_reports(self):
         self.init_run()
-        self.launch(
-            issue=14,
-            owner="owner-a",
-            worktree=self.root / "wt-a",
-            budget_minutes=10,
-        )
-        self.reconcile(now="2026-08-13T20:10:00Z")
+        worktree = self.root / "wt-a"
+        self.spawn(issue=14, worktree=worktree, budget_minutes=10)
+        self.expire(issue=14, worktree=worktree, now="2026-08-13T20:10:00Z")
         attempt = self.read_state()["issues"]["14"]["attempts"][0]
         self.assertEqual(attempt["state"], "stopped")
         self.assertEqual(attempt["result_source"], "expiry")
@@ -1517,19 +1600,10 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_expired_older_attempt_cannot_supersede_after_a_fresh_retry(self):
         self.init_run()
-        self.launch(
-            issue=14,
-            owner="owner-a",
-            worktree=self.root / "wt-a",
-            budget_minutes=10,
-        )
-        self.reconcile(now="2026-08-13T20:10:00Z")
-        self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=self.root / "wt-a",
-            now="2026-08-13T20:15:00Z",
-        )
+        worktree = self.root / "wt-a"
+        self.spawn(issue=14, worktree=worktree, budget_minutes=10)
+        self.expire(issue=14, worktree=worktree, now="2026-08-13T20:10:00Z")
+        self.retry(issue=14, worktree=worktree, now="2026-08-13T20:15:00Z")
         before = self.state_path.read_bytes()
         rejected = self.finish(
             1, self.merged_result(), now="2026-08-13T20:20:00Z", ok=False
@@ -1540,20 +1614,21 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_refused_third_attempt_result_is_not_supersedable(self):
         self.init_run()
-        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
-        self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=self.root / "wt-b",
-            now="2026-08-13T20:10:00Z",
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+        self.fail_owner(issue=14, attempt=1, now="2026-08-13T20:05:00Z")
+        retry = self.retry(
+            issue=14, worktree=self.root / "wt-b", now="2026-08-13T20:10:00Z"
         )
-        self.launch(
-            issue=14,
-            owner="owner-c",
-            worktree=self.root / "wt-c",
+        self.fail_owner(issue=14, attempt=2, now="2026-08-13T20:15:00Z")
+        refused = self.control(
             now="2026-08-13T20:20:00Z",
-            ok=False,
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": retry["worktree"], "state": "matching_issue_branch",
+            })],
         )
+        self.assertEqual(refused["deltas"][0]["kind"], "retry_refused")
         before = self.state_path.read_bytes()
         rejected = self.finish(
             2, self.merged_result(), now="2026-08-13T20:25:00Z", ok=False
@@ -1564,7 +1639,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_finish_rejects_time_before_last_progress(self):
         self.init_run()
-        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.spawn(issue=14, worktree=self.root / "wt-a")
         self.progress(issue=14, attempt=1, phase=3, now="2026-08-13T20:05:00Z")
         before = self.state_path.read_bytes()
         rejected = self.finish(
@@ -1576,7 +1651,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_handed_off_finish_rejects_without_changing_state(self):
         self.init_run()
-        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.spawn(issue=14, worktree=self.root / "wt-a")
         handoff_path = self.write_handoff(14)
         handed_off = self.progress(
             turn_count=118,
@@ -1592,59 +1667,52 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_owner_death_expiry_can_use_the_single_fresh_retry(self):
         self.init_run()
-        self.launch(
-            issue=14,
-            owner="owner-a",
-            worktree=self.root / "silent-owner",
-            budget_minutes=10,
-        )
-        self.reconcile(now="2026-08-13T20:10:00Z")
-        retried = self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=self.root / "retry-owner",
+        worktree = self.root / "silent-owner"
+        self.spawn(issue=14, worktree=worktree, budget_minutes=10)
+        self.expire(issue=14, worktree=worktree, now="2026-08-13T20:10:00Z")
+        retried = self.retry(
+            issue=14, worktree=self.root / "retry-owner",
             now="2026-08-13T20:11:00Z",
         )
-        self.assertEqual((retried["attempt"], retried["prior_attempt"]), (2, 1))
+        self.assertEqual(retried["attempt"], 2)
+        self.assertEqual(
+            self.read_state()["issues"]["14"]["attempts"][1]["prior_attempt"], 1
+        )
         state = self.read_state()["issues"]["14"]
         self.assertIsNone(state["outcome"])
         self.assertEqual(state["attempts"][0]["state"], "stopped")
 
-    def test_backward_launch_clock_cannot_corrupt_the_prior_attempt(self):
+    def test_backward_control_clock_cannot_corrupt_the_prior_attempt(self):
         self.init_run(now="2026-08-13T19:00:00Z")
-        self.launch(
-            issue=14,
-            owner="owner-a",
-            worktree=self.root / "wt-a",
-            budget_minutes=30,
-        )
+        first_worktree = self.root / "wt-a"
+        self.spawn(issue=14, worktree=first_worktree, budget_minutes=30)
         first_started = self.read_state()["issues"]["14"]["attempts"][0]["started_at"]
         self.assertEqual(first_started, DEFAULT_NOW)
 
         before = self.state_path.read_bytes()
-        refused = self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=self.root / "wt-b",
+        refused = self.control_raw(
             now="2026-08-13T19:30:00Z",
-            budget_minutes=30,
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={
+                "path": str(self.root / "wt-b"), "state": "absent",
+            })],
+            max_parallel=100,
+            attempt_budget_minutes=30,
             ok=False,
         )
         self.assertNotEqual(refused.returncode, 0)
         self.assertEqual(self.state_path.read_bytes(), before)
 
-        self.reconcile(now="2026-08-13T20:31:00Z")
+        self.expire(issue=14, worktree=first_worktree, now="2026-08-13T20:31:00Z")
         stopped = self.read_state()["issues"]["14"]["attempts"][0]
         self.assertEqual(stopped["state"], "stopped")
         self.assertEqual(stopped["result_source"], "expiry")
         self.assertGreaterEqual(stopped["finished_at"], stopped["started_at"])
 
-        retried = self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=self.root / "wt-b",
-            now="2026-08-13T20:32:00Z",
-            budget_minutes=30,
+        retried = self.retry(
+            issue=14, worktree=self.root / "wt-b",
+            now="2026-08-13T20:32:00Z", budget_minutes=30,
         )
         self.assertEqual(retried["attempt"], 2)
         rejected = self.progress(
@@ -1657,25 +1725,21 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
     def test_fresh_retry_may_reuse_the_prior_attempt_worktree(self):
         self.init_run()
         shared = self.root / "wt-issue-14"
-        resolved = str(shared.resolve())
-        self.launch(issue=14, owner="owner-a", worktree=shared, budget_minutes=10)
-        self.reconcile(now="2026-08-13T20:10:00Z")
+        resolved = os.path.abspath(shared)
+        self.spawn(issue=14, worktree=shared, budget_minutes=10)
+        self.expire(issue=14, worktree=shared, now="2026-08-13T20:10:00Z")
         first = self.read_state()["issues"]["14"]["attempts"][0]
         self.assertEqual(first["state"], "stopped")
         self.assertEqual(first["result_source"], "expiry")
         self.assertEqual(first["worktree"], resolved)
 
-        retried = self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=shared,
-            now="2026-08-13T20:15:00Z",
-        )
+        retried = self.retry(issue=14, worktree=shared, now="2026-08-13T20:15:00Z")
         self.assertEqual(retried["attempt"], 2)
         self.assertEqual(retried["worktree"], resolved)
-        self.assertEqual(retried["prior_attempt"], 1)
-        self.assertEqual(retried["state"], "active")
+        self.assertEqual(retried["kind"], "retry")
         attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual(attempts[1]["prior_attempt"], 1)
+        self.assertEqual(attempts[1]["state"], "active")
         self.assertEqual(len(attempts), 2)
         self.assertEqual(attempts[1]["worktree"], attempts[0]["worktree"])
 
@@ -1689,13 +1753,17 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         }
         self.finish(2, blocked, now="2026-08-13T20:30:00Z")
         before = self.state_path.read_bytes()
-        resumed = self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=shared,
+        resumed = self.control(
             now="2026-08-13T20:40:00Z",
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": resolved, "state": "matching_issue_branch",
+            })],
         )
-        self.assertEqual(resumed["state"], "stopped")
+        self.assert_control_response_shape(resumed)
+        self.assertEqual(resumed["summaries"][0]["state"], "stopped")
+        self.assertEqual(resumed["actions"], [{"id": "finalize", "kind": "finalize"}])
         self.assertEqual(len(self.read_state()["issues"]["14"]["attempts"]), 2)
         self.assertEqual(self.state_path.read_bytes(), before)
 
@@ -1754,11 +1822,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         ]
         for index, (overrides, expected_action) in enumerate(cases, start=1):
             issue = 20 + index
-            self.launch(
-                issue=issue,
-                owner=f"owner-{issue}",
-                worktree=self.root / f"wt-{issue}",
-            )
+            self.spawn(issue=issue, worktree=self.root / f"wt-{issue}")
             result = self.progress(issue=issue, phase=index, **overrides)
             persisted = self.read_state()["issues"][str(issue)]["attempts"][0]
             expected_inputs = {
@@ -1783,7 +1847,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_delegate_requires_measured_usage_below_both_ceilings(self):
         self.init_run()
-        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.spawn(issue=14, worktree=self.root / "wt-a")
         delegated = self.progress(
             issue=14,
             attempt=1,
@@ -1839,7 +1903,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
     def test_durable_handoff_requires_safe_file_and_resumes_same_attempt(self):
         self.init_run()
         worktree = self.root / "wt-a"
-        launched = self.launch(issue=14, owner="owner-a", worktree=worktree)
+        launched = self.spawn(issue=14, worktree=worktree)
         decision = self.progress(turn_count=118, context_tokens=20000)
         self.assertEqual(
             (decision["phase_action"], decision["state"]), ("handoff", "active")
@@ -1869,52 +1933,30 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(finalized["state"], "handed_off")
         self.assertEqual(finalized["handoff_path"], str(handoff_path))
 
-        wrong_path = str(handoff_path) + ".wrong"
-        rejected = self.run_cli(
-            "launch",
-            "--repo-root",
-            self.root,
-            "--run-id",
-            self.run_id,
-            "--issue",
-            14,
-            "--owner",
-            "owner-a",
-            "--worktree",
-            worktree,
-            "--now",
-            "2026-08-13T20:05:00Z",
-            "--budget-minutes",
-            30,
-            "--resume-handoff",
-            wrong_path,
+        before = self.state_path.read_bytes()
+        rejected = self.control_raw(
+            now="2026-08-13T20:05:00Z",
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": str(self.root / "wrong-worktree"),
+                "state": "matching_issue_branch",
+            })],
+            max_parallel=100,
             ok=False,
         )
         self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
 
-        resumed = self.run_cli(
-            "launch",
-            "--repo-root",
-            self.root,
-            "--run-id",
-            self.run_id,
-            "--issue",
-            14,
-            "--owner",
-            "owner-a",
-            "--worktree",
-            worktree,
-            "--now",
-            "2026-08-13T20:05:00Z",
-            "--budget-minutes",
-            30,
-            "--resume-handoff",
-            handoff_path,
+        resumed = self.resume(
+            issue=14, worktree=worktree, now="2026-08-13T20:05:00Z"
         )
-        resumed = json.loads(resumed.stdout)
-        self.assertEqual((resumed["attempt"], resumed["state"]), (1, "active"))
+        self.assertEqual((resumed["attempt"], resumed["kind"]), (1, "resume"))
+        self.assertEqual((resumed["owner"], resumed["id"]), ("14:1", "14:1:2"))
         self.assertEqual(resumed["deadline_at"], launched["deadline_at"])
-        self.assertEqual(len(resumed["launches"]), 2)
+        self.assertEqual(
+            len(self.read_state()["issues"]["14"]["attempts"][0]["launches"]), 2
+        )
         continued = self.progress(
             phase=2,
             now="2026-08-13T20:06:00Z",
@@ -1924,74 +1966,59 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual((continued["phase_action"], continued["state"]), ("continue", "active"))
         self.assertEqual(continued["handoff_path"], str(handoff_path))
 
-    def test_late_handoff_resume_stops_and_permits_fresh_retry(self):
+    def test_late_handoff_control_expires_and_permits_fresh_retry(self):
         self.init_run()
         worktree = self.root / "wt-a"
-        self.launch(issue=14, owner="owner-a", worktree=worktree)
+        self.spawn(issue=14, worktree=worktree)
         handoff_path = self.write_handoff(14)
         self.progress(turn_count=118, context_tokens=20000, handoff_path=handoff_path)
 
-        completed = self.run_cli(
-            "launch",
-            "--repo-root",
-            self.root,
-            "--run-id",
-            self.run_id,
-            "--issue",
-            14,
-            "--owner",
-            "owner-a",
-            "--worktree",
-            worktree,
-            "--now",
-            "2026-08-13T20:31:00Z",
-            "--budget-minutes",
-            30,
-            "--resume-handoff",
-            handoff_path,
+        completed = self.expire(
+            issue=14, worktree=worktree, now="2026-08-13T20:31:00Z"
         )
-        resumed = json.loads(completed.stdout)
-        self.assertEqual((resumed["issue"], resumed["state"]), (14, "stopped"))
-        self.assertIn(str(worktree.resolve()), resumed["notes"])
+        self.assert_control_response_shape(completed)
         persisted = self.read_state()["issues"]["14"]
-        self.assertEqual(persisted["outcome"], resumed)
+        self.assertEqual(persisted["outcome"]["state"], "stopped")
+        self.assertIn(os.path.abspath(worktree), persisted["outcome"]["notes"])
         self.assertEqual(persisted["attempts"][0]["state"], "stopped")
         self.assertEqual(len(persisted["attempts"][0]["launches"]), 1)
 
-        retried = self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=self.root / "wt-b",
+        retried = self.retry(
+            issue=14, worktree=self.root / "wt-b",
             now="2026-08-13T20:32:00Z",
         )
-        self.assertEqual((retried["attempt"], retried["prior_attempt"]), (2, 1))
+        self.assertEqual((retried["attempt"], retried["kind"]), (2, "retry"))
+        self.assertEqual(
+            self.read_state()["issues"]["14"]["attempts"][1]["prior_attempt"], 1
+        )
 
-    def test_reconcile_expires_unresumed_handoff_and_permits_fresh_retry(self):
+    def test_control_expires_unresumed_handoff_and_permits_fresh_retry(self):
         self.init_run()
         worktree = self.root / "wt-a"
-        self.launch(issue=14, owner="owner-a", worktree=worktree)
+        self.spawn(issue=14, worktree=worktree)
         handoff_path = self.write_handoff(14)
         self.progress(turn_count=118, context_tokens=20000, handoff_path=handoff_path)
 
-        reconciled = self.reconcile(now="2026-08-13T20:31:00Z")
-        persisted = reconciled["issues"]["14"]
+        reconciled = self.expire(
+            issue=14, worktree=worktree, now="2026-08-13T20:31:00Z"
+        )
+        self.assert_control_response_shape(reconciled)
+        persisted = self.read_state()["issues"]["14"]
         attempt = persisted["attempts"][0]
         self.assertEqual((attempt["state"], persisted["outcome"]["state"]), ("stopped", "stopped"))
         self.assertEqual(attempt["handoff_path"], str(handoff_path))
-        self.assertIn(str(worktree.resolve()), persisted["outcome"]["notes"])
+        self.assertIn(os.path.abspath(worktree), persisted["outcome"]["notes"])
 
-        retried = self.launch(
-            issue=14,
-            owner="owner-b",
-            worktree=self.root / "wt-b",
+        retried = self.retry(
+            issue=14, worktree=self.root / "wt-b",
             now="2026-08-13T20:32:00Z",
         )
-        self.assertEqual((retried["attempt"], retried["prior_attempt"]), (2, 1))
+        self.assertEqual((retried["attempt"], retried["kind"]), (2, "retry"))
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
     def test_handoff_symlink_escape_is_rejected_without_state_change(self):
         self.init_run()
-        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.spawn(issue=14, worktree=self.root / "wt-a")
         handoffs = self.workflows_dir / self.run_id / "handoffs"
         handoffs.mkdir()
         outside = self.root / "outside"
@@ -2012,7 +2039,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_progress_rejects_threshold_continue_invalid_inputs_and_transitions(self):
         self.init_run()
-        self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        self.spawn(issue=14, worktree=self.root / "wt-a")
         at_turn_threshold = self.progress(turn_count=118, context_tokens=20000)
         self.assertEqual(at_turn_threshold["phase_action"], "handoff")
         at_context_threshold = self.progress(
@@ -2071,7 +2098,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
     def test_combined_controller_demo_has_one_authoritative_outcome_per_issue(self):
         self.init_run()
 
-        completed = self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+        completed = self.spawn(issue=14, worktree=self.root / "wt-a")
         durable_result = self.merged_result(14)
         self.finish(completed["attempt"], durable_result, issue=14)
         delayed_result = {
@@ -2085,15 +2112,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         delayed = self.finish(1, delayed_result, issue=14, ok=False)
         self.assertNotEqual(delayed.returncode, 0)
 
-        self.launch(
-            issue=15,
-            owner="silent-owner",
-            worktree=self.root / "wt-15",
-            budget_minutes=10,
-        )
-        self.reconcile(now="2026-08-13T20:10:00Z")
-
-        self.launch(issue=16, owner="owner-c", worktree=self.root / "wt-16")
+        issue_15_worktree = self.root / "wt-15"
+        self.spawn(issue=15, worktree=issue_15_worktree, budget_minutes=10)
+        self.spawn(issue=16, worktree=self.root / "wt-16")
         decision = self.progress(
             issue=16,
             now="2026-08-13T20:05:00Z",
@@ -2109,8 +2130,19 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             context_tokens=140000,
             handoff_path=handoff_path,
         )
+        self.expire(
+            issue=15, worktree=issue_15_worktree, now="2026-08-13T20:10:00Z"
+        )
 
-        final_state = self.reconcile(now="2026-08-13T20:11:00Z")
+        final_response = self.control(
+            now="2026-08-13T20:11:00Z",
+            issues=[14, 15],
+            tracker=[self.tracker_fact(14), self.tracker_fact(15, state="closed")],
+            worktrees=[],
+            max_parallel=1,
+        )
+        self.assert_control_response_shape(final_response)
+        final_state = self.read_state()
         self.assertEqual(set(final_state["issues"]), {"14", "15", "16"})
         self.assertEqual(final_state["issues"]["14"]["outcome"], durable_result)
         self.assertEqual(final_state["issues"]["15"]["outcome"]["state"], "stopped")
@@ -2131,9 +2163,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_matching_repeated_finish_is_idempotent(self):
         self.init_run()
-        attempt = self.launch(
-            issue=14, owner="owner-a", worktree=self.root / "wt-a"
-        )["attempt"]
+        attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
         result = self.merged_result()
         first = self.finish(attempt, result)
         before = self.state_path.read_bytes()
@@ -2143,9 +2173,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_conflicting_write_rejection_leaves_state_bytes_unchanged(self):
         self.init_run()
-        attempt = self.launch(
-            issue=14, owner="owner-a", worktree=self.root / "wt-a"
-        )["attempt"]
+        attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
         self.finish(attempt, self.merged_result())
         before = self.state_path.read_bytes()
         conflict = {
@@ -2161,20 +2189,24 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn("conflicting terminal result", completed.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
 
-    def test_terminal_resume_returns_stored_result_without_launching(self):
+    def test_terminal_control_returns_stored_result_without_dispatching(self):
         self.init_run()
         worktree = self.root / "wt-a"
-        attempt = self.launch(issue=14, owner="owner-a", worktree=worktree)["attempt"]
+        attempt = self.spawn(issue=14, worktree=worktree)["attempt"]
         result = self.merged_result()
         self.finish(attempt, result)
         before = self.state_path.read_bytes()
-        resumed = self.launch(
-            issue=14,
-            owner="owner-a",
-            worktree=worktree,
+        resumed = self.control(
             now="2026-08-13T20:20:00Z",
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": os.path.abspath(worktree), "state": "matching_issue_branch",
+            })],
         )
-        self.assertEqual(resumed, result)
+        self.assert_control_response_shape(resumed)
+        self.assertEqual(resumed["summaries"][0]["result"], result)
+        self.assertEqual(resumed["actions"], [{"id": "finalize", "kind": "finalize"}])
         self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_invalid_schema_state_and_action_are_rejected_without_changes(self):
@@ -2197,14 +2229,19 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.init_run()
                 if label != "schema":
-                    self.launch(
-                        issue=14, owner="owner-a", worktree=self.root / "wt-a"
-                    )
+                    self.spawn(issue=14, worktree=self.root / "wt-a")
                 state = self.read_state()
                 corrupt(state)
                 self.state_path.write_text(json.dumps(state), encoding="utf-8")
                 before = self.state_path.read_bytes()
-                completed = self.reconcile(ok=False)
+                completed = self.control_raw(
+                    now=DEFAULT_NOW,
+                    issues=[14],
+                    tracker=[self.tracker_fact(14)],
+                    worktrees=[],
+                    max_parallel=1,
+                    ok=False,
+                )
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertEqual(self.state_path.read_bytes(), before)
                 self.state_path.unlink()
@@ -2327,13 +2364,20 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         for label, corrupt, message in corruptions:
             with self.subTest(label=label):
                 self.init_run()
-                self.launch(issue=14, owner="owner-a", worktree=self.root / "wt-a")
+                self.spawn(issue=14, worktree=self.root / "wt-a")
                 state = self.read_state()
                 attempt = state["issues"]["14"]["attempts"][0]
                 corrupt(attempt)
                 self.state_path.write_text(json.dumps(state), encoding="utf-8")
                 before = self.state_path.read_bytes()
-                completed = self.reconcile(ok=False)
+                completed = self.control_raw(
+                    now=DEFAULT_NOW,
+                    issues=[14],
+                    tracker=[self.tracker_fact(14)],
+                    worktrees=[],
+                    max_parallel=1,
+                    ok=False,
+                )
                 self.assertNotEqual(completed.returncode, 0)
                 if message is not None:
                     self.assertIn(message, completed.stderr)
@@ -2404,17 +2448,25 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 else:
                     external_path.write_bytes(b"external lock sentinel")
                 before = external_path.read_bytes()
+                request_path = self.root / f"control-{run_id}.json"
+                request_path.write_text(json.dumps(self.control_request(
+                    now=DEFAULT_NOW,
+                    issues=[14],
+                    tracker=[self.tracker_fact(14)],
+                    worktrees=[],
+                    max_parallel=1,
+                )), encoding="utf-8")
                 stable_path.unlink()
                 stable_path.symlink_to(external_path)
 
                 rejected = self.run_cli(
-                    "reconcile",
+                    "control",
                     "--repo-root",
                     self.root,
                     "--run-id",
                     run_id,
-                    "--now",
-                    DEFAULT_NOW,
+                    "--request-file",
+                    request_path,
                     ok=False,
                 )
                 self.assertNotEqual(rejected.returncode, 0)
@@ -2422,9 +2474,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def test_result_schema_note_length_and_nullable_url_sha_validation(self):
         self.init_run()
-        attempt = self.launch(
-            issue=14, owner="owner-a", worktree=self.root / "wt-a"
-        )["attempt"]
+        attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
         invalid_results = (
             {**self.merged_result(), "extra": "field"},
             {key: value for key, value in self.merged_result().items() if key != "notes"},
@@ -2457,7 +2507,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             {key: nullable[key] for key in nullable if key != "notes"},
         )
         self.assertIn(nullable["notes"], normalized["notes"])
-        self.assertIn(str((self.root / "wt-a").resolve()), normalized["notes"])
+        self.assertIn(os.path.abspath(self.root / "wt-a"), normalized["notes"])
         self.assertLessEqual(len(normalized["notes"]), 500)
 
     def test_workflows_gitignore_contains_wildcard(self):
@@ -2501,7 +2551,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
 
     @unittest.skipUnless(hasattr(os, "pipe") and os.name == "posix", "POSIX barrier")
-    def test_concurrent_launches_for_distinct_issues_preserve_both_updates(self):
+    def test_concurrent_controls_for_distinct_issues_preserve_both_updates(self):
         self.init_run()
         wrapper = (
             "import os,sys; "
@@ -2512,22 +2562,24 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         write_fds = []
         for issue in (14, 15):
             read_fd, write_fd = os.pipe()
+            request_path = self.root / f"concurrent-control-{issue}.json"
+            request_path.write_text(json.dumps(self.control_request(
+                now=DEFAULT_NOW,
+                issues=[issue],
+                tracker=[self.tracker_fact(issue)],
+                worktrees=[self.worktree_fact(issue, candidate={
+                    "path": str(self.root / f"wt-{issue}"), "state": "absent",
+                })],
+                max_parallel=2,
+            )), encoding="utf-8")
             args = [
-                "launch",
+                "control",
                 "--repo-root",
                 str(self.root),
                 "--run-id",
                 self.run_id,
-                "--issue",
-                str(issue),
-                "--owner",
-                f"owner-{issue}",
-                "--worktree",
-                str(self.root / f"wt-{issue}"),
-                "--now",
-                DEFAULT_NOW,
-                "--budget-minutes",
-                "30",
+                "--request-file",
+                str(request_path),
             ]
             process = subprocess.Popen(
                 [sys.executable, "-c", wrapper, str(read_fd), str(SCRIPT), *args],
@@ -2547,7 +2599,12 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             self.assertEqual(process.returncode, 0, stderr)
-            self.assertEqual(json.loads(stdout)["attempt"], 1)
+            response = json.loads(stdout)
+            self.assert_control_response_shape(response)
+            dispatch = self.dispatch_action(response, "spawn")
+            self.assertEqual((dispatch["attempt"], dispatch["owner"]), (
+                1, f"{dispatch['issue']}:1",
+            ))
 
         reopened = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.assertEqual(set(reopened["issues"]), {"14", "15"})

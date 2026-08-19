@@ -1526,156 +1526,6 @@ def command_control(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_launch(args: argparse.Namespace) -> int:
-    now_value = parse_utc(args.now, "--now")
-    now = format_utc(now_value)
-    worktree = str(Path(args.worktree).resolve(strict=False))
-    run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
-    if not args.owner:
-        raise WorkflowError("owner must not be empty")
-
-    def launch(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
-        assert state is not None
-        issue_key = str(args.issue)
-        issue_state = state["issues"].get(issue_key)
-        if issue_state is None:
-            issue_state = {"issue": args.issue, "attempts": [], "outcome": None}
-            state["issues"][issue_key] = issue_state
-
-        attempts = issue_state["attempts"]
-        if attempts:
-            latest = attempts[-1]
-            same_identity = latest["owner"] == args.owner and latest["worktree"] == worktree
-            if issue_state["outcome"] is not None:
-                if same_identity or issue_state["outcome"]["state"] == "merged":
-                    return issue_state["outcome"], False
-            if latest["state"] == "handed_off":
-                if not same_identity:
-                    raise WorkflowError(
-                        "handed-off attempt requires matching owner and worktree"
-                    )
-                if args.resume_handoff is None:
-                    raise WorkflowError("handed-off attempt requires --resume-handoff")
-                if args.resume_handoff != latest["handoff_path"]:
-                    raise WorkflowError(
-                        "resume handoff path does not match stored exact path"
-                    )
-                if now_value >= parse_utc(latest["deadline_at"], "attempt deadline"):
-                    outcome = stop_attempt(
-                        latest,
-                        reason="attempt deadline expired",
-                        now=now,
-                        source="expiry",
-                    )
-                    issue_state["outcome"] = outcome
-                    state["updated_at"] = now
-                    return outcome, True
-                validate_handoff_path(run_dir, args.resume_handoff)
-                latest["state"] = "active"
-                latest["launch_kind"] = "resume"
-                latest["launches"].append(
-                    {
-                        "kind": "resume",
-                        "owner": args.owner,
-                        "worktree": worktree,
-                        "at": now,
-                    }
-                )
-                state["updated_at"] = now
-                return latest, True
-            if args.resume_handoff is not None:
-                raise WorkflowError("attempt does not have a resumable handoff")
-            if same_identity and latest["state"] == "active":
-                if now_value >= parse_utc(latest["deadline_at"], "attempt deadline"):
-                    outcome = stop_attempt(
-                        latest,
-                        reason="attempt deadline expired",
-                        now=now,
-                        source="expiry",
-                    )
-                    issue_state["outcome"] = outcome
-                    state["updated_at"] = now
-                    return outcome, True
-                latest["launch_kind"] = "resume"
-                latest["launches"].append(
-                    {
-                        "kind": "resume",
-                        "owner": args.owner,
-                        "worktree": worktree,
-                        "at": now,
-                    }
-                )
-                state["updated_at"] = now
-                return latest, True
-
-        if len(attempts) >= 2:
-            worktrees = ", ".join(attempt["worktree"] for attempt in attempts[:2])
-            notes = f"Fresh launch refused after attempts 1 and 2; worktrees: {worktrees}"
-            failed = terminal_result(args.issue, "failed", notes)
-            latest = attempts[-1]
-            latest["state"] = "failed"
-            latest["result"] = failed
-            latest["finished_at"] = finish_time(latest, now)
-            latest["result_source"] = "refused"
-            issue_state["outcome"] = failed
-            state["updated_at"] = now
-            return {
-                "refused": True,
-                "message": (
-                    f"refusing fresh launch for issue {args.issue}: attempts 1 and 2 "
-                    "already consumed"
-                ),
-            }, True
-
-        prior_attempt = attempts[-1]["attempt"] if attempts else None
-        if attempts and attempts[-1]["state"] in {"active", "handed_off"}:
-            stop_attempt(
-                attempts[-1],
-                reason="superseded by fresh retry",
-                now=now,
-                source="superseded",
-            )
-        issue_state["outcome"] = None
-        attempt_number = len(attempts) + 1
-        deadline = format_utc(now_value + timedelta(minutes=args.budget_minutes))
-        event = {
-            "kind": "fresh",
-            "owner": args.owner,
-            "worktree": worktree,
-            "at": now,
-        }
-        attempt = {
-            "issue": args.issue,
-            "attempt": attempt_number,
-            "owner": args.owner,
-            "worktree": worktree,
-            "started_at": now,
-            "deadline_at": deadline,
-            "state": "active",
-            "launch_kind": "fresh",
-            "launches": [event],
-            "prior_attempt": prior_attempt,
-            "result": None,
-            "finished_at": None,
-            "result_source": None,
-            "handoff_path": None,
-            "phase": 0,
-            "last_progress_at": now,
-            "phase_action": None,
-            "phase_inputs": None,
-        }
-        attempts.append(attempt)
-        state["updated_at"] = now
-        return attempt, True
-
-    result = transact(args.repo_root, args.run_id, launch)
-    if isinstance(result, dict) and result.get("refused") is True:
-        print(result["message"], file=sys.stderr)
-        return 3
-    print_json(result)
-    return 0
-
-
 def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
     try:
         with Path(path_value).open(encoding="utf-8") as source:
@@ -1748,9 +1598,9 @@ def command_finish(args: argparse.Namespace) -> int:
     A finish at or after the attempt budget's ``deadline_at`` records the reported
     result rather than a synthetic expiry: the wall clock bounds how long an owner
     may keep working, not whether the work it finished is real. The stopped record
-    that ``reconcile`` (or ``launch``) writes when the attempt budget runs out is
-    therefore provisional — ``result_source == "expiry"`` on the issue's latest
-    attempt, and only there, is overwritten by the owner's own report.
+    that ``control`` writes when the attempt budget runs out is therefore provisional
+    — ``result_source == "expiry"`` on the issue's latest attempt, and only there, is
+    overwritten by the owner's own report.
     """
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
@@ -1805,38 +1655,6 @@ def command_finish(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_reconcile(args: argparse.Namespace) -> int:
-    now_value = parse_utc(args.now, "--now")
-    now = format_utc(now_value)
-
-    def reconcile(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
-        assert state is not None
-        changed = False
-        for issue_state in state["issues"].values():
-            if issue_state["outcome"] is not None:
-                continue
-            for attempt in issue_state["attempts"]:
-                if attempt["state"] not in {"active", "handed_off"}:
-                    continue
-                deadline = parse_utc(attempt["deadline_at"], "attempt deadline")
-                if now_value >= deadline:
-                    outcome = stop_attempt(
-                        attempt,
-                        reason="attempt deadline expired",
-                        now=now,
-                        source="expiry",
-                    )
-                    issue_state["outcome"] = outcome
-                    changed = True
-        if changed:
-            state["updated_at"] = now
-        return state, changed
-
-    state = transact(args.repo_root, args.run_id, reconcile)
-    print_json(state)
-    return 0
-
-
 def print_json(value: Any) -> None:
     json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
@@ -1860,15 +1678,6 @@ def build_parser() -> argparse.ArgumentParser:
     control.add_argument("--run-id", required=True)
     control.add_argument("--request-file", required=True)
     control.set_defaults(handler=command_control)
-
-    launch = subparsers.add_parser("launch")
-    add_run_arguments(launch)
-    launch.add_argument("--issue", required=True, type=positive_int)
-    launch.add_argument("--owner", required=True)
-    launch.add_argument("--worktree", required=True)
-    launch.add_argument("--budget-minutes", required=True, type=positive_int)
-    launch.add_argument("--resume-handoff")
-    launch.set_defaults(handler=command_launch)
 
     finish = subparsers.add_parser("finish")
     add_run_arguments(finish)
@@ -1896,9 +1705,6 @@ def build_parser() -> argparse.ArgumentParser:
     progress.add_argument("--handoff-path")
     progress.set_defaults(handler=command_progress)
 
-    reconcile = subparsers.add_parser("reconcile")
-    add_run_arguments(reconcile)
-    reconcile.set_defaults(handler=command_reconcile)
     return parser
 
 
