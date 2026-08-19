@@ -99,6 +99,7 @@ If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](
 
 ## Final spec measurement
 
+Measurement and remediation follow the authoritative final-writer rule (D5).
 When the grilling ends (frontier empty, or the user stops it), finish every glossary,
 ADR, spec, and decision-ledger edit. The last spec or ledger edit is the final mutation
 before measurement. Even when the grill did not change the spec, obtain a
@@ -116,13 +117,17 @@ If that check remains over budget, retain the draft and return
 or `complete` is forbidden. Exit 2 from either check is `failed`. When the root is
 known, report its path but no fabricated metrics or status.
 
+For `decompose_required`, use the bounded `notes` string to identify the
+independently deliverable parts as a concise proposed decomposition. Never add a
+list-valued report field; the retained draft root carries the detailed boundaries.
+
 The grill owns remeasurement whenever it changes the spec or decision ledger. Any
 mutation after a successful check invalidates the metrics and transfers a fresh
 check to that writer; this includes further grill fixes and later planning edits.
 
 ## Report on return
 
-Return exactly one D14 producer report, to the caller when invoked by another skill
+Return exactly one producer report (D11, D14), to the caller when invoked by another skill
 or to the user when standalone. Its closed state row is `state: complete | decompose_required | failed`:
 
 - `complete` has one artifact with `kind: design-spec`, the root `path`, `metrics`

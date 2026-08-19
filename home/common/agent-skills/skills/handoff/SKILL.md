@@ -26,6 +26,7 @@ destination for writing and do not publish yet.
 
 ## Candidate budget state machine
 
+Measurement and remediation follow the authoritative final-writer rule (D5).
 After the full candidate has been written, run `artifact-budget check --kind
 handoff --root <candidate-root> --format json`. Do not embed thresholds or use
 an ad-hoc byte counter. Exit 2 is `failed`; include the candidate root when known but no
@@ -50,7 +51,7 @@ regular file without changing its bytes is publication, not a content mutation.
 
 ## Producer report and publication
 
-The report returned for the final outcome is exactly one D14 object whose closed
+The report returned for the final outcome is exactly one producer object (D11, D14) whose closed
 state row is `state: complete | stopped | failed`:
 
 - `complete` has one artifact with `kind: handoff`, the published or nondurable

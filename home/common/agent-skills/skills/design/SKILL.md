@@ -62,6 +62,7 @@ Then read the file once with fresh eyes and fix inline: placeholders (`TBD`, "ha
 
 ## Artifact budget boundary
 
+Measurement and remediation follow the authoritative final-writer rule (D5).
 After the fresh-eyes fixes, run the stable command `artifact-budget check --kind
 design-spec --root <spec-root> --format json`. Do not embed thresholds or substitute
 an ad-hoc byte counter. Exit 2 is `failed`; when the root is known, preserve its path but attach no
@@ -77,6 +78,10 @@ budget, retain the draft and return `decompose_required` with the checker's sort
 closed `violations`; never call the design approved or complete. There is no second
 compaction strategy. A second-check exit 2 is `failed`.
 
+For `decompose_required`, use the bounded `notes` string to identify the
+independently deliverable parts as a concise proposed decomposition. Never add a
+list-valued report field; the retained draft root carries the detailed boundaries.
+
 Only a final within-budget result may be committed as the completed design. Any
 later writer owns remeasurement: in particular, a grill edit or a planning-phase
 decision-ledger append invalidates these metrics and must check the complete spec
@@ -84,7 +89,7 @@ again before its phase advances.
 
 ## Return control
 
-Return exactly one D14 producer report. Its closed state row is `state: complete | decompose_required | failed`:
+Return exactly one producer report (D11, D14). Its closed state row is `state: complete | decompose_required | failed`:
 
 - `complete` has one artifact with `kind: design-spec`, the root `path`, `metrics`
   containing exactly `root_bytes`, `total_bytes`, `file_count`, and

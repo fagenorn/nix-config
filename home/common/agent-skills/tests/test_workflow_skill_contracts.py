@@ -293,8 +293,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                                 "compact repetition", "artifact-budget check",
                                 "decompose_required")
             self.assertIn("budget_status: within_budget", producer)
-            self.assertIn("root_bytes", producer)
-            self.assertIn("largest_member_bytes", producer)
+            for metric in ("root_bytes", "total_bytes", "file_count",
+                           "largest_member_bytes"):
+                self.assertIn(metric, producer)
+            self.assert_ordered(producer, "decompose_required",
+                                "independently deliverable",
+                                "proposed decomposition")
             self.assertNotIn("wc -c", producer)
             self.assertRegex(producer, r"state:.*complete.*decompose_required.*failed")
 
@@ -309,6 +313,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for producer in (self.design, self.grill, self.handoff):
             for field in ("kind", "path", "metrics", "budget_status", "notes"):
                 self.assertIn(field, producer)
+            for metric in ("root_bytes", "total_bytes", "file_count",
+                           "largest_member_bytes"):
+                self.assertIn(metric, producer)
+            for decision in ("(D5)", "(D11, D14)"):
+                self.assertIn(decision, producer)
             self.assertIn("phase_reports.notes_max_characters", producer)
             self.assert_ordered(producer, "candidate JSON", "validate-report --boundary producer",
                                 "validated stdout")
