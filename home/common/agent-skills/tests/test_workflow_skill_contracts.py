@@ -302,6 +302,38 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertNotIn("wc -c", producer)
             self.assertRegex(producer, r"state:.*complete.*decompose_required.*failed")
 
+    def test_design_persists_the_final_measured_spec_before_reporting_complete(self):
+        design = " ".join(self.design.split())
+        self.assert_ordered(
+            design,
+            "final content mutation",
+            "run and, if needed, remediate the budget checks",
+            "final `within_budget` result",
+            "commit the completed spec in the worktree",
+            "construct, validate, and emit the `complete` producer report",
+            "candidate JSON file",
+            "validate-report --boundary producer",
+            "validated stdout bytes",
+        )
+        self.assertIn(
+            "If committing or signing fails, return `failed`; never emit `complete`",
+            design,
+        )
+        self.assertIn(
+            "Never commit an over-budget or `decompose_required` draft as a completed design",
+            design,
+        )
+
+        hook_boundary = design[design.index("If any commit hook changes"):]
+        self.assert_ordered(
+            hook_boundary,
+            "prior metrics are stale",
+            "artifact-budget check --kind design-spec",
+            "succeeding commit",
+            "newly measured, final within-budget content",
+            "before emitting `complete`",
+        )
+
     def test_handoff_measures_candidate_before_durable_replace(self):
         self.assert_ordered(self.handoff, "sibling temporary", "artifact-budget check",
                             "remove duplicated", "artifact-budget check", "stopped")

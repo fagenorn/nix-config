@@ -82,10 +82,23 @@ For `decompose_required`, use the bounded `notes` string to identify the
 independently deliverable parts as a concise proposed decomposition. Never add a
 list-valued report field; the retained draft root carries the detailed boundaries.
 
-Only a final within-budget result may be committed as the completed design. Any
-later writer owns remeasurement: in particular, a grill edit or a planning-phase
-decision-ledger append invalidates these metrics and must check the complete spec
-again before its phase advances.
+A design becomes complete only through this required sequence: make the final
+content mutation; run and, if needed, remediate the budget checks above; obtain a
+final `within_budget` result; commit the completed spec in the worktree; then
+construct, validate, and emit the `complete` producer report. If committing or
+signing fails, return `failed`; never emit `complete`. Never commit an over-budget
+or `decompose_required` draft as a completed design.
+
+If any commit hook changes the artifact, the prior metrics are stale. Run
+`artifact-budget check --kind design-spec --root <spec-root> --format json` again
+against the resulting artifact and require a succeeding commit that persists
+exactly the newly measured, final within-budget content before emitting
+`complete`. A hook-induced over-budget result follows the remediation boundary
+above and must not be committed or reported as a completed design.
+
+Any later writer owns remeasurement: in particular, a grill edit or a
+planning-phase decision-ledger append invalidates these metrics and must check the
+complete spec again before its phase advances.
 
 ## Return control
 
