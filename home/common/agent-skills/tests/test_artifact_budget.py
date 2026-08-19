@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 import subprocess
@@ -101,6 +102,33 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertEqual(result.stdout, "")
             self.assertTrue(result.stderr.strip())
+
+    def test_installed_default_policy_symlink_is_trusted_but_explicit_symlink_is_not(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            share = directory / ".agents/share"
+            share.mkdir(parents=True)
+            installed = share / "artifact-budget-policy.json"
+            installed.symlink_to(POLICY)
+            root = directory / "handoff.md"
+            root.write_text("small", encoding="utf-8")
+            default = subprocess.run(
+                [sys.executable, str(SCRIPT), "check", "--kind", "handoff",
+                 "--root", str(root), "--format", "json"],
+                text=True, capture_output=True, check=False,
+                env={**os.environ, "HOME": str(directory)},
+            )
+            self.assertEqual(default.returncode, 0, default.stderr)
+            report = subprocess.run(
+                [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+                 "--input", "-"],
+                input=b'{"state":"failed","artifact":null,"notes":"installed"}',
+                capture_output=True, check=False,
+                env={**os.environ, "HOME": str(directory)},
+            )
+            self.assertEqual(report.returncode, 0, report.stderr)
+            explicit = self.run_check("handoff", root, installed)
+            self.assertEqual((explicit.returncode, explicit.stdout), (2, ""))
 
     def materialize_descriptor(self, item: dict[str, object], directory: Path) -> Path:
         kind = item["kind"]

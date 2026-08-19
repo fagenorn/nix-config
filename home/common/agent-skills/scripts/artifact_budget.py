@@ -167,9 +167,18 @@ def _default_policy_path() -> Path:
     return Path.home() / ".agents/share/artifact-budget-policy.json"
 
 
+def _policy_path(policy_path: str | os.PathLike[str] | None) -> Path:
+    if policy_path is not None:
+        return Path(policy_path)
+    try:
+        return _default_policy_path().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ArtifactBudgetError("cannot resolve installed policy") from exc
+
+
 def load_limits(policy_path: str | os.PathLike[str] | None = None) -> dict[str, ArtifactLimits]:
     """Load and strictly validate the shared policy's artifact limits."""
-    return _load_policy(Path(policy_path) if policy_path is not None else _default_policy_path())[0]
+    return _load_policy(_policy_path(policy_path))[0]
 
 
 def _directory_entries(path: Path) -> list[Path]:
@@ -654,13 +663,12 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
-        policy_path = Path(args.policy) if args.policy else _default_policy_path()
         if args.command == "check":
-            result = check_artifact(args.kind, args.root, policy_path)
+            result = check_artifact(args.kind, args.root, args.policy)
             sys.stdout.buffer.write(_canonical(result.to_dict()))
             return 0 if result.status == "within_budget" else 3
         try:
-            _, notes_max, wire_max = _load_policy(policy_path)
+            _, notes_max, wire_max = _load_policy(_policy_path(args.policy))
         except ArtifactBudgetError:
             label = "report" if args.command == "validate-report" else "detail input"
             sys.stderr.write(f"artifact-budget: invalid {label}\n")
