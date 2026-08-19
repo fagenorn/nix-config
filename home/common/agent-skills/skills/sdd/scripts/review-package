@@ -1,46 +1,690 @@
-#!/usr/bin/env bash
-# Generate a review package: commit list, stat summary, and the net
-# diff with extended context, written to a file the reviewer reads in one
-# call. Using the recorded per-task BASE (not HEAD~1) keeps multi-commit
-# tasks intact.
-#
-# Usage: review-package PLAN_FILE BASE HEAD [OUTFILE]
-# Default OUTFILE: <repo-root>/.superpowers/sdd/<plan-basename>/review-<base7>..<head7>.diff
-# (named per range, so a re-review after fixes gets a distinct fresh file).
-set -euo pipefail
+#!/usr/bin/env python3
+"""Build bounded, deterministic review-package manifests and shards (D4/D9/D12-D16)."""
 
-if [ $# -lt 3 ] || [ $# -gt 4 ]; then
-  echo "usage: review-package PLAN_FILE BASE HEAD [OUTFILE]" >&2
-  exit 2
-fi
+from __future__ import annotations
 
-plan=$1
-base=$2
-head=$3
-[ -f "$plan" ] || { echo "no such plan file: $plan" >&2; exit 2; }
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from typing import Callable, Mapping, Sequence
 
-git rev-parse --verify --quiet "$base" >/dev/null || { echo "bad BASE: $base" >&2; exit 2; }
-git rev-parse --verify --quiet "$head" >/dev/null || { echo "bad HEAD: $head" >&2; exit 2; }
 
-if [ $# -eq 4 ]; then
-  out=$4
-else
-  dir=$("$(cd "$(dirname "$0")" && pwd)/sdd-workspace" "$plan")
-  out="$dir/review-$(git rev-parse --short "$base")..$(git rev-parse --short "$head").diff"
-fi
+sys.path.insert(0, str(Path.home() / ".agents/lib/python"))
+import artifact_budget  # noqa: E402
 
-{
-  echo "# Review package: ${base}..${head}"
-  echo
-  echo "## Commits"
-  git log --oneline "${base}..${head}"
-  echo
-  echo "## Files changed"
-  git diff --stat "${base}..${head}"
-  echo
-  echo "## Diff"
-  git diff -U10 "${base}..${head}"
-} > "$out"
 
-commits=$(git rev-list --count "${base}..${head}")
-echo "wrote ${out}: ${commits} commit(s), $(wc -c < "$out" | tr -d ' ') bytes"
+SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+DIFF_BOUNDARY = re.compile(br"(?m)^diff --git ")
+
+
+class InvocationError(Exception):
+    """The caller supplied invalid syntax, identity, or destination authority."""
+
+
+class GenerationError(Exception):
+    """The package could not be generated, measured, or published."""
+
+
+class PublicationError(GenerationError):
+    """Exclusive publication failed without replacing an existing entry."""
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise InvocationError(message)
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        raise InvocationError(message or "unsupported parser exit")
+
+
+def _canonical(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
+def _run_git(repo: Path, *args: str, binary: bool = False) -> bytes | str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=not binary,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise GenerationError("git command failed") from exc
+    return result.stdout
+
+
+def _full_commit(repo: Path, value: str, label: str) -> str:
+    if not value or value.startswith("-"):
+        raise InvocationError(f"invalid {label}")
+    try:
+        output = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", f"{value}^{{commit}}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise InvocationError(f"invalid {label}") from exc
+    if SHA_RE.fullmatch(output) is None:
+        raise InvocationError(f"invalid {label}")
+    return output
+
+
+def _display_path(root: Path, repository: Path) -> str:
+    try:
+        return root.relative_to(repository).as_posix()
+    except ValueError:
+        return str(root)
+
+
+def _split_diff(raw: bytes) -> list[bytes]:
+    if not raw:
+        return []
+    starts = [match.start() for match in DIFF_BOUNDARY.finditer(raw)]
+    if not starts or starts[0] != 0:
+        raise GenerationError("diff is not split at file boundaries")
+    return [raw[start:end] for start, end in zip(starts, starts[1:] + [len(raw)])]
+
+
+def _group_whole(records: Sequence[bytes], ceiling: int) -> list[bytes]:
+    shards: list[bytes] = []
+    current = bytearray()
+    for record in records:
+        if current and len(current) + len(record) > ceiling:
+            shards.append(bytes(current))
+            current.clear()
+        current.extend(record)
+        if len(current) > ceiling:
+            shards.append(bytes(current))
+            current.clear()
+    if current:
+        shards.append(bytes(current))
+    return shards
+
+
+def _parse_numstat(raw: bytes) -> dict[str, int]:
+    position = 0
+    files = insertions = deletions = 0
+    while position < len(raw):
+        first = raw.find(b"\t", position)
+        second = raw.find(b"\t", first + 1) if first >= 0 else -1
+        end = raw.find(b"\0", second + 1) if second >= 0 else -1
+        if min(first, second, end) < 0:
+            raise GenerationError("malformed Git numstat")
+        added, removed = raw[position:first], raw[first + 1 : second]
+        for value, label in ((added, "insertions"), (removed, "deletions")):
+            if value == b"-":
+                amount = 0
+            elif value and all(48 <= byte <= 57 for byte in value):
+                amount = int(value)
+            else:
+                raise GenerationError("malformed Git numstat count")
+            if label == "insertions":
+                insertions += amount
+            else:
+                deletions += amount
+        path = raw[second + 1 : end]
+        position = end + 1
+        if not path:
+            old_end = raw.find(b"\0", position)
+            new_end = raw.find(b"\0", old_end + 1) if old_end >= 0 else -1
+            if min(old_end, new_end) < 0:
+                raise GenerationError("malformed Git rename numstat")
+            position = new_end + 1
+        files += 1
+    return {
+        "files_changed": files,
+        "insertions": insertions,
+        "deletions": deletions,
+    }
+
+
+def _commits(repo: Path, base: str, head: str) -> list[dict[str, str]]:
+    listed = _run_git(repo, "rev-list", "--reverse", f"{base}..{head}")
+    assert isinstance(listed, str)
+    try:
+        commits: list[dict[str, str]] = []
+        for sha in listed.splitlines():
+            if SHA_RE.fullmatch(sha) is None:
+                raise GenerationError("malformed Git commit list")
+            subject = _run_git(repo, "show", "-s", "--format=%s", sha, binary=True)
+            assert isinstance(subject, bytes)
+            if subject.endswith(b"\n"):
+                subject = subject[:-1]
+            commits.append(
+                {"sha": sha, "subject": subject.decode("utf-8", errors="strict")}
+            )
+        return commits
+    except UnicodeDecodeError as exc:
+        raise GenerationError("commit metadata is not UTF-8") from exc
+
+
+def _write_stage(
+    final_root: Path,
+    manifest: Mapping[str, object],
+    shards: Sequence[bytes],
+    suffix: str,
+) -> tuple[Path, Path]:
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=f".{final_root.name}.stage-", dir=final_root.parent))
+        stage_root = staging / final_root.name
+        member_dir = stage_root.with_suffix(".shards")
+        member_dir.mkdir()
+        for number, raw in enumerate(shards, 1):
+            (member_dir / f"shard-{number:03d}.{suffix}").write_bytes(raw)
+        stage_root.write_bytes(_canonical(manifest))
+        return staging, stage_root
+    except OSError as exc:
+        raise GenerationError("cannot write staging package") from exc
+
+
+def _identity(path: Path) -> tuple[int, int]:
+    info = path.lstat()
+    return info.st_dev, info.st_ino
+
+
+def publish_package(
+    stage_root: Path,
+    final_root: Path,
+    before_mutation: Callable[[str, Path], None] | None = None,
+) -> None:
+    """Publish with exclusive hard links and inode-matched cleanup (D16)."""
+    stage_members = stage_root.with_suffix(".shards")
+    final_members = final_root.with_suffix(".shards")
+    linked: list[tuple[Path, tuple[int, int]]] = []
+    directory_identity: tuple[int, int] | None = None
+    try:
+        if before_mutation is not None:
+            before_mutation("member_dir", final_members)
+        final_members.mkdir()
+        directory_identity = _identity(final_members)
+        for source in sorted(stage_members.iterdir()):
+            destination = final_members / source.name
+            if before_mutation is not None:
+                before_mutation(f"member:{source.name}", destination)
+            os.link(source, destination, follow_symlinks=False)
+            linked.append((destination, _identity(source)))
+        if before_mutation is not None:
+            before_mutation("manifest", final_root)
+        os.link(stage_root, final_root, follow_symlinks=False)
+    except (OSError, RuntimeError) as exc:
+        for path, expected in reversed(linked):
+            try:
+                if _identity(path) == expected:
+                    path.unlink()
+            except (FileNotFoundError, OSError):
+                pass
+        if directory_identity is not None:
+            try:
+                if _identity(final_members) == directory_identity and not any(final_members.iterdir()):
+                    final_members.rmdir()
+            except (FileNotFoundError, OSError):
+                pass
+        raise PublicationError("exclusive package publication failed") from exc
+
+
+def _cleanup_stage(staging: Path) -> None:
+    try:
+        shutil.rmtree(staging)
+    except OSError:
+        pass
+
+
+def _artifact_report(
+    state: str,
+    path: str,
+    check: artifact_budget.CheckResult,
+) -> dict[str, object]:
+    artifact: dict[str, object] = {
+        "kind": "review-package",
+        "path": path,
+        "metrics": dict(check.metrics),
+        "budget_status": check.status,
+    }
+    if check.status == "over_budget":
+        artifact["violations"] = list(check.violations)
+    return {"state": state, "artifact": artifact, "notes": "validated review package"}
+
+
+def _validated_report(candidate: Mapping[str, object]) -> bytes:
+    path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="review-package-report-", suffix=".json", delete=False) as handle:
+            path = Path(handle.name)
+            handle.write(_canonical(candidate))
+        validator = Path(artifact_budget.__file__)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(validator),
+                "validate-report",
+                "--boundary",
+                "producer",
+                "--input",
+                str(path),
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0 or result.stderr or not result.stdout:
+            raise GenerationError("producer report validation failed")
+        return result.stdout
+    except OSError as exc:
+        raise GenerationError("producer report validation failed") from exc
+    finally:
+        if path is not None:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _validated_detail(path: Path) -> dict[str, object]:
+    validator = Path(artifact_budget.__file__)
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(validator),
+                "validate-detail-input",
+                "--input",
+                str(path),
+            ],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise InvocationError("invalid detail input") from exc
+    if result.returncode != 0 or result.stderr or not result.stdout:
+        raise InvocationError("invalid detail input")
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GenerationError("validated detail input was malformed") from exc
+    if not isinstance(value, dict):
+        raise GenerationError("validated detail input was malformed")
+    return value
+
+
+def _real_directory(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise InvocationError("invalid repository identity") from exc
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise InvocationError("invalid repository identity")
+
+
+def _primary_checkout(repo: Path) -> Path:
+    raw = _run_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    assert isinstance(raw, str)
+    common = Path(os.path.abspath(raw.strip()))
+    if common.name != ".git":
+        raise InvocationError("invalid common Git directory")
+    _real_directory(common)
+    primary = common.parent
+    shown = _run_git(primary, "rev-parse", "--show-toplevel")
+    assert isinstance(shown, str)
+    if Path(os.path.abspath(shown.strip())) != primary:
+        raise InvocationError("invalid primary checkout")
+    _real_directory(primary)
+    return primary
+
+
+def _open_directory(path: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(path, flags)
+
+
+def _ensure_directories(base: Path, parts: Sequence[str]) -> None:
+    try:
+        descriptor = _open_directory(base)
+    except OSError as exc:
+        raise InvocationError("unsafe destination parent") from exc
+    try:
+        for part in parts:
+            try:
+                os.mkdir(part, 0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            try:
+                child = os.open(
+                    part,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=descriptor,
+                )
+            except OSError as exc:
+                raise InvocationError("unsafe destination parent") from exc
+            os.close(descriptor)
+            descriptor = child
+    finally:
+        os.close(descriptor)
+
+
+def _ensure_ignore(primary: Path) -> None:
+    delivery = primary / ".superpowers/issue-delivery"
+    try:
+        directory = _open_directory(delivery)
+    except OSError as exc:
+        raise InvocationError("unsafe delivery home") from exc
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    created = False
+    created_identity: tuple[int, int] | None = None
+    descriptor = -1
+    try:
+        try:
+            descriptor = os.open(".gitignore", flags, 0o600, dir_fd=directory)
+            created = True
+            raw = b"*\n"
+            written = 0
+            while written < len(raw):
+                written += os.write(descriptor, raw[written:])
+            os.fsync(descriptor)
+            info = os.fstat(descriptor)
+            created_identity = (info.st_dev, info.st_ino)
+            os.close(descriptor)
+            descriptor = -1
+            descriptor = os.open(
+                ".gitignore",
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory,
+            )
+        except FileExistsError:
+            descriptor = os.open(
+                ".gitignore",
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory,
+            )
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise InvocationError("unsafe delivery ignore")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if os.read(descriptor, 3) != b"*\n":
+            raise InvocationError("invalid delivery ignore")
+    except (OSError, InvocationError) as exc:
+        if created and created_identity is not None:
+            try:
+                current = os.stat(".gitignore", dir_fd=directory, follow_symlinks=False)
+                if created_identity == (current.st_dev, current.st_ino):
+                    os.unlink(".gitignore", dir_fd=directory)
+            except OSError:
+                pass
+        if isinstance(exc, InvocationError):
+            raise
+        raise InvocationError("unsafe delivery ignore") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
+
+
+def _assert_output(raw: str, expected: Path, primary: Path) -> None:
+    supplied = Path(raw)
+    if any(part == ".." for part in supplied.parts):
+        raise InvocationError("invalid asserted output")
+    absolute = Path(os.path.abspath(supplied))
+    if ".git" in absolute.parts:
+        raise InvocationError("invalid asserted output")
+    try:
+        relative = expected.relative_to(primary)
+    except ValueError as exc:
+        raise InvocationError("invalid asserted output") from exc
+    count = len(relative.parts)
+    if count == 0 or tuple(absolute.parts[-count:]) != relative.parts:
+        raise InvocationError("invalid asserted output")
+    primary_alias = Path(*absolute.parts[:-count])
+    if Path(os.path.realpath(primary_alias)) != primary:
+        raise InvocationError("invalid asserted output")
+    current = primary_alias
+    for part in relative.parts:
+        current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise InvocationError("invalid asserted output") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise InvocationError("invalid asserted output")
+
+
+def _build_diff(args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    repo_raw = _run_git(Path.cwd(), "rev-parse", "--show-toplevel")
+    assert isinstance(repo_raw, str)
+    repo = Path(os.path.abspath(repo_raw.strip()))
+    plan = Path(args.items[0])
+    if not plan.is_absolute():
+        plan = Path.cwd() / plan
+    try:
+        plan_check = artifact_budget.check_artifact("implementation-plan", plan)
+        if plan_check.status != "within_budget":
+            raise InvocationError("invalid plan package")
+        limits = artifact_budget.load_limits()["review-package"]
+    except artifact_budget.ArtifactBudgetError as exc:
+        raise InvocationError("invalid plan package") from exc
+    base = _full_commit(repo, args.items[1], "base")
+    head = _full_commit(repo, args.items[2], "head")
+    if len(args.items) == 4:
+        final_root = Path(args.items[3])
+        if not final_root.is_absolute():
+            final_root = Path.cwd() / final_root
+        final_root = Path(os.path.abspath(final_root))
+    else:
+        workspace_script = Path(__file__).with_name("sdd-workspace")
+        try:
+            output = subprocess.run(
+                [str(workspace_script), str(plan)],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise GenerationError("cannot derive review workspace") from exc
+        final_root = Path(output) / f"review-{base[:7]}..{head[:7]}.json"
+    if final_root.suffix != ".json" or not final_root.parent.is_dir():
+        raise InvocationError("invalid output path")
+    diff = _run_git(
+        repo, "diff", "--no-ext-diff", "--binary", "-U10", f"{base}..{head}",
+        binary=True,
+    )
+    numstat = _run_git(
+        repo, "diff", "--no-ext-diff", "--numstat", "-z", f"{base}..{head}",
+        binary=True,
+    )
+    assert isinstance(diff, bytes) and isinstance(numstat, bytes)
+    chunks = _split_diff(diff)
+    stat_value = _parse_numstat(numstat)
+    if len(chunks) != stat_value["files_changed"]:
+        raise GenerationError("diff coverage does not match numstat")
+    shard_bytes = _group_whole(chunks, limits.member_max_bytes)
+    shard_dir_name = final_root.with_suffix(".shards").name
+    shard_entries = [
+        {"path": f"{shard_dir_name}/shard-{number:03d}.diff", "bytes": len(raw)}
+        for number, raw in enumerate(shard_bytes, 1)
+    ]
+    manifest = {
+        "interface_version": 1,
+        "kind": "review-package",
+        "purpose": "diff-review",
+        "range": {"base": base, "head": head},
+        "commits": _commits(repo, base, head),
+        "stat": stat_value,
+        "shards": shard_entries,
+        "total_diff_bytes": len(diff),
+        "coverage": {"complete": True, "file_diff_count": len(chunks)},
+    }
+    return _publish_candidate(repo, final_root, manifest, shard_bytes, "diff")
+
+
+def _build_detail(args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    repo_raw = _run_git(Path.cwd(), "rev-parse", "--show-toplevel")
+    assert isinstance(repo_raw, str)
+    repo = Path(os.path.abspath(repo_raw.strip()))
+    primary = _primary_checkout(repo)
+    if args.issue is None or not args.issue.isascii() or not args.issue.isdecimal():
+        raise InvocationError("invalid issue")
+    issue = int(args.issue)
+    if issue < 1:
+        raise InvocationError("invalid issue")
+    if args.producer not in {"sdd", "ship-review"}:
+        raise InvocationError("invalid producer")
+    if args.head is None or SHA_RE.fullmatch(args.head) is None:
+        raise InvocationError("invalid head")
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "-e", f"{args.head}^{{object}}"],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise InvocationError("invalid head") from exc
+    if args.branch is None:
+        raise InvocationError("invalid branch")
+    try:
+        subprocess.run(
+            ["git", "check-ref-format", "--branch", args.branch],
+            check=True,
+            capture_output=True,
+        )
+        current = _run_git(repo, "symbolic-ref", "--short", "HEAD")
+    except (OSError, subprocess.CalledProcessError, GenerationError) as exc:
+        raise InvocationError("invalid branch") from exc
+    assert isinstance(current, str)
+    if current.strip() != args.branch:
+        raise InvocationError("invalid branch")
+    if args.run_id == "-":
+        identity = "branch-" + hashlib.sha256(args.branch.encode("utf-8")).hexdigest()
+    elif args.run_id is not None and RUN_ID_RE.fullmatch(args.run_id):
+        identity = args.run_id
+    else:
+        raise InvocationError("invalid run id")
+    final_root = (
+        primary / ".superpowers/issue-delivery" / str(issue) / identity
+        / f"{args.producer}-{args.head}.json"
+    )
+    if args.output is not None:
+        _assert_output(args.output, final_root, primary)
+    source = Path(args.detail_input)
+    if not source.is_absolute():
+        source = Path.cwd() / source
+    detail = _validated_detail(source)
+    findings = detail["findings"]
+    assert isinstance(findings, list)
+    records = [_canonical(finding) for finding in findings]
+    try:
+        limits = artifact_budget.load_limits()["review-package"]
+    except artifact_budget.ArtifactBudgetError as exc:
+        raise GenerationError("cannot load review limits") from exc
+    shard_bytes = _group_whole(records, limits.member_max_bytes)
+    shard_dir_name = final_root.with_suffix(".shards").name
+    shards = [
+        {"path": f"{shard_dir_name}/shard-{number:03d}.jsonl", "bytes": len(raw)}
+        for number, raw in enumerate(shard_bytes, 1)
+    ]
+    manifest = {
+        "interface_version": 1,
+        "kind": "review-package",
+        "purpose": "delivery-detail",
+        "context": {"issue": issue, "branch": args.branch, "producer": args.producer},
+        "shards": shards,
+        "total_detail_bytes": sum(len(raw) for raw in records),
+        "coverage": {"complete": True, "finding_count": len(findings)},
+    }
+    _ensure_directories(primary, [".superpowers", "issue-delivery"])
+    _ensure_ignore(primary)
+    _ensure_directories(
+        primary, [".superpowers", "issue-delivery", str(issue), identity]
+    )
+    return _publish_candidate(primary, final_root, manifest, shard_bytes, "jsonl")
+
+
+def _publish_candidate(
+    repository: Path,
+    final_root: Path,
+    manifest: Mapping[str, object],
+    shards: Sequence[bytes],
+    suffix: str,
+) -> tuple[dict[str, object], int]:
+    staging: Path | None = None
+    try:
+        staging, stage_root = _write_stage(final_root, manifest, shards, suffix)
+        check = artifact_budget.check_artifact("review-package", stage_root)
+        publish_package(stage_root, final_root)
+    except artifact_budget.ArtifactBudgetError as exc:
+        raise GenerationError("review package measurement failed") from exc
+    finally:
+        if staging is not None:
+            _cleanup_stage(staging)
+    state = "complete" if check.status == "within_budget" else "decompose_required"
+    report = _artifact_report(state, _display_path(final_root, repository), check)
+    return report, 0 if state == "complete" else 3
+
+
+def _parser() -> _Parser:
+    parser = _Parser(prog="review-package", add_help=False)
+    parser.add_argument("items", nargs="*")
+    parser.add_argument("--detail-input")
+    parser.add_argument("--producer")
+    parser.add_argument("--issue")
+    parser.add_argument("--branch")
+    parser.add_argument("--run-id")
+    parser.add_argument("--head")
+    parser.add_argument("--output")
+    return parser
+
+
+def _mode(args: argparse.Namespace) -> str:
+    detail_values = (
+        args.detail_input, args.producer, args.issue, args.branch, args.run_id,
+        args.head, args.output,
+    )
+    if args.detail_input is not None:
+        if args.items or any(value is None for value in detail_values[:-1]):
+            raise InvocationError("invalid detail invocation")
+        return "detail"
+    if any(value is not None for value in detail_values) or len(args.items) not in {3, 4}:
+        raise InvocationError("invalid diff invocation")
+    return "diff"
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        args = _parser().parse_args(argv)
+        mode = _mode(args)
+        report, status = _build_detail(args) if mode == "detail" else _build_diff(args)
+        sys.stdout.buffer.write(_validated_report(report))
+        return status
+    except InvocationError:
+        sys.stderr.write("review-package: invalid invocation\n")
+        return 2
+    except (GenerationError, OSError, ValueError):
+        try:
+            sys.stdout.buffer.write(
+                _validated_report(
+                    {"state": "failed", "artifact": None,
+                     "notes": "review package generation failed"}
+                )
+            )
+        except GenerationError:
+            sys.stderr.write("review-package: generation failed\n")
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

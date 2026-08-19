@@ -26,7 +26,27 @@ Agent(subagent_type="implementer", model="opus", effort="high") owns the fifth a
 
 Every round: the implementer fixes, re-runs the covering tests, appends a fix report (what changed, covering tests, command, output) to the same report file, and returns the short contract. Confirm all three fix-report elements before dispatching the re-review — reviewers do not re-run tests.
 
-The re-review is scoped: `scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head the previous review saw), template [re-review-prompt.md](re-review-prompt.md), with the findings list, brief, and report paths. Its explicit `reviewer-lite` selection verdicts each finding ADDRESSED / NOT ADDRESSED and flags new breakage in the fix diff only; out-of-scope observations go to the ledger as deferred minors. A result that requires ambiguous adjudication or branch-wide review escapes reviewer-lite through this explicit full-review dispatch:
+The re-review is scoped: run `scripts/review-package PLAN_FILE FIX_BASE HEAD`
+(FIX_BASE = the head the previous review saw), capture stdout unchanged, and
+validate it through
+`artifact-budget validate-report --boundary producer --input -`. Generator
+exit 0 plus validator exit 0, a strict `complete` report, and report/checker
+agreement permits dispatch. Generator exit 3 records and returns
+`decompose_required` with no reviewer dispatched. Generator exit 2, validator
+exit 2, malformed or unknown output, or disagreement records and returns
+`failed` before dispatch.
+
+Supply [re-review-prompt.md](re-review-prompt.md) with the findings list, brief
+and report paths, and the manifest root path and all four metrics
+(`root_bytes`, `total_bytes`, `file_count`,
+`largest_member_bytes`), never shard lists or diff contents. The reviewer
+validates the strict manifest and coverage, reads every shard once in manifest
+order, and explicitly reports an unreadable or mismatched shard. Its explicit
+`reviewer-lite` selection verdicts each finding ADDRESSED / NOT ADDRESSED and
+flags new breakage in the fix diff only; out-of-scope observations go to the
+ledger as deferred minors. A result that requires ambiguous adjudication or
+branch-wide review escapes reviewer-lite through this explicit full-review
+dispatch:
 
 <!-- agent-dispatch: id=sdd-task-rereview-escalation role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") adjudicates an ambiguous or branch-wide task re-review escape.

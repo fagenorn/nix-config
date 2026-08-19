@@ -39,13 +39,17 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
 
     **Fix base:** [FIX_BASE_SHA] (the head the previous review saw)
     **Head:** [HEAD_SHA]
-    **Diff file:** [DIFF_FILE]
+    **Manifest:** [MANIFEST_ROOT]
+    **Metrics:** [ROOT_BYTES], [TOTAL_BYTES], [FILE_COUNT], [LARGEST_MEMBER_BYTES]
 
-    Read the diff file once — it contains the fix commits, a stat summary,
-    and the fix diff with surrounding context. Do not re-run git commands.
-    If the diff file is missing, fetch the diff yourself:
-    `git diff --stat [FIX_BASE_SHA]..[HEAD_SHA]` and
-    `git diff [FIX_BASE_SHA]..[HEAD_SHA]`.
+    The dispatch supplies the manifest root path and all four metrics:
+    `root_bytes`, `total_bytes`, `file_count`, and
+    `largest_member_bytes`. Read the strict manifest first, validate complete
+    coverage and declared bytes against the checker metrics, then read every
+    shard exactly once in manifest order. Explicitly report an unreadable or
+    mismatched shard as unreadable review evidence; do not fetch a fallback diff
+    or approve the fix. The shards contain the fix commits, stat, and complete
+    fix diff with surrounding context. Do not re-run git commands.
 
     Your review is read-only on this checkout. Do not mutate the working
     tree, the index, HEAD, or branch state in any way.
@@ -108,7 +112,9 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
 - `[REPORT_FILE]` — the implementer's report file (fix reports appended)
 - `[FIX_BASE_SHA]` — the head the previous review saw
 - `[HEAD_SHA]` — current commit
-- `[DIFF_FILE]` — the path `scripts/review-package PLAN_FILE FIX_BASE HEAD` printed
+- `[MANIFEST_ROOT]` and `[ROOT_BYTES]`, `[TOTAL_BYTES]`,
+  `[FILE_COUNT]`, `[LARGEST_MEMBER_BYTES]` — the manifest root path and all
+  four metrics from the validated producer report
 
 **Re-reviewer returns:** per-finding verdicts (ADDRESSED / NOT ADDRESSED),
 new breakage in the fix diff, out-of-scope observations, and a round verdict.

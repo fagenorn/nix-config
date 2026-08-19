@@ -30,15 +30,19 @@ Subagent (reviewer, Opus/high for the native path selected above):
     ## Diff Under Review
 
     **Base:** [MERGE_BASE_SHA]  **Head:** [HEAD_SHA]
-    **Diff file:** [DIFF_FILE]
+    **Manifest:** [MANIFEST_ROOT]
+    **Metrics:** [ROOT_BYTES], [TOTAL_BYTES], [FILE_COUNT], [LARGEST_MEMBER_BYTES]
 
-    Read the diff file once; when checking a finding, read the live file at HEAD,
-    not a snapshot. If no diff file was supplied, fetch the range yourself with
-    `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
-    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]` — both of them, unless the packet
-    states the review is scoped and lists the paths under review, in which case
-    neither of those two commands runs: those listed paths are the whole of the
-    range to fetch, so run
+    The SDD packet supplies the manifest root path and all four metrics:
+    `root_bytes`, `total_bytes`, `file_count`, and
+    `largest_member_bytes`. Read the strict manifest and validate its complete
+    coverage and declared bytes against those checker metrics. For an unscoped
+    review, read every shard exactly once in manifest order. Explicitly report
+    an unreadable or mismatched shard as unreadable review evidence; do not
+    fetch a fallback diff or report a clean axis. When the packet states the
+    review is scoped and lists the paths under review, retain the manifest root
+    and metrics only as range-coverage evidence: do not read its shards.
+    Instead, those listed paths are the whole of the range to fetch, so run
     `git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'` once per listed
     path and fetch nothing wider — one invocation per path, the path passed as a
     single literal argument after `--`, never shell-joined with the other listed
@@ -46,7 +50,11 @@ Subagent (reviewer, Opus/high for the native path selected above):
     prefix. A listed path carries whatever bytes Git records, so it may hold a
     space, a newline, a non-UTF-8 byte, or a leading `:`; treated as anything but
     one literal argument it splits or is reinterpreted, and you silently read a
-    diff that is not the one the packet bounded. Inspect code outside the diff only
+    diff that is not the one the packet bounded. A non-SDD dispatcher that
+    supplies no manifest may fetch the full range with
+    `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
+    `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`. When checking a finding, read the
+    live file at HEAD, not a snapshot. Inspect code outside the diff only
     to evaluate a concrete risk you can name — cross-task contract drift, changed
     lock ordering, shared mutable state — one focused check per named risk, named
     in your report. Your review is read-only on this checkout: do not mutate the
@@ -89,11 +97,11 @@ Subagent (reviewer, Opus/high for the native path selected above):
 ```
 
 **Placeholders:** `[PLAN_FILE]`, `[VERIFY_COMMANDS]` (from the project bindings /
-manifest detection), `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[DIFF_FILE]` (from
-`scripts/review-package`; a dispatcher without the sdd scripts omits it, and the
-reviewer fetches the range itself per the body's fallback). When this file rides as
-the Codex rubric, the `diff-review` packet supplies the same values — with one
-deliberate exception: on a scoped dispatch that packet leaves `[DIFF_FILE]`
-unsupplied, because the full-range package it names is exactly what scoping bounds.
-That is what routes the reviewer into the fallback branch above, where the packet's
-listed paths are the whole of the range to fetch.
+manifest detection), `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[MANIFEST_ROOT]`, and
+`[ROOT_BYTES]`, `[TOTAL_BYTES]`, `[FILE_COUNT]`,
+`[LARGEST_MEMBER_BYTES]`. SDD and the Codex `diff-review` packet always supply
+the manifest root path and all four metrics from the validated producer report.
+On a scoped dispatch they remain range-coverage evidence, but the packet directs
+the reviewer to do not read its shards and instead fetch the selected literal
+paths once each. A dispatcher without the sdd scripts omits the manifest inputs
+and uses the non-SDD fallback above.

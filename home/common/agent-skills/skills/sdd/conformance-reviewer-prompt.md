@@ -37,10 +37,17 @@ Subagent (reviewer, Sonnet/high as selected above):
     ## Diff Under Review
 
     **Base:** [MERGE_BASE_SHA]  **Head:** [HEAD_SHA]
-    **Diff file:** [DIFF_FILE]
+    **Manifest:** [MANIFEST_ROOT]
+    **Metrics:** [ROOT_BYTES], [TOTAL_BYTES], [FILE_COUNT], [LARGEST_MEMBER_BYTES]
 
-    Read the diff file once — commit list, stat summary, full diff with context.
-    If no diff file was supplied, fetch the range yourself:
+    For an SDD dispatch, the packet supplies the manifest root path and all four
+    metrics: `root_bytes`, `total_bytes`, `file_count`, and
+    `largest_member_bytes`. Read the strict manifest first, validate complete
+    coverage and declared bytes against those checker metrics, then read every
+    shard exactly once in manifest order. Explicitly report an unreadable or
+    mismatched shard as unreadable review evidence; do not fetch a fallback diff
+    or report a clean axis. A non-SDD dispatcher that supplies no manifest may
+    fetch the range itself:
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
     `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`.
     When checking a finding, read the live file at HEAD, not a snapshot. Your
@@ -89,9 +96,11 @@ Subagent (reviewer, Sonnet/high as selected above):
 **Placeholders:** `[ISSUE_REF]` (issue number/URL, or the caller's one-line intent
 statement when there is no tracker; omit the line when neither exists),
 `[SPEC_FILE]` (omit when no spec exists — standalone plans are graded against the
-plan alone), `[PLAN_FILE]`, `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[DIFF_FILE]` (from
-`scripts/review-package`; a dispatcher without the sdd scripts — e.g. ship-issue's
-full path — omits it, and the reviewer fetches the range itself per the body's
-fallback), `[DEFERRED_AND_PARKED_LINES]` (copied verbatim from the ledger; when the
+plan alone), `[PLAN_FILE]`, `[MERGE_BASE_SHA]`, `[HEAD_SHA]`,
+`[MANIFEST_ROOT]` plus `[ROOT_BYTES]`, `[TOTAL_BYTES]`, `[FILE_COUNT]`,
+`[LARGEST_MEMBER_BYTES]` (the manifest root path and all four metrics from
+SDD's validated producer report; a dispatcher without the sdd scripts — e.g.
+ship-issue's full path — omits them and the reviewer uses the body's fallback),
+`[DEFERRED_AND_PARKED_LINES]` (copied verbatim from the ledger; when the
 dispatch supplies no ledger lines — no ledger exists at ship — omit the line AND the
 Ledger Triage section).

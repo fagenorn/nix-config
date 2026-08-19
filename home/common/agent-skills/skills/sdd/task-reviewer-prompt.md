@@ -36,15 +36,20 @@ Subagent (reviewer, Opus/high as selected above):
 
     **Base:** [BASE_SHA]
     **Head:** [HEAD_SHA]
-    **Diff file:** [DIFF_FILE]
+    **Manifest:** [MANIFEST_ROOT]
+    **Metrics:** [ROOT_BYTES], [TOTAL_BYTES], [FILE_COUNT], [LARGEST_MEMBER_BYTES]
 
-    Read the diff file once — it contains the commit list, a stat summary,
-    and the full diff with surrounding context, and it is your view of the
-    change. The diff's context lines ARE the changed files: do not Read a
+    The dispatch supplies the manifest root path and all four metrics:
+    `root_bytes`, `total_bytes`, `file_count`, and
+    `largest_member_bytes`. Read the strict manifest JSON first. Validate its
+    declared complete coverage and shard byte totals against those checker
+    metrics, then read every shard exactly once in manifest order. Together the
+    shards are the byte-for-byte full diff with surrounding context and are
+    your view of the change. Explicitly report an unreadable or mismatched shard
+    as unreadable review evidence; do not fetch a fallback diff or report
+    approval. The diff's context lines ARE the changed files: do not Read a
     changed file separately unless a hunk you must judge is cut off
     mid-function — and say so in your report. Do not re-run git commands.
-    If the diff file is missing, fetch the diff yourself:
-    `git diff --stat [BASE_SHA]..[HEAD_SHA]` and `git diff [BASE_SHA]..[HEAD_SHA]`.
     Do not crawl the broader codebase. Inspect code outside the diff only
     to evaluate a concrete risk you can name — one focused check per named
     risk, and name both the risk and what you checked in your report.
@@ -179,9 +184,10 @@ Subagent (reviewer, Opus/high as selected above):
   report to
 - `[BASE_SHA]` — commit before this task
 - `[HEAD_SHA]` — current commit
-- `[DIFF_FILE]` — REQUIRED: the path the controller wrote the review
-  package to (`scripts/review-package PLAN_FILE BASE HEAD` prints the unique
-  path it wrote; the package never enters the controller's context)
+- `[MANIFEST_ROOT]` and `[ROOT_BYTES]`, `[TOTAL_BYTES]`,
+  `[FILE_COUNT]`, `[LARGEST_MEMBER_BYTES]` — REQUIRED: the manifest root
+  path and all four metrics from the validated producer report; the package
+  never enters the controller's context
 
 **Reviewer returns:** Spec Compliance verdict (✅/❌/⚠️), Strengths, Issues
 (Critical/Important/Minor), Task quality verdict

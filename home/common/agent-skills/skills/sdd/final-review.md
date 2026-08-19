@@ -3,7 +3,20 @@
 Loaded by `SKILL.md` when all tasks are complete. This gate runs for **every**
 risk lane — lanes narrow per-task review, never this one.
 
-Run `scripts/review-package PLAN_FILE MERGE_BASE HEAD` (MERGE_BASE = `git merge-base <integration-branch> HEAD`) once, then review the branch on two axes **in parallel, as isolated subagents** over that same package:
+Run `scripts/review-package PLAN_FILE MERGE_BASE HEAD` (MERGE_BASE = `git merge-base <integration-branch> HEAD`) once. Capture its stdout unchanged and pass those bytes through
+`artifact-budget validate-report --boundary producer --input -` before either
+axis is dispatched. Generator exit 0 plus validator exit 0, a strict
+`complete` report, and report/checker agreement permits dispatch. Generator
+exit 3 records and returns `decompose_required` with no reviewer dispatched.
+Generator exit 2, validator exit 2, malformed or unknown output, or disagreement
+records and returns `failed` before dispatch.
+
+Pass both axes the manifest root path and all four metrics (`root_bytes`,
+`total_bytes`, `file_count`, `largest_member_bytes`), never shard lists or
+diff contents. Every unscoped reviewer validates the strict manifest and
+coverage, reads every shard once in manifest order, and explicitly reports an
+unreadable or mismatched shard. Then review the branch on two axes **in
+parallel, as isolated subagents** over that same package:
 
 - **Conformance axis** — did the diff deliver what issue + spec + plan promised, honoring the project's ADRs, context docs, and standards. Native `reviewer` on the Sonnet/high tier selected in [conformance-reviewer-prompt.md](conformance-reviewer-prompt.md) — delivered-vs-promised grading is checklist-shaped work against written promises; the top tier stays on correctness.
 - **Correctness axis** — is it built right: bugs, boundary error handling, dead branches, assertions that pin the documented contract, DRY, cross-task integration. When the `codex-collaboration` skill is available, invoke its `diff-review` operation for this axis; that skill solely owns the isolated Codex transport launch and one-time native fallback, while the external Codex reviewer keeps its independently configured model. Unavailable → use the Opus/high native reviewer selected in [correctness-reviewer-prompt.md](correctness-reviewer-prompt.md). Either way the axis is never skipped.
@@ -22,7 +35,17 @@ Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-verdict
 <!-- agent-dispatch: id=sdd-final-correctness-rereview role=reviewer-lite model=sonnet effort=medium -->
 Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-verdicts the named correctness findings against the bounded fix diff.
 
-For either axis, supply (1) the axis's findings list verbatim, (2) a fix-range package from `scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head that axis's first pass reviewed), and (3) the instruction to verdict each finding ADDRESSED / NOT ADDRESSED and flag new breakage in the fix diff only — out-of-scope observations go to the ledger as deferred minors; ≤400 words. Ambiguous or branch-wide judgment escapes reviewer-lite through this explicit full-review dispatch:
+For either axis, generate a fix-range package with
+`scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head that
+axis's first pass reviewed), then apply the same generator/validator exit gate
+above before dispatch. Supply (1) the axis's findings list verbatim, (2) the
+manifest root path and all four metrics, never shard lists or diff contents, and
+(3) the instruction to validate the manifest and coverage, read each shard once
+in manifest order, explicitly report an unreadable or mismatched shard, verdict
+each finding ADDRESSED / NOT ADDRESSED, and flag new breakage in the fix diff
+only — out-of-scope observations go to the ledger as deferred minors; ≤400
+words. Ambiguous or branch-wide judgment escapes reviewer-lite through this
+explicit full-review dispatch:
 
 <!-- agent-dispatch: id=sdd-final-rereview-escalation role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") adjudicates an ambiguous or branch-wide final-axis re-review escape.

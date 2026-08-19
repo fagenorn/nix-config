@@ -83,12 +83,19 @@ Template: [implementer-prompt.md](implementer-prompt.md)
 
 ### 2. Handle the report
 
-- **DONE** → run `scripts/review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`, which silently drops all but the last commit), then the step-3 gate.
+- **DONE** → run `scripts/review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`, which silently drops all but the last commit), capture its compact JSON stdout unchanged, and pass those bytes through `artifact-budget validate-report --boundary producer --input -` before the step-3 gate.
 - **DONE_WITH_CONCERNS** → correctness/scope concerns get addressed before review; observations get noted, review proceeds.
 - **NEEDS_CONTEXT** → provide it, re-dispatch.
 - **BLOCKED** → context problem: add context, re-dispatch same tier. Reasoning problem: re-dispatch `implementer` (or bump the model). Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
 
 If the implementer asks questions — before or during — answer completely; don't rush it.
+
+Every initial review-package call uses the same closed gate before any review
+dispatch. Generator exit 0 plus validator exit 0, a strict `complete` report,
+and report/checker agreement permits dispatch. Generator exit 3 must validate as
+`decompose_required`; record and return it with no reviewer dispatched.
+Generator exit 2, validator exit 2, malformed or unknown output, or any
+report/checker disagreement is `failed`; record and return it before dispatch.
 
 ### 3. Review the task
 
@@ -104,11 +111,15 @@ Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies t
 
 For the full-lane review:
 
-- The reviewer gets the plan root path and all four metrics, then three task
-  paths — brief, report, review package — and nothing from the plan package
-  itself. It never gets a member list, artifact contents, or another task body.
-  The reviewer reads Global Constraints from the bounded root. The template
-  carries the process rules; the root carries what THIS project's spec demands.
+- The reviewer gets the plan root path and all four metrics, then the brief and
+  report paths plus the review-package manifest root path and all four metrics
+  (`root_bytes`, `total_bytes`, `file_count`,
+  `largest_member_bytes`). It never gets a member list, shard list, artifact
+  contents, diff contents, or another task body. The reviewer reads Global
+  Constraints from the bounded plan root, strictly checks the manifest, then
+  reads every shard once in manifest order and explicitly reports an unreadable
+  or mismatched shard. The template carries the process rules; the root carries
+  what THIS project's spec demands.
 - Don't add open-ended directives ("check all uses") without a concrete task-specific reason; don't ask it to re-run tests the implementer already ran; and never pre-judge — if your prompt contains "do not flag" or "at most Minor", stop: adjudication happens in the loop, not the dispatch.
 - **⚠️ Cannot-verify items** (requirements living in unchanged code or spanning tasks) don't block the review, but you resolve each yourself before marking the task complete — you hold the cross-task context. A confirmed gap enters the fix loop as a failed spec review.
 
