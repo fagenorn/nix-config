@@ -290,6 +290,48 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("root path and all four metrics", self.sdd)
         self.assertIn("missing or unreadable member is a contract error", self.sdd)
 
+    def test_sdd_review_dispatch_is_root_only(self):
+        review = " ".join(self.section(
+            self.sdd, "For the full-lane review:", "Template: [task-reviewer-prompt.md]"
+        ).split())
+        self.assertIn("plan root path and all four metrics", review)
+        self.assertIn("brief, report, review package", review)
+        self.assertIn("reads Global Constraints from the bounded root", review)
+        self.assertNotIn("global constraints copied **verbatim**", review.lower())
+
+    def test_native_phase_5_validates_before_dispatch_and_remeasures(self):
+        caller = self.section(
+            self.phase_5_review_contract,
+            "## Caller pre-dispatch boundary",
+            "## Reviewer instructions",
+        )
+        self.assert_ordered(
+            caller, "validate-report", "validated stdout bytes", "read `state`",
+            "artifact-budget check", "reviewer dispatch",
+        )
+        self.assertIn("only the plan root path and four metrics", caller)
+        remeasurement = self.section(
+            self.phase_5_review_contract, "## Accepted-edit remeasurement", "(D5, D14)."
+        )
+        self.assert_ordered(
+            remeasurement, "after the last write", "implementation-plan",
+            "design-spec", "may advance",
+        )
+
+    def test_codex_plan_review_validates_before_packet_and_remeasures(self):
+        self.assert_ordered(
+            self.codex_plan_review,
+            "## Caller input gate", "validate-report", "validated stdout bytes",
+            "artifact-budget check", "## Build the review packet",
+            "## Reviewer contract", "## Verify and disposition",
+            "After the last accepted edit", "implementation-plan",
+            "design-spec", "may not advance",
+        )
+        packet = self.section(
+            self.codex_plan_review, "## Build the review packet", "## Reviewer contract"
+        )
+        self.assertIn("Supply no member list or plan content", packet)
+
     def test_preflight_worktree_deletion_requires_proof_of_disposability(self):
         self.assertNotIn("one, clean → remove it", self.from_issue)
         phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")

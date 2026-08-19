@@ -1,31 +1,39 @@
 # Phase-5 plan review contract
 
-Reviewer-facing text for `from-issue` Phase 5. The dispatcher hands this file's **path** to the
-reviewer (or to `codex-collaboration`, which passes it by path in the review packet) and supplies concrete
-values for every `<placeholder>` and binding named below — plan root path, its four
-checker metrics, spec path, issue number,
-`<tracker-cli>`, `unsetGithubToken`, `docPaths.*`, `projectHints`, and the optional review focus.
-The orchestrator never inlines this text into its own context.
+Operational contract for `from-issue` Phase 5. The Phase-5 caller executes the
+caller sections in order. Only after the pre-dispatch boundary passes does it
+hand this file's **path** to the reviewer (or to `codex-collaboration`, which
+passes it by path in the review packet). It supplies concrete values for every
+`<placeholder>` and binding named below — plan root path, its four checker
+metrics, spec path, issue number, `<tracker-cli>`, `unsetGithubToken`,
+`docPaths.*`, `projectHints`, and the optional review focus. The orchestrator
+never inlines this text into its own context.
 
----
+## Caller pre-dispatch boundary
 
-Review the implementation plan at `<plan-path>` against the project's coding bar.
-
-Before Phase 5 reads state or advances, its caller must pipe the exact received
-planning-report bytes through `artifact-budget validate-report --boundary
-producer --input -` and use only validated stdout. It requires the exact D11
-object in `state: complete`, with one `implementation-plan` artifact whose root
-path and four metrics match the supplied values. Validator failure, any legacy
+Pipe the exact received planning-report bytes through `artifact-budget
+validate-report --boundary producer --input -` and retain only the exact
+validated stdout bytes. Only after validation succeeds may the caller read `state` or any artifact field. Require the exact D11 object in `state: complete`,
+with one `implementation-plan` artifact; validator failure, a legacy
 producer-specific list or summary field, or any other state stops Phase 5 as a
-contract failure; there is no prose fallback (D11, D14).
+contract failure. There is no prose fallback (D11, D14).
 
-Before reading plan content, run `artifact-budget check --kind
+Take the root path and four metrics only from that validated object, then run
+`artifact-budget check --kind
 implementation-plan --root <plan-path> --format json`. Require exit 0,
 `within_budget`, and the same `root_bytes`, `total_bytes`, `file_count`, and
-`largest_member_bytes` supplied in the packet. Exit 2/3, missing metrics, stale
-metrics, or an unreadable member is a blocking contract failure. Then read the
-root and every indexed member in checker discovery order. The packet supplies
-only the plan root and metrics, never contents or a member list (D3, D5, D6, D8).
+`largest_member_bytes`. Exit 2/3, missing metrics, stale metrics, or an unreadable
+member is a contract failure. Only after both gates pass may the caller build the
+reviewer dispatch. Supply only the plan root path and four metrics, plus the
+other non-plan paths and fixed scalars named below; never supply plan contents or
+a member list (D3, D5, D6, D8).
+
+## Reviewer instructions
+
+Review the implementation plan at `<plan-path>` against the project's coding bar.
+Before reviewing, read the root and every indexed member in checker discovery
+order. Explicitly report an unreadable member as a blocking contract failure;
+never fall back to monolithic task parsing.
 
 First ground in the project's docs: invoke `doc-grounded-questions` if available, else ground
 map-first — read the context map (`docPaths.contextMap`, else `docs/CONTEXT-MAP.md`, else legacy root `CONTEXT-MAP.md`) and open only
@@ -124,8 +132,12 @@ Output a structured review:
 Write `None.` under an empty section. Don't propose new features. Don't second-guess scope. Grade only
 against the bar.
 
-Accepted Phase-5 edits are not complete when the text is saved. After the last
-write, the orchestrator re-runs the implementation-plan check and compares the
-fresh package metrics; if it amended the spec or appended a decision-ledger row,
-it also re-runs the design-spec check. Any invalid or over-budget result stops
-the phase instead of advancing with stale measurement (D5, D14).
+## Accepted-edit remeasurement
+
+After reviewer output and disposition, accepted Phase-5 edits are not complete
+when the text is saved. The caller acts after the last write: re-run the
+implementation-plan check and retain its fresh metrics; if it amended the spec
+or appended a decision-ledger row, also re-run the design-spec check after that
+artifact's last write. Only valid, within-budget results may advance. An invalid or
+over-budget result stops the phase instead of advancing with stale measurement
+(D5, D14).

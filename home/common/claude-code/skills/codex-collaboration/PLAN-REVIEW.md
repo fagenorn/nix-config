@@ -4,20 +4,25 @@ Read this when running `plan-review`. SKILL.md owns the shared runtime contract
 (resolve policy, pre-flight, transport dispatch, validation, one-time fallback);
 this file owns the packet, the reviewer contract, and the disposition.
 
+## Caller input gate
+
+Before using the planning result, pipe its exact received bytes through
+`artifact-budget validate-report --boundary producer --input -` and retain only
+the validated stdout bytes. Only then read `state` or any artifact field. Require
+`state: complete` and the exact D11 `implementation-plan` artifact; legacy
+producer-specific fields, another state, or validation failure stops the
+operation without a prose fallback (D11, D14).
+
+Take the root path and four metrics only from that validated object. Run
+`artifact-budget check --kind implementation-plan --root <plan-root> --format
+json` and require exit 0, `within_budget`, and an exact match with all four
+metrics. Exit 2/3 or missing/stale metrics stops before packet construction or
+dispatch (D5, D6).
+
 ## Build the review packet
 
 Start from the invocation directory and resolve the canonical Git
 workspace/worktree root. Build one self-contained delegation prompt containing:
-
-Before using the planning result, pipe its exact received bytes through
-`artifact-budget validate-report --boundary producer --input -` and use only
-validated stdout. Require `state: complete` and the exact D11
-`implementation-plan` artifact; legacy producer-specific fields, another state,
-or validation failure stops the operation without a prose fallback (D11, D14).
-Run `artifact-budget check --kind implementation-plan --root <plan-root>
---format json` before reading the plan. Require exit 0, `within_budget`, and an
-exact match with the four report metrics. Exit 2/3 or missing/stale metrics stops
-the review (D5, D6).
 
 1. The operation name, invocation directory, worktree root, current branch, and
    base SHA.
@@ -87,11 +92,11 @@ The parent Claude agent owns the result:
 5. Do not store the raw reviewer transcript in the repository, plan, issue, PR,
    or commit message.
 
-After the last accepted edit, re-run the checker for the complete plan package
-and replace the retained metrics. If disposition amended the spec or its decision
-ledger, re-run the design-spec check too. An invalid or over-budget artifact is
-not a completed disposition and Phase 5 may not advance on stale measurements
-(D5, D14).
+After the last accepted edit, run `artifact-budget check --kind
+implementation-plan` on the complete package and replace the retained metrics.
+If disposition amended the spec or its decision ledger, re-run the design-spec
+check too. An invalid or over-budget artifact is not a completed disposition and
+Phase 5 may not advance on stale measurements (D5, D14).
 
 Return control only after all accepted findings have explicit dispositions and
 the plan is clean enough for the caller's Phase-5 checkpoint.

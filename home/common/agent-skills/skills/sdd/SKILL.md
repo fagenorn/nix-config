@@ -105,10 +105,10 @@ Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies t
 For the full-lane review:
 
 - The reviewer gets the plan root path and all four metrics, then three task
-  paths — brief, report, review package — plus the global constraints copied
-  **verbatim** from the root. It never gets a member list or another task body.
-  The template carries the process rules; the constraints block is what THIS
-  project's spec demands.
+  paths — brief, report, review package — and nothing from the plan package
+  itself. It never gets a member list, artifact contents, or another task body.
+  The reviewer reads Global Constraints from the bounded root. The template
+  carries the process rules; the root carries what THIS project's spec demands.
 - Don't add open-ended directives ("check all uses") without a concrete task-specific reason; don't ask it to re-run tests the implementer already ran; and never pre-judge — if your prompt contains "do not flag" or "at most Minor", stop: adjudication happens in the loop, not the dispatch.
 - **⚠️ Cannot-verify items** (requirements living in unchanged code or spanning tasks) don't block the review, but you resolve each yourself before marking the task complete — you hold the cross-task context. A confirmed gap enters the fix loop as a failed spec review.
 
