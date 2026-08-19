@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
         self.run_id = "issue-14-test"
+        self.control_request_serial = 0
 
     @property
     def workflows_dir(self):
@@ -186,6 +188,147 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         return json.loads(completed.stdout) if ok else completed
 
+    @staticmethod
+    def tracker_fact(issue, *, state="open", open_blockers=None,
+                     decision_blockers=None):
+        return {
+            "issue": issue,
+            "state": state,
+            "open_blockers": [] if open_blockers is None else open_blockers,
+            "decision_blockers": (
+                [] if decision_blockers is None else decision_blockers
+            ),
+        }
+
+    @staticmethod
+    def worktree_fact(issue, *, recorded=None, candidate=None):
+        return {"issue": issue, "recorded": recorded, "candidate": candidate}
+
+    @staticmethod
+    def owner_fact(*, event_id, issue, attempt, launch, state="unavailable"):
+        return {
+            "event_id": event_id,
+            "issue": issue,
+            "attempt": attempt,
+            "launch": launch,
+            "state": state,
+        }
+
+    def control_request(self, *, now, issues, tracker, worktrees, owners=None,
+                        max_parallel=2, attempt_budget_minutes=30):
+        return {
+            "interface_version": 1,
+            "now": now,
+            "max_parallel": max_parallel,
+            "attempt_budget_minutes": attempt_budget_minutes,
+            "issues": issues,
+            "tracker": tracker,
+            "owners": [] if owners is None else owners,
+            "worktrees": worktrees,
+        }
+
+    def control_raw(self, *, request=None, ok=True, **request_fields):
+        value = request if request is not None else self.control_request(**request_fields)
+        self.control_request_serial += 1
+        request_path = self.root / f"control-{self.control_request_serial}.json"
+        request_path.write_text(json.dumps(value), encoding="utf-8")
+        return self.run_cli(
+            "control",
+            "--repo-root", self.root,
+            "--run-id", self.run_id,
+            "--request-file", request_path,
+            ok=ok,
+        )
+
+    def control(self, **request_fields):
+        return json.loads(self.control_raw(**request_fields).stdout)
+
+    def assert_control_response_shape(self, response):
+        self.assertEqual(set(response), {
+            "interface_version", "run_id", "now", "summaries", "deltas",
+            "actions", "next_deadline",
+        })
+        self.assertIs(type(response["interface_version"]), int)
+        self.assertIsInstance(response["run_id"], str)
+        self.assertIsInstance(response["now"], str)
+        self.assertIsInstance(response["summaries"], list)
+        self.assertIsInstance(response["deltas"], list)
+        self.assertIsInstance(response["actions"], list)
+        self.assertTrue(response["next_deadline"] is None or
+                        isinstance(response["next_deadline"], str))
+        for summary in response["summaries"]:
+            self.assertEqual(set(summary), {
+                "issue", "state", "attempt", "owner", "worktree",
+                "deadline_at", "blockers", "result",
+            })
+            self.assertIs(type(summary["issue"]), int)
+            self.assertIn(summary["state"], {
+                "queued", "blocked", "fogged", "active", "handed_off",
+                "merged", "stopped", "failed", "closed",
+            })
+            self.assertIsInstance(summary["blockers"], list)
+            self.assertTrue(summary["attempt"] is None or
+                            type(summary["attempt"]) is int)
+            for field in ("owner", "worktree", "deadline_at"):
+                self.assertTrue(summary[field] is None or
+                                isinstance(summary[field], str))
+            for blocker in summary["blockers"]:
+                self.assertEqual(set(blocker), {"kind", "issue", "url"})
+                self.assertIn(blocker["kind"], {"issue", "decision"})
+                self.assertIs(type(blocker["issue"]), int)
+                self.assertTrue(blocker["url"] is None or
+                                isinstance(blocker["url"], str))
+            if summary["result"] is not None:
+                self.assertEqual(set(summary["result"]), {
+                    "issue", "state", "pr_url", "merge_sha", "issue_closed",
+                    "discussion_items", "notes",
+                })
+                self.assertIs(type(summary["result"]["issue"]), int)
+                self.assertIn(summary["result"]["state"], {"merged", "stopped", "failed"})
+                for field in ("pr_url", "merge_sha"):
+                    self.assertTrue(summary["result"][field] is None or
+                                    isinstance(summary["result"][field], str))
+                self.assertIs(type(summary["result"]["issue_closed"]), bool)
+                self.assertIsInstance(summary["result"]["discussion_items"], list)
+                self.assertIsInstance(summary["result"]["notes"], str)
+        for delta in response["deltas"]:
+            self.assertEqual(set(delta), {"issue", "attempt", "kind", "state"})
+            self.assertIs(type(delta["issue"]), int)
+            self.assertIs(type(delta["attempt"]), int)
+            self.assertIn(delta["kind"], {
+                "expired", "spawned", "resumed", "retried", "retry_refused",
+            })
+            self.assertIsInstance(delta["state"], str)
+        for action in response["actions"]:
+            self.assertIsInstance(action["id"], str)
+            self.assertIsInstance(action["kind"], str)
+            if action["kind"] in {"spawn", "resume", "retry"}:
+                self.assertEqual(set(action), {
+                    "id", "kind", "issue", "attempt", "owner", "worktree",
+                    "handoff_path", "deadline_at",
+                })
+                self.assertIs(type(action["issue"]), int)
+                self.assertIs(type(action["attempt"]), int)
+                self.assertIsInstance(action["owner"], str)
+                self.assertIsInstance(action["worktree"], str)
+                self.assertTrue(action["handoff_path"] is None or
+                                isinstance(action["handoff_path"], str))
+                self.assertIsInstance(action["deadline_at"], str)
+            elif action["kind"] == "wait":
+                self.assertEqual(set(action), {
+                    "id", "kind", "wake_on", "deadline_at",
+                })
+                self.assertIsInstance(action["wake_on"], list)
+                self.assertTrue(set(action["wake_on"]) <= {
+                    "owner_notification", "tracker_change", "deadline",
+                })
+                self.assertTrue(action["deadline_at"] is None or
+                                isinstance(action["deadline_at"], str))
+            elif action["kind"] == "finalize":
+                self.assertEqual(action, {"id": "finalize", "kind": "finalize"})
+            else:
+                self.fail(f"unknown control action kind: {action['kind']!r}")
+
     def read_state(self):
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
@@ -200,6 +343,357 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "discussion_items": [],
             "notes": "",
         }
+
+    def test_init_run_returns_only_the_strict_bounded_bootstrap(self):
+        fresh = self.init_run(now="2026-08-19T12:00:00Z")
+        self.assertEqual(fresh, {
+            "interface_version": 1,
+            "run_id": self.run_id,
+            "requirements": [],
+        })
+        paths = {issue: str(self.root / f"wt-{issue}") for issue in (47, 51)}
+        self.control(now="2026-08-19T12:00:00Z", issues=[51, 47],
+                     tracker=[self.tracker_fact(51), self.tracker_fact(47)],
+                     worktrees=[self.worktree_fact(
+                         issue, candidate={"path": paths[issue], "state": "absent"}
+                     ) for issue in (51, 47)])
+        restarted = self.init_run(now="2026-08-19T12:01:00Z")
+        self.assertEqual(restarted, {
+            "interface_version": 1,
+            "run_id": self.run_id,
+            "requirements": [
+                {"issue": 47, "attempt": 1, "owner": "47:1",
+                 "action_id": "47:1:1",
+                 "recorded_worktree": paths[47]},
+                {"issue": 51, "attempt": 1, "owner": "51:1",
+                 "action_id": "51:1:1",
+                 "recorded_worktree": paths[51]},
+            ],
+        })
+        rendered = json.dumps(restarted)
+        for forbidden in (
+            "attempts", "launches", "deadline_at", "phase", "handoff",
+            "result", "prior", "state",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_control_starts_ready_issues_persists_before_emission_and_bounds_output(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        paths = {issue: str(self.root / f"wt-{issue}") for issue in (47, 51, 53)}
+        response = self.control(
+            now="2026-08-19T12:00:00Z",
+            issues=[47, 51, 53],
+            max_parallel=2,
+            attempt_budget_minutes=180,
+            tracker=[self.tracker_fact(issue) for issue in (47, 51, 53)],
+            worktrees=[
+                self.worktree_fact(
+                    issue,
+                    candidate={"path": paths[issue], "state": "absent"},
+                )
+                for issue in (47, 51, 53)
+            ],
+        )
+        self.assertEqual([item["state"] for item in response["summaries"]],
+                         ["active", "active", "queued"])
+        self.assertEqual([item["kind"] for item in response["deltas"]],
+                         ["spawned", "spawned"])
+        self.assertEqual([item["kind"] for item in response["actions"]],
+                         ["spawn", "spawn", "wait"])
+        self.assertEqual([item["id"] for item in response["actions"]],
+                         ["47:1:1", "51:1:1", "wait:2026-08-19T15:00:00Z"])
+        self.assertEqual(response["summaries"][0], {
+            "issue": 47, "state": "active", "attempt": 1, "owner": "47:1",
+            "worktree": paths[47], "deadline_at": "2026-08-19T15:00:00Z",
+            "blockers": [], "result": None,
+        })
+        self.assertEqual(response["deltas"][0], {
+            "issue": 47, "attempt": 1, "kind": "spawned", "state": "active",
+        })
+        self.assertEqual(response["actions"][0], {
+            "id": "47:1:1", "kind": "spawn", "issue": 47, "attempt": 1,
+            "owner": "47:1", "worktree": paths[47], "handoff_path": None,
+            "deadline_at": "2026-08-19T15:00:00Z",
+        })
+        self.assertEqual(response["actions"][-1], {
+            "id": "wait:2026-08-19T15:00:00Z", "kind": "wait",
+            "wake_on": ["owner_notification", "tracker_change", "deadline"],
+            "deadline_at": "2026-08-19T15:00:00Z",
+        })
+        self.assertEqual(response["next_deadline"], "2026-08-19T15:00:00Z")
+        reopened = self.read_state()
+        for issue in (47, 51):
+            attempt = reopened["issues"][str(issue)]["attempts"][0]
+            self.assertEqual(attempt["owner"], f"{issue}:1")
+            self.assertEqual(len(attempt["launches"]), 1)
+        self.assertNotIn("53", reopened["issues"])
+
+    def test_control_response_is_canonical_compact_and_current_only(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        completed = self.control_raw(
+            now="2026-08-19T12:00:00Z",
+            issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": str(self.root / "wt-47"), "state": "absent"}
+            )],
+        )
+        response = json.loads(completed.stdout)
+        self.assert_control_response_shape(response)
+        self.assertEqual(
+            completed.stdout,
+            json.dumps(response, sort_keys=True, separators=(",", ":")) + "\n",
+        )
+        rendered = completed.stdout
+        for forbidden in (
+            '"attempts"', '"launches"', '"phase_inputs"',
+            '"prior_attempt"', '"result_source"',
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertEqual(len(response["summaries"]), 1)
+        self.assertLessEqual(len(response["deltas"]), 1)
+        self.assertLessEqual(
+            len([a for a in response["actions"] if a["kind"] != "wait"]), 2
+        )
+
+    def test_control_returns_external_wait_and_finalize_from_current_facts(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        waiting = self.control(
+            now="2026-08-19T12:00:00Z",
+            issues=[47],
+            tracker=[self.tracker_fact(47, open_blockers=[40])],
+            worktrees=[],
+        )
+        self.assertEqual(waiting["summaries"][0]["state"], "blocked")
+        self.assertEqual(waiting["summaries"][0]["blockers"], [
+            {"kind": "issue", "issue": 40, "url": None}
+        ])
+        self.assertEqual(waiting["actions"], [{
+            "id": "wait:external",
+            "kind": "wait",
+            "wake_on": ["owner_notification", "tracker_change"],
+            "deadline_at": None,
+        }])
+        self.assertIsNone(waiting["next_deadline"])
+        fogged = self.control(
+            now="2026-08-19T12:00:30Z", issues=[47],
+            tracker=[self.tracker_fact(47, decision_blockers=[{
+                "issue": 41,
+                "url": "https://github.com/fagenorn/nix-config/issues/41",
+            }])], worktrees=[],
+        )
+        self.assertEqual(fogged["summaries"][0]["state"], "fogged")
+        self.assertEqual(fogged["summaries"][0]["blockers"], [{
+            "kind": "decision", "issue": 41,
+            "url": "https://github.com/fagenorn/nix-config/issues/41",
+        }])
+        finalized = self.control(
+            now="2026-08-19T12:01:00Z",
+            issues=[47],
+            tracker=[self.tracker_fact(47, state="closed")],
+            worktrees=[],
+        )
+        self.assertEqual(finalized["summaries"][0]["state"], "closed")
+        self.assertEqual(finalized["actions"], [{"id": "finalize", "kind": "finalize"}])
+        self.assertIsNone(finalized["next_deadline"])
+
+    def test_control_rejects_bad_observations_without_rewriting_the_ledger(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        valid = self.control_request(
+            now="2026-08-19T12:00:00Z",
+            issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": str(self.root / "wt-47"), "state": "absent"}
+            )],
+        )
+        mutations = {
+            "unsupported control interface version":
+                lambda value: value.__setitem__("interface_version", 2),
+            "invalid control request fields":
+                lambda value: value.__setitem__("extra", True),
+            "duplicate control issue":
+                lambda value: value["issues"].append(47),
+            "invalid control issue":
+                lambda value: value["issues"].__setitem__(0, True),
+            "tracker observations must match requested issues":
+                lambda value: value["tracker"].clear(),
+            "duplicate tracker observation":
+                lambda value: value["tracker"].append(dict(value["tracker"][0])),
+            "invalid tracker state":
+                lambda value: value["tracker"][0].__setitem__("state", "merged"),
+            "invalid tracker observation fields":
+                lambda value: value["tracker"][0].pop("decision_blockers"),
+            "invalid tracker open blocker":
+                lambda value: value["tracker"][0].__setitem__("open_blockers", [True]),
+            "invalid decision blocker fields":
+                lambda value: value["tracker"][0].__setitem__(
+                    "decision_blockers", [{"issue": 40}]
+                ),
+            "invalid decision blocker issue":
+                lambda value: value["tracker"][0].__setitem__(
+                    "decision_blockers", [{"issue": True, "url": "https://example.test/40"}]
+                ),
+            "invalid decision blocker url":
+                lambda value: value["tracker"][0].__setitem__(
+                    "decision_blockers", [{"issue": 40, "url": 40}]
+                ),
+            "invalid max_parallel":
+                lambda value: value.__setitem__("max_parallel", True),
+            "invalid attempt_budget_minutes":
+                lambda value: value.__setitem__("attempt_budget_minutes", False),
+            "invalid owner observation fields":
+                lambda value: value["owners"].append({
+                    "event_id": "x", "issue": 47, "attempt": 1, "launch": 1,
+                }),
+            "invalid owner event_id":
+                lambda value: value["owners"].append(self.owner_fact(
+                    event_id="", issue=47, attempt=1, launch=1
+                )),
+            "invalid owner state":
+                lambda value: value["owners"].append(self.owner_fact(
+                    event_id="x", issue=47, attempt=1, launch=1, state="dead"
+                )),
+            "invalid owner attempt":
+                lambda value: value["owners"].append(self.owner_fact(
+                    event_id="x", issue=47, attempt=True, launch=1
+                )),
+            "invalid owner issue":
+                lambda value: value["owners"].append(self.owner_fact(
+                    event_id="x", issue=True, attempt=1, launch=1
+                )),
+            "invalid owner launch":
+                lambda value: value["owners"].append(self.owner_fact(
+                    event_id="x", issue=47, attempt=1, launch=False
+                )),
+            "duplicate worktree observation":
+                lambda value: value["worktrees"].append(copy.deepcopy(value["worktrees"][0])),
+            "invalid candidate path":
+                lambda value: value["worktrees"][0]["candidate"].__setitem__("path", "wt-47"),
+            "invalid candidate fields":
+                lambda value: value["worktrees"][0]["candidate"].pop("state"),
+            "invalid candidate state":
+                lambda value: value["worktrees"][0]["candidate"].__setitem__("state", "free"),
+            "invalid recorded fields":
+                lambda value: value["worktrees"][0].__setitem__(
+                    "recorded", {"path": str(self.root / "wt-47")}
+                ),
+            "worktree observation outside requested issues":
+                lambda value: value["worktrees"][0].__setitem__("issue", 99),
+            "control time must not move backward":
+                lambda value: value.__setitem__("now", "2026-08-19T11:59:59Z"),
+        }
+        before = self.state_path.read_bytes()
+        for message, mutate in mutations.items():
+            with self.subTest(message=message):
+                request = copy.deepcopy(valid)
+                mutate(request)
+                completed = self.control_raw(request=request, ok=False)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(completed.stdout, "")
+                self.assertIn(message, completed.stderr)
+                self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_control_rejects_bad_request_files_and_recorded_path_mismatch(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        for request_path, message in (
+            ("relative.json", "request file path must be absolute"),
+            (self.root / "missing.json", "cannot read control request file"),
+        ):
+            with self.subTest(message=message):
+                completed = self.run_cli(
+                    "control", "--repo-root", self.root, "--run-id", self.run_id,
+                    "--request-file", request_path, ok=False,
+                )
+                self.assertIn(message, completed.stderr)
+        invalid_json = self.root / "invalid-control.json"
+        invalid_json.write_text("{", encoding="utf-8")
+        completed = self.run_cli(
+            "control", "--repo-root", self.root, "--run-id", self.run_id,
+            "--request-file", invalid_json, ok=False,
+        )
+        self.assertIn("invalid control request JSON", completed.stderr)
+
+        path = str(self.root / "wt-47")
+        self.control(now="2026-08-19T12:00:00Z", issues=[47],
+                     tracker=[self.tracker_fact(47)],
+                     worktrees=[self.worktree_fact(
+                         47, candidate={"path": path, "state": "absent"})])
+        before = self.state_path.read_bytes()
+        mismatch = self.control_raw(
+            now="2026-08-19T12:01:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(47, recorded={
+                "path": str(self.root / "other"),
+                "state": "matching_issue_branch",
+            })], ok=False,
+        )
+        self.assertIn("recorded worktree path does not match ledger", mismatch.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_control_rejects_candidate_path_aliases_atomically(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        shared = str(self.root / "shared-worktree")
+        before = self.state_path.read_bytes()
+        duplicate = self.control_raw(
+            now="2026-08-19T12:00:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[
+                self.worktree_fact(
+                    47, candidate={"path": shared, "state": "absent"}),
+                self.worktree_fact(
+                    51, candidate={"path": shared, "state": "absent"}),
+            ], ok=False,
+        )
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertIn("candidate worktree path", duplicate.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": shared, "state": "absent"})],
+        )
+        recorded = self.state_path.read_bytes()
+        alias = self.control_raw(
+            now="2026-08-19T12:01:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                51, candidate={"path": shared, "state": "absent"})],
+            ok=False,
+        )
+        self.assertNotEqual(alias.returncode, 0)
+        self.assertIn("candidate worktree path", alias.stderr)
+        self.assertEqual(self.state_path.read_bytes(), recorded)
+
+    def test_control_accepts_shared_candidate_when_no_action_consumes_it(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        shared = str(self.root / "unused-shared-worktree")
+        response = self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[
+                self.tracker_fact(47, open_blockers=[40]),
+                self.tracker_fact(51, open_blockers=[40]),
+            ],
+            worktrees=[
+                self.worktree_fact(
+                    47, candidate={"path": shared, "state": "absent"}),
+                self.worktree_fact(
+                    51, candidate={"path": shared, "state": "absent"}),
+            ],
+        )
+        self.assertEqual([s["state"] for s in response["summaries"]],
+                         ["blocked", "blocked"])
+        self.assertEqual(response["deltas"], [])
+        self.assertEqual(response["actions"], [{
+            "id": "wait:external",
+            "kind": "wait",
+            "wake_on": ["owner_notification", "tracker_change"],
+            "deadline_at": None,
+        }])
+        self.assertIsNone(response["next_deadline"])
+        self.assertEqual(self.read_state()["issues"], {})
 
     def test_delayed_notification_recovers_durable_terminal_result(self):
         self.init_run()

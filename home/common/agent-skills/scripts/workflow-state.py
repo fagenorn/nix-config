@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 
 SCHEMA_VERSION = 1
+CONTROL_INTERFACE_VERSION = 1
 ATTEMPT_STATES = frozenset({"active", "handed_off", "stopped", "failed", "merged"})
 RESULT_STATES = frozenset({"merged", "stopped", "failed"})
 RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused"})
@@ -68,6 +69,97 @@ ATTEMPT_FIELDS = frozenset(
     }
 )
 LAUNCH_FIELDS = frozenset({"kind", "owner", "worktree", "at"})
+
+BOOTSTRAP_FIELDS = frozenset({"interface_version", "run_id", "requirements"})
+BOOTSTRAP_REQUIREMENT_FIELDS = frozenset(
+    {"issue", "attempt", "owner", "action_id", "recorded_worktree"}
+)
+CONTROL_REQUEST_FIELDS = frozenset(
+    {
+        "interface_version",
+        "now",
+        "max_parallel",
+        "attempt_budget_minutes",
+        "issues",
+        "tracker",
+        "owners",
+        "worktrees",
+    }
+)
+TRACKER_OBSERVATION_FIELDS = frozenset(
+    {"issue", "state", "open_blockers", "decision_blockers"}
+)
+TRACKER_STATES = frozenset({"open", "closed"})
+DECISION_BLOCKER_FIELDS = frozenset({"issue", "url"})
+OWNER_OBSERVATION_FIELDS = frozenset(
+    {"event_id", "issue", "attempt", "launch", "state"}
+)
+OWNER_OBSERVATION_STATES = frozenset({"unavailable"})
+WORKTREE_OBSERVATION_FIELDS = frozenset({"issue", "recorded", "candidate"})
+RECORDED_WORKTREE_FIELDS = frozenset({"path", "state"})
+RECORDED_WORKTREE_STATES = frozenset({"matching_issue_branch"})
+CANDIDATE_WORKTREE_FIELDS = frozenset({"path", "state"})
+CANDIDATE_WORKTREE_STATES = frozenset({"absent"})
+CONTROL_RESPONSE_FIELDS = frozenset(
+    {
+        "interface_version",
+        "run_id",
+        "now",
+        "summaries",
+        "deltas",
+        "actions",
+        "next_deadline",
+    }
+)
+CONTROL_SUMMARY_FIELDS = frozenset(
+    {
+        "issue",
+        "state",
+        "attempt",
+        "owner",
+        "worktree",
+        "deadline_at",
+        "blockers",
+        "result",
+    }
+)
+CONTROL_SUMMARY_STATES = frozenset(
+    {
+        "queued",
+        "blocked",
+        "fogged",
+        "active",
+        "handed_off",
+        "merged",
+        "stopped",
+        "failed",
+        "closed",
+    }
+)
+CONTROL_BLOCKER_FIELDS = frozenset({"kind", "issue", "url"})
+CONTROL_BLOCKER_KINDS = frozenset({"issue", "decision"})
+CONTROL_DELTA_FIELDS = frozenset({"issue", "attempt", "kind", "state"})
+CONTROL_DELTA_KINDS = frozenset(
+    {"expired", "spawned", "resumed", "retried", "retry_refused"}
+)
+CONTROL_DISPATCH_FIELDS = frozenset(
+    {
+        "id",
+        "kind",
+        "issue",
+        "attempt",
+        "owner",
+        "worktree",
+        "handoff_path",
+        "deadline_at",
+    }
+)
+CONTROL_DISPATCH_KINDS = frozenset({"spawn", "resume", "retry"})
+CONTROL_WAIT_FIELDS = frozenset({"id", "kind", "wake_on", "deadline_at"})
+CONTROL_WAKE_EVENTS = frozenset(
+    {"owner_notification", "tracker_change", "deadline"}
+)
+CONTROL_FINALIZE_FIELDS = frozenset({"id", "kind"})
 
 
 class WorkflowError(Exception):
@@ -703,6 +795,213 @@ def stop_attempt(
     return result
 
 
+def require_exact_fields(value: Any, fields: frozenset[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != fields:
+        raise WorkflowError(f"invalid {label} fields")
+    return value
+
+
+def require_absolute_path(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+        raise WorkflowError(f"invalid {label} path")
+    return value
+
+
+def validate_tracker_observation(value: Any) -> dict[str, Any]:
+    observation = require_exact_fields(
+        value, TRACKER_OBSERVATION_FIELDS, "tracker observation"
+    )
+    require_plain_int(observation["issue"], "tracker issue", minimum=1)
+    if (
+        not isinstance(observation["state"], str)
+        or observation["state"] not in TRACKER_STATES
+    ):
+        raise WorkflowError("invalid tracker state")
+    blockers = observation["open_blockers"]
+    if not isinstance(blockers, list):
+        raise WorkflowError("invalid tracker open blocker")
+    seen_open: set[int] = set()
+    for blocker in blockers:
+        require_plain_int(blocker, "tracker open blocker", minimum=1)
+        if blocker in seen_open:
+            raise WorkflowError("duplicate tracker open blocker")
+        seen_open.add(blocker)
+    decisions = observation["decision_blockers"]
+    if not isinstance(decisions, list):
+        raise WorkflowError("invalid decision blockers")
+    seen_decisions: set[int] = set()
+    for decision in decisions:
+        decision = require_exact_fields(
+            decision, DECISION_BLOCKER_FIELDS, "decision blocker"
+        )
+        decision_issue = require_plain_int(
+            decision["issue"], "decision blocker issue", minimum=1
+        )
+        if decision_issue in seen_decisions:
+            raise WorkflowError("duplicate decision blocker")
+        seen_decisions.add(decision_issue)
+        if decision["url"] is not None and not isinstance(decision["url"], str):
+            raise WorkflowError("invalid decision blocker url")
+    return observation
+
+
+def validate_owner_observation(value: Any) -> dict[str, Any]:
+    observation = require_exact_fields(
+        value, OWNER_OBSERVATION_FIELDS, "owner observation"
+    )
+    if not isinstance(observation["event_id"], str) or not observation["event_id"]:
+        raise WorkflowError("invalid owner event_id")
+    require_plain_int(observation["issue"], "owner issue", minimum=1)
+    require_plain_int(observation["attempt"], "owner attempt", minimum=1)
+    require_plain_int(observation["launch"], "owner launch", minimum=1)
+    if (
+        not isinstance(observation["state"], str)
+        or observation["state"] not in OWNER_OBSERVATION_STATES
+    ):
+        raise WorkflowError("invalid owner state")
+    return observation
+
+
+def validate_worktree_observation(value: Any) -> dict[str, Any]:
+    observation = require_exact_fields(
+        value, WORKTREE_OBSERVATION_FIELDS, "worktree observation"
+    )
+    require_plain_int(observation["issue"], "worktree issue", minimum=1)
+    recorded = observation["recorded"]
+    if recorded is not None:
+        recorded = require_exact_fields(
+            recorded, RECORDED_WORKTREE_FIELDS, "recorded"
+        )
+        require_absolute_path(recorded["path"], "recorded")
+        if (
+            not isinstance(recorded["state"], str)
+            or recorded["state"] not in RECORDED_WORKTREE_STATES
+        ):
+            raise WorkflowError("invalid recorded state")
+    candidate = observation["candidate"]
+    if candidate is not None:
+        candidate = require_exact_fields(
+            candidate, CANDIDATE_WORKTREE_FIELDS, "candidate"
+        )
+        require_absolute_path(candidate["path"], "candidate")
+        if (
+            not isinstance(candidate["state"], str)
+            or candidate["state"] not in CANDIDATE_WORKTREE_STATES
+        ):
+            raise WorkflowError("invalid candidate state")
+    return observation
+
+
+def validate_control_request(value: Any) -> dict[str, Any]:
+    request = require_exact_fields(value, CONTROL_REQUEST_FIELDS, "control request")
+    if (
+        type(request["interface_version"]) is not int
+        or request["interface_version"] != CONTROL_INTERFACE_VERSION
+    ):
+        raise WorkflowError("unsupported control interface version")
+    if not isinstance(request["now"], str):
+        raise WorkflowError("invalid control now: expected an RFC3339 UTC timestamp")
+    request["now"] = format_utc(parse_utc(request["now"], "control now"))
+    require_plain_int(request["max_parallel"], "max_parallel")
+    require_plain_int(
+        request["attempt_budget_minutes"], "attempt_budget_minutes", minimum=1
+    )
+
+    issues = request["issues"]
+    if not isinstance(issues, list):
+        raise WorkflowError("invalid control issues")
+    seen_issues: set[int] = set()
+    for issue in issues:
+        require_plain_int(issue, "control issue", minimum=1)
+        if issue in seen_issues:
+            raise WorkflowError("duplicate control issue")
+        seen_issues.add(issue)
+
+    tracker = request["tracker"]
+    if not isinstance(tracker, list):
+        raise WorkflowError("invalid tracker observations")
+    tracker_issues: set[int] = set()
+    for raw_observation in tracker:
+        observation = validate_tracker_observation(raw_observation)
+        issue = observation["issue"]
+        if issue in tracker_issues:
+            raise WorkflowError("duplicate tracker observation")
+        tracker_issues.add(issue)
+    if tracker_issues != seen_issues:
+        raise WorkflowError("tracker observations must match requested issues")
+
+    owners = request["owners"]
+    if not isinstance(owners, list):
+        raise WorkflowError("invalid owner observations")
+    owner_event_ids: set[str] = set()
+    owner_identities: set[tuple[int, int, int]] = set()
+    for raw_observation in owners:
+        observation = validate_owner_observation(raw_observation)
+        if observation["issue"] not in seen_issues:
+            raise WorkflowError("owner observation outside requested issues")
+        if observation["event_id"] in owner_event_ids:
+            raise WorkflowError("duplicate owner event_id")
+        owner_event_ids.add(observation["event_id"])
+        identity = (
+            observation["issue"], observation["attempt"], observation["launch"]
+        )
+        if identity in owner_identities:
+            raise WorkflowError("duplicate owner observation")
+        owner_identities.add(identity)
+
+    worktrees = request["worktrees"]
+    if not isinstance(worktrees, list):
+        raise WorkflowError("invalid worktree observations")
+    worktree_issues: set[int] = set()
+    for raw_observation in worktrees:
+        observation = validate_worktree_observation(raw_observation)
+        issue = observation["issue"]
+        if issue in worktree_issues:
+            raise WorkflowError("duplicate worktree observation")
+        worktree_issues.add(issue)
+        if issue not in seen_issues:
+            raise WorkflowError("worktree observation outside requested issues")
+    return request
+
+
+def load_control_request(path_value: str) -> dict[str, Any]:
+    path = Path(path_value)
+    if not path.is_absolute():
+        raise WorkflowError("request file path must be absolute")
+    try:
+        with path.open(encoding="utf-8") as source:
+            value = json.load(source)
+    except json.JSONDecodeError as error:
+        raise WorkflowError(f"invalid control request JSON: {error}") from error
+    except (OSError, UnicodeError) as error:
+        raise WorkflowError(f"cannot read control request file: {error}") from error
+    return validate_control_request(value)
+
+
+def bootstrap_response(state: dict[str, Any]) -> dict[str, Any]:
+    requirements = []
+    for issue_key in sorted(state["issues"], key=int):
+        issue_state = state["issues"][issue_key]
+        if not issue_state["attempts"]:
+            continue
+        attempt = issue_state["attempts"][-1]
+        launch = len(attempt["launches"])
+        requirements.append(
+            {
+                "issue": attempt["issue"],
+                "attempt": attempt["attempt"],
+                "owner": attempt["owner"],
+                "action_id": f"{attempt['issue']}:{attempt['attempt']}:{launch}",
+                "recorded_worktree": attempt["worktree"],
+            }
+        )
+    return {
+        "interface_version": CONTROL_INTERFACE_VERSION,
+        "run_id": state["run_id"],
+        "requirements": requirements,
+    }
+
+
 def command_init_run(args: argparse.Namespace) -> int:
     now = format_utc(parse_utc(args.now, "--now"))
 
@@ -722,7 +1021,291 @@ def command_init_run(args: argparse.Namespace) -> int:
     state = transact(
         args.repo_root, args.run_id, initialize, allow_missing=True
     )
-    print_json(state)
+    print_json(bootstrap_response(state))
+    return 0
+
+
+def control_blockers(tracker: dict[str, Any]) -> list[dict[str, Any]]:
+    if tracker["decision_blockers"]:
+        return [
+            {"kind": "decision", "issue": item["issue"], "url": item["url"]}
+            for item in tracker["decision_blockers"]
+        ]
+    return [
+        {"kind": "issue", "issue": issue, "url": None}
+        for issue in tracker["open_blockers"]
+    ]
+
+
+def new_control_attempt(
+    *, issue: int, worktree: str, now: str, deadline_at: str
+) -> dict[str, Any]:
+    owner = f"{issue}:1"
+    return {
+        "issue": issue,
+        "attempt": 1,
+        "owner": owner,
+        "worktree": worktree,
+        "started_at": now,
+        "deadline_at": deadline_at,
+        "state": "active",
+        "launch_kind": "fresh",
+        "launches": [
+            {"kind": "fresh", "owner": owner, "worktree": worktree, "at": now}
+        ],
+        "prior_attempt": None,
+        "result": None,
+        "finished_at": None,
+        "result_source": None,
+        "handoff_path": None,
+        "phase": 0,
+        "last_progress_at": now,
+        "phase_action": None,
+        "phase_inputs": None,
+    }
+
+
+def control_summary(
+    *,
+    issue: int,
+    tracker: dict[str, Any],
+    issue_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    blockers = control_blockers(tracker)
+    latest = None
+    if issue_state is not None and issue_state["attempts"]:
+        latest = issue_state["attempts"][-1]
+    if tracker["state"] == "closed" and latest is None:
+        state_name = "closed"
+    elif tracker["decision_blockers"] and latest is None:
+        state_name = "fogged"
+    elif tracker["open_blockers"] and latest is None:
+        state_name = "blocked"
+    elif latest is None:
+        state_name = "queued"
+    else:
+        state_name = latest["state"]
+        blockers = []
+    result = None
+    if latest is not None and latest["result"] is not None:
+        result = {
+            field: copy.deepcopy(latest["result"][field]) for field in RESULT_FIELDS
+        }
+    return {
+        "issue": issue,
+        "state": state_name,
+        "attempt": None if latest is None else latest["attempt"],
+        "owner": None if latest is None else latest["owner"],
+        "worktree": None if latest is None else latest["worktree"],
+        "deadline_at": None if latest is None else latest["deadline_at"],
+        "blockers": blockers,
+        "result": result,
+    }
+
+
+def command_control(args: argparse.Namespace) -> int:
+    request = load_control_request(args.request_file)
+    now = request["now"]
+    now_value = parse_utc(now, "control now")
+    tracker_by_issue = {item["issue"]: item for item in request["tracker"]}
+    worktree_by_issue = {item["issue"]: item for item in request["worktrees"]}
+
+    def control(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        assert state is not None
+        if now_value < parse_utc(state["updated_at"], "run update time"):
+            raise WorkflowError("control time must not move backward")
+
+        unavailable: set[tuple[int, int, int]] = set()
+        for observation in request["owners"]:
+            issue_state = state["issues"].get(str(observation["issue"]))
+            if issue_state is None or observation["attempt"] > len(
+                issue_state["attempts"]
+            ):
+                raise WorkflowError("unknown owner observation identity")
+            attempt = issue_state["attempts"][observation["attempt"] - 1]
+            if observation["launch"] > len(attempt["launches"]):
+                raise WorkflowError("unknown owner observation identity")
+            unavailable.add(
+                (observation["issue"], observation["attempt"], observation["launch"])
+            )
+
+        for issue, observation in worktree_by_issue.items():
+            recorded = observation["recorded"]
+            if recorded is None:
+                continue
+            issue_state = state["issues"].get(str(issue))
+            if issue_state is None or not issue_state["attempts"]:
+                raise WorkflowError("recorded worktree has no ledger attempt")
+            if recorded["path"] != issue_state["attempts"][-1]["worktree"]:
+                raise WorkflowError("recorded worktree path does not match ledger")
+
+        occupied = 0
+        for issue_state in state["issues"].values():
+            if not issue_state["attempts"]:
+                continue
+            latest = issue_state["attempts"][-1]
+            identity = (
+                latest["issue"], latest["attempt"], len(latest["launches"])
+            )
+            if latest["state"] == "active" and identity not in unavailable:
+                occupied += 1
+        capacity = max(0, request["max_parallel"] - occupied)
+
+        proposed: list[tuple[int, str, str]] = []
+        for issue in request["issues"]:
+            tracker = tracker_by_issue[issue]
+            issue_state = state["issues"].get(str(issue))
+            if (
+                capacity <= 0
+                or tracker["state"] != "open"
+                or tracker["open_blockers"]
+                or tracker["decision_blockers"]
+                or (issue_state is not None and issue_state["attempts"])
+            ):
+                continue
+            observation = worktree_by_issue.get(issue)
+            if observation is None or observation["candidate"] is None:
+                raise WorkflowError(
+                    "fresh control action requires an absent candidate worktree"
+                )
+            candidate = observation["candidate"]
+            proposed.append((issue, candidate["path"], candidate["state"]))
+            capacity -= 1
+
+        selected_paths: dict[str, int] = {}
+        durable_paths: dict[str, set[int]] = {}
+        for issue_state in state["issues"].values():
+            for attempt in issue_state["attempts"]:
+                key = os.path.normcase(os.path.normpath(attempt["worktree"]))
+                durable_paths.setdefault(key, set()).add(attempt["issue"])
+        for issue, path, _ in proposed:
+            key = os.path.normcase(os.path.normpath(path))
+            if key in selected_paths and selected_paths[key] != issue:
+                raise WorkflowError("candidate worktree path is shared by accepted actions")
+            if any(other_issue != issue for other_issue in durable_paths.get(key, set())):
+                raise WorkflowError("candidate worktree path aliases another issue")
+            selected_paths[key] = issue
+
+        actionless_replay = not proposed
+        for issue in request["issues"]:
+            issue_state = state["issues"].get(str(issue))
+            if issue_state is None or not issue_state["attempts"]:
+                continue
+            latest = issue_state["attempts"][-1]
+            if latest["state"] not in {"active", "handed_off"}:
+                continue
+            observation = worktree_by_issue.get(issue)
+            recorded = None if observation is None else observation["recorded"]
+            if recorded is not None:
+                continue
+            candidate = None if observation is None else observation["candidate"]
+            identity = (issue, latest["attempt"], len(latest["launches"]))
+            tracker = tracker_by_issue[issue]
+            replay = (
+                actionless_replay
+                and latest["state"] == "active"
+                and identity not in unavailable
+                and tracker["state"] == "open"
+                and not tracker["open_blockers"]
+                and not tracker["decision_blockers"]
+                and candidate is not None
+                and candidate["path"] == latest["worktree"]
+                and len(latest["launches"]) == 1
+                and latest["launches"][0]["at"] == now
+                and latest["started_at"] == now
+            )
+            if not replay:
+                raise WorkflowError(
+                    "current control action requires a recorded worktree observation"
+                )
+
+        deadline_at = format_utc(
+            now_value + timedelta(minutes=request["attempt_budget_minutes"])
+        )
+        deltas: list[dict[str, Any]] = []
+        actions: list[dict[str, Any]] = []
+        for issue, path, _ in proposed:
+            attempt = new_control_attempt(
+                issue=issue, worktree=path, now=now, deadline_at=deadline_at
+            )
+            state["issues"][str(issue)] = {
+                "issue": issue,
+                "attempts": [attempt],
+                "outcome": None,
+            }
+            action_id = f"{issue}:1:1"
+            deltas.append(
+                {"issue": issue, "attempt": 1, "kind": "spawned", "state": "active"}
+            )
+            actions.append(
+                {
+                    "id": action_id,
+                    "kind": "spawn",
+                    "issue": issue,
+                    "attempt": 1,
+                    "owner": attempt["owner"],
+                    "worktree": attempt["worktree"],
+                    "handoff_path": None,
+                    "deadline_at": attempt["deadline_at"],
+                }
+            )
+        changed = bool(proposed)
+        if changed:
+            state["updated_at"] = now
+
+        summaries = [
+            control_summary(
+                issue=issue,
+                tracker=tracker_by_issue[issue],
+                issue_state=state["issues"].get(str(issue)),
+            )
+            for issue in request["issues"]
+        ]
+        deadlines = [
+            summary["deadline_at"]
+            for summary in summaries
+            if summary["state"] in {"active", "handed_off"}
+            and summary["deadline_at"] is not None
+        ]
+        next_deadline = min(deadlines, key=lambda value: parse_utc(value)) if deadlines else None
+        if summaries and all(
+            summary["state"] in {"merged", "stopped", "failed", "closed"}
+            for summary in summaries
+        ) or not summaries:
+            actions.append({"id": "finalize", "kind": "finalize"})
+        elif next_deadline is None:
+            actions.append(
+                {
+                    "id": "wait:external",
+                    "kind": "wait",
+                    "wake_on": ["owner_notification", "tracker_change"],
+                    "deadline_at": None,
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "id": f"wait:{next_deadline}",
+                    "kind": "wait",
+                    "wake_on": [
+                        "owner_notification", "tracker_change", "deadline"
+                    ],
+                    "deadline_at": next_deadline,
+                }
+            )
+        response = {
+            "interface_version": CONTROL_INTERFACE_VERSION,
+            "run_id": args.run_id,
+            "now": now,
+            "summaries": summaries,
+            "deltas": deltas,
+            "actions": actions,
+            "next_deadline": next_deadline,
+        }
+        return response, changed
+
+    response = transact(args.repo_root, args.run_id, control)
+    print_json(response)
     return 0
 
 
@@ -1054,6 +1637,12 @@ def build_parser() -> argparse.ArgumentParser:
     init_run = subparsers.add_parser("init-run")
     add_run_arguments(init_run)
     init_run.set_defaults(handler=command_init_run)
+
+    control = subparsers.add_parser("control")
+    control.add_argument("--repo-root", required=True)
+    control.add_argument("--run-id", required=True)
+    control.add_argument("--request-file", required=True)
+    control.set_defaults(handler=command_control)
 
     launch = subparsers.add_parser("launch")
     add_run_arguments(launch)
