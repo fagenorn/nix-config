@@ -13,14 +13,14 @@ a strict interface-version-1 request then enters the sole policy command, `contr
 whose one transaction validates observations, applies lifecycle precedence, records
 accepted launches, and returns bounded summaries, current deltas, typed actions, and
 one deadline. The Claude skill becomes the adapter for tracker, worktree, owner, spawn,
-replaceable one-shot wait, and report I/O. See D1–D15.
+replaceable one-shot wait, and report I/O. See D1–D16.
 
 **Tech stack:** Python 3 standard library (`argparse`, `copy`, `datetime`, `fcntl`,
 `json`, `pathlib`, atomic filesystem operations); `unittest` subprocess/CLI tests;
 Markdown skill contracts; JSON eval fixtures; Nix/Just verification.
 
 **Spec:** `.claude/specs/2026-08-19-workflow-control-plane-design.md` is the source of
-truth. It owns the only issue-level decision ledger; this plan cites D1–D15 and does not
+truth. It owns the only issue-level decision ledger; this plan cites D1–D16 and does not
 duplicate its rows.
 
 ## Global Constraints
@@ -57,8 +57,12 @@ duplicate its rows.
   `init-run` requirement and for each absent/mismatched returned path. It never
   classifies tracker readiness; `control` ignores candidates it does not use (D15).
 - Wait replacement follows D11 and D14: missing/already-exited cancellation is
-  idempotent; an arm failure clears truthful adapter wait state and fails loudly; the
-  host reaps inherited detached observers before a full restart rearms.
+  idempotent; unexpected cancellation failure restores the old ID/handle and fails
+  before arming; an arm failure clears truthful adapter wait state and fails loudly;
+  the host reaps inherited detached observers before a full restart rearms.
+- Candidate paths consumed by accepted actions are pairwise distinct and do not alias
+  another issue's durable recorded path. Validate the complete proposed action set
+  under the ledger lock before mutation (D16).
 - Tests use only the control CLI, owner CLI commands, and reopened `state.json`; they
   never import transition helpers (D8).
 - Any prose written into `SKILL.md` or eval JSON must describe the behavior present in
@@ -119,9 +123,9 @@ surface.
 
 ## Decisions
 
-The spec's `## Decision ledger` is authoritative. Tasks cite D1–D15 at the exact points
+The spec's `## Decision ledger` is authoritative. Tasks cite D1–D16 at the exact points
 where those bindings constrain implementation. Phase-5 review added D10–D12,
-self-review added D13, and final re-review added D14–D15; this plan does not duplicate
+self-review added D13, and final re-review added D14–D16; this plan does not duplicate
 their rows.
 
 ## Phase-5 review provenance and dispositions
@@ -146,6 +150,7 @@ their rows.
 - Reviewer: native fresh reviewer `/root/issue47_plan_review`
 - Artifact: `/Users/anis/tmp/nix-config/.git/worktrees/issue-47-workflow-control-plane/PLAN-REVIEW.md`
 - Reviewed HEAD: `c4e3862de6478c22d296cec047050b4f3ba67e70`
+- Last-amendment base: `ac302b320b93b41c54ac3245c0a049d31d3707f2`
 - Fallback: native because `codex-collaboration` was unavailable
 
 | Finding | Disposition |
@@ -155,6 +160,8 @@ their rows.
 | Configured budget migration implicit | accepted — Task 4 migrates the live binding contract to exact request fields |
 | Wait failure semantics unspecified | accepted — Task 4 pins idempotent missing/exited cancellation and truthful fail-loud arm failure per D14 |
 | Full-restart observer ownership unclear | accepted — Task 4 makes inherited-detached-observer cleanup an explicit host precondition per D14 |
+| Accepted actions could share one candidate path | accepted — Task 1 rejects the complete proposal under lock and pins byte-unchanged two-ready-issue and durable-alias cases per D16 |
+| Unexpected old-observer cancellation failure lacked recovery | accepted — Task 4 restores the old ID/handle pair, fails before arming, and leaves identical-response replacement retryable per D14 |
 
 ---
 
@@ -205,6 +212,10 @@ their rows.
 - A candidate is required only when this invocation accepts a fresh attempt needing a
   new path; a recorded observation is required only when a current action needs it.
   Missing action-critical facts fail without changing `state.json` (D3, D7).
+- Candidate paths selected for distinct accepted actions are pairwise distinct and do
+  not equal another issue's durable recorded path. Validate the complete proposal under
+  the ledger lock before mutation; duplicate candidates that no action consumes remain
+  valid (D16).
 - The only consumed-candidate replay accepted is D13's actionless causal match: the
   latest attempt remains active, has no current-unavailable event, and its same exact
   path was consumed by the first launch at the identical request instant. Wrong
@@ -658,6 +669,42 @@ Then add these tests:
         )
         self.assertIn("recorded worktree path does not match ledger", mismatch.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_control_rejects_candidate_path_aliases_atomically(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        shared = str(self.root / "shared-worktree")
+        before = self.state_path.read_bytes()
+        duplicate = self.control_raw(
+            now="2026-08-19T12:00:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[
+                self.worktree_fact(
+                    47, candidate={"path": shared, "state": "absent"}),
+                self.worktree_fact(
+                    51, candidate={"path": shared, "state": "absent"}),
+            ], ok=False,
+        )
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertIn("candidate worktree path", duplicate.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": shared, "state": "absent"})],
+        )
+        recorded = self.state_path.read_bytes()
+        alias = self.control_raw(
+            now="2026-08-19T12:01:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                51, candidate={"path": shared, "state": "absent"})],
+            ok=False,
+        )
+        self.assertNotEqual(alias.returncode, 0)
+        self.assertIn("candidate worktree path", alias.stderr)
+        self.assertEqual(self.state_path.read_bytes(), recorded)
 ```
 
 - [ ] **Step 2: Run the focused tests and observe the red state**
@@ -671,11 +718,13 @@ python3 -m unittest -v \
   tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_returns_external_wait_and_finalize_from_current_facts \
   tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_rejects_bad_observations_without_rewriting_the_ledger \
   tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_rejects_bad_request_files_and_recorded_path_mismatch \
+  tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_rejects_candidate_path_aliases_atomically \
   2>&1 | tail -30
 ```
 
 Expected: FAIL because `init-run` still prints raw state and `control` is not a
-recognized command; `state.json` remains byte-identical in every rejection case.
+recognized command; the path-alias case additionally lacks D16 proposal validation.
+`state.json` remains byte-identical in every rejection case.
 
 - [ ] **Step 3: Implement the strict request and response boundary**
 
@@ -694,8 +743,12 @@ In `workflow-state.py`:
    unlike the other commands it has no `--now` because `now` is in the request.
 5. For the scheduling subset in this task, derive blocked/fogged/closed/queued states,
    fill capacity with never-launched ready issues in request order, and use only a
-   verified absent candidate. Create attempts with owner `<issue>:1`, one fresh launch
-   at request `now`, and fixed deadline `now + attempt_budget_minutes`.
+   verified absent candidate. Build the complete proposed action list in memory under
+   the ledger lock; before creating attempts, reject if candidate paths selected by
+   distinct actions repeat or equal another issue's durable recorded path. Do not
+   include unused candidate observations in this exclusivity set (D16). Create attempts
+   with owner `<issue>:1`, one fresh launch at request `now`, and fixed deadline
+   `now + attempt_budget_minutes`.
 6. Reuse the existing locked state mutation and atomic replace. Construct the response
    only from the post-mutation state. Append exactly one `wait` or `finalize` envelope
    after dispatch envelopes.
@@ -715,7 +768,8 @@ python3 -m unittest tests.test_workflow_state -q
 
 Expected: `OK`; all pre-existing public-command tests also remain green at this
 intermediate commit. Any response containing a forbidden history key or any changed
-ledger bytes after a rejected request blocks the commit.
+ledger bytes after a rejected request, including either candidate-alias case, blocks
+the commit.
 
 - [ ] **Step 5: Commit**
 
@@ -724,7 +778,7 @@ git add home/common/agent-skills/scripts/workflow-state.py home/common/agent-ski
 git commit -m "feat(workflow-state): add bounded bootstrap and control boundary
 
 Projects restart requirements, validates normalized observations, and returns
-canonical bounded responses while preserving schema version 1. Per D2-D5/D8/D10.
+canonical bounded responses while preserving schema version 1. Per D2-D5/D8/D10/D16.
 
 Co-Authored-By: Codex <noreply@openai.com>"
 ```
@@ -779,6 +833,9 @@ Co-Authored-By: Codex <noreply@openai.com>"
   wrong instant, a collision on the wrong durable path, same-instant terminal state,
   and current-unavailable state reject atomically. Resume/retry/new dispatch requires
   the current recorded/candidate facts.
+- After all resume/retry/spawn selections, apply D16 once to the complete proposed
+  action set before persisting any launch. Retry and spawn candidates share the same
+  exclusivity set; a conflict rejects every transition and preserves ledger bytes.
 
 - [ ] **Step 1: Write one exact six-stage combined replay, then focused scenarios**
 
@@ -1387,8 +1444,10 @@ literally:
    to current external owners exactly as D12 defines. Decrement once for every accepted
    dispatch action, including a resume.
 6. In three issue-ordered passes, accept resumes, then retries, then first spawns until
-   capacity is full. Reuse existing attempt construction/stop logic internally; do not
-   call a public command handler from another handler.
+   capacity is full. Before mutation, validate the complete proposal so candidate paths
+   consumed by retries/spawns are pairwise distinct and do not alias another issue's
+   durable recorded path (D16). Reuse existing attempt construction/stop logic
+   internally; do not call a public command handler from another handler.
 7. Record each accepted launch before placing its envelope in the response. Emit only
    current-invocation deltas; repeated control over advanced state emits none.
 8. Recompute summaries and minimum deadline from the committed post-transition state,
@@ -1419,7 +1478,7 @@ git add home/common/agent-skills/scripts/workflow-state.py home/common/agent-ski
 git commit -m "feat(workflow-state): centralize dispatcher lifecycle policy
 
 Applies expiry and resume-retry-spawn precedence atomically, persists actions
-before emission, and proves the single-ledger six-stage replay. Per D4-D8/D10/D12-D13.
+before emission, and proves the single-ledger six-stage replay. Per D4-D8/D10/D12-D13/D16.
 
 Co-Authored-By: Codex <noreply@openai.com>"
 ```
@@ -1587,11 +1646,14 @@ Co-Authored-By: Codex <noreply@openai.com>"
   `resume` includes the durable handoff path when present. Host task IDs remain outside
   the lifecycle contract.
 - Adapter state has only `current_wait_id` and `current_wait_handle`. For a new ID,
-  publish it first, cancel the old handle, then arm/store the new handle; a wake carries
-  its ID and is ignored unless it equals the current ID. The same ID never duplicates an
-  observer; finalize clears the ID before cancellation (D11). A missing/already-exited
-  old handle is idempotent and replacement arming continues. If arming fails, clear or
-  mark both adapter fields uninstalled and fail loudly that no wake is installed (D14).
+  save the old pair, publish the new ID, cancel the old handle, then arm/store the new
+  handle; a wake carries its ID and is ignored unless it equals the current ID. The same
+  ID never duplicates an observer; finalize clears the ID before cancellation (D11).
+  A missing/already-exited old handle is idempotent and replacement arming continues.
+  Unexpected cancellation failure restores the saved old ID/handle, does not arm, and
+  fails loudly so the next identical response retries replacement. If arming fails,
+  clear or mark both adapter fields uninstalled and fail loudly that no wake is
+  installed. A new ID is never paired with the old handle (D14).
 - On full dispatcher restart, the host reaps/cancels inherited detached observers
   before the restarted adapter rearms from a returned wait ID. Process-local adapter
   state cannot discover or adopt them (D14).
@@ -1679,7 +1741,8 @@ In `WorkflowSkillContractsTest`, replace launch/reconcile-specific assertions wi
         )
         self.assert_ordered(
             action_section,
-            "current_wait_id", "publish the new wait ID", "cancel the old handle",
+            "save the old `current_wait_id` and `current_wait_handle` pair",
+            "publish the new wait ID", "cancel the old handle",
             "arm and store the new one-shot observer",
         )
         self.assertIn("same wait ID", action_section)
@@ -1697,6 +1760,16 @@ In `WorkflowSkillContractsTest`, replace launch/reconcile-specific assertions wi
         self.assert_ordered(
             action_section, "missing or already exited", "idempotent",
             "arm the replacement",
+        )
+        self.assert_ordered(
+            action_section, "unexpected cancellation failure",
+            "restore the old `current_wait_id` and `current_wait_handle` pair",
+            "do not arm the replacement", "fail loudly",
+            "next identical response retries replacement",
+        )
+        self.assertIn(
+            "never leave the new wait ID paired with the old handle",
+            action_section,
         )
         self.assert_ordered(
             action_section, "arming fails", "clear `current_wait_id`",
@@ -1751,7 +1824,9 @@ In `WorkflowSkillContractsTest`, replace launch/reconcile-specific assertions wi
             "normalized", "spawn", "resume", "retry", "wait", "finalize",
             "bounded summaries", "unknown action kind", "cancel the old wait",
             "stale wake ID", "already-exited wait", "no wake is installed",
-            "reap inherited detached wait observers",
+            "unexpected cancellation failure", "restore the old wait ID/handle",
+            "do not arm replacement", "never pair the new wait ID with the old handle",
+            "retry replacement", "reap inherited detached wait observers",
         ):
             self.assertIn(anchor, expected)
         for retired in ("workflow-state launch", "workflow-state reconcile"):
@@ -1786,8 +1861,8 @@ python3 -m unittest tests.test_workflow_skill_contracts.WorkflowSkillContractsTe
 
 Expected: FAIL because the skill/evals still call `launch`/`reconcile`, narrate policy,
 lack bounded bootstrap, exact configured-limit mapping, policy-free candidate gathering,
-and operational wait failure/restart behavior, and leave standalone/handoff branches on
-the retired command.
+and operational wait cancellation/arming/restart recovery, and leave standalone/handoff
+branches on the retired command.
 
 - [ ] **Step 3: Rewrite the live skill and eval contracts**
 
@@ -1812,13 +1887,17 @@ and Claude-only dispatch metadata:
 4. **Execute control actions:** in returned order, spawn background owners for
    `spawn`/`resume`/`retry` using unchanged lifecycle tokens and exact paths. For
    `wait`, keep only `current_wait_id/current_wait_handle`: same ID means no new
-   observer; different ID publishes the replacement ID first, cancels the old handle,
-   then arms/stores one new observer; a wake carries its ID and is ignored when stale.
+   observer; for a different ID, save the old `current_wait_id` and
+   `current_wait_handle` pair, publish the replacement ID, cancel the old handle, then
+   arm/store one new observer; a wake carries its ID and is ignored when stale.
    Missing/already-exited old handles are idempotent cancel outcomes and do not prevent
-   replacement arming. If arming fails, clear/mark both fields uninstalled and fail
-   loudly that no wake is installed. `finalize` clears the ID before canceling the
-   handle. Any unknown kind stops before execution and surfaces the contract error
-   (D11, D14, and The Bar's fail-loud rule).
+   replacement arming. On unexpected cancellation failure, restore the old
+   `current_wait_id` and `current_wait_handle` pair, do not arm the replacement, and fail
+   loudly; the next identical response then retries replacement. Never leave the new
+   wait ID paired with the old handle. If arming fails after cancellation, clear/mark
+   both fields uninstalled and fail loudly that no wake is installed. `finalize` clears
+   the ID before canceling the handle. Any unknown kind stops before execution and
+   surfaces the contract error (D11, D14, and The Bar's fail-loud rule).
 5. **Final report:** render issue/state/PR/reason and grouped discussion items from the
    same finalize response's summaries.
 
@@ -1850,9 +1929,9 @@ Do not change phase-budget semantics, terminal finish, or Phase-1 exact-path ado
 Update both eval cases so their expected outputs grade the bounded bootstrap, response-
 only order/identity, the closed action set with fail-loud unknown kind, and wait-ID
 cancellation/stale-wake behavior, including missing/already-exited cancellation,
-truthful arm failure, and full-restart host cleanup. Keep plan-only mode and existing
-role-boundary failures. JSON must remain parseable and contain no retired command or
-hand-assembled policy anchor.
+unexpected-cancellation rollback/retry, truthful arm failure, and full-restart host
+cleanup. Keep plan-only mode and existing role-boundary failures. JSON must remain
+parseable and contain no retired command or hand-assembled policy anchor.
 
 - [ ] **Step 4: Run focused, full-suite, and build verification**
 
@@ -1890,7 +1969,7 @@ git commit -m "docs(orchestrate-issues): consume workflow control actions
 
 Moves the dispatcher contract and deployed evals to normalized observations,
 bounded bootstrap, typed control actions, replaceable one-shot waiting, and
-bounded final summaries. Per D1-D8/D10-D11/D14-D15.
+bounded final summaries. Per D1-D8/D10-D11/D14-D16.
 
 Co-Authored-By: Codex <noreply@openai.com>"
 ```
@@ -1903,13 +1982,14 @@ Co-Authored-By: Codex <noreply@openai.com>"
 | --- | --- |
 | Strict bounded restart bootstrap without raw history and latest resume/retry identity | Tasks 1–2, 4 |
 | Strict versioned nested request/response shapes, injected time, atomic rejection | Task 1 |
+| Pairwise-distinct accepted candidate paths, durable-path disjointness, byte-unchanged rejection | Tasks 1–2 |
 | Bounded summaries/deltas/actions and compact-output verification | Tasks 1–2 |
 | Persist-before-emission and deterministic action IDs | Tasks 1–2 |
 | Expiry, capacity formula, resume-before-retry-before-spawn, attempt cap, worktree reuse | Task 2 |
 | Single-ledger six-stage scenario, concurrent finish, copied/advanced replay | Task 2 |
 | Public `launch`/`reconcile` removal and CLI-only migrated tests | Task 3 |
 | Adapter-only dispatcher, policy-free candidate gathering, exact binding-to-request mapping, five envelopes, unknown-kind failure, finalize rendering | Task 4 |
-| Wait-ID replacement, cancellation-race stale wake, same-ID dedupe, idempotent dead-handle cancellation, truthful arm failure, restart-host cleanup | Task 4 |
+| Wait-ID replacement, cancellation-race stale wake, same-ID dedupe, idempotent dead-handle cancellation, unexpected-cancel rollback/retry, truthful arm failure, restart-host cleanup | Task 4 |
 | Actionless-only consumed-candidate replay and wrong-instant/path/terminal/unavailable negatives | Task 2 |
 | Owner handoff, direct/durable standalone routes, deployed eval migration | Task 4 |
 | Focused tests, whole workflow suite, and Nix distribution build | Task 4 |
