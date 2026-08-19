@@ -25,8 +25,8 @@
 - The ship handoff carries current spec/plan roots and metrics. Ship-issue rechecks both on entry and after any writer changes either artifact; a stale/mismatched/over-budget artifact prevents merge.
 - Per D10, ship-issue discovers checker-validated plan members locally and supplies root plus each member as individual `--artifact-path` arguments to `diff-scope`. No public report or prompt carries that list, and the existing ≤1,000-line/≤20-file gate is otherwise unchanged.
 - Small fixture cases complete; oversized fixture cases map exactly to design/grill `decompose_required`, planning `decompose_required`, handoff `stopped`, and review-package `decompose_required`. `complete` plus `over_budget` is always a contract error.
-- SDD's final phase report has exactly `state`, `review_state`, `conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`, `head_sha`, `report_path`, and policy-bounded `notes`; parked-finding or verdict-detail lists are rejected and their detail remains at `report_path`.
-- Resolve `<main-root>` as the parent of absolute `git rev-parse --git-common-dir`, require basename `.git`, and confirm it with `git -C <main-root> rev-parse --show-toplevel`; never use the feature worktree or a path inside `.git`. Before SDD workspace deletion, package every parked/residual finding through Task 3 delivery-detail mode at `<main-root>/.superpowers/issue-delivery/<issue>/<run-or-branch>/sdd-<head>.json`; before ship Phase 8 cleanup, package every Minor/Discussion item at the sibling `ship-review-<head>.json`. Leaves are per-run/branch and no-clobber.
+- SDD's final phase report has exactly `state`, `review_state`, `conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`, `head_sha`, `detail_state`, `report_path`, and policy-bounded `notes`; parked-finding or verdict-detail lists are rejected. `detail_state:"none"` requires a null path and genuinely empty findings; `detail_state:"present"` requires a checker-valid delivery-detail path and non-empty findings.
+- Task 3's producer independently resolves `<main-root>` from the absolute Git common directory, confirms the primary checkout, derives the only permitted leaf, and establishes the ignore boundary. Task 5 callers supply only issue/branch/run/head identity (an optional expected path is an assertion, never authority). Before SDD workspace deletion, package every parked/residual finding through delivery-detail mode; before ship Phase 8 cleanup, package every Minor/Discussion item at the derived sibling leaf. Leaves are per-run/branch, primary-root-owned, and no-clobber.
 - A non-empty detail set requires a checker-valid durable package and `report_path`; notes contain that exact path. Failure to publish/recheck it returns `failed` or `stopped` and preserves the feature worktree/workspace. With genuinely no detail, `report_path` is null. From-issue rechecks and consumes a non-null path before constructing Phase 7 or persisting the terminal result and never inlines its members.
 - Every producer, SDD, ship-handoff, and ship-summary candidate is a temporary JSON file validated through the corresponding CLI boundary; only validated stdout bytes are transported. `discussion_items` becomes empty only after detail publication, and all numeric notes enforcement comes from the shared policy.
 - `workflow-state finish` accepts the exact ship-summary schema including `report_path`, delegates schema/notes validation to Task 1's `validate_ship_summary` with the repository policy in source tests and installed policy in deployment, and preserves the scalar unchanged. It does not retain its old literal notes limit or accept a missing path key.
@@ -64,7 +64,7 @@ def test_autonomous_reports_and_ship_handoff_are_root_plus_metrics(self):
 def test_sdd_report_is_exact_and_mechanically_validated(self):
     for field in ("state", "review_state", "conformance_verdict",
                   "correctness_verdict", "verification_state", "base_sha",
-                  "head_sha", "report_path", "notes"):
+                  "head_sha", "detail_state", "report_path", "notes"):
         self.assertIn(field, self.sdd)
     self.assertIn("validate-report --boundary sdd", self.sdd)
     for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
@@ -90,6 +90,13 @@ def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn("keep the worktree", text)
     self.assertIn("primary worktree", self.ship_handoff)
     self.assertIn("never inline the report", self.from_issue)
+
+def test_review_package_failure_before_dispatch_has_no_fabricated_detail(self):
+    self.assert_ordered(self.sdd, "base_sha and head_sha", "review-package",
+                        "exit 2", 'detail_state: "none"', "report_path: null",
+                        "validate-report --boundary sdd")
+    self.assertIn("before reviewer dispatch", self.sdd)
+    self.assertIn("do not dispatch", self.sdd)
 
 def test_phase_five_remeasures_every_artifact_it_mutates(self):
     self.assert_ordered(self.standards_review, "apply blocking fixes", "final mutation",
@@ -161,7 +168,7 @@ Update `from-issue`'s structured-report and phase rules to send every received p
 
 Update `standards-review` so every accepted plan edit triggers a final plan-package check and every ledger/spec edit triggers a spec check. Apply the existing owner remediation once; unresolved oversize becomes `decompose_required` and returns to the decomposition checkpoint rather than Phase 6.
 
-Update SDD's review-package handling to validate generator stdout through the producer boundary, compare root/status/metrics with a checker result, and stop dispatch truthfully on exit 2/3. Before deleting its workspace, collect every parked/residual finding and ruling into Task 3's exact detail input, resolve the primary worktree, generate/check a no-clobber `delivery-detail` package under D15's unique path, and set `report_path`. Null is legal only when the collection is empty. Write the exact SDD candidate JSON, run `validate-report --boundary sdd`, and return only stdout. Publication/validation failure retains workspace/worktree and returns a valid failed row. From-issue validates through stdin, rechecks and reads any detail root, and only then constructs Phase 7.
+Update SDD's review-package handling to validate generator stdout through the producer boundary, compare root/status/metrics with a checker result, and stop dispatch truthfully on exit 2/3. A generation failure after `base_sha`/`head_sha` are known but before reviewer dispatch has empty findings, so it emits the failed-after-range row with `detail_state: "none"` and `report_path: null`; it does not dispatch or invent a package. Before deleting its workspace, collect every parked/residual finding and ruling into Task 3's exact detail input and invoke detail mode from the linked worktree, passing identity inputs rather than choosing an output path. The producer independently derives, generates, and checks the no-clobber D15 path. Set `detail_state: "present"` and `report_path` only for a non-empty, checker-valid result; an empty collection uses `none`/null. Write the exact SDD candidate JSON, run `validate-report --boundary sdd`, and return only stdout. Publication/validation failure retains workspace/worktree and returns the applicable valid failed row. From-issue validates through stdin, rechecks and reads any detail root, and only then constructs Phase 7.
 
 Update `ship-handoff` to the exact D14 state matrix with fixed lifecycle scalars, current spec/plan artifacts, SDD `report_path`, and notes; delete `summary`, validate a candidate with the ship-handoff boundary, and dispatch only stdout. Ship-issue revalidates that stdin, rechecks both artifact roots and any SDD detail root, then runs existing phases.
 

@@ -83,4 +83,14 @@ Task 5 — Close the orchestration contract and run repository gates — `home/c
 - R-B4: replaced check/rename with exclusive identity-tracked publication and race injections (D16).
 - R-S1: applied fixture dates to every commit and added byte-repeatability coverage.
 
+### Final review
+
+- Reviewer: `/root/issue49_plan_final_review` (native reviewer; no fallback).
+- Review artifact: `/tmp/issue49-plan-final-review.md`; reviewed head `f7500284e163545105c6718eca586fe921613590`; base `416e7a92795a282c1b8cdd71e35a0f570cd35e56`; isolated/read-only.
+- Accepted 3 Blocking and 1 Should-fix findings; rejected 0; deferred 0.
+- F-B1: split failed-after-range SDD validation into empty-detail/null-path and non-empty-detail/durable-path rows, including the pre-dispatch package-failure case (D14).
+- F-B2: made the detail producer derive and police its primary-checkout destination, identity, and linked-worktree trust boundary (D15).
+- F-B3: corrected the parked-detail fixture and added fail-closed null-ruling coverage.
+- F-S1: made the delivery home establish its own exact no-follow ignore boundary and verify it with `git check-ignore` (D15).
+
 Task members are the normative executable instructions. Read this root once for shared constraints and then only the selected linked member.

@@ -23,7 +23,7 @@
 - Reject a missing member directory, a root/member/directory symlink, non-regular entry, name gap, unknown entry, unreadable file, duplicate resolved member identity, malformed UTF-8 root/manifest, or reference mismatch with exit 2 and no success JSON.
 - Metrics are exact encoded bytes: `root_bytes`; `total_bytes = root_bytes + sum(member bytes)`; `file_count = 1 + member count`; `largest_member_bytes = 0` for one-file artifacts and the largest member otherwise.
 - Violations are the sorted subset in canonical order `root_bytes`, `member_bytes`, `member_count`, `aggregate_bytes`. Valid measurement always emits one compact deterministic JSON line plus newline; exit 0 means `within_budget`, exit 3 means `over_budget`. Exit 2 writes one concise diagnostic to stderr and nothing to stdout.
-- The four validators implement D14's exhaustive tables verbatim. Non-null `report_path` is one normalized primary-root-relative `.superpowers/issue-delivery/` path and must appear literally in bounded notes. Producer `failed` uses `artifact: null` before a root or exact `kind,path` after one; no other partial artifact is valid.
+- The four validators implement D14's exhaustive tables verbatim. SDD requires `detail_state: "none"` with null `report_path` for empty detail and `detail_state: "present"` with one normalized primary-root-relative `.superpowers/issue-delivery/` path for non-empty detail; every non-null path appears literally in bounded notes. Producer `failed` uses `artifact: null` before a root or exact `kind,path` after one; no other partial artifact is valid.
 - Report input rejects duplicate keys, JSON constants, malformed UTF-8, non-object roots, trailing data, symlink/non-regular files, unknown fields, booleans for integers, every unlisted enum/nullability combination, and input or canonical output beyond `phase_reports.wire_max_bytes`. Any report parse/schema failure emits no stdout, `artifact-budget: invalid report\n` on stderr, exit 2; report I/O failure emits no stdout, `artifact-budget: cannot read report\n`, exit 2.
 - Repository fixtures contain descriptors and repetition metadata, never large padding. Tests materialize every descriptor, invoke the CLI, and compare actual exit/status/metrics/violations with descriptor expectations.
 - The committed wrapper is mode `100755` and executes `python3 "$HOME/.agents/lib/python/artifact_budget.py" "$@"`; Home Manager installs that wrapper as the bin command and the module separately.
@@ -209,13 +209,13 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             return value
 
         def sdd(state, review, conformance, correctness, verification,
-                base, head, report_path):
+                base, head, detail_state, report_path):
             notes = f"details: {report_path}" if report_path else "no durable detail"
             return {"state": state, "review_state": review,
                     "conformance_verdict": conformance,
                     "correctness_verdict": correctness,
                     "verification_state": verification, "base_sha": base, "head_sha": head,
-                    "report_path": report_path, "notes": notes}
+                    "detail_state": detail_state, "report_path": report_path, "notes": notes}
 
         lifecycle = {"ledger_repo_root": None, "run_id": None, "attempt": None,
                      "owner": None, "owner_worktree": None, "issue_number": 49,
@@ -257,17 +257,20 @@ class ArtifactBudgetCliTest(unittest.TestCase):
              {"state": "failed", "artifact": {"kind": "handoff", "path": "h.md"}, "notes": "root exists"},
              {"state": "failed", "artifact": {"kind": "handoff", "path": "h.md", "metrics": metrics}, "notes": "root exists"}),
             ("sdd-clean", "sdd",
-             sdd("complete", "clean", "clean", "clean", "passed", "a" * 40, "b" * 40, None),
-             sdd("complete", "clean", "clean", "findings", "passed", "a" * 40, "b" * 40, None)),
+             sdd("complete", "clean", "clean", "clean", "passed", "a" * 40, "b" * 40, "none", None),
+             sdd("complete", "clean", "clean", "findings", "passed", "a" * 40, "b" * 40, "none", None)),
             ("sdd-residuals", "sdd",
-             sdd("residuals", "residuals", "clean", "findings", "passed", "a" * 40, "b" * 40, detail),
-             sdd("residuals", "residuals", "clean", "findings", "passed", "a" * 40, "b" * 40, None)),
+             sdd("residuals", "residuals", "clean", "findings", "passed", "a" * 40, "b" * 40, "present", detail),
+             sdd("residuals", "residuals", "clean", "findings", "passed", "a" * 40, "b" * 40, "none", None)),
             ("sdd-failed-before", "sdd",
-             sdd("failed", "unknown", "not_run", "not_run", "not_run", None, None, None),
-             sdd("failed", "unknown", "not_run", "not_run", "not_run", "a" * 40, None, None)),
-            ("sdd-failed-after", "sdd",
-             sdd("failed", "unknown", "clean", "findings", "failed", "a" * 40, "b" * 40, detail),
-             sdd("failed", "unknown", "clean", "clean", "passed", "a" * 40, "b" * 40, detail)),
+             sdd("failed", "unknown", "not_run", "not_run", "not_run", None, None, "none", None),
+             sdd("failed", "unknown", "not_run", "not_run", "not_run", "a" * 40, None, "none", None)),
+            ("sdd-failed-after-no-detail", "sdd",
+             sdd("failed", "unknown", "not_run", "not_run", "failed", "a" * 40, "b" * 40, "none", None),
+             sdd("failed", "unknown", "not_run", "not_run", "failed", "a" * 40, "b" * 40, "present", None)),
+            ("sdd-failed-after-with-detail", "sdd",
+             sdd("failed", "unknown", "clean", "findings", "failed", "a" * 40, "b" * 40, "present", detail),
+             sdd("failed", "unknown", "clean", "findings", "failed", "a" * 40, "b" * 40, "none", detail)),
             ("ship-handoff-complete", "ship-handoff", ship_complete,
              {**ship_complete, "plan_artifact": None}),
             ("ship-handoff-failed-before", "ship-handoff", ship_failed_before,
@@ -348,6 +351,19 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         self.assertEqual((over.returncode, over.stdout, over.stderr),
                          (2, b"", b"artifact-budget: invalid report\n"))
 
+    def test_sdd_review_package_failure_after_known_range_has_no_detail(self):
+        candidate = {"state": "failed", "review_state": "unknown",
+                     "conformance_verdict": "not_run", "correctness_verdict": "not_run",
+                     "verification_state": "failed", "base_sha": "a" * 40,
+                     "head_sha": "b" * 40, "detail_state": "none",
+                     "report_path": None, "notes": "package failed before reviewer dispatch"}
+        accepted = self.run_validate("sdd", candidate, use_stdin=True)
+        self.assertEqual((accepted.returncode, accepted.stderr), (0, b""))
+        self.assertEqual(json.loads(accepted.stdout), candidate)
+        fabricated = {**candidate, "detail_state": "present"}
+        rejected = self.run_validate("sdd", fabricated, use_stdin=False)
+        self.assertEqual((rejected.returncode, rejected.stdout), (2, b""))
+
     def test_review_manifest_member_boundary_and_reference_bytes(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / "review.json"
@@ -382,7 +398,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             members = directory / "delivery.shards"
             members.mkdir()
             record = (json.dumps({"axis": "correctness", "severity": "Minor",
-                                  "status": "parked", "text": "detail", "ruling": None},
+                                  "status": "parked", "text": "detail",
+                                  "ruling": "accepted for follow-up"},
                                  sort_keys=True, separators=(",", ":")) + "\n").encode()
             (members / "shard-001.jsonl").write_bytes(record)
             manifest = {"interface_version": 1, "kind": "review-package",
@@ -394,6 +411,19 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                         "coverage": {"complete": True, "finding_count": 1}}
             root.write_text(json.dumps(manifest), encoding="utf-8")
             self.assertEqual(self.run_check("review-package", root).returncode, 0)
+            invalid_record = (json.dumps({"axis": "correctness", "severity": "Minor",
+                                          "status": "parked", "text": "detail",
+                                          "ruling": None},
+                                         sort_keys=True, separators=(",", ":")) + "\n").encode()
+            (members / "shard-001.jsonl").write_bytes(invalid_record)
+            manifest["shards"][0]["bytes"] = len(invalid_record)
+            manifest["total_detail_bytes"] = len(invalid_record)
+            root.write_text(json.dumps(manifest), encoding="utf-8")
+            invalid_parked = self.run_check("review-package", root)
+            self.assertEqual((invalid_parked.returncode, invalid_parked.stdout), (2, ""))
+            (members / "shard-001.jsonl").write_bytes(record)
+            manifest["shards"][0]["bytes"] = len(record)
+            manifest["total_detail_bytes"] = len(record)
             manifest["context"]["issue"] = True
             root.write_text(json.dumps(manifest), encoding="utf-8")
             invalid = self.run_check("review-package", root)

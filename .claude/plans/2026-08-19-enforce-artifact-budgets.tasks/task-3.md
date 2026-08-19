@@ -17,7 +17,7 @@
 
 **Interfaces:**
 - Consumes: Task 1's `artifact_budget.load_limits`, `check_artifact`, and canonical `validate-report` CLI; Task 2's validated plan root/workspace; D4, D5, D6, D8, D9, and D12–D16.
-- Produces: diff mode `review-package PLAN_FILE BASE HEAD [OUTFILE]`, where default root is `<workspace>/review-<base7>..<head7>.json`; delivery-detail mode `review-package --detail-input <findings.json> --producer <sdd|ship-review> --issue <id> --branch <branch> --head <sha> <OUTFILE>`. Both roots use `<stem>.shards/`; diff members end `.diff`, detail members `.jsonl`.
+- Produces: diff mode `review-package PLAN_FILE BASE HEAD [OUTFILE]`, where default root is `<workspace>/review-<base7>..<head7>.json`; delivery-detail mode `review-package --detail-input <findings.json> --producer <sdd|ship-review> --issue <positive-int> --branch <branch> --run-id <safe-id|-> --head <sha> [--output <asserted-derived-path>]`. Detail mode independently derives the primary checkout and exact final root; `--output` is only an equality assertion, never destination authority. Both roots use `<stem>.shards/`; diff members end `.diff`, detail members `.jsonl`.
 - Stdout is one compact report. Success: `{"state":"complete","artifact":{"kind":"review-package","path":...,"metrics":{...},"budget_status":"within_budget"},"notes":...}` and exit 0. Valid oversize: same shape plus `violations`, `state:"decompose_required"`, `budget_status:"over_budget"`, exit 3. Invocation/generation/measurement error: `state:"failed"`, root path when known, no metrics/status, exit 2.
 
 **Invariants:**
@@ -31,6 +31,8 @@
 - Every initial, task-fix, final, and final-fix `review-package` call parses stdout and return code before dispatch: exit 0 plus a validated complete report permits dispatch; exit 3 records/returns `decompose_required` with no reviewer dispatched; exit 2 or any malformed/unknown result records `failed` with no reviewer dispatched.
 - Every generator report is written as candidate JSON and sent through `artifact-budget validate-report --boundary producer`; only validated stdout is emitted. Every caller validates received bytes through the same CLI stdin seam before branch/dispatch logic.
 - Fixture commit helpers pass the fixed author/committer-date environment on every `git commit`; constructing the same range twice in fresh repositories produces byte-identical canonical manifests and shards.
+- Detail mode resolves absolute `git rev-parse --git-common-dir`, requires its basename to be `.git`, takes its parent, and confirms that exact directory with `git -C <parent> rev-parse --show-toplevel`. It derives `<main>/.superpowers/issue-delivery/<issue>/<identity>/<producer>-<head>.json`, where identity is a validated run id or `branch-` plus the lowercase SHA-256 of the UTF-8 branch. Issue, producer, full lowercase head SHA, checked-out branch, and run id are strict; traversal, symlink parents, `.git`, outside-root, feature-worktree, malformed identity, and a non-equal `--output` fail before publication.
+- Before detail publication, create or validate `.superpowers/issue-delivery/.gitignore` as a no-follow regular file containing exactly `*\n`. Exclusive create uses `O_CREAT|O_EXCL|O_WRONLY` and `O_NOFOLLOW` where available; an existing entry must be non-symlink, regular, and byte-exact. Then create descendants with the same no-follow/fail-closed discipline. A repository without a broad local exclude must report every generated package member as ignored.
 
 - [ ] **Step 1: Write failing review-package CLI tests**
 
@@ -43,7 +45,6 @@ import json
 from importlib.machinery import SourceFileLoader
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -90,6 +91,17 @@ class ReviewPackageCliTest(unittest.TestCase):
                     "GIT_COMMITTER_DATE": "2026-08-19T12:00:00Z"})
         return str(directory / "plan.md"), env
 
+    def setup_linked_repo(self, directory: Path):
+        main = directory / "main"
+        linked = directory / "linked"
+        main.mkdir()
+        plan, env = self.setup_repo(main)
+        (main / "seed.txt").write_text("seed\n", encoding="utf-8")
+        head = self.commit(main, "seed", env)
+        self.run_git(main, "worktree", "add", "-q", "-b", "issue-49", str(linked))
+        (main / ".git/info/exclude").write_text("", encoding="utf-8")
+        return main, linked, str(linked / Path(plan).name), env, head
+
     def commit(self, repo: Path, message: str, env: dict[str, str]) -> str:
         subprocess.run(["git", "-C", str(repo), "add", "-A"], env=env, check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", message],
@@ -101,11 +113,17 @@ class ReviewPackageCliTest(unittest.TestCase):
         return subprocess.run([str(COMMAND), plan, base, head, str(out)], cwd=repo,
                               env=env, text=True, capture_output=True, check=False)
 
-    def invoke_detail(self, repo: Path, source: Path, out: Path, env: dict[str, str]):
-        return subprocess.run(
-            [str(COMMAND), "--detail-input", str(source), "--producer", "sdd",
-             "--issue", "49", "--branch", "issue-49", "--head", "b" * 40, str(out)],
-            cwd=repo, env=env, text=True, capture_output=True, check=False)
+    def invoke_detail(self, repo: Path, source: Path, env: dict[str, str],
+                      *, run_id: str = "run-1", branch: str = "issue-49",
+                      head: str, output: Path | str | None = None):
+        argv = [
+            str(COMMAND), "--detail-input", str(source), "--producer", "sdd",
+             "--issue", "49", "--branch", branch, "--run-id", run_id,
+             "--head", head]
+        if output is not None:
+            argv += ["--output", str(output)]
+        return subprocess.run(argv, cwd=repo, env=env, text=True,
+                              capture_output=True, check=False)
 
     def test_small_range_has_one_complete_reconstructable_shard(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -244,24 +262,31 @@ class ReviewPackageCliTest(unittest.TestCase):
 
     def test_delivery_detail_uses_the_shared_review_budget_and_canonical_findings(self):
         with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            _, env = self.setup_repo(repo)
-            feature_worktree = repo / "feature-worktree"
-            feature_worktree.mkdir()
+            main, linked, _, env, head = self.setup_linked_repo(Path(raw))
             findings = [
                 {"axis": "correctness", "severity": "Minor", "status": "parked",
                  "text": "Keep this evidence", "ruling": "accepted for follow-up"},
                 {"axis": "conformance", "severity": "Discussion", "status": "residual",
                  "text": "Explain this tradeoff", "ruling": None},
             ]
-            source = feature_worktree / "findings.json"
+            source = linked / "findings.json"
             source.write_text(json.dumps({"interface_version": 1, "findings": findings}),
                               encoding="utf-8")
-            out = repo / ".superpowers/issue-delivery/49/run-1/sdd-b.json"
-            out.parent.mkdir(parents=True)
-            result = self.invoke_detail(repo, source, out, env)
+            out = main / ".superpowers/issue-delivery/49/run-1" / f"sdd-{head}.json"
+            result = self.invoke_detail(linked, source, env, head=head, output=out)
             self.assertEqual(result.returncode, 0, result.stderr)
-            shutil.rmtree(feature_worktree)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["artifact"]["path"], out.relative_to(main).as_posix())
+            ignore_file = main / ".superpowers/issue-delivery/.gitignore"
+            self.assertEqual(ignore_file.read_bytes(), b"*\n")
+            ignored_root = self.run_git(main, "check-ignore", "-v",
+                                        out.relative_to(main).as_posix())
+            self.assertIn(ignore_file.relative_to(main).as_posix(), ignored_root)
+            member = out.with_suffix(".shards") / "shard-001.jsonl"
+            ignored_member = self.run_git(main, "check-ignore", "-v",
+                                          member.relative_to(main).as_posix())
+            self.assertIn(ignore_file.relative_to(main).as_posix(), ignored_member)
+            self.run_git(main, "worktree", "remove", "--force", str(linked))
             manifest = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(manifest["purpose"], "delivery-detail")
             self.assertEqual(manifest["context"],
@@ -274,6 +299,61 @@ class ReviewPackageCliTest(unittest.TestCase):
                              {"complete": True, "finding_count": len(findings)})
             self.assertEqual(json.loads(result.stdout)["artifact"]["budget_status"],
                              "within_budget")
+
+    def test_detail_mode_rejects_untrusted_destinations_and_identity(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            main, linked, _, env, head = self.setup_linked_repo(directory)
+            source = linked / "findings.json"
+            source.write_text(json.dumps({"interface_version": 1, "findings": []}),
+                              encoding="utf-8")
+            expected = main / ".superpowers/issue-delivery/49/run-1" / f"sdd-{head}.json"
+            bad_outputs = [
+                linked / ".superpowers/issue-delivery/49/run-1" / f"sdd-{head}.json",
+                directory / "outside.json", main / ".git/delivery.json",
+                str(expected.parent / ".." / "escape.json"),
+            ]
+            for output in bad_outputs:
+                with self.subTest(output=output):
+                    result = self.invoke_detail(linked, source, env, head=head, output=output)
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+            for run_id, branch in (("../bad", "issue-49"), ("run-1", "../bad"),
+                                   ("run-1", "main")):
+                with self.subTest(run_id=run_id, branch=branch):
+                    result = self.invoke_detail(linked, source, env, head=head,
+                                                run_id=run_id, branch=branch)
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+
+    def test_detail_mode_rejects_a_symlink_parent(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            main, linked, _, env, head = self.setup_linked_repo(directory)
+            source = linked / "findings.json"
+            source.write_text(json.dumps({"interface_version": 1, "findings": []}),
+                              encoding="utf-8")
+            home = main / ".superpowers/issue-delivery"
+            home.mkdir(parents=True)
+            (home / ".gitignore").write_text("*\n", encoding="utf-8")
+            outside = directory / "outside"
+            outside.mkdir()
+            (home / "49").symlink_to(outside, target_is_directory=True)
+            result = self.invoke_detail(linked, source, env, head=head)
+            self.assertEqual((result.returncode, result.stdout), (2, ""))
+
+    def test_detail_mode_rejects_a_symlink_ignore_file(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            main, linked, _, env, head = self.setup_linked_repo(directory)
+            source = linked / "findings.json"
+            source.write_text(json.dumps({"interface_version": 1, "findings": []}),
+                              encoding="utf-8")
+            home = main / ".superpowers/issue-delivery"
+            home.mkdir(parents=True)
+            target = directory / "outside-ignore"
+            target.write_text("*\n", encoding="utf-8")
+            (home / ".gitignore").symlink_to(target)
+            result = self.invoke_detail(linked, source, env, head=head)
+            self.assertEqual((result.returncode, result.stdout), (2, ""))
 
     def test_publication_races_never_replace_a_competitor(self):
         for boundary in ("member_dir", "member:shard-001.diff",
@@ -344,6 +424,10 @@ Expected: FAIL because the command currently writes one `.diff`, has no manifest
 - [ ] **Step 3: Implement deterministic generation and manifest-aware review contracts**
 
 Rewrite `review-package` as an executable import-safe Python script. Add `~/.agents/lib/python` to `sys.path`, import Task 1's module, validate plan/root and Git revisions, and obtain the one `review-package` limit set. Diff mode captures full SHAs/commits/stat, treats binary numstat `-` as zero churn, captures the binary diff once, finds only line-start `diff --git ` boundaries, and greedily groups complete chunks. Detail mode strictly parses the exact input finding records, canonicalizes each as one JSONL record, and greedily groups whole records under the same member limit; one oversized finding or oversized complete package yields the truthful over-budget producer state without truncation.
+
+For detail mode, derive the primary checkout inside the command: resolve `git rev-parse --git-common-dir` to an absolute path without following an untrusted final component, require `.git`, derive its parent, and require `git -C <parent> rev-parse --show-toplevel` to return that exact canonical path. Validate issue as a non-boolean positive integer, producer against the two-value enum, head as a full lowercase object SHA, branch both with `git check-ref-format --branch` and against the linked worktree's current branch, and run id against `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. A `-` run id deterministically becomes `branch-<sha256(branch UTF-8)>`. Construct the only allowed destination from those components; if `--output` is present, compare its unresolved lexical normalization and resolved existing-prefix identities to that destination and reject any mismatch, traversal, `.git`, outside-root, feature-worktree, or symlink-parent case.
+
+Before staging detail, establish `.superpowers/issue-delivery/.gitignore` fail-closed. Walk/create `.superpowers` and `issue-delivery` one component at a time using directory FDs/no-follow checks. Exclusively create `.gitignore` with mode `0o600`, `O_CREAT|O_EXCL|O_WRONLY` and `O_NOFOLLOW` where supported, write exactly `*\n`, fsync, and verify its regular-file identity; if it already exists, accept only an ordinary non-symlink file with exactly those bytes. Create the issue/identity descendants with the same no-follow checks. Any validation/publication failure reports exit 2 and does not redirect output elsewhere.
 
 Both modes write their exact D15 manifest/shards in a unique sibling stage, run `check_artifact`, then call `publish_package`. Implement mutation-point exclusion with `Path.mkdir()` for the final member directory and `os.link()` for each member and the manifest; never call replace/rename/copy over a final path. Record the directory identity immediately after creation and staged/final `(st_dev, st_ino)` after every successful link. On failure, unlink only a final entry whose current identity equals the recorded staged identity, then `rmdir` only when the directory is empty and still matches its recorded identity. Map `EXDEV`, collision, symlink/non-regular parent, or changed identity to `PublicationError`. The callback fires immediately before each actual mutation and is `None` outside tests. Validate every candidate producer report through `artifact-budget validate-report --boundary producer --input <temp>` and emit only validated stdout. A module/policy/check/publication failure produces a D14 `failed` candidate and validates it before emission.
 
