@@ -82,30 +82,42 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         end = text.index(next_heading, start + len(heading))
         return text[start:end]
 
-    def test_dispatcher_uses_durable_lifecycle_order(self):
-        self.assert_ordered(
-            self.orchestrate,
-            "init-run",
-            "reconcile",
-            "launch",
-            "from-issue",
-            "reconcile",
+    def test_dispatcher_is_a_control_adapter_not_a_policy_owner(self):
+        observe = self.section(
+            self.orchestrate, "## 2. Bootstrap and observe", "## 3. Decide"
         )
-        self.assertIn("Never poll continuously", self.orchestrate)
-        self.assertNotIn("Wait on notifications — never poll", self.orchestrate)
-        for boundary in (
-            "dispatcher resume",
-            "notification receipt",
-            "before retry",
-            "before final drain",
+        decide = self.section(
+            self.orchestrate, "## 3. Decide", "## 4. Execute control actions"
+        )
+        execute = self.section(
+            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
+        )
+        self.assert_ordered(observe, "workflow-state init-run", "requirements",
+                            "action_id", "recorded_worktree", "normalized")
+        self.assert_ordered(
+            observe, "every requested issue without a bootstrap requirement",
+            "verified absent candidate", "control ignores unused candidates",
+        )
+        self.assertIn("matching_issue_branch | absent | mismatch", observe)
+        self.assertRegex(observe, r"never omit the recorded-path\s+observation")
+        self.assertNotIn("tracker-ready", observe)
+        self.assertNotIn("classify tracker readiness", observe)
+        self.assert_ordered(decide, "--request-file <absolute-json-path>",
+                            "workflow-state control",
+                            "only source of action order, kind, and lifecycle identity")
+        for retired in ("workflow-state launch", "workflow-state reconcile"):
+            self.assertNotIn(retired, self.orchestrate)
+        for retired_policy_anchor in (
+            "resume before fresh", "attempts 1 and 2", "permits a retry",
+            "result_source", "earliest armed deadline", "deadline minima",
+            "occupied slots", "count capacity", "run is drained",
+            "fresh owner identity",
         ):
-            self.assertIn(boundary, self.orchestrate)
-        self.assertIn("durable result takes precedence", self.orchestrate)
-        self.assertIn("stale older-attempt notification", self.orchestrate)
+            self.assertNotIn(retired_policy_anchor, observe + decide + execute)
 
     def test_dispatcher_passes_immutable_ledger_root_separately_from_worktree(self):
         durable_section = self.section(
-            self.orchestrate, "### Durable run ledger", "## 4."
+            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
         )
         self.assert_ordered(
             durable_section,
@@ -117,63 +129,113 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("exact immutable value", durable_section)
         self.assertIn("independent of any issue worktree", durable_section)
 
-    def test_dispatcher_reserves_attempt_worktree_before_launch_and_envelope(self):
-        durable_section = self.section(
-            self.orchestrate, "### Durable run ledger", "## 4."
+        declaration = durable_section.index(
+            'Agent(subagent_type="general-purpose", model="opus", effort="high", '
+            'run_in_background=true)'
         )
-        self.assert_ordered(
-            durable_section,
-            "reserve a collision-free exact absolute worktree path",
-            "workflow-state launch",
-            "--worktree <absolute-worktree>",
+        fresh_context = durable_section[declaration:]
+        fresh_prompt = fresh_context[:fresh_context.index("\n\nNever inline")]
+        for field in (
+            "ledger_repo_root=<ledger_repo_root>",
+            "run_id=<run-id>",
+            "issue=<issue>",
+            "attempt=<attempt>",
+            "owner=<owner-token>",
+            "action_id=<action-id>",
             "worktree=<absolute-worktree>",
-        )
-        self.assertIn("configured worktree root", durable_section)
-        self.assertIn("does not create the worktree", durable_section)
+            "handoff_path=<exact-handoff-path>",
+            "from-issue <num> --auto",
+        ):
+            self.assertIn(f"> `{field}`", fresh_prompt)
+        self.assertIn("> Immutable lifecycle envelope:", fresh_prompt)
+        self.assertIn("> Include `handoff_path` only when non-null.", fresh_prompt)
 
-    def test_dispatcher_retry_is_reconciled_and_helper_capped(self):
-        retry_section = self.section(
-            self.orchestrate, "## 5. Failure policy", "## 6. Final report"
+    def test_dispatcher_maps_resolved_limits_into_control_request(self):
+        resolve = self.section(
+            self.orchestrate, "## 1. Resolve issue set and bindings",
+            "## 2. Bootstrap and observe",
+        )
+        self.assertIn(
+            "resolved `agentBudgetMinutes` as request `attempt_budget_minutes`",
+            resolve,
+        )
+        self.assertIn(
+            "resolved `maxParallel` as request `max_parallel`",
+            resolve,
+        )
+        self.assertNotIn("--budget-minutes <budget>", resolve)
+
+    def test_dispatcher_executes_the_closed_control_action_set(self):
+        action_section = self.section(
+            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
+        )
+        for kind in ("spawn", "resume", "retry", "wait", "finalize"):
+            self.assertIn(f"`{kind}`", action_section)
+        self.assertIn("returned order", action_section)
+        self.assertIn("owner token unchanged", action_section)
+        self.assertIn("handoff_path", action_section)
+        self.assertIn(
+            "Any other kind is a contract error: stop without executing it and surface the unknown kind",
+            action_section,
+        )
+        self.assertNotIn("host task ID as lifecycle identity", action_section)
+
+    def test_dispatcher_uses_one_superseding_wait(self):
+        action_section = self.section(
+            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
         )
         self.assert_ordered(
-            retry_section, "workflow-state reconcile", "workflow-state launch"
+            action_section,
+            "save the old `current_wait_id` and `current_wait_handle` pair",
+            "publish the new wait ID", "cancel the old handle",
+            "arm and store the new one-shot observer",
         )
-        self.assertIn("refuses a third fresh attempt", retry_section)
-        self.assertIn("retains the worktree", self.orchestrate)
-        self.assertIn("not automatically relaunch", self.orchestrate)
+        self.assertIn("same wait ID", action_section)
+        self.assertIn("does not arm another observer", action_section)
+        self.assertIn("wake carries its wait ID", action_section)
+        self.assertIn("ignore it unless it equals `current_wait_id`", action_section)
+        self.assert_ordered(action_section, "`finalize`", "clear `current_wait_id`",
+                            "cancel the outstanding handle")
+        self.assertIn("No polling or repeated short sleeps", action_section)
 
-    def test_dispatcher_resumes_recorded_attempt_before_fresh_launch(self):
-        retry_section = self.section(
-            self.orchestrate, "## 5. Failure policy", "## 6. Final report"
+    def test_dispatcher_wait_failures_and_restart_cleanup_are_explicit(self):
+        action_section = self.section(
+            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
         )
         self.assert_ordered(
-            retry_section,
-            "workflow-state reconcile",
-            "resume before fresh",
-            "--resume-handoff",
-            "same owner, same worktree",
-            "resume is impossible",
-            # The retry's identity is the owner handle; the workspace is chosen
-            # separately, and preferring the prior attempt's live worktree is
-            # what lets a retry reach the work it must resume.
-            "fresh owner identity",
-            "prior attempt's recorded `worktree`",
-            "git worktree list --porcelain",
-            "reserve a fresh",
-            "refuses a third fresh attempt",
+            action_section, "missing or already exited", "idempotent",
+            "arm the replacement",
         )
-        self.assertNotIn("fresh owner/worktree", retry_section)
-
-    def test_dispatcher_deadline_has_one_bounded_wake_path(self):
         self.assert_ordered(
-            self.orchestrate,
-            "Deadline wake path",
-            "exactly one",
-            "deadline observer",
-            "workflow-state reconcile",
+            action_section, "unexpected cancellation failure",
+            "restore the old `current_wait_id` and `current_wait_handle` pair",
+            "do not arm the replacement", "fail loudly",
+            "next identical response retries replacement",
         )
-        self.assertIn("never a poll loop", self.orchestrate)
-        self.assertIn("never repeated short sleeps", self.orchestrate)
+        self.assertIn(
+            "never leave the new wait ID paired with the old handle",
+            action_section,
+        )
+        self.assert_ordered(
+            action_section, "arming fails", "clear `current_wait_id`",
+            "clear `current_wait_handle`", "no wake is installed", "fail loudly",
+        )
+        self.assert_ordered(
+            self.orchestrate, "full dispatcher restart",
+            "host reaps or cancels inherited detached wait observers",
+            "before", "rearm",
+        )
+        self.assertIn("process-local", self.orchestrate)
+
+    def test_dispatcher_renders_finalize_from_bounded_summaries(self):
+        final_section = self.section(
+            self.orchestrate, "## 5. Final report", "## Notes"
+        )
+        self.assertIn("finalize", final_section)
+        self.assertIn("same control response", final_section)
+        self.assertIn("discussion_items", final_section)
+        for forbidden in ("attempts", "launches", "phase_inputs", "older results"):
+            self.assertIn(forbidden, self.orchestrate)
 
     def test_background_dispatch_flag_appears_only_in_orchestrate_issues(self):
         self.assertIn("run_in_background=true", self.orchestrate)
@@ -271,7 +333,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("separate owner worktree", lifecycle_section)
         self.assertIn("Every `workflow-state` command", lifecycle_section)
         self.assertIn("--repo-root <ledger_repo_root>", lifecycle_section)
-        self.assertIn("direct standalone invocation remains compatible", self.from_issue)
+        self.assertIn("Direct standalone invocation remains ledger-free", self.from_issue)
         phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
         self.assertIn("lifecycle identity", phase_zero)
         self.assertIn("workflow-state finish", phase_zero)
@@ -308,21 +370,27 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("Direct standalone", phase_one)
         self.assertIn("standard `worktrees` flow", phase_one)
 
-    def test_orchestrate_resolves_the_attempt_budget_from_the_resolver(self):
-        # `--budget-minutes` is the attempt budget — the wall clock for one
-        # attempt — and the resolver is its single home, so the dispatcher must
-        # not carry a second copy of the number.
+    def test_from_issue_handoff_is_resumed_only_from_a_control_envelope(self):
+        phase_gate = self.section(
+            self.from_issue, "## Dispatch, phase-budget and attempt-budget rules",
+            "## Terminal return procedure",
+        )
+        self.assertIn("returned `resume` envelope", phase_gate)
+        self.assertNotIn("workflow-state launch", phase_gate)
+
+    def test_from_issue_standalone_modes_use_live_lifecycle_interfaces(self):
+        identity = self.section(
+            self.from_issue, "## Lifecycle identity", "## The flow"
+        )
+        self.assertIn("Direct standalone invocation remains ledger-free", identity)
         self.assert_ordered(
-            self.orchestrate,
-            "--budget-minutes <budget>",
-            "attempt budget",
-            "agentBudgetMinutes",
-            "resolve-bindings",
+            identity,
+            "explicitly requests durable standalone orchestration",
+            "workflow-state init-run", "bounded `requirements`",
+            "max_parallel: 1", "workflow-state control", "first `spawn` envelope",
+            "adopt", "do not spawn another owner",
         )
-        self.assertIn(
-            "Resolve `maxParallel` from `~/.agents/bin/resolve-bindings`",
-            self.orchestrate,
-        )
+        self.assertIn("fail loudly", identity)
 
     def test_from_issue_routes_a_deadline_rejected_progress_to_the_terminal_return(self):
         # A progress call rejected past the attempt budget's deadline is a
@@ -338,19 +406,29 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "Persistence precedes notification",
         )
 
-    def test_orchestrate_eval_grades_the_prior_worktree_retry(self):
-        # The eval is the graded statement of correct behaviour, so a stale one
-        # actively fails a correct run: it must grade a fresh owner identity
-        # reaching the prior attempt's live worktree, not a fresh workspace.
+    def test_orchestrate_evals_grade_control_and_reject_retired_policy(self):
         expected = " ".join(
             case["expected_output"] for case in self.orchestrate_evals["evals"]
         )
-        self.assertNotIn("fresh worktree", expected)
-        self.assertIn("fresh owner identity", expected)
-        self.assertIn("prior attempt's recorded worktree", expected)
-        self.assertIn("resolve-bindings", expected)
-        # The first-attempt reservation is unchanged and stays graded.
-        self.assertIn("reserve a collision-free absolute worktree path", expected)
+        for anchor in (
+            "workflow-state init-run", "action_id", "recorded_worktree",
+            "workflow-state control",
+            "normalized", "spawn", "resume", "retry", "wait", "finalize",
+            "bounded summaries", "unknown action kind", "cancel the old wait",
+            "stale wake ID", "already-exited wait", "no wake is installed",
+            "unexpected cancellation failure", "restore the old wait ID/handle",
+            "do not arm replacement", "never pair the new wait ID with the old handle",
+            "retry replacement", "reap inherited detached wait observers",
+        ):
+            self.assertIn(anchor, expected)
+        for retired in ("workflow-state launch", "workflow-state reconcile"):
+            self.assertNotIn(retired, expected)
+        for retired_policy_anchor in (
+            "resume before fresh", "attempts 1 and 2", "permits a retry",
+            "result_source", "earliest armed deadline", "occupied slots",
+            "run is drained",
+        ):
+            self.assertNotIn(retired_policy_anchor, expected)
 
     def test_auto_mode_never_skips_durable_checkpoints_or_terminal_writes(self):
         self.assertIn("never skips `workflow-state progress`", self.auto)
