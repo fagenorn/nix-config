@@ -1,14 +1,39 @@
 # Phase-5 plan review contract
 
-Reviewer-facing text for `from-issue` Phase 5. The dispatcher hands this file's **path** to the
-reviewer (or to `codex-collaboration`, which passes it by path in the review packet) and supplies concrete
-values for every `<placeholder>` and binding named below — plan path, spec path, issue number,
-`<tracker-cli>`, `unsetGithubToken`, `docPaths.*`, `projectHints`, and the optional review focus.
-The orchestrator never inlines this text into its own context.
+Operational contract for `from-issue` Phase 5. The Phase-5 caller executes the
+caller sections in order. Only after the pre-dispatch boundary passes does it
+hand this file's **path** to the reviewer (or to `codex-collaboration`, which
+passes it by path in the review packet). It supplies concrete values for every
+`<placeholder>` and binding named below — plan root path, its four checker
+metrics, spec path, issue number, `<tracker-cli>`, `unsetGithubToken`,
+`docPaths.*`, `projectHints`, and the optional review focus. The orchestrator
+never inlines this text into its own context.
 
----
+## Caller pre-dispatch boundary
+
+Pipe the exact received planning-report bytes through `artifact-budget
+validate-report --boundary producer --input -` and retain only the exact
+validated stdout bytes. Only after validation succeeds may the caller read `state` or any artifact field. Require the exact D11 object in `state: complete`,
+with one `implementation-plan` artifact; validator failure, a legacy
+producer-specific list or summary field, or any other state stops Phase 5 as a
+contract failure. There is no prose fallback (D11, D14).
+
+Take the root path and four metrics only from that validated object, then run
+`artifact-budget check --kind
+implementation-plan --root <plan-path> --format json`. Require exit 0,
+`within_budget`, and the same `root_bytes`, `total_bytes`, `file_count`, and
+`largest_member_bytes`. Exit 2/3, missing metrics, stale metrics, or an unreadable
+member is a contract failure. Only after both gates pass may the caller build the
+reviewer dispatch. Supply only the plan root path and four metrics, plus the
+other non-plan paths and fixed scalars named below; never supply plan contents or
+a member list (D3, D5, D6, D8).
+
+## Reviewer instructions
 
 Review the implementation plan at `<plan-path>` against the project's coding bar.
+Before reviewing, read the root and every indexed member in checker discovery
+order. Explicitly report an unreadable member as a blocking contract failure;
+never fall back to monolithic task parsing.
 
 First ground in the project's docs: invoke `doc-grounded-questions` if available, else ground
 map-first — read the context map (`docPaths.contextMap`, else `docs/CONTEXT-MAP.md`, else legacy root `CONTEXT-MAP.md`) and open only
@@ -19,13 +44,16 @@ repos) only when cited; the standards layers that apply
 project's `docs/standards/` shards whose globs intersect). Only when the project has no map, fall
 back to reading `docPaths.{context,standards,architecture}` whole. Then
 read the issue body (`<tracker-cli> issue view <num>` — prefix with `unset GITHUB_TOKEN &&` only if
-`unsetGithubToken` is true), the spec at `<spec-path>`, and the plan.
+`unsetGithubToken` is true), the spec at `<spec-path>`, and the validated plan
+root plus every member.
 
 When checking specific findings, **read the live file at HEAD** rather than relying on snapshot/diff
 views — code may have been edited since the plan was written, and stale snapshots produce
 false-positive should-fixes.
 
-For each plan task, flag anything that violates the grounded constraints. Pay particular attention to:
+For each plan task, flag anything that violates the grounded constraints. Every
+finding identifies its affected task member or root section. Explicitly report
+any member that could not be read. Pay particular attention to:
 framework-first (custom executors/state machines where a framework primitive already exists),
 production-grade-by-default (half-finished branches, missing error paths at boundaries), DI rules, and
 the test-fixture conventions in the project's standards shards (or legacy coding-standards doc).
@@ -103,3 +131,13 @@ Output a structured review:
 
 Write `None.` under an empty section. Don't propose new features. Don't second-guess scope. Grade only
 against the bar.
+
+## Accepted-edit remeasurement
+
+After reviewer output and disposition, accepted Phase-5 edits are not complete
+when the text is saved. The caller acts after the last write: re-run the
+implementation-plan check and retain its fresh metrics; if it amended the spec
+or appended a decision-ledger row, also re-run the design-spec check after that
+artifact's last write. Only valid, within-budget results may advance. An invalid or
+over-budget result stops the phase instead of advancing with stale measurement
+(D5, D14).

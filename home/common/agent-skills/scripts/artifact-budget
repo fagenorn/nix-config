@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec python3 "$HOME/.agents/lib/python/artifact_budget.py" "$@"

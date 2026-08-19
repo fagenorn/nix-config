@@ -79,6 +79,14 @@ in
       executable = true;
     };
 
+    ".agents/bin/artifact-budget" = {
+      source = ./scripts/artifact-budget;
+      executable = true;
+    };
+
+    ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
+    ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
+
     # Claude accepts Home Manager's recursive file links, so its generated
     # multi-file skill can continue to use that layout.
     ".claude/skills/ui-ux-pro-max" = {

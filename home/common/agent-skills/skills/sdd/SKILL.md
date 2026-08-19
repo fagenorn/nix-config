@@ -13,6 +13,14 @@ Execute a plan by dispatching a fresh implementer per task, a lane-scoped task r
 
 Work happens in an isolated workspace: invoke the `worktrees` skill to create or verify one. Never implement on a main/master branch without explicit consent.
 
+Before initial plan validation or brief extraction, run `artifact-budget check
+--kind implementation-plan --root PLAN_FILE --format json`. Exit 2 is a package
+contract failure and exit 3 is an over-budget stop; neither may advance. On exit
+0, require `status: within_budget` and exactly the four non-boolean integer
+metrics `root_bytes`, `total_bytes`, `file_count`, and `largest_member_bytes`.
+Retain the root path and all four metrics for dispatches. Missing metrics or any
+other result shape is a contract error (D5, D6, D8).
+
 Conversation memory does not survive compaction; controllers that lost their place have re-dispatched entire completed task sequences. Track progress in a ledger file:
 
 - Each plan owns a workspace: `scripts/sdd-workspace PLAN_FILE` prints the plan's git-ignored directory (`<repo-root>/.superpowers/sdd/<plan-basename>/`) — home to every artifact for THIS plan: ledger, briefs, reports, review packages. Another plan's directory is never yours to read or write.
@@ -20,7 +28,17 @@ Conversation memory does not survive compaction; controllers that lost their pla
 - Create the ledger with its identity as the first line: `# SDD ledger — plan: <plan file path>`.
 - After compaction, trust the ledger and `git log` over recollection. (`git clean -fdx` destroys the workspace; recover from `git log`.)
 
-**Initial validation is the only whole-plan read.** Read the plan once now and scan for conflicts — tasks that contradict each other or the constraints, or anything the plan mandates that the review rubric treats as a defect — and present findings as one batched question (each beside the plan text mandating it, asking which governs) before execution begins. Clean scan → proceed without comment. After that, the controller holds only the plan **header** — summary, Global Constraints, Test seams, and the `## Task index` (ID, title, files touched, risk lane per task) — plus the current task's brief from `scripts/task-brief`; never re-read the whole plan. Build the todo list from the task index.
+**Initial validation is the only whole-package read.** After the successful
+checker result, read the root and every indexed member once in discovery order
+and scan them for conflicts — tasks that contradict each other or the constraints,
+or anything the package mandates that the review rubric treats as a defect — and
+present findings as one batched question (each beside the plan text mandating it,
+asking which governs) before execution begins. A missing or unreadable member is a contract error, never a fallback to monolithic parsing. Clean scan → proceed
+without comment. After that, the controller holds only the plan root **header** —
+summary, Global Constraints, Test seams, and the `## Task index` (ID, title,
+files touched, risk lane, member link per task) — its compact checker metrics,
+plus the current task's brief from `scripts/task-brief`; never re-read the whole
+package or retain other task bodies. Build the todo list from the Task index.
 
 ## Agent tiers
 
@@ -43,8 +61,20 @@ Everything you paste into a dispatch — and everything a subagent prints back �
 
 Record BASE (`git rev-parse HEAD`) first — the review package and fix-round diffs need it.
 
-- `scripts/task-brief PLAN_FILE N` extracts the task's full text to a file and prints the path. The brief is the single source of requirements; exact values (numbers, magic strings, signatures, test cases) appear only there. Never make a subagent read the whole plan.
-- The dispatch contains: one line on where the task fits; the brief path ("read this first — it is your requirements, with the exact values to use verbatim"); interfaces and decisions from earlier tasks the brief cannot know; your resolution of any ambiguity you noticed; the report-file path (brief `…/task-N-brief.md` → report `…/task-N-report.md`) and report contract. No accumulated prior-task history.
+- `scripts/task-brief PLAN_FILE N` revalidates the package, resolves exactly one
+  convention-linked member, copies it byte-for-byte, and prints the brief path.
+  Checker exit 2/3 or a missing, unreadable, duplicate, or nonconventional member
+  link stops before replacing an existing brief. The brief is the single source
+  of task-specific requirements; exact values (numbers, magic strings,
+  signatures, test cases) appear only there. Never make a subagent read the whole
+  plan package.
+- The dispatch contains: one line on where the task fits; the plan root path and
+  all four metrics; the brief path ("read this first — it is your requirements,
+  with the exact values to use verbatim"); interfaces and decisions from earlier
+  tasks the brief cannot know; your resolution of any ambiguity you noticed; the
+  report-file path (brief `…/task-N-brief.md` → report `…/task-N-report.md`) and
+  report contract. It never contains member lists, task contents, or accumulated
+  prior-task history (D6).
 - If an earlier task parked a finding in this task's area, carry a pointer to that ledger entry.
 - Record the implementer's agent identity — fix rounds 1–3 resume it.
 - Never dispatch multiple implementers in parallel (conflicts).
@@ -74,7 +104,11 @@ Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies t
 
 For the full-lane review:
 
-- The reviewer gets three paths — brief, report, review package — plus the global constraints copied **verbatim** from the plan. The template carries the process rules; the constraints block is what THIS project's spec demands.
+- The reviewer gets the plan root path and all four metrics, then three task
+  paths — brief, report, review package — and nothing from the plan package
+  itself. It never gets a member list, artifact contents, or another task body.
+  The reviewer reads Global Constraints from the bounded root. The template
+  carries the process rules; the root carries what THIS project's spec demands.
 - Don't add open-ended directives ("check all uses") without a concrete task-specific reason; don't ask it to re-run tests the implementer already ran; and never pre-judge — if your prompt contains "do not flag" or "at most Minor", stop: adjudication happens in the loop, not the dispatch.
 - **⚠️ Cannot-verify items** (requirements living in unchanged code or spanning tasks) don't block the review, but you resolve each yourself before marking the task complete — you hold the cross-task context. A confirmed gap enters the fix loop as a failed spec review.
 

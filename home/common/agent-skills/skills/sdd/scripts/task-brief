@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Extract one task's full text from an implementation plan into a file the
-# implementer reads in one call, so the task text never has to be pasted
-# through the controller's context.
+# Validate an implementation-plan package and copy one exactly indexed member
+# into a file the implementer reads in one call.
 #
 # Usage: task-brief PLAN_FILE TASK_NUMBER [OUTFILE]
 # Default OUTFILE: <repo-root>/.superpowers/sdd/<plan-basename>/task-<N>-brief.md
@@ -17,6 +16,30 @@ fi
 plan=$1
 n=$2
 [ -f "$plan" ] || { echo "no such plan file: $plan" >&2; exit 2; }
+case "$n" in
+  *[!0-9]*|0|0*) echo "task number must be a positive integer" >&2; exit 2 ;;
+esac
+
+if ! command -v artifact-budget >/dev/null 2>&1; then
+  echo "artifact-budget is not available" >&2
+  exit 2
+fi
+
+# A malformed package exits 2 and a valid oversized package exits 3. With
+# `set -e`, both statuses propagate unchanged before an output path is touched.
+policy="$HOME/.agents/share/artifact-budget-policy.json"
+policy=$(python3 - "$policy" <<'PY'
+from pathlib import Path
+import sys
+
+try:
+    print(Path(sys.argv[1]).resolve(strict=True))
+except OSError:
+    print("artifact-budget policy is unavailable", file=sys.stderr)
+    raise SystemExit(2)
+PY
+)
+artifact-budget check --kind implementation-plan --root "$plan" --policy "$policy" --format json >/dev/null
 
 if [ $# -eq 3 ]; then
   out=$3
@@ -24,18 +47,56 @@ else
   dir=$("$(cd "$(dirname "$0")" && pwd)/sdd-workspace" "$plan")
   out="$dir/task-${n}-brief.md"
 fi
+[ -n "$out" ] || { echo "output path must not be empty" >&2; exit 2; }
 
-awk -v n="$n" '
-  /^```/ { infence = !infence }
-  !infence && /^#+[ \t]+Task[ \t]+[0-9]+/ {
-    intask = ($0 ~ ("^#+[ \t]+Task[ \t]+" n "([^0-9]|$)"))
-  }
-  intask { print }
-' "$plan" > "$out"
+member=$(python3 - "$plan" "$n" <<'PY'
+from pathlib import Path
+import re
+import sys
 
-if [ ! -s "$out" ]; then
-  echo "task ${n} not found in ${plan} (no heading matching 'Task ${n}')" >&2
-  exit 3
-fi
+plan = Path(sys.argv[1])
+number = int(sys.argv[2])
+expected_target = f"{plan.with_suffix('.tasks').name}/task-{number}.md"
+text = plan.read_text(encoding="utf-8")
+
+in_index = False
+rows: list[str] = []
+for line in text.splitlines():
+    if line == "## Task index":
+        if in_index:
+            print("duplicate Task index", file=sys.stderr)
+            raise SystemExit(2)
+        in_index = True
+        continue
+    if in_index and line.startswith("## "):
+        break
+    if in_index and re.match(rf"^Task {number}\s+—", line):
+        rows.append(line)
+
+expected = re.compile(
+    rf"^Task {number}\s+—\s+.+\s+—\s+.+\s+—\s+.+\s+—\s+"
+    rf"\[task-{number}\.md\]\({re.escape(expected_target)}\)$"
+)
+if len(rows) != 1 or expected.fullmatch(rows[0]) is None:
+    print(f"task {number} has no unique conventional Task-index link", file=sys.stderr)
+    raise SystemExit(2)
+
+member = plan.parent / expected_target
+try:
+    member.read_bytes()
+except OSError:
+    print(f"task {number} member is unreadable", file=sys.stderr)
+    raise SystemExit(2)
+print(member)
+PY
+)
+
+out_dir=$(dirname "$out")
+[ -d "$out_dir" ] || { echo "output directory does not exist: $out_dir" >&2; exit 2; }
+tmp=$(mktemp "${out}.tmp.XXXXXX") || exit 2
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+cp -- "$member" "$tmp"
+mv -f -- "$tmp" "$out"
+trap - EXIT HUP INT TERM
 
 echo "wrote ${out}: $(wc -l < "$out" | tr -d ' ') lines"

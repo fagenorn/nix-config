@@ -59,12 +59,14 @@ evals skill id:
 agent-workflow-tests:
   python3 -m unittest -v \
     home/common/agent-skills/tests/test_workflow_state.py \
+    home/common/agent-skills/tests/test_task_brief.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_diff_scope.py \
     home/common/agent-skills/tests/test_resolve_bindings.py \
+    home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_costs.py \
     tests/test_branch_protection.py
 
