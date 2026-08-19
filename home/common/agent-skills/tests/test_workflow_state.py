@@ -344,6 +344,60 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "notes": "",
         }
 
+    def concurrent_finish(self, results, *, now):
+        wrapper = (
+            "import os,sys; fd=int(sys.argv[1]); script=sys.argv[2]; "
+            "args=sys.argv[3:]; os.read(fd,1); "
+            "os.execv(sys.executable,[sys.executable,script,*args])"
+        )
+        processes = []
+        write_fds = []
+        for issue, (attempt, result) in results.items():
+            result_path = self.root / f"concurrent-result-{issue}.json"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            read_fd, write_fd = os.pipe()
+            args = [
+                "finish", "--repo-root", str(self.root),
+                "--run-id", self.run_id, "--issue", str(issue),
+                "--attempt", str(attempt), "--result-file", str(result_path),
+                "--now", now,
+            ]
+            process = subprocess.Popen(
+                [sys.executable, "-c", wrapper, str(read_fd), str(SCRIPT), *args],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                pass_fds=(read_fd,),
+            )
+            os.close(read_fd)
+            processes.append(process)
+            write_fds.append(write_fd)
+        for write_fd in write_fds:
+            os.write(write_fd, b"x")
+            os.close(write_fd)
+        for process in processes:
+            _, stderr = process.communicate()
+            self.assertEqual(process.returncode, 0, stderr)
+        return processes
+
+    def copy_ledger_root(self, state_bytes):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        run_dir = root / ".superpowers" / "workflows" / self.run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "state.json").write_bytes(state_bytes)
+        return root
+
+    def run_control_at_root(self, root, request):
+        request_path = root / "copied-control.json"
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "control", "--repo-root", str(root),
+             "--run-id", self.run_id, "--request-file", str(request_path)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed
+
     def test_init_run_returns_only_the_strict_bounded_bootstrap(self):
         fresh = self.init_run(now="2026-08-19T12:00:00Z")
         self.assertEqual(fresh, {
@@ -793,6 +847,491 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(completed.stdout, "")
         self.assertIn("recorded worktree observation", completed.stderr)
         self.assertEqual(self.state_path.read_bytes(), terminal)
+
+    def test_control_combined_six_stage_single_ledger_replay(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        paths = {issue: str(self.root / f"wt-{issue}") for issue in (47, 51, 53)}
+
+        # 1. Two dispatches, one queued issue, one earliest deadline.
+        initial = self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51, 53], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(i) for i in (47, 51, 53)],
+            worktrees=[self.worktree_fact(
+                i, candidate={"path": paths[i], "state": "absent"}
+            ) for i in (47, 51, 53)],
+        )
+        self.assertEqual([a["id"] for a in initial["actions"]],
+                         ["47:1:1", "51:1:1", "wait:2026-08-19T12:30:00Z"])
+        self.assertEqual(initial["summaries"][2]["state"], "queued")
+        self.assertEqual(initial["next_deadline"], "2026-08-19T12:30:00Z")
+
+        # 2. The first owner succeeds after its fixed deadline; owner truth wins.
+        late = self.merged_result(47)
+        self.finish(1, late, issue=47, now="2026-08-19T12:31:00Z")
+        self.assertEqual(self.read_state()["issues"]["47"]["outcome"], late)
+
+        # Capture the exact state immediately before the composite expiry/retry/spawn.
+        pre_action_state = self.state_path.read_bytes()
+        decision_request = self.control_request(
+            now="2026-08-19T12:31:00Z", issues=[47, 51, 53], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(i) for i in (47, 51, 53)],
+            worktrees=[
+                self.worktree_fact(51, recorded={
+                    "path": paths[51], "state": "matching_issue_branch",
+                }),
+                self.worktree_fact(53, candidate={
+                    "path": paths[53], "state": "absent",
+                }),
+            ],
+        )
+
+        # 3. Silent expiry retries on the recorded path while unrelated work starts.
+        decision = self.control_raw(request=decision_request)
+        decided = json.loads(decision.stdout)
+        self.assertEqual([d["kind"] for d in decided["deltas"]],
+                         ["expired", "retried", "spawned"])
+        self.assertEqual([a["id"] for a in decided["actions"]],
+                         ["51:2:1", "53:1:1", "wait:2026-08-19T13:01:00Z"])
+        self.assertEqual(decided["actions"][0]["worktree"], paths[51])
+        post_action_state = self.state_path.read_bytes()
+
+        # 4. The retried owner and unrelated active owner finish concurrently.
+        finished = self.concurrent_finish(
+            {51: (2, self.merged_result(51)), 53: (1, self.merged_result(53))},
+            now="2026-08-19T12:40:00Z",
+        )
+        self.assertTrue(all(process.returncode == 0 for process in finished))
+        reopened = self.read_state()
+        self.assertEqual(reopened["issues"]["51"]["outcome"], self.merged_result(51))
+        self.assertEqual(reopened["issues"]["53"]["outcome"], self.merged_result(53))
+
+        # 5. One current summary per issue and one finalize action drain the run.
+        final_request = self.control_request(
+            now="2026-08-19T12:41:00Z", issues=[47, 51, 53], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(i, state="closed") for i in (47, 51, 53)],
+            worktrees=[],
+        )
+        final = self.control_raw(request=final_request)
+        final_value = json.loads(final.stdout)
+        self.assertEqual(final_value["actions"], [{"id": "finalize", "kind": "finalize"}])
+        self.assertEqual([s["issue"] for s in final_value["summaries"]], [47, 51, 53])
+        self.assertTrue(all(s["state"] == "merged" for s in final_value["summaries"]))
+        self.assertIsNone(final_value["next_deadline"])
+        final_bytes = self.state_path.read_bytes()
+        final_replay = self.control_raw(request=final_request)
+        self.assertEqual(final_replay.stdout, final.stdout)
+        self.assertEqual(self.state_path.read_bytes(), final_bytes)
+
+        # 6. Replay both sides of the composite decision after the main run drains.
+        copied_pre_root = self.copy_ledger_root(pre_action_state)
+        copied_pre = self.run_control_at_root(copied_pre_root, decision_request)
+        self.assertEqual(copied_pre.stdout, decision.stdout)
+        copied_advanced_root = self.copy_ledger_root(post_action_state)
+        copied_advanced_state = (
+            copied_advanced_root / ".superpowers" / "workflows" /
+            self.run_id / "state.json"
+        )
+        advanced_before = copied_advanced_state.read_bytes()
+        copied_advanced = self.run_control_at_root(copied_advanced_root, decision_request)
+        replayed_value = json.loads(copied_advanced.stdout)
+        self.assertEqual([a["kind"] for a in replayed_value["actions"]], ["wait"])
+        self.assertEqual(replayed_value["deltas"], [])
+        self.assertEqual(copied_advanced_state.read_bytes(), advanced_before)
+
+        for response in (initial, decided, replayed_value, final_value):
+            self.assert_control_response_shape(response)
+            rendered = json.dumps(response)
+            for forbidden in ("attempts", "launches", "phase_inputs", "prior_attempt"):
+                self.assertNotIn(forbidden, rendered)
+
+    def test_control_demo_1_starts_two_and_waits_at_the_earliest_deadline(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        response = self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51, 53], max_parallel=2,
+            attempt_budget_minutes=180,
+            tracker=[self.tracker_fact(i) for i in (47, 51, 53)],
+            worktrees=[self.worktree_fact(
+                i, candidate={"path": str(self.root / f"wt-{i}"), "state": "absent"}
+            ) for i in (47, 51, 53)],
+        )
+        self.assertEqual([a["kind"] for a in response["actions"]],
+                         ["spawn", "spawn", "wait"])
+        self.assertEqual(response["next_deadline"], "2026-08-19T15:00:00Z")
+        self.assertEqual(response["summaries"][2]["state"], "queued")
+
+    def test_control_demo_2_late_merged_finish_beats_the_deadline(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                i, candidate={"path": str(self.root / f"wt-{i}"), "state": "absent"}
+            ) for i in (47, 51)],
+        )
+        result = self.merged_result(47)
+        self.finish(1, result, issue=47, now="2026-08-19T12:31:00Z")
+        response = self.control(
+            now="2026-08-19T12:31:00Z", issues=[47, 51], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(47),
+                     self.tracker_fact(51, open_blockers=[40])], worktrees=[],
+        )
+        summary = next(item for item in response["summaries"] if item["issue"] == 47)
+        self.assertEqual(summary["state"], "merged")
+        self.assertEqual(summary["result"], result)
+        self.assertNotIn(47, [d["issue"] for d in response["deltas"] if d["kind"] == "expired"])
+
+    def test_control_demo_3_expires_retries_and_fills_unrelated_capacity(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        paths = {i: str(self.root / f"wt-{i}") for i in (47, 51, 53)}
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51, 53], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(i) for i in (47, 51, 53)],
+            worktrees=[self.worktree_fact(
+                i, candidate={"path": paths[i], "state": "absent"}
+            ) for i in (47, 51, 53)],
+        )
+        self.finish(1, self.merged_result(47), issue=47, now="2026-08-19T12:20:00Z")
+        response = self.control(
+            now="2026-08-19T12:30:00Z", issues=[47, 51, 53], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(i) for i in (47, 51, 53)],
+            worktrees=[
+                self.worktree_fact(51, recorded={"path": paths[51], "state": "matching_issue_branch"}),
+                self.worktree_fact(53, candidate={"path": paths[53], "state": "absent"}),
+            ],
+        )
+        self.assertEqual([a["kind"] for a in response["actions"]],
+                         ["retry", "spawn", "wait"])
+        retry, spawn = response["actions"][:2]
+        self.assertEqual((retry["id"], retry["worktree"]), ("51:2:1", paths[51]))
+        self.assertEqual((spawn["id"], spawn["issue"]), ("53:1:1", 53))
+        self.assertEqual([d["kind"] for d in response["deltas"]],
+                         ["expired", "retried", "spawned"])
+
+    def test_control_demo_4_concurrent_finishes_survive_reopen(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        paths = {i: str(self.root / f"wt-{i}") for i in (47, 51)}
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                i, candidate={"path": paths[i], "state": "absent"}
+            ) for i in (47, 51)],
+        )
+        failed = {**self.merged_result(47), "state": "failed", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False, "notes": "harness"}
+        self.finish(1, failed, issue=47, now="2026-08-19T12:04:00Z")
+        self.control(
+            now="2026-08-19T12:05:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                47, recorded={"path": paths[47], "state": "matching_issue_branch"}
+            )],
+        )
+        completed = self.concurrent_finish(
+            {47: (2, self.merged_result(47)), 51: (1, self.merged_result(51))},
+            now="2026-08-19T12:10:00Z",
+        )
+        self.assertTrue(all(item.returncode == 0 for item in completed))
+        reopened = self.read_state()
+        self.assertEqual(reopened["issues"]["47"]["outcome"], self.merged_result(47))
+        self.assertEqual(reopened["issues"]["51"]["outcome"], self.merged_result(51))
+
+    def test_control_demo_5_finalizes_and_replays_without_history_or_duplicate_launch(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-47")
+        request = self.control_request(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": path, "state": "absent"}
+            )],
+        )
+        before = self.state_path.read_bytes()
+        first = self.control_raw(request=request)
+        advanced = self.state_path.read_bytes()
+        copied_root = self.copy_ledger_root(before)
+        copied = self.run_control_at_root(copied_root, request)
+        self.assertEqual(first.stdout, copied.stdout)
+        repeated_request = self.control_request(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[],
+        )
+        repeated = self.control_raw(request=repeated_request)
+        self.assertEqual(self.state_path.read_bytes(), advanced)
+        self.assertEqual([a["kind"] for a in json.loads(repeated.stdout)["actions"]], ["wait"])
+        self.finish(1, self.merged_result(47), issue=47, now="2026-08-19T12:10:00Z")
+        final = self.control(
+            now="2026-08-19T12:10:00Z", issues=[47],
+            tracker=[self.tracker_fact(47, state="closed")], worktrees=[],
+        )
+        self.assertEqual(final["actions"], [{"id": "finalize", "kind": "finalize"}])
+        self.assertEqual(len(final["summaries"]), 1)
+        for forbidden in ("attempts", "launches", "phase_inputs", "prior_attempt"):
+            self.assertNotIn(forbidden, json.dumps(final))
+
+    def test_control_orders_resumes_before_retry_before_spawn(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        paths = {i: str(self.root / f"wt-{i}") for i in (47, 51, 53, 59)}
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51, 53, 59], max_parallel=3,
+            tracker=[self.tracker_fact(i, open_blockers=[40] if i == 59 else [])
+                     for i in (47, 51, 53, 59)],
+            worktrees=[self.worktree_fact(
+                i, candidate={"path": paths[i], "state": "absent"}
+            ) for i in (47, 51, 53)],
+        )
+        handoff = self.write_handoff(47)
+        self.progress(issue=47, phase=1, now="2026-08-19T12:05:00Z",
+                      context_tokens=140000, handoff_path=handoff)
+        failed = {**self.merged_result(53), "state": "failed", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False, "notes": "harness"}
+        self.finish(1, failed, issue=53, now="2026-08-19T12:05:00Z")
+        response = self.control(
+            now="2026-08-19T12:06:00Z", issues=[47, 51, 53, 59], max_parallel=4,
+            tracker=[self.tracker_fact(i) for i in (47, 51, 53, 59)],
+            owners=[self.owner_fact(event_id="51-a1-exit", issue=51,
+                                    attempt=1, launch=1)],
+            worktrees=[
+                self.worktree_fact(i, recorded={"path": paths[i],
+                                                "state": "matching_issue_branch"})
+                for i in (47, 51, 53)
+            ] + [self.worktree_fact(
+                59, candidate={"path": paths[59], "state": "absent"}
+            )],
+        )
+        self.assert_control_response_shape(response)
+        self.assertEqual([a["kind"] for a in response["actions"]],
+                         ["resume", "resume", "retry", "spawn", "wait"])
+        self.assertEqual([a["id"] for a in response["actions"][:-1]],
+                         ["47:1:2", "51:1:2", "53:2:1", "59:1:1"])
+        self.assertEqual(response["actions"][0], {
+            "id": "47:1:2", "kind": "resume", "issue": 47, "attempt": 1,
+            "owner": "47:1", "worktree": paths[47],
+            "handoff_path": str(handoff), "deadline_at": "2026-08-19T12:30:00Z",
+        })
+        self.assertEqual(response["actions"][1], {
+            "id": "51:1:2", "kind": "resume", "issue": 51, "attempt": 1,
+            "owner": "51:1", "worktree": paths[51], "handoff_path": None,
+            "deadline_at": "2026-08-19T12:30:00Z",
+        })
+        self.assertEqual(response["actions"][2], {
+            "id": "53:2:1", "kind": "retry", "issue": 53, "attempt": 2,
+            "owner": "53:2", "worktree": paths[53], "handoff_path": None,
+            "deadline_at": "2026-08-19T12:36:00Z",
+        })
+
+    def test_control_ignores_consumed_owner_event_and_rejects_future_event_atomically(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-47")
+        self.control(now="2026-08-19T12:00:00Z", issues=[47],
+                     tracker=[self.tracker_fact(47)],
+                     worktrees=[self.worktree_fact(
+                         47, candidate={"path": path, "state": "absent"})])
+        event = self.owner_fact(event_id="47-a1-exit", issue=47, attempt=1, launch=1)
+        facts = [self.worktree_fact(
+            47, recorded={"path": path, "state": "matching_issue_branch"})]
+        resumed = self.control(now="2026-08-19T12:01:00Z", issues=[47],
+                               tracker=[self.tracker_fact(47)], owners=[event],
+                               worktrees=facts)
+        self.assertEqual(resumed["actions"][0]["id"], "47:1:2")
+        repeated = self.control(now="2026-08-19T12:01:00Z", issues=[47],
+                                tracker=[self.tracker_fact(47)], owners=[event],
+                                worktrees=[])
+        self.assertEqual([a["kind"] for a in repeated["actions"]], ["wait"])
+        before = self.state_path.read_bytes()
+        future = self.owner_fact(event_id="47-future", issue=47,
+                                 attempt=1, launch=3)
+        rejected = self.control_raw(now="2026-08-19T12:02:00Z", issues=[47],
+                                    tracker=[self.tracker_fact(47)], owners=[future],
+                                    worktrees=[], ok=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_control_does_not_retry_owner_stopped_and_refuses_attempt_three(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        paths = {i: str(self.root / f"wt-{i}") for i in (47, 51)}
+        self.control(now="2026-08-19T12:00:00Z", issues=[47, 51],
+                     tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+                     worktrees=[self.worktree_fact(
+                         i, candidate={"path": paths[i], "state": "absent"})
+                         for i in (47, 51)])
+        stopped = {**self.merged_result(47), "state": "stopped", "pr_url": None,
+                   "merge_sha": None, "issue_closed": False, "notes": "content verdict"}
+        failed = {**self.merged_result(51), "state": "failed", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False, "notes": "harness"}
+        self.finish(1, stopped, issue=47, now="2026-08-19T12:05:00Z")
+        self.finish(1, failed, issue=51, now="2026-08-19T12:05:00Z")
+        retry = self.control(
+            now="2026-08-19T12:06:00Z", issues=[47, 51],
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                51, recorded={"path": paths[51], "state": "matching_issue_branch"})],
+        )
+        self.assertNotIn(47, [a.get("issue") for a in retry["actions"]])
+        self.assertEqual(retry["actions"][0]["id"], "51:2:1")
+        self.finish(2, failed, issue=51, now="2026-08-19T12:07:00Z")
+        refused = self.control(now="2026-08-19T12:08:00Z", issues=[47, 51],
+                               tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+                               worktrees=[])
+        self.assert_control_response_shape(refused)
+        refusal_delta = next(d for d in refused["deltas"] if d["issue"] == 51)
+        self.assertEqual(refusal_delta, {
+            "issue": 51, "attempt": 2, "kind": "retry_refused", "state": "failed",
+        })
+        summary = next(s for s in refused["summaries"] if s["issue"] == 51)
+        self.assertEqual(set(summary["result"]), {
+            "issue", "state", "pr_url", "merge_sha", "issue_closed",
+            "discussion_items", "notes",
+        })
+        self.assertEqual(summary["result"]["state"], "failed")
+        self.assertIn("attempts 1 and 2", summary["result"]["notes"])
+        persisted = self.read_state()["issues"]["51"]
+        self.assertEqual(len(persisted["attempts"]), 2)
+        self.assertEqual(persisted["attempts"][-1]["result_source"], "refused")
+        self.assertEqual(persisted["outcome"], summary["result"])
+
+    def test_control_tracker_blockers_and_fog_suppress_only_new_work(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-47")
+        self.control(now="2026-08-19T12:00:00Z", issues=[47],
+                     tracker=[self.tracker_fact(47)],
+                     worktrees=[self.worktree_fact(
+                         47, candidate={"path": path, "state": "absent"})])
+        response = self.control(
+            now="2026-08-19T12:01:00Z", issues=[47, 51, 53],
+            tracker=[
+                self.tracker_fact(47, state="closed"),
+                self.tracker_fact(51, open_blockers=[40]),
+                self.tracker_fact(53, decision_blockers=[
+                    {"issue": 52, "url": "https://github.com/fagenorn/nix-config/issues/52"}
+                ]),
+            ], worktrees=[],
+        )
+        self.assertEqual([s["state"] for s in response["summaries"]],
+                         ["active", "blocked", "fogged"])
+        self.assertEqual([a["kind"] for a in response["actions"]], ["wait"])
+
+    def test_control_requires_verified_worktree_fact_for_an_accepted_action(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        before = self.state_path.read_bytes()
+        missing = self.control_raw(now="2026-08-19T12:00:00Z", issues=[47],
+                                   tracker=[self.tracker_fact(47)], worktrees=[],
+                                   ok=False)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        relative = self.control_raw(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": "relative", "state": "absent"})], ok=False,
+        )
+        self.assertNotEqual(relative.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_init_run_bootstrap_projects_latest_resume_and_retry_identity(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        paths = {i: str(self.root / f"wt-{i}") for i in (47, 51)}
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                i, candidate={"path": paths[i], "state": "absent"}
+            ) for i in (47, 51)],
+        )
+        resumed = self.control(
+            now="2026-08-19T12:01:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            owners=[self.owner_fact(event_id="47-exit", issue=47,
+                                    attempt=1, launch=1)],
+            worktrees=[self.worktree_fact(47, recorded={
+                "path": paths[47], "state": "matching_issue_branch",
+            })],
+        )
+        self.assertEqual(resumed["actions"][0]["id"], "47:1:2")
+        after_resume = self.init_run(now="2026-08-19T12:01:00Z")
+        self.assertEqual(after_resume["requirements"], [
+            {"issue": 47, "attempt": 1, "owner": "47:1",
+             "action_id": "47:1:2", "recorded_worktree": paths[47]},
+            {"issue": 51, "attempt": 1, "owner": "51:1",
+             "action_id": "51:1:1", "recorded_worktree": paths[51]},
+        ])
+
+        failed = {**self.merged_result(51), "state": "failed", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False, "notes": "harness"}
+        self.finish(1, failed, issue=51, now="2026-08-19T12:02:00Z")
+        retried = self.control(
+            now="2026-08-19T12:03:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(51, recorded={
+                "path": paths[51], "state": "matching_issue_branch",
+            })],
+        )
+        self.assertEqual(retried["actions"][0]["id"], "51:2:1")
+        after_retry = self.init_run(now="2026-08-19T12:03:00Z")
+        self.assertEqual(after_retry["requirements"][1], {
+            "issue": 51, "attempt": 2, "owner": "51:2",
+            "action_id": "51:2:1", "recorded_worktree": paths[51],
+        })
+
+    def test_consumed_candidate_is_only_an_actionless_exact_replay(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-47")
+        original = self.control_request(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": path, "state": "absent"})],
+        )
+        self.control_raw(request=original)
+        advanced = self.state_path.read_bytes()
+        exact = json.loads(self.control_raw(request=original).stdout)
+        self.assertEqual(exact["deltas"], [])
+        self.assertEqual([a["kind"] for a in exact["actions"]], ["wait"])
+        self.assertEqual(self.state_path.read_bytes(), advanced)
+
+        wrong_instant = copy.deepcopy(original)
+        wrong_instant["now"] = "2026-08-19T12:00:01Z"
+        self.assertNotEqual(self.control_raw(request=wrong_instant,
+                                             ok=False).returncode, 0)
+        wrong_path = self.control_request(
+            now="2026-08-19T12:00:00Z", issues=[47, 51],
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                51, candidate={"path": path, "state": "absent"})],
+        )
+        self.assertNotEqual(self.control_raw(request=wrong_path,
+                                             ok=False).returncode, 0)
+
+        unavailable = copy.deepcopy(original)
+        unavailable["owners"] = [self.owner_fact(
+            event_id="47-exit", issue=47, attempt=1, launch=1)]
+        self.assertNotEqual(self.control_raw(request=unavailable,
+                                             ok=False).returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), advanced)
+
+        failed = {**self.merged_result(47), "state": "failed", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False, "notes": "harness"}
+        self.finish(1, failed, issue=47, now="2026-08-19T12:00:00Z")
+        terminal = self.state_path.read_bytes()
+        self.assertNotEqual(self.control_raw(request=original, ok=False).returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), terminal)
+
+        current = self.control(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(47, recorded={
+                "path": path, "state": "matching_issue_branch",
+            })],
+        )
+        self.assertEqual(current["actions"][0]["id"], "47:2:1")
 
     def test_delayed_notification_recovers_durable_terminal_result(self):
         self.init_run()

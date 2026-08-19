@@ -1038,12 +1038,12 @@ def control_blockers(tracker: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def new_control_attempt(
-    *, issue: int, worktree: str, now: str, deadline_at: str
+    *, issue: int, attempt_number: int, worktree: str, now: str, deadline_at: str
 ) -> dict[str, Any]:
-    owner = f"{issue}:1"
+    owner = f"{issue}:{attempt_number}"
     return {
         "issue": issue,
-        "attempt": 1,
+        "attempt": attempt_number,
         "owner": owner,
         "worktree": worktree,
         "started_at": now,
@@ -1053,7 +1053,7 @@ def new_control_attempt(
         "launches": [
             {"kind": "fresh", "owner": owner, "worktree": worktree, "at": now}
         ],
-        "prior_attempt": None,
+        "prior_attempt": None if attempt_number == 1 else attempt_number - 1,
         "result": None,
         "finished_at": None,
         "result_source": None,
@@ -1115,6 +1115,9 @@ def command_control(args: argparse.Namespace) -> int:
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise WorkflowError("control time must not move backward")
 
+        # Validate every ledger-dependent observation before deriving or applying
+        # transitions.  Only an observation for the latest launch of the latest
+        # attempt is current; older, valid identities are harmless stale notices.
         unavailable: set[tuple[int, int, int]] = set()
         for observation in request["owners"]:
             issue_state = state["issues"].get(str(observation["issue"]))
@@ -1125,9 +1128,16 @@ def command_control(args: argparse.Namespace) -> int:
             attempt = issue_state["attempts"][observation["attempt"] - 1]
             if observation["launch"] > len(attempt["launches"]):
                 raise WorkflowError("unknown owner observation identity")
-            unavailable.add(
-                (observation["issue"], observation["attempt"], observation["launch"])
-            )
+            if (
+                observation["attempt"] == len(issue_state["attempts"])
+                and observation["launch"] == len(attempt["launches"])
+            ):
+                unavailable.add(
+                    (
+                        observation["issue"], observation["attempt"],
+                        observation["launch"],
+                    )
+                )
 
         for issue, observation in worktree_by_issue.items():
             recorded = observation["recorded"]
@@ -1139,6 +1149,20 @@ def command_control(args: argparse.Namespace) -> int:
             if recorded["path"] != issue_state["attempts"][-1]["worktree"]:
                 raise WorkflowError("recorded worktree path does not match ledger")
 
+        # Expiry is projected first.  The actual records are written only after
+        # all proposals, replay exceptions and candidate exclusivity are valid.
+        expiring: set[int] = set()
+        for issue_key in sorted(state["issues"], key=int):
+            issue_state = state["issues"][issue_key]
+            if not issue_state["attempts"]:
+                continue
+            latest = issue_state["attempts"][-1]
+            if (
+                latest["state"] in {"active", "handed_off"}
+                and now_value >= parse_utc(latest["deadline_at"], "attempt deadline")
+            ):
+                expiring.add(latest["issue"])
+
         occupied = 0
         for issue_state in state["issues"].values():
             if not issue_state["attempts"]:
@@ -1147,72 +1171,177 @@ def command_control(args: argparse.Namespace) -> int:
             identity = (
                 latest["issue"], latest["attempt"], len(latest["launches"])
             )
-            if latest["state"] == "active" and identity not in unavailable:
+            if (
+                latest["issue"] not in expiring
+                and latest["state"] == "active"
+                and identity not in unavailable
+            ):
                 occupied += 1
         capacity = max(0, request["max_parallel"] - occupied)
 
-        proposed: list[tuple[int, str, str]] = []
+        proposals: list[dict[str, Any]] = []
+
+        # D6 pass one: resumptions.  A handed-off attempt and a current owner
+        # disappearance both release capacity before selection.
         for issue in request["issues"]:
-            tracker = tracker_by_issue[issue]
             issue_state = state["issues"].get(str(issue))
-            if (
-                capacity <= 0
-                or tracker["state"] != "open"
-                or tracker["open_blockers"]
-                or tracker["decision_blockers"]
-                or (issue_state is not None and issue_state["attempts"])
+            if capacity <= 0 or issue in expiring or issue_state is None:
+                continue
+            latest = issue_state["attempts"][-1]
+            identity = (issue, latest["attempt"], len(latest["launches"]))
+            if not (
+                latest["state"] == "handed_off"
+                or (latest["state"] == "active" and identity in unavailable)
             ):
+                continue
+            observation = worktree_by_issue.get(issue)
+            if observation is None or observation["recorded"] is None:
+                raise WorkflowError(
+                    "current control action requires a recorded worktree observation"
+                )
+            proposals.append(
+                {
+                    "kind": "resume", "issue": issue,
+                    "attempt": latest["attempt"], "path": latest["worktree"],
+                    "uses_candidate": False,
+                }
+            )
+            capacity -= 1
+
+        def ready_for_new_work(issue: int) -> bool:
+            tracker = tracker_by_issue[issue]
+            return (
+                tracker["state"] == "open"
+                and not tracker["open_blockers"]
+                and not tracker["decision_blockers"]
+            )
+
+        def retryable(latest: dict[str, Any], *, projected_expiry: bool) -> bool:
+            return projected_expiry or (
+                latest["state"] == "failed"
+                and latest["result_source"] == "owner"
+            ) or (
+                latest["state"] == "stopped"
+                and latest["result_source"] == "expiry"
+            )
+
+        # D6 pass two: retry once, or durably refuse the third attempt.
+        for issue in request["issues"]:
+            issue_state = state["issues"].get(str(issue))
+            if issue_state is None or not ready_for_new_work(issue):
+                continue
+            latest = issue_state["attempts"][-1]
+            if not retryable(latest, projected_expiry=issue in expiring):
+                continue
+            if latest["attempt"] >= 2:
+                proposals.append(
+                    {
+                        "kind": "refuse", "issue": issue,
+                        "attempt": latest["attempt"], "path": latest["worktree"],
+                        "uses_candidate": False,
+                    }
+                )
+                continue
+            if capacity <= 0:
+                continue
+            observation = worktree_by_issue.get(issue)
+            if observation is None:
+                raise WorkflowError(
+                    "retry control action requires a verified worktree observation"
+                )
+            if observation["recorded"] is not None:
+                path = latest["worktree"]
+                uses_candidate = False
+            elif observation["candidate"] is not None:
+                path = observation["candidate"]["path"]
+                uses_candidate = True
+            else:
+                raise WorkflowError(
+                    "retry control action requires a verified worktree observation"
+                )
+            proposals.append(
+                {
+                    "kind": "retry", "issue": issue, "attempt": 2,
+                    "path": path, "uses_candidate": uses_candidate,
+                }
+            )
+            capacity -= 1
+
+        # D6 pass three: first spawns.
+        for issue in request["issues"]:
+            if capacity <= 0 or not ready_for_new_work(issue):
+                continue
+            issue_state = state["issues"].get(str(issue))
+            if issue_state is not None and issue_state["attempts"]:
                 continue
             observation = worktree_by_issue.get(issue)
             if observation is None or observation["candidate"] is None:
                 raise WorkflowError(
                     "fresh control action requires an absent candidate worktree"
                 )
-            candidate = observation["candidate"]
-            proposed.append((issue, candidate["path"], candidate["state"]))
+            proposals.append(
+                {
+                    "kind": "spawn", "issue": issue, "attempt": 1,
+                    "path": observation["candidate"]["path"],
+                    "uses_candidate": True,
+                }
+            )
             capacity -= 1
 
+        dispatch_proposals = [
+            proposal for proposal in proposals
+            if proposal["kind"] in CONTROL_DISPATCH_KINDS
+        ]
+
+        # D16 validates the complete accepted retry/spawn candidate set against
+        # itself and every durable path before any launch is appended.
         selected_paths: dict[str, int] = {}
         durable_paths: dict[str, set[int]] = {}
         for issue_state in state["issues"].values():
             for attempt in issue_state["attempts"]:
                 key = os.path.normcase(os.path.normpath(attempt["worktree"]))
                 durable_paths.setdefault(key, set()).add(attempt["issue"])
-        for issue, path, _ in proposed:
-            key = os.path.normcase(os.path.normpath(path))
-            if key in selected_paths and selected_paths[key] != issue:
+        for proposal in dispatch_proposals:
+            if not proposal["uses_candidate"]:
+                continue
+            issue = proposal["issue"]
+            key = os.path.normcase(os.path.normpath(proposal["path"]))
+            if key in selected_paths:
                 raise WorkflowError("candidate worktree path is shared by accepted actions")
             if any(other_issue != issue for other_issue in durable_paths.get(key, set())):
                 raise WorkflowError("candidate worktree path aliases another issue")
             selected_paths[key] = issue
 
-        actionless_replay = not proposed
+        # D13 is the only case in which a durable issue may still present the
+        # consumed absent-candidate fact.  It is valid solely for an actionless,
+        # exact replay of the first active launch.
+        actionless_replay = not dispatch_proposals
+        proposal_by_issue = {proposal["issue"]: proposal for proposal in proposals}
         for issue in request["issues"]:
             issue_state = state["issues"].get(str(issue))
             if issue_state is None or not issue_state["attempts"]:
                 continue
             latest = issue_state["attempts"][-1]
             observation = worktree_by_issue.get(issue)
-            recorded = None if observation is None else observation["recorded"]
-            if recorded is not None:
-                continue
             candidate = None if observation is None else observation["candidate"]
             if candidate is None:
-                if latest["state"] in {"active", "handed_off"}:
-                    raise WorkflowError(
-                        "current control action requires a recorded worktree observation"
-                    )
+                continue
+            proposal = proposal_by_issue.get(issue)
+            if (
+                proposal is not None
+                and proposal["kind"] == "retry"
+                and proposal["uses_candidate"]
+                and proposal["path"] == candidate["path"]
+                and candidate["path"] != latest["worktree"]
+            ):
                 continue
             identity = (issue, latest["attempt"], len(latest["launches"]))
-            tracker = tracker_by_issue[issue]
             replay = (
                 actionless_replay
+                and issue not in expiring
+                and proposal is None
                 and latest["state"] == "active"
                 and identity not in unavailable
-                and tracker["state"] == "open"
-                and not tracker["open_blockers"]
-                and not tracker["decision_blockers"]
-                and candidate is not None
                 and candidate["path"] == latest["worktree"]
                 and len(latest["launches"]) == 1
                 and latest["launches"][0]["at"] == now
@@ -1223,37 +1352,106 @@ def command_control(args: argparse.Namespace) -> int:
                     "current control action requires a recorded worktree observation"
                 )
 
-        deadline_at = format_utc(
+        fresh_deadline = format_utc(
             now_value + timedelta(minutes=request["attempt_budget_minutes"])
         )
         deltas: list[dict[str, Any]] = []
         actions: list[dict[str, Any]] = []
-        for issue, path, _ in proposed:
-            attempt = new_control_attempt(
-                issue=issue, worktree=path, now=now, deadline_at=deadline_at
+
+        for issue in sorted(expiring):
+            issue_state = state["issues"][str(issue)]
+            latest = issue_state["attempts"][-1]
+            outcome = stop_attempt(
+                latest, reason="attempt deadline expired", now=now, source="expiry"
             )
-            state["issues"][str(issue)] = {
-                "issue": issue,
-                "attempts": [attempt],
-                "outcome": None,
-            }
-            action_id = f"{issue}:1:1"
+            issue_state["outcome"] = outcome
             deltas.append(
-                {"issue": issue, "attempt": 1, "kind": "spawned", "state": "active"}
+                {
+                    "issue": issue, "attempt": latest["attempt"],
+                    "kind": "expired", "state": "stopped",
+                }
+            )
+
+        for proposal in proposals:
+            issue = proposal["issue"]
+            issue_state = state["issues"].get(str(issue))
+            if proposal["kind"] == "resume":
+                assert issue_state is not None
+                attempt = issue_state["attempts"][-1]
+                attempt["state"] = "active"
+                attempt["launch_kind"] = "resume"
+                attempt["launches"].append(
+                    {
+                        "kind": "resume", "owner": attempt["owner"],
+                        "worktree": attempt["worktree"], "at": now,
+                    }
+                )
+                delta_kind = "resumed"
+                action_kind = "resume"
+            elif proposal["kind"] == "retry":
+                assert issue_state is not None
+                attempt = new_control_attempt(
+                    issue=issue, attempt_number=2, worktree=proposal["path"],
+                    now=now, deadline_at=fresh_deadline,
+                )
+                issue_state["attempts"].append(attempt)
+                issue_state["outcome"] = None
+                delta_kind = "retried"
+                action_kind = "retry"
+            elif proposal["kind"] == "spawn":
+                attempt = new_control_attempt(
+                    issue=issue, attempt_number=1, worktree=proposal["path"],
+                    now=now, deadline_at=fresh_deadline,
+                )
+                state["issues"][str(issue)] = {
+                    "issue": issue, "attempts": [attempt], "outcome": None,
+                }
+                delta_kind = "spawned"
+                action_kind = "spawn"
+            else:
+                assert proposal["kind"] == "refuse" and issue_state is not None
+                latest = issue_state["attempts"][-1]
+                worktrees = ", ".join(
+                    attempt["worktree"] for attempt in issue_state["attempts"][:2]
+                )
+                result = terminal_result(
+                    issue, "failed",
+                    f"Fresh retry refused after attempts 1 and 2; worktrees: {worktrees}",
+                )
+                latest["state"] = "failed"
+                latest["result"] = result
+                latest["finished_at"] = finish_time(latest, now)
+                latest["result_source"] = "refused"
+                issue_state["outcome"] = copy.deepcopy(result)
+                deltas.append(
+                    {
+                        "issue": issue, "attempt": latest["attempt"],
+                        "kind": "retry_refused", "state": "failed",
+                    }
+                )
+                continue
+
+            launch_ordinal = len(attempt["launches"])
+            deltas.append(
+                {
+                    "issue": issue, "attempt": attempt["attempt"],
+                    "kind": delta_kind, "state": "active",
+                }
             )
             actions.append(
                 {
-                    "id": action_id,
-                    "kind": "spawn",
+                    "id": f"{issue}:{attempt['attempt']}:{launch_ordinal}",
+                    "kind": action_kind,
                     "issue": issue,
-                    "attempt": 1,
+                    "attempt": attempt["attempt"],
                     "owner": attempt["owner"],
                     "worktree": attempt["worktree"],
-                    "handoff_path": None,
+                    "handoff_path": attempt["handoff_path"],
                     "deadline_at": attempt["deadline_at"],
                 }
             )
-        changed = bool(proposed)
+
+        changed = bool(expiring or proposals)
         if changed:
             state["updated_at"] = now
 
@@ -1265,17 +1463,32 @@ def command_control(args: argparse.Namespace) -> int:
             )
             for issue in request["issues"]
         ]
-        deadlines = [
-            summary["deadline_at"]
-            for summary in summaries
-            if summary["state"] in {"active", "handed_off"}
-            and summary["deadline_at"] is not None
-        ]
+        deadlines = []
+        for issue_state in state["issues"].values():
+            if not issue_state["attempts"]:
+                continue
+            latest = issue_state["attempts"][-1]
+            if latest["state"] in {"active", "handed_off"}:
+                deadlines.append(latest["deadline_at"])
         next_deadline = min(deadlines, key=lambda value: parse_utc(value)) if deadlines else None
-        if summaries and all(
-            summary["state"] in {"merged", "stopped", "failed", "closed"}
-            for summary in summaries
-        ) or not summaries:
+
+        pending_external = False
+        for issue in request["issues"]:
+            issue_state = state["issues"].get(str(issue))
+            tracker = tracker_by_issue[issue]
+            if issue_state is None or not issue_state["attempts"]:
+                if tracker["state"] != "closed":
+                    pending_external = True
+                continue
+            latest = issue_state["attempts"][-1]
+            if (
+                tracker["state"] == "open"
+                and retryable(latest, projected_expiry=False)
+                and latest["attempt"] < 2
+            ):
+                pending_external = True
+
+        if next_deadline is None and not pending_external:
             actions.append({"id": "finalize", "kind": "finalize"})
         elif next_deadline is None:
             actions.append(
