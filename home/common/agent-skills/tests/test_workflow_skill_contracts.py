@@ -401,6 +401,20 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("validate-report --boundary ship-handoff", self.ship_handoff)
         self.assertIn("validate-report --boundary ship-summary", self.ship_handoff)
 
+    def test_autonomous_over_budget_reports_include_required_violations(self):
+        for kind in ("design-spec", "implementation-plan"):
+            complete = (
+                f'{{"state":"complete","artifact":{{"kind":"{kind}"'
+            )
+            over = (
+                f'{{"state":"decompose_required","artifact":{{"kind":"{kind}"'
+            )
+            self.assertIn(complete, self.auto)
+            self.assertIn(over, self.auto)
+        self.assertEqual(self.auto.count('"violations":["root_bytes"]'), 2)
+        self.assertIn("ordered, non-empty", self.auto)
+        self.assertIn("metrics, budget status, and violations are forbidden", self.auto)
+
     def test_sdd_report_is_exact_and_mechanically_validated(self):
         for field in ("state", "review_state", "conformance_verdict",
                       "correctness_verdict", "verification_state", "base_sha",
@@ -431,12 +445,35 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
         self.assertIn("Minor/Discussion", self.ship_review)
         self.assert_ordered(self.ship_issue, "delivery-detail", "artifact-budget check",
-                            "validate-report --boundary ship-summary", "remove the worktree")
+                            "git worktree remove",
+                            "validate-report --boundary ship-summary")
         for text in (self.sdd, self.ship_review, self.ship_issue, self.ship_handoff):
             self.assertIn("report_path", text)
             self.assertIn("keep the worktree", text)
         self.assertIn("primary worktree", self.ship_handoff)
         self.assertIn("never inline the report", self.from_issue)
+
+    def test_terminal_review_findings_use_only_the_durable_report_path(self):
+        finish = self.sdd[self.sdd.index("## Finish"):]
+        severity = self.section(self.ship_review, "## Severity mapping", "##")
+        self.assertNotIn("surfaced list", finish)
+        self.assertNotIn("`discussion_items` return carry", severity)
+        for text in (finish, severity):
+            self.assertIn("`report_path`", text)
+        self.assertIn("only findings transport", finish)
+        self.assertIn("only terminal transport", severity)
+
+    def test_merged_ship_summary_is_validated_only_after_cleanup(self):
+        cleanup = self.section(self.ship_issue, "## Phase 8", "## Notes")
+        self.assert_ordered(
+            cleanup,
+            "do not construct or validate a successful `merged` ship summary yet",
+            "gh issue close",
+            "git worktree remove",
+            "Only after issue closure and worktree cleanup both succeed",
+            "validate-report --boundary ship-summary",
+        )
+        self.assertIn("do not forge", cleanup)
 
     def test_review_package_failure_before_dispatch_has_no_fabricated_detail(self):
         self.assert_ordered(self.sdd, "base_sha and head_sha", "review-package",

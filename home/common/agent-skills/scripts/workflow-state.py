@@ -1651,6 +1651,34 @@ def validate_retained_detail(worktree: str, report_path: str) -> None:
         raise WorkflowError("unpublished detail must retain non-empty findings")
 
 
+def validate_durable_detail(repo_root: str, report_path: str) -> None:
+    root = Path(repo_root).resolve(strict=True)
+    candidate = root / report_path
+    try:
+        resolved_parent = candidate.parent.resolve(strict=True)
+        resolved_parent.relative_to(root)
+    except (OSError, ValueError) as error:
+        raise WorkflowError("durable detail is not beneath the repository root") from error
+    argv, policy = artifact_budget_paths()
+    argv.extend((
+        "check", "--kind", "review-package", "--root", str(candidate),
+        "--format", "json",
+    ))
+    if policy is not None:
+        argv.extend(("--policy", str(policy)))
+    completed = subprocess.run(argv, capture_output=True, check=False)
+    if completed.returncode != 0:
+        raise WorkflowError("durable detail is not a checker-valid review package")
+    try:
+        canonical = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WorkflowError("artifact-budget check returned invalid canonical JSON") from error
+    if (not isinstance(canonical, dict)
+            or canonical.get("kind") != "review-package"
+            or canonical.get("status") != "within_budget"):
+        raise WorkflowError("artifact-budget check returned an invalid review result")
+
+
 def command_progress(args: argparse.Namespace) -> int:
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
@@ -1721,6 +1749,9 @@ def command_finish(args: argparse.Namespace) -> int:
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
     result = load_result_file(args.result_file, args.issue)
+    if result["detail_state"] == "present":
+        assert isinstance(result["report_path"], str)
+        validate_durable_detail(args.repo_root, result["report_path"])
 
     def finish(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         assert state is not None

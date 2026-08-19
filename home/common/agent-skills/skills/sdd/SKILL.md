@@ -192,7 +192,8 @@ Terminal states:
   parked findings are already available through the one durable report.
 - **Residuals** — the breaker surfaced a load-bearing residual the caller must
   decide on: keep the workspace and ledger for the caller's inspection and report
-  `review_state: residuals` with the surfaced list.
+  `review_state: residuals`; the retained or durable review package named by the
+  single `report_path` is the only findings transport.
 
 Report to the calling workflow only the validated SDD JSON above. `review_state`
 is `clean | residuals` — sdd never reports `unknown`; that third value exists for

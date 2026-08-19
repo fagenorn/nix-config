@@ -49,9 +49,10 @@ the scope only.
 The apply/push flow below speaks Blocking / Should-fix; map per axis, never
 merging reports: Critical ≙ Blocking (apply inline via the five steps),
 Important ≙ Should-fix (same five steps in `--auto`, surfaced otherwise), Minor ≙
-Discussion-grade (record; surface only when user-facing). PR comments and the
-caller's `discussion_items` return carry Minor and Discussion items labeled by
-their axis.
+Discussion-grade (record; surface only when user-facing). Retain every Minor or
+Discussion finding with its axis in the delivery-detail package; the single
+durable `report_path` is the only terminal transport and `discussion_items`
+remains empty.
 
 ## The five-step apply/push flow
 

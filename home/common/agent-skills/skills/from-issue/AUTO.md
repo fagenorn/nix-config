@@ -110,13 +110,22 @@ prompt for no gain.
 
 After the final mutation, write a candidate producer report, run
 `artifact-budget validate-report --boundary producer`, and return only validated stdout bytes.
-never inline artifact contents or member paths. The exact report is:
+never inline artifact contents or member paths. The exact `complete` report is:
 
 ```
-{"state":"complete|decompose_required|failed","artifact":{"kind":"design-spec","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget|over_budget"},"notes":"<bounded note>"}
+{"state":"complete","artifact":{"kind":"design-spec","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"notes":"<bounded note>"}
 ```
 
-For `failed`, `artifact` follows the producer boundary's null/root-only matrix.
+The exact over-budget report includes the checker's ordered, non-empty
+`violations` array:
+
+```
+{"state":"decompose_required","artifact":{"kind":"design-spec","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"over_budget","violations":["root_bytes"]},"notes":"<bounded note>"}
+```
+
+For `failed`, `artifact` is exactly `null` before a root exists or exactly
+`{"kind":"design-spec","path":"<root relative to repo>"}` after one exists;
+metrics, budget status, and violations are forbidden in both failed rows.
 The orchestrator keeps only the artifact root and metrics; ADR paths and ledger
 choices stay in the spec.
 
@@ -137,13 +146,23 @@ applies its own blocking fixes before returning.
 
 After the final mutation, write a candidate producer report, run
 `artifact-budget validate-report --boundary producer`, and return only validated stdout bytes.
-Never inline artifact contents or task member paths. The exact report is:
+never inline artifact contents or task member paths. The exact `complete` report is:
 
 ```
-{"state":"complete|decompose_required|failed","artifact":{"kind":"implementation-plan","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget|over_budget"},"notes":"<bounded note>"}
+{"state":"complete","artifact":{"kind":"implementation-plan","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"notes":"<bounded note>"}
 ```
 
-`complete` plus any status other than `within_budget` is a contract error.
+The exact over-budget report includes the checker's ordered, non-empty
+`violations` array:
+
+```
+{"state":"decompose_required","artifact":{"kind":"implementation-plan","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"over_budget","violations":["root_bytes"]},"notes":"<bounded note>"}
+```
+
+For `failed`, `artifact` is exactly `null` before a root exists or exactly
+`{"kind":"implementation-plan","path":"<root relative to repo>"}` after one
+exists; metrics, budget status, and violations are forbidden in both failed
+rows. `complete` plus any status other than `within_budget` is a contract error.
 
 ### Phases 5, 6, 7
 

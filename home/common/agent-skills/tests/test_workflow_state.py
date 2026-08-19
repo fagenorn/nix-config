@@ -124,6 +124,29 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         os.replace(temporary_path, handoff_path)
         return handoff_path
 
+    def write_delivery_detail(self, relative):
+        root = self.root / relative
+        members = root.with_suffix(".shards")
+        members.mkdir(parents=True)
+        finding = {
+            "axis": "correctness", "severity": "Minor", "status": "parked",
+            "text": "durable detail", "ruling": "accepted",
+        }
+        record = (json.dumps(finding, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        member = members / "shard-001.jsonl"
+        member.write_bytes(record)
+        manifest = {
+            "interface_version": 1,
+            "kind": "review-package",
+            "purpose": "delivery-detail",
+            "context": {"issue": 14, "branch": "issue-14", "producer": "ship-review"},
+            "shards": [{"path": f"{members.name}/{member.name}", "bytes": len(record)}],
+            "total_detail_bytes": len(record),
+            "coverage": {"complete": True, "finding_count": 1},
+        }
+        root.write_text(json.dumps(manifest), encoding="utf-8")
+        return root
+
     def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, ok=True):
         result_path = self.root / f"result-{issue}-{attempt}.json"
         result_path.write_text(json.dumps(result), encoding="utf-8")
@@ -2775,6 +2798,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.init_run()
         attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
         detail = ".superpowers/issue-delivery/14/run-1/ship-review-a.json"
+        self.write_delivery_detail(detail)
         valid = {**self.merged_result(), "detail_state": "present", "report_path": detail,
                  "notes": f"details: {detail}"}
         invalid = (
@@ -2792,6 +2816,33 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         normalized = self.finish(attempt, valid)
         self.assertEqual(normalized["report_path"], detail)
         self.assertIn(detail, normalized["notes"])
+
+    def test_present_ship_detail_must_exist_be_valid_and_stay_beneath_repo_root(self):
+        self.init_run()
+        attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
+        detail = ".superpowers/issue-delivery/14/run-1/ship-review-a.json"
+        result = {**self.merged_result(), "detail_state": "present", "report_path": detail,
+                  "notes": f"details: {detail}"}
+
+        before = self.state_path.read_bytes()
+        self.finish(attempt, result, ok=False)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        root = self.write_delivery_detail(detail)
+        root.write_text("{}", encoding="utf-8")
+        self.finish(attempt, result, ok=False)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        outside = self.root.parent / f"{self.root.name}-outside"
+        outside.mkdir()
+        self.addCleanup(lambda: outside.rmdir() if outside.exists() else None)
+        escaped_parent = self.root / ".superpowers/issue-delivery/14/escape"
+        escaped_parent.parent.mkdir(parents=True, exist_ok=True)
+        escaped_parent.symlink_to(outside, target_is_directory=True)
+        escaped = ".superpowers/issue-delivery/14/escape/review.json"
+        escaped_result = {**result, "report_path": escaped, "notes": f"details: {escaped}"}
+        self.finish(attempt, escaped_result, ok=False)
+        self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_unpublished_ship_detail_retains_a_readable_candidate(self):
         self.init_run()

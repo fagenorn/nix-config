@@ -212,9 +212,8 @@ After verifying the merge, ask the REMOTE whether the branch still exists — `g
 Before cleanup, take every non-empty Minor/Discussion finding retained per
 REVIEW.md and invoke review-package in `delivery-detail` mode. Independently run
 `artifact-budget check --kind review-package` on the returned durable root and
-compare metrics. Build the exact ship result with `detail_state` and one
-`report_path`, validate its candidate through `artifact-budget validate-report --boundary ship-summary`,
-and use only canonical stdout. With non-empty findings,
+compare metrics. Record the checked `detail_state` and single `report_path`, but
+do not construct or validate a successful `merged` ship summary yet. With non-empty findings,
 publication failure may return `unpublished` only after the no-follow retained
 source passes `validate-detail-input`; keep the worktree and do not remove it.
 Otherwise fail closed. Only `none` or a checker-valid `present` detail can proceed
@@ -233,7 +232,17 @@ to remove the worktree.
 
 3. If `git worktree remove` refuses on the rebased-branch case (see `docPaths.gitWorktrees`): confirm the PR landed via `gh pr view`, then retry with `ExitWorktree action: "remove", discard_changes: true` — the "discarded N commits" wording is misleading; the content is on the integration branch.
 
-Report the validated ship-summary stdout only: `issue`, `state`, `pr_url`, full
+4. Only after issue closure and worktree cleanup both succeed, construct the
+   successful `merged` ship summary with the observed full `merge_sha`,
+   `issue_closed: true`, `discussion_items: []`, and the checked detail fields.
+   Validate it through `artifact-budget validate-report --boundary ship-summary`
+   and report only canonical stdout. Never predeclare closure or cleanup in a
+   candidate. If an earlier phase fails before merge, validate and return the
+   truthful `stopped` or `failed` row. If a post-merge cleanup action fails, keep
+   ownership and recover or retry that action; do not forge either a pre-merge
+   failure row or a successful summary for actions that have not happened.
+
+The final validated ship-summary contains only `issue`, `state`, `pr_url`, full
 `merge_sha`, `issue_closed`, `discussion_items: []`, `detail_state`,
 `report_path`, and notes. A fresh ship owner never writes workflow-state itself.
 
