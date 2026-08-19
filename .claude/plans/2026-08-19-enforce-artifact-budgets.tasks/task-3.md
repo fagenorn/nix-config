@@ -306,7 +306,12 @@ class ReviewPackageCliTest(unittest.TestCase):
             directory = Path(raw)
             main, linked, _, env, head = self.setup_linked_repo(directory)
             source = linked / "findings.json"
-            source.write_text(json.dumps({"interface_version": 1, "findings": []}),
+            valid_finding = {
+                "axis": "ship", "severity": "Minor", "status": "minor",
+                "text": "Retain this detail", "ruling": None,
+            }
+            source.write_text(json.dumps({"interface_version": 1,
+                                          "findings": [valid_finding]}),
                               encoding="utf-8")
             expected = main / ".superpowers/issue-delivery/49/run-1" / f"sdd-{head}.json"
             bad_outputs = [
@@ -339,7 +344,12 @@ class ReviewPackageCliTest(unittest.TestCase):
             directory = Path(raw)
             main, linked, _, env, head = self.setup_linked_repo(directory)
             source = linked / "findings.json"
-            source.write_text(json.dumps({"interface_version": 1, "findings": []}),
+            valid_finding = {
+                "axis": "ship", "severity": "Minor", "status": "minor",
+                "text": "Retain this detail", "ruling": None,
+            }
+            source.write_text(json.dumps({"interface_version": 1,
+                                          "findings": [valid_finding]}),
                               encoding="utf-8")
             home = main / ".superpowers/issue-delivery"
             home.mkdir(parents=True)
@@ -355,7 +365,12 @@ class ReviewPackageCliTest(unittest.TestCase):
             directory = Path(raw)
             main, linked, _, env, head = self.setup_linked_repo(directory)
             source = linked / "findings.json"
-            source.write_text(json.dumps({"interface_version": 1, "findings": []}),
+            valid_finding = {
+                "axis": "ship", "severity": "Minor", "status": "minor",
+                "text": "Retain this detail", "ruling": None,
+            }
+            source.write_text(json.dumps({"interface_version": 1,
+                                          "findings": [valid_finding]}),
                               encoding="utf-8")
             home = main / ".superpowers/issue-delivery"
             home.mkdir(parents=True)

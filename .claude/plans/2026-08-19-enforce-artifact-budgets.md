@@ -111,4 +111,11 @@ Task 5 — Close the orchestration contract and run repository gates — `home/c
 - CL-B1: added one shared strict detail-input CLI and required canonical validation before unpublished persistence (D14/D15).
 - CL-B2: merged default and per-case identity kwargs so malformed-head cases reach the CLI.
 
+### Final closure
+
+- Reviewer: `/root/issue49_plan_final_closure` (native reviewer; no fallback).
+- Review artifact: `/tmp/issue49-plan-final-closure.md`; reviewed head `f4756fff64116a428e05a6363e82b22ff86ba8ea`; base `416e7a92795a282c1b8cdd71e35a0f570cd35e56`; isolated/read-only.
+- Accepted 1 Should-fix finding; rejected 0; deferred 0; no Blocking findings remained.
+- FC-S1: made every detail destination/identity negative test start from a valid non-empty finding payload, so the intended path or identity field is the only invalid condition.
+
 Task members are the normative executable instructions. Read this root once for shared constraints and then only the selected linked member.
