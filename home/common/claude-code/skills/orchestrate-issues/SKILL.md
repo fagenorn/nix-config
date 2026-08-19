@@ -41,10 +41,12 @@ Consume only the strict version-1 response's bounded `requirements`. Never
 print, read, retain, or reconstruct raw ledger state. Each requirement supplies
 the exact `issue`, `attempt`, lifecycle `owner`, `action_id`, and
 `recorded_worktree` needed to rebuild external observations. Inspect exactly
-every returned `recorded_worktree`: report it as a normalized matching recorded
-path only when it is the live worktree for that issue's branch. When a returned
-path is absent or mismatched, verify a collision-free absent path and report
-that replacement candidate instead.
+every returned `recorded_worktree` and report its durable path with the exact
+normalized state `matching_issue_branch | absent | mismatch`. Use
+`matching_issue_branch` only when the path is the live worktree for that issue's
+branch. When a returned path is absent or mismatched, also verify and report a
+collision-free absent replacement candidate; never omit the recorded-path
+observation.
 
 In addition, for every requested issue without a bootstrap requirement, reserve
 a harmless verified absent candidate. This is path validation, not scheduling:
@@ -125,6 +127,17 @@ correlation; it is never an owner token or action identity.
 <!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
 
+> Immutable lifecycle envelope:
+> `--repo-root <ledger_repo_root>`
+> `ledger_repo_root=<ledger_repo_root>`
+> `run_id=<run-id>`
+> `issue=<issue>`
+> `attempt=<attempt>`
+> `owner=<owner-token>`
+> `action_id=<action-id>`
+> `worktree=<absolute-worktree>`
+> `handoff_path=<exact-handoff-path>`
+> Include `handoff_path` only when non-null.
 > Invoke the `from-issue` skill via the Skill tool with the literal arguments
 > `from-issue <num> --auto`. Preserve the lifecycle identity and exact worktree.
 > Persist the compact result with `workflow-state finish`, then return exactly

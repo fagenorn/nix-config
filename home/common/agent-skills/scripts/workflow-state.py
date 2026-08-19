@@ -97,7 +97,9 @@ OWNER_OBSERVATION_FIELDS = frozenset(
 OWNER_OBSERVATION_STATES = frozenset({"unavailable"})
 WORKTREE_OBSERVATION_FIELDS = frozenset({"issue", "recorded", "candidate"})
 RECORDED_WORKTREE_FIELDS = frozenset({"path", "state"})
-RECORDED_WORKTREE_STATES = frozenset({"matching_issue_branch"})
+RECORDED_WORKTREE_STATES = frozenset(
+    {"matching_issue_branch", "absent", "mismatch"}
+)
 CANDIDATE_WORKTREE_FIELDS = frozenset({"path", "state"})
 CANDIDATE_WORKTREE_STATES = frozenset({"absent"})
 CONTROL_RESPONSE_FIELDS = frozenset(
@@ -1152,8 +1154,10 @@ def command_control(args: argparse.Namespace) -> int:
         # Expiry is projected first.  The actual records are written only after
         # all proposals, replay exceptions and candidate exclusivity are valid.
         expiring: set[int] = set()
-        for issue_key in sorted(state["issues"], key=int):
-            issue_state = state["issues"][issue_key]
+        for issue in request["issues"]:
+            issue_state = state["issues"].get(str(issue))
+            if issue_state is None:
+                continue
             if not issue_state["attempts"]:
                 continue
             latest = issue_state["attempts"][-1]
@@ -1195,9 +1199,13 @@ def command_control(args: argparse.Namespace) -> int:
             ):
                 continue
             observation = worktree_by_issue.get(issue)
-            if observation is None or observation["recorded"] is None:
+            if (
+                observation is None
+                or observation["recorded"] is None
+                or observation["recorded"]["state"] != "matching_issue_branch"
+            ):
                 raise WorkflowError(
-                    "current control action requires a recorded worktree observation"
+                    "resume control action requires a matching recorded worktree observation"
                 )
             proposals.append(
                 {
@@ -1249,7 +1257,10 @@ def command_control(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     "retry control action requires a verified worktree observation"
                 )
-            if observation["recorded"] is not None:
+            if (
+                observation["recorded"] is not None
+                and observation["recorded"]["state"] == "matching_issue_branch"
+            ):
                 path = latest["worktree"]
                 uses_candidate = False
             elif observation["candidate"] is not None:
@@ -1358,19 +1369,26 @@ def command_control(args: argparse.Namespace) -> int:
         deltas: list[dict[str, Any]] = []
         actions: list[dict[str, Any]] = []
 
-        for issue in sorted(expiring):
+        refusal_issues = {
+            proposal["issue"] for proposal in proposals
+            if proposal["kind"] == "refuse"
+        }
+        for issue in request["issues"]:
+            if issue not in expiring:
+                continue
             issue_state = state["issues"][str(issue)]
             latest = issue_state["attempts"][-1]
             outcome = stop_attempt(
                 latest, reason="attempt deadline expired", now=now, source="expiry"
             )
             issue_state["outcome"] = outcome
-            deltas.append(
-                {
-                    "issue": issue, "attempt": latest["attempt"],
-                    "kind": "expired", "state": "stopped",
-                }
-            )
+            if issue not in refusal_issues:
+                deltas.append(
+                    {
+                        "issue": issue, "attempt": latest["attempt"],
+                        "kind": "expired", "state": "stopped",
+                    }
+                )
 
         for proposal in proposals:
             issue = proposal["issue"]
@@ -1464,7 +1482,10 @@ def command_control(args: argparse.Namespace) -> int:
             for issue in request["issues"]
         ]
         deadlines = []
-        for issue_state in state["issues"].values():
+        for issue in request["issues"]:
+            issue_state = state["issues"].get(str(issue))
+            if issue_state is None:
+                continue
             if not issue_state["attempts"]:
                 continue
             latest = issue_state["attempts"][-1]

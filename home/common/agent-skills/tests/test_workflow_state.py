@@ -766,6 +766,113 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn("recorded worktree path does not match ledger", mismatch.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
 
+    def test_control_uses_recorded_state_to_select_retry_worktree(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        issues = [47, 51]
+        recorded_paths = {issue: str(self.root / f"wt-{issue}") for issue in issues}
+        candidate_paths = {
+            issue: str(self.root / f"replacement-{issue}") for issue in issues
+        }
+        self.control(
+            now="2026-08-19T12:00:00Z",
+            issues=issues,
+            tracker=[self.tracker_fact(issue) for issue in issues],
+            worktrees=[
+                self.worktree_fact(
+                    issue,
+                    candidate={"path": recorded_paths[issue], "state": "absent"},
+                )
+                for issue in issues
+            ],
+        )
+        failed = {
+            **self.merged_result(47),
+            "state": "failed",
+            "pr_url": None,
+            "merge_sha": None,
+            "issue_closed": False,
+            "notes": "owner unavailable",
+        }
+        for issue in issues:
+            self.finish(1, {**failed, "issue": issue}, issue=issue,
+                        now="2026-08-19T12:05:00Z")
+
+        before = self.state_path.read_bytes()
+        missing_candidate = self.control_raw(
+            now="2026-08-19T12:06:00Z",
+            issues=issues,
+            tracker=[self.tracker_fact(issue) for issue in issues],
+            worktrees=[
+                self.worktree_fact(
+                    47,
+                    recorded={"path": recorded_paths[47], "state": "absent"},
+                ),
+                self.worktree_fact(
+                    51,
+                    recorded={"path": recorded_paths[51], "state": "mismatch"},
+                    candidate={"path": candidate_paths[51], "state": "absent"},
+                ),
+            ],
+            ok=False,
+        )
+        self.assertIn("verified worktree observation", missing_candidate.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        response = self.control(
+            now="2026-08-19T12:06:00Z",
+            issues=issues,
+            tracker=[self.tracker_fact(issue) for issue in issues],
+            worktrees=[
+                self.worktree_fact(
+                    47,
+                    recorded={"path": recorded_paths[47], "state": "absent"},
+                    candidate={"path": candidate_paths[47], "state": "absent"},
+                ),
+                self.worktree_fact(
+                    51,
+                    recorded={"path": recorded_paths[51], "state": "mismatch"},
+                    candidate={"path": candidate_paths[51], "state": "absent"},
+                ),
+            ],
+        )
+        self.assertEqual(
+            [(action["issue"], action["worktree"]) for action in response["actions"][:-1]],
+            [(47, candidate_paths[47]), (51, candidate_paths[51])],
+        )
+        state = self.read_state()
+        self.assertEqual(
+            [state["issues"][str(issue)]["attempts"][-1]["worktree"] for issue in issues],
+            [candidate_paths[47], candidate_paths[51]],
+        )
+
+    def test_control_requires_matching_recorded_state_for_resume_atomically(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-47")
+        replacement = str(self.root / "replacement-47")
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": path, "state": "absent"})],
+        )
+        before = self.state_path.read_bytes()
+        for recorded_state in ("absent", "mismatch"):
+            with self.subTest(recorded_state=recorded_state):
+                rejected = self.control_raw(
+                    now="2026-08-19T12:01:00Z", issues=[47],
+                    tracker=[self.tracker_fact(47)],
+                    owners=[self.owner_fact(event_id=f"47-{recorded_state}", issue=47,
+                                            attempt=1, launch=1)],
+                    worktrees=[self.worktree_fact(
+                        47,
+                        recorded={"path": path, "state": recorded_state},
+                        candidate={"path": replacement, "state": "absent"},
+                    )],
+                    ok=False,
+                )
+                self.assertIn("matching recorded worktree", rejected.stderr)
+                self.assertEqual(self.state_path.read_bytes(), before)
+
     def test_control_rejects_candidate_path_aliases_atomically(self):
         self.init_run(now="2026-08-19T12:00:00Z")
         shared = str(self.root / "shared-worktree")
@@ -1077,6 +1184,51 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual([d["kind"] for d in response["deltas"]],
                          ["expired", "retried", "spawned"])
 
+    def test_control_expiry_deltas_follow_reversed_request_order(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        issues = [47, 51]
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=issues,
+            tracker=[self.tracker_fact(issue) for issue in issues],
+            worktrees=[self.worktree_fact(
+                issue,
+                candidate={"path": str(self.root / f"wt-{issue}"), "state": "absent"},
+            ) for issue in issues],
+        )
+        response = self.control(
+            now="2026-08-19T12:30:00Z", issues=[51, 47],
+            tracker=[self.tracker_fact(issue, open_blockers=[40])
+                     for issue in (51, 47)],
+            worktrees=[],
+        )
+        self.assertEqual([item["issue"] for item in response["summaries"]], [51, 47])
+        self.assertEqual([item["issue"] for item in response["deltas"]], [51, 47])
+        self.assertEqual([item["kind"] for item in response["deltas"]],
+                         ["expired", "expired"])
+
+    def test_control_subset_does_not_expire_or_report_unrequested_issue(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        issues = [47, 51]
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=issues,
+            tracker=[self.tracker_fact(issue) for issue in issues],
+            worktrees=[self.worktree_fact(
+                issue,
+                candidate={"path": str(self.root / f"wt-{issue}"), "state": "absent"},
+            ) for issue in issues],
+        )
+        unrequested_before = copy.deepcopy(self.read_state()["issues"]["51"])
+        response = self.control(
+            now="2026-08-19T12:30:00Z", issues=[47],
+            tracker=[self.tracker_fact(47, open_blockers=[40])],
+            worktrees=[],
+        )
+        self.assertEqual([item["issue"] for item in response["summaries"]], [47])
+        self.assertEqual([item["issue"] for item in response["deltas"]], [47])
+        self.assertFalse(any(item.get("issue") == 51 for item in response["actions"]))
+        self.assertIsNone(response["next_deadline"])
+        self.assertEqual(self.read_state()["issues"]["51"], unrequested_before)
+
     def test_control_demo_4_concurrent_finishes_survive_reopen(self):
         self.init_run(now="2026-08-19T12:00:00Z")
         paths = {i: str(self.root / f"wt-{i}") for i in (47, 51)}
@@ -1260,6 +1412,42 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(len(persisted["attempts"]), 2)
         self.assertEqual(persisted["attempts"][-1]["result_source"], "refused")
         self.assertEqual(persisted["outcome"], summary["result"])
+
+    def test_control_attempt_two_deadline_emits_only_retry_refused(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-47")
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": path, "state": "absent"})],
+        )
+        failed = {
+            **self.merged_result(47),
+            "state": "failed",
+            "pr_url": None,
+            "merge_sha": None,
+            "issue_closed": False,
+            "notes": "owner unavailable",
+        }
+        self.finish(1, failed, issue=47, now="2026-08-19T12:01:00Z")
+        retried = self.control(
+            now="2026-08-19T12:02:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, recorded={"path": path, "state": "matching_issue_branch"})],
+        )
+        self.assertEqual(retried["actions"][0]["id"], "47:2:1")
+
+        refused = self.control(
+            now="2026-08-19T12:32:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)], worktrees=[],
+        )
+        self.assertEqual(refused["deltas"], [{
+            "issue": 47, "attempt": 2, "kind": "retry_refused", "state": "failed",
+        }])
+        persisted = self.read_state()["issues"]["47"]["attempts"][-1]
+        self.assertEqual(persisted["result_source"], "refused")
 
     def test_control_tracker_blockers_and_fog_suppress_only_new_work(self):
         self.init_run(now="2026-08-19T12:00:00Z")

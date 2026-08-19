@@ -98,6 +98,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             observe, "every requested issue without a bootstrap requirement",
             "verified absent candidate", "control ignores unused candidates",
         )
+        self.assertIn("matching_issue_branch | absent | mismatch", observe)
+        self.assertRegex(observe, r"never omit the recorded-path\s+observation")
         self.assertNotIn("tracker-ready", observe)
         self.assertNotIn("classify tracker readiness", observe)
         self.assert_ordered(decide, "--request-file <absolute-json-path>",
@@ -126,6 +128,27 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn("exact immutable value", durable_section)
         self.assertIn("independent of any issue worktree", durable_section)
+
+        declaration = durable_section.index(
+            'Agent(subagent_type="general-purpose", model="opus", effort="high", '
+            'run_in_background=true)'
+        )
+        fresh_context = durable_section[declaration:]
+        fresh_prompt = fresh_context[:fresh_context.index("\n\nNever inline")]
+        for field in (
+            "ledger_repo_root=<ledger_repo_root>",
+            "run_id=<run-id>",
+            "issue=<issue>",
+            "attempt=<attempt>",
+            "owner=<owner-token>",
+            "action_id=<action-id>",
+            "worktree=<absolute-worktree>",
+            "handoff_path=<exact-handoff-path>",
+            "from-issue <num> --auto",
+        ):
+            self.assertIn(f"> `{field}`", fresh_prompt)
+        self.assertIn("> Immutable lifecycle envelope:", fresh_prompt)
+        self.assertIn("> Include `handoff_path` only when non-null.", fresh_prompt)
 
     def test_dispatcher_maps_resolved_limits_into_control_request(self):
         resolve = self.section(
