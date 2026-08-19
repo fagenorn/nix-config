@@ -97,15 +97,53 @@ Only offer to create an ADR when all three are true:
 
 If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md).
 
+## Final spec measurement
+
+When the grilling ends (frontier empty, or the user stops it), finish every glossary,
+ADR, spec, and decision-ledger edit. The last spec or ledger edit is the final mutation
+before measurement. Even when the grill did not change the spec, obtain a
+current result rather than repeating an earlier producer's claim: run
+`artifact-budget check --kind design-spec --root <spec-root> --format json`. Do not
+embed thresholds or substitute an ad-hoc byte counter.
+
+Exit 0 is acceptable only for `within_budget` with exactly the four metrics
+`root_bytes`, `total_bytes`, `file_count`, and `largest_member_bytes`. On the first
+exit 3, compact repetition, examples, and evidence references in the spec without
+weakening required sections or the decision ledger's meaning, then run
+`artifact-budget check --kind design-spec --root <spec-root> --format json` again.
+If that check remains over budget, retain the draft and return
+`decompose_required` with the checker's sorted closed `violations`; a clean grill
+or `complete` is forbidden. Exit 2 from either check is `failed`. When the root is
+known, report its path but no fabricated metrics or status.
+
+The grill owns remeasurement whenever it changes the spec or decision ledger. Any
+mutation after a successful check invalidates the metrics and transfers a fresh
+check to that writer; this includes further grill fixes and later planning edits.
+
 ## Report on return
 
-When the grilling ends (frontier empty, or the user stops it), report — to the caller when invoked from another skill, to the user when standalone:
+Return exactly one D14 producer report, to the caller when invoked by another skill
+or to the user when standalone. Its closed state row is `state: complete | decompose_required | failed`:
 
-- The decisions that crystallised, one line each, and where each was recorded (spec's decision ledger row, ADR path, glossary entry).
-- Doc files created or updated (glossary/area files, map rows, ADRs), by path.
-- Questions still open, with why each could not be settled.
-- ≤500 characters of notes for the next phase.
+- `complete` has one artifact with `kind: design-spec`, the root `path`, `metrics`
+  containing exactly `root_bytes`, `total_bytes`, `file_count`, and
+  `largest_member_bytes`, and `budget_status: within_budget`.
+- `decompose_required` has the same artifact shape with `budget_status:
+  over_budget` and the checker's sorted closed `violations`.
+- `failed` has a null artifact before a root is known, or only `kind` and `path`
+  when it is known. Include no fabricated metrics or budget status.
 
-Details stay in the committed files. Do not invoke the next skill or start implementing — the caller owns what happens next.
+Bound `notes` using only the shared policy's
+`phase_reports.notes_max_characters`. The report must never inline artifact contents,
+decision-ledger rows, doc or member lists, policy, or logs. Crystallised
+decisions, open questions, glossary/map changes, and ADR paths stay in the committed
+spec and documentation; bounded notes may point the caller to those roots.
+
+Only after the last artifact check, write the object as UTF-8 to a sibling temporary
+candidate JSON file, invoke `artifact-budget validate-report --boundary producer
+--input <candidate>`, and remove the candidate on every outcome. Return only the
+exact validated stdout bytes. Validation exit 2 is `failed`: emit no Markdown,
+YAML, candidate JSON, truncated text, or prose fallback. Do not invoke the next
+skill or start implementing — the caller owns what happens next.
 
 </supporting-info>

@@ -46,7 +46,7 @@ When the caller runs autonomously (`from-issue --auto`), **the `➡️` recommen
 
 ## Output
 
-Write the design to `<specDir>/<YYYY-MM-DD>-<topic>-design.md` (`specDir` from `~/.agents/bin/resolve-bindings`; helper missing → `.claude/skills.config.json`, default `.claude/specs`) and commit it in the worktree you were called in — never on the integration branch.
+Write the design to `<specDir>/<YYYY-MM-DD>-<topic>-design.md` (`specDir` from `~/.agents/bin/resolve-bindings`; helper missing → `.claude/skills.config.json`, default `.claude/specs`) in the worktree you were called in — never on the integration branch.
 
 Sections: **Problem** (from the user's perspective) · **Solution** · **Decisions** (modules and interfaces touched, schema and API contracts, behavior — no file paths or line numbers; they rot) · **Test seams** (the agreed seams and the prior art they follow) · **Out of scope** (mandatory, and real) · **Decision ledger** — the issue's single decision store, a table later phases cite by row ID instead of restating rationale:
 
@@ -58,8 +58,50 @@ Sections: **Problem** (from the user's perspective) · **Solution** · **Decisio
 
 Only non-obvious decisions earn a row (scope, interface, behavioral, test-seam, irreversible, user-preference — self-answered or user-answered); plans and task briefs cite "per D3" rather than duplicating the row.
 
-Then read the file once with fresh eyes and fix inline: placeholders (`TBD`, "handle edge cases"), sections that contradict each other, requirements that can be read two ways, scope that needs decomposing. No reviewer dispatch — this is your own pass.
+Then read the file once with fresh eyes and fix inline: placeholders (`TBD`, "handle edge cases"), sections that contradict each other, requirements that can be read two ways, scope that needs decomposing. No reviewer dispatch — this is your own pass. The last such edit is the final mutation before measurement.
+
+## Artifact budget boundary
+
+After the fresh-eyes fixes, run the stable command `artifact-budget check --kind
+design-spec --root <spec-root> --format json`. Do not embed thresholds or substitute
+an ad-hoc byte counter. Exit 2 is `failed`; when the root is known, preserve its path but attach no
+fabricated metrics or status. Exit 0 is acceptable only when the checker says
+`within_budget` and returns exactly `root_bytes`, `total_bytes`, `file_count`, and
+`largest_member_bytes`.
+
+On the first exit 3, compact repetition, examples, and evidence references without
+weakening any required section or changing the decision ledger's meaning. That edit
+invalidates the first measurement, so run `artifact-budget check --kind design-spec
+--root <spec-root> --format json` once more. If the second result is still over
+budget, retain the draft and return `decompose_required` with the checker's sorted,
+closed `violations`; never call the design approved or complete. There is no second
+compaction strategy. A second-check exit 2 is `failed`.
+
+Only a final within-budget result may be committed as the completed design. Any
+later writer owns remeasurement: in particular, a grill edit or a planning-phase
+decision-ledger append invalidates these metrics and must check the complete spec
+again before its phase advances.
 
 ## Return control
 
-Report to the caller: the spec path, any ADR paths, one line per auto-resolved decision, and ≤500 characters of notes for anything the plan phase must know. Details stay in the committed file. Do not invoke `writing-plans`, do not start implementing, and do not offer to — the caller owns the next phase.
+Return exactly one D14 producer report. Its closed state row is `state: complete | decompose_required | failed`:
+
+- `complete` has one artifact with `kind: design-spec`, the root `path`, `metrics`
+  containing exactly `root_bytes`, `total_bytes`, `file_count`, and
+  `largest_member_bytes`, and `budget_status: within_budget`.
+- `decompose_required` has the same artifact shape with `budget_status:
+  over_budget` and the checker's sorted closed `violations`.
+- `failed` has a null artifact before a root is known, or only `kind` and `path`
+  when it is known. Include no fabricated metrics or budget status.
+
+`notes` is a string bounded by the shared policy's
+`phase_reports.notes_max_characters`; the skill contains no copied limit. The
+report must never inline artifact contents, decision-ledger rows, policy, logs, or
+member lists. The committed root carries all detail.
+
+Only after the last artifact check, write the object as UTF-8 to a sibling temporary
+candidate JSON file, invoke `artifact-budget validate-report --boundary producer
+--input <candidate>`, and remove the candidate on every outcome. Return only the
+exact validated stdout bytes. Validation exit 2 is `failed`: emit no Markdown,
+YAML, candidate JSON, truncated text, or prose fallback. Do not invoke
+`writing-plans`, start implementing, or offer to — the caller owns the next phase.

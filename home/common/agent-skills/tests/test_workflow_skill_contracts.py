@@ -19,6 +19,8 @@ FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
 AUTO = REPO_ROOT / "home/common/agent-skills/skills/from-issue/AUTO.md"
 INVESTIGATE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/investigate.md"
 HANDOFF = REPO_ROOT / "home/common/agent-skills/skills/handoff/SKILL.md"
+DESIGN = REPO_ROOT / "home/common/agent-skills/skills/design/SKILL.md"
+GRILL = REPO_ROOT / "home/common/agent-skills/skills/grill-with-docs/SKILL.md"
 COLLABORATION = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md"
 )
@@ -64,6 +66,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.auto = AUTO.read_text(encoding="utf-8")
         cls.investigate = INVESTIGATE.read_text(encoding="utf-8")
         cls.handoff = HANDOFF.read_text(encoding="utf-8")
+        cls.design = DESIGN.read_text(encoding="utf-8")
+        cls.grill = GRILL.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
         cls.diff_review = DIFF_REVIEW.read_text(encoding="utf-8")
         cls.certification = CERTIFICATION.read_text(encoding="utf-8")
@@ -282,6 +286,35 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertNotRegex(self.writing_plans, rf"(?m)^\s*{re.escape(forbidden)}")
         self.assert_ordered(self.writing_plans, "candidate JSON", "validate-report",
                             "validated stdout bytes")
+
+    def test_design_and_grill_measure_after_last_write_and_stop_truthfully(self):
+        for producer in (self.design, self.grill):
+            self.assert_ordered(producer, "final mutation", "artifact-budget check",
+                                "compact repetition", "artifact-budget check",
+                                "decompose_required")
+            self.assertIn("budget_status: within_budget", producer)
+            self.assertIn("root_bytes", producer)
+            self.assertIn("largest_member_bytes", producer)
+            self.assertNotIn("wc -c", producer)
+            self.assertRegex(producer, r"state:.*complete.*decompose_required.*failed")
+
+    def test_handoff_measures_candidate_before_durable_replace(self):
+        self.assert_ordered(self.handoff, "sibling temporary", "artifact-budget check",
+                            "remove duplicated", "artifact-budget check", "stopped")
+        self.assert_ordered(self.handoff, "budget_status: within_budget", "atomically replace")
+        self.assertIn("leave the existing destination byte-identical", self.handoff)
+        self.assertIn("no fabricated metrics", self.handoff)
+
+    def test_artifact_reports_are_bounded_root_only_shapes(self):
+        for producer in (self.design, self.grill, self.handoff):
+            for field in ("kind", "path", "metrics", "budget_status", "notes"):
+                self.assertIn(field, producer)
+            self.assertIn("phase_reports.notes_max_characters", producer)
+            self.assert_ordered(producer, "candidate JSON", "validate-report --boundary producer",
+                                "validated stdout")
+            self.assertIn("never inline artifact contents", producer)
+            for forbidden in ("spec_path:", "adr_paths:", "decisions:", "open_items:", "summary:"):
+                self.assertNotRegex(producer, rf"(?m)^\s*{re.escape(forbidden)}")
 
     def test_sdd_validates_plan_before_extracting_a_member(self):
         setup = self.section(self.sdd, "## Setup", "## Agent tiers")

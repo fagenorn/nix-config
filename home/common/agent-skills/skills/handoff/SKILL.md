@@ -6,13 +6,12 @@ argument-hint: "What will the next session be used for?"
 
 Write a handoff document summarising the current conversation so a fresh agent can continue the work.
 
-By default, save it to a temp file whose name you generate portably — e.g.
-`mktemp "${TMPDIR:-/tmp}/handoff-XXXXXX.md"` (the explicit `XXXXXX` template
-works on both macOS/BSD and Linux). This remains the default for interactive use.
-`mktemp` creates the (empty) file as it generates the name: write the document
-straight into it and report the path — do not read the just-created empty file
-back first. The verify-and-replace protocol below exists for caller-provided
-durable destinations only, never for this default.
+By default, create a nondurable candidate with a portable name — e.g. `mktemp
+"${TMPDIR:-/tmp}/handoff-XXXXXX.md"` (the explicit `XXXXXX` template works on
+both macOS/BSD and Linux). `mktemp` creates the empty file as it generates the
+name: write the full candidate straight into it; do not read the just-created
+empty file back first. The durable publication protocol below exists only for a
+caller-provided destination.
 
 A caller-provided destination with the current `run_id` is accepted only under
 that run's `.superpowers/workflows/<run-id>/handoffs/` directory. Require
@@ -21,16 +20,73 @@ no-follow directory opens. Reject every path escape, symlink component, or
 non-directory parent. Inspect the destination leaf without following it; reject
 an existing symlink or non-regular file, but allow a missing destination.
 
-For that caller-provided destination: write and fsync a sibling temporary
-regular file without following any leaf.
-When the destination is missing, install it with an exclusive atomic operation
-(for example, hard-link the temporary file to the destination) that will fail if
-the leaf appeared concurrently; never overwrite that race. The missing
-destination is created atomically, then the temporary name is removed. When an
-existing regular destination is present, open and read it before writing, verify
-that the same regular file is still at the leaf, then atomically replace it with
-the sibling temporary file. Fsync the parent directory and return the exact
-destination path. Clean up the temporary file on every failure.
+For that caller-provided destination, write and fsync the full candidate as a
+sibling temporary regular file without following any leaf. Do not open the
+destination for writing and do not publish yet.
+
+## Candidate budget state machine
+
+After the full candidate has been written, run `artifact-budget check --kind
+handoff --root <candidate-root> --format json`. Do not embed thresholds or use
+an ad-hoc byte counter. Exit 2 is `failed`; include the candidate root when known but no
+fabricated metrics or status. On the first exit 3, perform one semantic rewrite:
+remove duplicated artifact, lifecycle, diff, and log content while preserving the
+continuation decisions and references, then run `artifact-budget check --kind
+handoff --root <candidate-root> --format json` once more. There is no second
+rewrite. A second exit 3 is `stopped`, never `complete`.
+
+For a nondurable candidate, retain that over-budget candidate for inspection. For
+a durable request, never install an over-budget candidate: remove its unpublished
+sibling temporary pathname after moving the same regular file, without changing
+its bytes, to a clearly nondurable retained-candidate path used in the stopped
+report. If an identity-preserving move is unavailable, remove the sibling name
+and stop failed rather than copy unmeasured bytes. Any checker exit 2 removes an
+unpublished candidate. Thus a terminal checker exit 2 or exit 3 must leave the
+existing destination byte-identical and clean up all unpublished temporary names.
+
+Any content mutation after a successful check invalidates the metrics and makes
+that writer responsible for remeasurement. Renaming or installing the same checked
+regular file without changing its bytes is publication, not a content mutation.
+
+## Producer report and publication
+
+The report returned for the final outcome is exactly one D14 object whose closed
+state row is `state: complete | stopped | failed`:
+
+- `complete` has one artifact with `kind: handoff`, the published or nondurable
+  root `path`, `metrics` containing exactly `root_bytes`, `total_bytes`,
+  `file_count`, and `largest_member_bytes`, and `budget_status: within_budget`.
+- `stopped` has the retained nondurable candidate `path`, the same exact metrics,
+  `budget_status: over_budget`, and the checker's sorted closed `violations`.
+- `failed` has a null artifact before a root is known, or only `kind` and `path`
+  when it is known. Include no fabricated metrics or budget status.
+
+Bound `notes` using only the shared policy's
+`phase_reports.notes_max_characters`. Reports must never inline artifact contents,
+member lists, policy, logs, lifecycle rows, or diff content.
+
+Only after the last artifact check, serialize the row as UTF-8 to a separate sibling
+report candidate JSON file, invoke `artifact-budget validate-report --boundary producer --input <report-candidate>`, remove the report candidate on every outcome,
+and hold only the exact validated stdout bytes. Validation exit 2 is `failed`: emit
+no Markdown, YAML, candidate JSON, truncated text, or prose fallback. It must also
+leave the existing destination byte-identical and remove unpublished temporary
+names.
+
+Only an exit-0 artifact check and an exit-0 report validation may reach durable
+publication. When the destination is missing, install the checked sibling file
+with an exclusive atomic operation (for example, hard-link it to the destination)
+that fails if the leaf appeared concurrently; never overwrite that race. The
+missing destination is created atomically, then the temporary name is removed.
+When an existing regular destination is present, open and read it before writing,
+verify that the same regular file is still at the leaf, then atomically replace it
+with the checked sibling temporary file. Fsync the parent directory. Publication
+failure cleans the unpublished file and is `failed`; discard the held success bytes,
+write the root-only failed row to a new sibling report candidate, validate and remove
+it by the same protocol, and return only that validated stdout. If this validation
+also exits 2, emit nothing rather than substitute a prose result. On publication
+success, return only the previously validated stdout bytes, whose root path is the
+exact destination. For the default nondurable route, return those bytes after
+validation without a replace.
 
 Suggest the skills to be used, if any, by the next session.
 
