@@ -85,11 +85,11 @@ not that packet plus tweaks. It contains exactly:
    instruct the reviewer not to grade it.
 3. The caller's correctness rubric by absolute path (sdd's
    `correctness-reviewer-prompt.md`), with concrete values supplied for every
-   placeholder it names. `[DIFF_FILE]` is the one exception: it is left
-   unsupplied when the range is scoped — see *When the range is over budget*.
-4. The diff-package path when the caller built one, and the plan path (routing
-   context for what the tasks were). The diff-package path is dropped when the
-   range is scoped — see *When the range is over budget*.
+   placeholder it names, including the review-package manifest and metrics.
+4. The manifest root path and all four metrics (`root_bytes`, `total_bytes`,
+   `file_count`, `largest_member_bytes`) from the caller's validated
+   producer report, plus the plan path (routing context for what the tasks
+   were). No shard list or diff contents ride in the packet.
 5. Inferred verify commands and every applicable `AGENTS.md`/`CLAUDE.md`.
 6. The standards layers matching the diff's file types
    (`~/.agents/standards/the-bar.md`, its `stacks/` shards, project
@@ -123,22 +123,22 @@ that reaches into an unlisted file is legal and reportable, as long as it is anc
 in a listed file. Silently grading an unlisted file, reporting a defect that lies
 wholly inside one, or implying it was covered, is not.
 
-**Item 4 drops the diff-package path.** That package is sdd's `scripts/review-package`
-output: an unconditional full-range `git diff -U10 <base>..<head>`, which the rubric
-tells the reviewer to read once. Carrying it in a scoped packet would hand over the
-entire range this packet just bounded, so a scoped item 4 carries the plan path alone
-— routing context is not a diff. Item 3 travels as always, with one placeholder
-unsupplied: `[DIFF_FILE]` has no value on a scoped dispatch, which is exactly what
-routes the reviewer into the rubric's "no diff file was supplied" branch. Do not
-regenerate a smaller package and do not change `scripts/review-package`: the
-conformance axis reads that same package whole.
+**Item 4 changes the manifest's use, not its presence.** The scoped correctness
+packet still carries the manifest root path and all four metrics as truthful
+range-coverage evidence, but directs the reviewer: **do not read its shards**.
+The full-range shards would defeat the 20-file evidence bound. Item 3 receives
+all manifest/metric placeholders as usual and routes on the packet's explicit
+scoped statement. Do not regenerate a smaller package: the conformance axis and
+every unscoped reviewer validate that same manifest and read all shards once in
+manifest order, explicitly reporting an unreadable or mismatched shard.
 
 **Item 7 exists only when scoped**, and it is the reviewer's collection instruction,
 not only a disclosure: the selected paths, worktree-root-relative, one per line, in
 the helper's emitted order, each with its `files[].changed_lines` count. Direct the
 reviewer to collect the diff for exactly those paths, one bounded read per listed
 path (`git diff <base>..<head> -- ':(literal)<path>'`), and to treat that set as the
-whole of the range under review. An unscoped packet has no item 7.
+whole of the range under review. This is one invocation per selected path. An
+unscoped packet has no item 7.
 
 Spell that invocation protocol out in item 7 rather than leaving it to the reviewer:
 **one invocation per path**, the path passed as a **single literal argument after

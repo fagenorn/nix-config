@@ -295,8 +295,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.sdd, "For the full-lane review:", "Template: [task-reviewer-prompt.md]"
         ).split())
         self.assertIn("plan root path and all four metrics", review)
-        self.assertIn("brief, report, review package", review)
-        self.assertIn("reads Global Constraints from the bounded root", review)
+        self.assertIn("brief and report paths plus the review-package manifest root path and all four metrics", review)
+        self.assertIn("reads Global Constraints from the bounded plan root", review)
+        self.assertIn("never gets a member list, shard list, artifact contents, diff contents", review)
         self.assertNotIn("global constraints copied **verbatim**", review.lower())
 
     def test_native_phase_5_validates_before_dispatch_and_remeasures(self):
@@ -569,15 +570,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "`full` | `scoped: <N> of <M> product files` | `unmeasured`",
             "This is a scoped review:",
             "do not treat their absence from the list as evidence they are clean",
-            # The bound is on input, not only on grading (D16): item 4's
-            # full-range package leaves a scoped packet, and item 7 is the
-            # collection instruction that replaces it.
+            # The bound is on input, not only on grading (D9): item 4 retains
+            # bounded coverage evidence while item 7 owns diff collection.
             "Under budget — or unmeasured — the packet is exactly the six items above",
             "Over budget it differs in exactly three places and nowhere else",
-            "Item 4 drops the diff-package path",
-            "`[DIFF_FILE]` has no value on a scoped dispatch",
-            "do not change `scripts/review-package`: the conformance axis reads that "
-            "same package whole",
+            "Item 4 changes the manifest's use, not its presence",
+            "manifest root path and all four metrics as truthful range-coverage evidence",
+            "do not read its shards",
+            "every unscoped reviewer validate that same manifest and read all shards "
+            "once in manifest order",
             "Item 7 exists only when scoped",
             "one bounded read per listed path",
             "treat that set as the whole of the range under review",
@@ -644,6 +645,19 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
 
     def test_diff_review_makes_the_scoped_coverage_disclosure_mandatory(self):
+        # Review-package transport stays bounded even when this axis scopes its
+        # evidence to selected product paths.
+        contract = " ".join(self.diff_review.replace("\n> ", "\n").split())
+        for fragment in (
+            "manifest root path and all four metrics",
+            "range-coverage evidence",
+            "do not read its shards",
+            "one invocation per selected path",
+            "`git diff <base>..<head> -- ':(literal)<path>'`",
+        ):
+            with self.subTest(review_package_fragment=fragment):
+                self.assertIn(fragment, contract)
+
         # The omission case can only be pinned here. `agent-evidence.py` sees a
         # result, never the packet that produced it, so it cannot tell a scoped
         # dispatch that dropped its coverage from an unscoped one — its own test
@@ -660,6 +674,43 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, contract)
+
+    def test_sdd_review_paths_use_validated_manifest_packages(self):
+        documents = {
+            "task loop": self.sdd,
+            "fix loop": (SDD_DIR / "fix-loop.md").read_text(encoding="utf-8"),
+            "final review": (SDD_DIR / "final-review.md").read_text(encoding="utf-8"),
+            "task reviewer": (SDD_DIR / "task-reviewer-prompt.md").read_text(encoding="utf-8"),
+            "re-reviewer": (SDD_DIR / "re-review-prompt.md").read_text(encoding="utf-8"),
+            "conformance": (SDD_DIR / "conformance-reviewer-prompt.md").read_text(encoding="utf-8"),
+            "correctness": (SDD_DIR / "correctness-reviewer-prompt.md").read_text(encoding="utf-8"),
+        }
+        for name, raw in documents.items():
+            text = " ".join(raw.split())
+            with self.subTest(document=name):
+                self.assertIn("manifest", text)
+                self.assertIn("root path and all four metrics", text)
+                self.assertIn("manifest order", text)
+                self.assertIn("unreadable", text)
+
+    def test_sdd_generator_stops_are_decided_before_review_dispatch(self):
+        for name, path in (
+            ("task loop", SDD),
+            ("fix loop", SDD_DIR / "fix-loop.md"),
+            ("final review", SDD_DIR / "final-review.md"),
+        ):
+            text = " ".join(path.read_text(encoding="utf-8").split())
+            with self.subTest(document=name):
+                self.assert_ordered(
+                    text,
+                    "artifact-budget validate-report --boundary producer --input -",
+                    "exit 3",
+                    "decompose_required",
+                    "no reviewer",
+                    "exit 2",
+                    "failed",
+                    "dispatch",
+                )
 
     def test_correctness_rubric_discloses_scope_only_when_the_packet_says_so(self):
         rubric = (SDD_DIR / "correctness-reviewer-prompt.md").read_text(
@@ -684,12 +735,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, " ".join(output_format.split()))
         # The scoped packet bounds what is fetched, not only what is graded
-        # (D16) — and the unconditional branch survives beside it.
+        # (D9), while unscoped review consumes the complete manifest.
         for fragment in (
-            "Read the diff file once",
-            "If no diff file was supplied, fetch the range yourself",
-            "unless the packet states the review is scoped and lists the paths "
-            "under review",
+            "Read the strict manifest",
+            "For an unscoped review, read every shard exactly once in manifest order",
+            "When the packet states the review is scoped and lists the paths under review",
+            "do not read its shards",
             "those listed paths are the whole of the range to fetch",
             "`git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'` once per "
             "listed path and fetch nothing wider",
@@ -705,31 +756,28 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(reader=reader):
                 self.assertNotIn(reader, output_format)
                 self.assertNotIn(reader, diff_under_review)
-        # The Placeholders paragraph tells a packet builder what `diff-review`
-        # supplies. Left flat ("the same values"), it directs the builder to hand
-        # over `[DIFF_FILE]` — the full-range package — and the bound degrades to
-        # grading-only, which is the failure D16 exists to close.
+        # The Placeholders paragraph tells a packet builder that the manifest
+        # remains coverage evidence while selected paths are the only diff reads.
         placeholders = " ".join(rubric[rubric.index("**Placeholders:**") :].split())
         for fragment in (
-            "on a scoped dispatch that packet leaves `[DIFF_FILE]` unsupplied",
-            "the full-range package it names is exactly what scoping bounds",
-            "routes the reviewer into the fallback branch above",
+            "manifest root path and all four metrics",
+            "On a scoped dispatch they remain range-coverage evidence",
+            "do not read its shards",
+            "fetch the selected literal paths once each",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, placeholders)
 
     def test_correctness_rubric_pins_the_scoped_fetch_quoting_protocol(self):
-        # K1's argv protocol has to land in the rubric, not only in
-        # DIFF-REVIEW.md item 7. A scoped dispatch leaves `[DIFF_FILE]`
-        # unsupplied, so this fallback branch is the one the reviewer actually
-        # runs — an unquoted `-- <path>` here is the live defect, and the packet
-        # contract cannot reach it. Mirrored wording, so the two cannot drift.
+        # D9's argv protocol has to land in the rubric, not only in
+        # DIFF-REVIEW.md item 7. Mirrored wording keeps the selected-path
+        # collection seam from drifting.
         rubric = (SDD_DIR / "correctness-reviewer-prompt.md").read_text(
             encoding="utf-8"
         )
         branch = " ".join(
             rubric[
-                rubric.index("If no diff file was supplied") : rubric.index(
+                rubric.index("When the packet states the") : rubric.index(
                     "Inspect code outside the diff"
                 )
             ].split()
