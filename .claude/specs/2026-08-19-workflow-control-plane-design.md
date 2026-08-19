@@ -1,0 +1,408 @@
+# Deepen workflow-state into the orchestration control plane
+
+Issue: https://github.com/fagenorn/nix-config/issues/47
+
+Amends, without replacing, the durable lifecycle defined by
+`2026-08-13-durable-workflow-lifecycle-design.md` and hardened by
+`2026-08-17-workflow-lifecycle-hardening-design.md`.
+
+## Problem
+
+The durable workflow ledger remembers what happened, but the Claude dispatcher still has to
+reconstruct what should happen next. It reads full attempt histories, counts occupied slots,
+chooses resume before retry, decides whether a recorded worktree can be reused, calculates the
+earliest deadline, arms and re-arms wake-ups, and decides when the run has drained. Those rules are
+spread across prose and are coupled to the dispatcher's conversation state. A restart therefore
+asks a model to rebuild lifecycle policy from raw records before it can safely act.
+
+This is a shallow module. `workflow-state` already owns locking, durable attempt identity, fixed
+deadlines, provisional expiry, late owner results, the two-attempt cap, worktree retention, and
+phase-budget decisions, but its dispatcher-facing interface exposes those details rather than
+providing leverage over them. `orchestrate-issues` has to know almost as much as the helper's
+implementation.
+
+The failure is visible in recent multi-issue runs: a late success can race a synthetic expiry; a
+silent owner needs a retry; that retry may need the existing worktree; two owners can finish at
+once; and an unrelated issue must keep moving while all of that happens. The current tests prove
+the individual ledger transitions, but not that one restarted dispatcher can follow a compact,
+deterministic control-plane response through the whole sequence.
+
+The desired interface must not absorb the external world. GitHub queries, worktree inspection,
+one-shot waiting, and background owner spawning remain outside the helper. The helper consumes
+normalized facts from those adapters, applies lifecycle policy atomically to durable state, and
+returns the side effects the dispatcher should perform.
+
+## Solution
+
+Add one dispatcher-facing `control` command to the existing `workflow-state` module:
+
+```text
+workflow-state control \
+  --repo-root <ledger_repo_root> \
+  --run-id <run-id> \
+  --request-file <absolute-json-path>
+```
+
+`control` is the external seam for orchestration. In one locked transaction it validates a
+versioned observation request, incorporates owner and deadline events, applies resume/retry/queue
+precedence, persists every accepted launch before exposing it, and returns a compact versioned
+response. The response has current issue summaries, only the transitions made by this invocation,
+typed next-action envelopes, and the earliest outstanding deadline. It never returns attempts,
+launch histories, phase inputs, or prior results.
+
+The existing `init-run`, `progress`, and `finish` commands remain. They are distinct lifecycle
+operations: run creation, owner phase-boundary state, and owner terminal truth. Dispatcher-side
+`launch` and `reconcile` are removed from the public CLI after their in-repository consumers and
+tests move to `control`; their behavior becomes implementation inside the deeper module. The
+durable ledger stays at schema version 1, so existing run files remain readable and no persisted
+state migration is introduced.
+
+`orchestrate-issues` becomes an adapter loop with no lifecycle decision tree:
+
+1. Query the tracker and inspect relevant worktree metadata.
+2. Normalize those facts and any owner-exit notification into one request.
+3. Invoke `workflow-state control`.
+4. Spawn owners for `spawn`, `resume`, and `retry` envelopes; perform the one-shot wait described
+   by `wait`; or render the final report described by `finalize`.
+5. Re-enter only on an owner notification, a tracker change/resume, or the returned deadline.
+
+The helper does not call GitHub, inspect Git worktrees, spawn agents, sleep, poll, merge pull
+requests, or change permissions. Its only side effect remains the atomically locked ledger.
+
+## Decisions
+
+### Module and seam
+
+The deep module is the durable lifecycle control plane. Its interface consists of four commands:
+
+- `init-run` creates or validates the run ledger.
+- `control` consumes normalized dispatcher observations and returns orchestration actions.
+- `progress` persists the existing owner-side phase-budget decision.
+- `finish` persists the existing compact owner result, including truthful late results.
+
+The seam is the CLI plus JSON files/stdout, which is already the interface used by skills and by
+tests. The implementation may retain internal transition functions, but callers and tests do not
+reach around `control` to invoke dispatcher-specific launch or reconciliation primitives.
+
+The helper remains a Python standard-library program. It needs no tracker adapter, Git library,
+queue, daemon, background thread, or new package. Its current lock and atomic replace transaction
+still serialize concurrent owner finishes with control decisions.
+
+### Versioned control request
+
+The request is a strict JSON object. `interface_version` versions the caller contract independently
+from the durable `schema_version`. Version 1 has exactly these top-level fields:
+
+```json
+{
+  "interface_version": 1,
+  "now": "2026-08-19T12:00:00Z",
+  "max_parallel": 2,
+  "attempt_budget_minutes": 180,
+  "issues": [47],
+  "tracker": [
+    {
+      "issue": 47,
+      "state": "open",
+      "open_blockers": [],
+      "decision_blockers": []
+    }
+  ],
+  "owners": [
+    {
+      "event_id": "task-47-a1-exit",
+      "issue": 47,
+      "attempt": 1,
+      "launch": 1,
+      "state": "unavailable"
+    }
+  ],
+  "worktrees": [
+    {
+      "issue": 47,
+      "recorded": {
+        "path": "/absolute/worktree-issue-47",
+        "state": "matching_issue_branch"
+      },
+      "candidate": null
+    }
+  ]
+}
+```
+
+The fields mean:
+
+- `now` is the injected decision instant. All deadline comparisons and newly persisted launch
+  times use it; the command never consults the wall clock itself.
+- `max_parallel` and `attempt_budget_minutes` are positive integers resolved by the caller from the
+  authoritative project bindings on every request. An existing attempt keeps its persisted fixed
+  deadline; the budget value applies only when `control` creates a fresh attempt.
+- `issues` is the requested run order, with unique positive issue numbers. It is the stable
+  scheduling tie-breaker and bounds every returned collection.
+- `tracker` has exactly one item per requested issue. `state` is `open | closed`.
+  `open_blockers` contains the already-normalized numbers of blockers that are currently open.
+  `decision_blockers` contains zero or more exact `{ "issue": <positive-int>, "url": <string> }`
+  objects for open `wayfinder:*` decisions. The helper decides blocked/fogged readiness from these
+  facts; it does not know how GitHub represents edges or labels.
+- `owners` contains only new host notifications. Version 1 admits one tagged state,
+  `unavailable`, meaning the named attempt's process exited without a durable terminal result.
+  `event_id` is a non-empty diagnostic identity and `launch` is the positive launch ordinal from
+  the dispatch action that created the unavailable host process. A stale event for an older
+  attempt or launch is ignored. For the latest active attempt, an event naming its current launch
+  makes it eligible for one resume. The resume appends the next durable launch ordinal at `now`, so
+  replaying the same observation cannot append or emit another launch. An event naming a future or
+  nonexistent launch fails loudly.
+- `worktrees` contains only filesystem facts, never filesystem instructions. `recorded` is null
+  when no attempt owns a path; otherwise its path must equal the latest attempt's durable worktree
+  and its state is `matching_issue_branch | absent | mismatch`. `candidate` is null or the exact
+  `{ "path": <absolute-path>, "state": "absent" }` path the dispatcher verified is free in both
+  the filesystem and `git worktree list`. A ready action that needs a candidate and lacks one fails
+  loudly instead of choosing a path inside the helper.
+
+Unknown versions, fields, enum members, duplicate issue observations, non-monotonic timestamps,
+relative paths, mismatched recorded paths, and incomplete facts required by a ready action fail
+without rewriting the ledger. Extra tracker issues or worktree observations outside `issues` also
+fail. Empty `owners` and a worktree omission for an issue that needs no action are valid.
+
+### Versioned control response
+
+Version 1 returns exactly these top-level fields:
+
+```json
+{
+  "interface_version": 1,
+  "run_id": "orchestrate-47-51",
+  "now": "2026-08-19T12:00:00Z",
+  "summaries": [],
+  "deltas": [],
+  "actions": [],
+  "next_deadline": null
+}
+```
+
+Collections follow `issues` order, then attempt number where needed. JSON serialization remains
+canonical and newline-terminated so identical snapshots and requests are byte-comparable.
+
+Each `summaries` item has exactly:
+
+```json
+{
+  "issue": 47,
+  "state": "active",
+  "attempt": 1,
+  "owner": "47:1",
+  "worktree": "/absolute/worktree-issue-47",
+  "deadline_at": "2026-08-19T15:00:00Z",
+  "blockers": [],
+  "result": null
+}
+```
+
+Summary `state` is the closed set `queued | blocked | fogged | active | handed_off | merged |
+stopped | failed | closed`. Attempt identity fields are null before any attempt and for a tracker-
+closed issue with no attempt. `blockers` is a homogeneous list of exact
+`{ "kind": "issue | decision", "issue": <positive-int>, "url": <string-or-null> }` objects;
+ordinary issue blockers have a null URL and decision blockers retain their tracker URL. `result` is
+null or the one existing compact terminal result for the latest attempt. A summary never contains
+`launches`, `prior_attempt`, phase fields, result provenance, or an older attempt.
+
+`deltas` contains only durable transitions performed by this `control` invocation. Each item has
+exactly `issue`, `attempt`, `kind`, and `state`. `kind` is the closed set `expired | spawned |
+resumed | retried | retry_refused`. Terminal writes performed earlier by `finish`, and tracker
+states derived from the request, appear in summaries rather than being replayed as synthetic
+deltas. Re-running against the advanced ledger therefore returns no duplicate delta.
+
+There are five action envelopes. Dispatch actions have one common shape:
+
+```json
+{
+  "id": "47:1:1",
+  "kind": "spawn",
+  "issue": 47,
+  "attempt": 1,
+  "owner": "47:1",
+  "worktree": "/absolute/worktree-issue-47",
+  "handoff_path": null,
+  "deadline_at": "2026-08-19T15:00:00Z"
+}
+```
+
+- `spawn` is the first fresh attempt.
+- `resume` is another launch of the latest nonterminal attempt with the same owner and worktree;
+  `handoff_path` carries the stored durable handoff when the attempt was handed off.
+- `retry` is attempt 2 with a new owner. It uses the recorded path when its normalized state is
+  `matching_issue_branch`, otherwise it uses the verified absent candidate.
+
+The helper generates lifecycle owner tokens as `<issue>:<attempt>`. They are not host task IDs.
+Action IDs are `<issue>:<attempt>:<launch-ordinal>` within the top-level run identity, so a dispatch
+envelope is stable and short. The dispatcher passes the owner token unchanged in the lifecycle
+envelope and does not invent attempt identity.
+
+Every response ends its `actions` array with exactly one control action. A waiting run uses:
+
+```json
+{
+  "id": "wait:2026-08-19T15:00:00Z",
+  "kind": "wait",
+  "wake_on": ["owner_notification", "tracker_change", "deadline"],
+  "deadline_at": "2026-08-19T15:00:00Z"
+}
+```
+
+If no deadline is armed, the id is `wait:external`, `deadline_at` is null, and `deadline` is absent
+from `wake_on`. `next_deadline` equals the wait envelope's deadline and is the minimum deadline of
+all current active or handed-off latest attempts. The adapter schedules at most one one-shot wake
+for the returned wait ID. A later control response supersedes the prior wait. This is event-driven
+scheduling, not a polling interval or a resident daemon.
+
+A drained run uses:
+
+```json
+{
+  "id": "finalize",
+  "kind": "finalize"
+}
+```
+
+`next_deadline` is null for `finalize`. The dispatcher renders its report from the same response's
+summaries, including each current compact result and discussion items. The response is bounded to
+one summary per requested issue, at most one current transition per affected attempt, at most
+`max_parallel` dispatch actions, and one control action. Durable attempt histories remain in the
+ledger and never enter dispatcher context.
+
+### Deterministic transition and action order
+
+Within the single control transaction, policy executes in this order:
+
+1. Validate the full request and current ledger before mutation.
+2. Treat a durable owner result as authoritative. A matching or stale notification cannot replace
+   it. The existing `finish` rules still allow a late owner result to supersede a provisional
+   expiry only while that attempt remains the latest.
+3. Expire each latest active or handed-off attempt at or after its fixed deadline, using the
+   existing provisional `expiry` result source and retained worktree.
+4. Derive tracker-closed, fogged, blocked, and queued eligibility from normalized tracker facts.
+   These facts suppress a new spawn or retry; they never terminate an already-active attempt,
+   whose durable lifecycle remains authoritative until owner finish or expiry.
+5. Count current active attempts against `max_parallel` and fill available slots in three passes:
+   resumable attempts, retryable terminal attempts, then never-launched queued issues. Each pass
+   preserves `issues` order.
+6. Resume a handed-off attempt, or an active attempt with one unconsumed `unavailable` event,
+   without changing its attempt number, owner, worktree, original start, or fixed deadline.
+7. Retry an `expiry` result or owner-reported `failed` result once. Owner-reported `stopped` is a
+   content verdict and is never retried. `merged`, and tracker `closed` or `fogged` when no attempt
+   remains nonterminal, are also final for this run. A retry request after attempt 2 persists the
+   existing refused/failed outcome and emits `retry_refused`; no third attempt exists.
+8. Start queued issues in request order until capacity is full. Failure of one issue never blocks
+   an unrelated ready issue.
+9. Recompute current summaries and the earliest deadline, then append exactly one `wait` or
+   `finalize` action.
+
+Accepted spawn/resume/retry actions are persisted before stdout, retaining the current
+launch-before-spawn safety property. A crash after persistence but before host spawning can delay
+that attempt until its fixed deadline; it cannot create duplicate work. A pure replay from an
+identical copied ledger snapshot and identical request is byte-identical. Repeating `control`
+against the already-advanced ledger emits no second launch and returns the then-current wait or
+finalize decision. Exactly-once host process creation is not claimed across the CLI/process seam.
+
+### Dispatcher migration
+
+The Claude dispatcher keeps only adapter mechanics and rendering:
+
+- resolve the issue set and configured `maxParallel`/`agentBudgetMinutes`;
+- query current tracker state, open blockers, and decision blockers;
+- inspect the exact recorded worktree and reserve an absent candidate when needed;
+- normalize host owner-exit notifications;
+- invoke `init-run` once and `control` on start/resume and each event;
+- execute dispatch action envelopes in order with the existing background owner prompt;
+- wait once according to the returned wait envelope; and
+- render the final table and discussion items from a finalize response.
+
+It deletes prose that counts attempts, chooses resume versus retry, checks whether expiry permits a
+retry, chooses recorded versus candidate worktrees, calculates deadline minima, decides whether to
+re-arm, counts occupied slots, or decides whether the run is drained. It does not maintain a second
+authoritative task ledger; any local table is a rendering of the latest summaries.
+
+The owner prompt remains compact: immutable ledger root, run, attempt, lifecycle owner token,
+worktree, and literal `from-issue <num> --auto`. `from-issue` keeps its Phase 1 exact-path adoption,
+phase-budget `progress`, and write-before-notify `finish` behavior. Its handoff text changes only to
+say that the dispatcher resumes it from a returned `resume` envelope; owners do not invoke a
+dispatcher launch command themselves.
+
+The deployed orchestrator eval expectations change with the skill contract. They grade normalized
+observations, envelope execution, and the absence of hand-assembled precedence rather than pinning
+the retired `reconcile`/`launch` narrative.
+
+### Scenario replay
+
+One deterministic CLI scenario uses injected timestamps and temporary worktrees to replay the
+multi-issue failure pattern in a single run:
+
+1. Control starts two issues and returns the earliest deadline while another ready issue waits.
+2. The first owner reports `merged` after its deadline through `finish`; the result remains merged.
+3. The second owner stays silent. Control expires it, emits a retry with a new owner and the same
+   normalized matching worktree, and uses the freed capacity for an unrelated queued issue.
+4. The retried owner and another active owner finish concurrently. Reopening the ledger preserves
+   both results.
+5. Control observes both completions, continues the unrelated issue set, and eventually returns
+   one finalize action with one current summary per issue.
+6. Replaying the same control request against the advanced state emits no duplicate dispatch;
+   replaying from a copied pre-decision state produces the same canonical action IDs, deltas, next
+   deadline, and summaries.
+
+The scenario asserts that no response contains `attempts`, `launches`, `phase_inputs`, or older
+results. Focused cases separately pin malformed observation rejection, resume-before-retry-before-
+spawn ordering, max-parallel accounting, handed-off resume, owner-stopped non-retry, second-failure
+refusal, tracker blockers/fog, no-deadline waiting, and finalize behavior.
+
+## Test seams
+
+- **Control CLI seam:** invoke `init-run`, `control`, `progress`, and `finish` as subprocesses with
+  request/result files and injected times. Assert canonical stdout, exit status, and typed action
+  envelopes. This is the same interface the skills use.
+- **Durable filesystem seam:** reopen `state.json` after every decision and run concurrent `finish`
+  subprocesses. Assert the helper persisted accepted actions before emitting them and retained both
+  concurrent outcomes. Tests do not call internal transition functions.
+- **Scenario seam:** extend the existing workflow-state test module with the combined replay above,
+  so the repository's existing `agent-workflow-tests` recipe discovers it without new wiring.
+- **Skill contract seam:** replace assertions for manual reconcile/launch/retry/deadline prose with
+  assertions that the dispatcher normalizes external facts, calls `control`, executes only the five
+  action kinds, and does not contain retired policy anchors. Pin the minimal `from-issue` handoff
+  wording and updated orchestrator eval expectations.
+- **Build seam:** `just agent-workflow-tests` is the deterministic behavioral gate and `just build`
+  verifies that the modified helper and skills still distribute through the unchanged Nix module.
+
+## Out of scope
+
+- GitHub or other tracker clients inside the helper, including GraphQL shapes, label parsing, PR
+  lookup, merge checks, and issue mutation.
+- Git worktree discovery, creation, movement, reset, cleanup, or branch-name inference inside the
+  helper. The caller supplies normalized exact-path facts.
+- Agent spawning, host task lookup, cancellation, exactly-once process creation, or notification
+  transport. The helper owns lifecycle tokens, not host process IDs.
+- A polling loop, resident scheduler, queue daemon, long-running helper process, or sleep inside
+  `workflow-state`. A wait action describes one event-driven wake horizon.
+- Changing phase-budget thresholds or precedence, attempt-budget configuration, late-finish
+  authority, the two-attempt cap, compact terminal-result fields, handoff file rules, or worktree
+  retention delivered by issues 14 and 33.
+- Changing tracker ordering semantics beyond the supplied open-blocker graph, or inferring overlap
+  by reading code/specs in the dispatcher.
+- Changing CI-required checks, branch protection, merge permissions, agent permission guards,
+  release behavior, or adding the workflow suite to CI (tracked separately by issue 37).
+- A new durable-ledger schema, migration framework, external event journal, or arbitrary historical
+  query interface. Internal attempt history remains available on disk for recovery/debugging, not
+  through the dispatcher response.
+- New Nix distribution wiring: the installed script path is unchanged.
+
+## Decision ledger
+
+| ID | Choice | Grounding | Rejected alternative |
+|----|--------|-----------|----------------------|
+| D1 | Make one versioned `control` command the dispatcher seam, retain owner-side `progress`/`finish`, and remove public dispatcher-side `launch`/`reconcile` after migration. | Issue 47 asks the helper to own orchestration decisions; the codebase-design deletion test says policy should reappear inside the deep module, not remain callable across shallow seams. | Layer a planner over public launch/reconcile — callers could still bypass the control plane and the interface would remain as complex as its implementation. |
+| D2 | Keep durable schema version 1 and version the strict control request/response independently as `interface_version: 1`. | Existing schema already contains every lifecycle fact required by issues 14/33, while issue 47 asks for a versioned compact interface rather than a ledger migration. | Bump/migrate the ledger to store dispatcher snapshots or action queues — adds irreversible state and migration risk without an acceptance need. |
+| D3 | Normalize tracker, owner-exit, recorded-worktree, and absent-candidate facts in a single request; the helper performs no tracker, Git, spawn, or clock I/O. | Issue 47 explicitly keeps tracker queries and spawning outside and requires deterministic tests; The Bar's defense-in-depth/fail-loud rules support strict closed observations. | Let the helper invoke `gh`, `git worktree`, or the wall clock — couples policy to environment-specific adapters and makes replay nondeterministic. |
+| D4 | Return one bounded current summary per issue, only current-invocation deltas, at most `max_parallel` typed dispatch actions, exactly one wait/finalize action, and the earliest deadline. | The acceptance criteria prohibit complete attempt histories and require spawn/resume/retry/wait/finalize envelopes plus next deadline; token economy favors one compact response. | Return the full ledger with a recommended action — preserves the dispatcher's reconstruction burden and unbounded history surface. |
+| D5 | Persist accepted action identity before emitting it, derive short owner/action tokens from run-local issue/attempt/launch ordinals, and treat replay against advanced state as wait/finalize rather than another dispatch. | The existing lifecycle persists launch before spawning, and acceptance requires restart replay without duplicate launches. | Re-emit an unacknowledged pending spawn until receipt — a crash after real spawning but before acknowledgement can duplicate work because the host spawn primitive is not idempotent. |
+| D6 | Apply global precedence `resume`, then one allowed retry, then first spawn in requested issue order, with owner-stopped/fogged/closed suppressing new work and expiry/owner-failed retryable. | The current orchestrator's issue-33 failure policy already gives resume precedence, treats content stops as verdicts, retries transient failures once, and lets unrelated issues continue. | Leave classification and precedence in skill prose — duplicates lifecycle policy and makes restart behavior model-dependent. |
+| D7 | Reuse the recorded path for retry only when the normalized worktree state is `matching_issue_branch`; otherwise require a verified absent candidate. | Issue 33 made configured worktrees authoritative and established that a fresh owner, not a fresh path, defines retry identity. | Always allocate a fresh retry path or inspect Git inside the helper — the first loses existing work; the second crosses the adapter seam. |
+| D8 | Test through the CLI/reopened ledger and one combined multi-issue replay in the existing helper test module; update skill contracts and deployed eval expectations at the same seam. | The prior lifecycle specs and The Bar require observable deterministic tests; the existing just recipe already names these test modules and current evals pin the behavior being retired. | Unit-test new planner functions or rely on prose/eval examples alone — tests past the interface or fail to prove concurrent durable behavior and bounded output. |
+| D9 | Record no ADR or glossary change; keep this amendment in the issue design spec. | Grounding found no project context/ADR tree, and both prior lifecycle designs use `.claude/specs`; grill-with-docs creates domain docs and ADRs only when their admission gates are met. | Bootstrap a docs/ADR architecture for this change — unrelated scope and a duplicate home for the lifecycle rationale. |
