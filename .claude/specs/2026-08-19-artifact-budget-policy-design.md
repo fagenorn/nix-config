@@ -35,7 +35,7 @@ Add an artifact-budget module consisting of a versioned JSON policy and a Python
 checker exposed at the same stable agent-tools location as the existing workflow helpers. Skills do
 not carry threshold numbers. They invoke the checker and interpret its closed result states.
 
-The checker has two stable commands:
+The checker has three stable commands:
 
 ```text
 artifact-budget check \
@@ -46,6 +46,10 @@ artifact-budget check \
 
 artifact-budget validate-report \
   --boundary <producer|sdd|ship-handoff|ship-summary> \
+  --input <path|-> \
+  [--policy <policy-path>]
+
+artifact-budget validate-detail-input \
   --input <path|-> \
   [--policy <policy-path>]
 ```
@@ -70,6 +74,13 @@ a sibling temporary candidate, invoke this command, and transport only its valid
 callers run received bytes back through the same command before trusting them. The shared policy's
 `phase_reports.wire_max_bytes` bounds both bytes read and canonical bytes emitted, so no fixed-shape
 string field can make the transport unbounded.
+
+`validate-detail-input` reads one no-follow regular file or stdin and requires exactly
+`{"interface_version":1,"findings":[...]}` with a non-empty array and D15's exact finding
+fields, types, enums, and parked-ruling rule. Success emits canonical compact JSON plus newline and
+exit 0. Missing/unreadable input emits no stdout, `artifact-budget: cannot read detail input\n`,
+exit 2; empty/malformed/wrong-schema input emits no stdout,
+`artifact-budget: invalid detail input\n`, exit 2.
 
 The result is a bounded shape:
 
@@ -194,7 +205,9 @@ the worktree; detail is never force-emptied to satisfy the transport schema. Bef
 the caller writes the exact detail input to a bounded repository-relative retained-candidate path
 beneath the live feature worktree's `.superpowers/` workspace. If publication fails with a non-empty
 collection, `detail_state: unpublished` points to that still-readable candidate, bounded notes name
-the same path, and cleanup/worktree removal is forbidden. It never claims a durable review package.
+the same path, and cleanup/worktree removal is forbidden. SDD/from-issue and ship/workflow-state
+pass the no-follow file through `validate-detail-input` and compare/consume canonical stdout bytes;
+mere readability never permits acceptance or persistence. It never claims a durable review package.
 
 Both variants generate under a unique sibling staging directory and are fully shape-validated and
 measured there before publication. Publication has no check-then-rename window: exclusively create
@@ -438,6 +451,6 @@ Concrete grill scenarios that must remain green:
 | D11 | Replace producer-specific report fields with the exact `state` + one root `artifact` + policy-bounded `notes` envelope; cross-phase and ship handoffs use fixed scalars/root metrics plus the same bounded notes, and legacy terminal `discussion_items` is always empty | Phase-5 review B1 verified that live `decisions`, `open_items`, `adr_paths`, and the Phase-7 paragraph summary are unbounded despite the spec's former claim; D6 already makes the artifact and durable ledgers authoritative | Add per-list count/item limits, which introduces more repeated numeric policy and still grows transport with artifact complexity; retain the lists because they are “existing,” which leaves the acceptance gap intact |
 | D12 | Refuse a review-package retry when its regular root or member directory already exists; generate in sibling staging, validate completely, publish members then manifest, and clean only newly published members if final publication fails | Phase-5 review S2 found that range-derived names collide on resume and stale shards can corrupt discovery; refusal is deterministic, preserves valid prior evidence byte-for-byte, and avoids pretending two filesystem renames are one atomic package swap | Overwrite in place, which can destroy a valid package or leave stale shards; multi-path replacement with rollback, which adds concurrency/state machinery for transient evidence when safe refusal suffices |
 | D13 | Make small/oversized descriptors executable test inputs, reject booleans for every policy/result/manifest integer, and count Git binary numstat `-` as zero insertions/deletions while retaining full binary diff bytes | Phase-5 review S1/S3 found static fixture self-assertion and Python's `bool`/`int` overlap; `diff-scope` already defines binary rows as zero churn, so matching it keeps one repository meaning | Treat descriptor expectations as proof, which cannot catch mismatched payloads; accept booleans through `isinstance(int)` or invent a different binary-stat convention, both of which create silent schema/accounting drift |
-| D14 | Make every phase/report boundary canonical JSON validated through one `validate-report` CLI operation, with exhaustive state-dependent schemas (including closed SDD/ship `detail_state` and path parity), an 8 KiB shared-policy wire ceiling, and candidate-file → validated-stdout transport | Re-review R-B1/R-B2, final review F-B1, and clean check C-B1 found that unnamed enum/nullability/detail combinations could drift or make a truthful publication failure inexpressible; 8 KiB matches the evidence-backed handoff ceiling while leaving ample room for fixed fields plus notes | Let each skill serialize/validate its own prose or YAML; infer whether a null path lost detail; or call an unpublished candidate durable |
-| D15 | Extend D8's review package with a `delivery-detail` manifest variant under the same numeric ceilings; the producer derives its exact ignored primary-checkout destination and maintains the no-follow local ignore boundary; on publication failure retain the bounded source candidate and forbid cleanup; transport only one validated relative `report_path` | Re-review R-B3/F-B2/F-S1 and clean check C-B1 showed durable detail must survive success while failed persistence must preserve inspectable source without claiming publication | Force-empty detail, trust caller output paths, or remove a workspace holding the only retained candidate |
+| D14 | Make every phase/report boundary canonical JSON validated through shared CLI operations, with exhaustive state schemas, one versioned detail-input validator, an 8 KiB shared-policy report ceiling, and candidate-file → validated-stdout transport | Reviews through closure CL-B1 found unnamed combinations drift and mere readability cannot prove retained detail is the promised non-empty collection | Let each skill duplicate schemas or accept arbitrary readable retained bytes |
+| D15 | Extend D8 with a `delivery-detail` variant under the same ceilings; derive the ignored primary destination; on failure retain and shared-validate the exact source before forbidding cleanup; transport one relative `report_path` | Reviews through closure CL-B1 showed success needs durable detail while failure needs schema-valid inspectable source without claiming publication | Force-empty detail, duplicate its schema in consumers, or remove the only retained candidate |
 | D16 | Replace D12's precheck-plus-rename publication with exclusive final-directory creation and identity-tracked exclusive hard links for members and manifest, manifest last | Re-review R-B4 identified a same-plan concurrency window where ordinary rename replaces a competitor; mutation-point exclusion plus inode-checked cleanup provides the no-clobber guarantee directly | Rely on an existence precheck or ordinary rename, both of which race; lock globally, which adds stale-lock recovery and broader coordination state for a leaf-local property |

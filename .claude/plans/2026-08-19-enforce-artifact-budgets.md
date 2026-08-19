@@ -16,6 +16,7 @@
 - Both `diff-review` and durable `delivery-detail` manifest variants are `review-package`; they use that one policy entry and introduce no unbudgeted report artifact or copied numeric ceiling.
 - All sizes are encoded bytes, not characters or model tokens; booleans are not integers in policy, result, metric, or manifest fields. Git binary numstat `-` contributes zero insertions/deletions while the file and binary patch remain covered.
 - `artifact-budget check --kind <design-spec|implementation-plan|handoff|review-package> --root <path> [--policy <path>] --format json` exits 0 only for `within_budget`, 3 only for valid `over_budget`, and 2 for invalid input. `artifact-budget validate-report --boundary <producer|sdd|ship-handoff|ship-summary> --input <path|-> [--policy <path>]` canonicalizes one strict UTF-8 JSON object on exit 0 and emits no stdout on exit 2.
+- `artifact-budget validate-detail-input --input <path|-> [--policy <path>]` is the sole strict non-empty finding-input validator used by generation and every unpublished-detail consumer.
 - A producer report has exactly `state`, one root `artifact`, and `notes`; it carries no `decisions`, `open_items`, `adr_paths`, member lists, or summary field. Successful artifact metrics are exactly `root_bytes`, `total_bytes`, `file_count`, and `largest_member_bytes`; the notes limit comes only from the shared policy.
 - Every phase boundary uses the exhaustive state/nullability matrix in D14: producers write candidate JSON and transport only validated stdout; callers validate received bytes again. No Markdown/YAML report is authoritative.
 - The one shared policy bounds notes at 500 characters and every report wire object at 8,192 encoded bytes; skills contain neither number.
@@ -101,5 +102,13 @@ Task 5 — Close the orchestration contract and run repository gates — `home/c
 - Accepted 1 Blocking and 1 Should-fix finding; rejected 0; deferred 0.
 - C-B1: added failure-only unpublished-detail transport with retained-candidate readability and cleanup prohibition (D14/D15).
 - C-S1: completed CLI rejection coverage for issue, producer, and head identity fields.
+
+### Closure check
+
+- Reviewer: `/root/issue49_plan_closure` (native reviewer; no fallback).
+- Review artifact: `/tmp/issue49-plan-closure.md`; reviewed head `6ed00cb74ca1f1d34f57c0dcec8bcf61e38d1d3a`; base `416e7a92795a282c1b8cdd71e35a0f570cd35e56`; isolated/read-only.
+- Accepted 2 Blocking findings; rejected 0; deferred 0.
+- CL-B1: added one shared strict detail-input CLI and required canonical validation before unpublished persistence (D14/D15).
+- CL-B2: merged default and per-case identity kwargs so malformed-head cases reach the CLI.
 
 Task members are the normative executable instructions. Read this root once for shared constraints and then only the selected linked member.

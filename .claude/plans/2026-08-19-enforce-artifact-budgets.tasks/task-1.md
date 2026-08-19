@@ -12,9 +12,10 @@
 
 **Interfaces:**
 - Consumes: no earlier task; design decisions D1, D2, D7, D8, D11, D13, D14, and D15 are the contract.
-- Produces: importable `artifact_budget.load_limits(kind: str, policy_path: Path | None = None) -> ArtifactLimits`; `artifact_budget.check_artifact(kind: str, root: Path, policy_path: Path | None = None) -> CheckResult`; `artifact_budget.validate_producer_report(report: Mapping[str, object], policy_path: Path | None = None) -> None`; `artifact_budget.validate_sdd_report(report: Mapping[str, object], policy_path: Path | None = None) -> None`; `artifact_budget.validate_ship_handoff(report: Mapping[str, object], policy_path: Path | None = None) -> None`; `artifact_budget.validate_ship_summary(report: Mapping[str, object], policy_path: Path | None = None) -> None`; `artifact_budget.main(argv: Sequence[str] | None = None) -> int`; executable wrapper `home/common/agent-skills/scripts/artifact-budget`; installed executable `~/.agents/bin/artifact-budget`; installed import path `~/.agents/lib/python/artifact_budget.py`; default policy `~/.agents/share/artifact-budget-policy.json`.
+- Produces: importable `load_limits`, `check_artifact`, the four named report validators, `validate_detail_input(value: Mapping[str, object]) -> None`, and `main`; executable/installed module, wrapper, and policy paths named in the root plan.
 - `ArtifactLimits` exposes integer `root_max_bytes`, `member_max_bytes`, `max_members`, and `aggregate_max_bytes`. `CheckResult.to_dict()` returns only `interface_version`, `kind`, `status`, `metrics`, and `violations`.
 - CLI report seam: `artifact-budget validate-report --boundary <producer|sdd|ship-handoff|ship-summary> --input <path|-> [--policy <path>]` reads one UTF-8 JSON object and returns the same semantic object as key-sorted compact UTF-8 JSON plus newline on stdout/exit 0.
+- CLI detail seam: `artifact-budget validate-detail-input --input <path|-> [--policy <path>]` canonicalizes one strict non-empty D15 detail-input object; invalid content emits no stdout/`artifact-budget: invalid detail input\n`/exit 2, and I/O failure emits no stdout/`artifact-budget: cannot read detail input\n`/exit 2.
 
 **Invariants:**
 - Policy version 1 has exactly `schema_version`, `unit`, `artifacts`, and `phase_reports`; the latter has exactly positive integer `notes_max_characters` and `wire_max_bytes`. Artifact kinds and entry fields are closed; unknown/duplicate/missing keys, booleans, fractions, non-positive roots/aggregates/report bounds, negative member fields, one-file inconsistencies, and aggregate limits below the root fail before measurement.
@@ -387,6 +388,41 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         rejected = self.run_validate("sdd", fabricated, use_stdin=False)
         self.assertEqual((rejected.returncode, rejected.stdout), (2, b""))
 
+    def test_validate_detail_input_is_one_strict_cli_boundary(self):
+        finding = {"axis": "ship", "severity": "Minor", "status": "minor",
+                   "text": "kept", "ruling": None}
+        valid = {"interface_version": 1, "findings": [finding]}
+        canonical = (json.dumps(valid, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "retained.json"
+            path.write_bytes(canonical)
+            accepted = subprocess.run(
+                [sys.executable, str(SCRIPT), "validate-detail-input", "--input", str(path),
+                 "--policy", str(POLICY)], capture_output=True, check=False)
+            self.assertEqual((accepted.returncode, accepted.stdout, accepted.stderr),
+                             (0, canonical, b""))
+        invalid = (b"", b"{", b'{"interface_version":2,"findings":[]}',
+                   b'{"interface_version":1,"items":[]}',
+                   b'{"interface_version":1,"findings":[]}',
+                   json.dumps({"interface_version": 1, "findings":
+                               [{**finding, "status": "unknown"}]}).encode(),
+                   json.dumps({"interface_version": 1, "findings":
+                               [{**finding, "text": 1}]}).encode(),
+                   json.dumps({"interface_version": 1, "findings":
+                               [{**finding, "status": "parked", "ruling": None}]}).encode())
+        for payload in invalid:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
+                 "--policy", str(POLICY)], input=payload, capture_output=True, check=False)
+            self.assertEqual((result.returncode, result.stdout, result.stderr),
+                             (2, b"", b"artifact-budget: invalid detail input\n"))
+        missing = subprocess.run(
+            [sys.executable, str(SCRIPT), "validate-detail-input", "--input",
+             "/definitely/missing/detail.json", "--policy", str(POLICY)],
+            capture_output=True, check=False)
+        self.assertEqual((missing.returncode, missing.stdout, missing.stderr),
+                         (2, b"", b"artifact-budget: cannot read detail input\n"))
+
     def test_review_manifest_member_boundary_and_reference_bytes(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / "review.json"
@@ -552,7 +588,7 @@ Write this exact policy data (pretty-printing is allowed; numeric values and key
 }
 ```
 
-Implement `artifact_budget.py` as one import-safe stdlib module with dataclasses for the two public values. `load_limits` loads either the explicit policy or `Path.home() / ".agents/share/artifact-budget-policy.json"`, uses `json.load(..., object_pairs_hook=...)` to reject duplicate keys, validates the complete policy before returning one kind's limits, and never coerces types. `check_artifact` opens and measures the regular root, discovers members from the required sibling directory, validates root/member agreement, and returns a result only after all shape/I/O checks pass. Compare bytes using strict `>` checks so exact ceilings succeed. The four report validators enforce D14's exact matrices and shared-policy notes bound. `present` accepts only `.superpowers/issue-delivery/`; `unpublished` accepts a normalized relative `.superpowers/` path outside that durable home and only with SDD `failed` or ship-summary `stopped|failed` (the owning workflow checks readability). Reject legacy lists/summary transport and add no numeric limit.
+Implement `artifact_budget.py` as one import-safe stdlib module with the public values above. The loaders/checker remain strict and no-follow. The four report validators enforce D14's exact matrices and policy notes bound. `present` accepts only `.superpowers/issue-delivery/`; `unpublished` accepts a normalized relative `.superpowers/` path outside that home and only with SDD `failed` or ship-summary `stopped|failed`. Implement the D15 finding record once in `validate_detail_input`; both `validate-detail-input` and review-package detail parsing call it. CLI input/canonicalization/error behavior matches the tests exactly. Reject legacy transport and add no numeric limit.
 
 For plan roots, accept only Task-index rows matching the task-number/member-number/name convention and require the discovered/reference sets and orders to be identical. For review roots, validate D15's exact `purpose`-discriminated manifest variants with booleans rejected for every integer, then compare ordered `shards` entries to discovery and measured bytes. Use `lstat`/no-follow checks before reads and `(st_dev, st_ino)` identities for duplicate-file rejection.
 

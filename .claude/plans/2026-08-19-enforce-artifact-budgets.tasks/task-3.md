@@ -330,7 +330,8 @@ class ReviewPackageCliTest(unittest.TestCase):
             ]
             for values in bad_identity:
                 with self.subTest(values=values):
-                    result = self.invoke_detail(linked, source, env, head=head, **values)
+                    kwargs = {"head": head, **values}
+                    result = self.invoke_detail(linked, source, env, **kwargs)
                     self.assertEqual((result.returncode, result.stdout), (2, ""))
 
     def test_detail_mode_rejects_a_symlink_parent(self):
@@ -432,7 +433,7 @@ Expected: FAIL because the command currently writes one `.diff`, has no manifest
 
 - [ ] **Step 3: Implement deterministic generation and manifest-aware review contracts**
 
-Rewrite `review-package` as an executable import-safe Python script. Add `~/.agents/lib/python` to `sys.path`, import Task 1's module, validate plan/root and Git revisions, and obtain the one `review-package` limit set. Diff mode captures full SHAs/commits/stat, treats binary numstat `-` as zero churn, captures the binary diff once, finds only line-start `diff --git ` boundaries, and greedily groups complete chunks. Detail mode strictly parses the exact input finding records, canonicalizes each as one JSONL record, and greedily groups whole records under the same member limit; one oversized finding or oversized complete package yields the truthful over-budget producer state without truncation.
+Rewrite `review-package` as an executable import-safe Python script. Add `~/.agents/lib/python` to `sys.path`, import Task 1's module, validate plan/root and Git revisions, and obtain the one `review-package` limit set. Diff mode captures full SHAs/commits/stat, treats binary numstat `-` as zero churn, captures the binary diff once, finds only line-start `diff --git ` boundaries, and greedily groups complete chunks. Detail mode obtains canonical input through Task 1's shared `validate_detail_input`, then groups whole JSONL records under the same member limit; one oversized record/package yields the truthful over-budget state without truncation.
 
 For detail mode, derive the primary checkout inside the command: resolve `git rev-parse --git-common-dir` to an absolute path without following an untrusted final component, require `.git`, derive its parent, and require `git -C <parent> rev-parse --show-toplevel` to return that exact canonical path. Validate issue as a non-boolean positive integer, producer against the two-value enum, head as a full lowercase object SHA, branch both with `git check-ref-format --branch` and against the linked worktree's current branch, and run id against `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. A `-` run id deterministically becomes `branch-<sha256(branch UTF-8)>`. Construct the only allowed destination from those components; if `--output` is present, compare its unresolved lexical normalization and resolved existing-prefix identities to that destination and reject any mismatch, traversal, `.git`, outside-root, feature-worktree, or symlink-parent case.
 

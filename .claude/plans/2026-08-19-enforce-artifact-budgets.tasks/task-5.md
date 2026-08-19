@@ -25,7 +25,7 @@
 - The ship handoff carries current spec/plan roots and metrics. Ship-issue rechecks both on entry and after any writer changes either artifact; a stale/mismatched/over-budget artifact prevents merge.
 - Per D10, ship-issue discovers checker-validated plan members locally and supplies root plus each member as individual `--artifact-path` arguments to `diff-scope`. No public report or prompt carries that list, and the existing ≤1,000-line/≤20-file gate is otherwise unchanged.
 - Small fixture cases complete; oversized fixture cases map exactly to design/grill `decompose_required`, planning `decompose_required`, handoff `stopped`, and review-package `decompose_required`. `complete` plus `over_budget` is always a contract error.
-- SDD's final phase report has exactly `state`, `review_state`, `conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`, `head_sha`, `detail_state`, `report_path`, and policy-bounded `notes`; lists are rejected. `none` requires empty detail/null path, `present` requires a checker-valid durable package, and failure-only `unpublished` requires a readable retained candidate in the live workspace.
+- SDD's exact final report uses D14's fields/states. Failure-only `unpublished` requires a retained candidate in the live workspace whose no-follow bytes pass the shared `validate-detail-input` CLI with non-empty findings.
 - Task 3's producer independently resolves `<main-root>` from the absolute Git common directory, confirms the primary checkout, derives the only permitted leaf, and establishes the ignore boundary. Task 5 callers supply only issue/branch/run/head identity (an optional expected path is an assertion, never authority). Before SDD workspace deletion, package every parked/residual finding through delivery-detail mode; before ship Phase 8 cleanup, package every Minor/Discussion item at the derived sibling leaf. Leaves are per-run/branch, primary-root-owned, and no-clobber.
 - A non-empty detail set requires either `present` plus a checker-valid durable package or `unpublished` plus its readable retained source; notes contain the exact path. The latter returns only `failed`/`stopped` and preserves the feature worktree/workspace. With genuinely no detail, the state is `none` and path null. From-issue distinguishes the states, consumes durable detail before advancing, and never inlines either file.
 - Every producer, SDD, ship-handoff, and ship-summary candidate is validated through the corresponding CLI boundary; only validated stdout bytes are transported. `discussion_items` is empty for `unpublished` only after the retained source is re-read and named; all numeric notes enforcement comes from the shared policy.
@@ -99,12 +99,14 @@ def test_review_package_failure_before_dispatch_has_no_fabricated_detail(self):
     self.assertIn("do not dispatch", self.sdd)
 
 def test_unpublished_detail_keeps_readable_sources_and_forbids_cleanup(self):
-    self.assert_ordered(self.sdd, "write the retained candidate", 'detail_state: "unpublished"',
+    self.assert_ordered(self.sdd, "write the retained candidate", "validate-detail-input",
+                        "consume canonical stdout", 'detail_state: "unpublished"',
                         "validate-report --boundary sdd", "keep the workspace")
-    self.assert_ordered(self.ship_review, "write the retained candidate",
+    self.assert_ordered(self.ship_review, "write the retained candidate", "validate-detail-input",
+                        "consume canonical stdout",
                         'detail_state: "unpublished"', "keep the worktree")
     for text in (self.sdd, self.ship_review, self.ship_issue):
-        self.assertIn("confirm the retained candidate is readable", text)
+        self.assertIn("non-empty findings", text)
         self.assertIn("do not remove", text)
 
 def test_phase_five_remeasures_every_artifact_it_mutates(self):
@@ -178,6 +180,14 @@ def test_unpublished_ship_detail_retains_a_readable_candidate(self):
     self.finish(attempt, result, ok=False)
     self.assertEqual(self.state_path.read_bytes(), before)
     retained.parent.mkdir(parents=True)
+    invalid_payloads = ("", "{", '{"interface_version":2,"findings":[]}',
+                        '{"interface_version":1,"items":[]}',
+                        '{"interface_version":1,"findings":[]}')
+    for invalid in invalid_payloads:
+        retained.write_text(invalid, encoding="utf-8")
+        before = self.state_path.read_bytes()
+        self.finish(attempt, result, ok=False)
+        self.assertEqual(self.state_path.read_bytes(), before)
     retained.write_text(payload, encoding="utf-8")
     normalized = self.finish(attempt, result)
     self.assertEqual(normalized["detail_state"], "unpublished")
@@ -198,13 +208,13 @@ Update `from-issue`'s structured-report and phase rules to send every received p
 
 Update `standards-review` so every accepted plan edit triggers a final plan-package check and every ledger/spec edit triggers a spec check. Apply the existing owner remediation once; unresolved oversize becomes `decompose_required` and returns to the decomposition checkpoint rather than Phase 6.
 
-Update SDD's review-package handling as above. A pre-dispatch failure uses `none`/null. Before delivery publication, write the non-empty exact detail input at `<workspace>/retained-detail.json` and confirm it is readable. Success uses `present` plus the durable root; publication/check failure uses `failed`, `unpublished`, and the repository-relative retained path, validates that SDD report, and explicitly does not remove the workspace/worktree. From-issue never advances an unpublished result to Phase 7.
+Update SDD's review-package handling as above. Before publication, write `<workspace>/retained-detail.json`; on failure SDD and from-issue each invoke `validate-detail-input` on the no-follow file and consume/compare canonical stdout before accepting `unpublished`. Any missing/empty/malformed/wrong-schema/empty-findings result stays failed and preserves workspace/worktree; it never advances to Phase 7.
 
 Update `ship-handoff` to the exact D14 state matrix with fixed lifecycle scalars, current spec/plan artifacts, SDD `report_path`, and notes; delete `summary`, validate a candidate with the ship-handoff boundary, and dispatch only stdout. Ship-issue revalidates that stdin, rechecks both artifact roots and any SDD detail root, then runs existing phases.
 
-Update `ship-issue/REVIEW.md` to write every Minor/Discussion item verbatim to a readable `.superpowers/ship-review/<issue>/retained-detail.json` candidate before delivery publication. Success uses `present` and the durable root. Publication/check failure uses stopped/failed plus `unpublished` and the repository-relative retained path, leaves `discussion_items: []` because notes/path preserve the detail, validates the summary, and explicitly does not remove the worktree. From-issue never treats that path as a durable package. Keep the existing degradation gate behavior.
+Update `ship-issue/REVIEW.md` to write every Minor/Discussion item to `.superpowers/ship-review/<issue>/retained-detail.json`. On publication failure, ship review and workflow-state each invoke `validate-detail-input` on the no-follow file and consume/compare canonical stdout before accepting `unpublished`; otherwise reject with no cleanup. Keep the existing degradation gate.
 
-Update `workflow-state.py`'s exact terminal fields to include `detail_state` and `report_path` before `notes`; internally synthesized results use `none`/null. Delegate the whole object to `validate_ship_summary`, then for `unpublished` resolve the path beneath the recorded live attempt worktree with no-follow regular-file checks and read it once before accepting `finish`; missing/unreadable/escaping candidates leave state unchanged. Translate validation failures to `WorkflowError`. Update factories/exact fixtures and add the persistence test above.
+Update `workflow-state.py`'s terminal fields as above. After ship-summary validation, an `unpublished` finish resolves the retained file beneath the recorded worktree, runs `artifact-budget validate-detail-input --input <path>` (source tests pass the repository policy), and consumes canonical stdout before persistence. Every rejection leaves ledger bytes unchanged. Update factories/exact fixtures and add the test above.
 
 - [ ] **Step 4: Run plan-level consistency and repository acceptance gates**
 
