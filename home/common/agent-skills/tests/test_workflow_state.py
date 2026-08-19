@@ -604,6 +604,26 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "kind": "decision", "issue": 41,
             "url": "https://github.com/fagenorn/nix-config/issues/41",
         }])
+        combined = self.control(
+            now="2026-08-19T12:00:45Z", issues=[47],
+            tracker=[self.tracker_fact(
+                47,
+                open_blockers=[40],
+                decision_blockers=[{
+                    "issue": 41,
+                    "url": "https://github.com/fagenorn/nix-config/issues/41",
+                }],
+            )],
+            worktrees=[],
+        )
+        self.assertEqual(combined["summaries"][0]["state"], "fogged")
+        self.assertEqual(combined["summaries"][0]["blockers"], [
+            {"kind": "issue", "issue": 40, "url": None},
+            {
+                "kind": "decision", "issue": 41,
+                "url": "https://github.com/fagenorn/nix-config/issues/41",
+            },
+        ])
         finalized = self.control(
             now="2026-08-19T12:01:00Z",
             issues=[47],
@@ -654,6 +674,10 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "invalid decision blocker url":
                 lambda value: value["tracker"][0].__setitem__(
                     "decision_blockers", [{"issue": 40, "url": 40}]
+                ),
+            "decision blocker url":
+                lambda value: value["tracker"][0].__setitem__(
+                    "decision_blockers", [{"issue": 40, "url": None}]
                 ),
             "invalid max_parallel":
                 lambda value: value.__setitem__("max_parallel", True),
@@ -908,6 +932,30 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertNotEqual(alias.returncode, 0)
         self.assertIn("candidate worktree path", alias.stderr)
         self.assertEqual(self.state_path.read_bytes(), recorded)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_control_rejects_candidates_aliasing_through_symlinked_parents(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        real_parent = self.root / "real-worktrees"
+        real_parent.mkdir()
+        alias_parent = self.root / "worktree-alias"
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+        before = self.state_path.read_bytes()
+        rejected = self.control_raw(
+            now="2026-08-19T12:00:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[
+                self.worktree_fact(47, candidate={
+                    "path": str(real_parent / "shared"), "state": "absent",
+                }),
+                self.worktree_fact(51, candidate={
+                    "path": str(alias_parent / "shared"), "state": "absent",
+                }),
+            ],
+            ok=False,
+        )
+        self.assertIn("candidate worktree path", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_control_accepts_shared_candidate_when_no_action_consumes_it(self):
         self.init_run(now="2026-08-19T12:00:00Z")
@@ -2153,6 +2201,29 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         self.assertEqual((continued["phase_action"], continued["state"]), ("continue", "active"))
         self.assertEqual(continued["handoff_path"], str(handoff_path))
+
+    def test_control_revalidates_handoff_before_resume(self):
+        self.init_run()
+        worktree = self.root / "wt-a"
+        self.spawn(issue=14, worktree=worktree)
+        handoff_path = self.write_handoff(14)
+        self.progress(
+            turn_count=118, context_tokens=20000, handoff_path=handoff_path
+        )
+        before = self.state_path.read_bytes()
+        handoff_path.unlink()
+        rejected = self.control_raw(
+            now="2026-08-13T20:05:00Z",
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": str(worktree), "state": "matching_issue_branch",
+            })],
+            max_parallel=100,
+            ok=False,
+        )
+        self.assertIn("handoff path does not exist", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_late_handoff_control_expires_and_permits_fresh_retry(self):
         self.init_run()

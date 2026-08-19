@@ -842,7 +842,7 @@ def validate_tracker_observation(value: Any) -> dict[str, Any]:
         if decision_issue in seen_decisions:
             raise WorkflowError("duplicate decision blocker")
         seen_decisions.add(decision_issue)
-        if decision["url"] is not None and not isinstance(decision["url"], str):
+        if not isinstance(decision["url"], str):
             raise WorkflowError("invalid decision blocker url")
     return observation
 
@@ -1028,15 +1028,18 @@ def command_init_run(args: argparse.Namespace) -> int:
 
 
 def control_blockers(tracker: dict[str, Any]) -> list[dict[str, Any]]:
-    if tracker["decision_blockers"]:
-        return [
-            {"kind": "decision", "issue": item["issue"], "url": item["url"]}
-            for item in tracker["decision_blockers"]
-        ]
     return [
         {"kind": "issue", "issue": issue, "url": None}
         for issue in tracker["open_blockers"]
+    ] + [
+        {"kind": "decision", "issue": item["issue"], "url": item["url"]}
+        for item in tracker["decision_blockers"]
     ]
+
+
+def canonical_worktree_path(path_value: str) -> str:
+    """Return a comparison identity that resolves aliases in existing parents."""
+    return os.path.normcase(str(Path(path_value).resolve(strict=False)))
 
 
 def new_control_attempt(
@@ -1109,6 +1112,7 @@ def command_control(args: argparse.Namespace) -> int:
     request = load_control_request(args.request_file)
     now = request["now"]
     now_value = parse_utc(now, "control now")
+    run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
     tracker_by_issue = {item["issue"]: item for item in request["tracker"]}
     worktree_by_issue = {item["issue"]: item for item in request["worktrees"]}
 
@@ -1198,6 +1202,8 @@ def command_control(args: argparse.Namespace) -> int:
                 or (latest["state"] == "active" and identity in unavailable)
             ):
                 continue
+            if latest["state"] == "handed_off":
+                validate_handoff_path(run_dir, latest["handoff_path"])
             observation = worktree_by_issue.get(issue)
             if (
                 observation is None
@@ -1310,13 +1316,13 @@ def command_control(args: argparse.Namespace) -> int:
         durable_paths: dict[str, set[int]] = {}
         for issue_state in state["issues"].values():
             for attempt in issue_state["attempts"]:
-                key = os.path.normcase(os.path.normpath(attempt["worktree"]))
+                key = canonical_worktree_path(attempt["worktree"])
                 durable_paths.setdefault(key, set()).add(attempt["issue"])
         for proposal in dispatch_proposals:
             if not proposal["uses_candidate"]:
                 continue
             issue = proposal["issue"]
-            key = os.path.normcase(os.path.normpath(proposal["path"]))
+            key = canonical_worktree_path(proposal["path"])
             if key in selected_paths:
                 raise WorkflowError("candidate worktree path is shared by accepted actions")
             if any(other_issue != issue for other_issue in durable_paths.get(key, set())):
