@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 from typing import Any, Callable
@@ -26,6 +27,8 @@ RESULT_FIELDS = (
     "merge_sha",
     "issue_closed",
     "discussion_items",
+    "detail_state",
+    "report_path",
     "notes",
 )
 
@@ -237,9 +240,62 @@ def validate_result(value: Any, *, expected_issue: int | None = None) -> dict[st
         raise WorkflowError("invalid terminal result issue_closed: expected boolean")
     if not isinstance(value["discussion_items"], list):
         raise WorkflowError("invalid terminal result discussion_items: expected list")
-    if not isinstance(value["notes"], str) or len(value["notes"]) > 500:
-        raise WorkflowError("invalid terminal result notes: expected at most 500 characters")
+    if value["detail_state"] not in {"none", "present", "unpublished"}:
+        raise WorkflowError("invalid terminal result detail_state")
+    if value["report_path"] is not None and not isinstance(value["report_path"], str):
+        raise WorkflowError("invalid terminal result report_path: expected string or null")
+    if not isinstance(value["notes"], str):
+        raise WorkflowError("invalid terminal result notes: expected string")
     return {field: copy.deepcopy(value[field]) for field in RESULT_FIELDS}
+
+
+def artifact_budget_paths() -> tuple[list[str], Path | None]:
+    """Resolve the Task-1 CLI and its repository/installed policy."""
+    script_dir = Path(__file__).resolve().parent
+    source_module = script_dir / "artifact_budget.py"
+    source_policy = script_dir.parent / "artifact-budget-policy.json"
+    if source_module.is_file() and source_policy.is_file():
+        return [sys.executable, str(source_module)], source_policy
+    installed_cli = Path(__file__).parent / "artifact-budget"
+    installed_policy = Path(__file__).parent.parent / "share/artifact-budget-policy.json"
+    if not installed_cli.is_file():
+        installed_cli = Path.home() / ".agents/bin/artifact-budget"
+    return [str(installed_cli)], installed_policy if installed_policy.is_file() else None
+
+
+def artifact_budget_validate(
+    command: str,
+    input_path: Path | None = None,
+    *,
+    boundary: str | None = None,
+    input_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    if (input_path is None) == (input_bytes is None):
+        raise WorkflowError("artifact-budget validation requires exactly one input")
+    argv, policy = artifact_budget_paths()
+    argv.append(command)
+    if boundary is not None:
+        argv.extend(("--boundary", boundary))
+    argv.extend(("--input", "-" if input_bytes is not None else str(input_path)))
+    if policy is not None:
+        argv.extend(("--policy", str(policy)))
+    completed = subprocess.run(argv, input=input_bytes, capture_output=True, check=False)
+    if completed.returncode != 0 or not completed.stdout:
+        raise WorkflowError(f"artifact-budget {command} rejected the terminal result")
+    try:
+        canonical = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WorkflowError(f"artifact-budget {command} returned invalid canonical JSON") from error
+    if not isinstance(canonical, dict):
+        raise WorkflowError(f"artifact-budget {command} returned a non-object")
+    return canonical
+
+
+def validate_ship_summary_value(value: dict[str, Any]) -> dict[str, Any]:
+    wire = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    return artifact_budget_validate(
+        "validate-report", boundary="ship-summary", input_bytes=wire
+    )
 
 
 def validate_launch_event(value: Any, *, owner: str, worktree: str) -> None:
@@ -737,30 +793,52 @@ def transact(
         return result
 
 
+def phase_notes_maximum() -> int:
+    _, policy_path = artifact_budget_paths()
+    if policy_path is None:
+        raise WorkflowError("artifact-budget policy is unavailable")
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        maximum = policy["phase_reports"]["notes_max_characters"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise WorkflowError("artifact-budget policy is invalid") from error
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+        raise WorkflowError("artifact-budget policy has an invalid notes limit")
+    return maximum
+
+
 def terminal_result(issue: int, state: str, notes: str) -> dict[str, Any]:
-    if len(notes) > 500:
-        raise WorkflowError("generated terminal notes exceed 500 characters")
-    return {
+    if len(notes) > phase_notes_maximum():
+        raise WorkflowError("generated terminal notes exceed the policy limit")
+    return validate_ship_summary_value({
         "issue": issue,
         "state": state,
         "pr_url": None,
         "merge_sha": None,
         "issue_closed": False,
         "discussion_items": [],
+        "detail_state": "none",
+        "report_path": None,
         "notes": notes,
-    }
+    })
 
 
-def retain_worktree(notes: str, worktree: str) -> str:
+def retain_worktree(notes: str, worktree: str, report_path: str | None = None) -> str:
     if worktree in notes:
         return notes
     suffix = f"worktree: {worktree}"
-    if len(suffix) > 500:
+    maximum = phase_notes_maximum()
+    if len(suffix) > maximum:
         raise WorkflowError("worktree path is too long for terminal notes")
     if not notes:
         return suffix
     separator = "; "
-    prefix = notes[: 500 - len(separator) - len(suffix)].rstrip()
+    if report_path is not None:
+        combined = f"{notes}{separator}{suffix}"
+        if len(combined) > maximum:
+            raise WorkflowError("terminal notes cannot retain both detail and worktree paths")
+        return combined
+    prefix = notes[: maximum - len(separator) - len(suffix)].rstrip()
     return f"{prefix}{separator}{suffix}" if prefix else suffix
 
 
@@ -1554,12 +1632,51 @@ def command_control(args: argparse.Namespace) -> int:
 
 
 def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
-    try:
-        with Path(path_value).open(encoding="utf-8") as source:
-            value = json.load(source)
-    except json.JSONDecodeError as error:
-        raise WorkflowError(f"invalid result file JSON: {error}") from error
+    value = artifact_budget_validate(
+        "validate-report", Path(path_value), boundary="ship-summary"
+    )
     return validate_result(value, expected_issue=issue)
+
+
+def validate_retained_detail(worktree: str, report_path: str) -> None:
+    root = Path(worktree).resolve(strict=True)
+    candidate = root / report_path
+    try:
+        resolved_parent = candidate.parent.resolve(strict=True)
+        resolved_parent.relative_to(root)
+    except (OSError, ValueError) as error:
+        raise WorkflowError("unpublished detail is not beneath the recorded worktree") from error
+    canonical = artifact_budget_validate("validate-detail-input", candidate)
+    if not canonical.get("findings"):
+        raise WorkflowError("unpublished detail must retain non-empty findings")
+
+
+def validate_durable_detail(repo_root: str, report_path: str) -> None:
+    root = Path(repo_root).resolve(strict=True)
+    candidate = root / report_path
+    try:
+        resolved_parent = candidate.parent.resolve(strict=True)
+        resolved_parent.relative_to(root)
+    except (OSError, ValueError) as error:
+        raise WorkflowError("durable detail is not beneath the repository root") from error
+    argv, policy = artifact_budget_paths()
+    argv.extend((
+        "check", "--kind", "review-package", "--root", str(candidate),
+        "--format", "json",
+    ))
+    if policy is not None:
+        argv.extend(("--policy", str(policy)))
+    completed = subprocess.run(argv, capture_output=True, check=False)
+    if completed.returncode != 0:
+        raise WorkflowError("durable detail is not a checker-valid review package")
+    try:
+        canonical = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WorkflowError("artifact-budget check returned invalid canonical JSON") from error
+    if (not isinstance(canonical, dict)
+            or canonical.get("kind") != "review-package"
+            or canonical.get("status") != "within_budget"):
+        raise WorkflowError("artifact-budget check returned an invalid review result")
 
 
 def command_progress(args: argparse.Namespace) -> int:
@@ -1632,6 +1749,9 @@ def command_finish(args: argparse.Namespace) -> int:
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
     result = load_result_file(args.result_file, args.issue)
+    if result["detail_state"] == "present":
+        assert isinstance(result["report_path"], str)
+        validate_durable_detail(args.repo_root, result["report_path"])
 
     def finish(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         assert state is not None
@@ -1643,8 +1763,18 @@ def command_finish(args: argparse.Namespace) -> int:
                 f"unknown attempt identity: issue {args.issue} attempt {args.attempt}"
             )
         attempt = issue_state["attempts"][args.attempt - 1]
+        if result["detail_state"] == "unpublished":
+            assert isinstance(result["report_path"], str)
+            validate_retained_detail(attempt["worktree"], result["report_path"])
         if result["state"] in {"stopped", "failed"}:
-            result["notes"] = retain_worktree(result["notes"], attempt["worktree"])
+            result["notes"] = retain_worktree(
+                result["notes"], attempt["worktree"], result["report_path"]
+            )
+            normalized_result = validate_result(
+                validate_ship_summary_value(result), expected_issue=args.issue
+            )
+            result.clear()
+            result.update(normalized_result)
         if now_value < parse_utc(attempt["last_progress_at"], "attempt progress time"):
             raise WorkflowError("finish time must not move backward")
         existing = attempt["result"]

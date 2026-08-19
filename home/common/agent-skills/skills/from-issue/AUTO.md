@@ -108,36 +108,61 @@ grill's refinements to it, and writes any context-doc updates and ADRs — all c
 worktree. Splitting these into two dispatches would mean re-establishing the whole design in a second
 prompt for no gain.
 
-Return schema:
+After the final mutation, write a candidate producer report, run
+`artifact-budget validate-report --boundary producer`, and return only validated stdout bytes.
+never inline artifact contents or member paths. The exact `complete` report is:
 
 ```
-spec_path:  <path relative to repo root>
-adr_paths:  [<path>, …]   ([] if none)
-decisions:  [<ledger ID: one-line choice>]
-notes:      <≤500 chars: unresolved tension, scope surprise, or anything the plan phase must know>
+{"state":"complete","artifact":{"kind":"design-spec","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"notes":"<bounded note>"}
 ```
+
+The exact over-budget report includes the checker's ordered, non-empty
+`violations` array:
+
+```
+{"state":"decompose_required","artifact":{"kind":"design-spec","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"over_budget","violations":["root_bytes"]},"notes":"<bounded note>"}
+```
+
+For `failed`, `artifact` is exactly `null` before a root exists or exactly
+`{"kind":"design-spec","path":"<root relative to repo>"}` after one exists;
+metrics, budget status, and violations are forbidden in both failed rows.
+The orchestrator keeps only the artifact root and metrics; ADR paths and ledger
+choices stay in the spec.
 
 ### Plan subagent — Phase 4 (+ mechanical Phase 5)
 
 <!-- agent-dispatch: id=from-issue-planning role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches the autonomous planning owner.
 
-Writes the implementation plan under `planDir`, committed in the worktree, with a `## Task index`
+Writes the implementation plan package under `planDir`, committed in the worktree, with a `## Task index`
 carrying each task's risk lane; it cites decision-ledger rows by ID and appends new non-obvious
-plan-level decisions to the spec's ledger. Give it the spec path and the design subagent's `decisions` and
-`notes` — not its transcript. `SKILL.md`'s plan-prose ≠ code-prose rule goes in the prompt.
+plan-level decisions to the spec's ledger. Give it the validated spec artifact
+root and metrics plus notes — not a transcript. `SKILL.md`'s plan-prose ≠
+code-prose rule goes in the prompt.
 
 When Phase 0 declared the issue `mechanical-only`, this dispatch also performs the Phase-5 self-grade
 (read issue, spec, plan, live files, standards; grade against Blocking / Should-fix / Discussion) and
 applies its own blocking fixes before returning.
 
-Return schema:
+After the final mutation, write a candidate producer report, run
+`artifact-budget validate-report --boundary producer`, and return only validated stdout bytes.
+never inline artifact contents or task member paths. The exact `complete` report is:
 
 ```
-plan_path:   <path relative to repo root>
-open_items:  [<blocking or should-fix item it could not resolve>]   ([] if none)
-notes:       <≤500 chars>
+{"state":"complete","artifact":{"kind":"implementation-plan","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"notes":"<bounded note>"}
 ```
+
+The exact over-budget report includes the checker's ordered, non-empty
+`violations` array:
+
+```
+{"state":"decompose_required","artifact":{"kind":"implementation-plan","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"over_budget","violations":["root_bytes"]},"notes":"<bounded note>"}
+```
+
+For `failed`, `artifact` is exactly `null` before a root exists or exactly
+`{"kind":"implementation-plan","path":"<root relative to repo>"}` after one
+exists; metrics, budget status, and violations are forbidden in both failed
+rows. `complete` plus any status other than `within_budget` is a contract error.
 
 ### Phases 5, 6, 7
 

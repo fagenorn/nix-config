@@ -57,6 +57,11 @@ Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi
 
 Everything you paste into a dispatch — and everything a subagent prints back — stays resident in your context for the session. Hand artifacts over as file paths; subagents write detail to files.
 
+All removable cleanup is downstream of the D15 `delivery-detail` publication
+contract. Its destination is derived by the producer beneath the primary
+checkout's `.superpowers/issue-delivery/` home; callers supply issue, branch,
+run, and head identity only, never an authoritative destination.
+
 ### 1. Dispatch the implementer
 
 Record BASE (`git rev-parse HEAD`) first — the review package and fix-round diffs need it.
@@ -96,6 +101,16 @@ and report/checker agreement permits dispatch. Generator exit 3 must validate as
 `decompose_required`; record and return it with no reviewer dispatched.
 Generator exit 2, validator exit 2, malformed or unknown output, or any
 report/checker disagreement is `failed`; record and return it before dispatch.
+
+Record the exact `base_sha and head_sha` before invoking any `review-package`
+producer. Parse every producer report only after the producer-boundary validator,
+then independently run `artifact-budget check --kind review-package` on its root
+and compare all four metrics before reviewer dispatch. On generator or validator
+exit 2, do not dispatch and construct the exact failed SDD candidate with
+`detail_state: "none"` and `report_path: null`; pass it through
+`artifact-budget validate-report --boundary sdd` and return only canonical stdout.
+Exit 3 must be a validated `decompose_required` producer report and also stops
+before dispatch. `complete` plus `over_budget` is a contract error.
 
 ### 3. Review the task
 
@@ -146,14 +161,41 @@ Mandatory for **every** risk lane — lanes narrow per-task review, never this g
 
 ## Finish
 
+Before any workspace can disappear, collect every parked or residual finding as
+the strict non-empty detail input and write the retained candidate to
+`<workspace>/retained-detail.json`. Invoke review-package in `delivery-detail`
+mode with issue/branch/run/head identity; it alone derives the primary-checkout
+destination. Independently run `artifact-budget check --kind review-package` on
+the published root and compare its metrics with the producer report.
+
+Build one exact SDD JSON object with only `state`, `review_state`,
+`conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`,
+`head_sha`, `detail_state`, `report_path`, and `notes`, then run
+`artifact-budget validate-report --boundary sdd` and transport only canonical
+stdout. A non-empty detail set is `present` with one main-root-relative durable
+path. With genuinely no findings it is `none` with a null path; transient review
+evidence is never inlined.
+
+If publication fails, run `artifact-budget validate-detail-input` against the
+no-follow retained file and consume canonical stdout, requiring non-empty findings
+and comparison with the candidate before setting `detail_state: "unpublished"`.
+Then validate the failed candidate through `artifact-budget
+validate-report --boundary sdd`, keep the workspace and keep the worktree, and
+do not remove either. Missing, unreadable, empty, malformed, wrong-schema, or
+empty-findings input remains failed without an unpublished claim.
+
 Terminal states:
 
 - **Clean** — both axes clean (or clean after the fix wave), or every remaining
   finding parked-with-ruling: delete this plan's workspace (`rm -rf <workspace>`;
   sibling directories belong to other plans) and report `review_state: clean` —
-  parked findings still travel in the report's parked-findings field.
+  parked findings are already available through the one durable report.
 - **Residuals** — the breaker surfaced a load-bearing residual the caller must
   decide on: keep the workspace and ledger for the caller's inspection and report
-  `review_state: residuals` with the surfaced list.
+  `review_state: residuals`; the retained or durable review package named by the
+  single `report_path` is the only findings transport.
 
-Report to the calling workflow: `review_state` (`clean | residuals` — sdd never reports `unknown`; that third value exists for downstream callers describing a branch with no evidence of a completed sdd review), per-axis final-review verdicts, commit range `<base7>..<head7>`, parked findings with rulings, verification status, ≤500 characters of notes. Do not ship, merge, or open PRs — the caller owns delivery.
+Report to the calling workflow only the validated SDD JSON above. `review_state`
+is `clean | residuals` — sdd never reports `unknown`; that third value exists for
+downstream callers describing a branch with no evidence of a completed sdd
+review. Do not ship, merge, or open PRs — the caller owns delivery.
