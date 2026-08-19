@@ -151,6 +151,7 @@ their rows.
 - Artifact: `/Users/anis/tmp/nix-config/.git/worktrees/issue-47-workflow-control-plane/PLAN-REVIEW.md`
 - Reviewed HEAD: `c4e3862de6478c22d296cec047050b4f3ba67e70`
 - Last-amendment base: `ac302b320b93b41c54ac3245c0a049d31d3707f2`
+- Final-test base: `15baaf9cc7d8e555e1802af15c2a949241bea629`
 - Fallback: native because `codex-collaboration` was unavailable
 
 | Finding | Disposition |
@@ -162,6 +163,7 @@ their rows.
 | Full-restart observer ownership unclear | accepted — Task 4 makes inherited-detached-observer cleanup an explicit host precondition per D14 |
 | Accepted actions could share one candidate path | accepted — Task 1 rejects the complete proposal under lock and pins byte-unchanged two-ready-issue and durable-alias cases per D16 |
 | Unexpected old-observer cancellation failure lacked recovery | accepted — Task 4 restores the old ID/handle pair, fails before arming, and leaves identical-response replacement retryable per D14 |
+| D16 lacked a positive unused-duplicate discriminator | accepted — Task 1 sends two blocked issues with distinct observations sharing one candidate and proves success, external wait, no deltas, and no attempts |
 
 ---
 
@@ -705,6 +707,34 @@ Then add these tests:
         self.assertNotEqual(alias.returncode, 0)
         self.assertIn("candidate worktree path", alias.stderr)
         self.assertEqual(self.state_path.read_bytes(), recorded)
+
+    def test_control_accepts_shared_candidate_when_no_action_consumes_it(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        shared = str(self.root / "unused-shared-worktree")
+        response = self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[
+                self.tracker_fact(47, open_blockers=[40]),
+                self.tracker_fact(51, open_blockers=[40]),
+            ],
+            worktrees=[
+                self.worktree_fact(
+                    47, candidate={"path": shared, "state": "absent"}),
+                self.worktree_fact(
+                    51, candidate={"path": shared, "state": "absent"}),
+            ],
+        )
+        self.assertEqual([s["state"] for s in response["summaries"]],
+                         ["blocked", "blocked"])
+        self.assertEqual(response["deltas"], [])
+        self.assertEqual(response["actions"], [{
+            "id": "wait:external",
+            "kind": "wait",
+            "wake_on": ["owner_notification", "tracker_change"],
+            "deadline_at": None,
+        }])
+        self.assertIsNone(response["next_deadline"])
+        self.assertEqual(self.read_state()["issues"], {})
 ```
 
 - [ ] **Step 2: Run the focused tests and observe the red state**
@@ -719,12 +749,15 @@ python3 -m unittest -v \
   tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_rejects_bad_observations_without_rewriting_the_ledger \
   tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_rejects_bad_request_files_and_recorded_path_mismatch \
   tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_rejects_candidate_path_aliases_atomically \
+  tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_accepts_shared_candidate_when_no_action_consumes_it \
   2>&1 | tail -30
 ```
 
 Expected: FAIL because `init-run` still prints raw state and `control` is not a
 recognized command; the path-alias case additionally lacks D16 proposal validation.
-`state.json` remains byte-identical in every rejection case.
+The positive shared-but-unconsumed case fails until `control` accepts the request and
+returns its external wait without creating attempts. `state.json` remains byte-identical
+in every rejection case.
 
 - [ ] **Step 3: Implement the strict request and response boundary**
 
@@ -1982,7 +2015,7 @@ Co-Authored-By: Codex <noreply@openai.com>"
 | --- | --- |
 | Strict bounded restart bootstrap without raw history and latest resume/retry identity | Tasks 1–2, 4 |
 | Strict versioned nested request/response shapes, injected time, atomic rejection | Task 1 |
-| Pairwise-distinct accepted candidate paths, durable-path disjointness, byte-unchanged rejection | Tasks 1–2 |
+| Pairwise-distinct consumed candidate paths, durable-path disjointness, byte-unchanged rejection, and successful unused-duplicate observation | Tasks 1–2 |
 | Bounded summaries/deltas/actions and compact-output verification | Tasks 1–2 |
 | Persist-before-emission and deterministic action IDs | Tasks 1–2 |
 | Expiry, capacity formula, resume-before-retry-before-spawn, attempt cap, worktree reuse | Task 2 |
