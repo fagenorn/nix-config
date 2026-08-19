@@ -190,7 +190,11 @@ per-plan workspace; ship review finalizes it before Phase 8 cleanup. A consumer 
 and reads it before cleanup/terminal persistence. When findings exist, `report_path` is required and
 bounded notes include that exact path; `null` is allowed only when there is genuinely no detail.
 Failure to durably publish and validate required detail makes the phase `stopped`/`failed` and keeps
-the worktree; detail is never force-emptied to satisfy the transport schema.
+the worktree; detail is never force-emptied to satisfy the transport schema. Before publication,
+the caller writes the exact detail input to a bounded repository-relative retained-candidate path
+beneath the live feature worktree's `.superpowers/` workspace. If publication fails with a non-empty
+collection, `detail_state: unpublished` points to that still-readable candidate, bounded notes name
+the same path, and cleanup/worktree removal is forbidden. It never claims a durable review package.
 
 Both variants generate under a unique sibling staging directory and are fully shape-validated and
 measured there before publication. Publication has no check-then-rename window: exclusively create
@@ -251,7 +255,7 @@ Cross-phase and ship handoffs carry fixed scalar lifecycle fields, current artif
 and policy-bounded `notes`; they do not restore removed lists under a new name. The Phase-7
 one-paragraph summary becomes `notes`. The legacy terminal lifecycle field `discussion_items`
 remains for schema compatibility but is always the empty list; Discussion/Minor detail stays in its
-review or ledger artifact and only a bounded pointer or synopsis travels in `notes`.
+durable package or readable retained candidate and only its bounded path plus notes travels.
 
 The shared module validates these exhaustive state matrices (`full` means exact
 `kind,path,metrics,budget_status`; `over` additionally requires non-empty closed `violations`;
@@ -274,11 +278,14 @@ The shared module validates these exhaustive state matrices (`full` means exact
 | failed before range | `failed` / `unknown` | both `not_run` | `not_run` | both null | `detail_state: none`; null path |
 | failed after range, no detail | `failed` / `unknown` | each `not_run|clean`, not the clean-success tuple | `passed|failed` | both full IDs | `detail_state: none`; null path |
 | failed after range, detail | `failed` / `unknown` | each `not_run|clean|findings`, not the clean-success tuple | `passed|failed` | both full IDs | `detail_state: present`; required durable path |
+| failed after range, unpublished detail | `failed` / `unknown` | at least one `findings` | `passed|failed` | both full IDs | `detail_state: unpublished`; required retained-candidate path |
 
 SDD top-level keys are exactly `state`, `review_state`, `conformance_verdict`,
 `correctness_verdict`, `verification_state`, `base_sha`, `head_sha`, `detail_state`, `report_path`,
-and `notes`. Every SDD row requires `detail_state: none | present`; it is `none` iff `report_path` is
-null and `present` iff the path is non-null. A verdict of `findings` requires `present`.
+and `notes`. Every SDD row requires `detail_state: none | present | unpublished`: `none` requires a
+null path, `present` requires the normalized primary-root-relative durable-package path, and
+`unpublished` requires a normalized repository-relative `.superpowers/` retained-candidate path in
+the live workspace. `unpublished` is valid only with `state: failed` and a `findings` verdict.
 
 | Ship-handoff row | `state` | artifacts/head | review/detail |
 |---|---|---|---|
@@ -293,12 +300,13 @@ integer fields.
 
 | Ship-summary row | `state` | `pr_url` | `merge_sha` | `issue_closed` | detail |
 |---|---|---|---|---|---|
-| merged | `merged` | required URL | full object ID | `true` | empty compatibility list; durable path iff detail exists |
-| stopped | `stopped` | URL or null | null | `false` | empty compatibility list; durable path iff detail exists |
-| failed | `failed` | URL or null | null | `false` | empty compatibility list; durable path iff detail exists |
+| merged | `merged` | required URL | full object ID | `true` | `none`/null or `present`/durable path |
+| stopped | `stopped` | URL or null | null | `false` | `none`/null, `present`/durable path, or `unpublished`/retained path |
+| failed | `failed` | URL or null | null | `false` | `none`/null, `present`/durable path, or `unpublished`/retained path |
 
-Ship-summary keys are exactly `issue,state,pr_url,merge_sha,issue_closed,discussion_items,report_path,notes`.
-`discussion_items` is always `[]`; when `report_path` is non-null, notes must contain that exact path.
+Ship-summary keys are exactly `issue,state,pr_url,merge_sha,issue_closed,discussion_items,detail_state,report_path,notes`.
+`discussion_items` is always `[]`; for `unpublished`, emptiness means the retained candidate and
+notes preserve the non-empty detail, not that it was discarded. Every non-null path appears in notes.
 All notes use the one shared-policy character limit. Unknown fields, missing fields, legacy lists,
 unlisted enum combinations, or independently nullable paired fields are contract errors.
 
@@ -430,6 +438,6 @@ Concrete grill scenarios that must remain green:
 | D11 | Replace producer-specific report fields with the exact `state` + one root `artifact` + policy-bounded `notes` envelope; cross-phase and ship handoffs use fixed scalars/root metrics plus the same bounded notes, and legacy terminal `discussion_items` is always empty | Phase-5 review B1 verified that live `decisions`, `open_items`, `adr_paths`, and the Phase-7 paragraph summary are unbounded despite the spec's former claim; D6 already makes the artifact and durable ledgers authoritative | Add per-list count/item limits, which introduces more repeated numeric policy and still grows transport with artifact complexity; retain the lists because they are “existing,” which leaves the acceptance gap intact |
 | D12 | Refuse a review-package retry when its regular root or member directory already exists; generate in sibling staging, validate completely, publish members then manifest, and clean only newly published members if final publication fails | Phase-5 review S2 found that range-derived names collide on resume and stale shards can corrupt discovery; refusal is deterministic, preserves valid prior evidence byte-for-byte, and avoids pretending two filesystem renames are one atomic package swap | Overwrite in place, which can destroy a valid package or leave stale shards; multi-path replacement with rollback, which adds concurrency/state machinery for transient evidence when safe refusal suffices |
 | D13 | Make small/oversized descriptors executable test inputs, reject booleans for every policy/result/manifest integer, and count Git binary numstat `-` as zero insertions/deletions while retaining full binary diff bytes | Phase-5 review S1/S3 found static fixture self-assertion and Python's `bool`/`int` overlap; `diff-scope` already defines binary rows as zero churn, so matching it keeps one repository meaning | Treat descriptor expectations as proof, which cannot catch mismatched payloads; accept booleans through `isinstance(int)` or invent a different binary-stat convention, both of which create silent schema/accounting drift |
-| D14 | Make every phase/report boundary canonical JSON validated through one `validate-report` CLI operation, with exhaustive state-dependent schemas (including SDD `detail_state`/path parity), an 8 KiB shared-policy wire ceiling, and candidate-file → validated-stdout transport | Re-review R-B1/R-B2 and final review F-B1 found that Python-only mapping validators were not callable by Markdown skills and that unnamed enum/nullability/detail combinations could drift; 8 KiB matches the evidence-backed handoff ceiling while leaving ample room for fixed fields plus notes; the coding bar requires message parity and fail-loud closed sets | Let each skill serialize/validate its own prose or YAML, which duplicates the wire contract; infer whether a null path lost detail, which cannot distinguish a pre-review failure from dropped findings |
-| D15 | Extend D8's review package with a `delivery-detail` manifest variant under the same numeric ceilings; the producer derives its exact ignored primary-checkout destination and maintains the no-follow local ignore boundary before removable-worktree cleanup; transport only one validated relative `report_path` | Re-review R-B3/F-B2/F-S1 showed the old workspace is deleted, ship review had no durable artifact, and caller-selected/unignored paths could be removable or accidentally committed; producer-owned derivation plus the primary checkout survives cleanup and the shared review budget prevents an unbounded producer | Keep detail in the per-plan/worktree workspace, trust caller output paths, or depend on a developer's broad local exclude; each makes evidence dangling, redirectable, or accidentally trackable |
+| D14 | Make every phase/report boundary canonical JSON validated through one `validate-report` CLI operation, with exhaustive state-dependent schemas (including closed SDD/ship `detail_state` and path parity), an 8 KiB shared-policy wire ceiling, and candidate-file → validated-stdout transport | Re-review R-B1/R-B2, final review F-B1, and clean check C-B1 found that unnamed enum/nullability/detail combinations could drift or make a truthful publication failure inexpressible; 8 KiB matches the evidence-backed handoff ceiling while leaving ample room for fixed fields plus notes | Let each skill serialize/validate its own prose or YAML; infer whether a null path lost detail; or call an unpublished candidate durable |
+| D15 | Extend D8's review package with a `delivery-detail` manifest variant under the same numeric ceilings; the producer derives its exact ignored primary-checkout destination and maintains the no-follow local ignore boundary; on publication failure retain the bounded source candidate and forbid cleanup; transport only one validated relative `report_path` | Re-review R-B3/F-B2/F-S1 and clean check C-B1 showed durable detail must survive success while failed persistence must preserve inspectable source without claiming publication | Force-empty detail, trust caller output paths, or remove a workspace holding the only retained candidate |
 | D16 | Replace D12's precheck-plus-rename publication with exclusive final-directory creation and identity-tracked exclusive hard links for members and manifest, manifest last | Re-review R-B4 identified a same-plan concurrency window where ordinary rename replaces a competitor; mutation-point exclusion plus inode-checked cleanup provides the no-clobber guarantee directly | Rely on an existence precheck or ordinary rename, both of which race; lock globally, which adds stale-lock recovery and broader coordination state for a leaf-local property |

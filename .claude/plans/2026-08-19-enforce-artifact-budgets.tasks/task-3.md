@@ -18,7 +18,7 @@
 **Interfaces:**
 - Consumes: Task 1's `artifact_budget.load_limits`, `check_artifact`, and canonical `validate-report` CLI; Task 2's validated plan root/workspace; D4, D5, D6, D8, D9, and D12–D16.
 - Produces: diff mode `review-package PLAN_FILE BASE HEAD [OUTFILE]`, where default root is `<workspace>/review-<base7>..<head7>.json`; delivery-detail mode `review-package --detail-input <findings.json> --producer <sdd|ship-review> --issue <positive-int> --branch <branch> --run-id <safe-id|-> --head <sha> [--output <asserted-derived-path>]`. Detail mode independently derives the primary checkout and exact final root; `--output` is only an equality assertion, never destination authority. Both roots use `<stem>.shards/`; diff members end `.diff`, detail members `.jsonl`.
-- Stdout is one compact report. Success: `{"state":"complete","artifact":{"kind":"review-package","path":...,"metrics":{...},"budget_status":"within_budget"},"notes":...}` and exit 0. Valid oversize: same shape plus `violations`, `state:"decompose_required"`, `budget_status:"over_budget"`, exit 3. Invocation/generation/measurement error: `state:"failed"`, root path when known, no metrics/status, exit 2.
+- Stdout is one compact report after valid invocation. Success exits 0; valid oversize adds violations and exits 3; generation/measurement failure emits validated `state:"failed"` and exits 2. CLI syntax, identity, trust-boundary, or asserted-output rejection emits no stdout, one stable stderr diagnostic, and exit 2.
 
 **Invariants:**
 - Diff manifest fields are exactly: `interface_version: 1`; `kind: "review-package"`; `purpose: "diff-review"`; `range` with full `base`/`head` SHAs; ordered exact commits/stat/shards; integer `total_diff_bytes`; complete file coverage. Delivery-detail input is exactly `{"interface_version":1,"findings":[...]}`; its manifest uses D15's exact context/shards/`total_detail_bytes`/finding coverage schema and one canonical exact-field JSON finding per line. Every integer rejects booleans.
@@ -115,10 +115,11 @@ class ReviewPackageCliTest(unittest.TestCase):
 
     def invoke_detail(self, repo: Path, source: Path, env: dict[str, str],
                       *, run_id: str = "run-1", branch: str = "issue-49",
-                      head: str, output: Path | str | None = None):
+                      issue: str = "49", producer: str = "sdd", head: str,
+                      output: Path | str | None = None):
         argv = [
-            str(COMMAND), "--detail-input", str(source), "--producer", "sdd",
-             "--issue", "49", "--branch", branch, "--run-id", run_id,
+            str(COMMAND), "--detail-input", str(source), "--producer", producer,
+             "--issue", issue, "--branch", branch, "--run-id", run_id,
              "--head", head]
         if output is not None:
             argv += ["--output", str(output)]
@@ -322,6 +323,14 @@ class ReviewPackageCliTest(unittest.TestCase):
                 with self.subTest(run_id=run_id, branch=branch):
                     result = self.invoke_detail(linked, source, env, head=head,
                                                 run_id=run_id, branch=branch)
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+            bad_identity = [
+                {"issue": "0"}, {"issue": "-1"}, {"issue": "true"},
+                {"producer": "unknown"}, {"head": "abc"}, {"head": "B" * 40},
+            ]
+            for values in bad_identity:
+                with self.subTest(values=values):
+                    result = self.invoke_detail(linked, source, env, head=head, **values)
                     self.assertEqual((result.returncode, result.stdout), (2, ""))
 
     def test_detail_mode_rejects_a_symlink_parent(self):

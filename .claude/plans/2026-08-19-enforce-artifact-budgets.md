@@ -22,6 +22,7 @@
 - Measurement happens after the final mutation. Any later writer owns remeasurement; no missing or stale measurement permits a successful state.
 - Plans keep shared constraints in this root and task-specific contracts in convention-named members; reviewers and implementers receive paths plus compact metrics, never artifact contents or member lists.
 - SDD and ship review persist non-empty detail as a `delivery-detail` review-package below the primary checkout's `.superpowers/issue-delivery/` home before removable-worktree cleanup; callers receive one main-root-relative `report_path`, never a findings list.
+- If that publication fails, closed `detail_state: unpublished` carries only the readable retained-candidate path and bounded notes; SDD/ship fail or stop and must not remove its workspace/worktree.
 - The only over-budget transitions are those in the spec: design/grill compact then `decompose_required`; planning compact/split then `decompose_required`; handoff rewrite once then `stopped`; review-package generation then `decompose_required`.
 - Historical artifacts are not migrated. Model/token budgets, attempt budgets, general product diff-size gates, and CI wiring remain out of scope, except for the D9/D10 compatibility required by the new package roots.
 - Use the Python standard library only, preserve existing public workflow semantics not explicitly changed here, append `Co-Authored-By: Codex <noreply@openai.com>`, and never disable commit signing.
@@ -92,5 +93,13 @@ Task 5 — Close the orchestration contract and run repository gates — `home/c
 - F-B2: made the detail producer derive and police its primary-checkout destination, identity, and linked-worktree trust boundary (D15).
 - F-B3: corrected the parked-detail fixture and added fail-closed null-ruling coverage.
 - F-S1: made the delivery home establish its own exact no-follow ignore boundary and verify it with `git check-ignore` (D15).
+
+### Clean check
+
+- Reviewer: `/root/issue49_plan_clean_check` (native reviewer; no fallback).
+- Review artifact: `/tmp/issue49-plan-clean-check.md`; reviewed head `374f903129c852bfaec6859272e0860970c197c5`; base `416e7a92795a282c1b8cdd71e35a0f570cd35e56`; isolated/read-only.
+- Accepted 1 Blocking and 1 Should-fix finding; rejected 0; deferred 0.
+- C-B1: added failure-only unpublished-detail transport with retained-candidate readability and cleanup prohibition (D14/D15).
+- C-S1: completed CLI rejection coverage for issue, producer, and head identity fields.
 
 Task members are the normative executable instructions. Read this root once for shared constraints and then only the selected linked member.

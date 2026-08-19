@@ -23,7 +23,7 @@
 - Reject a missing member directory, a root/member/directory symlink, non-regular entry, name gap, unknown entry, unreadable file, duplicate resolved member identity, malformed UTF-8 root/manifest, or reference mismatch with exit 2 and no success JSON.
 - Metrics are exact encoded bytes: `root_bytes`; `total_bytes = root_bytes + sum(member bytes)`; `file_count = 1 + member count`; `largest_member_bytes = 0` for one-file artifacts and the largest member otherwise.
 - Violations are the sorted subset in canonical order `root_bytes`, `member_bytes`, `member_count`, `aggregate_bytes`. Valid measurement always emits one compact deterministic JSON line plus newline; exit 0 means `within_budget`, exit 3 means `over_budget`. Exit 2 writes one concise diagnostic to stderr and nothing to stdout.
-- The four validators implement D14's exhaustive tables verbatim. SDD requires `detail_state: "none"` with null `report_path` for empty detail and `detail_state: "present"` with one normalized primary-root-relative `.superpowers/issue-delivery/` path for non-empty detail; every non-null path appears literally in bounded notes. Producer `failed` uses `artifact: null` before a root or exact `kind,path` after one; no other partial artifact is valid.
+- The four validators implement D14's exhaustive tables verbatim. `detail_state` is the closed `none|present|unpublished`: null, durable primary-root `issue-delivery` path, or retained live-workspace `.superpowers/` candidate path respectively. `unpublished` is failure-only; every non-null path appears literally in bounded notes. Producer `failed` uses `artifact: null` before a root or exact `kind,path` after one; no other partial artifact is valid.
 - Report input rejects duplicate keys, JSON constants, malformed UTF-8, non-object roots, trailing data, symlink/non-regular files, unknown fields, booleans for integers, every unlisted enum/nullability combination, and input or canonical output beyond `phase_reports.wire_max_bytes`. Any report parse/schema failure emits no stdout, `artifact-budget: invalid report\n` on stderr, exit 2; report I/O failure emits no stdout, `artifact-budget: cannot read report\n`, exit 2.
 - Repository fixtures contain descriptors and repetition metadata, never large padding. Tests materialize every descriptor, invoke the CLI, and compare actual exit/status/metrics/violations with descriptor expectations.
 - The committed wrapper is mode `100755` and executes `python3 "$HOME/.agents/lib/python/artifact_budget.py" "$@"`; Home Manager installs that wrapper as the bin command and the module separately.
@@ -200,6 +200,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         metrics = {"root_bytes": 1, "total_bytes": 1, "file_count": 1,
                    "largest_member_bytes": 0}
         detail = ".superpowers/issue-delivery/49/run-1/sdd-a.json"
+        retained = ".superpowers/sdd/plan/retained-detail.json"
 
         def full(kind: str, over: bool = False):
             value = {"kind": kind, "path": f"artifacts/{kind}.json", "metrics": metrics,
@@ -271,6 +272,12 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             ("sdd-failed-after-with-detail", "sdd",
              sdd("failed", "unknown", "clean", "findings", "failed", "a" * 40, "b" * 40, "present", detail),
              sdd("failed", "unknown", "clean", "findings", "failed", "a" * 40, "b" * 40, "none", detail)),
+            ("sdd-failed-after-unpublished", "sdd",
+             sdd("failed", "unknown", "clean", "findings", "failed", "a" * 40, "b" * 40, "unpublished", retained),
+             sdd("complete", "clean", "clean", "clean", "passed", "a" * 40, "b" * 40, "unpublished", retained)),
+            ("sdd-unpublished-requires-path", "sdd",
+             sdd("failed", "unknown", "clean", "findings", "failed", "a" * 40, "b" * 40, "unpublished", retained),
+             sdd("failed", "unknown", "clean", "findings", "failed", "a" * 40, "b" * 40, "unpublished", None)),
             ("ship-handoff-complete", "ship-handoff", ship_complete,
              {**ship_complete, "plan_artifact": None}),
             ("ship-handoff-failed-before", "ship-handoff", ship_failed_before,
@@ -280,24 +287,40 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             ("ship-summary-merged", "ship-summary",
              {"issue": 49, "state": "merged", "pr_url": "https://example.test/pr/1",
               "merge_sha": "c" * 40, "issue_closed": True, "discussion_items": [],
-              "report_path": None, "notes": "no durable detail"},
+              "detail_state": "none", "report_path": None, "notes": "no durable detail"},
              {"issue": 49, "state": "merged", "pr_url": "https://example.test/pr/1",
               "merge_sha": None, "issue_closed": True, "discussion_items": [],
-              "report_path": None, "notes": "no durable detail"}),
+              "detail_state": "none", "report_path": None, "notes": "no durable detail"}),
             ("ship-summary-stopped", "ship-summary",
              {"issue": 49, "state": "stopped", "pr_url": "https://example.test/pr/1",
               "merge_sha": None, "issue_closed": False, "discussion_items": [],
-              "report_path": detail, "notes": f"details: {detail}"},
+              "detail_state": "present", "report_path": detail, "notes": f"details: {detail}"},
              {"issue": 49, "state": "stopped", "pr_url": "https://example.test/pr/1",
               "merge_sha": None, "issue_closed": False, "discussion_items": ["lost"],
-              "report_path": detail, "notes": f"details: {detail}"}),
+              "detail_state": "present", "report_path": detail, "notes": f"details: {detail}"}),
             ("ship-summary-failed", "ship-summary",
              {"issue": 49, "state": "failed", "pr_url": None, "merge_sha": None,
-              "issue_closed": False, "discussion_items": [], "report_path": None,
+              "issue_closed": False, "discussion_items": [], "detail_state": "none", "report_path": None,
               "notes": "failed before review"},
              {"issue": 49, "state": "failed", "pr_url": None, "merge_sha": None,
-              "issue_closed": True, "discussion_items": [], "report_path": None,
+              "issue_closed": True, "discussion_items": [], "detail_state": "none", "report_path": None,
               "notes": "failed before review"}),
+            ("ship-summary-unpublished", "ship-summary",
+             {"issue": 49, "state": "stopped", "pr_url": "https://example.test/pr/1",
+              "merge_sha": None, "issue_closed": False, "discussion_items": [],
+              "detail_state": "unpublished", "report_path": retained,
+              "notes": f"retained: {retained}"},
+             {"issue": 49, "state": "merged", "pr_url": "https://example.test/pr/1",
+              "merge_sha": "c" * 40, "issue_closed": True, "discussion_items": [],
+              "detail_state": "unpublished", "report_path": retained,
+              "notes": f"retained: {retained}"}),
+            ("ship-summary-unpublished-requires-path", "ship-summary",
+             {"issue": 49, "state": "failed", "pr_url": None, "merge_sha": None,
+              "issue_closed": False, "discussion_items": [], "detail_state": "unpublished",
+              "report_path": retained, "notes": f"retained: {retained}"},
+             {"issue": 49, "state": "failed", "pr_url": None, "merge_sha": None,
+              "issue_closed": False, "discussion_items": [], "detail_state": "unpublished",
+              "report_path": None, "notes": "retained candidate missing"}),
         ]
         for number, (name, boundary, valid, invalid) in enumerate(rows):
             with self.subTest(name=name, disposition="valid"):
@@ -346,7 +369,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         oversized = {"issue": 49, "state": "stopped",
                      "pr_url": "https://example.test/" + "x" * policy["phase_reports"]["wire_max_bytes"],
                      "merge_sha": None, "issue_closed": False, "discussion_items": [],
-                     "report_path": None, "notes": "wire bound"}
+                     "detail_state": "none", "report_path": None, "notes": "wire bound"}
         over = self.run_validate("ship-summary", oversized, use_stdin=True)
         self.assertEqual((over.returncode, over.stdout, over.stderr),
                          (2, b"", b"artifact-budget: invalid report\n"))
@@ -529,7 +552,7 @@ Write this exact policy data (pretty-printing is allowed; numeric values and key
 }
 ```
 
-Implement `artifact_budget.py` as one import-safe stdlib module with dataclasses for the two public values. `load_limits` loads either the explicit policy or `Path.home() / ".agents/share/artifact-budget-policy.json"`, uses `json.load(..., object_pairs_hook=...)` to reject duplicate keys, validates the complete policy before returning one kind's limits, and never coerces types. `check_artifact` opens and measures the regular root, discovers members from the required sibling directory, validates root/member agreement, and returns a result only after all shape/I/O checks pass. Compare bytes using strict `>` checks so exact ceilings succeed. The four report validators load the same policy, enforce D14's exact per-boundary matrices, closed states/types, and policy-owned notes bound, and use `type(value) is int` for all integer fields. They reject every legacy list/summary transport instead of truncating it and do not introduce another numeric limit.
+Implement `artifact_budget.py` as one import-safe stdlib module with dataclasses for the two public values. `load_limits` loads either the explicit policy or `Path.home() / ".agents/share/artifact-budget-policy.json"`, uses `json.load(..., object_pairs_hook=...)` to reject duplicate keys, validates the complete policy before returning one kind's limits, and never coerces types. `check_artifact` opens and measures the regular root, discovers members from the required sibling directory, validates root/member agreement, and returns a result only after all shape/I/O checks pass. Compare bytes using strict `>` checks so exact ceilings succeed. The four report validators enforce D14's exact matrices and shared-policy notes bound. `present` accepts only `.superpowers/issue-delivery/`; `unpublished` accepts a normalized relative `.superpowers/` path outside that durable home and only with SDD `failed` or ship-summary `stopped|failed` (the owning workflow checks readability). Reject legacy lists/summary transport and add no numeric limit.
 
 For plan roots, accept only Task-index rows matching the task-number/member-number/name convention and require the discovered/reference sets and orders to be identical. For review roots, validate D15's exact `purpose`-discriminated manifest variants with booleans rejected for every integer, then compare ordered `shards` entries to discovery and measured bytes. Use `lstat`/no-follow checks before reads and `(st_dev, st_ino)` identities for duplicate-file rejection.
 
