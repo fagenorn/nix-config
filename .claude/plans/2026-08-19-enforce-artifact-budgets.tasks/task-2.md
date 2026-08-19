@@ -11,7 +11,7 @@
 - Modify: `Justfile`
 
 **Interfaces:**
-- Consumes: Task 1's executable `artifact-budget` wrapper, installed/source module, fixed implementation-plan metrics/result, and report validator; D3, D5, D6, D8, and D11.
+- Consumes: Task 1's executable `artifact-budget` wrapper, installed/source module, fixed implementation-plan result, and `validate-report` wire seam; D3, D5, D6, D8, D11, and D14.
 - Produces: root `<planDir>/<stem>.md`; members `<planDir>/<stem>.tasks/task-1.md` through `task-N.md`; one Task-index row per member ending exactly in `[task-N.md](<stem>.tasks/task-N.md)`; `task-brief PLAN_FILE N [OUTFILE]` that validates the package and copies only the indexed member into the brief.
 - The planning report has exactly `state`, one `artifact` object, and policy-bounded `notes`. The artifact root replaces `plan_path`; `open_items` is removed, with unresolved blocking state expressed by `state` and bounded notes pointing to the plan/spec. Over-budget adds the closed `violations` array inside `artifact`.
 
@@ -23,6 +23,7 @@
 - SDD validates the complete plan package once at setup, retains the root header plus its four checker metrics, and passes the root path/metrics plus the current brief path to implementers and reviewers. A missing/unreadable member is a contract failure, never a fallback to monolithic parsing.
 - Phase-5 plan review validates the package first and reads root plus every member from discovery order. Review findings identify the member task or root section; accepted edits remeasure the complete plan.
 - Planning and its callers validate the exact D11 report object; legacy `open_items`, `decisions`, `adr_paths`, or `summary` fields are contract errors.
+- Planning writes its final report object to a sibling temporary UTF-8 JSON file, runs `artifact-budget validate-report --boundary producer --input <temp>`, deletes the candidate, and returns only the exact validated stdout bytes. Phase 5/from-issue validate those received bytes again through stdin before reading state or advancing.
 
 - [ ] **Step 1: Write failing task-brief and plan-contract tests**
 
@@ -133,6 +134,8 @@ def test_plan_package_contract_is_root_only_and_fail_closed(self):
     self.assertIn("report only the root path and four metrics", self.writing_plans)
     for forbidden in ("open_items:", "decisions:", "adr_paths:", "summary:"):
         self.assertNotRegex(self.writing_plans, rf"(?m)^\s*{re.escape(forbidden)}")
+    self.assert_ordered(self.writing_plans, "candidate JSON", "validate-report",
+                        "validated stdout bytes")
 
 def test_sdd_validates_plan_before_extracting_a_member(self):
     setup = self.section(self.sdd, "## Setup", "## Agent tiers")
@@ -152,13 +155,13 @@ Expected: FAIL because `task-brief` still extracts headings from one monolithic 
 
 - [ ] **Step 3: Implement the package producer, reader, and plan-review contracts**
 
-Rewrite `writing-plans` so the root header shape remains the current plan header but numbered tasks live only in the sibling directory. State the exact link suffix from D8, contiguous numbering, max eight members, final measurement order, two remediation states, and exact D11 planning report with no producer-specific fields. Preserve its existing test-first, no-placeholder, gate-scoping, lane, and self-review requirements. Its self-review checks root/member reference equality, per-member completeness, and both root/spec remeasurement when it appended a ledger row.
+Rewrite `writing-plans` so the root header shape remains the current plan header but numbered tasks live only in the sibling directory. State the exact link suffix from D8, contiguous numbering, max eight members, final measurement order, two remediation states, and exact D14 producer JSON report with no producer-specific fields. After the last measurement, write a sibling temporary candidate JSON, invoke `validate-report --boundary producer`, clean the candidate, and return only validated stdout; exit 2 is `failed`, never a prose fallback. Preserve its existing test-first, no-placeholder, gate-scoping, lane, and self-review requirements. Its self-review checks root/member reference equality, per-member completeness, and both root/spec remeasurement when it appended a ledger row.
 
 Change `task-brief` to validate arguments and task number, run `artifact-budget check --kind implementation-plan --root "$plan" --format json`, propagate exit 2/3, parse the exact Task-index link for N without accepting arbitrary Markdown, then copy through a sibling temporary file and atomic rename so an existing valid brief survives failure. Reject multiple links for N. Preserve default workspace naming.
 
 In SDD setup, run the checker before initial plan validation, reject non-`within_budget`/missing metrics, and read root plus all task members exactly once for conflict scanning. Thereafter retain only root header/index/metrics and current task brief. Include root path, four metrics, and brief path—never members or contents—in task/reviewer dispatch context.
 
-Update both plan-review routes so the reviewer runs the checker, reads the root and every discovered member, and reports unreadable members. The review packet still supplies only the plan root and metrics. Accepted Phase-5 edits are incomplete until the orchestrator rechecks plan and any amended spec after the last write.
+Update both plan-review routes so the reviewer runs the checker, reads the root and every discovered member, and reports unreadable members. The review packet still supplies only the plan root and metrics. Phase 5 validates the received report JSON through `validate-report --boundary producer --input -` before use. Accepted Phase-5 edits are incomplete until the orchestrator rechecks plan and any amended spec after the last write.
 
 - [ ] **Step 4: Verify the executable adapter and workflow contract**
 

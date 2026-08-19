@@ -16,19 +16,21 @@
 - Modify: `Justfile`
 
 **Interfaces:**
-- Consumes: Task 1's `artifact_budget.load_limits`, `check_artifact`, and `validate_producer_report`; Task 2's validated plan root/workspace; D4, D5, D6, D8, D9, D12, and D13.
-- Produces: `review-package PLAN_FILE BASE HEAD [OUTFILE]`, where default root is `<workspace>/review-<base7>..<head7>.json` and members are `<stem>.shards/shard-001.diff`…`shard-NNN.diff`.
+- Consumes: Task 1's `artifact_budget.load_limits`, `check_artifact`, and canonical `validate-report` CLI; Task 2's validated plan root/workspace; D4, D5, D6, D8, D9, and D12–D16.
+- Produces: diff mode `review-package PLAN_FILE BASE HEAD [OUTFILE]`, where default root is `<workspace>/review-<base7>..<head7>.json`; delivery-detail mode `review-package --detail-input <findings.json> --producer <sdd|ship-review> --issue <id> --branch <branch> --head <sha> <OUTFILE>`. Both roots use `<stem>.shards/`; diff members end `.diff`, detail members `.jsonl`.
 - Stdout is one compact report. Success: `{"state":"complete","artifact":{"kind":"review-package","path":...,"metrics":{...},"budget_status":"within_budget"},"notes":...}` and exit 0. Valid oversize: same shape plus `violations`, `state:"decompose_required"`, `budget_status:"over_budget"`, exit 3. Invocation/generation/measurement error: `state:"failed"`, root path when known, no metrics/status, exit 2.
 
 **Invariants:**
-- Manifest fields are exactly: `interface_version: 1`; `kind: "review-package"`; `range` with full `base`/`head` SHAs; ordered `commits` entries with exact `sha`/`subject`; `stat` with integer `files_changed`/`insertions`/`deletions`; ordered `shards` entries with relative `path`/actual `bytes`; integer `total_diff_bytes`; `coverage` with `complete: true` and integer `file_diff_count`. Every integer rejects booleans.
+- Diff manifest fields are exactly: `interface_version: 1`; `kind: "review-package"`; `purpose: "diff-review"`; `range` with full `base`/`head` SHAs; ordered exact commits/stat/shards; integer `total_diff_bytes`; complete file coverage. Delivery-detail input is exactly `{"interface_version":1,"findings":[...]}`; its manifest uses D15's exact context/shards/`total_detail_bytes`/finding coverage schema and one canonical exact-field JSON finding per line. Every integer rejects booleans.
 - The diff stream is byte-identical to `git diff --no-ext-diff --binary -U10 BASE..HEAD`. Split only before a line beginning `diff --git `; never decode or reorder patch bytes. Greedily append complete file diffs to the current shard while the authoritative member ceiling still fits.
 - A complete file diff larger than the member ceiling remains whole in one oversized candidate shard; too many/too-large complete shards remain a complete candidate package. The final checker returns `decompose_required`; no truncation, partial coverage, reviewer dispatch, or success state occurs.
-- Build the complete convention-named candidate under a unique sibling staging directory, then run the checker after the manifest's final byte. If final root or member directory already exists in any form, return failed/exit 2 without touching it. For a new path, rename the validated member directory into place and publish the manifest last; if that final rename fails, remove only the newly published member directory. Valid over-budget candidates are published for diagnosis/decomposition. Success/over leaves no staging entry or orphan shard; any refused retry preserves the prior manifest and every shard byte-identically.
+- Build the complete convention-named candidate under a unique sibling staging directory and check it after the manifest's final byte. Publication never relies on a precheck: `publish_package(stage_root, final_root, before_mutation: Callable[[str, Path], None] | None = None)` exclusively creates the final member directory, exclusively hard-links each staged member, then exclusively hard-links the manifest last. Any collision/cross-device error fails without replacement. Cleanup unlinks only this invocation's `(st_dev, st_ino)`-matching entries and removes its directory only when empty and still at its recorded post-`mkdir` identity. The callback is an import-level deterministic test seam called before `member_dir`, every `member:<name>`, and `manifest` mutation; production passes `None`.
 - Parse Git `--numstat -z` without decoding path bytes for counts: each binary `-` insertion/deletion value contributes zero while its row contributes one to `files_changed`; text values are strict non-negative decimal integers.
 - Task and final review dispatches carry manifest root plus four metrics, not shard lists or diff contents. Unscoped rubrics read the strict manifest then each shard once in manifest order and explicitly report an unreadable/mismatched shard.
 - Per D9, the >20-product-file correctness packet carries root/metrics as range-coverage evidence but does not read full-range shards; it fetches only `diff-scope`'s selected literal paths. Conformance and every unscoped review consume all shards.
 - Every initial, task-fix, final, and final-fix `review-package` call parses stdout and return code before dispatch: exit 0 plus a validated complete report permits dispatch; exit 3 records/returns `decompose_required` with no reviewer dispatched; exit 2 or any malformed/unknown result records `failed` with no reviewer dispatched.
+- Every generator report is written as candidate JSON and sent through `artifact-budget validate-report --boundary producer`; only validated stdout is emitted. Every caller validates received bytes through the same CLI stdin seam before branch/dispatch logic.
+- Fixture commit helpers pass the fixed author/committer-date environment on every `git commit`; constructing the same range twice in fresh repositories produces byte-identical canonical manifests and shards.
 
 - [ ] **Step 1: Write failing review-package CLI tests**
 
@@ -38,10 +40,14 @@ Create the test module below. `install_budget_runtime` makes source-tree executi
 from __future__ import annotations
 
 import json
+from importlib.machinery import SourceFileLoader
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 
 
@@ -49,6 +55,9 @@ ROOT = Path(__file__).parents[4]
 COMMAND = ROOT / "home/common/agent-skills/skills/sdd/scripts/review-package"
 MODULE = ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
+sys.path.insert(0, str(MODULE.parent))
+review_package_module = types.ModuleType("review_package")
+SourceFileLoader("review_package", str(COMMAND)).exec_module(review_package_module)
 
 
 class ReviewPackageCliTest(unittest.TestCase):
@@ -81,9 +90,10 @@ class ReviewPackageCliTest(unittest.TestCase):
                     "GIT_COMMITTER_DATE": "2026-08-19T12:00:00Z"})
         return str(directory / "plan.md"), env
 
-    def commit(self, repo: Path, message: str) -> str:
-        self.run_git(repo, "add", "-A")
-        self.run_git(repo, "commit", "-q", "-m", message)
+    def commit(self, repo: Path, message: str, env: dict[str, str]) -> str:
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], env=env, check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", message],
+                       env=env, check=True)
         return self.run_git(repo, "rev-parse", "HEAD").strip()
 
     def invoke(self, repo: Path, plan: str, base: str, head: str,
@@ -91,14 +101,20 @@ class ReviewPackageCliTest(unittest.TestCase):
         return subprocess.run([str(COMMAND), plan, base, head, str(out)], cwd=repo,
                               env=env, text=True, capture_output=True, check=False)
 
+    def invoke_detail(self, repo: Path, source: Path, out: Path, env: dict[str, str]):
+        return subprocess.run(
+            [str(COMMAND), "--detail-input", str(source), "--producer", "sdd",
+             "--issue", "49", "--branch", "issue-49", "--head", "b" * 40, str(out)],
+            cwd=repo, env=env, text=True, capture_output=True, check=False)
+
     def test_small_range_has_one_complete_reconstructable_shard(self):
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
             plan, env = self.setup_repo(repo)
             (repo / "a.txt").write_text("before\n", encoding="utf-8")
-            base = self.commit(repo, "base")
+            base = self.commit(repo, "base", env)
             (repo / "a.txt").write_text("after\n", encoding="utf-8")
-            head = self.commit(repo, "change a")
+            head = self.commit(repo, "change a", env)
             out = repo / "review.json"
             result = self.invoke(repo, plan, base, head, out, env)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -106,7 +122,8 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual(report["state"], "complete")
             self.assertEqual(report["artifact"]["budget_status"], "within_budget")
             manifest = json.loads(out.read_text(encoding="utf-8"))
-            self.assertEqual(set(manifest), {"interface_version", "kind", "range",
+            self.assertEqual(manifest["purpose"], "diff-review")
+            self.assertEqual(set(manifest), {"interface_version", "kind", "purpose", "range",
                 "commits", "stat", "shards", "total_diff_bytes", "coverage"})
             rebuilt = b"".join((out.parent / item["path"]).read_bytes()
                                for item in manifest["shards"])
@@ -126,10 +143,10 @@ class ReviewPackageCliTest(unittest.TestCase):
             plan, env = self.setup_repo(repo)
             (repo / "a.txt").write_text("a\n", encoding="utf-8")
             (repo / "b.txt").write_text("b\n", encoding="utf-8")
-            base = self.commit(repo, "base")
+            base = self.commit(repo, "base", env)
             (repo / "a.txt").write_text("A" * 40_000 + "\n", encoding="utf-8")
             (repo / "b.txt").write_text("B" * 40_000 + "\n", encoding="utf-8")
-            head = self.commit(repo, "large separate files")
+            head = self.commit(repo, "large separate files", env)
             out = repo / "review.json"
             result = self.invoke(repo, plan, base, head, out, env)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -144,9 +161,9 @@ class ReviewPackageCliTest(unittest.TestCase):
             repo = Path(raw)
             plan, env = self.setup_repo(repo)
             (repo / "large.txt").write_text("small\n", encoding="utf-8")
-            base = self.commit(repo, "base")
+            base = self.commit(repo, "base", env)
             (repo / "large.txt").write_text("X" * 70_000 + "\n", encoding="utf-8")
-            head = self.commit(repo, "oversized file")
+            head = self.commit(repo, "oversized file", env)
             out = repo / "review.json"
             result = self.invoke(repo, plan, base, head, out, env)
             self.assertEqual(result.returncode, 3, result.stderr)
@@ -165,11 +182,11 @@ class ReviewPackageCliTest(unittest.TestCase):
             plan, env = self.setup_repo(repo)
             for number in range(9):
                 (repo / f"f-{number}.txt").write_text("small\n", encoding="utf-8")
-            base = self.commit(repo, "base")
+            base = self.commit(repo, "base", env)
             for number in range(9):
                 (repo / f"f-{number}.txt").write_text(
                     chr(65 + number) * 33_000 + "\n", encoding="utf-8")
-            head = self.commit(repo, "nine large files")
+            head = self.commit(repo, "nine large files", env)
             out = repo / "review.json"
             result = self.invoke(repo, plan, base, head, out, env)
             self.assertEqual(result.returncode, 3, result.stderr)
@@ -191,9 +208,9 @@ class ReviewPackageCliTest(unittest.TestCase):
             repo = Path(raw)
             plan, env = self.setup_repo(repo)
             (repo / "binary.dat").write_bytes(b"\x00before")
-            base = self.commit(repo, "base binary")
+            base = self.commit(repo, "base binary", env)
             (repo / "binary.dat").write_bytes(b"\x00after")
-            head = self.commit(repo, "change binary")
+            head = self.commit(repo, "change binary", env)
             out = repo / "review.json"
             result = self.invoke(repo, plan, base, head, out, env)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -209,9 +226,9 @@ class ReviewPackageCliTest(unittest.TestCase):
             repo = Path(raw)
             plan, env = self.setup_repo(repo)
             (repo / "a.txt").write_text("before\n", encoding="utf-8")
-            base = self.commit(repo, "base")
+            base = self.commit(repo, "base", env)
             (repo / "a.txt").write_text("after\n", encoding="utf-8")
-            head = self.commit(repo, "change")
+            head = self.commit(repo, "change", env)
             out = repo / "review.json"
             first = self.invoke(repo, plan, base, head, out, env)
             self.assertEqual(first.returncode, 0, first.stderr)
@@ -224,6 +241,94 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual({p.name: p.read_bytes() for p in (repo / "review.shards").iterdir()},
                              members_before)
             self.assertFalse(any("stage" in p.name for p in repo.iterdir()))
+
+    def test_delivery_detail_uses_the_shared_review_budget_and_canonical_findings(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            _, env = self.setup_repo(repo)
+            feature_worktree = repo / "feature-worktree"
+            feature_worktree.mkdir()
+            findings = [
+                {"axis": "correctness", "severity": "Minor", "status": "parked",
+                 "text": "Keep this evidence", "ruling": "accepted for follow-up"},
+                {"axis": "conformance", "severity": "Discussion", "status": "residual",
+                 "text": "Explain this tradeoff", "ruling": None},
+            ]
+            source = feature_worktree / "findings.json"
+            source.write_text(json.dumps({"interface_version": 1, "findings": findings}),
+                              encoding="utf-8")
+            out = repo / ".superpowers/issue-delivery/49/run-1/sdd-b.json"
+            out.parent.mkdir(parents=True)
+            result = self.invoke_detail(repo, source, out, env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            shutil.rmtree(feature_worktree)
+            manifest = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["purpose"], "delivery-detail")
+            self.assertEqual(manifest["context"],
+                             {"issue": 49, "branch": "issue-49", "producer": "sdd"})
+            rebuilt = b"".join((out.parent / item["path"]).read_bytes()
+                               for item in manifest["shards"])
+            decoded = [json.loads(line) for line in rebuilt.splitlines()]
+            self.assertEqual(decoded, findings)
+            self.assertEqual(manifest["coverage"],
+                             {"complete": True, "finding_count": len(findings)})
+            self.assertEqual(json.loads(result.stdout)["artifact"]["budget_status"],
+                             "within_budget")
+
+    def test_publication_races_never_replace_a_competitor(self):
+        for boundary in ("member_dir", "member:shard-001.diff",
+                         "member:shard-002.diff", "manifest"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                stage = directory / "stage"
+                stage_members = stage / "review.shards"
+                stage_members.mkdir(parents=True)
+                stage_root = stage / "review.json"
+                stage_root.write_bytes(b"staged-manifest")
+                (stage_members / "shard-001.diff").write_bytes(b"staged-shard")
+                (stage_members / "shard-002.diff").write_bytes(b"staged-shard-two")
+                final_root = directory / "review.json"
+                competitor = b"competitor-bytes"
+                competed_path = None
+
+                def inject(label: str, path: Path):
+                    nonlocal competed_path
+                    if label != boundary:
+                        return
+                    if label == "member_dir":
+                        path.mkdir()
+                        competed_path = path / "competitor"
+                    else:
+                        competed_path = path
+                    competed_path.write_bytes(competitor)
+
+                with self.assertRaises(review_package_module.PublicationError):
+                    review_package_module.publish_package(stage_root, final_root, inject)
+                self.assertIsNotNone(competed_path)
+                self.assertEqual(competed_path.read_bytes(), competitor)
+                final_members = directory / "review.shards"
+                if boundary == "manifest":
+                    self.assertFalse(final_members.exists())
+                else:
+                    self.assertEqual({p.name for p in final_members.iterdir()},
+                                     {competed_path.name})
+
+    def test_fixed_commit_environment_makes_two_packages_byte_identical(self):
+        snapshots = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as raw:
+                repo = Path(raw)
+                plan, env = self.setup_repo(repo)
+                (repo / "a.txt").write_text("before\n", encoding="utf-8")
+                base = self.commit(repo, "base", env)
+                (repo / "a.txt").write_text("after\n", encoding="utf-8")
+                head = self.commit(repo, "change", env)
+                out = repo / "review.json"
+                result = self.invoke(repo, plan, base, head, out, env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                snapshots.append((out.read_bytes(),
+                    [(p.name, p.read_bytes()) for p in sorted((repo / "review.shards").iterdir())]))
+        self.assertEqual(snapshots[0], snapshots[1])
 ```
 
 Add `test_review_package.py` to `agent-workflow-tests`.
@@ -238,9 +343,11 @@ Expected: FAIL because the command currently writes one `.diff`, has no manifest
 
 - [ ] **Step 3: Implement deterministic generation and manifest-aware review contracts**
 
-Rewrite `review-package` as an executable import-safe Python script. Add `~/.agents/lib/python` to `sys.path`, import Task 1's module, validate the plan/root and Git revisions, capture full SHAs/commits/stat, and obtain the `review-package` member ceiling with `load_limits`. Treat binary numstat `-` as D13 zero churn. Capture the binary diff once; find only line-start `diff --git ` boundaries; greedily group complete chunks. Refuse any existing final root/directory untouched. Write convention-named shards and final UTF-8 manifest inside a unique sibling stage, call `check_artifact` there, then publish by renaming members first and manifest last with the cleanup/first-publication rules above. Validate the fixed report before stdout. A module/policy/check/publication failure produces `failed` without invented metrics.
+Rewrite `review-package` as an executable import-safe Python script. Add `~/.agents/lib/python` to `sys.path`, import Task 1's module, validate plan/root and Git revisions, and obtain the one `review-package` limit set. Diff mode captures full SHAs/commits/stat, treats binary numstat `-` as zero churn, captures the binary diff once, finds only line-start `diff --git ` boundaries, and greedily groups complete chunks. Detail mode strictly parses the exact input finding records, canonicalizes each as one JSONL record, and greedily groups whole records under the same member limit; one oversized finding or oversized complete package yields the truthful over-budget producer state without truncation.
 
-Update SDD's task loop, `fix-loop.md`, and final review so every first-pass and fix-range generator result is parsed and validated before dispatch. For each site: exit 0 dispatches only after report/checker agreement; exit 3 records and returns `decompose_required` without dispatch; exit 2 or malformed/unknown output records and returns `failed` without dispatch. All unscoped reviewer templates read the root JSON, validate its declared coverage/bytes against supplied checker metrics, then read shards once in listed order; delete their missing-package fallback for SDD-produced packages and explicitly report unreadable evidence.
+Both modes write their exact D15 manifest/shards in a unique sibling stage, run `check_artifact`, then call `publish_package`. Implement mutation-point exclusion with `Path.mkdir()` for the final member directory and `os.link()` for each member and the manifest; never call replace/rename/copy over a final path. Record the directory identity immediately after creation and staged/final `(st_dev, st_ino)` after every successful link. On failure, unlink only a final entry whose current identity equals the recorded staged identity, then `rmdir` only when the directory is empty and still matches its recorded identity. Map `EXDEV`, collision, symlink/non-regular parent, or changed identity to `PublicationError`. The callback fires immediately before each actual mutation and is `None` outside tests. Validate every candidate producer report through `artifact-budget validate-report --boundary producer --input <temp>` and emit only validated stdout. A module/policy/check/publication failure produces a D14 `failed` candidate and validates it before emission.
+
+Update SDD's task loop, `fix-loop.md`, and final review so every first-pass and fix-range generator stdout is passed unchanged to `artifact-budget validate-report --boundary producer --input -` before dispatch. For each site: generator exit 0 plus validator exit 0 and report/checker agreement permits dispatch; generator exit 3 records/returns `decompose_required` with no dispatch; generator/validator exit 2 or malformed/unknown output records/returns `failed` with no dispatch. All unscoped reviewer templates read the root JSON, validate its declared coverage/bytes against supplied checker metrics, then read shards once in listed order; delete their missing-package fallback for SDD-produced packages and explicitly report unreadable evidence.
 
 Update `DIFF-REVIEW.md`, its eval, and the correctness prompt per D9: an unscoped correctness axis consumes all shards; a scoped axis is still handed root/metrics but treats them as range coverage only, never reads shards, and fetches exactly the selected files. Conformance always reads the complete package.
 
@@ -248,7 +355,7 @@ Update `DIFF-REVIEW.md`, its eval, and the correctness prompt per D9: an unscope
 
 Run: `python3 -m unittest -v home/common/agent-skills/tests/test_review_package.py`
 
-Expected: PASS; reconstructed bytes equal Git output, shards are bounded/ordered, binary stats are zero churn, oversized cases stop, existing-package retry preserves bytes, and successful publication leaves no staging/orphan entries.
+Expected: PASS; reconstructed bytes equal Git output, both purposes stay under one review budget, binary stats are zero churn, oversized cases stop, concurrent competitors remain byte-identical at every mutation boundary, commits/packages repeat byte-for-byte, and successful publication leaves no staging/orphan entries.
 
 Run: `just agent-workflow-tests`
 

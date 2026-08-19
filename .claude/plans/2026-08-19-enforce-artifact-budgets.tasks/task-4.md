@@ -7,7 +7,7 @@
 - Modify/Test: `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 
 **Interfaces:**
-- Consumes: Task 1's `artifact-budget check` and `validate_producer_report`; D2, D5, D6, D7, and D11.
+- Consumes: Task 1's `artifact-budget check` and `validate-report --boundary producer` CLI; D2, D5, D6, D7, D11, and D14.
 - Produces: the same exact three-field report for design, grill, and handoff: `state`, one artifact whose `path` is the spec/handoff root, and policy-bounded `notes`. `spec_path`, `adr_paths`, `decisions`, `open_items`, and free-form `summary` are removed; committed roots/ledgers carry their detail.
 - A complete artifact object has `kind`, root `path`, exactly four `metrics`, and `budget_status: within_budget`. Over budget adds sorted closed `violations`; failed measurement includes root path when known and omits fabricated metrics/status.
 
@@ -18,7 +18,7 @@
 - Durable handoff candidates are measured as sibling temporary regular files before the existing exclusive-create/atomic-replace operation. Any checker exit 2/3 leaves an old valid destination byte-identical and cleans unpublished temporary names.
 - Any mutation after a successful check invalidates metrics and transfers remeasurement to that writer. Producers invoke the checker by stable command, never embed thresholds or use `wc`.
 - Reports never inline contents, member lists, policy, logs, or decision-ledger rows; the shared policy alone supplies the notes limit.
-- Each producer validates its report against Task 1's module before return; any extra legacy field or notes beyond the shared policy limit is `failed`, never truncated into apparent success.
+- Each producer writes candidate JSON only after its last artifact check, invokes the Task 1 CLI on that file, removes the candidate, and returns only canonical validated stdout bytes. Validation exit 2 is `failed` and never falls back to Markdown/YAML/prose or truncation.
 
 - [ ] **Step 1: Add failing producer transition and publication-order tests**
 
@@ -48,7 +48,8 @@ def test_artifact_reports_are_bounded_root_only_shapes(self):
         for field in ("kind", "path", "metrics", "budget_status", "notes"):
             self.assertIn(field, producer)
         self.assertIn("phase_reports.notes_max_characters", producer)
-        self.assertIn("validate_producer_report", producer)
+        self.assert_ordered(producer, "candidate JSON", "validate-report --boundary producer",
+                            "validated stdout")
         self.assertIn("never inline artifact contents", producer)
         for forbidden in ("spec_path:", "adr_paths:", "decisions:", "open_items:", "summary:"):
             self.assertNotRegex(producer, rf"(?m)^\s*{re.escape(forbidden)}")
@@ -62,11 +63,11 @@ Expected: FAIL because the three skills currently return paths without final bud
 
 - [ ] **Step 3: Implement exact producer state machines and reports**
 
-In `design`, put final measurement after its fresh-eyes fix pass. Define the exact generate/check/compact/recheck/complete-or-decompose sequence, exact D11 report, report validation, and failed-measurement behavior. Make clear that a later grill or plan ledger append owns a new spec check. Remove transported ADR/decision lists; the artifact root and bounded notes are sufficient routing.
+In `design`, put final measurement after its fresh-eyes fix pass. Define the exact generate/check/compact/recheck/complete-or-decompose sequence, exact D14 producer report rows, candidate-file/validated-stdout flow, and before-root/after-root failed shapes. Make clear that a later grill or plan ledger append owns a new spec check. Remove transported ADR/decision lists; the artifact root and bounded notes are sufficient routing.
 
-In `grill-with-docs`, preserve glossary/ADR behavior, but make any spec/ledger mutation end in the same design-spec check. Its exact report includes the spec root/metrics and no doc/open-item lists; if the grill did not change the spec, it must still obtain a current check rather than repeat an earlier claim.
+In `grill-with-docs`, preserve glossary/ADR behavior, but make any spec/ledger mutation end in the same design-spec check. Its exact candidate JSON includes the spec root/metrics and no doc/open-item lists, passes through `validate-report`, and returns only validated stdout; if the grill did not change the spec, it must still obtain a current check rather than repeat an earlier claim.
 
-In `handoff`, integrate the checker into both temporary and durable routes. Write the candidate once, measure, rewrite once if over, and remeasure. Only an exit-0 result may reach the durable exclusive-create/replace operations. Return the exact complete/stopped/failed report shape, retain an over-budget nondurable candidate for inspection, and never alter an existing durable target on checker failure/oversize.
+In `handoff`, integrate the checker into both temporary and durable routes. Write the candidate once, measure, rewrite once if over, and remeasure. Only an exit-0 result may reach the durable exclusive-create/replace operations. Serialize the exact complete/stopped/failed producer row to a separate sibling report candidate, validate it through the CLI, and return only stdout. Retain an over-budget nondurable artifact candidate for inspection, and never alter an existing durable target on checker/report failure or oversize.
 
 - [ ] **Step 4: Verify producer ordering and repository workflow contracts**
 

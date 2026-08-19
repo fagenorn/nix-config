@@ -35,7 +35,7 @@ Add an artifact-budget module consisting of a versioned JSON policy and a Python
 checker exposed at the same stable agent-tools location as the existing workflow helpers. Skills do
 not carry threshold numbers. They invoke the checker and interpret its closed result states.
 
-The checker has one command:
+The checker has two stable commands:
 
 ```text
 artifact-budget check \
@@ -43,6 +43,11 @@ artifact-budget check \
   --root <artifact-root-path> \
   [--policy <policy-path>] \
   --format json
+
+artifact-budget validate-report \
+  --boundary <producer|sdd|ship-handoff|ship-summary> \
+  --input <path|-> \
+  [--policy <policy-path>]
 ```
 
 `--policy` exists for repository tests and pre-install development. Normal skill use omits it and
@@ -54,6 +59,17 @@ duplicate resolved paths, then emits exactly one versioned result. It exits 0 on
 `within_budget`, 3 for a valid measurement that is `over_budget`, and 2 for an invocation, policy,
 package-shape, schema, or I/O error. Exit 2 is a failed measurement and must fail the producer; it
 never degrades to `unmeasured` success.
+
+Phase reports are canonical UTF-8 JSON objects, never Markdown/YAML or prose wrappers.
+`validate-report` reads exactly one JSON object from a non-symlink regular file or stdin (`-`),
+rejects duplicate keys, non-standard constants, malformed UTF-8, trailing non-whitespace, and the
+selected boundary's closed schema, then emits the same semantic object as key-sorted compact UTF-8
+JSON plus one newline. Success is stdout only and exit 0. Every parse, schema, invocation, or I/O
+failure emits no stdout, exactly one stable class diagnostic on stderr, and exit 2. Producers write
+a sibling temporary candidate, invoke this command, and transport only its validated stdout bytes;
+callers run received bytes back through the same command before trusting them. The shared policy's
+`phase_reports.wire_max_bytes` bounds both bytes read and canonical bytes emitted, so no fixed-shape
+string field can make the transport unbounded.
 
 The result is a bounded shape:
 
@@ -122,7 +138,8 @@ than duplicating them. For a durable destination, budget enforcement happens on 
 sibling temporary file before the existing atomic install/replace step, so an oversized handoff is
 never published as a valid durable resume point.
 
-A review package becomes a JSON manifest plus deterministic diff shards. For a root named
+A review package becomes a purpose-discriminated JSON manifest plus deterministic shards. For a
+`diff-review` root named
 `<stem>.json`, shards are contiguous regular files named
 `<stem>.shards/shard-001.diff` through `shard-NNN.diff`; no other directory entry is allowed. The
 generator treats Git's diff as a byte stream and groups complete file diffs
@@ -139,13 +156,41 @@ Every manifest integer rejects booleans. Git numstat `-` for a binary file contr
 the insertion and deletion totals, matching the existing `diff-scope` convention, while the file
 still contributes to `files_changed` and its complete binary patch remains in the diff stream.
 
-Generation happens under a unique sibling staging directory and is fully shape-validated and
-measured there before publication. A regular manifest or member directory already at the requested
-root makes the retry fail without touching either path; symlink and non-regular collisions also fail.
-First publication renames the staged member directory into place and publishes the manifest last; a
-manifest-publication failure removes only that just-published member directory. A successful run
-leaves no staging entry or orphan shard, and a failed retry preserves a prior valid package
-byte-identically.
+The `delivery-detail` review-package variant stores SDD parked/residual findings and ship-review
+Minor/Discussion detail without transporting a growing list. Its strict root has exactly
+`interface_version`, `kind: "review-package"`, `purpose: "delivery-detail"`, `context` (exactly
+`issue`, `branch`, `producer: "sdd" | "ship-review"`), ordered `shards`,
+`total_detail_bytes`, and `coverage` (exactly `complete: true` and `finding_count`). Members are
+contiguous `shard-NNN.jsonl`; each line is one canonical JSON finding with exact `axis`, `severity`,
+`status`, `text`, and nullable `ruling`. `axis` is `conformance | correctness | ship`, severity is
+`Critical | Important | Minor | Blocking | Should-fix | Discussion`, and status is
+`parked | residual | discussion | minor`; text is non-empty and ruling is required for `parked`.
+Whole finding records are greedily grouped without splitting.
+It uses the same review-package root/member/count/aggregate ceilings; the policy contains no second
+copy of those numbers. The checker selects the exact manifest/member schema from `purpose`.
+
+Delivery-detail roots live under the primary checkout, never the removable feature worktree or
+protected Git metadata: `<main-root>/.superpowers/issue-delivery/<issue>/<run-or-branch>/<producer>-<head>.json`.
+The producer derives `<main-root>` as the parent of absolute `git rev-parse --git-common-dir`,
+requires that common directory's basename to be `.git`, confirms the parent with
+`git -C <main-root> rev-parse --show-toplevel`, and validates every existing report-home parent as a
+non-symlink directory, uses a sanitized issue/run/branch identity and per-producer/head unique leaf,
+and returns a primary-root-relative `report_path`. SDD finalizes this package before deleting its
+per-plan workspace; ship review finalizes it before Phase 8 cleanup. A consumer rechecks the package
+and reads it before cleanup/terminal persistence. When findings exist, `report_path` is required and
+bounded notes include that exact path; `null` is allowed only when there is genuinely no detail.
+Failure to durably publish and validate required detail makes the phase `stopped`/`failed` and keeps
+the worktree; detail is never force-emptied to satisfy the transport schema.
+
+Both variants generate under a unique sibling staging directory and are fully shape-validated and
+measured there before publication. Publication has no check-then-rename window: exclusively create
+the final member directory, exclusively hard-link each staged member into it, and exclusively
+hard-link the staged manifest last. Any destination that appears concurrently makes that mutation
+fail without replacement. Cleanup unlinks only entries whose device/inode identity still matches
+this invocation's staged file and removes its member directory only when empty and still at the
+identity recorded immediately after its exclusive creation. Symlink,
+non-regular, cross-device, and existing-path cases fail closed. A successful run leaves no staging
+entry or orphan member; a failed retry or injected race preserves every competitor byte-identically.
 
 ### Producer behavior and timing
 
@@ -170,17 +215,11 @@ decomposition checkpoints decide what work resumes; this policy does not create 
 
 ### Phase and agent result contract
 
-Producer reports use exactly three top-level fields: `state: complete | decompose_required | stopped |
-failed`, one `artifact` object, and `notes`. A successful report has exactly this shape:
+Producer reports use exactly three top-level fields: `state`, `artifact`, and `notes`. A successful
+report has exactly this JSON shape:
 
-```yaml
-state: complete
-artifact:
-  kind: implementation-plan
-  path: .claude/plans/2026-08-19-example.md
-  metrics: {root_bytes: 12000, total_bytes: 84000, file_count: 5, largest_member_bytes: 21000}
-  budget_status: within_budget
-notes: <at most 500 characters>
+```json
+{"artifact":{"budget_status":"within_budget","kind":"implementation-plan","metrics":{"file_count":5,"largest_member_bytes":21000,"root_bytes":12000,"total_bytes":84000},"path":".claude/plans/2026-08-19-example.md"},"notes":"validated","state":"complete"}
 ```
 
 The path is the artifact root; consumers discover members from the root rather than receiving a
@@ -204,12 +243,51 @@ one-paragraph summary becomes `notes`. The legacy terminal lifecycle field `disc
 remains for schema compatibility but is always the empty list; Discussion/Minor detail stays in its
 review or ledger artifact and only a bounded pointer or synopsis travels in `notes`.
 
-The shared module validates the exact non-producer boundaries too. SDD returns closed state,
-review-state, two axis-verdict, and verification-state scalars, fixed base/head SHAs, at most one
-ledger/report path, and bounded notes. The Phase-7 ship handoff has fixed lifecycle scalars, one spec
-artifact, one plan artifact, and bounded notes. The terminal ship summary keeps its existing fixed
-scalar keys, requires the compatibility `discussion_items` list to be empty, and bounds notes from
-the same policy. Unknown fields or legacy lists/summaries are contract errors at each boundary.
+The shared module validates these exhaustive state matrices (`full` means exact
+`kind,path,metrics,budget_status`; `over` additionally requires non-empty closed `violations`;
+`root-only` means exact `kind,path`; `—` means JSON `null`):
+
+| Producer row | `state` | `artifact` | Required combination |
+|---|---|---|---|
+| complete | `complete` | full | any core kind, `within_budget`, no `violations` |
+| design over | `decompose_required` | over | `design-spec`, `over_budget` |
+| plan over | `decompose_required` | over | `implementation-plan`, `over_budget` |
+| review over | `decompose_required` | over | `review-package`, `over_budget` |
+| handoff over | `stopped` | over | `handoff`, `over_budget` |
+| failed before root | `failed` | — | no artifact fields |
+| failed after root | `failed` | root-only | metrics/status/violations forbidden |
+
+| SDD row | `state` / `review_state` | axis verdicts | verification | SHAs | `report_path` |
+|---|---|---|---|---|---|
+| clean | `complete` / `clean` | both `clean` | `passed` | both full lowercase object IDs | null only with no detail; otherwise durable path |
+| residuals | `residuals` / `residuals` | each `clean|findings`, at least one `findings` | `passed|failed` | both full IDs | required durable path |
+| failed before range | `failed` / `unknown` | both `not_run` | `not_run` | both null | null only with no detail |
+| failed after range | `failed` / `unknown` | each `not_run|clean|findings`, not the clean-success tuple | `passed|failed` | both full IDs | required durable path |
+
+SDD top-level keys are exactly `state`, `review_state`, `conformance_verdict`,
+`correctness_verdict`, `verification_state`, `base_sha`, `head_sha`, `report_path`, and `notes`.
+
+| Ship-handoff row | `state` | artifacts/head | review/detail |
+|---|---|---|---|
+| complete | `complete` | both full within-budget artifacts; full `head_sha` | closed `review_state`; durable `report_path` when SDD detail exists |
+| failed before artifacts | `failed` | both artifacts and `head_sha` null | `review_state: unknown`; path null unless detail was durably published |
+| failed after artifacts | `failed` | both full artifacts and full `head_sha` | closed review state; durable path required when detail exists |
+
+Ship-handoff keys are exactly `state`, the five all-null-or-all-present lifecycle fields
+`ledger_repo_root,run_id,attempt,owner,owner_worktree`, then `issue_number,branch,worktree_path`,
+`spec_artifact,plan_artifact,head_sha,review_state,auto,report_path,notes`. Booleans never satisfy
+integer fields.
+
+| Ship-summary row | `state` | `pr_url` | `merge_sha` | `issue_closed` | detail |
+|---|---|---|---|---|---|
+| merged | `merged` | required URL | full object ID | `true` | empty compatibility list; durable path iff detail exists |
+| stopped | `stopped` | URL or null | null | `false` | empty compatibility list; durable path iff detail exists |
+| failed | `failed` | URL or null | null | `false` | empty compatibility list; durable path iff detail exists |
+
+Ship-summary keys are exactly `issue,state,pr_url,merge_sha,issue_closed,discussion_items,report_path,notes`.
+`discussion_items` is always `[]`; when `report_path` is non-null, notes must contain that exact path.
+All notes use the one shared-policy character limit. Unknown fields, missing fields, legacy lists,
+unlisted enum combinations, or independently nullable paired fields are contract errors.
 
 ## Decisions
 
@@ -241,7 +319,7 @@ stable for identical content.
 ### Policy schema
 
 Policy version 1 is a strict object with `schema_version`, `unit: "bytes"`, a closed `artifacts` map,
-and `phase_reports.notes_max_characters: 500`. Each artifact entry contains positive integer
+and exact `phase_reports` integers `notes_max_characters: 500` and `wire_max_bytes: 8192`. Each artifact entry contains positive integer
 `root_max_bytes` and `aggregate_max_bytes`, plus non-negative integer `member_max_bytes` and
 `max_members`. For one-file kinds both member values are zero. The checker rejects booleans,
 fractions, negative values, unknown keys, missing kinds, inconsistent one-file limits, and aggregate
@@ -339,3 +417,6 @@ Concrete grill scenarios that must remain green:
 | D11 | Replace producer-specific report fields with the exact `state` + one root `artifact` + policy-bounded `notes` envelope; cross-phase and ship handoffs use fixed scalars/root metrics plus the same bounded notes, and legacy terminal `discussion_items` is always empty | Phase-5 review B1 verified that live `decisions`, `open_items`, `adr_paths`, and the Phase-7 paragraph summary are unbounded despite the spec's former claim; D6 already makes the artifact and durable ledgers authoritative | Add per-list count/item limits, which introduces more repeated numeric policy and still grows transport with artifact complexity; retain the lists because they are “existing,” which leaves the acceptance gap intact |
 | D12 | Refuse a review-package retry when its regular root or member directory already exists; generate in sibling staging, validate completely, publish members then manifest, and clean only newly published members if final publication fails | Phase-5 review S2 found that range-derived names collide on resume and stale shards can corrupt discovery; refusal is deterministic, preserves valid prior evidence byte-for-byte, and avoids pretending two filesystem renames are one atomic package swap | Overwrite in place, which can destroy a valid package or leave stale shards; multi-path replacement with rollback, which adds concurrency/state machinery for transient evidence when safe refusal suffices |
 | D13 | Make small/oversized descriptors executable test inputs, reject booleans for every policy/result/manifest integer, and count Git binary numstat `-` as zero insertions/deletions while retaining full binary diff bytes | Phase-5 review S1/S3 found static fixture self-assertion and Python's `bool`/`int` overlap; `diff-scope` already defines binary rows as zero churn, so matching it keeps one repository meaning | Treat descriptor expectations as proof, which cannot catch mismatched payloads; accept booleans through `isinstance(int)` or invent a different binary-stat convention, both of which create silent schema/accounting drift |
+| D14 | Make every phase/report boundary canonical JSON validated through one `validate-report` CLI operation, with exhaustive state-dependent schemas, an 8 KiB shared-policy wire ceiling, and candidate-file → validated-stdout transport | Re-review R-B1/R-B2 found that Python-only mapping validators were not callable by Markdown skills and that unnamed enum/nullability combinations could drift; 8 KiB matches the evidence-backed handoff ceiling while leaving ample room for the fixed fields plus 500-character notes; the coding bar requires message parity and fail-loud closed sets | Let each skill serialize/validate its own prose or YAML, which duplicates the wire contract; accept partially specified failure objects, which turns schema mistakes into ambiguous workflow state |
+| D15 | Extend D8's review package with a `delivery-detail` manifest variant under the same numeric ceilings; publish SDD/ship findings below the primary checkout's ignored `.superpowers/issue-delivery/` home before removable-worktree cleanup and transport only one validated relative `report_path` | Re-review R-B3 showed the old SDD workspace is deleted and ship review had no durable artifact, so emptying transported lists would lose required review evidence; the primary checkout survives feature-worktree cleanup and the shared review-package budget prevents a new unbounded producer | Keep detail in the per-plan/worktree workspace, which leaves dangling paths after cleanup; inline capped excerpts, which can omit load-bearing findings; invent an unbudgeted report file kind |
+| D16 | Replace D12's precheck-plus-rename publication with exclusive final-directory creation and identity-tracked exclusive hard links for members and manifest, manifest last | Re-review R-B4 identified a same-plan concurrency window where ordinary rename replaces a competitor; mutation-point exclusion plus inode-checked cleanup provides the no-clobber guarantee directly | Rely on an existence precheck or ordinary rename, both of which race; lock globally, which adds stale-lock recovery and broader coordination state for a leaf-local property |

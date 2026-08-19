@@ -6,16 +6,19 @@
 - Modify: `home/common/agent-skills/skills/from-issue/standards-review.md`
 - Modify: `home/common/agent-skills/skills/from-issue/ship-handoff.md`
 - Modify: `home/common/agent-skills/skills/ship-issue/SKILL.md`
+- Modify: `home/common/agent-skills/skills/ship-issue/REVIEW.md`
 - Modify: `home/common/agent-skills/skills/sdd/SKILL.md`
+- Modify: `home/common/agent-skills/scripts/workflow-state.py`
+- Modify/Test: `home/common/agent-skills/tests/test_workflow_state.py`
 - Modify/Test: `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 
 **Interfaces:**
-- Consumes: Task 1 checker and exact producer/SDD/ship-handoff/ship-summary validators/results/behavioral fixtures; Task 2 plan package/report; Task 3 review-package report; Task 4 design/grill/handoff reports; D5, D6, D7, D10, and D11.
-- Produces: phase boundaries that accept exact three-field producer reports and accept `complete` only with `within_budget` and all four integers; Phase-7 handoff fields `spec_artifact` and `plan_artifact`, each root plus compact metrics/status, plus fixed lifecycle scalars and policy-bounded `notes`; ship-time checker validation and plan-member artifact exclusions.
-- Preserves the terminal lifecycle result keys (`issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`, `discussion_items`, `notes`) but requires `discussion_items` to be exactly `[]`; review detail remains behind its ledger/report path and bounded notes carry only a pointer/synopsis. The former Phase-7 `summary` is removed.
+- Consumes: Task 1 checker and `validate-report` CLI; Task 2 plan package/report; Task 3 diff/delivery-detail review-package modes; Task 4 producer reports; D5–D7, D10–D11, and D14–D16.
+- Produces: phase boundaries that accept only revalidated canonical JSON; exact D14 SDD report; exact ship handoff with `state`, fixed lifecycle/artifact fields, one `report_path`, and notes; exact terminal ship summary with one `report_path`; ship-time checker validation and plan-member exclusions.
+- Preserves terminal keys `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`, `discussion_items`, `notes`, adds scalar `report_path`, and requires `discussion_items: []` only after any detail has been durably published. The former Phase-7 `summary` is removed.
 
 **Invariants:**
-- From-issue validates each producer's closed state/status combination, then independently invokes the checker against the reported root before persisting phase progress or dispatching the next phase. A claim mismatch, missing helper, checker exit 2, or missing/non-integer metric is `failed`; over budget follows the producer's truthful terminal state and never advances.
+- From-issue pipes every received JSON report through the matching `validate-report --input -` boundary before decoding it, then independently invokes the checker against reported artifact roots. Validator/checker exit 2, a claim mismatch, or missing/non-integer metric is `failed`; over budget never advances.
 - The autonomous design and plan prompts require the new fixed report fields. The orchestrator holds returned root/metrics only, never member lists or artifact contents.
 - Phase 5 rechecks both the full plan package and the spec after every accepted edit/ledger append. It uses the owning producer's remediation and returns `decompose_required` rather than dispatching SDD when the final check is over.
 - SDD parses every review-package command report, passes root/metrics to the intended reviewer, and never dispatches on `decompose_required`/`failed`. Its final phase report remains compact and does not inline transient review evidence.
@@ -23,7 +26,10 @@
 - Per D10, ship-issue discovers checker-validated plan members locally and supplies root plus each member as individual `--artifact-path` arguments to `diff-scope`. No public report or prompt carries that list, and the existing ≤1,000-line/≤20-file gate is otherwise unchanged.
 - Small fixture cases complete; oversized fixture cases map exactly to design/grill `decompose_required`, planning `decompose_required`, handoff `stopped`, and review-package `decompose_required`. `complete` plus `over_budget` is always a contract error.
 - SDD's final phase report has exactly `state`, `review_state`, `conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`, `head_sha`, `report_path`, and policy-bounded `notes`; parked-finding or verdict-detail lists are rejected and their detail remains at `report_path`.
-- Every phase and ship report rejects `decisions`, `open_items`, `adr_paths`, and `summary`; `validate_ship_summary` rejects non-empty `discussion_items`. Numeric notes enforcement comes only from the shared policy/report validators.
+- Resolve `<main-root>` as the parent of absolute `git rev-parse --git-common-dir`, require basename `.git`, and confirm it with `git -C <main-root> rev-parse --show-toplevel`; never use the feature worktree or a path inside `.git`. Before SDD workspace deletion, package every parked/residual finding through Task 3 delivery-detail mode at `<main-root>/.superpowers/issue-delivery/<issue>/<run-or-branch>/sdd-<head>.json`; before ship Phase 8 cleanup, package every Minor/Discussion item at the sibling `ship-review-<head>.json`. Leaves are per-run/branch and no-clobber.
+- A non-empty detail set requires a checker-valid durable package and `report_path`; notes contain that exact path. Failure to publish/recheck it returns `failed` or `stopped` and preserves the feature worktree/workspace. With genuinely no detail, `report_path` is null. From-issue rechecks and consumes a non-null path before constructing Phase 7 or persisting the terminal result and never inlines its members.
+- Every producer, SDD, ship-handoff, and ship-summary candidate is a temporary JSON file validated through the corresponding CLI boundary; only validated stdout bytes are transported. `discussion_items` becomes empty only after detail publication, and all numeric notes enforcement comes from the shared policy.
+- `workflow-state finish` accepts the exact ship-summary schema including `report_path`, delegates schema/notes validation to Task 1's `validate_ship_summary` with the repository policy in source tests and installed policy in deployment, and preserves the scalar unchanged. It does not retain its old literal notes limit or accept a missing path key.
 
 - [ ] **Step 1: Add failing end-to-end workflow contract assertions**
 
@@ -50,18 +56,40 @@ def test_autonomous_reports_and_ship_handoff_are_root_plus_metrics(self):
         self.assertNotRegex(self.auto, rf"(?m)^\s*{re.escape(forbidden)}")
         self.assertNotRegex(self.ship_handoff, rf"(?m)^\s*{re.escape(forbidden)}")
     self.assertIn("discussion_items: []", self.ship_handoff)
+    self.assertIn("report_path", self.ship_handoff)
     self.assertIn("phase_reports.notes_max_characters", self.ship_handoff)
-    self.assertIn("validate_ship_handoff", self.ship_handoff)
-    self.assertIn("validate_ship_summary", self.ship_handoff)
+    self.assertIn("validate-report --boundary ship-handoff", self.ship_handoff)
+    self.assertIn("validate-report --boundary ship-summary", self.ship_handoff)
 
 def test_sdd_report_is_exact_and_mechanically_validated(self):
     for field in ("state", "review_state", "conformance_verdict",
                   "correctness_verdict", "verification_state", "base_sha",
                   "head_sha", "report_path", "notes"):
         self.assertIn(field, self.sdd)
-    self.assertIn("validate_sdd_report", self.sdd)
+    self.assertIn("validate-report --boundary sdd", self.sdd)
     for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
         self.assertNotRegex(self.sdd, rf"(?m)^\s*{re.escape(forbidden)}")
+
+def test_received_reports_cross_the_same_json_wire_seam(self):
+    self.assert_ordered(self.from_issue, "received stdout bytes",
+                        "validate-report --boundary producer --input -", "decode JSON")
+    self.assert_ordered(self.from_issue, "validate-report --boundary sdd --input -",
+                        "construct the Phase-7 handoff")
+    self.assertIn("return only validated stdout bytes", self.auto)
+
+def test_durable_review_detail_precedes_every_removable_cleanup(self):
+    self.assertIn(".superpowers/issue-delivery/", self.sdd)
+    self.assert_ordered(self.sdd, "delivery-detail", "artifact-budget check",
+                        "validate-report --boundary sdd", "delete this plan's workspace")
+    self.assertIn(".superpowers/issue-delivery/", self.ship_review)
+    self.assertIn("Minor/Discussion", self.ship_review)
+    self.assert_ordered(self.ship_issue, "delivery-detail", "artifact-budget check",
+                        "validate-report --boundary ship-summary", "remove the worktree")
+    for text in (self.sdd, self.ship_review, self.ship_issue, self.ship_handoff):
+        self.assertIn("report_path", text)
+        self.assertIn("keep the worktree", text)
+    self.assertIn("primary worktree", self.ship_handoff)
+    self.assertIn("never inline the report", self.from_issue)
 
 def test_phase_five_remeasures_every_artifact_it_mutates(self):
     self.assert_ordered(self.standards_review, "apply blocking fixes", "final mutation",
@@ -92,7 +120,34 @@ def test_fixture_producer_states_supplement_behavioral_cli_cases(self):
         self.assertIn("contract error", text)
 ```
 
-If existing class attributes use different names, add the exact paths and decoded fixture values without changing the assertions' meaning. These static assertions only pin routing prose; Task 1 must first materialize and execute every descriptor through the CLI, and Task 3 remains the review generator's behavioral seam.
+In `test_workflow_state.py`, add `report_path: None` to the shared terminal-result factory, use a
+full lowercase SHA, update exact-key assertions, and add this behavioral contract:
+
+```python
+def test_terminal_result_report_path_is_one_validated_durable_scalar(self):
+    self.init_run()
+    attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
+    detail = ".superpowers/issue-delivery/14/run-1/ship-review-a.json"
+    valid = {**self.merged_result(), "report_path": detail,
+             "notes": f"details: {detail}"}
+    invalid = (
+        {key: value for key, value in valid.items() if key != "report_path"},
+        {**valid, "report_path": [detail]},
+        {**valid, "report_path": "/tmp/outside.json"},
+        {**valid, "report_path": "../outside.json"},
+        {**valid, "notes": "detail omitted"},
+        {**valid, "discussion_items": ["not durably moved"]},
+    )
+    for candidate in invalid:
+        before = self.state_path.read_bytes()
+        self.finish(attempt, candidate, ok=False)
+        self.assertEqual(self.state_path.read_bytes(), before)
+    normalized = self.finish(attempt, valid)
+    self.assertEqual(normalized["report_path"], detail)
+    self.assertIn(detail, normalized["notes"])
+```
+
+If existing class attributes use different names, add the exact paths and decoded fixture values without changing the assertions' meaning; expose `SHIP_ISSUE_REVIEW` as `self.ship_review`. These static assertions only pin routing prose; Task 1 behaviorally exercises every report row through stdin/file CLI inputs, Task 3 behaviorally exercises package publication/lifetime, and these checks pin routing and cleanup order.
 
 - [ ] **Step 2: Run the workflow suite and observe missing caller validation**
 
@@ -102,13 +157,17 @@ Expected: FAIL because current phase schemas carry paths without budget states/m
 
 - [ ] **Step 3: Wire producer reports through callers and final writers**
 
-Update `from-issue`'s structured-report and phase rules to call `validate_producer_report`, validate state/status/metrics, run its own checker, and stop before progress/dispatch on mismatch. Update both autonomous report schemas to exactly `state`, `artifact`, and policy-bounded `notes`; remove `spec_path`, `plan_path`, `adr_paths`, `decisions`, and `open_items` because `artifact.path` replaces the root fields. Keep the caller context bounded to reports and paths.
+Update `from-issue`'s structured-report and phase rules to send every received producer stdout byte through `validate-report --boundary producer --input -` before JSON decoding, validate state/status/metrics, run its own checker, and stop before progress/dispatch on mismatch. Update both autonomous schemas to exact producer JSON; remove `spec_path`, `plan_path`, `adr_paths`, `decisions`, and `open_items`. Their prompts require candidate-file validation and return only CLI stdout. Keep caller context bounded to reports and paths.
 
 Update `standards-review` so every accepted plan edit triggers a final plan-package check and every ledger/spec edit triggers a spec check. Apply the existing owner remediation once; unresolved oversize becomes `decompose_required` and returns to the decomposition checkpoint rather than Phase 6.
 
-Update SDD's review-package handling to parse command JSON, compare its root/status/metrics with a checker result, and stop review dispatch truthfully on exit 2/3. Its final report uses the exact nine-field schema above and calls `validate_sdd_report` before return—no parked-findings or verdict-detail lists. From-issue validates it again before constructing Phase 7.
+Update SDD's review-package handling to validate generator stdout through the producer boundary, compare root/status/metrics with a checker result, and stop dispatch truthfully on exit 2/3. Before deleting its workspace, collect every parked/residual finding and ruling into Task 3's exact detail input, resolve the primary worktree, generate/check a no-clobber `delivery-detail` package under D15's unique path, and set `report_path`. Null is legal only when the collection is empty. Write the exact SDD candidate JSON, run `validate-report --boundary sdd`, and return only stdout. Publication/validation failure retains workspace/worktree and returns a valid failed row. From-issue validates through stdin, rechecks and reads any detail root, and only then constructs Phase 7.
 
-Update `ship-handoff` with the exact fixed lifecycle scalars, current spec/plan artifact objects, and policy-bounded `notes`; delete its one-paragraph `summary`, and call `validate_ship_handoff` before dispatch. Require the ship return's legacy `discussion_items` to be `[]`, with any detail left in its review/ledger path and only a bounded synopsis in notes, and call `validate_ship_summary` before accepting the terminal result. In `ship-issue`, recheck both roots at preflight and after a ship-time mutation. For the existing degradation measurement only, enumerate the checker-validated plan sibling directory and add one literal `--artifact-path` per root/member; keep all current product thresholds, exclusions, and full-review routing unchanged.
+Update `ship-handoff` to the exact D14 state matrix with fixed lifecycle scalars, current spec/plan artifacts, SDD `report_path`, and notes; delete `summary`, validate a candidate with the ship-handoff boundary, and dispatch only stdout. Ship-issue revalidates that stdin, rechecks both artifact roots and any SDD detail root, then runs existing phases.
+
+Update `ship-issue/REVIEW.md` to retain every Minor/Discussion item verbatim in a Task 3 detail input. Before Phase 8, resolve the primary worktree, generate/check the unique no-clobber `ship-review-<head>` delivery package when detail exists, and place its relative root in `report_path`; do not empty the compatibility list until this succeeds. Assemble the exact merged/stopped/failed candidate, make notes contain a non-null path, run the ship-summary boundary, and return only stdout. On publication/validation failure return stopped/failed and keep the feature worktree. From-issue validates/rechecks/reads that path before `workflow-state finish`, never inlines members, and persists `discussion_items: []`. For degradation measurement only, enumerate checker-validated plan members into literal `--artifact-path` arguments; keep current product gates and review routing unchanged.
+
+Update `workflow-state.py`'s exact terminal fields to include `report_path` before `notes`; every internally synthesized expiry/refusal result sets it to null. Import Task 1's module from the source scripts directory or installed `~/.agents/lib/python`, select the adjacent repository policy for source execution and the module default when installed, and delegate the entire terminal object to `validate_ship_summary`; translate its `ValueError` to the existing `WorkflowError` without copying enum/notes rules. Update the test factory and exact-key assertions once so existing lifecycle cases inherit `report_path: None`, update any intentional raw exact fixtures, and add the invalid/valid persistence test above.
 
 - [ ] **Step 4: Run plan-level consistency and repository acceptance gates**
 
@@ -129,8 +188,11 @@ Expected: exit 0 with no output; the pathspec excludes planning artifacts while 
 ```bash
 git add home/common/agent-skills/skills/from-issue \
   home/common/agent-skills/skills/ship-issue/SKILL.md \
+  home/common/agent-skills/skills/ship-issue/REVIEW.md \
   home/common/agent-skills/skills/sdd/SKILL.md \
-  home/common/agent-skills/tests/test_workflow_skill_contracts.py
+  home/common/agent-skills/scripts/workflow-state.py \
+  home/common/agent-skills/tests/test_workflow_skill_contracts.py \
+  home/common/agent-skills/tests/test_workflow_state.py
 git commit -m "feat(issue-49): enforce artifact budgets across workflow" \
   -m "Co-Authored-By: Codex <noreply@openai.com>"
 ```

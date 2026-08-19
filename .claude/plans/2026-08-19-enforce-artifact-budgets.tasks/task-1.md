@@ -11,21 +11,20 @@
 - Modify: `Justfile`
 
 **Interfaces:**
-- Consumes: no earlier task; design decisions D1, D2, D7, D8, D11, and D13 are the contract.
+- Consumes: no earlier task; design decisions D1, D2, D7, D8, D11, D13, D14, and D15 are the contract.
 - Produces: importable `artifact_budget.load_limits(kind: str, policy_path: Path | None = None) -> ArtifactLimits`; `artifact_budget.check_artifact(kind: str, root: Path, policy_path: Path | None = None) -> CheckResult`; `artifact_budget.validate_producer_report(report: Mapping[str, object], policy_path: Path | None = None) -> None`; `artifact_budget.validate_sdd_report(report: Mapping[str, object], policy_path: Path | None = None) -> None`; `artifact_budget.validate_ship_handoff(report: Mapping[str, object], policy_path: Path | None = None) -> None`; `artifact_budget.validate_ship_summary(report: Mapping[str, object], policy_path: Path | None = None) -> None`; `artifact_budget.main(argv: Sequence[str] | None = None) -> int`; executable wrapper `home/common/agent-skills/scripts/artifact-budget`; installed executable `~/.agents/bin/artifact-budget`; installed import path `~/.agents/lib/python/artifact_budget.py`; default policy `~/.agents/share/artifact-budget-policy.json`.
 - `ArtifactLimits` exposes integer `root_max_bytes`, `member_max_bytes`, `max_members`, and `aggregate_max_bytes`. `CheckResult.to_dict()` returns only `interface_version`, `kind`, `status`, `metrics`, and `violations`.
+- CLI report seam: `artifact-budget validate-report --boundary <producer|sdd|ship-handoff|ship-summary> --input <path|-> [--policy <path>]` reads one UTF-8 JSON object and returns the same semantic object as key-sorted compact UTF-8 JSON plus newline on stdout/exit 0.
 
 **Invariants:**
-- Policy version 1 has exactly `schema_version`, `unit`, `artifacts`, and `phase_reports`; artifact kinds and entry fields are closed; unknown/duplicate/missing keys, booleans, fractions, non-positive roots/aggregates, negative member fields, one-file inconsistencies, and aggregate limits below the root fail before measurement.
-- `design-spec` and `handoff` accept one non-symlink regular root and no members. `implementation-plan` discovers contiguous `<stem>.tasks/task-1.md`…`task-N.md`; `review-package` discovers contiguous `<stem>.shards/shard-001.diff`…`shard-NNN.diff`.
-- Package roots must reference every discovered member exactly once and no absent/outside member. Plan references are the final Markdown link on each Task-index row. Review manifests use exactly the D8 fields; each `shards` entry has exactly `path` and `bytes`, matches discovery order and actual bytes, `total_diff_bytes` equals the shard-byte sum, and `coverage.complete` is true. Every manifest integer uses `type(value) is int`, so booleans fail.
+- Policy version 1 has exactly `schema_version`, `unit`, `artifacts`, and `phase_reports`; the latter has exactly positive integer `notes_max_characters` and `wire_max_bytes`. Artifact kinds and entry fields are closed; unknown/duplicate/missing keys, booleans, fractions, non-positive roots/aggregates/report bounds, negative member fields, one-file inconsistencies, and aggregate limits below the root fail before measurement.
+- `design-spec` and `handoff` accept one non-symlink regular root and no members. `implementation-plan` discovers contiguous `<stem>.tasks/task-1.md`…`task-N.md`; `review-package` uses `purpose` to discover contiguous `shard-NNN.diff` or `shard-NNN.jsonl` members.
+- Package roots must reference every discovered member exactly once and no absent/outside member. Plan references are the final Markdown link on each Task-index row. Review manifests accept only D15's two exact variants: `diff-review` retains D8's range/commit/stat/coverage fields and `total_diff_bytes`; `delivery-detail` has exact context/finding coverage and `total_detail_bytes`. Each shard entry is exact path/bytes in discovery order; declared totals equal measured member bytes. Every integer uses `type(value) is int`, so booleans fail.
 - Reject a missing member directory, a root/member/directory symlink, non-regular entry, name gap, unknown entry, unreadable file, duplicate resolved member identity, malformed UTF-8 root/manifest, or reference mismatch with exit 2 and no success JSON.
 - Metrics are exact encoded bytes: `root_bytes`; `total_bytes = root_bytes + sum(member bytes)`; `file_count = 1 + member count`; `largest_member_bytes = 0` for one-file artifacts and the largest member otherwise.
 - Violations are the sorted subset in canonical order `root_bytes`, `member_bytes`, `member_count`, `aggregate_bytes`. Valid measurement always emits one compact deterministic JSON line plus newline; exit 0 means `within_budget`, exit 3 means `over_budget`. Exit 2 writes one concise diagnostic to stderr and nothing to stdout.
-- `validate_producer_report` accepts only top-level `state`, `artifact`, and `notes`, applies `phase_reports.notes_max_characters` from the loaded policy, rejects legacy/extra fields, validates exact artifact/status/metrics/violation shapes and all integer types, and rejects every invalid state/status pairing.
-- `validate_sdd_report` accepts exactly `state`, `review_state`, `conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`, `head_sha`, `report_path`, and `notes`; its state/verdict values are closed enums, SHAs are full lowercase Git object IDs or `null` on failure, the one report path is a repository-relative string or `null`, and notes use the policy-owned limit.
-- `validate_ship_handoff` accepts exactly the fixed lifecycle scalars, one spec artifact, one plan artifact, and `notes`: `ledger_repo_root`, `run_id`, `attempt`, `owner`, `owner_worktree`, `issue_number`, `branch`, `worktree_path`, `spec_artifact`, `plan_artifact`, `head_sha`, `review_state`, `auto`, `notes`. Lifecycle identity fields may be `null` only as one group; all integers reject booleans; both artifacts use the same strict root/status/metrics shape; no path or member list is accepted.
-- `validate_ship_summary` accepts exactly the fixed lifecycle scalar fields `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`, `discussion_items`, and `notes`, rejects extra/legacy fields, requires `discussion_items == []`, and applies the same policy-owned notes limit.
+- The four validators implement D14's exhaustive tables verbatim. Non-null `report_path` is one normalized primary-root-relative `.superpowers/issue-delivery/` path and must appear literally in bounded notes. Producer `failed` uses `artifact: null` before a root or exact `kind,path` after one; no other partial artifact is valid.
+- Report input rejects duplicate keys, JSON constants, malformed UTF-8, non-object roots, trailing data, symlink/non-regular files, unknown fields, booleans for integers, every unlisted enum/nullability combination, and input or canonical output beyond `phase_reports.wire_max_bytes`. Any report parse/schema failure emits no stdout, `artifact-budget: invalid report\n` on stderr, exit 2; report I/O failure emits no stdout, `artifact-budget: cannot read report\n`, exit 2.
 - Repository fixtures contain descriptors and repetition metadata, never large padding. Tests materialize every descriptor, invoke the CLI, and compare actual exit/status/metrics/violations with descriptor expectations.
 - The committed wrapper is mode `100755` and executes `python3 "$HOME/.agents/lib/python/artifact_budget.py" "$@"`; Home Manager installs that wrapper as the bin command and the module separately.
 
@@ -62,6 +61,23 @@ class ArtifactBudgetCliTest(unittest.TestCase):
              "--root", str(root), "--policy", str(policy), "--format", "json"],
             text=True, capture_output=True, check=False,
         )
+
+    def run_validate(self, boundary: str, payload: object, use_stdin: bool):
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if use_stdin:
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), "validate-report", "--boundary", boundary,
+                 "--input", "-", "--policy", str(POLICY)],
+                input=encoded, capture_output=True, check=False,
+            )
+        with tempfile.TemporaryDirectory() as raw:
+            candidate = Path(raw) / "candidate.json"
+            candidate.write_bytes(encoded)
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), "validate-report", "--boundary", boundary,
+                 "--input", str(candidate), "--policy", str(POLICY)],
+                capture_output=True, check=False,
+            )
 
     def test_single_file_exact_boundary_and_unicode_plus_one(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -153,7 +169,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             path = members / f"shard-{number:03d}.diff"
             path.write_bytes(b"d" * size)
             shards.append({"path": f"review.shards/{path.name}", "bytes": size})
-        manifest = {"interface_version": 1, "kind": "review-package",
+        manifest = {"interface_version": 1, "kind": "review-package", "purpose": "diff-review",
                     "range": {"base": "a" * 40, "head": "b" * 40},
                     "commits": [],
                     "stat": {"files_changed": len(shards), "insertions": 0, "deletions": 0},
@@ -180,64 +196,157 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                     if result.returncode == 3:
                         self.assertNotEqual(measured["status"], "within_budget")
 
-    def test_report_validator_rejects_legacy_fields_and_policy_over_limit_notes(self):
-        policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        limit = policy["phase_reports"]["notes_max_characters"]
-        report = {"state": "complete", "artifact": {"kind": "handoff", "path": "h.md",
-                  "metrics": {"root_bytes": 1, "total_bytes": 1, "file_count": 1,
-                              "largest_member_bytes": 0},
-                  "budget_status": "within_budget"}, "notes": "ok"}
-        artifact_budget.validate_producer_report(report, POLICY)
-        for forbidden in ("decisions", "open_items", "adr_paths", "summary"):
-            with self.subTest(forbidden=forbidden), self.assertRaises(ValueError):
-                artifact_budget.validate_producer_report({**report, forbidden: []}, POLICY)
-        with self.assertRaises(ValueError):
-            artifact_budget.validate_producer_report({**report, "notes": "x" * (limit + 1)}, POLICY)
+    def test_every_report_matrix_row_accepts_one_wire_object_and_rejects_its_discriminator(self):
+        metrics = {"root_bytes": 1, "total_bytes": 1, "file_count": 1,
+                   "largest_member_bytes": 0}
+        detail = ".superpowers/issue-delivery/49/run-1/sdd-a.json"
 
-    def test_ship_summary_validator_rejects_lists_legacy_summary_and_long_notes(self):
-        policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        limit = policy["phase_reports"]["notes_max_characters"]
-        summary = {"issue": 49, "state": "merged", "pr_url": "https://example.test/pr/1",
-                   "merge_sha": "a" * 40, "issue_closed": True,
-                   "discussion_items": [], "notes": "review detail: ledger.md"}
-        artifact_budget.validate_ship_summary(summary, POLICY)
-        for mutation in ({**summary, "summary": "legacy"},
-                         {**summary, "discussion_items": ["unbounded"]},
-                         {**summary, "notes": "x" * (limit + 1)}):
-            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
-                artifact_budget.validate_ship_summary(mutation, POLICY)
+        def full(kind: str, over: bool = False):
+            value = {"kind": kind, "path": f"artifacts/{kind}.json", "metrics": metrics,
+                     "budget_status": "over_budget" if over else "within_budget"}
+            if over:
+                value["violations"] = ["root_bytes"]
+            return value
 
-    def test_sdd_and_ship_handoff_validators_reject_legacy_transport(self):
-        policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        limit = policy["phase_reports"]["notes_max_characters"]
-        sdd = {"state": "complete", "review_state": "clean",
-               "conformance_verdict": "clean", "correctness_verdict": "clean",
-               "verification_state": "passed", "base_sha": "a" * 40,
-               "head_sha": "b" * 40, "report_path": ".superpowers/sdd/p/progress.md",
-               "notes": "ok"}
-        artifact_budget.validate_sdd_report(sdd, POLICY)
-        for mutation in ({**sdd, "parked_findings": []},
-                         {**sdd, "notes": "x" * (limit + 1)}):
-            with self.subTest(kind="sdd", mutation=mutation), self.assertRaises(ValueError):
-                artifact_budget.validate_sdd_report(mutation, POLICY)
+        def sdd(state, review, conformance, correctness, verification,
+                base, head, report_path):
+            notes = f"details: {report_path}" if report_path else "no durable detail"
+            return {"state": state, "review_state": review,
+                    "conformance_verdict": conformance,
+                    "correctness_verdict": correctness,
+                    "verification_state": verification, "base_sha": base, "head_sha": head,
+                    "report_path": report_path, "notes": notes}
 
-        artifact = {"path": ".claude/specs/s.md",
-                    "metrics": {"root_bytes": 1, "total_bytes": 1,
-                                "file_count": 1, "largest_member_bytes": 0},
-                    "budget_status": "within_budget"}
-        handoff = {"ledger_repo_root": None, "run_id": None, "attempt": None,
-                   "owner": None, "owner_worktree": None, "issue_number": 49,
-                   "branch": "issue-49", "worktree_path": "/tmp/issue-49",
-                   "spec_artifact": {"kind": "design-spec", **artifact},
-                   "plan_artifact": {"kind": "implementation-plan", **artifact},
-                   "head_sha": "b" * 40, "review_state": "clean", "auto": True,
-                   "notes": "ok"}
-        artifact_budget.validate_ship_handoff(handoff, POLICY)
-        for mutation in ({**handoff, "summary": "legacy"},
-                         {**handoff, "adr_paths": []},
-                         {**handoff, "notes": "x" * (limit + 1)}):
-            with self.subTest(kind="handoff", mutation=mutation), self.assertRaises(ValueError):
-                artifact_budget.validate_ship_handoff(mutation, POLICY)
+        lifecycle = {"ledger_repo_root": None, "run_id": None, "attempt": None,
+                     "owner": None, "owner_worktree": None, "issue_number": 49,
+                     "branch": "issue-49", "worktree_path": "/tmp/issue-49", "auto": True}
+        ship_complete = {**lifecycle, "state": "complete",
+                         "spec_artifact": full("design-spec"),
+                         "plan_artifact": full("implementation-plan"),
+                         "head_sha": "b" * 40, "review_state": "clean",
+                         "report_path": None, "notes": "no durable detail"}
+        ship_failed_before = {**lifecycle, "state": "failed", "spec_artifact": None,
+                              "plan_artifact": None, "head_sha": None,
+                              "review_state": "unknown", "report_path": None,
+                              "notes": "failed before artifacts"}
+        ship_failed_after = {**lifecycle, "state": "failed",
+                             "spec_artifact": full("design-spec"),
+                             "plan_artifact": full("implementation-plan"),
+                             "head_sha": "b" * 40, "review_state": "residuals",
+                             "report_path": detail, "notes": f"details: {detail}"}
+        rows = [
+            ("producer-complete", "producer",
+             {"state": "complete", "artifact": full("handoff"), "notes": "ok"},
+             {"state": "complete", "artifact": full("handoff", True), "notes": "ok"}),
+            ("producer-design-over", "producer",
+             {"state": "decompose_required", "artifact": full("design-spec", True), "notes": "ok"},
+             {"state": "stopped", "artifact": full("design-spec", True), "notes": "ok"}),
+            ("producer-plan-over", "producer",
+             {"state": "decompose_required", "artifact": full("implementation-plan", True), "notes": "ok"},
+             {"state": "decompose_required", "artifact": full("handoff", True), "notes": "ok"}),
+            ("producer-review-over", "producer",
+             {"state": "decompose_required", "artifact": full("review-package", True), "notes": "ok"},
+             {"state": "decompose_required", "artifact": {**full("review-package", True), "violations": []}, "notes": "ok"}),
+            ("producer-handoff-over", "producer",
+             {"state": "stopped", "artifact": full("handoff", True), "notes": "ok"},
+             {"state": "decompose_required", "artifact": full("handoff", True), "notes": "ok"}),
+            ("producer-failed-before", "producer",
+             {"state": "failed", "artifact": None, "notes": "no root"},
+             {"state": "failed", "artifact": {}, "notes": "no root"}),
+            ("producer-failed-after", "producer",
+             {"state": "failed", "artifact": {"kind": "handoff", "path": "h.md"}, "notes": "root exists"},
+             {"state": "failed", "artifact": {"kind": "handoff", "path": "h.md", "metrics": metrics}, "notes": "root exists"}),
+            ("sdd-clean", "sdd",
+             sdd("complete", "clean", "clean", "clean", "passed", "a" * 40, "b" * 40, None),
+             sdd("complete", "clean", "clean", "findings", "passed", "a" * 40, "b" * 40, None)),
+            ("sdd-residuals", "sdd",
+             sdd("residuals", "residuals", "clean", "findings", "passed", "a" * 40, "b" * 40, detail),
+             sdd("residuals", "residuals", "clean", "findings", "passed", "a" * 40, "b" * 40, None)),
+            ("sdd-failed-before", "sdd",
+             sdd("failed", "unknown", "not_run", "not_run", "not_run", None, None, None),
+             sdd("failed", "unknown", "not_run", "not_run", "not_run", "a" * 40, None, None)),
+            ("sdd-failed-after", "sdd",
+             sdd("failed", "unknown", "clean", "findings", "failed", "a" * 40, "b" * 40, detail),
+             sdd("failed", "unknown", "clean", "clean", "passed", "a" * 40, "b" * 40, detail)),
+            ("ship-handoff-complete", "ship-handoff", ship_complete,
+             {**ship_complete, "plan_artifact": None}),
+            ("ship-handoff-failed-before", "ship-handoff", ship_failed_before,
+             {**ship_failed_before, "spec_artifact": full("design-spec")}),
+            ("ship-handoff-failed-after", "ship-handoff", ship_failed_after,
+             {**ship_failed_after, "head_sha": None}),
+            ("ship-summary-merged", "ship-summary",
+             {"issue": 49, "state": "merged", "pr_url": "https://example.test/pr/1",
+              "merge_sha": "c" * 40, "issue_closed": True, "discussion_items": [],
+              "report_path": None, "notes": "no durable detail"},
+             {"issue": 49, "state": "merged", "pr_url": "https://example.test/pr/1",
+              "merge_sha": None, "issue_closed": True, "discussion_items": [],
+              "report_path": None, "notes": "no durable detail"}),
+            ("ship-summary-stopped", "ship-summary",
+             {"issue": 49, "state": "stopped", "pr_url": "https://example.test/pr/1",
+              "merge_sha": None, "issue_closed": False, "discussion_items": [],
+              "report_path": detail, "notes": f"details: {detail}"},
+             {"issue": 49, "state": "stopped", "pr_url": "https://example.test/pr/1",
+              "merge_sha": None, "issue_closed": False, "discussion_items": ["lost"],
+              "report_path": detail, "notes": f"details: {detail}"}),
+            ("ship-summary-failed", "ship-summary",
+             {"issue": 49, "state": "failed", "pr_url": None, "merge_sha": None,
+              "issue_closed": False, "discussion_items": [], "report_path": None,
+              "notes": "failed before review"},
+             {"issue": 49, "state": "failed", "pr_url": None, "merge_sha": None,
+              "issue_closed": True, "discussion_items": [], "report_path": None,
+              "notes": "failed before review"}),
+        ]
+        for number, (name, boundary, valid, invalid) in enumerate(rows):
+            with self.subTest(name=name, disposition="valid"):
+                result = self.run_validate(boundary, valid, use_stdin=number % 2 == 0)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, b"")
+                self.assertEqual(json.loads(result.stdout), valid)
+                self.assertEqual(result.stdout,
+                    (json.dumps(valid, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":")) + "\n").encode("utf-8"))
+            with self.subTest(name=name, disposition="invalid"):
+                result = self.run_validate(boundary, invalid, use_stdin=number % 2 != 0)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(result.stderr, b"artifact-budget: invalid report\n")
+
+    def test_validate_report_rejects_wire_parse_and_io_failures(self):
+        malformed = (b'{"state":"failed","state":"failed","artifact":null,"notes":"x"}',
+                     b"\xff", b"[]", b"{}{}", b'{"value":NaN}')
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+                     "--input", "-", "--policy", str(POLICY)], input=raw,
+                    capture_output=True, check=False)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (2, b"", b"artifact-budget: invalid report\n"))
+        missing = subprocess.run(
+            [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+             "--input", "/definitely/missing/report.json", "--policy", str(POLICY)],
+            capture_output=True, check=False)
+        self.assertEqual((missing.returncode, missing.stdout, missing.stderr),
+                         (2, b"", b"artifact-budget: cannot read report\n"))
+        with tempfile.TemporaryDirectory() as raw:
+            target = Path(raw) / "target.json"
+            target.write_text('{"state":"failed","artifact":null,"notes":"x"}', encoding="utf-8")
+            link = Path(raw) / "link.json"
+            link.symlink_to(target)
+            symlinked = subprocess.run(
+                [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+                 "--input", str(link), "--policy", str(POLICY)],
+                capture_output=True, check=False)
+            self.assertEqual((symlinked.returncode, symlinked.stdout, symlinked.stderr),
+                             (2, b"", b"artifact-budget: cannot read report\n"))
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        oversized = {"issue": 49, "state": "stopped",
+                     "pr_url": "https://example.test/" + "x" * policy["phase_reports"]["wire_max_bytes"],
+                     "merge_sha": None, "issue_closed": False, "discussion_items": [],
+                     "report_path": None, "notes": "wire bound"}
+        over = self.run_validate("ship-summary", oversized, use_stdin=True)
+        self.assertEqual((over.returncode, over.stdout, over.stderr),
+                         (2, b"", b"artifact-budget: invalid report\n"))
 
     def test_review_manifest_member_boundary_and_reference_bytes(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -248,7 +357,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             member.write_bytes(b"d" * 65_536)
             manifest = {
                 "interface_version": 1,
-                "kind": "review-package",
+                "kind": "review-package", "purpose": "diff-review",
                 "range": {"base": "a" * 40, "head": "b" * 40},
                 "commits": [{"sha": "b" * 40, "subject": "fixture"}],
                 "stat": {"files_changed": 1, "insertions": 1, "deletions": 0},
@@ -266,6 +375,30 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual(over.returncode, 3)
             self.assertIn("member_bytes", json.loads(over.stdout)["violations"])
 
+    def test_delivery_detail_manifest_uses_the_same_review_limits(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            root = directory / "delivery.json"
+            members = directory / "delivery.shards"
+            members.mkdir()
+            record = (json.dumps({"axis": "correctness", "severity": "Minor",
+                                  "status": "parked", "text": "detail", "ruling": None},
+                                 sort_keys=True, separators=(",", ":")) + "\n").encode()
+            (members / "shard-001.jsonl").write_bytes(record)
+            manifest = {"interface_version": 1, "kind": "review-package",
+                        "purpose": "delivery-detail",
+                        "context": {"issue": 49, "branch": "issue-49", "producer": "sdd"},
+                        "shards": [{"path": "delivery.shards/shard-001.jsonl",
+                                    "bytes": len(record)}],
+                        "total_detail_bytes": len(record),
+                        "coverage": {"complete": True, "finding_count": 1}}
+            root.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(self.run_check("review-package", root).returncode, 0)
+            manifest["context"]["issue"] = True
+            root.write_text(json.dumps(manifest), encoding="utf-8")
+            invalid = self.run_check("review-package", root)
+            self.assertEqual((invalid.returncode, invalid.stdout), (2, ""))
+
     def test_review_manifest_rejects_boolean_in_every_integer_family(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -273,7 +406,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             members = directory / "review.shards"
             members.mkdir()
             (members / "shard-001.diff").write_bytes(b"diff")
-            valid = {"interface_version": 1, "kind": "review-package",
+            valid = {"interface_version": 1, "kind": "review-package", "purpose": "diff-review",
                      "range": {"base": "a" * 40, "head": "b" * 40}, "commits": [],
                      "stat": {"files_changed": 1, "insertions": 1, "deletions": 0},
                      "shards": [{"path": "review.shards/shard-001.diff", "bytes": 4}],
@@ -346,7 +479,7 @@ The descriptor rows supply the exact plan aggregate/member/count boundary assert
 
 Run: `python3 -m unittest -v home/common/agent-skills/tests/test_artifact_budget.py`
 
-Expected: FAIL because the module, executable wrapper, policy, fixture descriptors, and report validator do not exist at the base commit.
+Expected: FAIL because the module, executable wrapper, policy, fixture descriptors, and report-validation CLI do not exist at the base commit.
 
 - [ ] **Step 3: Implement the strict module, policy, and Home Manager publication**
 
@@ -362,13 +495,15 @@ Write this exact policy data (pretty-printing is allowed; numeric values and key
     "handoff": {"root_max_bytes": 8192, "member_max_bytes": 0, "max_members": 0, "aggregate_max_bytes": 8192},
     "review-package": {"root_max_bytes": 16384, "member_max_bytes": 65536, "max_members": 8, "aggregate_max_bytes": 524288}
   },
-  "phase_reports": {"notes_max_characters": 500}
+  "phase_reports": {"notes_max_characters": 500, "wire_max_bytes": 8192}
 }
 ```
 
-Implement `artifact_budget.py` as one import-safe stdlib module with dataclasses for the two public values. `load_limits` loads either the explicit policy or `Path.home() / ".agents/share/artifact-budget-policy.json"`, uses `json.load(..., object_pairs_hook=...)` to reject duplicate keys, validates the complete policy before returning one kind's limits, and never coerces types. `check_artifact` opens and measures the regular root, discovers members from the required sibling directory, validates root/member agreement, and returns a result only after all shape/I/O checks pass. Compare bytes using strict `>` checks so exact ceilings succeed. The four report validators load the same policy, enforce D11's exact per-boundary key sets, closed states/types, and policy-owned notes bound, and use `type(value) is int` for all integer fields. They reject every legacy list/summary transport instead of truncating it and do not introduce another numeric limit.
+Implement `artifact_budget.py` as one import-safe stdlib module with dataclasses for the two public values. `load_limits` loads either the explicit policy or `Path.home() / ".agents/share/artifact-budget-policy.json"`, uses `json.load(..., object_pairs_hook=...)` to reject duplicate keys, validates the complete policy before returning one kind's limits, and never coerces types. `check_artifact` opens and measures the regular root, discovers members from the required sibling directory, validates root/member agreement, and returns a result only after all shape/I/O checks pass. Compare bytes using strict `>` checks so exact ceilings succeed. The four report validators load the same policy, enforce D14's exact per-boundary matrices, closed states/types, and policy-owned notes bound, and use `type(value) is int` for all integer fields. They reject every legacy list/summary transport instead of truncating it and do not introduce another numeric limit.
 
-For plan roots, accept only Task-index rows matching the task-number/member-number/name convention and require the discovered/reference sets and orders to be identical. For review roots, validate the exact D8 manifest types and fields with booleans rejected for every integer, then compare its ordered `shards` entries to discovery and measured bytes. Use `lstat`/no-follow checks before reads and `(st_dev, st_ino)` identities for duplicate-file rejection. Catch expected parse/I/O/validation errors only at `main`, print one diagnostic to stderr, and return 2; unexpected programmer errors must not be translated to success.
+For plan roots, accept only Task-index rows matching the task-number/member-number/name convention and require the discovered/reference sets and orders to be identical. For review roots, validate D15's exact `purpose`-discriminated manifest variants with booleans rejected for every integer, then compare ordered `shards` entries to discovery and measured bytes. Use `lstat`/no-follow checks before reads and `(st_dev, st_ino)` identities for duplicate-file rejection.
+
+Implement `validate-report` in `main` exactly as the CLI interface above. Parse duplicate keys and non-standard constants fail closed; file input uses no-follow regular-file checks and stdin is read once. Canonical output uses `json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))` encoded as UTF-8 plus one newline. Catch expected invocation/parse/I/O/validation errors only at `main`, emit the specified stable class diagnostic and return 2; unexpected programmer errors must not be translated to success.
 
 Create the exact executable Bash wrapper named above and commit it as mode `100755`. Publish that wrapper at `.agents/bin/artifact-budget`, the Python module at `.agents/lib/python/artifact_budget.py`, and the JSON under `.agents/share/`. Add `test_artifact_budget.py` to `agent-workflow-tests`; do not add CI wiring.
 

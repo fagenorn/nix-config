@@ -11,22 +11,26 @@
 
 ## Global Constraints
 
-- The authoritative design is `.claude/specs/2026-08-19-artifact-budget-policy-design.md`; implementations cite D1–D13 and do not duplicate decision rationale.
+- The authoritative design is `.claude/specs/2026-08-19-artifact-budget-policy-design.md`; implementations cite D1–D16 and do not duplicate decision rationale.
 - Exact limits are: design spec 65,536 bytes; implementation-plan root 16,384 bytes, member 49,152 bytes, eight members, aggregate 131,072 bytes; handoff 8,192 bytes; review-package root 16,384 bytes, member 65,536 bytes, eight members, aggregate 524,288 bytes.
+- Both `diff-review` and durable `delivery-detail` manifest variants are `review-package`; they use that one policy entry and introduce no unbudgeted report artifact or copied numeric ceiling.
 - All sizes are encoded bytes, not characters or model tokens; booleans are not integers in policy, result, metric, or manifest fields. Git binary numstat `-` contributes zero insertions/deletions while the file and binary patch remain covered.
-- `artifact-budget check --kind <design-spec|implementation-plan|handoff|review-package> --root <path> [--policy <path>] --format json` exits 0 only for `within_budget`, 3 only for a valid `over_budget` measurement, and 2 for every invocation, policy, package-shape, schema, or I/O failure.
+- `artifact-budget check --kind <design-spec|implementation-plan|handoff|review-package> --root <path> [--policy <path>] --format json` exits 0 only for `within_budget`, 3 only for valid `over_budget`, and 2 for invalid input. `artifact-budget validate-report --boundary <producer|sdd|ship-handoff|ship-summary> --input <path|-> [--policy <path>]` canonicalizes one strict UTF-8 JSON object on exit 0 and emits no stdout on exit 2.
 - A producer report has exactly `state`, one root `artifact`, and `notes`; it carries no `decisions`, `open_items`, `adr_paths`, member lists, or summary field. Successful artifact metrics are exactly `root_bytes`, `total_bytes`, `file_count`, and `largest_member_bytes`; the notes limit comes only from the shared policy.
+- Every phase boundary uses the exhaustive state/nullability matrix in D14: producers write candidate JSON and transport only validated stdout; callers validate received bytes again. No Markdown/YAML report is authoritative.
+- The one shared policy bounds notes at 500 characters and every report wire object at 8,192 encoded bytes; skills contain neither number.
 - Measurement happens after the final mutation. Any later writer owns remeasurement; no missing or stale measurement permits a successful state.
 - Plans keep shared constraints in this root and task-specific contracts in convention-named members; reviewers and implementers receive paths plus compact metrics, never artifact contents or member lists.
+- SDD and ship review persist non-empty detail as a `delivery-detail` review-package below the primary checkout's `.superpowers/issue-delivery/` home before removable-worktree cleanup; callers receive one main-root-relative `report_path`, never a findings list.
 - The only over-budget transitions are those in the spec: design/grill compact then `decompose_required`; planning compact/split then `decompose_required`; handoff rewrite once then `stopped`; review-package generation then `decompose_required`.
 - Historical artifacts are not migrated. Model/token budgets, attempt budgets, general product diff-size gates, and CI wiring remain out of scope, except for the D9/D10 compatibility required by the new package roots.
 - Use the Python standard library only, preserve existing public workflow semantics not explicitly changed here, append `Co-Authored-By: Codex <noreply@openai.com>`, and never disable commit signing.
 
 ## Test seams
 
-- `artifact-budget check` is the primary seam: table-driven CLI tests use repository-owned small/oversized descriptors and temporary payloads for boundaries, strict schemas, discovery, deterministic JSON, and fail-closed errors.
+- `artifact-budget check` and `validate-report` are the primary seams: table-driven CLI tests use repository-owned artifact descriptors and every valid/invalid boundary matrix row through stdin and file input for deterministic JSON and fail-closed errors.
 - `sdd/scripts/task-brief` is the plan-consumer seam: it validates a package root and resolves exactly one indexed task member without reading other task bodies.
-- `sdd/scripts/review-package` is the review-producer seam: temporary Git ranges prove complete ordered sharding, complete manifests, metrics, and truthful oversize stops.
+- `sdd/scripts/review-package` is the review-producer seam: temporary Git ranges and detail inputs prove both strict variants, deterministic commits/bytes, durable lifetime, mutation-point no-clobber races, complete manifests, metrics, and truthful oversize stops.
 - `just agent-workflow-tests` pins producer/caller ordering, final-writer remeasurement, fixed reports, small/oversized transitions, and root-only dispatches.
 - `just build` is the publication seam for the installed module, command, policy, and updated skills.
 
@@ -40,7 +44,7 @@ Task 3 — Generate bounded review manifests and whole-file diff shards — `hom
 
 Task 4 — Enforce budgets in single-file artifact producers — `home/common/agent-skills/skills/{design/SKILL.md,grill-with-docs/SKILL.md,handoff/SKILL.md}`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-4.md](2026-08-19-enforce-artifact-budgets.tasks/task-4.md)
 
-Task 5 — Close the orchestration contract and run repository gates — `home/common/agent-skills/skills/from-issue/{SKILL.md,AUTO.md,standards-review.md,ship-handoff.md}`, `home/common/agent-skills/skills/ship-issue/SKILL.md`, `home/common/agent-skills/skills/sdd/SKILL.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-5.md](2026-08-19-enforce-artifact-budgets.tasks/task-5.md)
+Task 5 — Close the orchestration contract and run repository gates — `home/common/agent-skills/skills/from-issue/{SKILL.md,AUTO.md,standards-review.md,ship-handoff.md}`, `home/common/agent-skills/skills/ship-issue/{SKILL.md,REVIEW.md}`, `home/common/agent-skills/skills/sdd/SKILL.md`, `home/common/agent-skills/scripts/workflow-state.py`, `home/common/agent-skills/tests/{test_workflow_skill_contracts.py,test_workflow_state.py}` — full — [task-5.md](2026-08-19-enforce-artifact-budgets.tasks/task-5.md)
 
 ## Decisions
 
@@ -53,6 +57,9 @@ Task 5 — Close the orchestration contract and run repository gates — `home/c
 - D11 defines the exact bounded report and ship-summary transport used by Tasks 1, 2, 4, and 5.
 - D12 defines deterministic staged review-package publication/refusal used by Task 3.
 - D13 defines behavioral descriptors and strict manifest/binary accounting used by Tasks 1 and 3.
+- D14 defines the canonical report CLI and exhaustive boundary matrices used by all tasks.
+- D15 defines the budgeted durable delivery-detail package and cleanup lifetime used by Tasks 3 and 5.
+- D16 replaces D12's racy rename step with mutation-point no-clobber publication in Task 3.
 
 ## Standards review provenance
 
@@ -65,5 +72,15 @@ Task 5 — Close the orchestration contract and run repository gates — `home/c
 - S2: selected staged first-publication plus untouched refusal for existing packages (D12).
 - S3: rejected manifest booleans and matched binary zero-churn stat precedent (D13).
 - S4: added a real executable wrapper and source test runtime matching Home Manager publication.
+
+### Second review
+
+- Reviewer: `/root/issue49_plan_rereview` (native reviewer; no fallback).
+- Review artifact: `/tmp/issue49-plan-rereview.md`; reviewed head `53ad1d8fda183e40808de0473f4625c7f0cb1933`; base `416e7a92795a282c1b8cdd71e35a0f570cd35e56`; isolated/read-only.
+- Accepted 4 Blocking and 1 Should-fix findings; rejected 0; deferred 0.
+- R-B1/R-B2: added canonical JSON CLI validation and exhaustive valid/invalid boundary rows (D14).
+- R-B3: added a primary-checkout durable detail package, cleanup order, and path-lifetime seam (D15).
+- R-B4: replaced check/rename with exclusive identity-tracked publication and race injections (D16).
+- R-S1: applied fixture dates to every commit and added byte-repeatability coverage.
 
 Task members are the normative executable instructions. Read this root once for shared constraints and then only the selected linked member.
