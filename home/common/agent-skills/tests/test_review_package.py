@@ -9,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).parents[4]
@@ -84,6 +85,30 @@ class ReviewPackageCliTest(unittest.TestCase):
             argv += ["--output", str(output)]
         return subprocess.run(argv, cwd=repo, env=env, text=True,
                               capture_output=True, check=False)
+
+    def test_unavailable_validator_has_one_stable_cli_failure(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for broken in (False, True):
+                with self.subTest(broken=broken):
+                    home = directory / ("broken" if broken else "missing")
+                    module_home = home / ".agents/lib/python"
+                    module_home.mkdir(parents=True)
+                    if broken:
+                        (module_home / "artifact_budget.py").write_text(
+                            "raise RuntimeError('broken validator')\n", encoding="utf-8"
+                        )
+                    env = os.environ.copy()
+                    env.update({"HOME": str(home), "PYTHONPATH": ""})
+                    result = subprocess.run(
+                        [str(COMMAND)], cwd=directory, env=env, text=True,
+                        capture_output=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(
+                        result.stderr, "review-package: validator unavailable\n"
+                    )
 
     def test_small_range_has_one_complete_reconstructable_shard(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -479,6 +504,59 @@ class ReviewPackageCliTest(unittest.TestCase):
                 if mutation == "member-before-second":
                     competed_path = final_members / "shard-001.diff"
                 self.assertEqual(competed_path.read_bytes(), competitor)
+
+    def test_parent_swap_cannot_redirect_publication_outside_root(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            primary = directory / "primary"
+            outside = directory / "outside"
+            stage = directory / "stage"
+            primary.mkdir()
+            outside.mkdir()
+            stage_members = stage / "review.shards"
+            stage_members.mkdir(parents=True)
+            stage_root = stage / "review.json"
+            stage_root.write_bytes(b"staged-manifest")
+            (stage_members / "shard-001.diff").write_bytes(b"staged-shard")
+            chain = review_package_module._ensure_directories(
+                primary, ["identity"], retain=True
+            )
+            self.assertIsNotNone(chain)
+            identity = primary / "identity"
+            moved = primary / "identity-moved"
+            final_root = identity / "review.json"
+
+            def swap_parent(label: str, _path: Path):
+                if label == "member_dir":
+                    identity.rename(moved)
+                    identity.symlink_to(outside, target_is_directory=True)
+
+            try:
+                with self.assertRaises(review_package_module.PublicationError):
+                    review_package_module.publish_package(
+                        stage_root, final_root, swap_parent,
+                        final_parent_fd=chain.leaf,
+                        verify_final_parent=chain.verify,
+                    )
+            finally:
+                chain.close()
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertFalse((moved / "review.json").exists())
+            self.assertFalse((moved / "review.shards").exists())
+
+    def test_stage_write_failure_removes_partial_stage_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            final_root = directory / "review.json"
+            with mock.patch.object(
+                Path, "write_bytes",
+                side_effect=OSError("injected write failure"),
+            ):
+                with self.assertRaises(review_package_module.GenerationError):
+                    review_package_module._write_stage(
+                        final_root, {"manifest": "candidate"}, [b"member"], "diff"
+                    )
+            self.assertFalse(any(".stage-" in path.name for path in directory.iterdir()))
 
     def test_fixed_commit_environment_makes_two_packages_byte_identical(self):
         snapshots = []

@@ -17,10 +17,6 @@ import tempfile
 from typing import Callable, Mapping, Sequence
 
 
-sys.path.insert(0, str(Path.home() / ".agents/lib/python"))
-import artifact_budget  # noqa: E402
-
-
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 DIFF_BOUNDARY = re.compile(br"(?m)^diff --git ")
@@ -178,8 +174,11 @@ def _write_stage(
     shards: Sequence[bytes],
     suffix: str,
 ) -> tuple[Path, Path]:
+    staging: Path | None = None
     try:
-        staging = Path(tempfile.mkdtemp(prefix=f".{final_root.name}.stage-", dir=final_root.parent))
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".{final_root.name}.stage-", dir=final_root.parent
+        ))
         stage_root = staging / final_root.name
         member_dir = stage_root.with_suffix(".shards")
         member_dir.mkdir()
@@ -187,12 +186,21 @@ def _write_stage(
             (member_dir / f"shard-{number:03d}.{suffix}").write_bytes(raw)
         stage_root.write_bytes(_canonical(manifest))
         return staging, stage_root
-    except OSError as exc:
-        raise GenerationError("cannot write staging package") from exc
+    except Exception as exc:
+        if staging is not None:
+            _cleanup_stage(staging)
+        if isinstance(exc, OSError):
+            raise GenerationError("cannot write staging package") from exc
+        raise
 
 
 def _identity(path: Path) -> tuple[int, int]:
     info = path.lstat()
+    return info.st_dev, info.st_ino
+
+
+def _descriptor_identity(descriptor: int) -> tuple[int, int]:
+    info = os.fstat(descriptor)
     return info.st_dev, info.st_ino
 
 
@@ -215,8 +223,16 @@ def publish_package(
     stage_root: Path,
     final_root: Path,
     before_mutation: Callable[[str, Path], None] | None = None,
+    *,
+    final_parent_fd: int | None = None,
+    verify_final_parent: Callable[[], None] | None = None,
 ) -> None:
     """Publish with exclusive hard links and inode-matched cleanup (D16)."""
+    previous_fd = -1
+    if final_parent_fd is not None:
+        previous_fd = _open_directory(Path.cwd())
+        os.fchdir(final_parent_fd)
+        final_root = Path(final_root.name)
     stage_members = stage_root.with_suffix(".shards")
     final_members = final_root.with_suffix(".shards")
     linked: list[tuple[Path, tuple[int, int]]] = []
@@ -224,12 +240,16 @@ def publish_package(
     try:
         if before_mutation is not None:
             before_mutation("member_dir", final_members)
+        if verify_final_parent is not None:
+            verify_final_parent()
         final_members.mkdir()
         directory_identity = _identity(final_members)
         for source in sorted(stage_members.iterdir()):
             destination = final_members / source.name
             if before_mutation is not None:
                 before_mutation(f"member:{source.name}", destination)
+            if verify_final_parent is not None:
+                verify_final_parent()
             _verify_published_identities(
                 final_members, directory_identity, linked
             )
@@ -241,6 +261,8 @@ def publish_package(
             )
         if before_mutation is not None:
             before_mutation("manifest", final_root)
+        if verify_final_parent is not None:
+            verify_final_parent()
         _verify_published_identities(final_members, directory_identity, linked)
         os.link(stage_root, final_root, follow_symlinks=False)
     except (OSError, RuntimeError, PublicationError) as exc:
@@ -252,11 +274,16 @@ def publish_package(
                 pass
         if directory_identity is not None:
             try:
-                if _identity(final_members) == directory_identity and not any(final_members.iterdir()):
+                if (_identity(final_members) == directory_identity
+                        and not any(final_members.iterdir())):
                     final_members.rmdir()
             except (FileNotFoundError, OSError):
                 pass
         raise PublicationError("exclusive package publication failed") from exc
+    finally:
+        if previous_fd >= 0:
+            os.fchdir(previous_fd)
+            os.close(previous_fd)
 
 
 def _cleanup_stage(staging: Path) -> None:
@@ -374,11 +401,49 @@ def _open_directory(path: Path) -> int:
     return os.open(path, flags)
 
 
-def _ensure_directories(base: Path, parts: Sequence[str]) -> None:
+class _DirectoryChain:
+    """Retain and revalidate every no-follow directory used for publication."""
+
+    def __init__(self, descriptors: list[int], names: list[str]):
+        self._descriptors = descriptors
+        self._names = names
+        self._identities = [_descriptor_identity(fd) for fd in descriptors]
+
+    @property
+    def leaf(self) -> int:
+        return self._descriptors[-1]
+
+    def verify(self) -> None:
+        try:
+            for index, descriptor in enumerate(self._descriptors):
+                if _descriptor_identity(descriptor) != self._identities[index]:
+                    raise PublicationError("destination parent identity changed")
+                if index:
+                    info = os.stat(
+                        self._names[index - 1],
+                        dir_fd=self._descriptors[index - 1],
+                        follow_symlinks=False,
+                    )
+                    if (not stat.S_ISDIR(info.st_mode)
+                            or (info.st_dev, info.st_ino) != self._identities[index]):
+                        raise PublicationError("destination parent identity changed")
+        except OSError as exc:
+            raise PublicationError("destination parent identity changed") from exc
+
+    def close(self) -> None:
+        for descriptor in reversed(self._descriptors):
+            os.close(descriptor)
+        self._descriptors.clear()
+
+
+def _ensure_directories(
+    base: Path, parts: Sequence[str], *, retain: bool = False
+) -> _DirectoryChain | None:
     try:
         descriptor = _open_directory(base)
     except OSError as exc:
         raise InvocationError("unsafe destination parent") from exc
+    descriptors = [descriptor]
     try:
         for part in parts:
             try:
@@ -394,10 +459,18 @@ def _ensure_directories(base: Path, parts: Sequence[str]) -> None:
                 )
             except OSError as exc:
                 raise InvocationError("unsafe destination parent") from exc
-            os.close(descriptor)
             descriptor = child
-    finally:
-        os.close(descriptor)
+            descriptors.append(descriptor)
+        chain = _DirectoryChain(descriptors, list(parts))
+        chain.verify()
+        if retain:
+            return chain
+        chain.close()
+        return None
+    except Exception:
+        for opened in reversed(descriptors):
+            os.close(opened)
+        raise
 
 
 def _ensure_ignore(primary: Path) -> None:
@@ -639,10 +712,18 @@ def _build_detail(args: argparse.Namespace) -> tuple[dict[str, object], int]:
     }
     _ensure_directories(primary, [".superpowers", "issue-delivery"])
     _ensure_ignore(primary)
-    _ensure_directories(
-        primary, [".superpowers", "issue-delivery", str(issue), identity]
+    trusted_parent = _ensure_directories(
+        primary, [".superpowers", "issue-delivery", str(issue), identity],
+        retain=True,
     )
-    return _publish_candidate(primary, final_root, manifest, shard_bytes, "jsonl")
+    assert trusted_parent is not None
+    try:
+        return _publish_candidate(
+            primary, final_root, manifest, shard_bytes, "jsonl",
+            trusted_parent=trusted_parent,
+        )
+    finally:
+        trusted_parent.close()
 
 
 def _publish_candidate(
@@ -651,19 +732,37 @@ def _publish_candidate(
     manifest: Mapping[str, object],
     shards: Sequence[bytes],
     suffix: str,
+    *,
+    trusted_parent: _DirectoryChain | None = None,
+    before_mutation: Callable[[str, Path], None] | None = None,
 ) -> tuple[dict[str, object], int]:
     staging: Path | None = None
+    published_root = final_root
+    previous_fd = -1
     try:
+        if trusted_parent is not None:
+            trusted_parent.verify()
+            previous_fd = _open_directory(Path.cwd())
+            os.fchdir(trusted_parent.leaf)
+            final_root = Path(final_root.name)
         staging, stage_root = _write_stage(final_root, manifest, shards, suffix)
         check = artifact_budget.check_artifact("review-package", stage_root)
-        publish_package(stage_root, final_root)
+        publish_package(
+            stage_root, final_root, before_mutation,
+            verify_final_parent=(
+                trusted_parent.verify if trusted_parent is not None else None
+            ),
+        )
     except artifact_budget.ArtifactBudgetError as exc:
         raise GenerationError("review package measurement failed") from exc
     finally:
         if staging is not None:
             _cleanup_stage(staging)
+        if previous_fd >= 0:
+            os.fchdir(previous_fd)
+            os.close(previous_fd)
     state = "complete" if check.status == "within_budget" else "decompose_required"
-    report = _artifact_report(state, _display_path(final_root, repository), check)
+    report = _artifact_report(state, _display_path(published_root, repository), check)
     return report, 0 if state == "complete" else 3
 
 
@@ -694,7 +793,27 @@ def _mode(args: argparse.Namespace) -> str:
     return "diff"
 
 
+def _bootstrap_validator() -> bool:
+    global artifact_budget
+    sys.path.insert(0, str(Path.home() / ".agents/lib/python"))
+    try:
+        import artifact_budget as loaded_validator
+        required = (
+            "ArtifactBudgetError", "CheckResult", "check_artifact", "load_limits",
+        )
+        if (not getattr(loaded_validator, "__file__", None)
+                or any(not hasattr(loaded_validator, name) for name in required)):
+            return False
+    except Exception:
+        return False
+    artifact_budget = loaded_validator
+    return True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    if not _bootstrap_validator():
+        sys.stderr.write("review-package: validator unavailable\n")
+        return 2
     try:
         args = _parser().parse_args(argv)
         mode = _mode(args)
