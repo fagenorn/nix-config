@@ -80,6 +80,32 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual(ninth.returncode, 2)
             self.assertEqual(ninth.stdout, "")
 
+    def test_plan_requires_one_nonempty_task_index_and_contiguous_reference_set(self):
+        cases = {
+            "missing": ("# Plan\n", {}),
+            "empty": ("## Task index\n", {}),
+            "missing_with_member": (
+                "Task 1 — T — f — full — [task-1.md](plan.tasks/task-1.md)\n",
+                {1: "# Task 1\n"},
+            ),
+            "duplicate": (
+                "## Task index\n\nTask 1 — T — f — full — "
+                "[task-1.md](plan.tasks/task-1.md)\n\n## Task index\n",
+                {1: "# Task 1\n"},
+            ),
+        }
+        for name, (root_text, task_texts) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                root = directory / "plan.md"
+                members = directory / "plan.tasks"
+                members.mkdir()
+                root.write_text(root_text, encoding="utf-8")
+                for number, task_text in task_texts.items():
+                    (members / f"task-{number}.md").write_text(task_text, encoding="utf-8")
+                result = self.run_check("implementation-plan", root)
+                self.assertEqual((result.returncode, result.stdout), (2, ""))
+
     def test_valid_measurement_is_deterministic_and_violations_are_closed(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "handoff.md"
@@ -355,6 +381,16 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         self.assertEqual((over.returncode, over.stdout, over.stderr),
                          (2, b"", b"artifact-budget: invalid report\n"))
 
+    def test_validate_report_rejects_escaped_lone_surrogate_without_traceback(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+             "--input", "-", "--policy", str(POLICY)],
+            input=b'{"state":"failed","artifact":null,"notes":"\\ud800"}',
+            capture_output=True, check=False,
+        )
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (2, b"", b"artifact-budget: invalid report\n"))
+
     def test_validate_detail_input_is_one_strict_cli_boundary(self):
         finding = {"axis": "ship", "severity": "Minor", "status": "minor",
                    "text": "kept", "ruling": None}
@@ -378,6 +414,18 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                  "--policy", str(POLICY)], input=payload, capture_output=True, check=False)
             self.assertEqual((result.returncode, result.stdout, result.stderr),
                              (2, b"", b"artifact-budget: invalid detail input\n"))
+
+    def test_validate_detail_input_rejects_escaped_lone_surrogate_without_traceback(self):
+        payload = (
+            b'{"interface_version":1,"findings":[{"axis":"ship","severity":"Minor",'
+            b'"status":"minor","text":"\\ud800","ruling":null}]}'
+        )
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
+             "--policy", str(POLICY)], input=payload, capture_output=True, check=False,
+        )
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (2, b"", b"artifact-budget: invalid detail input\n"))
 
     def review_manifest(self, directory: Path, suffix="diff", size=4):
         root = directory / "review.json"
@@ -533,14 +581,59 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             member.write_text("# Task 1\n", encoding="utf-8")
             root.write_text("## Task index\n\nTask 1 — T — f — full — "
                             "[task-1.md](plan.tasks/task-1.md)\n", encoding="utf-8")
-            original = artifact_budget._read_regular
-            def refuse(path, *, limit=None):
+            original = artifact_budget.os.access
+
+            def refuse(path, mode, **kwargs):
                 if Path(path) == member:
-                    raise artifact_budget.InputReadError("denied")
-                return original(path, limit=limit)
-            with mock.patch.object(artifact_budget, "_read_regular", side_effect=refuse):
+                    return False
+                return original(path, mode, **kwargs)
+
+            with mock.patch.object(artifact_budget.os, "access", side_effect=refuse):
                 with self.assertRaises(artifact_budget.ArtifactBudgetError):
                     artifact_budget.check_artifact("implementation-plan", root, POLICY)
+
+    def test_checker_rejects_path_replacement_during_single_descriptor_capture(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            root = directory / "handoff.md"
+            replacement = directory / "replacement.md"
+            root.write_text("original", encoding="utf-8")
+            replacement.write_text("replacement", encoding="utf-8")
+            original_fstat = os.fstat
+            calls = 0
+
+            def replace_before_stability_check(descriptor):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    os.replace(replacement, root)
+                return original_fstat(descriptor)
+
+            with mock.patch.object(artifact_budget.os, "fstat",
+                                   side_effect=replace_before_stability_check):
+                with self.assertRaisesRegex(artifact_budget.ArtifactBudgetError,
+                                           "artifact changed during read"):
+                    artifact_budget.check_artifact("handoff", root, POLICY)
+
+    def test_checker_rejects_member_in_place_mutation_during_capture(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            root, member, _ = self.review_manifest(directory)
+            original_fstat = os.fstat
+            calls = 0
+
+            def mutate_before_stability_check(descriptor):
+                nonlocal calls
+                calls += 1
+                if calls == 5:
+                    member.write_bytes(b"changed in place")
+                return original_fstat(descriptor)
+
+            with mock.patch.object(artifact_budget.os, "fstat",
+                                   side_effect=mutate_before_stability_check):
+                with self.assertRaisesRegex(artifact_budget.ArtifactBudgetError,
+                                           "artifact changed during read"):
+                    artifact_budget.check_artifact("review-package", root, POLICY)
 
     def test_duplicate_unknown_and_scalar_policy_errors_are_rejected(self):
         with tempfile.TemporaryDirectory() as raw:

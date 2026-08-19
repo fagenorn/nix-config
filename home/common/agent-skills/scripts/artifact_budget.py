@@ -54,6 +54,19 @@ class CheckResult:
         }
 
 
+@dataclass(frozen=True)
+class CapturedArtifact:
+    path: Path
+    raw: bytes
+    device: int
+    inode: int
+    signature: tuple[int, int, int, int, int, int]
+
+    @property
+    def size(self) -> int:
+        return len(self.raw)
+
+
 def _exact_keys(value: object, keys: set[str]) -> bool:
     return isinstance(value, dict) and set(value) == keys
 
@@ -191,20 +204,51 @@ def _directory_entries(path: Path) -> list[Path]:
         raise ArtifactBudgetError("cannot inspect member directory") from exc
 
 
-def _regular_identity(path: Path) -> tuple[int, int, int]:
+def _stat_signature(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _capture_artifact(path: Path) -> CapturedArtifact:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        info = path.lstat()
-    except OSError as exc:
-        raise ArtifactBudgetError("cannot inspect artifact") from exc
-    if not stat.S_ISREG(info.st_mode):
-        raise ArtifactBudgetError("artifact is not a non-symlink regular file")
-    try:
-        if not os.access(path, os.R_OK):
-            raise ArtifactBudgetError("artifact is unreadable")
-        raw = _read_regular(path)
-    except InputReadError as exc:
+        descriptor = os.open(path, flags)
+    except (OSError, ValueError) as exc:
         raise ArtifactBudgetError("artifact is unreadable") from exc
-    return info.st_dev, info.st_ino, len(raw)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ArtifactBudgetError("artifact is not a non-symlink regular file")
+        if not os.access(path, os.R_OK, follow_symlinks=False):
+            raise ArtifactBudgetError("artifact is unreadable")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read()
+        after = os.fstat(descriptor)
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise ArtifactBudgetError("artifact changed during read") from exc
+        if (_stat_signature(before) != _stat_signature(after)
+                or _stat_signature(after) != _stat_signature(current)
+                or len(raw) != after.st_size):
+            raise ArtifactBudgetError("artifact changed during read")
+        return CapturedArtifact(path, raw, after.st_dev, after.st_ino,
+                                _stat_signature(after))
+    except OSError as exc:
+        raise ArtifactBudgetError("artifact is unreadable") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _assert_artifact_current(artifact: CapturedArtifact) -> None:
+    try:
+        current = artifact.path.lstat()
+    except OSError as exc:
+        raise ArtifactBudgetError("artifact changed after read") from exc
+    if _stat_signature(current) != artifact.signature:
+        raise ArtifactBudgetError("artifact changed after read")
 
 
 def _discover_plan(root: Path, root_raw: bytes) -> list[Path]:
@@ -226,6 +270,10 @@ def _discover_plan(root: Path, root_raw: bytes) -> list[Path]:
         text = root_raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ArtifactBudgetError("malformed UTF-8 plan") from exc
+    if text.splitlines().count("## Task index") != 1:
+        raise ArtifactBudgetError("plan must contain exactly one task index")
+    if count == 0:
+        raise ArtifactBudgetError("plan must contain at least one task member")
     expected = [f"{directory.name}/task-{number}.md" for number in range(1, count + 1)]
     references: list[str] = []
     row_re = re.compile(
@@ -290,7 +338,7 @@ def validate_detail_input(value: Mapping[str, object]) -> None:
         _validate_finding(finding)
 
 
-def _validate_manifest(root: Path, root_raw: bytes) -> list[Path]:
+def _validate_manifest(root: Path, root_raw: bytes) -> list[CapturedArtifact]:
     manifest = _decode_json(root_raw)
     if not isinstance(manifest, dict):
         raise ArtifactBudgetError("manifest is not an object")
@@ -361,19 +409,20 @@ def _validate_manifest(root: Path, root_raw: bytes) -> list[Path]:
     if not isinstance(shards, list) or len(shards) != count:
         raise ArtifactBudgetError("manifest shards do not match discovery")
     paths = [numbered[number] for number in range(1, count + 1)]
+    members = [_capture_artifact(path) for path in paths]
     sizes: list[int] = []
-    for number, (entry, path) in enumerate(zip(shards, paths), 1):
+    for number, (entry, member) in enumerate(zip(shards, members), 1):
         if not _exact_keys(entry, {"path", "bytes"}):
             raise ArtifactBudgetError("invalid shard entry")
         expected_path = f"{directory.name}/shard-{number:03d}.{suffix}"
         if entry["path"] != expected_path or not _integer(entry["bytes"]):  # type: ignore[index]
             raise ArtifactBudgetError("invalid shard reference")
-        size = _regular_identity(path)[2]
+        size = member.size
         if entry["bytes"] != size:  # type: ignore[index]
             raise ArtifactBudgetError("stale shard bytes")
         sizes.append(size)
         if suffix == "jsonl":
-            raw = _read_regular(path)
+            raw = member.raw
             lines = raw.splitlines(keepends=True)
             if not lines or any(not line.endswith(b"\n") for line in lines):
                 raise ArtifactBudgetError("invalid JSONL shard")
@@ -381,8 +430,7 @@ def _validate_manifest(root: Path, root_raw: bytes) -> list[Path]:
             for line in lines:
                 finding = _decode_json(line)
                 _validate_finding(finding)
-                canonical = (json.dumps(finding, ensure_ascii=False, sort_keys=True,
-                                        separators=(",", ":")) + "\n").encode("utf-8")
+                canonical = _canonical(finding)
                 if line != canonical:
                     raise ArtifactBudgetError("non-canonical JSONL finding")
                 findings.append(finding)
@@ -392,12 +440,12 @@ def _validate_manifest(root: Path, root_raw: bytes) -> list[Path]:
         raise ArtifactBudgetError("invalid declared total")
     if suffix == "jsonl":
         all_findings: list[object] = []
-        for path in paths:
-            all_findings.extend(_decode_json(line) for line in _read_regular(path).splitlines())
+        for member in members:
+            all_findings.extend(_decode_json(line) for line in member.raw.splitlines())
         validate_detail_input({"interface_version": 1, "findings": all_findings})
         if manifest["coverage"]["finding_count"] != len(all_findings):  # type: ignore[index]
             raise ArtifactBudgetError("inconsistent detail coverage")
-    return paths
+    return members
 
 
 def check_artifact(kind: str, root: str | os.PathLike[str],
@@ -407,9 +455,9 @@ def check_artifact(kind: str, root: str | os.PathLike[str],
     if kind not in limits:
         raise ArtifactBudgetError("unknown artifact kind")
     root_path = Path(root)
-    root_identity = _regular_identity(root_path)
-    root_raw = _read_regular(root_path)
-    members: list[Path]
+    root_artifact = _capture_artifact(root_path)
+    root_raw = root_artifact.raw
+    members: list[CapturedArtifact]
     if kind in {"design-spec", "handoff"}:
         try:
             root_raw.decode("utf-8", errors="strict")
@@ -419,23 +467,24 @@ def check_artifact(kind: str, root: str | os.PathLike[str],
     elif kind == "implementation-plan":
         if root_path.suffix != ".md" or not root_path.stem:
             raise ArtifactBudgetError("invalid plan root name")
-        members = _discover_plan(root_path, root_raw)
+        members = [_capture_artifact(path) for path in _discover_plan(root_path, root_raw)]
     else:
         if root_path.suffix != ".json" or not root_path.stem:
             raise ArtifactBudgetError("invalid review root name")
         members = _validate_manifest(root_path, root_raw)
-    identities = {(root_identity[0], root_identity[1])}
+    identities = {(root_artifact.device, root_artifact.inode)}
     member_sizes: list[int] = []
     for member in members:
-        device, inode, size = _regular_identity(member)
-        identity = (device, inode)
+        identity = (member.device, member.inode)
         if identity in identities:
             raise ArtifactBudgetError("duplicate resolved member identity")
         identities.add(identity)
-        member_sizes.append(size)
+        member_sizes.append(member.size)
+    for artifact in [root_artifact, *members]:
+        _assert_artifact_current(artifact)
     metrics = {
-        "root_bytes": root_identity[2],
-        "total_bytes": root_identity[2] + sum(member_sizes),
+        "root_bytes": root_artifact.size,
+        "total_bytes": root_artifact.size + sum(member_sizes),
         "file_count": 1 + len(member_sizes),
         "largest_member_bytes": max(member_sizes, default=0),
     }
@@ -625,7 +674,11 @@ def validate_ship_summary_report(value: Mapping[str, object], notes_max_characte
 
 
 def _canonical(value: object) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    try:
+        return (json.dumps(value, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")) + "\n").encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ArtifactBudgetError("invalid Unicode string") from exc
 
 
 def _input_bytes(path: str, wire_max: int) -> bytes:
