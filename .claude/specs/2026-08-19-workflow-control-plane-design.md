@@ -62,7 +62,9 @@ readable and no persisted state migration is introduced.
 `orchestrate-issues` becomes an adapter loop with no lifecycle decision tree:
 
 1. Invoke `init-run` and read its bounded current requirements.
-2. Query the tracker and inspect exactly the returned worktrees plus needed absent candidates.
+2. Query the tracker, inspect exactly the returned worktrees, and verify an absent candidate for
+   every requested issue without a bootstrap requirement plus every absent/mismatched returned
+   path.
 3. Normalize those facts and any owner-exit notification into one request.
 4. Invoke `workflow-state control`.
 5. Spawn owners for `spawn`, `resume`, and `retry` envelopes; perform the one-shot wait described
@@ -121,10 +123,12 @@ canonical and newline-terminated.
 
 On restart, the dispatcher already has the requested issue set from its invocation. It calls
 `init-run`, inspects exactly each returned `recorded_worktree`, and reports that path's normalized
-state in the next control request. For a returned path that is absent or mismatched, and for a
-requested ready issue with no requirement, it also reserves a verified absent candidate. The
-helper still validates every supplied recorded path against the ledger inside `control`; the
-projection is discovery, not authority.
+state in the next control request. For a returned path that is absent or mismatched, it also
+reserves a verified absent candidate. For every requested issue with no bootstrap requirement, it
+reserves and reports a harmless verified absent candidate without first classifying that issue as
+ready, blocked, fogged, or closed. Extra candidates that policy does not use are valid observations
+and `control` ignores them. The helper still validates every supplied recorded path against the
+ledger inside `control`; the projection is discovery, not authority.
 
 ### Versioned control request
 
@@ -200,14 +204,18 @@ The fields mean:
 Unknown versions, fields, enum members, duplicate issue observations, non-monotonic timestamps,
 relative paths, mismatched recorded paths, and incomplete facts required by a ready action fail
 without rewriting the ledger. Extra tracker issues or worktree observations outside `issues` also
-fail. Empty `owners` and a worktree omission for an issue that needs no action are valid.
+fail. Empty `owners`, a worktree omission for an issue that needs no action, and a verified absent
+candidate for a requested issue that policy does not dispatch are valid.
 
 One narrow replay exception preserves the identical-request guarantee: a candidate that was absent
 in the request may equal the latest attempt's now-recorded worktree only when that attempt's first
-launch was created by this same request instant at that exact path. The helper treats it as the
-already-consumed candidate observation and emits no duplicate action. A candidate colliding with
-any other durable attempt/path/time remains invalid; this exception does not weaken recorded-path
-validation for a new action.
+launch was created by this same request instant at that exact path, the latest attempt remains
+active, no current `unavailable` observation names that launch, and accepting the fact can produce
+no lifecycle transition or dispatch for the issue. The helper treats it only as the already-
+consumed candidate observation and emits no duplicate action. A wrong instant or path, a same-
+instant terminal attempt, a current-unavailable attempt, or any other durable collision remains
+invalid. A request that could resume, retry, or otherwise dispatch must supply current recorded or
+candidate facts; this exception does not weaken worktree validation for a new action.
 
 ### Versioned control response
 
@@ -300,9 +308,18 @@ all current active or handed-off latest attempts. The adapter schedules at most 
 for the returned wait ID. On a different returned wait ID, it first publishes the new current ID,
 then cancels the old observer and arms/stores the new one; the observer reports its wait ID when it
 wakes, and the adapter ignores that wake if the ID is no longer current. Repeating the current wait
-ID does not arm a second observer. `finalize` first clears the current ID, then cancels and clears
-any outstanding observer, so a racing old wake is stale. This is event-driven scheduling, not a
-polling interval or a resident daemon.
+ID does not arm a second observer. A missing or already-exited old handle is an idempotent cancel
+outcome and does not prevent arming the replacement. If replacement arming fails, the adapter
+clears both `current_wait_id` and `current_wait_handle` (or marks their equivalent state as
+uninstalled) and fails loudly that no wake is installed. `finalize` first clears the current ID,
+then cancels and clears any outstanding observer, so a racing old wake is stale.
+
+The adapter's wait-handle state is process-local. On a full dispatcher restart, the host is
+responsible for reaping or cancelling every inherited detached wait observer before the restarted
+dispatcher rearms from the next returned wait ID. This external-edge cleanup is the assumption
+under which “at most one one-shot wake” remains truthful across process restarts. The ledger does
+not discover or own detached host processes. This is event-driven scheduling, not a polling
+interval or a resident daemon.
 
 A drained run uses:
 
@@ -360,16 +377,22 @@ finalize decision. Exactly-once host process creation is not claimed across the 
 
 The Claude dispatcher keeps only adapter mechanics and rendering:
 
-- resolve the issue set and configured `maxParallel`/`agentBudgetMinutes`;
+- resolve the issue set and configured bindings, placing `maxParallel` in request
+  `max_parallel` and `agentBudgetMinutes` in request `attempt_budget_minutes`;
 - call `init-run`, then inspect exactly its returned recorded worktree requirements;
 - query current tracker state, open blockers, and decision blockers;
-- reserve verified absent candidates where the normalized recorded facts or new ready issues need
-  them;
+- reserve a verified absent candidate for every requested issue with no bootstrap requirement and
+  for every returned path observed absent or mismatched, without classifying tracker readiness;
 - normalize host owner-exit notifications;
 - invoke `control` on start/resume and each event;
 - execute dispatch action envelopes in order with the existing background owner prompt;
-- replace the one outstanding wait observer by returned wait ID, ignoring stale wake IDs; and
+- replace the one outstanding wait observer by returned wait ID, applying the idempotent-cancel and
+  fail-loud arm rules above and ignoring stale wake IDs;
 - render the final table and discussion items from a finalize response.
+
+Before a full dispatcher restart enters this loop, its host reaps or cancels inherited detached
+wait observers. The restarted adapter does not infer their existence from the ledger or attempt to
+adopt them.
 
 It deletes prose that counts attempts, chooses resume versus retry, checks whether expiry permits a
 retry, chooses recorded versus candidate worktrees, calculates deadline minima, decides whether to
@@ -419,7 +442,10 @@ refusal, tracker blockers/fog, no-deadline waiting, and finalize behavior.
 
 - **Control CLI seam:** invoke `init-run`, `control`, `progress`, and `finish` as subprocesses with
   request/result files and injected times. Assert the exact bounded bootstrap projection, canonical
-  stdout, exit status, and typed action envelopes. This is the same interface the skills use.
+  stdout, exit status, and typed action envelopes. Bootstrap checks include the latest launch
+  identity after resume and retry. Consumed-candidate checks distinguish actionless replay from
+  wrong-instant, wrong-path, terminal, and current-unavailable requests that need current facts.
+  This is the same interface the skills use.
 - **Durable filesystem seam:** reopen `state.json` after every decision and run concurrent `finish`
   subprocesses. Assert the helper persisted accepted actions before emitting them and retained both
   concurrent outcomes. Tests do not call internal transition functions.
@@ -428,8 +454,10 @@ refusal, tracker blockers/fog, no-deadline waiting, and finalize behavior.
 - **Skill contract seam:** replace assertions for manual reconcile/launch/retry/deadline prose with
   assertions that the dispatcher normalizes external facts, calls `control`, executes only the five
   action kinds, fails loudly on an unknown kind, replaces/cancels waits by ID, ignores stale wake
-  IDs, and does not contain retired policy anchors. Pin the minimal `from-issue` handoff wording,
-  its direct/durable standalone routes, and updated orchestrator eval expectations.
+  IDs, treats missing/exited cancellation idempotently, reports failed arming truthfully, maps
+  configured limits to their request fields, performs restart-host observer cleanup, and does not
+  contain retired policy anchors. Pin the minimal `from-issue` handoff wording, its direct/durable
+  standalone routes, and updated orchestrator eval expectations.
 - **Build seam:** `just agent-workflow-tests` is the deterministic behavioral gate and `just build`
   verifies that the modified helper and skills still distribute through the unchanged Nix module.
 
@@ -471,4 +499,6 @@ refusal, tracker blockers/fog, no-deadline waiting, and finalize behavior.
 | D10 | Make `init-run` return a strict version-1 latest-requirement projection (`issue`, current attempt/owner/action identity, recorded worktree) and use control's first `spawn` envelope for explicitly requested durable standalone ownership. | A restarted adapter must discover exact recorded paths and correlate current host notifications before it can normalize an action-ready control request, while direct standalone use must remain ledger-free and durable standalone use needs one nonduplicated identity after public `launch` removal. | Print the raw ledger, add a fifth bootstrap command, guess identity/paths, or let standalone initialization create identity outside `control` — each either leaks history, widens the interface, or bypasses policy. |
 | D11 | Replace the adapter's sole outstanding wait by publishing the new wait ID before canceling the old handle; ignore stale wake IDs, avoid duplicate observers for the same ID, and clear the ID before finalize cancellation. | A prose-only “supersedes” rule leaves a cancellation race able to create extra control events; explicit ID comparison makes the one-shot event contract operational without durable scheduler state. | Persist observers in the ledger or let cancellation order make an old wake look current — the first crosses the adapter seam and the second violates the single-wake contract. |
 | D12 | Count only currently active external owners as occupied: handed-off and current-unavailable attempts consume a slot only when their returned resume action is accepted. | The control plane must be able to resume interrupted work at full durable nonterminal count, and the request already distinguishes a current unavailable launch from a live owner. | Count every durable nonterminal attempt as occupied — handed-off and dead owners could fill all capacity and prevent their own resume. |
-| D13 | Accept an absent-candidate fact on identical advanced-state replay only when the latest attempt's first launch at the same request instant consumed that exact path. | Persist-before-emission advances the ledger, so the request that created a first attempt necessarily carries a candidate that is no longer absent when replayed; the acceptance guarantee requires a causal, narrowly provable replay case. | Reject every consumed candidate or broadly trust stale candidate facts — the first breaks identical replay, while the second can hide a real path collision. |
+| D13 | Accept an absent-candidate fact only for actionless identical-request replay when the latest attempt remains active and its first launch at the same request instant consumed that exact path; reject wrong instant/path, terminal, and current-unavailable cases, and require current facts for any dispatch. | Persist-before-emission advances the ledger, so the request that created a first attempt necessarily carries a candidate that is no longer absent when replayed; the acceptance guarantee requires a causal exception that cannot authorize a new action. | Reject every consumed candidate or broadly trust stale candidate facts — the first breaks identical replay, while the second can hide a collision or authorize resume/retry from obsolete evidence. |
+| D14 | Keep wait handles process-local: missing/already-exited cancellation is idempotent, failed replacement arming clears truthful adapter wait state and fails loudly, and the host reaps inherited detached observers before a full dispatcher restart rearms. | Cancellation and arming are external process boundaries that can race or fail outside the ledger; explicit recovery ownership is required for both truthful “no wake installed” reporting and the at-most-one observer claim. | Persist observer handles in schema v1, silently swallow arm failure, or assume a restarted process can cancel unknown inherited observers — each either crosses the seam or reports false scheduler state. |
+| D15 | Gather a verified absent candidate for every requested issue without an `init-run` requirement, plus every absent/mismatched returned path, and let `control` ignore unused candidates. | The adapter has filesystem responsibility but must not duplicate control's tracker-readiness classification; harmless extra normalized facts keep one action-ready request without a policy round trip. | Ask the adapter to decide ready/blocked/fogged or add a second helper requirements exchange — the first recreates policy outside control and the second widens the interface and loop. |

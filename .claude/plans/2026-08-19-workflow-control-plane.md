@@ -13,14 +13,14 @@ a strict interface-version-1 request then enters the sole policy command, `contr
 whose one transaction validates observations, applies lifecycle precedence, records
 accepted launches, and returns bounded summaries, current deltas, typed actions, and
 one deadline. The Claude skill becomes the adapter for tracker, worktree, owner, spawn,
-replaceable one-shot wait, and report I/O. See D1–D13.
+replaceable one-shot wait, and report I/O. See D1–D15.
 
 **Tech stack:** Python 3 standard library (`argparse`, `copy`, `datetime`, `fcntl`,
 `json`, `pathlib`, atomic filesystem operations); `unittest` subprocess/CLI tests;
 Markdown skill contracts; JSON eval fixtures; Nix/Just verification.
 
 **Spec:** `.claude/specs/2026-08-19-workflow-control-plane-design.md` is the source of
-truth. It owns the only issue-level decision ledger; this plan cites D1–D13 and does not
+truth. It owns the only issue-level decision ledger; this plan cites D1–D15 and does not
 duplicate its rows.
 
 ## Global Constraints
@@ -50,6 +50,15 @@ duplicate its rows.
   unavailable attempts consume a slot only when their resume action is accepted (D12).
 - `init-run` returns one exact latest requirement per durable issue and never raw state,
   attempts, launches, phase history, deadlines, handoffs, or results (D10).
+- D13 permits a consumed candidate only for actionless identical-request replay. Wrong
+  instant/path, same-instant terminal state, or current-unavailable state rejects it;
+  any new dispatch requires current worktree facts.
+- The adapter gathers a verified absent candidate for every requested issue without an
+  `init-run` requirement and for each absent/mismatched returned path. It never
+  classifies tracker readiness; `control` ignores candidates it does not use (D15).
+- Wait replacement follows D11 and D14: missing/already-exited cancellation is
+  idempotent; an arm failure clears truthful adapter wait state and fails loudly; the
+  host reaps inherited detached observers before a full restart rearms.
 - Tests use only the control CLI, owner CLI commands, and reopened `state.json`; they
   never import transition helpers (D8).
 - Any prose written into `SKILL.md` or eval JSON must describe the behavior present in
@@ -110,9 +119,10 @@ surface.
 
 ## Decisions
 
-The spec's `## Decision ledger` is authoritative. Tasks cite D1–D13 at the exact points
-where those bindings constrain implementation. Phase-5 review added D10–D12, and
-self-review added the causal replay binding D13; this plan does not duplicate their rows.
+The spec's `## Decision ledger` is authoritative. Tasks cite D1–D15 at the exact points
+where those bindings constrain implementation. Phase-5 review added D10–D12,
+self-review added D13, and final re-review added D14–D15; this plan does not duplicate
+their rows.
 
 ## Phase-5 review provenance and dispositions
 
@@ -130,6 +140,21 @@ self-review added the causal replay binding D13; this plan does not duplicate th
 | Retired-policy checks fragile | accepted — Task 4 scopes positive response-only behavior and forbidden policy vocabulary |
 | Standalone lifecycle stale | accepted — Task 4 pins direct ledger-free use and D10 durable bootstrap/adoption |
 | Capacity formula implicit | accepted — Task 2 implements and tests D12 explicitly |
+
+### Final re-review provenance and dispositions
+
+- Reviewer: native fresh reviewer `/root/issue47_plan_review`
+- Artifact: `/Users/anis/tmp/nix-config/.git/worktrees/issue-47-workflow-control-plane/PLAN-REVIEW.md`
+- Reviewed HEAD: `c4e3862de6478c22d296cec047050b4f3ba67e70`
+- Fallback: native because `codex-collaboration` was unavailable
+
+| Finding | Disposition |
+| --- | --- |
+| Adapter still classified tracker readiness | accepted — Task 4 gathers one harmless candidate for every no-requirement issue and leaves classification to control per D15 |
+| Bootstrap/D13 tests did not discriminate latest identity and unsafe near-misses | accepted — Task 2 pins post-resume/post-retry projection plus actionless replay and all requested negatives |
+| Configured budget migration implicit | accepted — Task 4 migrates the live binding contract to exact request fields |
+| Wait failure semantics unspecified | accepted — Task 4 pins idempotent missing/exited cancellation and truthful fail-loud arm failure per D14 |
+| Full-restart observer ownership unclear | accepted — Task 4 makes inherited-detached-observer cleanup an explicit host precondition per D14 |
 
 ---
 
@@ -180,9 +205,11 @@ self-review added the causal replay binding D13; this plan does not duplicate th
 - A candidate is required only when this invocation accepts a fresh attempt needing a
   new path; a recorded observation is required only when a current action needs it.
   Missing action-critical facts fail without changing `state.json` (D3, D7).
-- The only consumed-candidate replay accepted is the D13 causal match: latest attempt,
-  same exact path, and first launch at the identical request instant. Every other
-  candidate collision remains an atomic rejection.
+- The only consumed-candidate replay accepted is D13's actionless causal match: the
+  latest attempt remains active, has no current-unavailable event, and its same exact
+  path was consumed by the first launch at the identical request instant. Wrong
+  instant/path, same-instant terminal, current-unavailable, or any request that could
+  dispatch remains an atomic rejection and requires current worktree facts.
 - Response top-level fields are exactly `interface_version`, `run_id`, `now`,
   `summaries`, `deltas`, `actions`, `next_deadline`. Summary, delta, dispatch, wait,
   and finalize fields and enum members are exactly those in the spec (D4).
@@ -746,6 +773,12 @@ Co-Authored-By: Codex <noreply@openai.com>"
   exactly one control action ends every response (D4).
 - A late `finish` on the latest expired attempt remains authoritative. Concurrent
   finishes serialize through the existing lock and both survive reopen.
+- `init-run` always projects the latest launch identity: a resumed attempt exposes its
+  new launch action ID, and a retry exposes the new attempt/owner/first-launch ID (D10).
+- D13 is actionless only. Exact active replay may consume its original candidate;
+  wrong instant, a collision on the wrong durable path, same-instant terminal state,
+  and current-unavailable state reject atomically. Resume/retry/new dispatch requires
+  the current recorded/candidate facts.
 
 - [ ] **Step 1: Write one exact six-stage combined replay, then focused scenarios**
 
@@ -1212,6 +1245,103 @@ composition the demos exercise:
         )
         self.assertNotEqual(relative.returncode, 0)
         self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_init_run_bootstrap_projects_latest_resume_and_retry_identity(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        paths = {i: str(self.root / f"wt-{i}") for i in (47, 51)}
+        self.control(
+            now="2026-08-19T12:00:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                i, candidate={"path": paths[i], "state": "absent"}
+            ) for i in (47, 51)],
+        )
+        resumed = self.control(
+            now="2026-08-19T12:01:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            owners=[self.owner_fact(event_id="47-exit", issue=47,
+                                    attempt=1, launch=1)],
+            worktrees=[self.worktree_fact(47, recorded={
+                "path": paths[47], "state": "matching_issue_branch",
+            })],
+        )
+        self.assertEqual(resumed["actions"][0]["id"], "47:1:2")
+        after_resume = self.init_run(now="2026-08-19T12:01:00Z")
+        self.assertEqual(after_resume["requirements"], [
+            {"issue": 47, "attempt": 1, "owner": "47:1",
+             "action_id": "47:1:2", "recorded_worktree": paths[47]},
+            {"issue": 51, "attempt": 1, "owner": "51:1",
+             "action_id": "51:1:1", "recorded_worktree": paths[51]},
+        ])
+
+        failed = {**self.merged_result(51), "state": "failed", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False, "notes": "harness"}
+        self.finish(1, failed, issue=51, now="2026-08-19T12:02:00Z")
+        retried = self.control(
+            now="2026-08-19T12:03:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(51, recorded={
+                "path": paths[51], "state": "matching_issue_branch",
+            })],
+        )
+        self.assertEqual(retried["actions"][0]["id"], "51:2:1")
+        after_retry = self.init_run(now="2026-08-19T12:03:00Z")
+        self.assertEqual(after_retry["requirements"][1], {
+            "issue": 51, "attempt": 2, "owner": "51:2",
+            "action_id": "51:2:1", "recorded_worktree": paths[51],
+        })
+
+    def test_consumed_candidate_is_only_an_actionless_exact_replay(self):
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-47")
+        original = self.control_request(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(
+                47, candidate={"path": path, "state": "absent"})],
+        )
+        self.control_raw(request=original)
+        advanced = self.state_path.read_bytes()
+        exact = json.loads(self.control_raw(request=original).stdout)
+        self.assertEqual(exact["deltas"], [])
+        self.assertEqual([a["kind"] for a in exact["actions"]], ["wait"])
+        self.assertEqual(self.state_path.read_bytes(), advanced)
+
+        wrong_instant = copy.deepcopy(original)
+        wrong_instant["now"] = "2026-08-19T12:00:01Z"
+        self.assertNotEqual(self.control_raw(request=wrong_instant,
+                                             ok=False).returncode, 0)
+        wrong_path = self.control_request(
+            now="2026-08-19T12:00:00Z", issues=[47, 51],
+            tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(
+                51, candidate={"path": path, "state": "absent"})],
+        )
+        self.assertNotEqual(self.control_raw(request=wrong_path,
+                                             ok=False).returncode, 0)
+
+        unavailable = copy.deepcopy(original)
+        unavailable["owners"] = [self.owner_fact(
+            event_id="47-exit", issue=47, attempt=1, launch=1)]
+        self.assertNotEqual(self.control_raw(request=unavailable,
+                                             ok=False).returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), advanced)
+
+        failed = {**self.merged_result(47), "state": "failed", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False, "notes": "harness"}
+        self.finish(1, failed, issue=47, now="2026-08-19T12:00:00Z")
+        terminal = self.state_path.read_bytes()
+        self.assertNotEqual(self.control_raw(request=original, ok=False).returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), terminal)
+
+        current = self.control(
+            now="2026-08-19T12:00:00Z", issues=[47],
+            tracker=[self.tracker_fact(47)],
+            worktrees=[self.worktree_fact(47, recorded={
+                "path": path, "state": "matching_issue_branch",
+            })],
+        )
+        self.assertEqual(current["actions"][0]["id"], "47:2:1")
 ```
 
 - [ ] **Step 2: Run the new scenarios and observe the red state**
@@ -1225,12 +1355,16 @@ python3 -m unittest -v \
   tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_demo_3_expires_retries_and_fills_unrelated_capacity \
   tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_demo_4_concurrent_finishes_survive_reopen \
   tests.test_workflow_state.WorkflowStateLifecycleTest.test_control_demo_5_finalizes_and_replays_without_history_or_duplicate_launch \
+  tests.test_workflow_state.WorkflowStateLifecycleTest.test_init_run_bootstrap_projects_latest_resume_and_retry_identity \
+  tests.test_workflow_state.WorkflowStateLifecycleTest.test_consumed_candidate_is_only_an_actionless_exact_replay \
   2>&1 | tail -35
 ```
 
 Expected: the combined replay and focused demos 2–5 fail on absent
-expiry/retry/replay/drain behavior; focused demo 1 passes from Task 1. A failure caused
-only by fixture setup must be corrected before implementation begins.
+expiry/retry/replay/drain behavior; the post-resume/post-retry bootstrap and D13
+discriminators also fail until the latest-launch projection and actionless exception
+are complete. Focused demo 1 passes from Task 1. A failure caused only by fixture setup
+must be corrected before implementation begins.
 
 - [ ] **Step 3: Implement the complete transaction policy**
 
@@ -1238,9 +1372,11 @@ Inside `command_control`'s one `transact` callback, implement the spec's numbere
 literally:
 
 1. Validate every observation and all ledger-dependent identities before mutation.
-   Recognize D13's consumed-candidate replay only when latest attempt path and first
-   launch instant exactly match the candidate and request `now`; reject every other
-   collision before mutation.
+   Recognize D13's consumed-candidate replay only when the latest attempt is active,
+   has no current-unavailable event, its path and first-launch instant exactly match
+   the candidate and request `now`, and no transition/action for that issue can result.
+   Reject wrong-instant/path, terminal/current-unavailable, and every other collision
+   before mutation; require current facts for any new dispatch.
 2. Leave durable terminal owner results authoritative; classify stale notifications
    without writing.
 3. Expire every latest active/handed-off attempt whose fixed deadline is reached using
@@ -1270,8 +1406,9 @@ cd /Users/anis/tmp/nix-config/.claude/worktrees/issue-47-workflow-control-plane/
 python3 -m unittest tests.test_workflow_state -q
 ```
 
-Expected: `OK`. The single combined replay, five focused demos, and all focused policy
-cases pass; reopening the ledger shows each emitted dispatch launch already present.
+Expected: `OK`. The single combined replay, five focused demos, latest-bootstrap
+identity cases, D13 positive/negative discriminators, and all focused policy cases
+pass; reopening the ledger shows each emitted dispatch launch already present.
 Any duplicate action on advanced replay, noncanonical copied-state replay, lost
 concurrent result, or leaked history key blocks the commit.
 
@@ -1282,7 +1419,7 @@ git add home/common/agent-skills/scripts/workflow-state.py home/common/agent-ski
 git commit -m "feat(workflow-state): centralize dispatcher lifecycle policy
 
 Applies expiry and resume-retry-spawn precedence atomically, persists actions
-before emission, and proves the single-ledger six-stage replay. Per D4-D8/D12-D13.
+before emission, and proves the single-ledger six-stage replay. Per D4-D8/D10/D12-D13.
 
 Co-Authored-By: Codex <noreply@openai.com>"
 ```
@@ -1421,10 +1558,12 @@ Co-Authored-By: Codex <noreply@openai.com>"
   four-command public CLI.
 - Produces:
   - Dispatcher flow: resolve inputs/bindings; call `init-run`; inspect exactly its
-    returned `recorded_worktree` requirements plus needed absent candidates; correlate
-    notifications with returned owner/action identity; query tracker facts; normalize
-    any owner notification; call `control`; execute returned actions in order; replace
-    at most one wait; render finalize summaries.
+    returned `recorded_worktree` requirements; verify an absent candidate for every
+    requested issue without a requirement plus every absent/mismatched returned path;
+    correlate notifications with returned owner/action identity; query tracker facts;
+    normalize any owner notification; map configured limits to the exact request
+    fields; call `control`; execute returned actions in order; replace at most one wait;
+    render finalize summaries.
   - Owner dispatch envelope: immutable ledger root, run ID, issue/attempt, lifecycle
     owner token, exact worktree, optional handoff path, literal
     `from-issue <num> --auto`.
@@ -1437,6 +1576,10 @@ Co-Authored-By: Codex <noreply@openai.com>"
   printed nor reconstructed. Returned issue/attempt/owner/path fields identify the
   exact paths to inspect and current host notification to correlate before the first
   action-ready request (D10).
+- For every requested issue absent from bootstrap requirements, the adapter gathers a
+  harmless verified absent candidate without deciding tracker readiness. It also
+  gathers one for an absent/mismatched returned path; `control` ignores unused facts
+  (D15).
 - The skill does not count attempts/capacity, classify retryable results, choose
   resume/retry/spawn precedence, calculate deadline minima, infer drain, or call retired
   commands. It follows the returned action order (D1, D6).
@@ -1446,7 +1589,14 @@ Co-Authored-By: Codex <noreply@openai.com>"
 - Adapter state has only `current_wait_id` and `current_wait_handle`. For a new ID,
   publish it first, cancel the old handle, then arm/store the new handle; a wake carries
   its ID and is ignored unless it equals the current ID. The same ID never duplicates an
-  observer; finalize clears the ID before cancellation (D11).
+  observer; finalize clears the ID before cancellation (D11). A missing/already-exited
+  old handle is idempotent and replacement arming continues. If arming fails, clear or
+  mark both adapter fields uninstalled and fail loudly that no wake is installed (D14).
+- On full dispatcher restart, the host reaps/cancels inherited detached observers
+  before the restarted adapter rearms from a returned wait ID. Process-local adapter
+  state cannot discover or adopt them (D14).
+- Binding migration is exact: resolved `agentBudgetMinutes` populates request
+  `attempt_budget_minutes`, and resolved `maxParallel` populates request `max_parallel`.
 - A finalize envelope renders the final table and discussion items from the same
   response's bounded summaries; no second ledger reconstruction occurs (D4).
 - `from-issue` retains `progress` and `finish`; its handoff text says the dispatcher
@@ -1474,6 +1624,12 @@ In `WorkflowSkillContractsTest`, replace launch/reconcile-specific assertions wi
         )
         self.assert_ordered(observe, "workflow-state init-run", "requirements",
                             "action_id", "recorded_worktree", "normalized")
+        self.assert_ordered(
+            observe, "every requested issue without a bootstrap requirement",
+            "verified absent candidate", "control ignores unused candidates",
+        )
+        self.assertNotIn("tracker-ready", observe)
+        self.assertNotIn("classify tracker readiness", observe)
         self.assert_ordered(decide, "--request-file <absolute-json-path>",
                             "workflow-state control",
                             "only source of action order, kind, and lifecycle identity")
@@ -1486,6 +1642,21 @@ In `WorkflowSkillContractsTest`, replace launch/reconcile-specific assertions wi
             "fresh owner identity",
         ):
             self.assertNotIn(retired_policy_anchor, observe + decide + execute)
+
+    def test_dispatcher_maps_resolved_limits_into_control_request(self):
+        resolve = self.section(
+            self.orchestrate, "## 1. Resolve issue set and bindings",
+            "## 2. Bootstrap and observe",
+        )
+        self.assertIn(
+            "resolved `agentBudgetMinutes` as request `attempt_budget_minutes`",
+            resolve,
+        )
+        self.assertIn(
+            "resolved `maxParallel` as request `max_parallel`",
+            resolve,
+        )
+        self.assertNotIn("--budget-minutes <budget>", resolve)
 
     def test_dispatcher_executes_the_closed_control_action_set(self):
         action_section = self.section(
@@ -1518,6 +1689,25 @@ In `WorkflowSkillContractsTest`, replace launch/reconcile-specific assertions wi
         self.assert_ordered(action_section, "`finalize`", "clear `current_wait_id`",
                             "cancel the outstanding handle")
         self.assertIn("No polling or repeated short sleeps", action_section)
+
+    def test_dispatcher_wait_failures_and_restart_cleanup_are_explicit(self):
+        action_section = self.section(
+            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
+        )
+        self.assert_ordered(
+            action_section, "missing or already exited", "idempotent",
+            "arm the replacement",
+        )
+        self.assert_ordered(
+            action_section, "arming fails", "clear `current_wait_id`",
+            "clear `current_wait_handle`", "no wake is installed", "fail loudly",
+        )
+        self.assert_ordered(
+            self.orchestrate, "full dispatcher restart",
+            "host reaps or cancels inherited detached wait observers",
+            "before", "rearm",
+        )
+        self.assertIn("process-local", self.orchestrate)
 
     def test_dispatcher_renders_finalize_from_bounded_summaries(self):
         final_section = self.section(
@@ -1560,7 +1750,8 @@ In `WorkflowSkillContractsTest`, replace launch/reconcile-specific assertions wi
             "workflow-state control",
             "normalized", "spawn", "resume", "retry", "wait", "finalize",
             "bounded summaries", "unknown action kind", "cancel the old wait",
-            "stale wake ID",
+            "stale wake ID", "already-exited wait", "no wake is installed",
+            "reap inherited detached wait observers",
         ):
             self.assertIn(anchor, expected)
         for retired in ("workflow-state launch", "workflow-state reconcile"):
@@ -1575,7 +1766,12 @@ In `WorkflowSkillContractsTest`, replace launch/reconcile-specific assertions wi
 
 Keep the existing background-agent placement, immutable ledger-root, lifecycle-envelope,
 phase-gate, terminal-write, exact-worktree adoption, and bare-helper-path tests. Update
-their retired command anchors. In
+their retired command anchors. Replace the live
+`test_orchestrate_resolves_the_attempt_budget_from_the_resolver` test with
+`test_dispatcher_maps_resolved_limits_into_control_request` above: it migrates
+`resolve-bindings.agentBudgetMinutes` to request `attempt_budget_minutes` and
+`resolve-bindings.maxParallel` to request `max_parallel`, rather than merely checking
+that both configured names appear. In
 `test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops`, replace the old
 `direct standalone invocation remains compatible` assertion with
 `Direct standalone invocation remains ledger-free`; the new standalone test above owns
@@ -1589,8 +1785,9 @@ python3 -m unittest tests.test_workflow_skill_contracts.WorkflowSkillContractsTe
 ```
 
 Expected: FAIL because the skill/evals still call `launch`/`reconcile`, narrate policy,
-lack bounded bootstrap and operational wait replacement, and leave standalone/handoff
-branches on the retired command.
+lack bounded bootstrap, exact configured-limit mapping, policy-free candidate gathering,
+and operational wait failure/restart behavior, and leave standalone/handoff branches on
+the retired command.
 
 - [ ] **Step 3: Rewrite the live skill and eval contracts**
 
@@ -1598,13 +1795,17 @@ Rewrite `orchestrate-issues/SKILL.md` around these sections, keeping its role bo
 and Claude-only dispatch metadata:
 
 1. **Resolve issue set and bindings:** preserve explicit/list ordering and resolve
-   `maxParallel`/`agentBudgetMinutes` through the existing binding resolver.
+   `maxParallel`/`agentBudgetMinutes` through the existing binding resolver. State the
+   live mapping exactly: place resolved `maxParallel` in request `max_parallel` and
+   resolved `agentBudgetMinutes` in request `attempt_budget_minutes`.
 2. **Bootstrap and observe:** invoke `init-run`; consume only its strict version-1
    `requirements`. One tracker read supplies state, open blockers, and decision
    blockers. Inspect exactly every returned `recorded_worktree`, then reserve an absent
-   candidate for a returned absent/mismatch plus each tracker-ready requested issue
-   with no requirement. Normalize the exact control request without retaining raw
-   state or a second task ledger (D10).
+   candidate for a returned absent/mismatch plus every requested issue with no
+   bootstrap requirement. Do not ask the adapter to decide ready/blocked/fogged/closed;
+   pass the harmless facts and state that `control` ignores unused candidates.
+   Normalize the exact control request without retaining raw state or a second task
+   ledger (D10, D15).
 3. **Decide:** invoke `control` at start/resume and on each owner, tracker, or current
    wait-ID event. State verbatim that the response is the only source of action order,
    kind, and lifecycle identity; do not infer another action.
@@ -1613,10 +1814,19 @@ and Claude-only dispatch metadata:
    `wait`, keep only `current_wait_id/current_wait_handle`: same ID means no new
    observer; different ID publishes the replacement ID first, cancels the old handle,
    then arms/stores one new observer; a wake carries its ID and is ignored when stale.
-   `finalize` clears the ID before canceling the handle. Any unknown kind stops before
-   execution and surfaces the contract error (D11 and The Bar's fail-loud rule).
+   Missing/already-exited old handles are idempotent cancel outcomes and do not prevent
+   replacement arming. If arming fails, clear/mark both fields uninstalled and fail
+   loudly that no wake is installed. `finalize` clears the ID before canceling the
+   handle. Any unknown kind stops before execution and surfaces the contract error
+   (D11, D14, and The Bar's fail-loud rule).
 5. **Final report:** render issue/state/PR/reason and grouped discussion items from the
    same finalize response's summaries.
+
+In the restart/bootstrap notes, state the external-edge precondition verbatim in terms
+of live behavior: on a full dispatcher restart, the host reaps or cancels inherited
+detached wait observers before the restarted adapter rearms from the returned wait ID.
+The two adapter wait fields are process-local and cannot adopt an inherited handle
+(D14).
 
 State explicitly that responses omit `attempts`, `launches`, `phase_inputs`, and older
 results so no prose reader is invited to rebuild policy. Delete all attempt counting,
@@ -1639,9 +1849,10 @@ Do not change phase-budget semantics, terminal finish, or Phase-1 exact-path ado
 
 Update both eval cases so their expected outputs grade the bounded bootstrap, response-
 only order/identity, the closed action set with fail-loud unknown kind, and wait-ID
-cancellation/stale-wake behavior. Keep plan-only mode and existing role-boundary
-failures. JSON must remain parseable and contain no retired command or hand-assembled
-policy anchor.
+cancellation/stale-wake behavior, including missing/already-exited cancellation,
+truthful arm failure, and full-restart host cleanup. Keep plan-only mode and existing
+role-boundary failures. JSON must remain parseable and contain no retired command or
+hand-assembled policy anchor.
 
 - [ ] **Step 4: Run focused, full-suite, and build verification**
 
@@ -1679,7 +1890,7 @@ git commit -m "docs(orchestrate-issues): consume workflow control actions
 
 Moves the dispatcher contract and deployed evals to normalized observations,
 bounded bootstrap, typed control actions, replaceable one-shot waiting, and
-bounded final summaries. Per D1-D8/D10-D11.
+bounded final summaries. Per D1-D8/D10-D11/D14-D15.
 
 Co-Authored-By: Codex <noreply@openai.com>"
 ```
@@ -1690,14 +1901,15 @@ Co-Authored-By: Codex <noreply@openai.com>"
 
 | Spec requirement | Owning task |
 | --- | --- |
-| Strict bounded restart bootstrap without raw history | Tasks 1, 4 |
+| Strict bounded restart bootstrap without raw history and latest resume/retry identity | Tasks 1–2, 4 |
 | Strict versioned nested request/response shapes, injected time, atomic rejection | Task 1 |
 | Bounded summaries/deltas/actions and compact-output verification | Tasks 1–2 |
 | Persist-before-emission and deterministic action IDs | Tasks 1–2 |
 | Expiry, capacity formula, resume-before-retry-before-spawn, attempt cap, worktree reuse | Task 2 |
 | Single-ledger six-stage scenario, concurrent finish, copied/advanced replay | Task 2 |
 | Public `launch`/`reconcile` removal and CLI-only migrated tests | Task 3 |
-| Adapter-only dispatcher, five envelopes, unknown-kind failure, finalize rendering | Task 4 |
-| Wait-ID replacement, cancellation-race stale wake, same-ID dedupe | Task 4 |
+| Adapter-only dispatcher, policy-free candidate gathering, exact binding-to-request mapping, five envelopes, unknown-kind failure, finalize rendering | Task 4 |
+| Wait-ID replacement, cancellation-race stale wake, same-ID dedupe, idempotent dead-handle cancellation, truthful arm failure, restart-host cleanup | Task 4 |
+| Actionless-only consumed-candidate replay and wrong-instant/path/terminal/unavailable negatives | Task 2 |
 | Owner handoff, direct/durable standalone routes, deployed eval migration | Task 4 |
 | Focused tests, whole workflow suite, and Nix distribution build | Task 4 |
