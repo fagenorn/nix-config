@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "unit": "bytes",
+  "artifacts": {
+    "design-spec": {"root_max_bytes": 65536, "member_max_bytes": 0, "max_members": 0, "aggregate_max_bytes": 65536},
+    "implementation-plan": {"root_max_bytes": 16384, "member_max_bytes": 49152, "max_members": 8, "aggregate_max_bytes": 131072},
+    "handoff": {"root_max_bytes": 8192, "member_max_bytes": 0, "max_members": 0, "aggregate_max_bytes": 8192},
+    "review-package": {"root_max_bytes": 16384, "member_max_bytes": 65536, "max_members": 8, "aggregate_max_bytes": 524288}
+  },
+  "phase_reports": {"notes_max_characters": 500, "wire_max_bytes": 8192}
+}

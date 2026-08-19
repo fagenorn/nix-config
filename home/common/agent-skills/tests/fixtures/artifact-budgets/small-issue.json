@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "case": "small-issue",
+  "artifacts": [
+    {
+      "kind": "design-spec",
+      "case": "small-design",
+      "shape": "one-file",
+      "root_bytes": 1024,
+      "member_bytes": [],
+      "expected": {
+        "exit_code": 0,
+        "status": "within_budget",
+        "metrics": {"root_bytes": 1024, "total_bytes": 1024, "file_count": 1, "largest_member_bytes": 0},
+        "violations": [],
+        "producer_state": "complete"
+      }
+    },
+    {
+      "kind": "implementation-plan",
+      "case": "small-plan",
+      "shape": "indexed-package",
+      "root_bytes": 1024,
+      "member_bytes": [100, 200],
+      "expected": {
+        "exit_code": 0,
+        "status": "within_budget",
+        "metrics": {"root_bytes": 1024, "total_bytes": 1324, "file_count": 3, "largest_member_bytes": 200},
+        "violations": [],
+        "producer_state": "complete"
+      }
+    },
+    {
+      "kind": "handoff",
+      "case": "small-handoff",
+      "shape": "one-file",
+      "root_bytes": 512,
+      "member_bytes": [],
+      "expected": {
+        "exit_code": 0,
+        "status": "within_budget",
+        "metrics": {"root_bytes": 512, "total_bytes": 512, "file_count": 1, "largest_member_bytes": 0},
+        "violations": [],
+        "producer_state": "complete"
+      }
+    },
+    {
+      "kind": "review-package",
+      "case": "small-review",
+      "shape": "diff-review-package",
+      "root_bytes": 1024,
+      "member_bytes": [100, 200],
+      "expected": {
+        "exit_code": 0,
+        "status": "within_budget",
+        "metrics": {"root_bytes": 1024, "total_bytes": 1324, "file_count": 3, "largest_member_bytes": 200},
+        "violations": [],
+        "producer_state": "complete"
+      }
+    }
+  ]
+}

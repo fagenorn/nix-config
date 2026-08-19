@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "case": "oversized-issue",
+  "artifacts": [
+    {
+      "kind": "design-spec",
+      "case": "design-root-plus-one",
+      "shape": "one-file",
+      "root_bytes": 65537,
+      "member_bytes": [],
+      "expected": {
+        "exit_code": 3,
+        "status": "over_budget",
+        "metrics": {"root_bytes": 65537, "total_bytes": 65537, "file_count": 1, "largest_member_bytes": 0},
+        "violations": ["root_bytes", "aggregate_bytes"],
+        "producer_state": "decompose_required"
+      }
+    },
+    {
+      "kind": "implementation-plan",
+      "case": "plan-ninth-member",
+      "shape": "indexed-package",
+      "root_bytes": 1024,
+      "member_bytes": [100, 100, 100, 100, 100, 100, 100, 100, 100],
+      "expected": {
+        "exit_code": 3,
+        "status": "over_budget",
+        "metrics": {"root_bytes": 1024, "total_bytes": 1924, "file_count": 10, "largest_member_bytes": 100},
+        "violations": ["member_count"],
+        "producer_state": "decompose_required"
+      }
+    },
+    {
+      "kind": "implementation-plan",
+      "case": "plan-member-plus-one",
+      "shape": "indexed-package",
+      "root_bytes": 1024,
+      "member_bytes": [49153],
+      "expected": {
+        "exit_code": 3,
+        "status": "over_budget",
+        "metrics": {"root_bytes": 1024, "total_bytes": 50177, "file_count": 2, "largest_member_bytes": 49153},
+        "violations": ["member_bytes"],
+        "producer_state": "decompose_required"
+      }
+    },
+    {
+      "kind": "handoff",
+      "case": "handoff-root-plus-one",
+      "shape": "one-file",
+      "root_bytes": 8193,
+      "member_bytes": [],
+      "expected": {
+        "exit_code": 3,
+        "status": "over_budget",
+        "metrics": {"root_bytes": 8193, "total_bytes": 8193, "file_count": 1, "largest_member_bytes": 0},
+        "violations": ["root_bytes", "aggregate_bytes"],
+        "producer_state": "stopped"
+      }
+    },
+    {
+      "kind": "review-package",
+      "case": "review-member-plus-one",
+      "shape": "diff-review-package",
+      "root_bytes": 1024,
+      "member_bytes": [65537],
+      "expected": {
+        "exit_code": 3,
+        "status": "over_budget",
+        "metrics": {"root_bytes": 1024, "total_bytes": 66561, "file_count": 2, "largest_member_bytes": 65537},
+        "violations": ["member_bytes"],
+        "producer_state": "decompose_required"
+      }
+    },
+    {
+      "kind": "review-package",
+      "case": "review-aggregate-and-count",
+      "shape": "diff-review-package",
+      "root_bytes": 1024,
+      "member_bytes": [60000, 60000, 60000, 60000, 60000, 60000, 60000, 60000, 60000],
+      "expected": {
+        "exit_code": 3,
+        "status": "over_budget",
+        "metrics": {"root_bytes": 1024, "total_bytes": 541024, "file_count": 10, "largest_member_bytes": 60000},
+        "violations": ["member_count", "aggregate_bytes"],
+        "producer_state": "decompose_required"
+      }
+    }
+  ]
+}
