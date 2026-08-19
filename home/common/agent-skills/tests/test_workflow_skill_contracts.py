@@ -37,6 +37,12 @@ SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVI
 SHIP_ISSUE_EVALS = (
     REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json"
 )
+WRITING_PLANS = REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md"
+SDD = SDD_DIR / "SKILL.md"
+PHASE_5_REVIEW_CONTRACT = FROM_ISSUE_DIR / "REVIEW-CONTRACT.md"
+CODEX_PLAN_REVIEW = (
+    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/PLAN-REVIEW.md"
+)
 
 # The Phase-5 degradation boundary, spelled once for the whole module: the skill
 # and its eval are both checked against these two strings so they cannot drift.
@@ -65,6 +71,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
         cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
+        cls.writing_plans = WRITING_PLANS.read_text(encoding="utf-8")
+        cls.sdd = SDD.read_text(encoding="utf-8")
+        cls.phase_5_review_contract = PHASE_5_REVIEW_CONTRACT.read_text(encoding="utf-8")
+        cls.codex_plan_review = CODEX_PLAN_REVIEW.read_text(encoding="utf-8")
         cls.orchestrate_evals = json.loads(
             ORCHESTRATE_EVALS.read_text(encoding="utf-8")
         )
@@ -260,6 +270,25 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             sdd_root,
         )
         self.assertIn("resume the original implementer", fix_loop)
+
+    def test_plan_package_contract_is_root_only_and_fail_closed(self):
+        self.assertIn("<stem>.tasks/task-1.md", self.writing_plans)
+        self.assertIn("[task-N.md](<stem>.tasks/task-N.md)", self.writing_plans)
+        self.assert_ordered(self.writing_plans, "write every task member", "artifact-budget check",
+                            "compact repeated prose", "split only where both results are independently testable",
+                            "decompose_required")
+        self.assertIn("report only the root path and four metrics", self.writing_plans)
+        for forbidden in ("open_items:", "decisions:", "adr_paths:", "summary:"):
+            self.assertNotRegex(self.writing_plans, rf"(?m)^\s*{re.escape(forbidden)}")
+        self.assert_ordered(self.writing_plans, "candidate JSON", "validate-report",
+                            "validated stdout bytes")
+
+    def test_sdd_validates_plan_before_extracting_a_member(self):
+        setup = self.section(self.sdd, "## Setup", "## Agent tiers")
+        self.assert_ordered(setup, "artifact-budget check", "read the root and every indexed member")
+        self.assertIn("scripts/task-brief PLAN_FILE N", self.sdd)
+        self.assertIn("root path and all four metrics", self.sdd)
+        self.assertIn("missing or unreadable member is a contract error", self.sdd)
 
     def test_preflight_worktree_deletion_requires_proof_of_disposability(self):
         self.assertNotIn("one, clean → remove it", self.from_issue)

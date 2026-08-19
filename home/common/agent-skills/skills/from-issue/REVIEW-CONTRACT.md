@@ -2,13 +2,30 @@
 
 Reviewer-facing text for `from-issue` Phase 5. The dispatcher hands this file's **path** to the
 reviewer (or to `codex-collaboration`, which passes it by path in the review packet) and supplies concrete
-values for every `<placeholder>` and binding named below — plan path, spec path, issue number,
+values for every `<placeholder>` and binding named below — plan root path, its four
+checker metrics, spec path, issue number,
 `<tracker-cli>`, `unsetGithubToken`, `docPaths.*`, `projectHints`, and the optional review focus.
 The orchestrator never inlines this text into its own context.
 
 ---
 
 Review the implementation plan at `<plan-path>` against the project's coding bar.
+
+Before Phase 5 reads state or advances, its caller must pipe the exact received
+planning-report bytes through `artifact-budget validate-report --boundary
+producer --input -` and use only validated stdout. It requires the exact D11
+object in `state: complete`, with one `implementation-plan` artifact whose root
+path and four metrics match the supplied values. Validator failure, any legacy
+producer-specific list or summary field, or any other state stops Phase 5 as a
+contract failure; there is no prose fallback (D11, D14).
+
+Before reading plan content, run `artifact-budget check --kind
+implementation-plan --root <plan-path> --format json`. Require exit 0,
+`within_budget`, and the same `root_bytes`, `total_bytes`, `file_count`, and
+`largest_member_bytes` supplied in the packet. Exit 2/3, missing metrics, stale
+metrics, or an unreadable member is a blocking contract failure. Then read the
+root and every indexed member in checker discovery order. The packet supplies
+only the plan root and metrics, never contents or a member list (D3, D5, D6, D8).
 
 First ground in the project's docs: invoke `doc-grounded-questions` if available, else ground
 map-first — read the context map (`docPaths.contextMap`, else `docs/CONTEXT-MAP.md`, else legacy root `CONTEXT-MAP.md`) and open only
@@ -19,13 +36,16 @@ repos) only when cited; the standards layers that apply
 project's `docs/standards/` shards whose globs intersect). Only when the project has no map, fall
 back to reading `docPaths.{context,standards,architecture}` whole. Then
 read the issue body (`<tracker-cli> issue view <num>` — prefix with `unset GITHUB_TOKEN &&` only if
-`unsetGithubToken` is true), the spec at `<spec-path>`, and the plan.
+`unsetGithubToken` is true), the spec at `<spec-path>`, and the validated plan
+root plus every member.
 
 When checking specific findings, **read the live file at HEAD** rather than relying on snapshot/diff
 views — code may have been edited since the plan was written, and stale snapshots produce
 false-positive should-fixes.
 
-For each plan task, flag anything that violates the grounded constraints. Pay particular attention to:
+For each plan task, flag anything that violates the grounded constraints. Every
+finding identifies its affected task member or root section. Explicitly report
+any member that could not be read. Pay particular attention to:
 framework-first (custom executors/state machines where a framework primitive already exists),
 production-grade-by-default (half-finished branches, missing error paths at boundaries), DI rules, and
 the test-fixture conventions in the project's standards shards (or legacy coding-standards doc).
@@ -103,3 +123,9 @@ Output a structured review:
 
 Write `None.` under an empty section. Don't propose new features. Don't second-guess scope. Grade only
 against the bar.
+
+Accepted Phase-5 edits are not complete when the text is saved. After the last
+write, the orchestrator re-runs the implementation-plan check and compares the
+fresh package metrics; if it amended the spec or appended a decision-ledger row,
+it also re-runs the design-spec check. Any invalid or over-budget result stops
+the phase instead of advancing with stale measurement (D5, D14).

@@ -9,11 +9,23 @@ this file owns the packet, the reviewer contract, and the disposition.
 Start from the invocation directory and resolve the canonical Git
 workspace/worktree root. Build one self-contained delegation prompt containing:
 
+Before using the planning result, pipe its exact received bytes through
+`artifact-budget validate-report --boundary producer --input -` and use only
+validated stdout. Require `state: complete` and the exact D11
+`implementation-plan` artifact; legacy producer-specific fields, another state,
+or validation failure stops the operation without a prose fallback (D11, D14).
+Run `artifact-budget check --kind implementation-plan --root <plan-root>
+--format json` before reading the plan. Require exit 0, `within_budget`, and an
+exact match with the four report metrics. Exit 2/3 or missing/stale metrics stops
+the review (D5, D6).
+
 1. The operation name, invocation directory, worktree root, current branch, and
    base SHA.
 2. The issue title/body/URL, acceptance criteria, Phase-0 investigation summary,
    open questions and their dispositions.
-3. Absolute paths to the approved specification and implementation plan.
+3. Absolute paths to the approved specification and implementation-plan root,
+   plus its `root_bytes`, `total_bytes`, `file_count`, and
+   `largest_member_bytes`. Supply no member list or plan content.
 4. Every applicable `AGENTS.md` and `CLAUDE.md` from the invocation directory up
    through the worktree root.
 5. `.claude/skills.config.json` and `projectHints` when present, plus domain
@@ -38,13 +50,16 @@ workspace/worktree root. Build one self-contained delegation prompt containing:
 
 Include these rules verbatim in substance, alongside SKILL.md's read-only rules:
 
+- Read the plan root and every indexed member in checker discovery order before
+  reviewing. A missing or unreadable member is a contract failure and must be
+  reported explicitly; never fall back to parsing numbered bodies from the root.
 - Review only for conformance to the issue, acceptance criteria, approved spec,
   live implementation context, project docs, and supplied coding bar. Do not add
   features or relitigate accepted scope.
 - Do not review the whole branch as a substitute for reviewing the plan.
 - Return exactly three top-level sections: `Blocking`, `Should fix`, and
   `Discussion`. Write `None.` under an empty section.
-- For every finding include a stable ID, the affected plan task or section,
+- For every finding include a stable ID, the affected task member or root section,
   evidence with live `path:line` references, confidence (`high`, `medium`, or
   `low`), the required or suggested correction, and unresolved unknowns
   (`none` when empty).
@@ -71,6 +86,12 @@ The parent Claude agent owns the result:
    applicable.
 5. Do not store the raw reviewer transcript in the repository, plan, issue, PR,
    or commit message.
+
+After the last accepted edit, re-run the checker for the complete plan package
+and replace the retained metrics. If disposition amended the spec or its decision
+ledger, re-run the design-spec check too. An invalid or over-budget artifact is
+not a completed disposition and Phase 5 may not advance on stale measurements
+(D5, D14).
 
 Return control only after all accepted findings have explicit dispositions and
 the plan is clean enough for the caller's Phase-5 checkpoint.

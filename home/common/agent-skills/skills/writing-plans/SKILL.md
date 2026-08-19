@@ -7,7 +7,12 @@ description: Turn a spec into a task-by-task implementation plan before touching
 
 Write the plan for an engineer who is skilled but has zero context for this codebase, this toolset, and this domain, and who will read exactly one task without the others. Every task names the files it touches, the exact interfaces and invariants it must satisfy, how to test it, and how to verify it. DRY. YAGNI. Test-first. Frequent commits.
 
-**Save to** `<planDir>/YYYY-MM-DD-<feature-name>.md` (`planDir` from `~/.agents/bin/resolve-bindings`; helper missing → `.claude/skills.config.json`, default `.claude/plans`), committed in the worktree you were called in.
+**Save the package root to** `<planDir>/YYYY-MM-DD-<feature-name>.md`
+(`planDir` from `~/.agents/bin/resolve-bindings`; helper missing →
+`.claude/skills.config.json`, default `.claude/plans`) and its task members to
+the sibling `<planDir>/<stem>.tasks/` directory, committed in the worktree you
+were called in. For example, the first member is `<stem>.tasks/task-1.md`.
+The root path remains the public plan path (D3, D6).
 
 ## Payload discipline
 
@@ -40,7 +45,10 @@ Steps inside a task are one action each (2–5 minutes): write the failing test 
 
 ## Plan header
 
-Every plan starts with:
+Every plan root starts with the following header and contains no numbered task
+bodies or copied decision-ledger rationale. It holds the goal, architecture,
+technology, Global Constraints, Test seams, Task index, and decision-ID
+citations. Numbered tasks live only in members (D3).
 
 ```markdown
 # <Feature> Implementation Plan
@@ -67,7 +75,9 @@ nowhere else; a task needing a new seam is a plan bug, not an implementer's call
 
 ## Task index
 
-<One line per task: ID, title, files touched, risk lane. Lanes:
+<One line per task: ID, title, files touched, risk lane, and member link. Number
+members contiguously from 1, with one row per member. Every row ends exactly in
+`[task-N.md](<stem>.tasks/task-N.md)`. There may be at most eight members. Lanes:
 - `mechanical` — deletion/renaming with no behavioral, configuration, interface,
   generated-output, or semantic-documentation effect.
 - `low-risk` — small semantic changes: bounded, locally-verifiable behavior
@@ -75,7 +85,7 @@ nowhere else; a task needing a new seam is a plan bug, not an implementer's call
   operations, security, release, migration, or public contracts.
 - `full` — everything else.
 
-Example: `Task 3 — Wire settings loader — src/config.py, tests/test_config.py — low-risk`>
+Example: `Task 3 — Wire settings loader — src/config.py, tests/test_config.py — low-risk — [task-3.md](2026-08-19-feature.tasks/task-3.md)`>
 
 ## Decisions
 
@@ -94,16 +104,20 @@ row.>
 
 ## Task structure
 
-Task bodies carry exact interfaces, invariants, assertions, verification
+Write each task body to exactly `<stem>.tasks/task-N.md`. Each member is
+self-contained for one implementer and carries exact interfaces, invariants, assertions, verification
 commands, and decision-rich algorithms — where an algorithm embodies a real
 decision, spell the decision out step by step. Full implementation code appears
 ONLY when it preserves a decision that prose or interfaces cannot safely express
 (a subtle algorithm, an exact wire format); otherwise interfaces plus assertions
 suffice. Test code is the exception: failing tests are written out in full —
-they ARE the task's contract.
+they ARE the task's contract. Do not duplicate Global Constraints or decision
+rationale in members: the root and specification own those shared facts, while
+the member cites applicable decision IDs and carries every task-specific value
+(D3).
 
 ````markdown
-### Task N: <Component>
+# Task N: <Component>
 
 **Files:**
 - Create: `exact/path/to/file.py`
@@ -163,6 +177,28 @@ git commit -m "feat: add specific feature"
 
 **Scope every gate to the files the plan owns.** Give diffs a pathspec (`git diff --stat BASE..HEAD -- <the paths named in the plan's Files: blocks>`) or assert against file content directly; never write a raw commit-range expectation — "exactly three files changed", "every commit in the range is a `feat:`". The range is not the plan's to grade: the plan and spec files land in it, so do the caller's `docs(plans):`/`docs(specs):` artifact commits, and a ship-time sync merge pulls in everything the integration branch advanced by — the gate then reads another issue's shipped work as scope creep and demands reverting it. Where commit shape genuinely is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`; the sync merge is unreachable from the integration branch, so `^` alone leaves it in) and name the artifact and review-fixup subjects as exempt.
 
+## Package construction and budget boundary
+
+Finish all content before measuring. Write the root, then write every task member,
+then run `artifact-budget check --kind implementation-plan --root <root-path>
+--format json`. Exit 2 means `failed`; never publish prose or an unvalidated
+fallback. Accept exit 0 only when the result is `within_budget` and contains
+exactly the four metrics `root_bytes`, `total_bytes`, `file_count`, and
+`largest_member_bytes`, all non-boolean integers. The checker discovers members;
+never pass or report a member list (D5, D6, D8).
+
+On the first exit 3, compact repeated prose into root/spec references without
+removing task-specific contracts, then re-run the check. If it remains over
+budget, split only where both results are independently testable, update the
+contiguous index and links, and re-run the check. If any root, member, count, or
+aggregate violation persists, return `decompose_required`; `complete` is
+forbidden. These are the only planning remediation states (D5).
+
+Measurement happens after the final mutation. If planning appends a decision
+ledger row to the spec, measure that complete design spec as well. Any later
+writer, including an accepted Phase-5 edit, owns a fresh check of every artifact
+it changed before it may advance (D5, D14).
+
 ## No placeholders
 
 These are plan failures — never write them:
@@ -186,9 +222,31 @@ Read the finished plan against the spec with fresh eyes. This is your own checkl
 3. **Type consistency** — do the signatures, method names and property names used in later tasks match what earlier tasks define? `clearLayers()` in Task 3 and `clearFullLayers()` in Task 7 is a bug.
 4. **Falsifiability and gate scope** — every task has a verification line that can fail, and no gate asserts over an unscoped commit range.
 5. **Task index accuracy** — one index row per task, and each row's files and risk lane match the task body; a lane claiming `mechanical` or `low-risk` for work inside the exclusion list is a plan bug.
+6. **Package reference equality** — root index rows and discovered members are a
+   one-to-one contiguous set; each row ends in its convention link and the root
+   contains no numbered task body.
+7. **Member completeness** — each member has exact files, consumed/produced
+   interfaces, task-specific invariants, complete failing tests, implementation
+   actions, a falsifiable scoped gate, decision-ID citations, and commit scope.
+8. **Final remeasurement** — after every self-review edit, check the whole plan
+   package again; if a ledger row was appended, check the amended spec again too.
 
 Fix inline and move on; no re-review pass.
 
 ## Return control
 
-Report the plan path, any question you could not resolve, and ≤500 characters of notes. Do not offer an execution choice, invoke an execution skill, or start implementing — the caller owns standards review and execution.
+Build exactly one producer report with `state`, one `artifact`, and `notes` (D11,
+D14). For `complete`, the artifact contains `kind: "implementation-plan"`, the
+root `path`, the four final checker `metrics`, and `budget_status:
+"within_budget"`. For `decompose_required`, it has the same fields with
+`budget_status: "over_budget"` plus the checker's closed `violations` array.
+For `failed`, the artifact is null or contains only the known root `kind` and
+`path`. Legacy producer-specific lists or summary fields are contract errors.
+Notes point to the root/spec when needed and remain within shared policy; report only the root path and four metrics, never artifact contents or member paths.
+
+Write this object as UTF-8 to a sibling temporary candidate JSON file, run
+`artifact-budget validate-report --boundary producer --input <candidate>`,
+delete the candidate, and return only the exact validated stdout bytes. Validator
+exit 2 is `failed`; do not emit the candidate or a prose fallback. Do not offer
+an execution choice, invoke an execution skill, or start implementing — the
+caller owns standards review and execution.
