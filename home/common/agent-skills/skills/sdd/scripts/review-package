@@ -196,6 +196,21 @@ def _identity(path: Path) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
+def _verify_published_identities(
+    member_dir: Path,
+    directory_identity: tuple[int, int],
+    linked: Sequence[tuple[Path, tuple[int, int]]],
+) -> None:
+    try:
+        if _identity(member_dir) != directory_identity:
+            raise PublicationError("published member directory identity changed")
+        for path, expected in linked:
+            if _identity(path) != expected:
+                raise PublicationError("published member identity changed")
+    except OSError as exc:
+        raise PublicationError("published package identity changed") from exc
+
+
 def publish_package(
     stage_root: Path,
     final_root: Path,
@@ -215,12 +230,20 @@ def publish_package(
             destination = final_members / source.name
             if before_mutation is not None:
                 before_mutation(f"member:{source.name}", destination)
+            _verify_published_identities(
+                final_members, directory_identity, linked
+            )
+            expected = _identity(source)
             os.link(source, destination, follow_symlinks=False)
-            linked.append((destination, _identity(source)))
+            linked.append((destination, expected))
+            _verify_published_identities(
+                final_members, directory_identity, linked
+            )
         if before_mutation is not None:
             before_mutation("manifest", final_root)
+        _verify_published_identities(final_members, directory_identity, linked)
         os.link(stage_root, final_root, follow_symlinks=False)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, PublicationError) as exc:
         for path, expected in reversed(linked):
             try:
                 if _identity(path) == expected:
@@ -451,6 +474,14 @@ def _assert_output(raw: str, expected: Path, primary: Path) -> None:
     primary_alias = Path(*absolute.parts[:-count])
     if Path(os.path.realpath(primary_alias)) != primary:
         raise InvocationError("invalid asserted output")
+    try:
+        alias_info = primary_alias.lstat()
+        if (not stat.S_ISDIR(alias_info.st_mode)
+                or stat.S_ISLNK(alias_info.st_mode)
+                or _identity(primary_alias) != _identity(primary)):
+            raise InvocationError("invalid asserted output")
+    except OSError as exc:
+        raise InvocationError("invalid asserted output") from exc
     current = primary_alias
     for part in relative.parts:
         current /= part

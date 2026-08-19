@@ -381,6 +381,27 @@ class ReviewPackageCliTest(unittest.TestCase):
             result = self.invoke_detail(linked, source, env, head=head, output=aliased)
             self.assertEqual((result.returncode, result.stdout), (2, ""))
 
+    def test_detail_output_assertion_rejects_a_primary_checkout_alias(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            main, linked, _, env, head = self.setup_linked_repo(directory)
+            source = linked / "findings.json"
+            source.write_text(json.dumps({
+                "interface_version": 1,
+                "findings": [{
+                    "axis": "ship", "severity": "Minor", "status": "minor",
+                    "text": "Retain this detail", "ruling": None,
+                }],
+            }), encoding="utf-8")
+            alias = directory / "main-alias"
+            alias.symlink_to(main, target_is_directory=True)
+            aliased = (
+                alias / ".superpowers/issue-delivery/49/run-1"
+                / f"sdd-{head}.json"
+            )
+            result = self.invoke_detail(linked, source, env, head=head, output=aliased)
+            self.assertEqual((result.returncode, result.stdout), (2, ""))
+
     def test_publication_races_never_replace_a_competitor(self):
         for boundary in ("member_dir", "member:shard-001.diff",
                          "member:shard-002.diff", "manifest"):
@@ -418,6 +439,46 @@ class ReviewPackageCliTest(unittest.TestCase):
                 else:
                     self.assertEqual({p.name for p in final_members.iterdir()},
                                      {competed_path.name})
+
+    def test_publication_rejects_changed_directory_and_link_identities(self):
+        for mutation in ("directory-before-first", "member-before-second",
+                         "directory-before-manifest"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                stage = directory / "stage"
+                stage_members = stage / "review.shards"
+                stage_members.mkdir(parents=True)
+                stage_root = stage / "review.json"
+                stage_root.write_bytes(b"staged-manifest")
+                (stage_members / "shard-001.diff").write_bytes(b"staged-one")
+                (stage_members / "shard-002.diff").write_bytes(b"staged-two")
+                final_root = directory / "review.json"
+                final_members = directory / "review.shards"
+                competitor = b"competitor-bytes"
+                competed_path = final_members / "competitor"
+
+                def inject(label: str, path: Path):
+                    if mutation == "directory-before-first" and label == "member:shard-001.diff":
+                        final_members.rmdir()
+                        final_members.mkdir()
+                        competed_path.write_bytes(competitor)
+                    elif mutation == "member-before-second" and label == "member:shard-002.diff":
+                        prior = final_members / "shard-001.diff"
+                        prior.unlink()
+                        prior.write_bytes(competitor)
+                    elif mutation == "directory-before-manifest" and label == "manifest":
+                        for member in final_members.iterdir():
+                            member.unlink()
+                        final_members.rmdir()
+                        final_members.mkdir()
+                        competed_path.write_bytes(competitor)
+
+                with self.assertRaises(review_package_module.PublicationError):
+                    review_package_module.publish_package(stage_root, final_root, inject)
+                self.assertFalse(final_root.exists())
+                if mutation == "member-before-second":
+                    competed_path = final_members / "shard-001.diff"
+                self.assertEqual(competed_path.read_bytes(), competitor)
 
     def test_fixed_commit_environment_makes_two_packages_byte_identical(self):
         snapshots = []
