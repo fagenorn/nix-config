@@ -5,7 +5,7 @@
 - Test: `home/common/agent-skills/tests/test_workflow_state.py`
 
 **Interfaces:**
-- Consumes: the existing schema-1 ledger, hardened workflow directory/regular-file/lock primitives, atomic state replacement, tracker/worktree validators, one-issue `control` policy, and D1–D7/D9/D11–D13.
+- Consumes: the existing schema-1 ledger, hardened workflow directory/regular-file/lock primitives, atomic state replacement, tracker/worktree validators, one-issue `control` policy, and D1–D7/D9/D11–D14.
 - Produces: `workflow-state direct-owner --repo-root <absolute-ledger-repository-root> --request-file <absolute-json-path>`; strict `DIRECT_OWNER_INTERFACE_VERSION = 1`; strict request loader/validator; retained direct-run discovery; canonical `observe | owner | terminal` responses.
 - Produces one private one-issue policy operation, named `_apply_one_issue_policy`, whose keyword-only inputs are the validated ledger issue (or no prior issue), optional normalized tracker/worktree observations, injected `now` and `attempt_budget_minutes`, an internally derived current-owner-unavailable boolean, dispatch permission, the selected run directory, and an optional `retained_worktree` path. `retained_worktree` is non-null only for an authorized new run after direct discovery has validated it as the greatest terminal run's latest attempt path; the shared operation then validates any recorded observation against it and alone chooses that retained path versus an absent candidate for attempt 1. Its result is a closed proposed operation (`observe | spawn | resume | retry | refuse | terminal | idle`) plus a changed boolean and the projection data needed by the caller. Both `command_control` and `command_direct_owner` call it; neither carries a second copy of resume/retry/refusal or worktree-selection rules. The private representation may use a frozen record, but those inputs, operations, and outputs are fixed.
 - Preserves: the exact public `init-run`, `control`, `progress`, and `finish` arguments and all existing dispatcher response shapes. Parser help adds `direct-owner` and no retired operation.
@@ -128,8 +128,17 @@ Replace the old four-command help assertion and add the acquisition/strict-shape
         valid = self.direct_request()
         cases = {
             "unknown": {**valid, "extra": None},
+            "missing required": {
+                key: value for key, value in valid.items()
+                if key != "attempt_budget_minutes"
+            },
             "version": {**valid, "interface_version": 2},
+            "boolean version": {**valid, "interface_version": True},
             "boolean issue": {**valid, "issue": True},
+            "zero budget": {**valid, "attempt_budget_minutes": 0},
+            "boolean budget": {**valid, "attempt_budget_minutes": True},
+            "nonboolean new run": {**valid, "new_run": 1},
+            "nonboolean owner unavailable": {**valid, "owner_unavailable": "false"},
             "local time": {**valid, "now": "2026-08-20T10:00:00"},
             "both flags": {**valid, "new_run": True, "owner_unavailable": True},
             "tracker mismatch": {**valid, "tracker": self.tracker_fact(74)},

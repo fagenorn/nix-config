@@ -11,7 +11,7 @@
 
 ## Global Constraints
 
-- `.claude/specs/2026-08-20-direct-autonomous-issue-durability-design.md` is authoritative; implementations cite D1–D13 and do not duplicate its decision rationale.
+- `.claude/specs/2026-08-20-direct-autonomous-issue-durability-design.md` is authoritative; implementations cite D1–D14 and do not duplicate its decision rationale.
 - Phase-0 scope is direct lifecycle acquisition plus the `from-issue` adapter only. Do not change dispatcher request/response envelopes, ordinary interactive-direct ledger-free behavior, or the existing explicitly durable interactive route.
 - `workflow-state` remains Python-standard-library-only and performs no tracker query, Git inspection, owner spawn, waiter installation, process-liveness check, or wall-clock read. Every decision instant and normalized observation comes from the request.
 - The exact public acquisition command is `workflow-state direct-owner --repo-root <absolute-ledger-repository-root> --request-file <absolute-json-path>` with direct interface version 1 and only the strict request/response shapes in D2/D6.
@@ -62,5 +62,14 @@ Task 2 — Route direct autonomous from-issue through durable acquisition — `.
 | New per-issue lock and non-directory namespace entries lack filesystem coverage | accepted — Task 1 adds issue-lock sentinel and regular-file run-entry cases per D12 |
 | Lifecycle terminal tests do not pin the closed response shape | accepted — Task 1 now asserts complete merged, stopped, and refused terminal objects per D12 |
 | Adjacent accepted spec and helper docstring remain stale | accepted — Tasks 1–2 correct both live statements and include the predecessor spec in owned path checks per D13 |
+
+### Focused re-review
+
+- Reviewed HEAD: `f2d1dff7d4eecf91dc5a5222035b36e56a6bc045`
+- Result: all six original findings resolved; one new Should-fix accepted
+
+| Finding | Disposition |
+| --- | --- |
+| Strict-request tests omit boolean version/budget, zero budget, non-boolean authorizations, and a missing member | accepted — Task 1 adds the complete mutation-free failure matrix per D14 |
 
 ---
