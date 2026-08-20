@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
@@ -17,6 +18,7 @@ from typing import Any, Callable
 
 SCHEMA_VERSION = 1
 CONTROL_INTERFACE_VERSION = 1
+DIRECT_OWNER_INTERFACE_VERSION = 1
 ATTEMPT_STATES = frozenset({"active", "handed_off", "stopped", "failed", "merged"})
 RESULT_STATES = frozenset({"merged", "stopped", "failed"})
 RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused"})
@@ -33,6 +35,7 @@ RESULT_FIELDS = (
 )
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+DIRECT_RUN_ID_PATTERN = re.compile(r"^direct-([1-9][0-9]*)-([0-9]{6})$")
 PHASE_ACTIONS = frozenset({"continue", "fresh_start", "handoff", "delegate"})
 PHASE_INPUT_FIELDS = (
     "turn_count",
@@ -87,6 +90,18 @@ CONTROL_REQUEST_FIELDS = frozenset(
         "tracker",
         "owners",
         "worktrees",
+    }
+)
+DIRECT_OWNER_REQUEST_FIELDS = frozenset(
+    {
+        "interface_version",
+        "issue",
+        "now",
+        "attempt_budget_minutes",
+        "new_run",
+        "owner_unavailable",
+        "tracker",
+        "worktree",
     }
 )
 TRACKER_OBSERVATION_FIELDS = frozenset(
@@ -509,19 +524,28 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
     return value
 
 
-def workflow_paths(repo_root_value: str, run_id: str) -> tuple[Path, Path, Path]:
-    if not RUN_ID_PATTERN.fullmatch(run_id):
-        raise WorkflowError("invalid run_id")
+def resolve_repo_root(repo_root_value: str) -> Path:
     supplied_root = Path(repo_root_value).absolute()
     root_status = path_status(supplied_root)
     if root_status is None:
         raise WorkflowError("repository root does not exist")
     if stat.S_ISLNK(root_status.st_mode) or not stat.S_ISDIR(root_status.st_mode):
         raise WorkflowError("repository root must be a non-symlink directory")
-    repo_root = supplied_root.resolve(strict=True)
+    return supplied_root.resolve(strict=True)
+
+
+def ensure_workflows_directory(repo_root: Path) -> Path:
     workflows_dir = repo_root / ".superpowers" / "workflows"
     ensure_directory(repo_root / ".superpowers", ".superpowers")
     ensure_directory(workflows_dir, "workflows")
+    return workflows_dir
+
+
+def workflow_paths(repo_root_value: str, run_id: str) -> tuple[Path, Path, Path]:
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise WorkflowError("invalid run_id")
+    repo_root = resolve_repo_root(repo_root_value)
+    workflows_dir = ensure_workflows_directory(repo_root)
     run_dir = workflows_dir / run_id
     ensure_directory(run_dir, "run directory")
     return run_dir, run_dir / "state.json", run_dir / "state.lock"
@@ -659,20 +683,26 @@ def validate_handoff_path(run_dir: Path, path_value: str) -> str:
     return str(candidate)
 
 
-def open_stable_lock(lock_path: Path) -> int:
-    require_regular_path(lock_path, "state lock", allow_missing=True)
+def open_stable_lock(
+    lock_path: Path, label: str = "state lock", *, allow_missing: bool = True
+) -> int:
+    exists = require_regular_path(lock_path, label, allow_missing=allow_missing)
+    if not exists and not allow_missing:
+        raise WorkflowError(f"{label} does not exist")
     no_follow = getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(
-            lock_path,
-            os.O_RDWR | os.O_CREAT | os.O_EXCL | no_follow,
-            0o600,
-        )
-    except FileExistsError:
-        descriptor = open_existing_regular(lock_path, "state lock", os.O_RDWR)
+    if exists:
+        descriptor = open_existing_regular(lock_path, label, os.O_RDWR)
     else:
         try:
-            verify_open_file(lock_path, descriptor, "state lock")
+            descriptor = os.open(
+                lock_path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | no_follow,
+                0o600,
+            )
+        except FileExistsError:
+            descriptor = open_existing_regular(lock_path, label, os.O_RDWR)
+        try:
+            verify_open_file(lock_path, descriptor, label)
         except BaseException:
             os.close(descriptor)
             raise
@@ -845,11 +875,10 @@ def retain_worktree(notes: str, worktree: str, report_path: str | None = None) -
 def finish_time(attempt: dict[str, Any], now: str) -> str:
     """Clamp a terminal finish instant to at least the attempt's own start.
 
-    ``launch`` deliberately leaves its ``--now`` unguarded, so a dispatcher may
-    hand a terminal writer an instant earlier than the attempt it is closing
-    began. Clamping keeps the record truthful — the attempt ended no earlier
-    than it began — and keeps the ``finished_at >= started_at`` invariant
-    satisfiable instead of bricking every later read of the run.
+    The terminal-writer policy receives an injected time which may precede the
+    attempt it is closing. Clamping keeps the record truthful — the attempt ended
+    no earlier than it began — and preserves the ``finished_at >= started_at``
+    invariant for every later read of the run.
     """
     started_at = parse_utc(attempt["started_at"], "attempt start time")
     return now if parse_utc(now, "finish time") >= started_at else attempt["started_at"]
@@ -1044,7 +1073,7 @@ def validate_control_request(value: Any) -> dict[str, Any]:
     return request
 
 
-def load_control_request(path_value: str) -> dict[str, Any]:
+def load_json_request(path_value: str, label: str) -> Any:
     path = Path(path_value)
     if not path.is_absolute():
         raise WorkflowError("request file path must be absolute")
@@ -1052,10 +1081,54 @@ def load_control_request(path_value: str) -> dict[str, Any]:
         with path.open(encoding="utf-8") as source:
             value = json.load(source)
     except json.JSONDecodeError as error:
-        raise WorkflowError(f"invalid control request JSON: {error}") from error
+        raise WorkflowError(f"invalid {label} JSON: {error}") from error
     except (OSError, UnicodeError) as error:
-        raise WorkflowError(f"cannot read control request file: {error}") from error
-    return validate_control_request(value)
+        raise WorkflowError(f"cannot read {label} file: {error}") from error
+    return value
+
+
+def load_control_request(path_value: str) -> dict[str, Any]:
+    return validate_control_request(load_json_request(path_value, "control request"))
+
+
+def validate_direct_owner_request(value: Any) -> dict[str, Any]:
+    request = require_exact_fields(
+        value, DIRECT_OWNER_REQUEST_FIELDS, "direct owner request"
+    )
+    if (
+        type(request["interface_version"]) is not int
+        or request["interface_version"] != DIRECT_OWNER_INTERFACE_VERSION
+    ):
+        raise WorkflowError("unsupported direct owner interface version")
+    issue = require_plain_int(request["issue"], "direct owner issue", minimum=1)
+    require_plain_int(
+        request["attempt_budget_minutes"],
+        "attempt_budget_minutes",
+        minimum=1,
+    )
+    if not isinstance(request["now"], str):
+        raise WorkflowError("invalid direct owner now: expected an RFC3339 UTC timestamp")
+    request["now"] = format_utc(parse_utc(request["now"], "direct owner now"))
+    for field in ("new_run", "owner_unavailable"):
+        if type(request[field]) is not bool:
+            raise WorkflowError(f"invalid {field}: expected boolean")
+    if request["new_run"] and request["owner_unavailable"]:
+        raise WorkflowError("new_run and owner_unavailable cannot both be true")
+    if request["tracker"] is not None:
+        tracker = validate_tracker_observation(request["tracker"])
+        if tracker["issue"] != issue:
+            raise WorkflowError("tracker observation does not match requested issue")
+    if request["worktree"] is not None:
+        worktree = validate_worktree_observation(request["worktree"])
+        if worktree["issue"] != issue:
+            raise WorkflowError("worktree observation does not match requested issue")
+    return request
+
+
+def load_direct_owner_request(path_value: str) -> dict[str, Any]:
+    return validate_direct_owner_request(
+        load_json_request(path_value, "direct owner request")
+    )
 
 
 def bootstrap_response(state: dict[str, Any]) -> dict[str, Any]:
@@ -1082,7 +1155,13 @@ def bootstrap_response(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def reject_reserved_direct_run_id(run_id: str) -> None:
+    if DIRECT_RUN_ID_PATTERN.fullmatch(run_id):
+        raise WorkflowError("direct run identities are reserved for direct-owner")
+
+
 def command_init_run(args: argparse.Namespace) -> int:
+    reject_reserved_direct_run_id(args.run_id)
     now = format_utc(parse_utc(args.now, "--now"))
 
     def initialize(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
@@ -1186,7 +1265,318 @@ def control_summary(
     }
 
 
+def _apply_one_issue_policy(
+    *,
+    ledger_issue: dict[str, Any] | None,
+    tracker: dict[str, Any] | None,
+    worktree: dict[str, Any] | None,
+    now: str,
+    attempt_budget_minutes: int,
+    current_owner_unavailable: bool,
+    dispatch_permitted: bool,
+    run_dir: Path,
+    retained_worktree: str | None = None,
+) -> dict[str, Any]:
+    """Derive and apply the shared lifecycle policy for exactly one issue."""
+    if ledger_issue is not None:
+        issue = ledger_issue["issue"]
+    elif tracker is not None:
+        issue = tracker["issue"]
+    elif worktree is not None:
+        issue = worktree["issue"]
+    else:
+        match = DIRECT_RUN_ID_PATTERN.fullmatch(run_dir.name)
+        if match is None:
+            raise WorkflowError("cannot derive issue identity for one-issue policy")
+        issue = int(match.group(1))
+
+    if tracker is not None and tracker["issue"] != issue:
+        raise WorkflowError("tracker observation does not match ledger issue")
+    if worktree is not None and worktree["issue"] != issue:
+        raise WorkflowError("worktree observation does not match ledger issue")
+
+    attempts = [] if ledger_issue is None else ledger_issue["attempts"]
+    latest = attempts[-1] if attempts else None
+    recorded_path = retained_worktree if latest is None else latest["worktree"]
+
+    def validate_recorded_worktree() -> None:
+        if worktree is None or worktree["recorded"] is None:
+            return
+        if recorded_path is None:
+            raise WorkflowError("recorded worktree has no ledger attempt")
+        if worktree["recorded"]["path"] != recorded_path:
+            raise WorkflowError("recorded worktree path does not match ledger")
+
+    now_value = parse_utc(now, "policy now")
+    expired = bool(
+        latest is not None
+        and latest["state"] in {"active", "handed_off"}
+        and now_value >= parse_utc(latest["deadline_at"], "attempt deadline")
+    )
+    active_unexpired = bool(
+        latest is not None and latest["state"] == "active" and not expired
+    )
+    handed_off = bool(
+        latest is not None and latest["state"] == "handed_off" and not expired
+    )
+    retryable = bool(
+        latest is not None
+        and (
+            expired
+            or (
+                latest["state"] == "failed"
+                and latest["result_source"] == "owner"
+            )
+            or (
+                latest["state"] == "stopped"
+                and latest["result_source"] == "expiry"
+            )
+        )
+    )
+
+    if current_owner_unavailable and not active_unexpired:
+        raise WorkflowError("owner_unavailable is not applicable")
+
+    if latest is not None and not (active_unexpired or handed_off or retryable):
+        return {
+            "operation": "terminal", "changed": False,
+            "issue_state": ledger_issue, "attempt": latest,
+            "requirements": [], "uses_candidate": False,
+            "expired": False, "desired": "terminal",
+        }
+
+    if active_unexpired and not current_owner_unavailable:
+        return {
+            "operation": "idle", "changed": False,
+            "issue_state": ledger_issue, "attempt": latest,
+            "requirements": [], "uses_candidate": False,
+            "expired": False, "desired": "idle",
+        }
+
+    if active_unexpired or handed_off:
+        assert latest is not None
+        if not dispatch_permitted:
+            return {
+                "operation": "idle", "changed": False,
+                "issue_state": ledger_issue, "attempt": latest,
+                "requirements": [], "uses_candidate": False,
+                "expired": False, "desired": "resume",
+            }
+        if handed_off:
+            validate_handoff_path(run_dir, latest["handoff_path"])
+        validate_recorded_worktree()
+        recorded = None if worktree is None else worktree["recorded"]
+        if recorded is None or recorded["state"] != "matching_issue_branch":
+            return {
+                "operation": "observe", "changed": False,
+                "issue_state": ledger_issue, "attempt": latest,
+                "requirements": [
+                    {"kind": "recorded_worktree", "path": latest["worktree"]}
+                ],
+                "uses_candidate": False, "expired": False,
+                "desired": "resume",
+            }
+        latest["state"] = "active"
+        latest["launch_kind"] = "resume"
+        latest["launches"].append({
+            "kind": "resume", "owner": latest["owner"],
+            "worktree": latest["worktree"], "at": now,
+        })
+        return {
+            "operation": "resume", "changed": True,
+            "issue_state": ledger_issue, "attempt": latest,
+            "requirements": [], "uses_candidate": False,
+            "expired": False, "desired": "resume",
+        }
+
+    needs_new_work = latest is None or retryable
+    if needs_new_work and tracker is None:
+        return {
+            "operation": "observe", "changed": False,
+            "issue_state": ledger_issue, "attempt": latest,
+            "requirements": [{"kind": "tracker"}],
+            "uses_candidate": False, "expired": expired,
+            "desired": "retry" if retryable else "spawn",
+        }
+
+    assert tracker is not None
+    blockers = control_blockers(tracker)
+    if tracker["state"] == "closed" or tracker["decision_blockers"] or tracker["open_blockers"]:
+        changed = False
+        if expired:
+            assert latest is not None and ledger_issue is not None
+            ledger_issue["outcome"] = stop_attempt(
+                latest, reason="attempt deadline expired", now=now, source="expiry"
+            )
+            changed = True
+        return {
+            "operation": "terminal", "changed": changed,
+            "issue_state": ledger_issue, "attempt": latest,
+            "requirements": [], "uses_candidate": False,
+            "expired": expired, "desired": "terminal",
+            "tracker_reason": (
+                "closed" if tracker["state"] == "closed"
+                else "fogged" if tracker["decision_blockers"] else "blocked"
+            ),
+            "blockers": blockers,
+        }
+
+    if retryable and latest is not None and latest["attempt"] >= 2:
+        validate_recorded_worktree()
+        if not dispatch_permitted:
+            return {
+                "operation": "idle", "changed": False,
+                "issue_state": ledger_issue, "attempt": latest,
+                "requirements": [], "uses_candidate": False,
+                "expired": expired, "desired": "refuse",
+            }
+        if expired:
+            outcome = stop_attempt(
+                latest, reason="attempt deadline expired", now=now, source="expiry"
+            )
+            assert ledger_issue is not None
+            ledger_issue["outcome"] = outcome
+        worktrees = ", ".join(
+            attempt["worktree"] for attempt in ledger_issue["attempts"][:2]
+        )
+        result = terminal_result(
+            issue, "failed",
+            f"Fresh retry refused after attempts 1 and 2; worktrees: {worktrees}",
+        )
+        latest["state"] = "failed"
+        latest["result"] = result
+        latest["finished_at"] = finish_time(latest, now)
+        latest["result_source"] = "refused"
+        ledger_issue["outcome"] = copy.deepcopy(result)
+        return {
+            "operation": "refuse", "changed": True,
+            "issue_state": ledger_issue, "attempt": latest,
+            "requirements": [], "uses_candidate": False,
+            "expired": expired, "desired": "refuse",
+        }
+
+    if not dispatch_permitted:
+        if expired:
+            assert latest is not None and ledger_issue is not None
+            ledger_issue["outcome"] = stop_attempt(
+                latest, reason="attempt deadline expired", now=now, source="expiry"
+            )
+            return {
+                "operation": "idle", "changed": True,
+                "issue_state": ledger_issue, "attempt": latest,
+                "requirements": [], "uses_candidate": False,
+                "expired": True,
+                "desired": "retry" if retryable else "spawn",
+            }
+        return {
+            "operation": "idle", "changed": False,
+            "issue_state": ledger_issue, "attempt": latest,
+            "requirements": [], "uses_candidate": False,
+            "expired": False,
+            "desired": "retry" if retryable else "spawn",
+        }
+
+    selected_path: str | None = None
+    uses_candidate = False
+    if latest is None and retained_worktree is not None:
+        validate_recorded_worktree()
+        recorded = None if worktree is None else worktree["recorded"]
+        if recorded is None:
+            return {
+                "operation": "observe", "changed": False,
+                "issue_state": ledger_issue, "attempt": latest,
+                "requirements": [
+                    {"kind": "recorded_worktree", "path": retained_worktree}
+                ],
+                "uses_candidate": False, "expired": False,
+                "desired": "spawn",
+            }
+        if recorded["state"] == "matching_issue_branch":
+            selected_path = retained_worktree
+        elif worktree is not None and worktree["candidate"] is not None:
+            selected_path = worktree["candidate"]["path"]
+            uses_candidate = True
+        else:
+            return {
+                "operation": "observe", "changed": False,
+                "issue_state": ledger_issue, "attempt": latest,
+                "requirements": [{"kind": "candidate_worktree"}],
+                "uses_candidate": False, "expired": False,
+                "desired": "spawn",
+            }
+    elif latest is None:
+        validate_recorded_worktree()
+        candidate = None if worktree is None else worktree["candidate"]
+        if candidate is None:
+            return {
+                "operation": "observe", "changed": False,
+                "issue_state": ledger_issue, "attempt": latest,
+                "requirements": [{"kind": "candidate_worktree"}],
+                "uses_candidate": False, "expired": False,
+                "desired": "spawn",
+            }
+        selected_path = candidate["path"]
+        uses_candidate = True
+    else:
+        validate_recorded_worktree()
+        recorded = None if worktree is None else worktree["recorded"]
+        candidate = None if worktree is None else worktree["candidate"]
+        if recorded is None and candidate is None:
+            return {
+                "operation": "observe", "changed": False,
+                "issue_state": ledger_issue, "attempt": latest,
+                "requirements": [
+                    {"kind": "recorded_worktree", "path": latest["worktree"]}
+                ],
+                "uses_candidate": False, "expired": expired,
+                "desired": "retry",
+            }
+        if recorded is not None and recorded["state"] == "matching_issue_branch":
+            selected_path = latest["worktree"]
+        elif candidate is not None:
+            selected_path = candidate["path"]
+            uses_candidate = True
+        else:
+            return {
+                "operation": "observe", "changed": False,
+                "issue_state": ledger_issue, "attempt": latest,
+                "requirements": [{"kind": "candidate_worktree"}],
+                "uses_candidate": False, "expired": expired,
+                "desired": "retry",
+            }
+
+    desired = "retry" if retryable else "spawn"
+    if expired and latest is not None:
+        outcome = stop_attempt(
+            latest, reason="attempt deadline expired", now=now, source="expiry"
+        )
+        assert ledger_issue is not None
+        ledger_issue["outcome"] = outcome
+    attempt_number = 2 if retryable else 1
+    deadline_at = format_utc(
+        now_value + timedelta(minutes=attempt_budget_minutes)
+    )
+    attempt = new_control_attempt(
+        issue=issue, attempt_number=attempt_number,
+        worktree=selected_path, now=now, deadline_at=deadline_at,
+    )
+    if ledger_issue is None:
+        ledger_issue = {"issue": issue, "attempts": [attempt], "outcome": None}
+    elif retryable:
+        ledger_issue["attempts"].append(attempt)
+        ledger_issue["outcome"] = None
+    else:
+        ledger_issue["attempts"].append(attempt)
+    return {
+        "operation": desired, "changed": True,
+        "issue_state": ledger_issue, "attempt": attempt,
+        "requirements": [], "uses_candidate": uses_candidate,
+        "path": selected_path, "expired": expired, "desired": desired,
+    }
+
+
 def command_control(args: argparse.Namespace) -> int:
+    reject_reserved_direct_run_id(args.run_id)
     request = load_control_request(args.request_file)
     now = request["now"]
     now_value = parse_utc(now, "control now")
@@ -1199,9 +1589,6 @@ def command_control(args: argparse.Namespace) -> int:
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise WorkflowError("control time must not move backward")
 
-        # Validate every ledger-dependent observation before deriving or applying
-        # transitions.  Only an observation for the latest launch of the latest
-        # attempt is current; older, valid identities are harmless stale notices.
         unavailable: set[tuple[int, int, int]] = set()
         for observation in request["owners"]:
             issue_state = state["issues"].get(str(observation["issue"]))
@@ -1216,12 +1603,17 @@ def command_control(args: argparse.Namespace) -> int:
                 observation["attempt"] == len(issue_state["attempts"])
                 and observation["launch"] == len(attempt["launches"])
             ):
-                unavailable.add(
-                    (
-                        observation["issue"], observation["attempt"],
-                        observation["launch"],
-                    )
-                )
+                unavailable.add((
+                    observation["issue"], observation["attempt"],
+                    observation["launch"],
+                ))
+
+        def owner_is_unavailable(issue_state: dict[str, Any] | None) -> bool:
+            if issue_state is None or not issue_state["attempts"]:
+                return False
+            latest = issue_state["attempts"][-1]
+            identity = (latest["issue"], latest["attempt"], len(latest["launches"]))
+            return latest["state"] == "active" and identity in unavailable
 
         for issue, observation in worktree_by_issue.items():
             recorded = observation["recorded"]
@@ -1233,185 +1625,116 @@ def command_control(args: argparse.Namespace) -> int:
             if recorded["path"] != issue_state["attempts"][-1]["worktree"]:
                 raise WorkflowError("recorded worktree path does not match ledger")
 
-        # Expiry is projected first.  The actual records are written only after
-        # all proposals, replay exceptions and candidate exclusivity are valid.
-        expiring: set[int] = set()
+        analysis: dict[int, dict[str, Any]] = {}
         for issue in request["issues"]:
             issue_state = state["issues"].get(str(issue))
-            if issue_state is None:
-                continue
-            if not issue_state["attempts"]:
-                continue
-            latest = issue_state["attempts"][-1]
-            if (
-                latest["state"] in {"active", "handed_off"}
-                and now_value >= parse_utc(latest["deadline_at"], "attempt deadline")
-            ):
-                expiring.add(latest["issue"])
+            analysis[issue] = _apply_one_issue_policy(
+                ledger_issue=copy.deepcopy(issue_state),
+                tracker=tracker_by_issue[issue],
+                worktree=worktree_by_issue.get(issue),
+                now=now,
+                attempt_budget_minutes=request["attempt_budget_minutes"],
+                current_owner_unavailable=owner_is_unavailable(issue_state),
+                dispatch_permitted=False,
+                run_dir=run_dir,
+            )
 
         occupied = 0
         for issue_state in state["issues"].values():
             if not issue_state["attempts"]:
                 continue
             latest = issue_state["attempts"][-1]
-            identity = (
-                latest["issue"], latest["attempt"], len(latest["launches"])
-            )
+            identity = (latest["issue"], latest["attempt"], len(latest["launches"]))
             if (
-                latest["issue"] not in expiring
-                and latest["state"] == "active"
+                latest["state"] == "active"
+                and now_value < parse_utc(latest["deadline_at"], "attempt deadline")
                 and identity not in unavailable
             ):
                 occupied += 1
         capacity = max(0, request["max_parallel"] - occupied)
 
-        proposals: list[dict[str, Any]] = []
+        planned: dict[int, dict[str, Any]] = {}
+        proposal_order: list[int] = []
 
-        # D6 pass one: resumptions.  A handed-off attempt and a current owner
-        # disappearance both release capacity before selection.
-        for issue in request["issues"]:
+        def apply_policy(issue: int, dispatch_permitted: bool) -> dict[str, Any]:
             issue_state = state["issues"].get(str(issue))
-            if capacity <= 0 or issue in expiring or issue_state is None:
+            result = _apply_one_issue_policy(
+                ledger_issue=copy.deepcopy(issue_state),
+                tracker=tracker_by_issue[issue],
+                worktree=worktree_by_issue.get(issue),
+                now=now,
+                attempt_budget_minutes=request["attempt_budget_minutes"],
+                current_owner_unavailable=owner_is_unavailable(issue_state),
+                dispatch_permitted=dispatch_permitted,
+                run_dir=run_dir,
+            )
+            planned[issue] = result
+            return result
+
+        for issue in request["issues"]:
+            if capacity <= 0 or analysis[issue]["desired"] != "resume":
                 continue
-            latest = issue_state["attempts"][-1]
-            identity = (issue, latest["attempt"], len(latest["launches"]))
-            if not (
-                latest["state"] == "handed_off"
-                or (latest["state"] == "active" and identity in unavailable)
-            ):
-                continue
-            if latest["state"] == "handed_off":
-                validate_handoff_path(run_dir, latest["handoff_path"])
-            observation = worktree_by_issue.get(issue)
-            if (
-                observation is None
-                or observation["recorded"] is None
-                or observation["recorded"]["state"] != "matching_issue_branch"
-            ):
+            result = apply_policy(issue, True)
+            if result["operation"] == "observe":
                 raise WorkflowError(
                     "resume control action requires a matching recorded worktree observation"
                 )
-            proposals.append(
-                {
-                    "kind": "resume", "issue": issue,
-                    "attempt": latest["attempt"], "path": latest["worktree"],
-                    "uses_candidate": False,
-                }
-            )
+            proposal_order.append(issue)
             capacity -= 1
 
-        def ready_for_new_work(issue: int) -> bool:
-            tracker = tracker_by_issue[issue]
-            return (
-                tracker["state"] == "open"
-                and not tracker["open_blockers"]
-                and not tracker["decision_blockers"]
-            )
-
-        def retryable(latest: dict[str, Any], *, projected_expiry: bool) -> bool:
-            return projected_expiry or (
-                latest["state"] == "failed"
-                and latest["result_source"] == "owner"
-            ) or (
-                latest["state"] == "stopped"
-                and latest["result_source"] == "expiry"
-            )
-
-        # D6 pass two: retry once, or durably refuse the third attempt.
         for issue in request["issues"]:
-            issue_state = state["issues"].get(str(issue))
-            if issue_state is None or not ready_for_new_work(issue):
-                continue
-            latest = issue_state["attempts"][-1]
-            if not retryable(latest, projected_expiry=issue in expiring):
-                continue
-            if latest["attempt"] >= 2:
-                proposals.append(
-                    {
-                        "kind": "refuse", "issue": issue,
-                        "attempt": latest["attempt"], "path": latest["worktree"],
-                        "uses_candidate": False,
-                    }
-                )
-                continue
-            if capacity <= 0:
-                continue
-            observation = worktree_by_issue.get(issue)
-            if observation is None:
-                raise WorkflowError(
-                    "retry control action requires a verified worktree observation"
-                )
-            if (
-                observation["recorded"] is not None
-                and observation["recorded"]["state"] == "matching_issue_branch"
-            ):
-                path = latest["worktree"]
-                uses_candidate = False
-            elif observation["candidate"] is not None:
-                path = observation["candidate"]["path"]
-                uses_candidate = True
-            else:
-                raise WorkflowError(
-                    "retry control action requires a verified worktree observation"
-                )
-            proposals.append(
-                {
-                    "kind": "retry", "issue": issue, "attempt": 2,
-                    "path": path, "uses_candidate": uses_candidate,
-                }
-            )
-            capacity -= 1
+            desired = analysis[issue]["desired"]
+            if desired == "refuse":
+                apply_policy(issue, True)
+                proposal_order.append(issue)
+            elif desired == "retry":
+                if capacity > 0:
+                    result = apply_policy(issue, True)
+                    if result["operation"] == "observe":
+                        raise WorkflowError(
+                            "retry control action requires a verified worktree observation"
+                        )
+                    proposal_order.append(issue)
+                    capacity -= 1
+                elif analysis[issue]["expired"]:
+                    apply_policy(issue, False)
+            elif analysis[issue]["expired"]:
+                apply_policy(issue, False)
 
-        # D6 pass three: first spawns.
         for issue in request["issues"]:
-            if capacity <= 0 or not ready_for_new_work(issue):
+            if capacity <= 0 or analysis[issue]["desired"] != "spawn":
                 continue
-            issue_state = state["issues"].get(str(issue))
-            if issue_state is not None and issue_state["attempts"]:
-                continue
-            observation = worktree_by_issue.get(issue)
-            if observation is None or observation["candidate"] is None:
+            result = apply_policy(issue, True)
+            if result["operation"] == "observe":
                 raise WorkflowError(
                     "fresh control action requires an absent candidate worktree"
                 )
-            proposals.append(
-                {
-                    "kind": "spawn", "issue": issue, "attempt": 1,
-                    "path": observation["candidate"]["path"],
-                    "uses_candidate": True,
-                }
-            )
+            proposal_order.append(issue)
             capacity -= 1
 
-        dispatch_proposals = [
-            proposal for proposal in proposals
-            if proposal["kind"] in CONTROL_DISPATCH_KINDS
+        dispatch_results = [
+            planned[issue] for issue in proposal_order
+            if planned[issue]["operation"] in CONTROL_DISPATCH_KINDS
         ]
-
-        # D16 validates the complete accepted retry/spawn candidate set against
-        # itself and every durable path before any launch is appended.
         selected_paths: dict[str, int] = {}
         durable_paths: dict[str, set[int]] = {}
         for issue_state in state["issues"].values():
             for attempt in issue_state["attempts"]:
                 key = canonical_worktree_path(attempt["worktree"])
                 durable_paths.setdefault(key, set()).add(attempt["issue"])
-        for proposal in dispatch_proposals:
-            if not proposal["uses_candidate"]:
+        for result in dispatch_results:
+            if not result["uses_candidate"]:
                 continue
-            issue = proposal["issue"]
-            key = canonical_worktree_path(proposal["path"])
+            attempt = result["attempt"]
+            issue = attempt["issue"]
+            key = canonical_worktree_path(attempt["worktree"])
             if key in selected_paths:
                 raise WorkflowError("candidate worktree path is shared by accepted actions")
             if any(other_issue != issue for other_issue in durable_paths.get(key, set())):
                 raise WorkflowError("candidate worktree path aliases another issue")
             selected_paths[key] = issue
 
-        # D13 is the only case in which a durable issue may still present the
-        # consumed absent-candidate fact.  It is valid solely for an actionless,
-        # exact replay of the first active launch.
-        actionless_replay = not dispatch_proposals
-        proposal_by_issue = {proposal["issue"]: proposal for proposal in proposals}
+        actionless_replay = not dispatch_results
         for issue in request["issues"]:
             issue_state = state["issues"].get(str(issue))
             if issue_state is None or not issue_state["attempts"]:
@@ -1421,20 +1744,20 @@ def command_control(args: argparse.Namespace) -> int:
             candidate = None if observation is None else observation["candidate"]
             if candidate is None:
                 continue
-            proposal = proposal_by_issue.get(issue)
+            result = planned.get(issue)
             if (
-                proposal is not None
-                and proposal["kind"] == "retry"
-                and proposal["uses_candidate"]
-                and proposal["path"] == candidate["path"]
+                result is not None
+                and result["operation"] == "retry"
+                and result["uses_candidate"]
+                and result["attempt"]["worktree"] == candidate["path"]
                 and candidate["path"] != latest["worktree"]
             ):
                 continue
             identity = (issue, latest["attempt"], len(latest["launches"]))
             replay = (
                 actionless_replay
-                and issue not in expiring
-                and proposal is None
+                and not analysis[issue]["expired"]
+                and (result is None or not result["changed"])
                 and latest["state"] == "active"
                 and identity not in unavailable
                 and candidate["path"] == latest["worktree"]
@@ -1447,113 +1770,55 @@ def command_control(args: argparse.Namespace) -> int:
                     "current control action requires a recorded worktree observation"
                 )
 
-        fresh_deadline = format_utc(
-            now_value + timedelta(minutes=request["attempt_budget_minutes"])
-        )
+        for issue, result in planned.items():
+            if result["changed"]:
+                state["issues"][str(issue)] = result["issue_state"]
+
         deltas: list[dict[str, Any]] = []
         actions: list[dict[str, Any]] = []
-
-        refusal_issues = {
-            proposal["issue"] for proposal in proposals
-            if proposal["kind"] == "refuse"
-        }
         for issue in request["issues"]:
-            if issue not in expiring:
-                continue
-            issue_state = state["issues"][str(issue)]
-            latest = issue_state["attempts"][-1]
-            outcome = stop_attempt(
-                latest, reason="attempt deadline expired", now=now, source="expiry"
-            )
-            issue_state["outcome"] = outcome
-            if issue not in refusal_issues:
-                deltas.append(
-                    {
-                        "issue": issue, "attempt": latest["attempt"],
-                        "kind": "expired", "state": "stopped",
-                    }
-                )
-
-        for proposal in proposals:
-            issue = proposal["issue"]
-            issue_state = state["issues"].get(str(issue))
-            if proposal["kind"] == "resume":
-                assert issue_state is not None
-                attempt = issue_state["attempts"][-1]
-                attempt["state"] = "active"
-                attempt["launch_kind"] = "resume"
-                attempt["launches"].append(
-                    {
-                        "kind": "resume", "owner": attempt["owner"],
-                        "worktree": attempt["worktree"], "at": now,
-                    }
-                )
-                delta_kind = "resumed"
-                action_kind = "resume"
-            elif proposal["kind"] == "retry":
-                assert issue_state is not None
-                attempt = new_control_attempt(
-                    issue=issue, attempt_number=2, worktree=proposal["path"],
-                    now=now, deadline_at=fresh_deadline,
-                )
-                issue_state["attempts"].append(attempt)
-                issue_state["outcome"] = None
-                delta_kind = "retried"
-                action_kind = "retry"
-            elif proposal["kind"] == "spawn":
-                attempt = new_control_attempt(
-                    issue=issue, attempt_number=1, worktree=proposal["path"],
-                    now=now, deadline_at=fresh_deadline,
-                )
-                state["issues"][str(issue)] = {
-                    "issue": issue, "attempts": [attempt], "outcome": None,
-                }
-                delta_kind = "spawned"
-                action_kind = "spawn"
-            else:
-                assert proposal["kind"] == "refuse" and issue_state is not None
-                latest = issue_state["attempts"][-1]
-                worktrees = ", ".join(
-                    attempt["worktree"] for attempt in issue_state["attempts"][:2]
-                )
-                result = terminal_result(
-                    issue, "failed",
-                    f"Fresh retry refused after attempts 1 and 2; worktrees: {worktrees}",
-                )
-                latest["state"] = "failed"
-                latest["result"] = result
-                latest["finished_at"] = finish_time(latest, now)
-                latest["result_source"] = "refused"
-                issue_state["outcome"] = copy.deepcopy(result)
-                deltas.append(
-                    {
-                        "issue": issue, "attempt": latest["attempt"],
-                        "kind": "retry_refused", "state": "failed",
-                    }
-                )
-                continue
-
-            launch_ordinal = len(attempt["launches"])
-            deltas.append(
-                {
-                    "issue": issue, "attempt": attempt["attempt"],
-                    "kind": delta_kind, "state": "active",
-                }
-            )
-            actions.append(
-                {
-                    "id": f"{issue}:{attempt['attempt']}:{launch_ordinal}",
-                    "kind": action_kind,
+            result = planned.get(issue)
+            if (
+                analysis[issue]["expired"]
+                and result is not None
+                and result["changed"]
+                and result["operation"] != "refuse"
+            ):
+                deltas.append({
                     "issue": issue,
-                    "attempt": attempt["attempt"],
-                    "owner": attempt["owner"],
-                    "worktree": attempt["worktree"],
-                    "handoff_path": attempt["handoff_path"],
-                    "deadline_at": attempt["deadline_at"],
-                }
-            )
+                    "attempt": analysis[issue]["attempt"]["attempt"],
+                    "kind": "expired", "state": "stopped",
+                })
 
-        changed = bool(expiring or proposals)
+        for issue in proposal_order:
+            result = planned[issue]
+            operation = result["operation"]
+            attempt = result["attempt"]
+            if operation == "refuse":
+                deltas.append({
+                    "issue": issue, "attempt": attempt["attempt"],
+                    "kind": "retry_refused", "state": "failed",
+                })
+                continue
+            delta_kind = {
+                "spawn": "spawned", "resume": "resumed", "retry": "retried",
+            }[operation]
+            deltas.append({
+                "issue": issue, "attempt": attempt["attempt"],
+                "kind": delta_kind, "state": "active",
+            })
+            actions.append({
+                "id": f"{issue}:{attempt['attempt']}:{len(attempt['launches'])}",
+                "kind": operation,
+                "issue": issue,
+                "attempt": attempt["attempt"],
+                "owner": attempt["owner"],
+                "worktree": attempt["worktree"],
+                "handoff_path": attempt["handoff_path"],
+                "deadline_at": attempt["deadline_at"],
+            })
+
+        changed = any(result["changed"] for result in planned.values())
         if changed:
             state["updated_at"] = now
 
@@ -1568,14 +1833,15 @@ def command_control(args: argparse.Namespace) -> int:
         deadlines = []
         for issue in request["issues"]:
             issue_state = state["issues"].get(str(issue))
-            if issue_state is None:
-                continue
-            if not issue_state["attempts"]:
+            if issue_state is None or not issue_state["attempts"]:
                 continue
             latest = issue_state["attempts"][-1]
             if latest["state"] in {"active", "handed_off"}:
                 deadlines.append(latest["deadline_at"])
-        next_deadline = min(deadlines, key=lambda value: parse_utc(value)) if deadlines else None
+        next_deadline = (
+            min(deadlines, key=lambda value: parse_utc(value))
+            if deadlines else None
+        )
 
         pending_external = False
         for issue in request["issues"]:
@@ -1588,7 +1854,10 @@ def command_control(args: argparse.Namespace) -> int:
             latest = issue_state["attempts"][-1]
             if (
                 tracker["state"] == "open"
-                and retryable(latest, projected_expiry=False)
+                and (
+                    (latest["state"] == "failed" and latest["result_source"] == "owner")
+                    or (latest["state"] == "stopped" and latest["result_source"] == "expiry")
+                )
                 and latest["attempt"] < 2
             ):
                 pending_external = True
@@ -1596,26 +1865,18 @@ def command_control(args: argparse.Namespace) -> int:
         if next_deadline is None and not pending_external:
             actions.append({"id": "finalize", "kind": "finalize"})
         elif next_deadline is None:
-            actions.append(
-                {
-                    "id": "wait:external",
-                    "kind": "wait",
-                    "wake_on": ["owner_notification", "tracker_change"],
-                    "deadline_at": None,
-                }
-            )
+            actions.append({
+                "id": "wait:external", "kind": "wait",
+                "wake_on": ["owner_notification", "tracker_change"],
+                "deadline_at": None,
+            })
         else:
-            actions.append(
-                {
-                    "id": f"wait:{next_deadline}",
-                    "kind": "wait",
-                    "wake_on": [
-                        "owner_notification", "tracker_change", "deadline"
-                    ],
-                    "deadline_at": next_deadline,
-                }
-            )
-        response = {
+            actions.append({
+                "id": f"wait:{next_deadline}", "kind": "wait",
+                "wake_on": ["owner_notification", "tracker_change", "deadline"],
+                "deadline_at": next_deadline,
+            })
+        return {
             "interface_version": CONTROL_INTERFACE_VERSION,
             "run_id": args.run_id,
             "now": now,
@@ -1623,10 +1884,295 @@ def command_control(args: argparse.Namespace) -> int:
             "deltas": deltas,
             "actions": actions,
             "next_deadline": next_deadline,
-        }
-        return response, changed
+        }, changed
 
     response = transact(args.repo_root, args.run_id, control)
+    print_json(response)
+    return 0
+
+
+def direct_run_is_terminal(issue_state: dict[str, Any]) -> bool:
+    if not issue_state["attempts"]:
+        return False
+    latest = issue_state["attempts"][-1]
+    if latest["state"] in {"active", "handed_off"}:
+        return False
+    if (
+        latest["state"] == "failed" and latest["result_source"] == "owner"
+    ) or (
+        latest["state"] == "stopped" and latest["result_source"] == "expiry"
+    ):
+        return False
+    return True
+
+
+def direct_observe(
+    issue: int, run_id: str | None, requirements: list[dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "interface_version": DIRECT_OWNER_INTERFACE_VERSION,
+        "kind": "observe",
+        "issue": issue,
+        "run_id": run_id,
+        "requirements": requirements,
+    }
+
+
+def direct_terminal(
+    *, issue: int, run_id: str | None, source: str, reason: str,
+    blockers: list[dict[str, Any]], result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "interface_version": DIRECT_OWNER_INTERFACE_VERSION,
+        "kind": "terminal",
+        "issue": issue,
+        "run_id": run_id,
+        "source": source,
+        "reason": reason,
+        "blockers": blockers,
+        "result": copy.deepcopy(result),
+    }
+
+
+def direct_owner_response(
+    repo_root: Path, run_id: str, attempt: dict[str, Any], operation: str
+) -> dict[str, Any]:
+    launch_kind = "resume" if operation == "resume" else operation
+    return {
+        "interface_version": DIRECT_OWNER_INTERFACE_VERSION,
+        "kind": "owner",
+        "ledger_repo_root": str(repo_root),
+        "run_id": run_id,
+        "issue": attempt["issue"],
+        "attempt": attempt["attempt"],
+        "owner": attempt["owner"],
+        "action_id": (
+            f"{attempt['issue']}:{attempt['attempt']}:{len(attempt['launches'])}"
+        ),
+        "launch_kind": launch_kind,
+        "worktree": attempt["worktree"],
+        "handoff_path": attempt["handoff_path"],
+        "deadline_at": attempt["deadline_at"],
+    }
+
+
+def command_direct_owner(args: argparse.Namespace) -> int:
+    request = load_direct_owner_request(args.request_file)
+    issue = request["issue"]
+    if not Path(args.repo_root).is_absolute():
+        raise WorkflowError("repository root path must be absolute")
+    repo_root = resolve_repo_root(args.repo_root)
+    workflows_dir = ensure_workflows_directory(repo_root)
+    issue_lock_path = workflows_dir / f".direct-{issue}.lock"
+    issue_lock_descriptor = open_stable_lock(
+        issue_lock_path, "direct issue lock", allow_missing=True
+    )
+
+    response: dict[str, Any]
+    with os.fdopen(issue_lock_descriptor, "r+b") as issue_lock:
+        fcntl.flock(issue_lock.fileno(), fcntl.LOCK_EX)
+        with ExitStack() as retained_locks:
+            prefix = f"direct-{issue}-"
+            retained: list[tuple[int, str, Path, Path, dict[str, Any]]] = []
+            claimed: list[tuple[int, str, Path]] = []
+            for entry in os.scandir(workflows_dir):
+                if not entry.name.startswith(prefix):
+                    continue
+                suffix = entry.name[len(prefix):]
+                if len(suffix) != 6 or not suffix.isascii() or not suffix.isdecimal():
+                    raise WorkflowError("malformed direct run namespace entry")
+                sequence = int(suffix)
+                if sequence < 1:
+                    raise WorkflowError("malformed direct run namespace entry")
+                run_id = entry.name
+                run_dir = workflows_dir / run_id
+                run_status = path_status(run_dir)
+                if (
+                    run_status is None
+                    or stat.S_ISLNK(run_status.st_mode)
+                    or not stat.S_ISDIR(run_status.st_mode)
+                ):
+                    raise WorkflowError(
+                        "direct run entry must be a non-symlink directory"
+                    )
+                claimed.append((sequence, run_id, run_dir))
+
+            for sequence, run_id, run_dir in sorted(claimed):
+                lock_path = run_dir / "state.lock"
+                state_path = run_dir / "state.json"
+                require_regular_path(lock_path, "state lock", allow_missing=False)
+                require_regular_path(state_path, "workflow state", allow_missing=False)
+                lock_descriptor = open_stable_lock(
+                    lock_path, "state lock", allow_missing=False
+                )
+                lock = retained_locks.enter_context(
+                    os.fdopen(lock_descriptor, "r+b")
+                )
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                state = read_locked_state(state_path, run_id)
+                if set(state["issues"]) != {str(issue)}:
+                    raise WorkflowError(
+                        "direct run state must contain exactly the requested issue"
+                    )
+                retained.append(
+                    (sequence, run_id, run_dir, state_path, state)
+                )
+            nonterminal = [
+                item for item in retained
+                if not direct_run_is_terminal(item[4]["issues"][str(issue)])
+            ]
+            if len(nonterminal) > 1:
+                raise WorkflowError("multiple nonterminal direct runs are corrupt")
+            if nonterminal and any(
+                item[0] > nonterminal[0][0]
+                and direct_run_is_terminal(item[4]["issues"][str(issue)])
+                for item in retained
+            ):
+                raise WorkflowError("nonterminal direct run is below a newer terminal run")
+
+            greatest = retained[-1] if retained else None
+            selected = nonterminal[0] if nonterminal else greatest
+            selected_is_terminal = bool(
+                selected is not None
+                and direct_run_is_terminal(selected[4]["issues"][str(issue)])
+            )
+
+            if request["new_run"]:
+                if not retained or not selected_is_terminal or nonterminal:
+                    raise WorkflowError("new_run is not applicable")
+            elif request["owner_unavailable"] and (
+                selected is None or selected_is_terminal
+            ):
+                raise WorkflowError("owner_unavailable is not applicable")
+
+            if selected_is_terminal and not request["new_run"]:
+                assert selected is not None
+                issue_state = selected[4]["issues"][str(issue)]
+                latest = issue_state["attempts"][-1]
+                response = direct_terminal(
+                    issue=issue, run_id=selected[1], source="lifecycle",
+                    reason=latest["result"]["state"], blockers=[],
+                    result=issue_state["outcome"],
+                )
+            else:
+                retained_worktree = None
+                if request["new_run"]:
+                    assert greatest is not None
+                    if greatest[0] >= 999999:
+                        raise WorkflowError("direct run sequence exhausted")
+                    run_sequence = greatest[0] + 1
+                    terminal_issue = greatest[4]["issues"][str(issue)]
+                    retained_worktree = terminal_issue["attempts"][-1]["worktree"]
+                    run_id = f"direct-{issue}-{run_sequence:06d}"
+                    run_dir = workflows_dir / run_id
+                    state_path = run_dir / "state.json"
+                    state = None
+                    issue_state = None
+                elif selected is None:
+                    if retained:
+                        raise WorkflowError("invalid direct run history")
+                    run_id = f"direct-{issue}-000001"
+                    run_dir = workflows_dir / run_id
+                    state_path = run_dir / "state.json"
+                    state = None
+                    issue_state = None
+                else:
+                    _, run_id, run_dir, state_path, current_state = selected
+                    state = copy.deepcopy(current_state)
+                    issue_state = state["issues"][str(issue)]
+
+                if issue_state is not None and issue_state["attempts"]:
+                    latest = issue_state["attempts"][-1]
+                    if (
+                        latest["state"] == "active"
+                        and parse_utc(request["now"], "direct owner now")
+                        < parse_utc(latest["deadline_at"], "attempt deadline")
+                        and not request["owner_unavailable"]
+                    ):
+                        raise WorkflowError("direct run has an active owner")
+                    if (
+                        parse_utc(request["now"], "direct owner now")
+                        < parse_utc(state["updated_at"], "run update time")
+                    ):
+                        raise WorkflowError("direct owner time must not move backward")
+
+                policy = _apply_one_issue_policy(
+                    ledger_issue=issue_state,
+                    tracker=request["tracker"],
+                    worktree=request["worktree"],
+                    now=request["now"],
+                    attempt_budget_minutes=request["attempt_budget_minutes"],
+                    current_owner_unavailable=request["owner_unavailable"],
+                    dispatch_permitted=True,
+                    run_dir=run_dir,
+                    retained_worktree=retained_worktree,
+                )
+                operation = policy["operation"]
+                if operation == "idle":
+                    raise WorkflowError("direct run has an active owner")
+                if operation == "observe":
+                    observed_run_id = None
+                    if selected is not None and not request["new_run"]:
+                        observed_run_id = run_id
+                    elif policy["requirements"] != [{"kind": "tracker"}]:
+                        observed_run_id = run_id
+                    response = direct_observe(
+                        issue, observed_run_id, policy["requirements"]
+                    )
+                elif operation == "terminal" and "tracker_reason" in policy:
+                    if policy["changed"]:
+                        assert state is not None
+                        state["issues"][str(issue)] = policy["issue_state"]
+                        state["updated_at"] = request["now"]
+                        validate_state(state, run_id=run_id)
+                        atomic_write_state(run_dir, state_path, state)
+                    response = direct_terminal(
+                        issue=issue,
+                        run_id=(run_id if selected is not None else None),
+                        source="tracker", reason=policy["tracker_reason"],
+                        blockers=policy["blockers"], result=None,
+                    )
+                elif operation in {"spawn", "resume", "retry", "refuse"}:
+                    if state is None:
+                        ensure_gitignore(workflows_dir)
+                        try:
+                            run_dir.mkdir()
+                        except FileExistsError as error:
+                            raise WorkflowError(
+                                "direct run directory appeared during allocation"
+                            ) from error
+                        new_lock_descriptor = open_stable_lock(
+                            run_dir / "state.lock", "state lock", allow_missing=True
+                        )
+                        new_lock = retained_locks.enter_context(
+                            os.fdopen(new_lock_descriptor, "r+b")
+                        )
+                        fcntl.flock(new_lock.fileno(), fcntl.LOCK_EX)
+                        state = {
+                            "schema_version": SCHEMA_VERSION,
+                            "run_id": run_id,
+                            "created_at": request["now"],
+                            "updated_at": request["now"],
+                            "issues": {str(issue): policy["issue_state"]},
+                        }
+                    else:
+                        state["issues"][str(issue)] = policy["issue_state"]
+                        state["updated_at"] = request["now"]
+                    validate_state(state, run_id=run_id)
+                    atomic_write_state(run_dir, state_path, state)
+                    if operation == "refuse":
+                        response = direct_terminal(
+                            issue=issue, run_id=run_id, source="lifecycle",
+                            reason="failed", blockers=[],
+                            result=policy["issue_state"]["outcome"],
+                        )
+                    else:
+                        response = direct_owner_response(
+                            repo_root, run_id, policy["attempt"], operation
+                        )
+                else:
+                    raise WorkflowError("invalid one-issue policy operation")
+
     print_json(response)
     return 0
 
@@ -1835,6 +2381,11 @@ def build_parser() -> argparse.ArgumentParser:
     control.add_argument("--run-id", required=True)
     control.add_argument("--request-file", required=True)
     control.set_defaults(handler=command_control)
+
+    direct_owner = subparsers.add_parser("direct-owner")
+    direct_owner.add_argument("--repo-root", required=True)
+    direct_owner.add_argument("--request-file", required=True)
+    direct_owner.set_defaults(handler=command_direct_owner)
 
     finish = subparsers.add_parser("finish")
     add_run_arguments(finish)
