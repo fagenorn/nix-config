@@ -2167,6 +2167,179 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 self.assertEqual(persisted["last_progress_at"], DEFAULT_NOW)
                 self.assertEqual(persisted["phase_inputs"], expected_inputs)
 
+    def test_direct_progress_uses_complete_artifact_first_precedence(self):
+        cases = (
+            ({"turn_count": None, "context_tokens": None,
+              "remainder_self_contained": True}, "delegate"),
+            ({"turn_count": 118, "context_tokens": 20000,
+              "remainder_self_contained": True}, "delegate"),
+            ({"turn_count": 118, "context_tokens": 140000,
+              "next_needs_context": False, "artifacts_sufficient": True,
+              "remainder_self_contained": True}, "delegate"),
+            ({"turn_count": None, "context_tokens": None,
+              "next_needs_context": False, "artifacts_sufficient": True},
+             "fresh_start"),
+            ({"turn_count": 118, "context_tokens": 140000,
+              "next_needs_context": False, "artifacts_sufficient": True},
+             "fresh_start"),
+            ({"turn_count": None, "context_tokens": 140000,
+              "next_needs_context": True}, "handoff"),
+            ({"turn_count": None, "context_tokens": None,
+              "next_needs_context": True}, "continue"),
+            ({"turn_count": None, "context_tokens": None,
+              "next_needs_context": False, "artifacts_sufficient": False},
+             "handoff"),
+            ({"turn_count": 10, "context_tokens": 20000,
+              "next_needs_context": True}, "continue"),
+        )
+        for offset, (overrides, expected) in enumerate(cases, start=80):
+            with self.subTest(issue=offset, expected=expected):
+                owner = self.acquire_direct(issue=offset)
+                self.run_id = owner["run_id"]
+                result = self.progress(
+                    issue=offset, phase=1, now="2026-08-20T10:05:00Z",
+                    **overrides,
+                )
+                attempt = json.loads(
+                    self.direct_state_path(owner["run_id"]).read_text()
+                )["issues"][str(offset)]["attempts"][0]
+                self.assertEqual(result["phase_action"], expected)
+                self.assertEqual(attempt["phase_action"], expected)
+                self.assertEqual(attempt["phase_inputs"]["remainder_self_contained"],
+                                 overrides.get("remainder_self_contained", False))
+                self.assertEqual(attempt["deadline_at"], owner["deadline_at"])
+
+    def test_non_direct_phase_order_and_ledger_bytes_remain_exact(self):
+        for run_id in ("dispatcher-owned", "durable-interactive"):
+            with self.subTest(run_id=run_id):
+                self.run_id = run_id
+                self.init_run()
+                worktree = os.path.abspath(self.root / f"{run_id}-worktree")
+                self.spawn(issue=14, worktree=worktree)
+                result = self.progress(
+                    issue=14, phase=1, turn_count=118, context_tokens=20000,
+                    remainder_self_contained=True,
+                )
+                expected_inputs = {
+                    "turn_count": 118, "context_tokens": 20000,
+                    "turn_ceiling": 120, "context_ceiling": 150000,
+                    "turn_headroom": 2, "context_headroom": 10000,
+                    "next_needs_context": True, "artifacts_sufficient": False,
+                    "remainder_self_contained": True,
+                }
+                expected_attempt = {
+                    "issue": 14, "attempt": 1, "owner": "14:1",
+                    "worktree": worktree, "started_at": DEFAULT_NOW,
+                    "deadline_at": "2026-08-13T20:30:00Z", "state": "active",
+                    "launch_kind": "fresh", "launches": [{
+                        "kind": "fresh", "owner": "14:1",
+                        "worktree": worktree, "at": DEFAULT_NOW,
+                    }],
+                    "prior_attempt": None, "result": None, "finished_at": None,
+                    "result_source": None, "handoff_path": None, "phase": 1,
+                    "last_progress_at": DEFAULT_NOW, "phase_action": "handoff",
+                    "phase_inputs": expected_inputs,
+                }
+                expected_state = {
+                    "schema_version": 1, "run_id": run_id,
+                    "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
+                    "issues": {"14": {
+                        "issue": 14, "attempts": [expected_attempt],
+                        "outcome": None,
+                    }},
+                }
+                expected_bytes = (json.dumps(
+                    expected_state, sort_keys=True, separators=(",", ":")
+                ) + "\n").encode()
+                self.assertEqual(result, expected_attempt)
+                self.assertEqual(self.state_path.read_bytes(), expected_bytes)
+
+    def test_zero_sequence_direct_shaped_dispatcher_keeps_non_direct_progress_and_reopen_bytes(self):
+        self.run_id = "direct-14-000000"
+        self.init_run()
+        worktree = os.path.abspath(self.root / "zero-sequence-worktree")
+        self.spawn(issue=14, worktree=worktree)
+        result = self.progress(
+            issue=14, phase=1, turn_count=118, context_tokens=20000,
+            remainder_self_contained=True,
+        )
+        expected_inputs = {
+            "turn_count": 118, "context_tokens": 20000,
+            "turn_ceiling": 120, "context_ceiling": 150000,
+            "turn_headroom": 2, "context_headroom": 10000,
+            "next_needs_context": True, "artifacts_sufficient": False,
+            "remainder_self_contained": True,
+        }
+        expected_attempt = {
+            "issue": 14, "attempt": 1, "owner": "14:1",
+            "worktree": worktree, "started_at": DEFAULT_NOW,
+            "deadline_at": "2026-08-13T20:30:00Z", "state": "active",
+            "launch_kind": "fresh", "launches": [{
+                "kind": "fresh", "owner": "14:1",
+                "worktree": worktree, "at": DEFAULT_NOW,
+            }],
+            "prior_attempt": None, "result": None, "finished_at": None,
+            "result_source": None, "handoff_path": None, "phase": 1,
+            "last_progress_at": DEFAULT_NOW, "phase_action": "handoff",
+            "phase_inputs": expected_inputs,
+        }
+        expected_state = {
+            "schema_version": 1, "run_id": self.run_id,
+            "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
+            "issues": {"14": {
+                "issue": 14, "attempts": [expected_attempt], "outcome": None,
+            }},
+        }
+        expected_bytes = (json.dumps(
+            expected_state, sort_keys=True, separators=(",", ":")
+        ) + "\n").encode()
+        self.assertEqual(result, expected_attempt)
+        self.assertEqual(self.state_path.read_bytes(), expected_bytes)
+
+        reopened = self.control_raw(
+            now=DEFAULT_NOW, issues=[14], tracker=[self.tracker_fact(14)],
+            worktrees=[], max_parallel=1,
+        )
+        self.assertEqual(reopened.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), expected_bytes)
+
+    def test_phase_action_validation_is_bound_to_run_identity(self):
+        self.run_id = "dispatcher-corruption"
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "dispatcher-worktree")
+        self.progress(
+            issue=14, phase=1, turn_count=118, context_tokens=20000,
+            remainder_self_contained=True,
+        )
+        state = self.read_state()
+        state["issues"]["14"]["attempts"][0]["phase_action"] = "delegate"
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        before = self.state_path.read_bytes()
+        rejected = self.control_raw(
+            now=DEFAULT_NOW, issues=[14], tracker=[self.tracker_fact(14)],
+            worktrees=[], max_parallel=1, ok=False,
+        )
+        self.assertIn("phase action does not match persisted inputs", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        owner = self.acquire_direct(issue=73)
+        self.run_id = owner["run_id"]
+        self.progress(
+            issue=73, phase=1, now="2026-08-20T10:05:00Z",
+            turn_count=118, context_tokens=20000,
+            remainder_self_contained=True,
+        )
+        direct_path = self.direct_state_path(owner["run_id"])
+        state = json.loads(direct_path.read_text())
+        state["issues"]["73"]["attempts"][0]["phase_action"] = "handoff"
+        direct_path.write_text(json.dumps(state), encoding="utf-8")
+        before = direct_path.read_bytes()
+        rejected = self.direct_owner_raw(
+            issue=73, now="2026-08-20T10:06:00Z", ok=False,
+        )
+        self.assertIn("phase action does not match persisted inputs", rejected.stderr)
+        self.assertEqual(direct_path.read_bytes(), before)
+
     def test_delegate_requires_measured_usage_below_both_ceilings(self):
         self.init_run()
         self.spawn(issue=14, worktree=self.root / "wt-a")
@@ -3151,6 +3324,224 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(resumed["launch_kind"], "resume")
         self.assertEqual(resumed["handoff_path"], str(handoff))
         self.assertEqual(resumed["deadline_at"], owner["deadline_at"])
+
+    def test_direct_phase_zero_handoff_resumes_its_exact_absent_reservation(self):
+        owner = self.acquire_direct(issue=73)
+        self.run_id = owner["run_id"]
+        handoff = self.write_handoff(73)
+        self.progress(
+            issue=73, phase=0, now="2026-08-20T10:01:00Z",
+            turn_count=118, context_tokens=20000,
+            next_needs_context=True, artifacts_sufficient=False,
+            handoff_path=handoff,
+        )
+        before = json.loads(self.direct_state_path(owner["run_id"]).read_text())
+        alternate = os.path.abspath(self.root / "alternate-worktree-73")
+        resumed = self.direct_owner(
+            issue=73, now="2026-08-20T10:02:00Z",
+            worktree=self.worktree_fact(
+                73,
+                recorded={"path": owner["worktree"], "state": "absent"},
+                candidate={"path": alternate, "state": "absent"},
+            ),
+        )
+        self.assertEqual(resumed, {
+            **owner, "action_id": "73:1:2", "launch_kind": "resume",
+            "handoff_path": str(handoff),
+        })
+        after = json.loads(self.direct_state_path(owner["run_id"]).read_text())
+        attempt = after["issues"]["73"]["attempts"][0]
+        old_attempt = before["issues"]["73"]["attempts"][0]
+        for field in ("issue", "attempt", "owner", "worktree", "started_at",
+                      "deadline_at", "handoff_path"):
+            self.assertEqual(attempt[field], old_attempt[field])
+        self.assertEqual(attempt["state"], "active")
+        self.assertEqual(attempt["launch_kind"], "resume")
+        self.assertEqual(len(attempt["launches"]), 2)
+        self.assertEqual(resumed["owner"], owner["owner"])
+        self.assertEqual(resumed["worktree"], owner["worktree"])
+        self.assertNotEqual(resumed["worktree"], alternate)
+        self.assertEqual(len(after["issues"]["73"]["attempts"]), 1)
+        self.assertFalse(self.direct_state_path("direct-73-000002").exists())
+
+    def test_absent_resume_exception_rejects_every_adjacent_case_without_mutation(self):
+        owner = self.acquire_direct(issue=74)
+        self.run_id = owner["run_id"]
+        handoff = self.write_handoff(74)
+        self.progress(
+            issue=74, phase=1, now="2026-08-20T10:01:00Z",
+            turn_count=118, handoff_path=handoff,
+        )
+        path = self.direct_state_path(owner["run_id"])
+        before = path.read_bytes()
+        observed = self.direct_owner(
+            issue=74, now="2026-08-20T10:02:00Z",
+            worktree=self.worktree_fact(74, recorded={
+                "path": owner["worktree"], "state": "absent",
+            }),
+        )
+        self.assertEqual(observed["kind"], "observe")
+        self.assertEqual(path.read_bytes(), before)
+
+        active = self.acquire_direct(issue=75)
+        active_path = self.direct_state_path(active["run_id"])
+        before = active_path.read_bytes()
+        observed = self.direct_owner(
+            issue=75, now="2026-08-20T10:02:00Z", owner_unavailable=True,
+            worktree=self.worktree_fact(75, recorded={
+                "path": active["worktree"], "state": "absent",
+            }),
+        )
+        self.assertEqual(observed["kind"], "observe")
+        self.assertEqual(active_path.read_bytes(), before)
+
+        owner = self.acquire_direct(issue=76)
+        self.run_id = owner["run_id"]
+        handoff = self.write_handoff(76)
+        self.progress(
+            issue=76, phase=0, now="2026-08-20T10:01:00Z",
+            turn_count=118, handoff_path=handoff,
+        )
+        path = self.direct_state_path(owner["run_id"])
+        before = path.read_bytes()
+        replacement = os.path.abspath(self.root / "alternate-76")
+        for recorded in (None, {
+            "path": owner["worktree"], "state": "mismatch",
+        }):
+            with self.subTest(recorded=recorded):
+                observed = self.direct_owner(
+                    issue=76, now="2026-08-20T10:02:00Z",
+                    worktree=self.worktree_fact(
+                        76, recorded=recorded,
+                        candidate={"path": replacement, "state": "absent"},
+                    ),
+                )
+                self.assertEqual(observed["kind"], "observe")
+                self.assertEqual(observed["requirements"], [{
+                    "kind": "recorded_worktree", "path": owner["worktree"],
+                }])
+                self.assertEqual(path.read_bytes(), before)
+        wrong = self.direct_owner_raw(
+            issue=76, now="2026-08-20T10:02:00Z",
+            worktree=self.worktree_fact(76, recorded={
+                "path": os.path.abspath(self.root / "wrong-76"),
+                "state": "absent",
+            }), ok=False,
+        )
+        self.assertIn("recorded worktree path does not match ledger", wrong.stderr)
+        self.assertEqual(path.read_bytes(), before)
+
+        self.run_id = "dispatcher-phase-zero"
+        self.init_run(now="2026-08-20T10:00:00Z")
+        dispatched = self.spawn(
+            issue=77, worktree=self.root / "dispatcher-77",
+            now="2026-08-20T10:00:00Z",
+        )
+        handoff = self.write_handoff(77)
+        self.progress(
+            issue=77, phase=0, now="2026-08-20T10:01:00Z",
+            turn_count=118, handoff_path=handoff,
+        )
+        before = self.state_path.read_bytes()
+        rejected = self.control_raw(
+            now="2026-08-20T10:02:00Z", issues=[77],
+            tracker=[self.tracker_fact(77)],
+            worktrees=[self.worktree_fact(77, recorded={
+                "path": dispatched["worktree"], "state": "absent",
+            })], max_parallel=1, ok=False,
+        )
+        self.assertIn("matching recorded worktree", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_zero_sequence_direct_shaped_dispatcher_rejects_absent_resume_without_mutation(self):
+        self.run_id = "direct-78-000000"
+        self.init_run(now="2026-08-20T10:00:00Z")
+        dispatched = self.spawn(
+            issue=78, worktree=self.root / "dispatcher-78",
+            now="2026-08-20T10:00:00Z",
+        )
+        handoff = self.write_handoff(78)
+        self.progress(
+            issue=78, phase=0, now="2026-08-20T10:01:00Z",
+            turn_count=118, handoff_path=handoff,
+        )
+        before = self.state_path.read_bytes()
+        rejected = self.control_raw(
+            now="2026-08-20T10:02:00Z", issues=[78],
+            tracker=[self.tracker_fact(78)],
+            worktrees=[self.worktree_fact(78, recorded={
+                "path": dispatched["worktree"], "state": "absent",
+            })], max_parallel=1, ok=False,
+        )
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("matching recorded worktree", rejected.stderr)
+
+    def test_absent_direct_handoff_materializes_exact_worktree_then_records_phase_one(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            origin = root / "origin.git"
+            repo = root / "repo"
+            worktree = root / "worktree-issue-73"
+            subprocess.run(["git", "init", "--bare", str(origin)], check=True,
+                           capture_output=True, text=True)
+            subprocess.run(["git", "clone", str(origin), str(repo)], check=True,
+                           capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"],
+                           check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email",
+                            "fixture@example.test"], check=True)
+            subprocess.run(["git", "-C", str(repo), "checkout", "-b", "main"],
+                           check=True, capture_output=True, text=True)
+            (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "fixture"],
+                           check=True, capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(repo), "push", "-u", "origin", "main"],
+                           check=True, capture_output=True, text=True)
+
+            original_root, original_run_id = self.root, self.run_id
+            self.root = repo
+            self.addCleanup(setattr, self, "root", original_root)
+            self.addCleanup(setattr, self, "run_id", original_run_id)
+            owner = self.acquire_direct(issue=73, worktree=worktree)
+            self.run_id = owner["run_id"]
+            handoff = self.write_handoff(73)
+            self.progress(
+                issue=73, phase=0, now="2026-08-20T10:01:00Z",
+                turn_count=118, handoff_path=handoff,
+            )
+            self.assertFalse(worktree.exists())
+            resumed = self.direct_owner(
+                issue=73, now="2026-08-20T10:02:00Z",
+                worktree=self.worktree_fact(73, recorded={
+                    "path": str(worktree), "state": "absent",
+                }),
+            )
+            self.assertEqual(resumed["worktree"], str(worktree))
+            self.assertEqual(resumed["launch_kind"], "resume")
+            self.assertFalse(worktree.exists())
+
+            subprocess.run([
+                "git", "-C", str(repo), "worktree", "add", "-b", "issue-73-fixture",
+                str(worktree), "origin/main",
+            ], check=True, capture_output=True, text=True)
+            branch = subprocess.run([
+                "git", "-C", str(worktree), "rev-parse", "--abbrev-ref", "HEAD",
+            ], check=True, capture_output=True, text=True).stdout.strip()
+            self.assertEqual(branch, "issue-73-fixture")
+            progressed = self.progress(
+                issue=73, phase=1, now="2026-08-20T10:03:00Z",
+                turn_count=10, context_tokens=20000,
+            )
+            self.assertEqual(progressed["phase"], 1)
+            state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
+            attempts = state["issues"]["73"]["attempts"]
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(len(attempts[0]["launches"]), 2)
+            self.assertEqual(attempts[0]["worktree"], str(worktree))
+            runs = sorted(path.name for path in self.workflows_dir.glob("direct-73-*"))
+            self.assertEqual(runs, [owner["run_id"]])
 
     def test_direct_owner_retries_owner_failure_then_replays_terminal_and_starts_new_run(self):
         owner = self.acquire_direct()

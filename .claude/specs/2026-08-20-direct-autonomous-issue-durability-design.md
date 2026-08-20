@@ -239,6 +239,17 @@ one-issue control rules with effective capacity one:
 1. A latest unexpired `handed_off` attempt resumes automatically after its
    recorded worktree is observed matching. It retains attempt, owner, worktree,
    original start, fixed deadline, and handoff path and appends one resume launch.
+
+   (**amended by issue 74's direct autonomous implementation owner rollover
+   design** — The matching-worktree requirement has one exact pre-worktree
+   exception: only a reserved direct run's latest unexpired `handed_off` Phase-0
+   attempt with a valid durable handoff may resume when its exact recorded path
+   is observed `absent`. It uses that recorded reservation even if an alternate
+   absent candidate is also supplied, preserves the same attempt, owner,
+   worktree, original start, fixed deadline, and handoff path, and appends exactly
+   one resume launch. Every other acquisition still requires the matching
+   recorded worktree stated above.)
+
 2. A latest unexpired `active` attempt is presumed owned. With
    `owner_unavailable: false`, `direct-owner` fails loudly before mutation even
    if all other facts are absent. With explicit authorization, it derives the

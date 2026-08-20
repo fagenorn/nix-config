@@ -224,6 +224,14 @@ Agent(subagent_type="general-purpose", model="opus", effort="high") delegates th
 Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.
    Give it the exact commands, identities, and paths inline; it decides nothing and edits nothing.
 
+For the direct-autonomous Phase-5 `delegate` case, the
+mandatory direct-autonomous Phase-5 rollover in `AUTO.md` replaces the generic delegation
+behavior above. Its post-rollover Phase-6 and Phase-7 gates also use the narrow
+routes defined there: Phase-6 `delegate` launches the existing fresh ship owner,
+and Phase-7 `delegate` launches only the ledger-only finish bookkeeper. The
+behavior for all other acquisition modes retains the existing generic action
+semantics unchanged.
+
 If `workflow-state progress` is rejected because the
 attempt budget's deadline has passed — either
 `cannot record progress at or after attempt deadline`, or
@@ -250,6 +258,12 @@ only its canonical stdout as the `--result-file` bytes. The policy's
 `--result-file <path>` to `workflow-state finish` using the exact run, issue,
 attempt, and current time. Capture stdout; only after that durable write succeeds,
 send the exact JSON from stdout unchanged to the caller.
+
+The earlier direct-autonomous controller that delegated at the mandatory
+Phase-5 rollover does not run this procedure after receiving the fresh owner's
+canonical terminal bytes. Its only terminal work is the validate-and-relay stop
+defined in `AUTO.md`; the delegated owner already performed the single durable
+`finish`.
 
 The rule is: failure to persist is a failure to finish. Surface it and never report the issue as merged or completed.
 Without lifecycle identity, send the same compact schema directly.

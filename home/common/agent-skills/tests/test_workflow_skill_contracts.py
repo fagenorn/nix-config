@@ -620,6 +620,159 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("failure to persist is a failure to finish", owner_return_section)
         self.assertIn("never report the issue as merged or completed", owner_return_section)
 
+    def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
+        transfer = self.section(
+            self.auto,
+            "#### Mandatory transfer gate",
+            "#### Fresh delegated owner",
+        )
+        delegated = self.section(
+            self.auto,
+            "#### Fresh delegated owner",
+            "#### Earlier controller stop",
+        )
+        earlier = self.section(
+            self.auto,
+            "#### Earlier controller stop",
+            "### Other Phase 5–7 routes",
+        )
+        self.assert_ordered(
+            transfer,
+            "dispositioned every Blocking and accepted Should-fix finding",
+            "commit",
+            "artifact-budget check --kind design-spec",
+            "artifact-budget check --kind implementation-plan",
+            "within_budget",
+            "workflow-state progress",
+            "next_needs_context=false",
+            "artifacts_sufficient=true",
+            "remainder_self_contained=true",
+            "delegate",
+            "exactly one fresh issue owner",
+        )
+        match = re.search(r"```json\n(\{.*?\})\n```", transfer, re.DOTALL)
+        self.assertIsNotNone(match)
+        continuation = json.loads(match.group(1))
+        self.assertEqual(set(continuation), {
+            "owner", "reviewed_head_sha", "spec_artifact", "plan_artifact",
+        })
+        self.assertEqual(set(continuation["owner"]), {
+            "interface_version", "kind", "ledger_repo_root", "run_id", "issue",
+            "attempt", "owner", "action_id", "launch_kind", "worktree",
+            "handoff_path", "deadline_at",
+        })
+        self.assertEqual(continuation["owner"]["kind"], "owner")
+        self.assertRegex(continuation["reviewed_head_sha"], r"^[0-9a-f]{40}$")
+        artifact_fields = {"kind", "path", "metrics", "budget_status"}
+        metric_fields = {
+            "root_bytes", "total_bytes", "file_count", "largest_member_bytes",
+        }
+        for block, kind in (
+            ("spec_artifact", "design-spec"),
+            ("plan_artifact", "implementation-plan"),
+        ):
+            artifact = continuation[block]
+            self.assertEqual(set(artifact), artifact_fields)
+            self.assertEqual(artifact["kind"], kind)
+            self.assertEqual(set(artifact["metrics"]), metric_fields)
+            self.assertTrue(all(type(value) is int
+                                for value in artifact["metrics"].values()))
+            self.assertEqual(artifact["budget_status"], "within_budget")
+        for excluded in (
+            "no artifact contents", "no task-member paths", "no review transcript",
+            "no conversation summary", "no alternate worktree",
+            "no reconstructed lifecycle field", "no authorization flag",
+        ):
+            self.assertIn(excluded, transfer)
+        self.assertIn("mechanical-only direct autonomous", transfer)
+        self.assert_ordered(
+            delegated,
+            "Before reading either artifact",
+            "`branchPattern` and `worktreePrefix`",
+            "decimal `owner.issue`",
+            "final path component",
+            "binding-derived accepted branch regex",
+            "`expected_branch`",
+            "`git -C owner.worktree branch --show-current`",
+            "equal `expected_branch`",
+            "mismatch is a contract failure",
+            "both roots are tracked",
+        )
+        self.assert_ordered(
+            delegated,
+            "mismatch is a contract failure",
+            "current clean HEAD",
+            "equal `reviewed_head_sha`",
+            "both roots are tracked at that exact reviewed HEAD",
+            "independently run `artifact-budget check`",
+            "compare all four metrics",
+            "adopt the owner envelope",
+            "must not call `direct-owner`",
+            "begin at Phase 6",
+            "invoke `sdd`",
+            "completed Phase 6",
+            "remainder_self_contained=true",
+            "persisted action `delegate`",
+            "fresh Phase-7 ship owner",
+            "must not dispatch a second issue owner",
+            "completed Phase 7",
+            "ledger-only remainder",
+            "ledger-only bookkeeper",
+            "exact `workflow-state finish` command",
+            "return only the exact canonical JSON",
+        )
+        self.assertIn("existing mechanical Phase-6 mechanic/reviewer route", delegated)
+        self.assert_ordered(
+            earlier,
+            "received bytes",
+            "artifact-budget validate-report --boundary ship-summary",
+            "relay the canonical bytes unchanged",
+            "stop",
+        )
+        self.assertIn(
+            "post-delegation action set is exactly validate, relay, and stop",
+            earlier,
+        )
+        affirmative_permission = re.compile(
+            r"\b(?:may|can|could|must|should|is allowed to|is authorized to|is permitted to)\s+(?:"
+            r"invoke `sdd`|edit implementation files|reacquire|"
+            r"call `direct-owner`|(?:start|create) (?:a )?new attempt|"
+            r"dispatch (?:a )?second (?:replacement )?owner|"
+            r"call `workflow-state finish` after delegation|"
+            r"continue after (?:the )?delegated report)",
+            re.IGNORECASE,
+        )
+        self.assertIsNone(affirmative_permission.search(earlier))
+        for denial in (
+            "does not invoke `sdd`", "does not edit implementation files",
+            "does not reacquire or call `direct-owner`",
+            "does not start or create a new attempt", "does not dispatch a second owner",
+            "does not call `workflow-state finish` after delegation",
+            "does not continue after the delegated report",
+        ):
+            self.assertIn(denial, earlier)
+        self.assertIn("dispatch failure", earlier)
+        self.assertIn("never permission to implement locally", earlier)
+
+        other_start = self.auto.index("### Other Phase 5–7 routes")
+        other = self.auto[other_start:]
+        self.assertIn(
+            "Mechanical-only module-owned direct autonomous runs are excluded from this section",
+            other,
+        )
+        self.assertIn("mechanical-only ordering and ownership for other acquisition routes", other)
+
+        phase_gate = self.section(
+            self.from_issue,
+            "## Dispatch, phase-budget and attempt-budget rules",
+            "## Terminal return procedure",
+        )
+        self.assertIn("mandatory direct-autonomous Phase-5 rollover", phase_gate)
+        self.assertIn("AUTO.md", phase_gate)
+        self.assertIn("all other acquisition modes", phase_gate)
+        self.assertIn("post-rollover Phase-6 and Phase-7 gates", phase_gate)
+        self.assertIn("unchanged", phase_gate)
+
     def test_owner_has_executable_phase_gate_and_action_semantics(self):
         self.assertIn("workflow-state progress", self.from_issue)
         self.assertIn("continue | fresh_start | handoff | delegate", self.from_issue)
@@ -864,6 +1017,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertNotIn(retired_policy_anchor, expected)
 
     def test_auto_mode_never_skips_durable_checkpoints_or_terminal_writes(self):
+        checkpoint_contract = self.section(
+            self.auto, "## The self-answer pattern", "## When *not* to auto-resolve"
+        )
         self.assertIn("never skips `workflow-state progress`", self.auto)
         self.assertIn("every phase checkpoint", self.auto)
         self.assert_ordered(
@@ -878,6 +1034,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "workflow-state finish",
             "notification",
         )
+        self.assertNotIn(
+            "For every terminal result, call `workflow-state finish`",
+            checkpoint_contract,
+        )
+        for relay_exception in (
+            "successful direct Phase-5 relay",
+            "delegated fresh owner has already persisted",
+            "must not call `workflow-state finish` again",
+            "delegated-owner dispatch failure",
+        ):
+            self.assertIn(relay_exception, checkpoint_contract)
 
     def test_handoff_supports_safe_durable_destination_and_temp_default(self):
         self.assertIn(".superpowers/workflows/<run-id>/handoffs/", self.handoff)
