@@ -51,11 +51,11 @@ In the direct autonomous skill, a clean Phase-5 review becomes the mandatory
 implementation-owner seam. The current controller commits and validates the
 reviewed artifacts, records Phase 5 with a self-contained remainder, receives and
 persists `delegate`, then dispatches exactly one fresh issue owner. The fresh
-owner receives the unchanged direct-owner envelope and only the two bounded
-artifact roots with current metrics. It reconstructs from disk, begins at Phase
-6, performs the existing SDD and fresh Phase-7 shipping flow, persists the final
-result, and returns the canonical terminal JSON. The earlier controller never
-invokes SDD or edits implementation files.
+owner receives the unchanged direct-owner envelope, the exact reviewed HEAD,
+and only the two bounded artifact roots with current metrics. It reconstructs
+from disk, begins at Phase 6, performs the existing SDD and fresh Phase-7
+shipping flow, persists the final result, and returns the canonical terminal
+JSON. The earlier controller never invokes SDD or edits implementation files.
 
 ## Decisions
 
@@ -126,15 +126,17 @@ runs remain outside this durable rollover contract.
 
 The delegation prompt is a small continuation interface, not a transcript. Its
 standing instructions declare direct autonomous mode and the Phase-6 entry point,
-then refer to three machine-shaped blocks:
+then refer to four closed fields:
 
 1. The canonical direct-owner `owner` object unchanged, including
    `interface_version`, `kind`, `ledger_repo_root`, `run_id`, `issue`, `attempt`,
    `owner`, `action_id`, `launch_kind`, `worktree`, nullable `handoff_path`, and
    `deadline_at`.
-2. `spec_artifact`, with exactly `kind: design-spec`, repository-relative root
+2. `reviewed_head_sha`, the full lowercase 40-hex commit reviewed after the
+   Phase-5 artifact checks and final clean-worktree gate.
+3. `spec_artifact`, with exactly `kind: design-spec`, repository-relative root
    `path`, the four integer metrics, and `budget_status: within_budget`.
-3. `plan_artifact`, with exactly `kind: implementation-plan`, repository-relative
+4. `plan_artifact`, with exactly `kind: implementation-plan`, repository-relative
    root `path`, the same four metrics, and `budget_status: within_budget`.
 
 The prompt contains no artifact contents, task-member paths, review transcript,
@@ -143,15 +145,20 @@ authorization flag. Repository bindings are resolved from the delegated owner's
 worktree instead of being copied into a second continuation schema.
 
 Before reading either artifact, the fresh owner verifies that the worktree and
-branch match the envelope, that both roots are tracked at the current clean HEAD,
-independently checks both roots with the artifact budget module, and compares all
+branch match the envelope, that its clean current HEAD equals
+`reviewed_head_sha`, and that both roots are tracked at that exact commit. It
+independently checks both roots with the artifact budget module and compares all
 four metrics with the prompt. It adopts the envelope rather than calling
-direct-owner and begins at Phase 6. It invokes the
-current SDD skill, validates the SDD report, then uses the existing fresh Phase-7
-ship-owner handoff. It remains the lifecycle owner: after the ship report or any
-execution stop, it validates the ship-summary candidate, calls `finish` with the
-same run and attempt, and returns only the exact canonical JSON printed by that
-durable write.
+direct-owner and begins at Phase 6.
+
+After validating SDD, the owner records Phase 6 with a self-contained remainder
+and requires `delegate`; that action is fulfilled by the existing fresh Phase-7
+ship owner, never another issue owner. After the ship report or any execution
+stop, it validates the ship-summary candidate, records Phase 7 with the exact
+finish command as a self-contained ledger-only remainder, requires `delegate`,
+and sends only that command to the existing bookkeeper route. The bookkeeper
+calls `finish` with the same run and attempt and relays canonical stdout; the
+fresh issue owner returns those bytes unchanged.
 
 The fixed report contract is therefore the existing closed ship-summary object,
 not a new delegation result:
@@ -241,10 +248,11 @@ home.
   progress sequence. Assert that no second run or attempt appears and never
   fabricate `matching_issue_branch` before Git actually materializes the path.
 - **Skill contract seam:** pin the ordered Phase-5 commit/check/progress/delegate/
-  dispatch sequence, the complete envelope and two root-plus-metrics blocks, the
-  fresh owner's independent checks and Phase-6 entry, and the canonical terminal
-  relay. Negative assertions fail if the pre-rollover controller can invoke SDD,
-  edit implementation, reacquire, create an attempt, call terminal finish after
+  dispatch sequence, the complete envelope, reviewed HEAD, and two
+  root-plus-metrics blocks; pin the fresh owner's independent checks, Phase-6
+  ship delegation, Phase-7 ledger-only delegation, and canonical terminal relay.
+  Negative assertions fail if the pre-rollover controller can invoke SDD, edit
+  implementation, reacquire, create an attempt, call terminal finish after
   delegation, or continue after the delegated report.
 - **Repository gates:** the deterministic agent-workflow suite proves the module
   and skill contracts, and the repository build verifies that the updated helper
@@ -279,3 +287,5 @@ home.
 | D7 | Split the installed rollover contract test into mandatory-transfer, fresh-owner, and earlier-controller-stop seams; assert the exact three-block nested field sets and reject any affirmative post-delegation permission outside validate, relay, and stop. | Native Phase-5 finding B1 showed that mixed presence/order anchors could pass with extra transfer fields or prose authorizing forbidden parent actions; D3–D4 define closed interfaces and The Bar requires fail-loud tests that can fail. | Keep one mixed substring test — it cannot distinguish the delegated owner from the earlier controller or prove the continuation is closed. |
 | D8 | Test an exact recorded `absent` reservation together with an alternate absent candidate and require ordinary resume to preserve the recorded owner/worktree; keep candidate-only and mismatched observations non-resumable and mutation-free. | Native Phase-5 finding S2 exposed the missing mixed-observation case; D5 and the issue criteria make the recorded reservation authoritative even when an extra candidate is supplied. | Test only exact-recorded success and candidate-only/mismatch failures separately — leaves candidate precedence unproved when both facts arrive together. |
 | D9 | Include mechanical-only module-owned direct autonomous runs in the mandatory Phase-5 rollover; the fresh owner uses the existing mechanical Phase-6 mechanic/reviewer route, while mechanical ordering and ownership stay unchanged only for other acquisition routes. | Native Phase-5 discussion D1 resolved the design's identity-and-checkpoint rule consistently with D3: every qualifying direct-auto run rolls before implementation, regardless of implementation lane. | Exempt mechanical direct-auto work or redesign its Phase-6 route — the first weakens the mandatory ownership seam and the second changes behavior the issue does not target. |
+| D10 | Reverse D4's three-field-only continuation: add the exact reviewed full HEAD SHA and require equality before artifact reads, while retaining the unchanged owner and two root-and-metrics objects. | Ship correctness finding COR-002 showed that cleanliness plus artifact size metrics cannot identify reviewed content; The Bar requires evidence to bind the state it authorizes. | Trust any clean HEAD or use artifact metrics as content identity — both can admit equal-size or unrelated clean changes that Phase 5 never reviewed. |
+| D11 | At the delegated owner's Phase-6 gate, fulfill persisted `delegate` with the existing fresh ship owner; at Phase 7, make the exact finish command the self-contained ledger-only remainder and fulfill `delegate` with the existing bookkeeper. | Ship correctness finding COR-001 exposed the collision between the mandatory every-phase gate and the generic issue-owner delegate route; the existing ship-owner and ledger-only routes already match the two remaining responsibilities. | Skip progress, report false booleans, or dispatch a second issue owner — violates durable phase accounting, falsifies state, or reintroduces the ownership churn this issue removes. |

@@ -654,7 +654,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIsNotNone(match)
         continuation = json.loads(match.group(1))
         self.assertEqual(set(continuation), {
-            "owner", "spec_artifact", "plan_artifact",
+            "owner", "reviewed_head_sha", "spec_artifact", "plan_artifact",
         })
         self.assertEqual(set(continuation["owner"]), {
             "interface_version", "kind", "ledger_repo_root", "run_id", "issue",
@@ -662,6 +662,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "handoff_path", "deadline_at",
         })
         self.assertEqual(continuation["owner"]["kind"], "owner")
+        self.assertRegex(continuation["reviewed_head_sha"], r"^[0-9a-f]{40}$")
         artifact_fields = {"kind", "path", "metrics", "budget_status"}
         metric_fields = {
             "root_bytes", "total_bytes", "file_count", "largest_member_bytes",
@@ -701,15 +702,23 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             delegated,
             "mismatch is a contract failure",
             "current clean HEAD",
-            "both roots are tracked",
+            "equal `reviewed_head_sha`",
+            "both roots are tracked at that exact reviewed HEAD",
             "independently run `artifact-budget check`",
             "compare all four metrics",
             "adopt the owner envelope",
             "must not call `direct-owner`",
             "begin at Phase 6",
             "invoke `sdd`",
+            "completed Phase 6",
+            "remainder_self_contained=true",
+            "persisted action `delegate`",
             "fresh Phase-7 ship owner",
-            "workflow-state finish",
+            "must not dispatch a second issue owner",
+            "completed Phase 7",
+            "ledger-only remainder",
+            "ledger-only bookkeeper",
+            "exact `workflow-state finish` command",
             "return only the exact canonical JSON",
         )
         self.assertIn("existing mechanical Phase-6 mechanic/reviewer route", delegated)
@@ -761,6 +770,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("mandatory direct-autonomous Phase-5 rollover", phase_gate)
         self.assertIn("AUTO.md", phase_gate)
         self.assertIn("all other acquisition modes", phase_gate)
+        self.assertIn("post-rollover Phase-6 and Phase-7 gates", phase_gate)
         self.assertIn("unchanged", phase_gate)
 
     def test_owner_has_executable_phase_gate_and_action_semantics(self):

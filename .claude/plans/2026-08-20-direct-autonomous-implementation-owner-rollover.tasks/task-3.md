@@ -8,14 +8,14 @@
 
 **Interfaces:**
 - Consumes: the persisted direct-owner `owner` object, reviewed/committed design and implementation-plan root artifacts with current four-metric checker results, the Phase-5 `workflow-state progress` response, existing `sdd` producer report, Phase-7 ship-owner contract, ship-summary validator, and terminal `finish` CLI.
-- Produces: one direct-autonomous Phase-5 delegation prompt containing exactly the unchanged owner object, `spec_artifact`, and `plan_artifact`; a fresh implementation owner that enters at Phase 6 and returns the canonical terminal JSON printed by `finish`; byte-for-byte relay by the earlier controller.
+- Produces: one direct-autonomous Phase-5 delegation prompt containing exactly the unchanged owner object, `reviewed_head_sha`, `spec_artifact`, and `plan_artifact`; a fresh implementation owner that enters at Phase 6 and returns the canonical terminal JSON printed by `finish`; byte-for-byte relay by the earlier controller.
 
 **Invariants:**
 - Per D3, rollover occurs only after all Blocking and accepted Should-fix findings are dispositioned, review edits/ledger writes are committed, both artifact roots are freshly `within_budget`, and Phases 6–7 are self-contained.
 - The earlier controller records completed Phase 5 with `next_needs_context=false`, `artifacts_sufficient=true`, and `remainder_self_contained=true`, requires persisted `delegate`, and dispatches exactly one fresh issue owner.
-- Per D4/D7, the continuation is one closed object with exactly `owner`, `spec_artifact`, and `plan_artifact`; tests separately prove the exact nested field sets, delegated-owner duties, and earlier-controller stop.
-- The fresh owner verifies matching worktree/branch, clean current HEAD, tracked roots, independent checker results, and all four metric values before reading artifacts; it adopts the envelope without `direct-owner` and enters Phase 6.
-- The fresh owner owns SDD, fresh Phase-7 shipping, report validation, the single `finish`, and exact canonical return. The earlier controller's post-delegation action set is closed to ship-summary validation, byte relay, and stop.
+- Per D4/D7/D10, the continuation is one closed object with exactly `owner`, `reviewed_head_sha`, `spec_artifact`, and `plan_artifact`; tests separately prove the exact nested field sets, delegated-owner duties, and earlier-controller stop.
+- The fresh owner verifies matching worktree/branch, clean current HEAD equal to `reviewed_head_sha`, tracked roots at that exact commit, independent checker results, and all four metric values before reading artifacts; it adopts the envelope without `direct-owner` and enters Phase 6.
+- Per D11, the fresh owner records Phase 6 and fulfills `delegate` through the existing fresh ship owner, then records Phase 7 and fulfills its ledger-only `delegate` through the exact finish bookkeeper. The earlier controller's post-delegation action set is closed to ship-summary validation, byte relay, and stop.
 - Per D9, mechanical-only module-owned direct autonomous runs use this same mandatory rollover, then the fresh owner invokes the existing mechanical Phase-6 mechanic/reviewer route.
 - Dispatcher-owned autonomous, explicitly durable interactive, ledger-free interactive, and direct pre-Phase-5 action handling remain unchanged.
 
@@ -60,7 +60,7 @@ def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
     self.assertIsNotNone(match)
     continuation = json.loads(match.group(1))
     self.assertEqual(set(continuation), {
-        "owner", "spec_artifact", "plan_artifact",
+        "owner", "reviewed_head_sha", "spec_artifact", "plan_artifact",
     })
     self.assertEqual(set(continuation["owner"]), {
         "interface_version", "kind", "ledger_repo_root", "run_id", "issue",
@@ -68,6 +68,7 @@ def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
         "handoff_path", "deadline_at",
     })
     self.assertEqual(continuation["owner"]["kind"], "owner")
+    self.assertRegex(continuation["reviewed_head_sha"], r"^[0-9a-f]{40}$")
     artifact_fields = {"kind", "path", "metrics", "budget_status"}
     metric_fields = {
         "root_bytes", "total_bytes", "file_count", "largest_member_bytes",
@@ -94,15 +95,23 @@ def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
         delegated,
         "verify that the worktree and branch match the owner envelope",
         "current clean HEAD",
-        "both roots are tracked",
+        "equal `reviewed_head_sha`",
+        "both roots are tracked at that exact reviewed HEAD",
         "independently run `artifact-budget check`",
         "compare all four metrics",
         "adopt the owner envelope",
         "must not call `direct-owner`",
         "begin at Phase 6",
         "invoke `sdd`",
+        "completed Phase 6",
+        "remainder_self_contained=true",
+        "persisted action `delegate`",
         "fresh Phase-7 ship owner",
-        "workflow-state finish",
+        "must not dispatch a second issue owner",
+        "completed Phase 7",
+        "ledger-only remainder",
+        "ledger-only bookkeeper",
+        "exact `workflow-state finish` command",
         "return only the exact canonical JSON",
     )
     self.assertIn("existing mechanical Phase-6 mechanic/reviewer route", delegated)
@@ -154,6 +163,7 @@ def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
     self.assertIn("mandatory direct-autonomous Phase-5 rollover", phase_gate)
     self.assertIn("AUTO.md", phase_gate)
     self.assertIn("all other acquisition modes", phase_gate)
+    self.assertIn("post-rollover Phase-6 and Phase-7 gates", phase_gate)
     self.assertIn("unchanged", phase_gate)
 ```
 
@@ -167,14 +177,14 @@ Expected: FAIL because the base `AUTO.md` has no mandatory direct implementation
 
 In `AUTO.md`, replace the current direct-autonomous Phase-5–7 summary with `### Mandatory direct implementation-owner rollover` followed by `### Other Phase 5–7 routes`.
 
-The mandatory section must contain three level-four seams, in order: `#### Mandatory transfer gate`, `#### Fresh delegated owner`, and `#### Earlier controller stop`. Encode this executable behavior per D3–D4, D7, and D9:
+The mandatory section must contain three level-four seams, in order: `#### Mandatory transfer gate`, `#### Fresh delegated owner`, and `#### Earlier controller stop`. Encode this executable behavior per D3–D4, D7, and D9–D11:
 
-1. In `Mandatory transfer gate`, finish dispositioning Phase-5 findings; commit the reviewed plan and any ledger edit. Run fresh design-spec and implementation-plan checks after the last mutation, retain all four metrics, and repeat check/commit if a hook changes either artifact. With no conversational dependency remaining, call `workflow-state progress` for completed Phase 5 using the three exact booleans and truthful available usage. Require persisted `delegate`, then dispatch exactly one fresh issue owner at the existing `from-issue-phase-delegate` tier. State explicitly that this includes mechanical-only direct autonomous runs.
-2. Put one valid representative JSON object in that subsection. Its top-level fields are exactly `owner`, `spec_artifact`, and `plan_artifact`; `owner` has exactly the twelve canonical direct-owner fields asserted by the test; each artifact has exactly `kind`, `path`, `metrics`, and `budget_status`; each `metrics` object has exactly the four asserted integer fields; kinds are `design-spec`/`implementation-plan` and both statuses are `within_budget`. State every excluded continuation field named in the invariants. Repository bindings are re-resolved in the delegated worktree.
-3. In `Fresh delegated owner`, require worktree/branch/clean-HEAD/tracked-root validation, independent checks and four-metric comparison before artifact reads, envelope adoption without acquisition, and Phase-6 entry. It validates SDD, uses the fresh Phase-7 ship owner, validates the report, persists the single terminal `finish`, and returns canonical stdout. For mechanical-only direct autonomous work it invokes the existing mechanical Phase-6 mechanic/reviewer route without changing that route's order or ownership.
+1. In `Mandatory transfer gate`, finish dispositioning Phase-5 findings; commit the reviewed plan and any ledger edit. Run fresh design-spec and implementation-plan checks after the last mutation, retain all four metrics, and repeat check/commit if a hook changes either artifact. Require a clean worktree and capture its full lowercase 40-hex HEAD as `reviewed_head_sha`. With no conversational dependency remaining, call `workflow-state progress` for completed Phase 5 using the three exact booleans and truthful available usage. Require persisted `delegate`, then dispatch exactly one fresh issue owner at the existing `from-issue-phase-delegate` tier. State explicitly that this includes mechanical-only direct autonomous runs.
+2. Put one valid representative JSON object in that subsection. Its top-level fields are exactly `owner`, `reviewed_head_sha`, `spec_artifact`, and `plan_artifact`; `owner` has exactly the twelve canonical direct-owner fields asserted by the test; `reviewed_head_sha` is a full lowercase 40-hex commit; each artifact has exactly `kind`, `path`, `metrics`, and `budget_status`; each `metrics` object has exactly the four asserted integer fields; kinds are `design-spec`/`implementation-plan` and both statuses are `within_budget`. State every excluded continuation field named in the invariants. Repository bindings are re-resolved in the delegated worktree.
+3. In `Fresh delegated owner`, require worktree/branch validation, clean-HEAD equality with `reviewed_head_sha`, tracked roots at that exact commit, independent checks and four-metric comparison before artifact reads, envelope adoption without acquisition, and Phase-6 entry. After validating SDD, record Phase 6 with the self-contained booleans, require `delegate`, and fulfill it through the existing fresh Phase-7 ship owner without a second issue owner. After validating the ship report, record Phase 7 with the exact finish command as the ledger-only remainder, require `delegate`, and fulfill it through the existing bookkeeper. Return canonical finish stdout. For mechanical-only direct autonomous work invoke the existing mechanical Phase-6 mechanic/reviewer route without changing that route's order or ownership.
 4. In `Earlier controller stop`, define its closed post-delegation action set as exactly validate, relay, and stop. After ship-summary validation it relays bytes and stops. Use the exact negative sentences pinned by the test so no affirmative permission exists to invoke SDD, edit implementation, reacquire/call `direct-owner`, start an attempt, dispatch a second owner, call `finish`, or continue after the delegated report. Only dispatch failure may be terminally persisted; it never enables local implementation.
 
-In `SKILL.md`'s phase-action rules, point the direct-autonomous Phase-5 `delegate` case to this mandatory `AUTO.md` contract, state that all other acquisition modes retain the existing generic action semantics, and ensure the generic terminal procedure cannot be misread as authorizing a second `finish` after the delegated owner returned canonical terminal bytes.
+In `SKILL.md`'s phase-action rules, point the direct-autonomous Phase-5 `delegate` case and its post-rollover Phase-6/7 action routing to this mandatory `AUTO.md` contract, state that all other acquisition modes retain the existing generic action semantics, and ensure the generic terminal procedure cannot be misread as authorizing a second `finish` after the delegated owner returned canonical terminal bytes.
 
 The `### Other Phase 5–7 routes` section must explicitly say `Mechanical-only module-owned direct autonomous runs are excluded from this section` because they rolled above. It retains the existing dispatcher-owned autonomous, explicit durable interactive, ledger-free interactive, reviewer, SDD, and shipping behavior, and must use the phrase `mechanical-only ordering and ownership for other acquisition routes` to make that compatibility boundary executable in the test.
 

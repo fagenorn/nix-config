@@ -194,7 +194,9 @@ ledger. After the last mutation, run fresh
 checker's `root_bytes`, `total_bytes`, `file_count`, and
 `largest_member_bytes`, and require both results to be `within_budget`. If a
 commit hook changes either artifact, repeat the check and commit sequence until
-the committed roots and retained measurements agree.
+the committed roots and retained measurements agree. Require a clean worktree,
+then resolve the full lowercase 40-hex current commit as `reviewed_head_sha`;
+that commit is the content identity reviewed at this gate.
 
 Once no conversational dependency remains, call `workflow-state progress` for
 completed Phase 5 with truthful available usage and the exact gate values
@@ -223,6 +225,7 @@ value:
     "handoff_path": null,
     "deadline_at": "2026-08-20T12:00:00Z"
   },
+  "reviewed_head_sha": "0123456789abcdef0123456789abcdef01234567",
   "spec_artifact": {
     "kind": "design-spec",
     "path": ".claude/specs/issue-74.md",
@@ -248,11 +251,18 @@ value:
 }
 ```
 
-Pass the unchanged owner object and the two measured artifact blocks only:
-no artifact contents, no task-member paths, no review transcript,
-no conversation summary, no alternate worktree,
-no reconstructed lifecycle field, and no authorization flag. Repository
-bindings are re-resolved in the delegated worktree.
+Pass the unchanged owner object, `reviewed_head_sha`, and the two measured
+artifact blocks only:
+
+- no artifact contents;
+- no task-member paths;
+- no review transcript;
+- no conversation summary;
+- no alternate worktree;
+- no reconstructed lifecycle field; and
+- no authorization flag.
+
+Repository bindings are re-resolved in the delegated worktree.
 
 #### Fresh delegated owner
 
@@ -265,22 +275,37 @@ and require it to match that binding-derived accepted branch regex; that compone
 is the deterministic `expected_branch`. Require
 `git -C owner.worktree branch --show-current` to equal `expected_branch`. A
 pattern, path, or current-branch mismatch is a contract failure before either
-artifact root is read. Only after that branch check, verify the current clean HEAD,
-then verify that both roots are tracked at that HEAD. Next, independently run `artifact-budget check`
-for each root and compare all four metrics with the
+artifact root is read. Only after that branch check, verify the current clean HEAD.
+Require its full commit ID to equal `reviewed_head_sha`.
+Verify both roots are tracked at that exact reviewed HEAD.
+Next, independently run `artifact-budget check` for each root and compare all four metrics with the
 continuation. Any mismatch stops the attempt as a contract failure.
 
 After those checks pass, adopt the owner envelope as the existing lifecycle
 identity; the fresh owner must not call `direct-owner` or perform any other
 acquisition. It must begin at Phase 6, invoke `sdd` with the reviewed plan, and
-validate the SDD producer report under the existing contract. It then dispatches
-a fresh Phase-7 ship owner with `auto: true`, validates that owner's ship-summary
-report, calls the terminal procedure's single `workflow-state finish`, and must
-return only the exact canonical JSON printed by that command.
+validate the SDD producer report under the existing contract.
+
+After SDD is validated, call `workflow-state progress` for completed Phase 6
+with truthful available usage and `next_needs_context=false`,
+`artifacts_sufficient=true`, and `remainder_self_contained=true`. Require the
+persisted action `delegate`. For this already-delegated implementation owner,
+that Phase-6 delegate is fulfilled by the existing fresh Phase-7 ship owner with
+`auto: true`; it must not dispatch a second issue owner.
+
+After validating the ship owner's ship-summary bytes, call
+`workflow-state progress` for completed Phase 7. Make the terminal result file
+and finish invocation the ledger-only remainder; use truthful available usage
+and the same three gate values, require persisted `delegate`, and use the
+existing ledger-only bookkeeper route.
+Give the bookkeeper the exact `workflow-state finish` command. It executes only that command and relays its
+stdout; it decides nothing and edits nothing. The fresh implementation owner
+must return only the exact canonical JSON printed by that durable finish.
 
 For mechanical-only direct autonomous work, the fresh owner invokes the
 existing mechanical Phase-6 mechanic/reviewer route without changing its order
-or ownership, then performs the same fresh shipping and terminal sequence.
+or ownership, then performs the same Phase-6 progress, fresh shipping, Phase-7
+ledger-only progress, and terminal sequence.
 
 #### Earlier controller stop
 

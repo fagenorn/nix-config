@@ -17,6 +17,8 @@
 - Keep Git, tracker reads, worktree creation, owner dispatch, artifact reads, SDD, and shipping outside the lifecycle module.
 - Resume an absent recorded path only for an unexpired handed-off direct attempt whose completed phase is exactly 0, and preserve the run, attempt, owner, worktree, start time, deadline, and handoff path.
 - The pre-rollover controller must stop before SDD or implementation edits; dispatch failure may be durably failed but never implemented locally.
+- Bind the fresh continuation to the exact reviewed full HEAD SHA and reject any clean but different commit before artifact reads.
+- Record every delegated-owner phase boundary: Phase-6 `delegate` launches the existing ship owner, and Phase-7 ledger-only `delegate` launches only the exact finish bookkeeper.
 - Append explicit issue-74 amendment markers to the accepted issue-33 phase-order and issue-73 acquisition records; do not rewrite their point-in-time claims or create a glossary/ADR tree.
 - Every task is `full` risk because it changes lifecycle, concurrency-sensitive persistence, or public agent contracts.
 
@@ -25,7 +27,7 @@
 - Progress CLI seam: exercise the complete direct-only mixed-input precedence and reopened action validation while retaining exact non-direct ledger bytes.
 - Direct-owner CLI seam: exercise exact absent Phase-0 handoff reacquisition plus mutation-free mismatch, wrong-phase, active-owner, dispatcher, and alternate-candidate cases.
 - Real-filesystem seam: create a temporary repository with `origin/main`, resume the absent reservation, materialize that exact path with `git worktree add`, and record Phase 1 on the same attempt.
-- Skill contract seam: pin the ordered Phase-5 commit/check/progress/delegate/dispatch protocol, exact bounded continuation blocks, fresh-owner validation/Phase-6 entry, terminal persistence, and earlier-controller stop.
+- Skill contract seam: pin the ordered Phase-5 commit/check/progress/delegate/dispatch protocol, exact reviewed-HEAD continuation, fresh-owner validation, Phase-6 ship delegation, Phase-7 ledger-only finish delegation, terminal persistence, and earlier-controller stop.
 - Repository seams: `just agent-workflow-tests` proves deterministic module/skill contracts and `just build` proves the helper and installed skill documentation ship together.
 
 ## Task index
@@ -40,6 +42,8 @@ Task 3 — Enforce the reviewed-plan implementation-owner rollover — `home/com
 
 Reviewer provenance: `reviewer=native; job_id=issue74-phase5-native; base_sha=c780b38f613c59a7d6674dc081d9f67666054ebf; fallback=false`. Applied B1 by closing and separating the transfer/owner/controller-stop test seams (D7); applied S1 by adding clean task starts and mechanically scoped current-task path gates; applied S2 by pinning exact-recorded authority in the presence of an alternate candidate (D8); resolved D1 by including mechanical-only direct autonomous runs in the rollover while preserving their existing fresh-owner Phase-6 route (D9).
 
+Ship review: conformance clean; correctness findings COR-001 and COR-002 applied by binding the continuation to `reviewed_head_sha` (D10) and routing the delegated owner's Phase-6/7 actions through the existing ship-owner and ledger-only seams (D11).
+
 ## Decisions
 
 - Direct-only precedence and identity-derived policy follow D1–D2.
@@ -47,5 +51,6 @@ Reviewer provenance: `reviewer=native; job_id=issue74-phase5-native; base_sha=c7
 - Exact absent Phase-0 reservation resume follows D5.
 - Public CLI, real-filesystem, installed-skill, and documentation seams follow D6.
 - Phase-5 closed-interface, mixed-observation authority, and mechanical-direct scope corrections follow D7–D9.
+- Reviewed-content identity and delegated-owner Phase-6/7 action routing follow D10–D11.
 
 ---

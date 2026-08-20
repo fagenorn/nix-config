@@ -226,8 +226,11 @@ Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger
 
 For the direct-autonomous Phase-5 `delegate` case, the
 mandatory direct-autonomous Phase-5 rollover in `AUTO.md` replaces the generic delegation
-behavior above. The behavior for all other acquisition modes retains the
-existing generic action semantics unchanged.
+behavior above. Its post-rollover Phase-6 and Phase-7 gates also use the narrow
+routes defined there: Phase-6 `delegate` launches the existing fresh ship owner,
+and Phase-7 `delegate` launches only the ledger-only finish bookkeeper. The
+behavior for all other acquisition modes retains the existing generic action
+semantics unchanged.
 
 If `workflow-state progress` is rejected because the
 attempt budget's deadline has passed — either
