@@ -44,8 +44,9 @@ resolve through the existing bindings and adapters the immutable absolute ledger
 repository root (`ledger_repo_root`), positive issue and configured positive
 attempt budget. Resolve a fresh current RFC3339 UTC instant for every request,
 including before the first call. For every call, write a new absolute temporary
-request file containing exactly this version-1 shape, with only observations
-requested in the current round:
+request file containing exactly this version-1 shape. For each request, populate
+every observation kind the helper has requested at least once during this acquisition;
+keep an observation kind `null` until the helper requests it:
 
 ```json
 {

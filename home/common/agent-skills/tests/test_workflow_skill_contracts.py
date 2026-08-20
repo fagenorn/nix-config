@@ -766,6 +766,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "kind: terminal",
             "return",
         )
+        self.assertIn(
+            "every observation kind the helper has requested at least once during this acquisition",
+            direct,
+        )
+        self.assertIn(
+            "keep an observation kind `null` until the helper requests it",
+            direct,
+        )
+        self.assertNotIn("only observations requested in the current round", direct)
         for field in (
             "ledger_repo_root", "run_id", "issue", "attempt", "owner",
             "action_id", "launch_kind", "worktree", "handoff_path",
