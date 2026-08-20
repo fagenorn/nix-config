@@ -1,12 +1,13 @@
 # Task 2: Route direct autonomous from-issue through durable acquisition
 
 **Files:**
+- Modify: `.claude/specs/2026-08-19-workflow-control-plane-design.md`
 - Modify: `home/common/agent-skills/skills/from-issue/SKILL.md`
 - Modify: `home/common/agent-skills/skills/from-issue/AUTO.md`
 - Test: `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 
 **Interfaces:**
-- Consumes: Task 1's strict `workflow-state direct-owner --repo-root <root> --request-file <absolute-path>` command and its `observe | owner | terminal` responses; the existing tracker/worktree adapters; the existing dispatcher lifecycle envelope; D2/D6/D8/D9.
+- Consumes: Task 1's strict `workflow-state direct-owner --repo-root <root> --request-file <absolute-path>` command and its `observe | owner | terminal` responses; the existing tracker/worktree adapters; the existing dispatcher lifecycle envelope; D2/D6/D8–D10/D12/D13.
 - Produces: one explicit `### Direct autonomous acquisition` adapter contract in `from-issue/SKILL.md` and matching false-by-default authorization rules in `AUTO.md`.
 - Preserves: dispatcher-envelope adoption without `direct-owner`; ordinary interactive direct ledger-free behavior; explicit durable interactive `init-run`/`control`; Phase 0–7, `progress`, `finish`, and terminal-return contracts after an owner response is adopted.
 
@@ -18,6 +19,8 @@
 - On `owner`, validate the exact closed shape, adopt `ledger_repo_root`, run, issue, attempt, owner, action ID, worktree, handoff, deadline, and launch kind as the invocation's lifecycle identity, then continue the existing Phase 0–7 owner flow. Do not spawn or reserve another owner/worktree.
 - On `terminal`, validate and return the compact response unchanged to the caller, stop before Phase 1, and install no wait observer. A loud helper error is surfaced; it is never bypassed through `init-run`, `control`, a fabricated envelope, or the ledger-free path.
 - Direct acquisition never consumes or interprets dispatcher summaries, deltas, wait IDs, `wait`, or `finalize`. Dispatcher and explicit-durable interactive prose retain their existing bounded `init-run`/`control` behavior.
+- Handoff and Phase-1 worktree prose are acquisition-mode-specific: dispatcher-owned resumptions arrive only through `control`; direct autonomous resumptions arrive through the persisted `direct-owner` envelope; only ledger-free interactive direct creates an ordinary worktree. A direct autonomous owner always adopts the exact returned path, including a retained handoff/retry path.
+- Amend the accepted issue-47 control-plane spec inline to state that issue 73 supersedes only its blanket direct-standalone paragraph: direct autonomous now uses `direct-owner`, while interactive ledger-free and explicitly durable interactive behavior remain as described.
 - Contract tests assert behavior-bearing wording and ordered branches, not incidental line counts. Prose added to the live skill states the implemented behavior precisely and contains no placeholder.
 
 - [ ] **Step 1: Write failing invocation-routing and adapter-loop contract tests**
@@ -120,6 +123,32 @@ Add the following complete tests to `WorkflowSkillContractsTest`:
 
 Revise the existing `test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops` and `test_from_issue_standalone_modes_use_live_lifecycle_interfaces` assertions so they select the new named subsections and retain all assertions about immutable ledger root, exact worktree identity, `progress`, `finish`, and terminal persistence. Do not weaken an existing assertion merely because headings moved.
 
+Replace the global handoff/worktree assertions with acquisition-specific contracts:
+
+```python
+    def test_from_issue_handoff_resume_is_acquisition_mode_specific(self):
+        phase_gate = self.section(
+            self.from_issue, "## Dispatch, phase-budget and attempt-budget rules",
+            "## Terminal return procedure",
+        )
+        self.assertIn("dispatcher-owned", phase_gate)
+        self.assertIn("returned `resume` envelope", phase_gate)
+        self.assertIn("direct autonomous", phase_gate)
+        self.assertIn("persisted `direct-owner` owner envelope", phase_gate)
+        self.assertNotIn("workflow-state launch", phase_gate)
+
+    def test_lifecycle_phase_one_paths_are_acquisition_mode_specific(self):
+        phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")
+        self.assertIn("dispatcher-owned or direct-autonomous lifecycle envelope", phase_one)
+        self.assertIn("use its exact absolute `worktree`", phase_one)
+        self.assertIn("adopt it", phase_one)
+        self.assertIn("Do not re-create it, do not move it, do not reset it", phase_one)
+        self.assertIn("ledger-free interactive direct", phase_one)
+        self.assertIn("standard `worktrees` flow", phase_one)
+```
+
+The revised assertions must prove that dispatcher-owned handoffs name `control`, direct autonomous handoffs name `direct-owner`, and neither route falls through to ordinary worktree creation.
+
 - [ ] **Step 2: Run the focused contract tests and confirm the new routing prose is absent**
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -v`
@@ -136,6 +165,12 @@ Within `## Lifecycle identity` in `from-issue/SKILL.md`, preserve the shared exa
 4. `### Explicit durable interactive acquisition`: preserve the current `init-run` bootstrap, normalized tracker/worktree request with `max_parallel: 1`, `control`, exact single `spawn` adoption, and no-waiter behavior.
 
 In `AUTO.md`, add the exact exceptional-authorization rule beside the self-answer/lifecycle rules: both fields are always present and false unless the current instruction explicitly authorizes that exact transition; self-answering cannot infer authority from any process/tracker/terminal observation. Keep `progress` at every phase checkpoint and `finish` before notification unchanged.
+
+Audit the adjacent live sections rather than stopping at Lifecycle identity:
+
+- In the phase-budget handoff branch, say a dispatcher-owned owner is relaunched only from `control`'s returned `resume` envelope, while a direct autonomous restart reacquires the handed-off attempt through the persisted `direct-owner` owner envelope.
+- In Phase 1, apply exact-path adopt/create/fail handling to both dispatcher-owned and direct-autonomous lifecycle envelopes; reserve the standard `worktrees` flow for ledger-free interactive direct invocations.
+- In `.claude/specs/2026-08-19-workflow-control-plane-design.md`, add an issue-73 inline amendment beside the blanket direct-standalone paragraph, preserving its interactive and explicitly durable branches but replacing direct autonomous acquisition with `direct-owner` (per D13).
 
 - [ ] **Step 4: Verify focused skill behavior**
 
@@ -155,12 +190,12 @@ Expected: exit 0; Nix evaluation/build publishes the modified helper and `from-i
 
 - [ ] **Step 6: Verify the owned diff and commit the adapter tracer**
 
-Run: `git diff --check -- home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/skills/from-issue/AUTO.md home/common/agent-skills/tests/test_workflow_skill_contracts.py`
+Run: `git diff --check -- .claude/specs/2026-08-19-workflow-control-plane-design.md home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/skills/from-issue/AUTO.md home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 
-Expected: exit 0 with no output. Then inspect `git diff --stat --` with the same three pathspecs; the dispatcher skill, Nix wiring, and any unrelated skill are unchanged.
+Expected: exit 0 with no output. Then inspect `git diff --stat --` with the same four pathspecs; the dispatcher skill, Nix wiring, and any unrelated skill are unchanged.
 
 ```bash
-git add home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/skills/from-issue/AUTO.md home/common/agent-skills/tests/test_workflow_skill_contracts.py
+git add .claude/specs/2026-08-19-workflow-control-plane-design.md home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/skills/from-issue/AUTO.md home/common/agent-skills/tests/test_workflow_skill_contracts.py
 git commit -m "feat(issue-73): adopt durable direct owner state" -m "Co-Authored-By: Codex <noreply@openai.com>"
 ```
 

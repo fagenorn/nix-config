@@ -5,9 +5,9 @@
 - Test: `home/common/agent-skills/tests/test_workflow_state.py`
 
 **Interfaces:**
-- Consumes: the existing schema-1 ledger, hardened workflow directory/regular-file/lock primitives, atomic state replacement, tracker/worktree validators, one-issue `control` policy, and D1–D7/D9.
+- Consumes: the existing schema-1 ledger, hardened workflow directory/regular-file/lock primitives, atomic state replacement, tracker/worktree validators, one-issue `control` policy, and D1–D7/D9/D11–D13.
 - Produces: `workflow-state direct-owner --repo-root <absolute-ledger-repository-root> --request-file <absolute-json-path>`; strict `DIRECT_OWNER_INTERFACE_VERSION = 1`; strict request loader/validator; retained direct-run discovery; canonical `observe | owner | terminal` responses.
-- Produces one private one-issue policy operation, named `_apply_one_issue_policy`, whose keyword-only inputs are the validated ledger issue (or no prior issue), optional normalized tracker/worktree observations, injected `now` and `attempt_budget_minutes`, an internally derived current-owner-unavailable boolean, dispatch permission, and the selected run directory. Its result is a closed proposed operation (`observe | spawn | resume | retry | refuse | terminal | idle`) plus a changed boolean and the projection data needed by the caller. Both `command_control` and `command_direct_owner` call it; neither carries a second copy of resume/retry/refusal rules. The private representation may use a frozen record, but those inputs, operations, and outputs are fixed.
+- Produces one private one-issue policy operation, named `_apply_one_issue_policy`, whose keyword-only inputs are the validated ledger issue (or no prior issue), optional normalized tracker/worktree observations, injected `now` and `attempt_budget_minutes`, an internally derived current-owner-unavailable boolean, dispatch permission, the selected run directory, and an optional `retained_worktree` path. `retained_worktree` is non-null only for an authorized new run after direct discovery has validated it as the greatest terminal run's latest attempt path; the shared operation then validates any recorded observation against it and alone chooses that retained path versus an absent candidate for attempt 1. Its result is a closed proposed operation (`observe | spawn | resume | retry | refuse | terminal | idle`) plus a changed boolean and the projection data needed by the caller. Both `command_control` and `command_direct_owner` call it; neither carries a second copy of resume/retry/refusal or worktree-selection rules. The private representation may use a frozen record, but those inputs, operations, and outputs are fixed.
 - Preserves: the exact public `init-run`, `control`, `progress`, and `finish` arguments and all existing dispatcher response shapes. Parser help adds `direct-owner` and no retired operation.
 
 **Invariants:**
@@ -22,6 +22,7 @@
 - `observe.requirements` is ordered and contains only exact `tracker`, `recorded_worktree`, or `candidate_worktree` items. `run_id` is null before selection and otherwise the selected direct ID. Supplying one observation round may reveal the next; observation never changes a ledger.
 - `owner` is printed only after persistence and has exactly the fields in D6, with `ledger_repo_root` equal to the validated immutable absolute root and `launch_kind` translated to `spawn | resume | retry`. `terminal` has only the D6 fields and either a lifecycle result/non-null run ID/empty blockers or a tracker result-null/normalized blockers/nullable run ID. No direct response contains control summaries, deltas, wait, finalize, or dispatcher action arrays.
 - `new_run` is applicable only when retained history exists and the latest run is terminal. It creates the next sequence with a fresh two-attempt allowance after tracker readiness and reuses the latest terminal worktree only when observed matching; otherwise it requires a verified absent candidate. Lifecycle terminal replay is byte-equivalent across processes when `new_run` is false.
+- Direct discovery validates the optional retained terminal path's provenance before policy entry; `_apply_one_issue_policy` verifies the supplied recorded observation names that exact path and owns the final retained-versus-candidate choice. `command_direct_owner` never preselects a launch path.
 - Reject exact reserved direct IDs in public `init-run` and `control` before `workflow_paths` can create/open them. Do not apply that rejection to `progress` or `finish`; their existing state/attempt/result validation remains the authority.
 - JSON remains key-sorted compact UTF-8 with one trailing newline. All failures exit 2, write no success stdout, and preserve every pre-existing `state.json` byte-for-byte. Creating the stable issue lock is not a lifecycle mutation.
 
@@ -301,6 +302,19 @@ Add reserved-capability, discovery-corruption, and concurrent-first-call tests:
         self.assertEqual(rejected_control.returncode, 2)
         self.assertFalse((self.workflows_dir / run_id).exists())
         owner = self.acquire_direct()
+        before = self.direct_state_path(run_id).read_bytes()
+        existing_init = self.run_cli(
+            "init-run", "--repo-root", self.root, "--run-id", run_id,
+            "--now", "2026-08-20T10:01:00Z", ok=False,
+        )
+        existing_control = self.run_cli(
+            "control", "--repo-root", self.root, "--run-id", run_id,
+            "--request-file", request_path, ok=False,
+        )
+        for rejected in (existing_init, existing_control):
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+        self.assertEqual(self.direct_state_path(run_id).read_bytes(), before)
         self.run_id = owner["run_id"]
         progress = self.progress(issue=73, now="2026-08-20T10:01:00Z")
         self.assertEqual(progress["action"], "continue")
@@ -385,11 +399,20 @@ Add the remaining filesystem, authorization, expiry, replay, and canonical-outpu
         owner = self.acquire_direct()
         valid_state = self.direct_state_path(owner["run_id"]).read_bytes()
 
-        def materialize(root, *, directory="real", lock="file", state="file",
-                        state_bytes=valid_state):
+        def materialize(root, *, directory="real", issue_lock="missing",
+                        lock="file", state="file", state_bytes=valid_state):
             workflows = root / ".superpowers" / "workflows"
             workflows.mkdir(parents=True)
+            if issue_lock == "symlink":
+                target = root / "issue-lock-target"
+                target.write_bytes(b"external issue lock sentinel")
+                (workflows / ".direct-73.lock").symlink_to(target)
+            elif issue_lock == "directory":
+                (workflows / ".direct-73.lock").mkdir()
             run = workflows / "direct-73-000001"
+            if directory == "file":
+                run.write_bytes(b"claimed namespace sentinel")
+                return
             if directory == "symlink":
                 target = root / "run-target"
                 target.mkdir()
@@ -422,7 +445,10 @@ Add the remaining filesystem, authorization, expiry, replay, and canonical-outpu
             wrong_issue, sort_keys=True, separators=(",", ":")
         ) + "\n").encode()
         cases = {
+            "regular-file run entry": {"directory": "file"},
             "symlink directory": {"directory": "symlink"},
+            "symlink issue lock": {"issue_lock": "symlink"},
+            "non-regular issue lock": {"issue_lock": "directory"},
             "missing lock": {"lock": "missing"},
             "symlink lock": {"lock": "symlink"},
             "missing state": {"state": "missing"},
@@ -443,6 +469,11 @@ Add the remaining filesystem, authorization, expiry, replay, and canonical-outpu
                 )
                 self.assertEqual(rejected.returncode, 2)
                 self.assertEqual(rejected.stdout, "")
+                if label == "symlink issue lock":
+                    self.assertEqual(
+                        (root / "issue-lock-target").read_bytes(),
+                        b"external issue lock sentinel",
+                    )
                 self.assertEqual(
                     {path: path.read_bytes() for path in before}, before,
                 )
@@ -584,8 +615,15 @@ Add the remaining filesystem, authorization, expiry, replay, and canonical-outpu
             }),
         )
         self.assertEqual(
-            (refused["kind"], refused["source"], refused["reason"]),
-            ("terminal", "lifecycle", "failed"),
+            refused,
+            {
+                "interface_version": 1, "kind": "terminal", "issue": 73,
+                "run_id": owner["run_id"], "source": "lifecycle",
+                "reason": "failed", "blockers": [],
+                "result": json.loads(
+                    self.direct_state_path(owner["run_id"]).read_text()
+                )["issues"]["73"]["outcome"],
+            },
         )
         state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
         self.assertEqual(len(state["issues"]["73"]["attempts"]), 2)
@@ -602,8 +640,11 @@ Add the remaining filesystem, authorization, expiry, replay, and canonical-outpu
         self.assertEqual(first.stdout, second.stdout)
         self.assertTrue(first.stdout.endswith("\n"))
         merged_terminal = json.loads(first.stdout)
-        self.assertEqual(merged_terminal["result"], merged)
-        self.assertEqual(merged_terminal["reason"], "merged")
+        self.assertEqual(merged_terminal, {
+            "interface_version": 1, "kind": "terminal", "issue": 73,
+            "run_id": merged_owner["run_id"], "source": "lifecycle",
+            "reason": "merged", "blockers": [], "result": merged,
+        })
 
         stopped_owner = self.acquire_direct(issue=74)
         self.run_id = stopped_owner["run_id"]
@@ -615,8 +656,11 @@ Add the remaining filesystem, authorization, expiry, replay, and canonical-outpu
                               now="2026-08-20T10:01:00Z")
         stopped_terminal = self.direct_owner(issue=74,
                                              now="2026-08-20T10:02:00Z")
-        self.assertEqual(stopped_terminal["reason"], "stopped")
-        self.assertEqual(stopped_terminal["result"], stopped)
+        self.assertEqual(stopped_terminal, {
+            "interface_version": 1, "kind": "terminal", "issue": 74,
+            "run_id": stopped_owner["run_id"], "source": "lifecycle",
+            "reason": "stopped", "blockers": [], "result": stopped,
+        })
 
     def test_direct_and_control_project_the_same_one_issue_retry_policy(self):
         control_worktree = os.path.abspath(self.root / "control-worktree-14")
@@ -663,9 +707,10 @@ In `workflow-state.py`:
 2. Separate validated repository/workflows-directory resolution from run-directory creation. Generalize `open_stable_lock(path, label, allow_missing)` so normal transactions may create a run lock, while discovery requires every retained run lock to exist. Preserve no-follow open plus inode/device verification.
 3. Add an issue-lock context that creates/opens only `.direct-<issue>.lock`, obtains `LOCK_EX`, scans directory entries without following links, validates every claimed namespace member, opens/locks retained runs in sequence order, and classifies them from validated state. Reject all corrupt/ambiguous/exhausted shapes before mutation.
 4. Extract the one-issue transition derivation/application now nested in `command_control` behind `_apply_one_issue_policy`. Keep control's three scheduling passes, capacity, candidate exclusivity, replay exception, deltas, summary ordering, and trailing wait/finalize construction unchanged; move only the lifecycle knowledge that both entry points must share. Direct acquisition passes capacity one and nullable facts so the shared operation can return the next required observation rather than fabricating tracker/Git state.
-5. Implement initial/adopt/replay/new-run selection and authorization applicability under the issue lock. For new-run worktree reuse, treat the latest retained terminal attempt's recorded path as the prior worktree input to the shared fresh/retry path selection, while writing attempt 1 into a new schema-1 ledger.
+5. Implement initial/adopt/replay/new-run selection and authorization applicability under the issue lock. For new-run worktree reuse, discovery validates the greatest terminal run's latest attempt path and passes it as `_apply_one_issue_policy(retained_worktree=...)`; the shared operation validates a matching recorded observation and alone chooses that path versus an absent candidate while writing attempt 1 into a new schema-1 ledger. The direct command never chooses the launch path outside that operation.
 6. Map the accepted shared operation to exact direct `observe`, `owner`, or `terminal` projections. Derive action/owner identity only from the persisted attempt, translate the first fresh launch to `spawn` and a later run's fresh attempt to `spawn`, and never expose dispatcher-only state.
-7. Add `reject_reserved_direct_run_id` at the start of `command_init_run` and `command_control`, before any call that can create a run directory. Register `direct-owner` with only `--repo-root` and `--request-file`. Leave `progress` and `finish` unchanged.
+7. Add `reject_reserved_direct_run_id` at the start of `command_init_run` and `command_control`, before any call that can create or open a run directory. Register `direct-owner` with only `--repo-root` and `--request-file`. Leave `progress` and `finish` unchanged.
+8. Rewrite `finish_time`'s stale public-`launch` docstring so it describes the live injected-time terminal-writer invariant without naming a retired command (per D13).
 
 Implementation is incomplete if a second process can observe an empty new ledger, if an observation response changes `state.json`, if a selected run is unlocked between classification and mutation, or if any existing control response byte changes for the same ledger/request snapshot.
 
