@@ -204,8 +204,10 @@ class ScanFileTest(unittest.TestCase):
         issue_8 = "/Users/me/repo/.claude/worktrees/worktree-issue-8-other"
         cases = [
             ("aissue-7-owner-2-deadbeef", [issue_7], "7"),
+            ("aissue-7-owner-2-deadbeef", [f"{issue_7}/scripts"], "7"),
             ("aissue-7-owner-2-deadbeef", [issue_8], None),
             ("aissue-7-owner-2-deadbeef", [issue_7, issue_8], None),
+            ("aissue-7-owner-2-deadbeef", ["/tmp/issue-7-not-a-worktree"], None),
             ("areviewer-7-deadbeef", [issue_7], None),
             ("aissue-7-owner-0-deadbeef", [issue_7], None),
         ]
@@ -359,7 +361,8 @@ class ExecutorFallbackTest(unittest.TestCase):
 
                 return values()
 
-        self.assert_fallback(IterationFailure, "RuntimeError")
+        scanned = self.assert_fallback(IterationFailure, "RuntimeError")
+        self.assertEqual(scanned, [self.paths[0]] + self.paths)
 
     def test_teardown_failure_discards_complete_mapping_and_rescans_all(self):
         class TeardownFailure:

@@ -61,6 +61,9 @@ COUNTER_FIELDS = ("models", "efforts", "stop_reasons", "phase_turns", "attr_turn
 LIST_FIELDS = ("agent_prompt_bytes", "agent_result_bytes")
 
 ISSUE_RE = re.compile(r"(?:^|[-/])(?:worktree-)?issue-(\d+)")
+ISSUE_WORKTREE_RE = re.compile(
+    r"(?:^|/)\.claude/worktrees/(?:worktree-)?issue-([1-9][0-9]*)-[^/]+(?:/|$)"
+)
 OWNER_AGENT_RE = re.compile(r"^aissue-([1-9][0-9]*)-owner-([1-9][0-9]*)-(.+)$")
 MULTI_ISSUE = "*"  # root session that roamed across several issue worktrees
 HOME = os.path.expanduser("~")
@@ -372,7 +375,7 @@ def owner_issue(result):
     cwd_issues = {
         cwd_match.group(1)
         for cwd in result.get("cwds", {})
-        for cwd_match in ISSUE_RE.finditer(cwd)
+        for cwd_match in ISSUE_WORKTREE_RE.finditer(cwd)
     }
     if len(cwd_issues) != 1:
         return None
