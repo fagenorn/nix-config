@@ -420,12 +420,18 @@ phase-budget `progress`, and write-before-notify `finish` behavior. Its handoff 
 say that the dispatcher resumes it from a returned `resume` envelope; owners do not invoke a
 dispatcher launch command themselves.
 
-A direct standalone `from-issue` invocation remains ledger-free. When the user explicitly requests
-durable standalone orchestration, `from-issue` calls `init-run`, gathers one issue's normalized
-tracker/worktree facts, calls `control` with `max_parallel: 1`, and adopts the returned first
-`spawn` envelope as its lifecycle identity and exact Phase-1 worktree. It does not spawn another
-owner or issue a second control call for that launch. A non-`spawn` response or an action for a
-different issue fails loudly instead of inventing identity.
+Issue 73 supersedes only the blanket direct-standalone statement in this
+paragraph. A direct autonomous `from-issue <issue> --auto` invocation without a
+dispatcher envelope now acquires durable lifecycle identity only through
+`workflow-state direct-owner`, adopts its exact returned owner identity and
+worktree, and returns a terminal replay without entering the owner flow. An
+interactive direct invocation remains ledger-free. When an interactive user
+explicitly requests durable standalone orchestration, `from-issue` still calls
+`init-run`, gathers one issue's normalized tracker/worktree facts, calls
+`control` with `max_parallel: 1`, and adopts the returned first `spawn` envelope
+as its lifecycle identity and exact Phase-1 worktree. It does not spawn another
+owner or issue a second control call for that launch. A non-`spawn` response or
+an action for a different issue fails loudly instead of inventing identity.
 
 The deployed orchestrator eval expectations change with the skill contract. They grade normalized
 observations, envelope execution, and the absence of hand-assembled precedence rather than pinning
