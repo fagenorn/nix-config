@@ -76,6 +76,10 @@ agent-model-matrix:
   python3 home/common/agent-skills/scripts/agent-model-matrix.py validate
   python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
 
+# PROTOTYPE: inspect the proposed agent-system adoption contract without mutation.
+prototype-agent-adoption-dry-run target="." *args:
+  python3 prototype-agent-adoption-dry-run/tui.py "{{target}}" {{args}}
+
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
 show-claude-settings: build
