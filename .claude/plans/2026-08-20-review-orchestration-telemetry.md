@@ -54,7 +54,7 @@ Task 2 — Attribute transcript telemetry and add ordered pool fallback — `scr
 |---------|-------------|-------------|
 | B1 | Applied | Worker invalid-operation test now expects non-zero exit and the exact durable failed record/diagnostic (D7). |
 | B2 | Applied | Task 1 inventories and migrates help plus every bare guard, timeout, parallel-isolation, deadline, and remaining `--reviewer` call site before the full suite (D7). |
-| S1 | Applied | Synthetic telemetry pins raw `cost == 0.0113625` before any grouped comparison (D8). |
+| S1 | Applied | Synthetic telemetry uses literal `0.0113625` as a 12-place raw-cost oracle before any grouped comparison (D8). |
 | S2 | Applied | Task 2 rewrites the module counting-rule prose to describe proven-owner movement and rooted overhead. |
 | S3 | Applied | Successful-executor stdout/stderr is deterministic; forced/default fallback behavior is tested separately (D8). |
 | Review D1 | Applied — smaller scope | Cancellation preserves operation in the durable cancelled record/result and shared cleanup; no new cancel-response field (D9). |

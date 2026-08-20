@@ -22,7 +22,7 @@
 - The cheap user-record prefilter admits a large valid envelope. It does not widen ordinary long-user scanning beyond the exact envelope marker (D4).
 - Parallel values are fully materialized inside the protected boundary. A construction, map, iteration, or context-manager teardown exception discards the attempt and sequentially scans every path once in original order; sequential errors propagate (D5).
 - Global `fresh`, `cache_create`, `cache_read`, `output`, `turns`, and `cost` are folded directly from retained raw results in stable order before group partitioning (D5).
-- The successful-executor and forced-fallback report bytes are identical, the successful executor emits no stderr, and the six-transcript fixture's raw cost is exactly `0.0113625` before group totals are compared (D8).
+- The successful-executor and forced-fallback report bytes are identical, the successful executor emits no stderr, and the six-transcript fixture's raw cost matches literal `0.0113625` to 12 decimal places before group totals are compared (D8).
 - The module counting-rule prose describes the live partition: proven issue-owner transcripts follow their issue worktree, while rooted helper/reviewer overhead remains with root (D8).
 - Pricing, model mapping, report headings/layout, and root-overhead cost policy remain unchanged.
 
@@ -324,7 +324,7 @@ Add this helper and test to `EndToEndTest`:
         self.assertEqual(direct["output"], 120)
         self.assertEqual(direct["cache_create"], 30)
         self.assertEqual(direct["cache_read"], 600)
-        self.assertEqual(direct["cost"], 0.0113625)
+        self.assertAlmostEqual(direct["cost"], 0.0113625, places=12)
         self.assertIn("6 turns", successful_stdout)
         self.assertIn("fresh 60", successful_stdout)
         self.assertIn("cache_create 30", successful_stdout)
