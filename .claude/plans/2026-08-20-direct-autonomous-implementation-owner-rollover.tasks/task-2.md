@@ -13,9 +13,12 @@
 **Invariants:**
 - Per D5, the exception requires all of: reserved direct run, unexpired `handed_off`, completed phase `0`, valid durable handoff, exact recorded path, and observation state `absent`.
 - Successful reacquisition preserves run, attempt, owner, worktree, started time, deadline, and handoff path; it appends exactly one resume launch and consumes no retry/new run.
+- Per D8, when the exact recorded `absent` reservation and an alternate absent candidate arrive together, the response is the ordinary recorded-path resume envelope and the candidate is never adopted.
 - `workflow-state` performs no Git or filesystem materialization; Phase 1 creates only the exact envelope path from `origin/main`.
-- Active-owner takeover, dispatcher-owned resume, handoff after Phase 0, mismatch, wrong-branch occupancy, missing recorded observation, wrong recorded path, and alternate candidate remain non-resumable and mutation-free.
+- Active-owner takeover, dispatcher-owned resume, handoff after Phase 0, mismatch, wrong-branch occupancy, missing/wrong recorded observation, and candidate-only input remain non-resumable and mutation-free.
 - Existing `matching_issue_branch` resume remains unchanged.
+
+**Task-start baseline:** Before editing, run `test -z "$(git status --porcelain=v1)" && git rev-parse --verify HEAD`. Expected: exit 0 and one baseline SHA; non-empty status fails the task start. Keep `HEAD` at this baseline until the task's final verification so its tracked, staged, and untracked comparison excludes every earlier task commit.
 
 - [ ] **Step 1: Write the failing exact-absent and negative CLI tests**
 
@@ -33,11 +36,14 @@ def test_direct_phase_zero_handoff_resumes_its_exact_absent_reservation(self):
         handoff_path=handoff,
     )
     before = json.loads(self.direct_state_path(owner["run_id"]).read_text())
+    alternate = os.path.abspath(self.root / "alternate-worktree-73")
     resumed = self.direct_owner(
         issue=73, now="2026-08-20T10:02:00Z",
-        worktree=self.worktree_fact(73, recorded={
-            "path": owner["worktree"], "state": "absent",
-        }),
+        worktree=self.worktree_fact(
+            73,
+            recorded={"path": owner["worktree"], "state": "absent"},
+            candidate={"path": alternate, "state": "absent"},
+        ),
     )
     self.assertEqual(resumed, {
         **owner, "action_id": "73:1:2", "launch_kind": "resume",
@@ -52,6 +58,9 @@ def test_direct_phase_zero_handoff_resumes_its_exact_absent_reservation(self):
     self.assertEqual(attempt["state"], "active")
     self.assertEqual(attempt["launch_kind"], "resume")
     self.assertEqual(len(attempt["launches"]), 2)
+    self.assertEqual(resumed["owner"], owner["owner"])
+    self.assertEqual(resumed["worktree"], owner["worktree"])
+    self.assertNotEqual(resumed["worktree"], alternate)
     self.assertEqual(len(after["issues"]["73"]["attempts"]), 1)
     self.assertFalse(self.direct_state_path("direct-73-000002").exists())
 
@@ -153,7 +162,7 @@ Expected: FAIL because the base direct-owner policy returns `kind: observe` for 
 
 - [ ] **Step 3: Admit only the direct Phase-0 exact-absent resume fact**
 
-In `_apply_one_issue_policy`, keep exact recorded-path validation first. In the active/handed-off resume branch, accept `recorded["state"] == "absent"` as resume-ready only when the latest attempt is `handed_off`, its `phase == 0`, and `run_dir.name` matches `DIRECT_RUN_ID_PATTERN`. All other cases continue to require `matching_issue_branch` and produce their existing observe/error behavior. Do not select a candidate path in the resume branch.
+In `_apply_one_issue_policy`, keep exact recorded-path validation first. In the active/handed-off resume branch, accept `recorded["state"] == "absent"` as resume-ready only when the latest attempt is `handed_off`, its `phase == 0`, and `run_dir.name` matches `DIRECT_RUN_ID_PATTERN`. Per D8, once that exact recorded fact qualifies, return the ordinary resume for `latest["worktree"]` even if the observation also carries an alternate absent candidate; never read or select the candidate in the resume branch. Candidate-only, mismatched, and wrong-path observations retain their existing observe/error behavior without mutation.
 
 Use the existing resume mutation unchanged: validate the handoff, restore `active`, set latest `launch_kind` to `resume`, append one resume launch with the same owner/worktree, and preserve every other attempt field. Append an issue-74 amendment marker after issue 73's matching-worktree acquisition rule, naming this exact pre-worktree exception and retaining every other requirement.
 
@@ -237,7 +246,11 @@ Expected: PASS; the real-filesystem test creates the exact reserved path only af
 
 Run: `git diff --check -- home/common/agent-skills/scripts/workflow-state.py home/common/agent-skills/tests/test_workflow_state.py .claude/specs/2026-08-20-direct-autonomous-issue-durability-design.md`
 
-Expected: exit 0 with no output; any whitespace error or edit outside these owned files leaves the task incomplete.
+Expected: exit 0 with no output; any whitespace error in these owned files leaves the task incomplete.
+
+Run: `bash -c 'set -euo pipefail; allowed=$(mktemp); actual=$(mktemp); trap '\''rm -f "$allowed" "$actual"'\'' EXIT; printf "%s\n" "home/common/agent-skills/scripts/workflow-state.py" "home/common/agent-skills/tests/test_workflow_state.py" ".claude/specs/2026-08-20-direct-autonomous-issue-durability-design.md" | LC_ALL=C sort -u >"$allowed"; { git diff --name-only HEAD --; git ls-files --others --exclude-standard; } | LC_ALL=C sort -u >"$actual"; unexpected=$(comm -23 "$actual" "$allowed"); if [ -n "$unexpected" ]; then printf "unexpected current-task path: %s\n" "$unexpected"; exit 1; fi'`
+
+Expected: exit 0 with no output. The command compares all tracked, staged, and untracked current-task edits with the exact `Files:` set; an outside path is printed and fails, while commits completed by earlier tasks are already in `HEAD` and are not graded.
 
 - [ ] **Step 6: Commit**
 

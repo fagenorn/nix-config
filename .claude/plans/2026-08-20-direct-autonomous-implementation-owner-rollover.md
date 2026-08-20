@@ -36,11 +36,16 @@ Task 2 — Resume and materialize an exact absent Phase-0 reservation — `home/
 
 Task 3 — Enforce the reviewed-plan implementation-owner rollover — `home/common/agent-skills/skills/from-issue/SKILL.md`, `home/common/agent-skills/skills/from-issue/AUTO.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-3.md](2026-08-20-direct-autonomous-implementation-owner-rollover.tasks/task-3.md)
 
+## Standards review
+
+Reviewer provenance: `reviewer=native; job_id=issue74-phase5-native; base_sha=c780b38f613c59a7d6674dc081d9f67666054ebf; fallback=false`. Applied B1 by closing and separating the transfer/owner/controller-stop test seams (D7); applied S1 by adding clean task starts and mechanically scoped current-task path gates; applied S2 by pinning exact-recorded authority in the presence of an alternate candidate (D8); resolved D1 by including mechanical-only direct autonomous runs in the rollover while preserving their existing fresh-owner Phase-6 route (D9).
+
 ## Decisions
 
 - Direct-only precedence and identity-derived policy follow D1–D2.
 - The mandatory reviewed-plan seam and bounded fresh-owner interface follow D3–D4.
 - Exact absent Phase-0 reservation resume follows D5.
 - Public CLI, real-filesystem, installed-skill, and documentation seams follow D6.
+- Phase-5 closed-interface, mixed-observation authority, and mechanical-direct scope corrections follow D7–D9.
 
 ---

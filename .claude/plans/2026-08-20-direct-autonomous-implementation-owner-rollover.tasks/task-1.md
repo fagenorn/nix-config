@@ -17,6 +17,8 @@
 - Every non-direct run evaluates the current order unchanged: eligible `fresh_start`, missing-usage `handoff`, near-ceiling `handoff`, `delegate`, no-context `handoff`, `continue`.
 - A direct/non-direct action transplanted across identities fails loudly before mutation; delegation never changes `deadline_at`.
 
+**Task-start baseline:** Before editing, run `test -z "$(git status --porcelain=v1)" && git rev-parse --verify HEAD`. Expected: exit 0 and one baseline SHA; non-empty status fails the task start. Keep `HEAD` at this baseline until the task's final verification so its tracked, staged, and untracked comparison excludes every earlier task commit.
+
 - [ ] **Step 1: Write the failing direct precedence, compatibility, and identity-validation tests**
 
 Add these complete methods to `WorkflowStateLifecycleTest`:
@@ -169,7 +171,11 @@ Expected: PASS; the first and identity-validation tests prove the direct excepti
 
 Run: `git diff --check -- home/common/agent-skills/scripts/workflow-state.py home/common/agent-skills/tests/test_workflow_state.py .claude/specs/2026-08-17-workflow-lifecycle-hardening-design.md`
 
-Expected: exit 0 with no output; any whitespace error or edit outside these owned files leaves the task incomplete.
+Expected: exit 0 with no output; any whitespace error in these owned files leaves the task incomplete.
+
+Run: `bash -c 'set -euo pipefail; allowed=$(mktemp); actual=$(mktemp); trap '\''rm -f "$allowed" "$actual"'\'' EXIT; printf "%s\n" "home/common/agent-skills/scripts/workflow-state.py" "home/common/agent-skills/tests/test_workflow_state.py" ".claude/specs/2026-08-17-workflow-lifecycle-hardening-design.md" | LC_ALL=C sort -u >"$allowed"; { git diff --name-only HEAD --; git ls-files --others --exclude-standard; } | LC_ALL=C sort -u >"$actual"; unexpected=$(comm -23 "$actual" "$allowed"); if [ -n "$unexpected" ]; then printf "unexpected current-task path: %s\n" "$unexpected"; exit 1; fi'`
+
+Expected: exit 0 with no output. The command compares all tracked, staged, and untracked current-task edits with the exact `Files:` set; an outside path is printed and fails, while commits completed by earlier tasks are already in `HEAD` and are not graded.
 
 - [ ] **Step 5: Commit**
 

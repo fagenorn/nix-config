@@ -13,10 +13,13 @@
 **Invariants:**
 - Per D3, rollover occurs only after all Blocking and accepted Should-fix findings are dispositioned, review edits/ledger writes are committed, both artifact roots are freshly `within_budget`, and Phases 6–7 are self-contained.
 - The earlier controller records completed Phase 5 with `next_needs_context=false`, `artifacts_sufficient=true`, and `remainder_self_contained=true`, requires persisted `delegate`, and dispatches exactly one fresh issue owner.
-- Per D4, the continuation carries the exact closed owner fields and only two root-plus-metrics artifact objects; it contains no transcript, artifact contents, member paths, alternate worktree, reconstructed lifecycle value, or authorization flag.
+- Per D4/D7, the continuation is one closed object with exactly `owner`, `spec_artifact`, and `plan_artifact`; tests separately prove the exact nested field sets, delegated-owner duties, and earlier-controller stop.
 - The fresh owner verifies matching worktree/branch, clean current HEAD, tracked roots, independent checker results, and all four metric values before reading artifacts; it adopts the envelope without `direct-owner` and enters Phase 6.
-- The fresh owner owns SDD, fresh Phase-7 shipping, report validation, the single `finish`, and exact canonical return. The earlier controller only validates/relays those bytes and never writes `finish` again.
+- The fresh owner owns SDD, fresh Phase-7 shipping, report validation, the single `finish`, and exact canonical return. The earlier controller's post-delegation action set is closed to ship-summary validation, byte relay, and stop.
+- Per D9, mechanical-only module-owned direct autonomous runs use this same mandatory rollover, then the fresh owner invokes the existing mechanical Phase-6 mechanic/reviewer route.
 - Dispatcher-owned autonomous, explicitly durable interactive, ledger-free interactive, and direct pre-Phase-5 action handling remain unchanged.
+
+**Task-start baseline:** Before editing, run `test -z "$(git status --porcelain=v1)" && git rev-parse --verify HEAD`. Expected: exit 0 and one baseline SHA; non-empty status fails the task start. Keep `HEAD` at this baseline until the task's final verification so its tracked, staged, and untracked comparison excludes every earlier task commit.
 
 - [ ] **Step 1: Write the failing installed-skill contract test**
 
@@ -24,13 +27,23 @@ Add this complete method to `WorkflowSkillContractsTest`:
 
 ```python
 def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
-    rollover = self.section(
+    transfer = self.section(
         self.auto,
-        "### Mandatory direct implementation-owner rollover",
+        "#### Mandatory transfer gate",
+        "#### Fresh delegated owner",
+    )
+    delegated = self.section(
+        self.auto,
+        "#### Fresh delegated owner",
+        "#### Earlier controller stop",
+    )
+    earlier = self.section(
+        self.auto,
+        "#### Earlier controller stop",
         "### Other Phase 5–7 routes",
     )
     self.assert_ordered(
-        rollover,
+        transfer,
         "dispositioned every Blocking and accepted Should-fix finding",
         "commit",
         "artifact-budget check --kind design-spec",
@@ -43,27 +56,42 @@ def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
         "delegate",
         "exactly one fresh issue owner",
     )
-    for field in (
+    match = re.search(r"```json\n(\{.*?\})\n```", transfer, re.DOTALL)
+    self.assertIsNotNone(match)
+    continuation = json.loads(match.group(1))
+    self.assertEqual(set(continuation), {
+        "owner", "spec_artifact", "plan_artifact",
+    })
+    self.assertEqual(set(continuation["owner"]), {
         "interface_version", "kind", "ledger_repo_root", "run_id", "issue",
         "attempt", "owner", "action_id", "launch_kind", "worktree",
         "handoff_path", "deadline_at",
-    ):
-        self.assertIn(field, rollover)
-    for block in ("spec_artifact", "plan_artifact"):
-        self.assertIn(block, rollover)
-    for field in (
+    })
+    self.assertEqual(continuation["owner"]["kind"], "owner")
+    artifact_fields = {"kind", "path", "metrics", "budget_status"}
+    metric_fields = {
         "root_bytes", "total_bytes", "file_count", "largest_member_bytes",
-        "budget_status", "within_budget",
+    }
+    for block, kind in (
+        ("spec_artifact", "design-spec"),
+        ("plan_artifact", "implementation-plan"),
     ):
-        self.assertIn(field, rollover)
+        artifact = continuation[block]
+        self.assertEqual(set(artifact), artifact_fields)
+        self.assertEqual(artifact["kind"], kind)
+        self.assertEqual(set(artifact["metrics"]), metric_fields)
+        self.assertTrue(all(type(value) is int
+                            for value in artifact["metrics"].values()))
+        self.assertEqual(artifact["budget_status"], "within_budget")
     for excluded in (
         "no artifact contents", "no task-member paths", "no review transcript",
         "no conversation summary", "no alternate worktree",
         "no reconstructed lifecycle field", "no authorization flag",
     ):
-        self.assertIn(excluded, rollover)
+        self.assertIn(excluded, transfer)
+    self.assertIn("mechanical-only direct autonomous", transfer)
     self.assert_ordered(
-        rollover,
+        delegated,
         "verify that the worktree and branch match the owner envelope",
         "current clean HEAD",
         "both roots are tracked",
@@ -77,22 +105,46 @@ def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
         "workflow-state finish",
         "return only the exact canonical JSON",
     )
-    for forbidden_parent_action in (
-        "must not invoke `sdd`", "must not edit implementation files",
-        "must not reacquire", "must not create a new attempt",
-        "must not dispatch a second replacement owner",
-        "must not call `workflow-state finish` after delegation",
-    ):
-        self.assertIn(forbidden_parent_action, rollover)
+    self.assertIn("existing mechanical Phase-6 mechanic/reviewer route", delegated)
     self.assert_ordered(
-        rollover,
+        earlier,
         "received bytes",
         "artifact-budget validate-report --boundary ship-summary",
         "relay the canonical bytes unchanged",
         "stop",
     )
-    self.assertIn("dispatch failure", rollover)
-    self.assertIn("never permission to implement locally", rollover)
+    self.assertIn(
+        "post-delegation action set is exactly validate, relay, and stop",
+        earlier,
+    )
+    affirmative_permission = re.compile(
+        r"\b(?:may|can|could|must|should|is allowed to|is authorized to|is permitted to)\s+(?:"
+        r"invoke `sdd`|edit implementation files|reacquire|"
+        r"call `direct-owner`|(?:start|create) (?:a )?new attempt|"
+        r"dispatch (?:a )?second (?:replacement )?owner|"
+        r"call `workflow-state finish` after delegation|"
+        r"continue after (?:the )?delegated report)",
+        re.IGNORECASE,
+    )
+    self.assertIsNone(affirmative_permission.search(earlier))
+    for denial in (
+        "does not invoke `sdd`", "does not edit implementation files",
+        "does not reacquire or call `direct-owner`",
+        "does not start or create a new attempt", "does not dispatch a second owner",
+        "does not call `workflow-state finish` after delegation",
+        "does not continue after the delegated report",
+    ):
+        self.assertIn(denial, earlier)
+    self.assertIn("dispatch failure", earlier)
+    self.assertIn("never permission to implement locally", earlier)
+
+    other_start = self.auto.index("### Other Phase 5–7 routes")
+    other = self.auto[other_start:]
+    self.assertIn(
+        "Mechanical-only module-owned direct autonomous runs are excluded from this section",
+        other,
+    )
+    self.assertIn("mechanical-only ordering and ownership for other acquisition routes", other)
 
     phase_gate = self.section(
         self.from_issue,
@@ -115,18 +167,16 @@ Expected: FAIL because the base `AUTO.md` has no mandatory direct implementation
 
 In `AUTO.md`, replace the current direct-autonomous Phase-5–7 summary with `### Mandatory direct implementation-owner rollover` followed by `### Other Phase 5–7 routes`.
 
-The mandatory section must encode this executable order per D3–D4:
+The mandatory section must contain three level-four seams, in order: `#### Mandatory transfer gate`, `#### Fresh delegated owner`, and `#### Earlier controller stop`. Encode this executable behavior per D3–D4, D7, and D9:
 
-1. Finish dispositioning Phase-5 findings; commit the reviewed plan and any ledger edit. Run fresh design-spec and implementation-plan checks after the last mutation, retain all four metrics, and repeat check/commit if a hook changes either artifact.
-2. With no conversational dependency remaining, call `workflow-state progress` for completed Phase 5 using the three exact booleans and truthful available usage. Require the persisted action `delegate`; any other response is a contract failure, not permission to continue.
-3. Dispatch exactly one fresh issue owner at the existing issue-owner tier using the existing `from-issue-phase-delegate` route. Give it a standing direct-autonomous/Phase-6 instruction plus three closed machine-shaped blocks: the unchanged complete owner object; `spec_artifact` with kind/path/four metrics/within-budget; and `plan_artifact` with the same shape.
-4. State every excluded continuation field named in the invariants. Repository bindings are re-resolved in the delegated worktree.
-5. Require the fresh owner to validate its worktree/branch/clean HEAD/tracked roots, independently check and compare both artifacts before reading them, adopt the owner envelope without acquisition, enter Phase 6, validate SDD, launch the existing fresh Phase-7 ship owner, validate the ship report, persist the one terminal `finish`, and return only its canonical stdout.
-6. Require the earlier controller to validate the received bytes as `ship-summary`, relay canonical bytes unchanged, and stop. It performs none of the forbidden parent actions in the test. Only a dispatch failure may be terminally persisted by the earlier controller; it never enables local implementation.
+1. In `Mandatory transfer gate`, finish dispositioning Phase-5 findings; commit the reviewed plan and any ledger edit. Run fresh design-spec and implementation-plan checks after the last mutation, retain all four metrics, and repeat check/commit if a hook changes either artifact. With no conversational dependency remaining, call `workflow-state progress` for completed Phase 5 using the three exact booleans and truthful available usage. Require persisted `delegate`, then dispatch exactly one fresh issue owner at the existing `from-issue-phase-delegate` tier. State explicitly that this includes mechanical-only direct autonomous runs.
+2. Put one valid representative JSON object in that subsection. Its top-level fields are exactly `owner`, `spec_artifact`, and `plan_artifact`; `owner` has exactly the twelve canonical direct-owner fields asserted by the test; each artifact has exactly `kind`, `path`, `metrics`, and `budget_status`; each `metrics` object has exactly the four asserted integer fields; kinds are `design-spec`/`implementation-plan` and both statuses are `within_budget`. State every excluded continuation field named in the invariants. Repository bindings are re-resolved in the delegated worktree.
+3. In `Fresh delegated owner`, require worktree/branch/clean-HEAD/tracked-root validation, independent checks and four-metric comparison before artifact reads, envelope adoption without acquisition, and Phase-6 entry. It validates SDD, uses the fresh Phase-7 ship owner, validates the report, persists the single terminal `finish`, and returns canonical stdout. For mechanical-only direct autonomous work it invokes the existing mechanical Phase-6 mechanic/reviewer route without changing that route's order or ownership.
+4. In `Earlier controller stop`, define its closed post-delegation action set as exactly validate, relay, and stop. After ship-summary validation it relays bytes and stops. Use the exact negative sentences pinned by the test so no affirmative permission exists to invoke SDD, edit implementation, reacquire/call `direct-owner`, start an attempt, dispatch a second owner, call `finish`, or continue after the delegated report. Only dispatch failure may be terminally persisted; it never enables local implementation.
 
 In `SKILL.md`'s phase-action rules, point the direct-autonomous Phase-5 `delegate` case to this mandatory `AUTO.md` contract, state that all other acquisition modes retain the existing generic action semantics, and ensure the generic terminal procedure cannot be misread as authorizing a second `finish` after the delegated owner returned canonical terminal bytes.
 
-The `### Other Phase 5–7 routes` section must retain the existing dispatcher-owned autonomous, explicit durable interactive, ledger-free interactive, mechanical-only, reviewer, SDD, and shipping behavior without changing their ordering or ownership.
+The `### Other Phase 5–7 routes` section must explicitly say `Mechanical-only module-owned direct autonomous runs are excluded from this section` because they rolled above. It retains the existing dispatcher-owned autonomous, explicit durable interactive, ledger-free interactive, reviewer, SDD, and shipping behavior, and must use the phrase `mechanical-only ordering and ownership for other acquisition routes` to make that compatibility boundary executable in the test.
 
 - [ ] **Step 4: Verify the installed skill and repository distribution gates**
 
@@ -144,7 +194,11 @@ Expected: exit 0 and a successful Nix build of the current host configuration; a
 
 Run: `git diff --check -- home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/skills/from-issue/AUTO.md home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 
-Expected: exit 0 with no output; any whitespace error or edit outside these owned files leaves the task incomplete.
+Expected: exit 0 with no output; any whitespace error in these owned files leaves the task incomplete.
+
+Run: `bash -c 'set -euo pipefail; allowed=$(mktemp); actual=$(mktemp); trap '\''rm -f "$allowed" "$actual"'\'' EXIT; printf "%s\n" "home/common/agent-skills/skills/from-issue/SKILL.md" "home/common/agent-skills/skills/from-issue/AUTO.md" "home/common/agent-skills/tests/test_workflow_skill_contracts.py" | LC_ALL=C sort -u >"$allowed"; { git diff --name-only HEAD --; git ls-files --others --exclude-standard; } | LC_ALL=C sort -u >"$actual"; unexpected=$(comm -23 "$actual" "$allowed"); if [ -n "$unexpected" ]; then printf "unexpected current-task path: %s\n" "$unexpected"; exit 1; fi'`
+
+Expected: exit 0 with no output. The command compares all tracked, staged, and untracked current-task edits with the exact `Files:` set; an outside path is printed and fails, while commits completed by earlier tasks are already in `HEAD` and are not graded.
 
 - [ ] **Step 5: Commit**
 
