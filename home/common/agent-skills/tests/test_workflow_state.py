@@ -3189,6 +3189,38 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertTrue(self.direct_state_path("direct-73-000001").exists())
         self.assertTrue(self.direct_state_path("direct-73-000002").exists())
 
+    def test_direct_new_run_tracker_terminals_do_not_leak_uncreated_run_id(self):
+        owner = self.acquire_direct()
+        self.run_id = owner["run_id"]
+        self.finish(1, self.merged_result(73), issue=73,
+                    now="2026-08-20T10:01:00Z")
+        cases = (
+            (self.tracker_fact(73, state="closed"), "closed", []),
+            (self.tracker_fact(73, open_blockers=[12], decision_blockers=[
+                {"issue": 99, "url": "https://example.test/issues/99"},
+            ]), "fogged", [
+                {"kind": "issue", "issue": 12, "url": None},
+                {"kind": "decision", "issue": 99,
+                 "url": "https://example.test/issues/99"},
+            ]),
+            (self.tracker_fact(73, open_blockers=[12]), "blocked", [
+                {"kind": "issue", "issue": 12, "url": None},
+            ]),
+        )
+        for tracker, reason, blockers in cases:
+            with self.subTest(reason=reason):
+                self.assertEqual(self.direct_owner(
+                    now="2026-08-20T10:02:00Z", new_run=True,
+                    tracker=tracker,
+                ), {
+                    "interface_version": 1, "kind": "terminal", "issue": 73,
+                    "run_id": None, "source": "tracker", "reason": reason,
+                    "blockers": blockers, "result": None,
+                })
+                self.assertFalse(
+                    self.direct_state_path("direct-73-000002").exists()
+                )
+
     def test_direct_owner_tracker_terminals_use_closed_precedence_and_closed_shapes(self):
         cases = (
             (self.tracker_fact(73, state="closed"), "closed", []),
@@ -3218,23 +3250,58 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 ))
 
     def test_reserved_direct_ids_are_closed_to_init_and_control_but_open_to_owner_mutations(self):
-        run_id = "direct-73-000001"
-        rejected_init = self.run_cli(
-            "init-run", "--repo-root", self.root, "--run-id", run_id,
-            "--now", "2026-08-20T10:00:00Z", ok=False,
-        )
-        self.assertEqual(rejected_init.returncode, 2)
         request_path = self.root / "control-reserved.json"
         request_path.write_text(json.dumps(self.control_request(
             now="2026-08-20T10:00:00Z", issues=[73],
             tracker=[self.tracker_fact(73)], worktrees=[],
         )), encoding="utf-8")
-        rejected_control = self.run_cli(
-            "control", "--repo-root", self.root, "--run-id", run_id,
-            "--request-file", request_path, ok=False,
-        )
-        self.assertEqual(rejected_control.returncode, 2)
-        self.assertFalse((self.workflows_dir / run_id).exists())
+        for run_id in ("direct-73-000001", "direct-73-999999"):
+            rejected_init = self.run_cli(
+                "init-run", "--repo-root", self.root, "--run-id", run_id,
+                "--now", "2026-08-20T10:00:00Z", ok=False,
+            )
+            rejected_control = self.run_cli(
+                "control", "--repo-root", self.root, "--run-id", run_id,
+                "--request-file", request_path, ok=False,
+            )
+            for rejected in (rejected_init, rejected_control):
+                self.assertEqual(rejected.returncode, 2)
+                self.assertEqual(rejected.stdout, "")
+            self.assertFalse((self.workflows_dir / run_id).exists())
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            zero_id = "direct-73-000000"
+            initialized = self.run_cli(
+                "init-run", "--repo-root", root, "--run-id", zero_id,
+                "--now", "2026-08-20T10:00:00Z",
+            )
+            self.assertEqual(json.loads(initialized.stdout), {
+                "interface_version": 1, "run_id": zero_id,
+                "requirements": [],
+            })
+            zero_request = root / "control-zero.json"
+            zero_request.write_text(json.dumps(self.control_request(
+                now="2026-08-20T10:01:00Z", issues=[73],
+                tracker=[self.tracker_fact(73, state="closed")], worktrees=[],
+            )), encoding="utf-8")
+            controlled = self.run_cli(
+                "control", "--repo-root", root, "--run-id", zero_id,
+                "--request-file", zero_request,
+            )
+            self.assertEqual(json.loads(controlled.stdout), {
+                "interface_version": 1, "run_id": zero_id,
+                "now": "2026-08-20T10:01:00Z",
+                "summaries": [{
+                    "issue": 73, "state": "closed", "attempt": None,
+                    "owner": None, "worktree": None, "deadline_at": None,
+                    "blockers": [], "result": None,
+                }],
+                "deltas": [], "actions": [{"id": "finalize", "kind": "finalize"}],
+                "next_deadline": None,
+            })
+
+        run_id = "direct-73-000001"
         owner = self.acquire_direct()
         before = self.direct_state_path(run_id).read_bytes()
         existing_init = self.run_cli(

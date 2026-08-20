@@ -1156,7 +1156,8 @@ def bootstrap_response(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def reject_reserved_direct_run_id(run_id: str) -> None:
-    if DIRECT_RUN_ID_PATTERN.fullmatch(run_id):
+    match = DIRECT_RUN_ID_PATTERN.fullmatch(run_id)
+    if match is not None and int(match.group(2)) >= 1:
         raise WorkflowError("direct run identities are reserved for direct-owner")
 
 
@@ -2081,7 +2082,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         atomic_write_state(run_dir, state_path, state)
                     response = direct_terminal(
                         issue=issue,
-                        run_id=(run_id if selected is not None else None),
+                        run_id=(run_id if state is not None else None),
                         source="tracker", reason=policy["tracker_reason"],
                         blockers=policy["blockers"], result=None,
                     )
