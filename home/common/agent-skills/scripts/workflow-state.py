@@ -1307,6 +1307,22 @@ def _apply_one_issue_policy(
         if worktree["recorded"]["path"] != recorded_path:
             raise WorkflowError("recorded worktree path does not match ledger")
 
+    def decision(
+        operation: str, *, changed: bool = False,
+        requirements: list[dict[str, Any]] | None = None,
+        uses_candidate: bool = False, desired: str | None = None,
+        attempt: dict[str, Any] | None = None, **projection: Any,
+    ) -> dict[str, Any]:
+        return {
+            "operation": operation, "changed": changed,
+            "issue_state": ledger_issue,
+            "attempt": latest if attempt is None else attempt,
+            "requirements": [] if requirements is None else requirements,
+            "uses_candidate": uses_candidate,
+            "desired": operation if desired is None else desired,
+            **projection,
+        }
+
     now_value = parse_utc(now, "policy now")
     expired = bool(
         latest is not None
@@ -1338,66 +1354,40 @@ def _apply_one_issue_policy(
         raise WorkflowError("owner_unavailable is not applicable")
 
     if latest is not None and not (active_unexpired or handed_off or retryable):
-        return {
-            "operation": "terminal", "changed": False,
-            "issue_state": ledger_issue, "attempt": latest,
-            "requirements": [], "uses_candidate": False,
-            "expired": False, "desired": "terminal",
-        }
+        return decision("terminal", expired=False)
 
     if active_unexpired and not current_owner_unavailable:
-        return {
-            "operation": "idle", "changed": False,
-            "issue_state": ledger_issue, "attempt": latest,
-            "requirements": [], "uses_candidate": False,
-            "expired": False, "desired": "idle",
-        }
+        return decision("idle", expired=False)
 
     if active_unexpired or handed_off:
         assert latest is not None
         if not dispatch_permitted:
-            return {
-                "operation": "idle", "changed": False,
-                "issue_state": ledger_issue, "attempt": latest,
-                "requirements": [], "uses_candidate": False,
-                "expired": False, "desired": "resume",
-            }
+            return decision("idle", desired="resume", expired=False)
         if handed_off:
             validate_handoff_path(run_dir, latest["handoff_path"])
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
         if recorded is None or recorded["state"] != "matching_issue_branch":
-            return {
-                "operation": "observe", "changed": False,
-                "issue_state": ledger_issue, "attempt": latest,
-                "requirements": [
+            return decision(
+                "observe", desired="resume", requirements=[
                     {"kind": "recorded_worktree", "path": latest["worktree"]}
                 ],
-                "uses_candidate": False, "expired": False,
-                "desired": "resume",
-            }
+                expired=False,
+            )
         latest["state"] = "active"
         latest["launch_kind"] = "resume"
         latest["launches"].append({
             "kind": "resume", "owner": latest["owner"],
             "worktree": latest["worktree"], "at": now,
         })
-        return {
-            "operation": "resume", "changed": True,
-            "issue_state": ledger_issue, "attempt": latest,
-            "requirements": [], "uses_candidate": False,
-            "expired": False, "desired": "resume",
-        }
+        return decision("resume", changed=True, expired=False)
 
     needs_new_work = latest is None or retryable
     if needs_new_work and tracker is None:
-        return {
-            "operation": "observe", "changed": False,
-            "issue_state": ledger_issue, "attempt": latest,
-            "requirements": [{"kind": "tracker"}],
-            "uses_candidate": False, "expired": expired,
-            "desired": "retry" if retryable else "spawn",
-        }
+        return decision(
+            "observe", requirements=[{"kind": "tracker"}],
+            desired="retry" if retryable else "spawn", expired=expired,
+        )
 
     assert tracker is not None
     blockers = control_blockers(tracker)
@@ -1409,27 +1399,19 @@ def _apply_one_issue_policy(
                 latest, reason="attempt deadline expired", now=now, source="expiry"
             )
             changed = True
-        return {
-            "operation": "terminal", "changed": changed,
-            "issue_state": ledger_issue, "attempt": latest,
-            "requirements": [], "uses_candidate": False,
-            "expired": expired, "desired": "terminal",
-            "tracker_reason": (
+        return decision(
+            "terminal", changed=changed, expired=expired,
+            tracker_reason=(
                 "closed" if tracker["state"] == "closed"
                 else "fogged" if tracker["decision_blockers"] else "blocked"
             ),
-            "blockers": blockers,
-        }
+            blockers=blockers,
+        )
 
     if retryable and latest is not None and latest["attempt"] >= 2:
         validate_recorded_worktree()
         if not dispatch_permitted:
-            return {
-                "operation": "idle", "changed": False,
-                "issue_state": ledger_issue, "attempt": latest,
-                "requirements": [], "uses_candidate": False,
-                "expired": expired, "desired": "refuse",
-            }
+            return decision("idle", desired="refuse", expired=expired)
         if expired:
             outcome = stop_attempt(
                 latest, reason="attempt deadline expired", now=now, source="expiry"
@@ -1448,12 +1430,7 @@ def _apply_one_issue_policy(
         latest["finished_at"] = finish_time(latest, now)
         latest["result_source"] = "refused"
         ledger_issue["outcome"] = copy.deepcopy(result)
-        return {
-            "operation": "refuse", "changed": True,
-            "issue_state": ledger_issue, "attempt": latest,
-            "requirements": [], "uses_candidate": False,
-            "expired": expired, "desired": "refuse",
-        }
+        return decision("refuse", changed=True, expired=expired)
 
     if not dispatch_permitted:
         if expired:
@@ -1461,20 +1438,13 @@ def _apply_one_issue_policy(
             ledger_issue["outcome"] = stop_attempt(
                 latest, reason="attempt deadline expired", now=now, source="expiry"
             )
-            return {
-                "operation": "idle", "changed": True,
-                "issue_state": ledger_issue, "attempt": latest,
-                "requirements": [], "uses_candidate": False,
-                "expired": True,
-                "desired": "retry" if retryable else "spawn",
-            }
-        return {
-            "operation": "idle", "changed": False,
-            "issue_state": ledger_issue, "attempt": latest,
-            "requirements": [], "uses_candidate": False,
-            "expired": False,
-            "desired": "retry" if retryable else "spawn",
-        }
+            return decision(
+                "idle", changed=True, desired="retry" if retryable else "spawn",
+                expired=True,
+            )
+        return decision(
+            "idle", desired="retry" if retryable else "spawn", expired=False,
+        )
 
     selected_path: str | None = None
     uses_candidate = False
@@ -1482,39 +1452,30 @@ def _apply_one_issue_policy(
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
         if recorded is None:
-            return {
-                "operation": "observe", "changed": False,
-                "issue_state": ledger_issue, "attempt": latest,
-                "requirements": [
+            return decision(
+                "observe", desired="spawn", requirements=[
                     {"kind": "recorded_worktree", "path": retained_worktree}
                 ],
-                "uses_candidate": False, "expired": False,
-                "desired": "spawn",
-            }
+                expired=False,
+            )
         if recorded["state"] == "matching_issue_branch":
             selected_path = retained_worktree
         elif worktree is not None and worktree["candidate"] is not None:
             selected_path = worktree["candidate"]["path"]
             uses_candidate = True
         else:
-            return {
-                "operation": "observe", "changed": False,
-                "issue_state": ledger_issue, "attempt": latest,
-                "requirements": [{"kind": "candidate_worktree"}],
-                "uses_candidate": False, "expired": False,
-                "desired": "spawn",
-            }
+            return decision(
+                "observe", desired="spawn",
+                requirements=[{"kind": "candidate_worktree"}], expired=False,
+            )
     elif latest is None:
         validate_recorded_worktree()
         candidate = None if worktree is None else worktree["candidate"]
         if candidate is None:
-            return {
-                "operation": "observe", "changed": False,
-                "issue_state": ledger_issue, "attempt": latest,
-                "requirements": [{"kind": "candidate_worktree"}],
-                "uses_candidate": False, "expired": False,
-                "desired": "spawn",
-            }
+            return decision(
+                "observe", desired="spawn",
+                requirements=[{"kind": "candidate_worktree"}], expired=False,
+            )
         selected_path = candidate["path"]
         uses_candidate = True
     else:
@@ -1522,28 +1483,22 @@ def _apply_one_issue_policy(
         recorded = None if worktree is None else worktree["recorded"]
         candidate = None if worktree is None else worktree["candidate"]
         if recorded is None and candidate is None:
-            return {
-                "operation": "observe", "changed": False,
-                "issue_state": ledger_issue, "attempt": latest,
-                "requirements": [
+            return decision(
+                "observe", desired="retry", requirements=[
                     {"kind": "recorded_worktree", "path": latest["worktree"]}
                 ],
-                "uses_candidate": False, "expired": expired,
-                "desired": "retry",
-            }
+                expired=expired,
+            )
         if recorded is not None and recorded["state"] == "matching_issue_branch":
             selected_path = latest["worktree"]
         elif candidate is not None:
             selected_path = candidate["path"]
             uses_candidate = True
         else:
-            return {
-                "operation": "observe", "changed": False,
-                "issue_state": ledger_issue, "attempt": latest,
-                "requirements": [{"kind": "candidate_worktree"}],
-                "uses_candidate": False, "expired": expired,
-                "desired": "retry",
-            }
+            return decision(
+                "observe", desired="retry",
+                requirements=[{"kind": "candidate_worktree"}], expired=expired,
+            )
 
     desired = "retry" if retryable else "spawn"
     if expired and latest is not None:
@@ -1567,12 +1522,10 @@ def _apply_one_issue_policy(
         ledger_issue["outcome"] = None
     else:
         ledger_issue["attempts"].append(attempt)
-    return {
-        "operation": desired, "changed": True,
-        "issue_state": ledger_issue, "attempt": attempt,
-        "requirements": [], "uses_candidate": uses_candidate,
-        "path": selected_path, "expired": expired, "desired": desired,
-    }
+    return decision(
+        desired, changed=True, attempt=attempt, uses_candidate=uses_candidate,
+        path=selected_path, expired=expired,
+    )
 
 
 def command_control(args: argparse.Namespace) -> int:
