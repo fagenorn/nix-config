@@ -549,7 +549,7 @@ index 1954274..2097f9f 100644
 +  supervisionTimer.unref();
 +
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..98c626f 100644
+index 83df468..d0dc464 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
 @@ -32,2 +31,0 @@ import {
@@ -569,31 +569,18 @@ index 83df468..98c626f 100644
 +// silently clamped to 1 ms, so this is the ceiling on a timeout the worker can
 +// actually enforce — and therefore on one a job record may advertise.
 +const MAX_ENFORCEABLE_TIMEOUT_MS = 2147483647;
-@@ -71,0 +78 @@ const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "hi
-+const REVIEW_OPERATIONS = new Set(["plan-review", "diff-review"]);
-@@ -79 +86 @@ function printUsage() {
+@@ -79 +85 @@ function printUsage() {
 -      "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
 +      "  node scripts/codex-companion.mjs setup [--disable-review-gate] [--json]",
-@@ -82 +89 @@ function printUsage() {
+@@ -82 +88 @@ function printUsage() {
 -      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
 +      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--reviewer <plan-review|diff-review>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
-@@ -129,0 +137,10 @@ function normalizeReasoningEffort(effort) {
-+function normalizeReviewOperation(operation, diagnostic = "--reviewer must be plan-review or diff-review.") {
-+  if (operation == null) {
-+    return null;
-+  }
-+  if (!REVIEW_OPERATIONS.has(operation)) {
-+    throw new Error(diagnostic);
-+  }
-+  return operation;
-+}
-+
-@@ -198,4 +214,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
+@@ -198,4 +203,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 -  if (!config.stopReviewGate) {
 -    nextSteps.push("Optional: run `/codex:setup --enable-review-gate` to require a fresh review before stop.");
 -  }
 -
-@@ -230,4 +243,4 @@ async function handleSetup(argv) {
+@@ -230,4 +232,4 @@ async function handleSetup(argv) {
 -    setConfig(workspaceRoot, "stopReviewGate", true);
 -    actionsTaken.push(`Enabled the stop-time review gate for ${workspaceRoot}.`);
 -  } else if (options["disable-review-gate"]) {
@@ -602,45 +589,46 @@ index 83df468..98c626f 100644
 +  }
 +  if (getConfig(workspaceRoot).stopReviewGate || options["disable-review-gate"]) {
 +    setConfigRetainingActive(workspaceRoot, "stopReviewGate", false);
-@@ -290,4 +302,0 @@ function renderStatusPayload(report, asJson) {
+@@ -290,4 +291,0 @@ function renderStatusPayload(report, asJson) {
 -function isActiveJobStatus(status) {
 -  return status === "queued" || status === "running";
 -}
 -
-@@ -339 +348,3 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
+@@ -339 +337,3 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
 -  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
 +  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)).filter(
 +    (job) => job.id !== options.excludeJobId
 +  );
-@@ -462,0 +474,5 @@ async function executeTaskRun(request) {
-+  const reviewOperation = normalizeReviewOperation(
-+    request.reviewOperation,
-+    "Stored review operation must be plan-review or diff-review."
-+  );
+@@ -460 +459,0 @@ async function executeReviewRun(request) {
+-
+@@ -462,0 +462,2 @@ async function executeTaskRun(request) {
++  const reviewOperation = normalizeReviewOperation(request.reviewOperation, STORED_REVIEW_OPERATION_ERROR);
 +  const isReviewer = reviewOperation !== null;
-@@ -467 +483,2 @@ async function executeTaskRun(request) {
+@@ -464 +464,0 @@ async function executeTaskRun(request) {
+-
+@@ -467 +467,2 @@ async function executeTaskRun(request) {
 -    resumeLast: request.resumeLast
 +    resumeLast: request.resumeLast,
 +    reviewOperation
-@@ -491 +508 @@ async function executeTaskRun(request) {
+@@ -491 +492 @@ async function executeTaskRun(request) {
 -    sandbox: request.write ? "workspace-write" : "read-only",
 +    sandbox: isReviewer ? "read-only" : request.write ? "workspace-write" : "read-only",
-@@ -493,2 +510,4 @@ async function executeTaskRun(request) {
+@@ -493,2 +494,4 @@ async function executeTaskRun(request) {
 -    persistThread: true,
 -    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
 +    persistThread: !isReviewer,
 +    threadName: isReviewer || resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
 +    reviewerJobId: isReviewer ? request.jobId : null,
 +    timeoutMs: request.timeoutMs
-@@ -496,0 +516,4 @@ async function executeTaskRun(request) {
+@@ -496,0 +500,4 @@ async function executeTaskRun(request) {
 +  if (isReviewer && result.touchedFiles.length > 0) {
 +    throw new Error(`Read-only Codex reviewer reported file changes: ${result.touchedFiles.join(", ")}`);
 +  }
 +
-@@ -527 +550 @@ async function executeTaskRun(request) {
+@@ -527 +534 @@ async function executeTaskRun(request) {
 -    jobClass: "task",
 +    jobClass: isReviewer ? "review" : "task",
-@@ -540 +563,7 @@ function buildReviewJobMetadata(reviewName, target) {
+@@ -540 +547,7 @@ function buildReviewJobMetadata(reviewName, target) {
 -function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 +function buildTaskRunMetadata({ prompt, resumeLast = false, reviewOperation = null }) {
 +  if (reviewOperation !== null) {
@@ -649,32 +637,30 @@ index 83df468..98c626f 100644
 +      summary: shorten(prompt || "Read-only review")
 +    };
 +  }
-@@ -563,0 +593,3 @@ function getJobKindLabel(kind, jobClass) {
-+  if (REVIEW_OPERATIONS.has(kind)) {
-+    return kind;
-+  }
-@@ -592 +624,2 @@ function createTrackedProgress(job, options = {}) {
+@@ -564 +577 @@ function getJobKindLabel(kind, jobClass) {
+-  return jobClass === "review" ? "review" : "rescue";
++  return REVIEW_OPERATIONS.has(kind) ? kind : jobClass === "review" ? "review" : "rescue";
+@@ -592 +605 @@ function createTrackedProgress(job, options = {}) {
 -function buildTaskJob(workspaceRoot, taskMetadata, write) {
 +function buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation = null) {
-+  const isReviewer = reviewOperation !== null;
-@@ -594,2 +627,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -594,2 +607,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    prefix: "task",
 -    kind: "task",
-+    prefix: isReviewer ? "reviewer" : "task",
-+    kind: isReviewer ? reviewOperation : "task",
-@@ -598 +631 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
++    prefix: reviewOperation === null ? "task" : "reviewer",
++    kind: reviewOperation ?? "task",
+@@ -598 +611 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    jobClass: "task",
-+    jobClass: isReviewer ? "review" : "task",
-@@ -604 +637 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
++    jobClass: reviewOperation === null ? "task" : "review",
+@@ -604 +617 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
 +function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, reviewOperation, timeoutMs, jobId }) {
-@@ -611,0 +645,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
+@@ -611,0 +625,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
 +    reviewOperation,
 +    timeoutMs,
-@@ -671 +706 @@ async function runForegroundCommand(job, runner, options = {}) {
+@@ -671 +686 @@ async function runForegroundCommand(job, runner, options = {}) {
 -function spawnDetachedTaskWorker(cwd, jobId) {
 +function spawnDetachedTaskWorker(cwd, jobId, logFile) {
-@@ -672,0 +708,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -672,0 +688,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  // Same shape as spawnBrokerProcess. The child inherits an O_APPEND fd on the
 +  // job log, so everything it writes to fd 1/2 is appended to the file the job
 +  // record already points at via logFile — including output no application code
@@ -685,12 +671,12 @@ index 83df468..98c626f 100644
 +  // O_APPEND on the same inode from the same process, so the two interleave
 +  // chronologically: the last progress line, then the trail that ended it.
 +  const logFd = fs.openSync(logFile, "a");
-@@ -677 +722 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -677 +702 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 -    stdio: "ignore",
 +    stdio: ["ignore", logFd, logFd],
-@@ -680,0 +726 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -680,0 +706 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  fs.closeSync(logFd);
-@@ -683,0 +730,35 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -683,0 +710,35 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +function resolveJobDeadline(createdAt, timeoutMs) {
 +  // The issue's definition: enqueue time + timeout, and a deadline exists only
 +  // when a timeout does. Measured from the record's own createdAt rather than a
@@ -726,7 +712,7 @@ index 83df468..98c626f 100644
 +  return deadline.toISOString();
 +}
 +
-@@ -688 +769,6 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -688 +749,6 @@ function enqueueBackgroundTask(cwd, job, request) {
 -  const child = spawnDetachedTaskWorker(cwd, job.id);
 +  // Resolved before the spawn. It depends only on the record's createdAt and the
 +  // request's timeoutMs, both already known here, and anything that goes wrong
@@ -734,16 +720,18 @@ index 83df468..98c626f 100644
 +  // job record at all — unreachable, unreportable, and never reaped.
 +  const deadlineAt = resolveJobDeadline(job.createdAt, request.timeoutMs);
 +  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
-@@ -694,0 +781 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -694,0 +761 @@ function enqueueBackgroundTask(cwd, job, request) {
 +    ...(deadlineAt ? { deadlineAt } : {}),
-@@ -703,0 +791 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -704,2 +771,2 @@ function enqueueBackgroundTask(cwd, job, request) {
+-      title: job.title,
+-      summary: job.summary,
 +      kind: job.kind,
-@@ -764 +852 @@ async function handleTask(argv) {
++      title: job.title, summary: job.summary,
+@@ -764 +831 @@ async function handleTask(argv) {
 -    valueOptions: ["model", "effort", "cwd", "prompt-file"],
 +    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms", "reviewer"],
-@@ -782,0 +871,9 @@ async function handleTask(argv) {
-+  const reviewOperation = normalizeReviewOperation(options.reviewer);
-+  const isReviewer = reviewOperation !== null;
+@@ -782,0 +850,8 @@ async function handleTask(argv) {
++  const reviewOperation = normalizeReviewOperation(options.reviewer), isReviewer = reviewOperation !== null;
 +  if (isReviewer && (write || resumeLast)) {
 +    throw new Error("Reviewer jobs must be fresh and read-only.");
 +  }
@@ -751,35 +739,49 @@ index 83df468..98c626f 100644
 +  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
 +    throw new Error("--timeout-ms must be a positive number.");
 +  }
-@@ -785 +882,2 @@ async function handleTask(argv) {
+@@ -785 +860,2 @@ async function handleTask(argv) {
 -    resumeLast
 +    resumeLast,
 +    reviewOperation
-@@ -792 +890 @@ async function handleTask(argv) {
+@@ -792 +868 @@ async function handleTask(argv) {
 -    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
-@@ -799,0 +898,2 @@ async function handleTask(argv) {
+@@ -799,0 +876,2 @@ async function handleTask(argv) {
 +      reviewOperation,
 +      timeoutMs,
-@@ -807 +907 @@ async function handleTask(argv) {
+@@ -807 +885 @@ async function handleTask(argv) {
 -  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
-@@ -817,0 +918,2 @@ async function handleTask(argv) {
+@@ -817,0 +896,2 @@ async function handleTask(argv) {
 +        reviewOperation,
 +        timeoutMs,
-@@ -937 +1039 @@ function handleTaskResumeCandidate(argv) {
+@@ -937 +1017 @@ function handleTaskResumeCandidate(argv) {
 -  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
 +  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)));
-@@ -976 +1078,4 @@ async function handleCancel(argv) {
+@@ -976 +1056,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
 +    job.jobClass === "review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1092,3 @@ async function handleCancel(argv) {
+@@ -986,0 +1070,3 @@ async function handleCancel(argv) {
 +  if (job.jobClass === "review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
+@@ -1023,0 +1110,13 @@ async function handleCancel(argv) {
++const REVIEW_OPERATIONS = new Set(["plan-review", "diff-review"]);
++const STORED_REVIEW_OPERATION_ERROR = "Stored review operation must be plan-review or diff-review.";
++
++function normalizeReviewOperation(operation, diagnostic = "--reviewer must be plan-review or diff-review.") {
++  if (operation == null) {
++    return null;
++  }
++  if (!REVIEW_OPERATIONS.has(operation)) {
++    throw new Error(diagnostic);
++  }
++  return operation;
++}
++
 diff --git a/plugins/codex/scripts/lib/app-server.mjs b/plugins/codex/scripts/lib/app-server.mjs
 index 72b30a7..24dbf8f 100644
 --- a/plugins/codex/scripts/lib/app-server.mjs
@@ -3333,10 +3335,10 @@ index 0000000..c871991
 +  assert.equal(fs.existsSync(broker.sessionDir), false);
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
-index c34b060..2b198ae 100644
+index c34b060..43bc066 100644
 --- a/tests/commands.test.mjs
 +++ b/tests/commands.test.mjs
-@@ -205 +205,24 @@ test("internal docs use task terminology for rescue runs", () => {
+@@ -205 +205,27 @@ test("internal docs use task terminology for rescue runs", () => {
 -test("hooks keep session-end cleanup and stop gating enabled", () => {
 +test("the status command preserves the overdue marker when it re-renders the table", () => {
 +  const source = read("commands/status.md");
@@ -3349,27 +3351,30 @@ index c34b060..2b198ae 100644
 +
 +test("the reviewer bridge validates and forwards one explicit operation envelope", () => {
 +  const agent = read("agents/codex-reviewer.md");
++  // Pin the ordered envelope and closed operation set.
 +  assert.match(agent, /first two lines are exactly `WORKTREE_ROOT: <absolute path>` and `REVIEW_OPERATION: <operation>`/);
 +  assert.match(agent, /exactly one `REVIEW_OPERATION:` declaration/);
 +  assert.match(agent, /only accepted values are `plan-review` and `diff-review`/);
++  // Pin value forwarding, bounded waits, raw extraction, and failures.
 +  assert.match(agent, /task --fresh --reviewer <operation> --background --json/);
 +  assert.match(agent, /--wait --timeout-ms 540000/);
 +  assert.match(agent, /storedJob\?\.result\?\.rawOutput/);
 +  assert.match(agent, /CODEX_REVIEW_FAILURE:/);
++  // Keep the foreground-only regression covered in both directions.
 +  assert.match(agent, /Never pass `run_in_background`/);
 +  assert.doesNotMatch(agent, /run_in_background:\s*true/);
 +  assert.doesNotMatch(agent, /completion notification/i);
 +});
 +
 +test("hooks keep session lifecycle cleanup without a Stop review gate", () => {
-@@ -209 +232,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
+@@ -209 +235,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
 -  assert.match(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /"Stop"/);
-@@ -217 +241 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -217 +244 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]'/);
 +  assert.match(setup, /argument-hint:\s*'\[--disable-review-gate\]'/);
-@@ -223 +246,0 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -223 +249,0 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(readme, /\/codex:setup --enable-review-gate/);
 diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
 index f83c96a..6920c62 100644
@@ -4186,7 +4191,7 @@ index 0000000..00e9dbe
 +  });
 +}
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
-index 8f27683..98a6d3a 100644
+index 8f27683..692054c 100644
 --- a/tests/runtime.test.mjs
 +++ b/tests/runtime.test.mjs
 @@ -9 +9 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
@@ -4262,7 +4267,7 @@ index 8f27683..98a6d3a 100644
 -  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
-@@ -765,0 +798,96 @@ test("task --fresh is treated as routing control and does not leak into the prom
+@@ -765,0 +798,74 @@ test("task --fresh is treated as routing control and does not leak into the prom
 +for (const operation of ["plan-review", "diff-review"]) {
 +  test(`foreground ${operation} uses fresh read-only isolation`, () => {
 +    const repo = makeTempDir();
@@ -4312,35 +4317,13 @@ index 8f27683..98a6d3a 100644
 +  run("git", ["commit", "-m", "init"], { cwd: repo });
 +  fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{}\n");
 +  fs.writeFileSync(path.join(canonicalHome, "config.toml"), "model = \"canonical\"\n");
-+
-+  const firstArgs = [
-+    SCRIPT,
-+    "task",
-+    "--fresh",
-+    "--reviewer",
-+    "plan-review",
-+    "--timeout-ms",
-+    "5000",
-+    "--json",
-+    "review the plan"
-+  ];
-+  const secondArgs = [
-+    SCRIPT,
-+    "task",
-+    "--fresh",
-+    "--reviewer",
-+    "diff-review",
-+    "--timeout-ms",
-+    "5000",
-+    "--json",
-+    "review the diff"
-+  ];
++  const args = (operation) => [SCRIPT, "task", "--fresh", "--reviewer", operation, "--timeout-ms", "5000", "--json", "review packet"];
 +  const [first, second] = await Promise.all([
-+    runChild(process.execPath, firstArgs, {
++    runChild(process.execPath, args("plan-review"), {
 +      cwd: repo,
 +      env: { ...buildEnv(firstBin), CODEX_HOME: canonicalHome }
 +    }),
-+    runChild(process.execPath, secondArgs, {
++    runChild(process.execPath, args("diff-review"), {
 +      cwd: repo,
 +      env: { ...buildEnv(secondBin), CODEX_HOME: canonicalHome }
 +    })
@@ -4359,46 +4342,46 @@ index 8f27683..98a6d3a 100644
 +  assert.equal(loadBrokerSession(repo), null);
 +});
 +
-@@ -802,3 +930,2 @@ test("task logs reasoning summaries and assistant messages to the job log", () =
+@@ -802,3 +908,2 @@ test("task logs reasoning summaries and assistant messages to the job log", () =
 -  const stateDir = resolveStateDir(repo);
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
-@@ -826,3 +953,2 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
+@@ -826,3 +931,2 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
 -  const stateDir = resolveStateDir(repo);
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
-@@ -1627,2 +1753 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
+@@ -1627,2 +1731 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  const cancelled = state.jobs.find((job) => job.id === "task-live");
 +  const cancelled = JSON.parse(fs.readFileSync(jobFile, "utf8"));
-@@ -1688,2 +1813,2 @@ test("cancel without a job id ignores active jobs from other Claude sessions", (
+@@ -1688,2 +1791,2 @@ test("cancel without a job id ignores active jobs from other Claude sessions", (
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  assert.equal(state.jobs[0].status, "running");
 +  const stored = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-other"), "utf8"));
 +  assert.equal(stored.status, "running");
-@@ -1736,2 +1861,2 @@ test("cancel with a job id can still target an active job from another Claude se
+@@ -1736,2 +1839,2 @@ test("cancel with a job id can still target an active job from another Claude se
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  assert.equal(state.jobs[0].status, "cancelled");
 +  const stored = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-other"), "utf8"));
 +  assert.equal(stored.status, "cancelled");
-@@ -1761 +1885,0 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+@@ -1761 +1863,0 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
 -  const stateDir = resolveStateDir(repo);
-@@ -1763,2 +1887 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+@@ -1763,2 +1865 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
 -    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -    const job = state.jobs.find((candidate) => candidate.id === jobId);
 +    const job = JSON.parse(fs.readFileSync(resolveJobFile(repo, jobId), "utf8"));
-@@ -1804 +1927 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
+@@ -1804 +1905 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
 -test("session end fully cleans up jobs for the ending session", async (t) => {
 +test("session end terminates live workers and retains terminal records", async (t) => {
-@@ -1905,0 +2029,3 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1905,0 +2007,3 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 +  // SessionEnd deletes nothing now: every record of the ending session is left
 +  // terminal and retained, with its log, beside the other session's untouched
 +  // pair.
-@@ -1907,2 +2033,9 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1907,2 +2011,9 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 -    fs.readdirSync(path.dirname(otherJobFile)).sort(),
 -    [path.basename(otherJobFile), path.basename(otherSessionLog)].sort()
 +    fs.readdirSync(jobsDir).sort(),
@@ -4410,7 +4393,7 @@ index 8f27683..98a6d3a 100644
 +      path.basename(otherSessionLog),
 +      path.basename(runningLog)
 +    ].sort()
-@@ -1920,4 +2053,14 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1920,4 +2031,14 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 -  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
 -  assert.deepEqual(state.jobs.map((job) => job.id), ["review-other"]);
 -  const otherJob = state.jobs[0];
@@ -4429,10 +4412,10 @@ index 8f27683..98a6d3a 100644
 +  // newest; the seeded pair keeps its 15:35 / 15:31 order behind it.
 +  assert.deepEqual(jobIds, ["review-running", "review-other", "review-completed"]);
 +  assert.equal(listJobs(repo).find((job) => job.id === "review-other").logFile, otherSessionLog);
-@@ -1926 +2069 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
+@@ -1926 +2047 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
 -test("stop hook runs a stop-time review task and blocks on findings when the review gate is enabled", () => {
 +test.skip("upstream-only: stop hook blocks on findings when the review gate is enabled", () => {
-@@ -2039 +2182,11 @@ test("stop hook logs running tasks to stderr without blocking when the review ga
+@@ -2039 +2160,11 @@ test("stop hook logs running tasks to stderr without blocking when the review ga
 -test("stop hook allows the stop when the review gate is enabled and the stop-time review task is clean", () => {
 +test("setup refuses to enable the automatic Stop review gate", () => {
 +  const workspace = makeTempDir();
@@ -4445,13 +4428,13 @@ index 8f27683..98a6d3a 100644
 +});
 +
 +test.skip("upstream-only: stop hook allows a clean result when the review gate is enabled", () => {
-@@ -2064 +2217 @@ test("stop hook allows the stop when the review gate is enabled and the stop-tim
+@@ -2064 +2195 @@ test("stop hook allows the stop when the review gate is enabled and the stop-tim
 -test("stop hook does not block when Codex is unavailable even if the review gate is enabled", () => {
 +test.skip("upstream-only: stop hook tolerates unavailable Codex when the review gate is enabled", () => {
-@@ -2091 +2244 @@ test("stop hook does not block when Codex is unavailable even if the review gate
+@@ -2091 +2222 @@ test("stop hook does not block when Codex is unavailable even if the review gate
 -test("stop hook runs the actual task when auth status looks stale", () => {
 +test.skip("upstream-only: stop hook refreshes stale authentication", () => {
-@@ -2258 +2411 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
+@@ -2258 +2389 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
 -  assert.equal(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
 +  assert.notEqual(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
 diff --git a/tests/state.test.mjs b/tests/state.test.mjs
