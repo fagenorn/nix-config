@@ -1392,10 +1392,12 @@ def _apply_one_issue_policy(
             validate_handoff_path(run_dir, latest["handoff_path"])
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
+        direct_run_match = DIRECT_RUN_ID_PATTERN.fullmatch(run_dir.name)
         absent_phase_zero_direct_reservation = bool(
             handed_off
             and latest["phase"] == 0
-            and DIRECT_RUN_ID_PATTERN.fullmatch(run_dir.name)
+            and direct_run_match is not None
+            and int(direct_run_match.group(2)) >= 1
             and recorded is not None
             and recorded["state"] == "absent"
         )

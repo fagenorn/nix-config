@@ -3404,6 +3404,30 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn("matching recorded worktree", rejected.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
 
+    def test_zero_sequence_direct_shaped_dispatcher_rejects_absent_resume_without_mutation(self):
+        self.run_id = "direct-78-000000"
+        self.init_run(now="2026-08-20T10:00:00Z")
+        dispatched = self.spawn(
+            issue=78, worktree=self.root / "dispatcher-78",
+            now="2026-08-20T10:00:00Z",
+        )
+        handoff = self.write_handoff(78)
+        self.progress(
+            issue=78, phase=0, now="2026-08-20T10:01:00Z",
+            turn_count=118, handoff_path=handoff,
+        )
+        before = self.state_path.read_bytes()
+        rejected = self.control_raw(
+            now="2026-08-20T10:02:00Z", issues=[78],
+            tracker=[self.tracker_fact(78)],
+            worktrees=[self.worktree_fact(78, recorded={
+                "path": dispatched["worktree"], "state": "absent",
+            })], max_parallel=1, ok=False,
+        )
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("matching recorded worktree", rejected.stderr)
+
     def test_absent_direct_handoff_materializes_exact_worktree_then_records_phase_one(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
