@@ -78,10 +78,12 @@ requests, or change permissions. Its only side effect remains the atomically loc
 
 ### Module and seam
 
-The deep module is the durable lifecycle control plane. Its interface consists of four commands:
+The deep module is the durable lifecycle control plane. Its interface consists of five commands:
 
 - `init-run` creates or validates the run ledger and returns its bounded bootstrap projection.
 - `control` consumes normalized dispatcher observations and returns orchestration actions.
+- `direct-owner` discovers or creates one durable direct-autonomous run and returns its bounded
+  acquisition projection.
 - `progress` persists the existing owner-side phase-budget decision.
 - `finish` persists the existing compact owner result, including truthful late results.
 
@@ -420,12 +422,18 @@ phase-budget `progress`, and write-before-notify `finish` behavior. Its handoff 
 say that the dispatcher resumes it from a returned `resume` envelope; owners do not invoke a
 dispatcher launch command themselves.
 
-A direct standalone `from-issue` invocation remains ledger-free. When the user explicitly requests
-durable standalone orchestration, `from-issue` calls `init-run`, gathers one issue's normalized
-tracker/worktree facts, calls `control` with `max_parallel: 1`, and adopts the returned first
-`spawn` envelope as its lifecycle identity and exact Phase-1 worktree. It does not spawn another
-owner or issue a second control call for that launch. A non-`spawn` response or an action for a
-different issue fails loudly instead of inventing identity.
+Issue 73 supersedes only the blanket direct-standalone statement in this
+paragraph. A direct autonomous `from-issue <issue> --auto` invocation without a
+dispatcher envelope now acquires durable lifecycle identity only through
+`workflow-state direct-owner`, adopts its exact returned owner identity and
+worktree, and returns a terminal replay without entering the owner flow. An
+interactive direct invocation remains ledger-free. When an interactive user
+explicitly requests durable standalone orchestration, `from-issue` still calls
+`init-run`, gathers one issue's normalized tracker/worktree facts, calls
+`control` with `max_parallel: 1`, and adopts the returned first `spawn` envelope
+as its lifecycle identity and exact Phase-1 worktree. It does not spawn another
+owner or issue a second control call for that launch. A non-`spawn` response or
+an action for a different issue fails loudly instead of inventing identity.
 
 The deployed orchestrator eval expectations change with the skill contract. They grade normalized
 observations, envelope execution, and the absence of hand-assembled precedence rather than pinning
@@ -513,7 +521,7 @@ refusal, tracker blockers/fog, no-deadline waiting, and finalize behavior.
 | D7 | Reuse the recorded path for retry only when the normalized worktree state is `matching_issue_branch`; otherwise require a verified absent candidate. | Issue 33 made configured worktrees authoritative and established that a fresh owner, not a fresh path, defines retry identity. | Always allocate a fresh retry path or inspect Git inside the helper — the first loses existing work; the second crosses the adapter seam. |
 | D8 | Test through the CLI/reopened ledger and one combined multi-issue replay in the existing helper test module; update skill contracts and deployed eval expectations at the same seam. | The prior lifecycle specs and The Bar require observable deterministic tests; the existing just recipe already names these test modules and current evals pin the behavior being retired. | Unit-test new planner functions or rely on prose/eval examples alone — tests past the interface or fail to prove concurrent durable behavior and bounded output. |
 | D9 | Record no ADR or glossary change; keep this amendment in the issue design spec. | Grounding found no project context/ADR tree, and both prior lifecycle designs use `.claude/specs`; grill-with-docs creates domain docs and ADRs only when their admission gates are met. | Bootstrap a docs/ADR architecture for this change — unrelated scope and a duplicate home for the lifecycle rationale. |
-| D10 | Make `init-run` return a strict version-1 latest-requirement projection (`issue`, current attempt/owner/action identity, recorded worktree) and use control's first `spawn` envelope for explicitly requested durable standalone ownership. | A restarted adapter must discover exact recorded paths and correlate current host notifications before it can normalize an action-ready control request, while direct standalone use must remain ledger-free and durable standalone use needs one nonduplicated identity after public `launch` removal. | Print the raw ledger, add a fifth bootstrap command, guess identity/paths, or let standalone initialization create identity outside `control` — each either leaks history, widens the interface, or bypasses policy. |
+| D10 | Make `init-run` return a strict version-1 latest-requirement projection (`issue`, current attempt/owner/action identity, recorded worktree) and use control's first `spawn` envelope for explicitly requested durable standalone ownership. | A restarted adapter must discover exact recorded paths and correlate current host notifications before it can normalize an action-ready control request. Ordinary interactive direct use remains ledger-free, direct autonomous use acquires through `direct-owner`, and explicitly durable interactive use needs one nonduplicated identity after public `launch` removal. | Print the raw ledger, add another bootstrap command, guess identity/paths, or let explicitly durable interactive initialization create identity outside `control` — each either leaks history, widens the interface, or bypasses policy. |
 | D11 | Replace the adapter's sole outstanding wait by publishing the new wait ID before canceling the old handle; ignore stale wake IDs, avoid duplicate observers for the same ID, and clear the ID before finalize cancellation. | A prose-only “supersedes” rule leaves a cancellation race able to create extra control events; explicit ID comparison makes the one-shot event contract operational without durable scheduler state. | Persist observers in the ledger or let cancellation order make an old wake look current — the first crosses the adapter seam and the second violates the single-wake contract. |
 | D12 | Count only currently active external owners as occupied: handed-off and current-unavailable attempts consume a slot only when their returned resume action is accepted. | The control plane must be able to resume interrupted work at full durable nonterminal count, and the request already distinguishes a current unavailable launch from a live owner. | Count every durable nonterminal attempt as occupied — handed-off and dead owners could fill all capacity and prevent their own resume. |
 | D13 | Accept an absent-candidate fact only for actionless identical-request replay when the latest attempt remains active and its first launch at the same request instant consumed that exact path; reject wrong instant/path, terminal, and current-unavailable cases, and require current facts for any dispatch. | Persist-before-emission advances the ledger, so the request that created a first attempt necessarily carries a candidate that is no longer absent when replayed; the acceptance guarantee requires a causal exception that cannot authorize a new action. | Reject every consumed candidate or broadly trust stale candidate facts — the first breaks identical replay, while the second can hide a collision or authorize resume/retry from obsolete evidence. |

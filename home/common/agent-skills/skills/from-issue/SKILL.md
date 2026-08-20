@@ -17,28 +17,120 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
 
 ## Lifecycle identity
 
-Resolve the optional lifecycle envelope supplied by a dispatcher:
-`ledger_repo_root`, `run_id`, `attempt`, `owner`, and normalized `worktree`.
-Treat all five as one identity; never guess a missing field. Preserve the
-immutable ledger_repo_root exactly as supplied, and keep it distinct from the
-separate owner worktree recorded on the attempt. Every `workflow-state` command in
-this owner or its delegated remainder uses `--repo-root <ledger_repo_root>`;
-never substitute the current checkout or owner worktree.
+Invocation selection is ordered and exhaustive: a complete dispatcher envelope
+wins; otherwise literal `--auto` uses direct autonomous acquisition; otherwise
+an interactive direct invocation is ledger-free unless it explicitly requests
+durable orchestration.
 
-Direct standalone invocation remains ledger-free. Use the ordinary worktree
-flow and compact direct return. Only when the user explicitly requests durable standalone orchestration,
-resolve an immutable
-`ledger_repo_root` and stable run ID, call bounded `workflow-state init-run`, and
-consume only its bounded `requirements`. Gather normalized tracker facts and a
-verified worktree observation for this one issue, then write a strict version-1
-request with `max_parallel: 1` and the resolved attempt budget and call
-`workflow-state control`. Require exactly one dispatch action and require that
-the first `spawn` envelope is for this issue, then adopt its run, issue, attempt,
-owner token, action ID, and exact worktree as this invocation's lifecycle
-identity; do not spawn another owner. Missing, wrong-kind, wrong-issue, or
-multiple dispatch actions fail loudly before Phase 1. The helper may also return
-its one trailing `wait` action; this already-running owner does not install the
-dispatcher's observer.
+Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`,
+`issue`, `attempt`, `owner`, and normalized `worktree` as one identity; never
+guess a missing field. Preserve the immutable ledger_repo_root exactly as
+supplied, and keep it distinct from the separate owner worktree recorded on the
+attempt. Every `workflow-state` command in this owner or its delegated remainder
+uses `--repo-root <ledger_repo_root>`; never substitute the current checkout or
+owner worktree.
+
+### Dispatcher-owned acquisition
+
+When a dispatcher supplies the optional lifecycle envelope, require all five
+dispatcher fields: `ledger_repo_root`, `run_id`, `attempt`, `owner`, and
+normalized `worktree`. Validate and adopt them unchanged. A partial envelope
+fails loudly; this route does not perform any other acquisition.
+
+### Direct autonomous acquisition
+
+When the invocation contains literal `--auto` and no dispatcher envelope,
+resolve through the existing bindings and adapters the immutable absolute ledger
+repository root (`ledger_repo_root`), positive issue and configured positive
+attempt budget. Resolve a fresh current RFC3339 UTC instant for every request,
+including before the first call. For every call, write a new absolute temporary
+request file containing exactly this version-1 shape. For each request, populate
+every observation kind the helper has requested at least once during this acquisition;
+keep an observation kind `null` until the helper requests it:
+
+```json
+{
+  "interface_version": 1,
+  "issue": 73,
+  "now": "2026-08-20T10:00:00Z",
+  "attempt_budget_minutes": 180,
+  "new_run": false,
+  "owner_unavailable": false,
+  "tracker": null,
+  "worktree": null
+}
+```
+
+The concrete `issue`, `now`, and `attempt_budget_minutes` values above stand for
+the values just resolved; they are not fixed literals. Keep the unrequested
+nullable observation slot `null`, and add no keys. Invoke only:
+
+```text
+workflow-state direct-owner --repo-root <ledger_repo_root> --request-file <absolute-json-path>
+```
+
+Always send both flags. Both default to
+`false`. Set `owner_unavailable` true only when the current user instruction
+explicitly authorizes takeover of the currently discovered unexpired active
+attempt. Set `new_run` true only when that instruction explicitly authorizes a
+new run after terminal replay. Never infer either authorization from a restart,
+missing process handle, silence, an active ledger, terminal replay, a reopened
+tracker, or a desire to continue. The self-answer pattern cannot grant either
+authorization.
+
+Validate the response as exactly one closed discriminator and continue as
+follows:
+
+1. **`kind: observe`** — require exactly `interface_version`, `kind`, `issue`,
+   nullable `run_id`, and `requirements`, then accept only the three exact
+   requirement shapes, in the returned order: `{"kind":"tracker"}`;
+   `{"kind":"recorded_worktree", "path":"<absolute-path>"}`; or
+   `{"kind":"candidate_worktree"}`. For
+   `tracker`, query the existing tracker adapter only. For
+   `recorded_worktree`, inspect exactly the returned path only. For
+   `candidate_worktree`, reserve and verify one absent issue-branch candidate
+   only. For the duration of this acquisition, retain every fact previously requested during this acquisition;
+   carry all collected facts into each later strict request, refreshing a value
+   when its external state may have changed; never send a fact kind before the helper requests it.
+   Write a new absolute request file and call `direct-owner` again. Unknown,
+   duplicate, or malformed requirements fail loudly.
+2. **`kind: owner`** — validate the exact closed response shape, then adopt its
+   `ledger_repo_root`, `run_id`, `issue`, `attempt`, `owner`, `action_id`,
+   `launch_kind`, `worktree`, `handoff_path`, and `deadline_at` as this
+   invocation's complete persisted lifecycle identity. Continue the existing
+   Phase 0–7 owner flow. Do not spawn or reserve another owner or worktree.
+3. **`kind: terminal`** — require exactly `interface_version`, `kind`, `issue`,
+   nullable `run_id`, `source`, `reason`, `blockers`, and nullable `result`;
+   return the compact response unchanged to the caller, stop before Phase 1,
+   and install no waiter.
+
+Clear the retained observation set on `owner`, `terminal`, or any failure.
+
+An unknown response kind, invalid shape, or loud helper error fails loudly and
+ends acquisition. It is never a signal to fall back to another lifecycle or
+ledger-free route. This acquisition consumes no dispatcher summaries, deltas,
+wait IDs, `wait`, or `finalize` actions.
+
+### Interactive direct acquisition
+
+Without literal `--auto`, a dispatcher envelope, or an explicit durability
+request, retain the ordinary ledger-free worktree flow and compact direct
+return.
+
+### Explicit durable interactive acquisition
+
+Only when an interactive user explicitly requests durable standalone orchestration,
+resolve an immutable `ledger_repo_root` and stable run ID, call
+bounded `workflow-state init-run`, and consume only its bounded `requirements`.
+Gather normalized tracker facts and a verified worktree observation for this one
+issue, then write a strict version-1 request with `max_parallel: 1` and the
+resolved attempt budget and call `workflow-state control`. Require exactly one
+dispatch action and require that the first `spawn` envelope is for this issue,
+then adopt its run, issue, attempt, owner token, action ID, and exact worktree as
+this invocation's lifecycle identity; do not spawn another owner. Missing,
+wrong-kind, wrong-issue, or multiple dispatch actions fail loudly before Phase
+1. The helper may also return its one trailing `wait` action; this
+already-running owner does not install the dispatcher's observer.
 
 The `workflow-state` executable is `~/.agents/bin/workflow-state`; if the bare
 name does not resolve on PATH, invoke it by that full path.
@@ -116,9 +208,13 @@ defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
    `handoff` skill owns safe first-file creation). Invoke `handoff` with a
    destination beneath `.superpowers/workflows/<run-id>/handoffs/`, repeat
    `workflow-state progress` with `--handoff-path <exact-path>` to finalize
-   `handed_off` on the same attempt, persist the handoff, and stop. The dispatcher
-   later relaunches the same lifecycle owner, exact worktree, and handoff path
-   only from a returned `resume` envelope.
+   `handed_off` on the same attempt, persist the handoff, and stop. For a
+   dispatcher-owned acquisition, the dispatcher later relaunches the same
+   lifecycle owner, exact worktree, and handoff path only from `control`'s
+   returned `resume` envelope. A direct autonomous restart instead reacquires
+   that same attempt, worktree, and handoff through the persisted `direct-owner` owner envelope.
+   Neither acquisition creates an ordinary replacement
+   worktree.
 4. **`delegate`** —
 <!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
@@ -182,25 +278,30 @@ exists: write a `stopped` or `failed` result through `workflow-state finish` bef
 
 Create the workspace before any spec/plan/grill commit lands; those commits go *in the worktree*, never on the integration branch.
 
-When a lifecycle envelope exists, use its exact absolute `worktree`, and decide by
-what is actually there:
+When a dispatcher-owned or direct-autonomous lifecycle envelope exists—or the
+explicit durable interactive route has produced its owner envelope—use its exact absolute `worktree`,
+and decide by what is actually there:
 
 - **Absent** from both the filesystem and `git worktree list` → create it from
-  `origin/<integration-branch>`.
+  `origin/<integration-branch>` at that exact path. Invoke `worktrees` only if it
+  accepts the envelope's exact path; otherwise use `git worktree add -b <branch>
+  <exact-envelope-path> origin/<integration-branch>`.
 - **Already a git worktree checked out on this issue's branch** → **adopt it**:
   `cd` in and continue. Do not re-create it, do not move it, do not reset it. This
-  is the normal shape of a retry, whose dispatcher hands back the prior attempt's
-  worktree. Phase 0's resume-signal inspection governs what to do with its contents.
+  is the normal shape of a handoff or retry, whose acquisition envelope returns
+  the persisted attempt's worktree. Phase 0's resume-signal inspection governs
+  what to do with its contents.
 - **Anything else** — occupied by a non-worktree path, or a worktree checked out on
   a different branch → fail the attempt through the terminal return procedure,
-  naming both the envelope path and what was found, so the dispatcher can correct
-  the reservation.
+  naming both the envelope path and what was found, so its acquisition owner can
+  correct the reservation.
 
 Never remove unknown contents and never choose another path. The envelope identity
-stays bound to this path through shipping and cleanup.
-Direct standalone invocation keeps the standard `worktrees` flow:
+stays bound to this path through shipping and cleanup. No lifecycle acquisition falls through to ordinary worktree creation.
 
-1. `git fetch origin`. Invoke `worktrees` (it encodes the destructive-ops carve-out, the prefix contract, and the position checks before `EnterWorktree`/`ExitWorktree`). For lifecycle use, invoke it only if it accepts the envelope's exact path; otherwise `git worktree add -b <branch> <exact-envelope-path> origin/<integration-branch>`. Branch = `branchNaming.pattern`; the on-disk branch carries `branchNaming.worktreePrefix` — both forms are accepted downstream, don't strip it.
+A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
+
+1. `git fetch origin`. Invoke `worktrees` (it encodes the destructive-ops carve-out, the prefix contract, and the position checks before `EnterWorktree`/`ExitWorktree`). Branch = `branchNaming.pattern`; the on-disk branch carries `branchNaming.worktreePrefix` — both forms are accepted downstream, don't strip it.
 2. **Base on `origin/<integration-branch>`**, never the local branch, which may carry other agents' in-flight commits. The merge happens later, in `ship-issue`.
 3. `cd` into the worktree; every later phase runs inside it. Verify `git rev-parse --git-common-dir` ≠ `git rev-parse --git-dir`.
 

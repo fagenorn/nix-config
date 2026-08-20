@@ -7,6 +7,14 @@ The shift is *what you do at a decision point*, not *what work gets done*. Every
 produces the same artifact at the same quality bar. Brainstorm still happens. Grill still happens.
 Standards review still happens. You don't get to skip thinking — you only stop waiting for the user.
 
+Direct autonomous acquisition always includes both `new_run` and
+`owner_unavailable` in every strict request, and both fields are `false` unless
+the current user instruction explicitly authorizes that exact transition.
+Self-answering never infers `owner_unavailable` from a restart, missing process
+handle, silence, or an active ledger, and never infers `new_run` from terminal
+replay, a reopened tracker, or a desire to continue. Process, tracker, and
+terminal observations are facts, not authorization.
+
 ## The self-answer pattern
 
 Wherever a phase or sub-skill would ask the user a clarifying question, present option sets, or pause
