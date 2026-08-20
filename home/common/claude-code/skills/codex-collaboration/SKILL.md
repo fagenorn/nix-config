@@ -75,11 +75,18 @@ agent once with the complete packet using this transport selection:
 <!-- agent-dispatch: id=codex-review-transport role=codex-transport model=sonnet effort=medium -->
 Agent(subagent_type="codex:codex-reviewer", model="sonnet", effort="medium") transports the complete review packet to the isolated Codex runtime.
 
-Run it in the foreground, with the first line of the dispatch exactly
-`WORKTREE_ROOT: <absolute worktree root>` so the bridge keys runtime job state
-to the reviewed worktree. Launch mechanics live solely in that agent's
-definition. This selection changes only the Claude transport tier; it does not
-select or change the external Codex runtime model. The contract: the review runs
+Run it in the foreground, with the first two lines of the dispatch exactly, in
+this order:
+
+`WORKTREE_ROOT: <absolute worktree root>`
+`REVIEW_OPERATION: <plan-review|diff-review>`
+
+Here `<operation>` is the operation currently being invoked. The first line lets
+the bridge key runtime job state to the reviewed worktree, and the second
+preserves the operation across the detached transport. Launch mechanics live
+solely in that agent's definition. This selection changes only the Claude
+transport tier; it does not select or change the external Codex runtime model.
+The contract: the review runs
 fresh in an isolated read-only Codex runtime (fresh `CODEX_HOME`, approval
 policy `never`, sandbox `read-only`), survives the bridge's own lifetime, and is
 bounded by the runtime's internal ~14 min budget — expect up to ~15 minutes wall
