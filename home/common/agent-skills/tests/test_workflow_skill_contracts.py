@@ -667,12 +667,25 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_lifecycle_phase_one_paths_are_acquisition_mode_specific(self):
         phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")
-        self.assertIn("dispatcher-owned or direct-autonomous lifecycle envelope", phase_one)
-        self.assertIn("use its exact absolute `worktree`", phase_one)
-        self.assertIn("adopt it", phase_one)
-        self.assertIn("Do not re-create it, do not move it, do not reset it", phase_one)
-        self.assertIn("ledger-free interactive direct", phase_one)
-        self.assertIn("standard `worktrees` flow", phase_one)
+        self.assert_ordered(
+            phase_one,
+            "dispatcher-owned or direct-autonomous lifecycle envelope",
+            "use its exact absolute `worktree`",
+            "**Absent** from both the filesystem",
+            "checked out on this issue's branch",
+            "adopt it",
+            "Do not re-create it, do not move it, do not reset it",
+            "a different branch",
+            "fail the attempt through the terminal return procedure",
+            "never choose another path",
+        )
+        self.assertIn("fail the attempt", phase_one)
+        self.assert_ordered(
+            phase_one,
+            "No lifecycle acquisition falls through to ordinary worktree creation",
+            "ledger-free interactive direct",
+            "standard `worktrees` flow",
+        )
 
     def test_from_issue_handoff_resume_is_acquisition_mode_specific(self):
         phase_gate = self.section(
@@ -744,6 +757,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "tracker",
             "recorded_worktree",
             "candidate_worktree",
+            "retain every fact previously requested during this acquisition",
+            "carry all collected facts into each later strict request",
+            "never send a fact kind before the helper requests it",
             "call `direct-owner` again",
             "kind: owner",
             "adopt",

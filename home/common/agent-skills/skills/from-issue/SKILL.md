@@ -88,9 +88,11 @@ follows:
    `tracker`, query the existing tracker adapter only. For
    `recorded_worktree`, inspect exactly the returned path only. For
    `candidate_worktree`, reserve and verify one absent issue-branch candidate
-   only. Put only those currently requested normalized facts into the next
-   strict request, write a new absolute request file, and call `direct-owner` again.
-   Unknown, duplicate, or malformed requirements fail loudly.
+   only. For the duration of this acquisition, retain every fact previously requested during this acquisition;
+   carry all collected facts into each later strict request, refreshing a value
+   when its external state may have changed; never send a fact kind before the helper requests it.
+   Write a new absolute request file and call `direct-owner` again. Unknown,
+   duplicate, or malformed requirements fail loudly.
 2. **`kind: owner`** — validate the exact closed response shape, then adopt its
    `ledger_repo_root`, `run_id`, `issue`, `attempt`, `owner`, `action_id`,
    `launch_kind`, `worktree`, `handoff_path`, and `deadline_at` as this
@@ -100,6 +102,8 @@ follows:
    nullable `run_id`, `source`, `reason`, `blockers`, and nullable `result`;
    return the compact response unchanged to the caller, stop before Phase 1,
    and install no waiter.
+
+Clear the retained observation set on `owner`, `terminal`, or any failure.
 
 An unknown response kind, invalid shape, or loud helper error fails loudly and
 ends acquisition. It is never a signal to fall back to another lifecycle or
@@ -292,8 +296,7 @@ and decide by what is actually there:
   correct the reservation.
 
 Never remove unknown contents and never choose another path. The envelope identity
-stays bound to this path through shipping and cleanup. No lifecycle acquisition
-falls through to ordinary worktree creation.
+stays bound to this path through shipping and cleanup. No lifecycle acquisition falls through to ordinary worktree creation.
 
 A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
 
