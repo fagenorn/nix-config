@@ -34,6 +34,7 @@ assert "`pending`" not in text
 assert "remaining" not in text.lower()
 match = re.search(r"(?m)^- Verdict: `(certified|not certified|unknown)`$", text)
 assert match is not None
+assert len(re.findall(r"(?m)^- Verdict: `(certified|not certified|unknown)`$", text)) == 1
 for heading in (
     "## Verdict and scope",
     "## Deployment freshness",

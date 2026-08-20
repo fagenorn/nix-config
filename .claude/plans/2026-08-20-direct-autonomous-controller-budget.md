@@ -46,4 +46,11 @@ Task 2 — Seal the post-terminal certification — `.claude/specs/2026-08-20-di
 - Immutable evidence anchors and sealed mutable prefixes follow D4; the bounded historical comparison follows D5.
 - The task execution boundary follows D6, final-report self-identification follows D7, and the closed verdict precedence follows D8.
 
+## Phase 5 standards review
+
+- Reviewer: `native-codex`; job `phase5-plan-review-75-1`; base `f3fac9554761d0c3085d70bf4526cf3e7486de3e`; native fallback not used.
+- B1 — accepted and applied per D9: Task 1 now seals only the exact Phase-5 `delegate` observation prefix and leaves both terminal controller prefixes and maximum-input records to Task 2.
+- S1 — accepted and applied: both structural tests now require exactly one verdict line, with the expected pending or closed state.
+- Discussion findings: none.
+
 ---
