@@ -1220,6 +1220,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "call the bridge current",
         )
 
+    def test_codex_collaboration_dispatch_carries_operation_envelope(self):
+        launch = self.section(
+            self.collaboration,
+            "Build the operation's packet",
+            "Parallel reviews are valid.",
+        )
+        self.assertIn("first two lines", launch)
+        self.assertIn("`WORKTREE_ROOT: <absolute worktree root>`", launch)
+        self.assertIn("`REVIEW_OPERATION: <plan-review|diff-review>`", launch)
+        self.assert_ordered(launch, "WORKTREE_ROOT:", "REVIEW_OPERATION:", "Launch mechanics")
+
     def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
         # The gate states a policy and calls the helper; the accounting itself
         # lives in diff-scope.py and is not restated here.

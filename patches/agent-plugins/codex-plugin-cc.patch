@@ -19,31 +19,36 @@ index 937a303..f418e48 100644
 -
 diff --git a/plugins/codex/agents/codex-reviewer.md b/plugins/codex/agents/codex-reviewer.md
 new file mode 100644
-index 0000000..7cd5eb5
+index 0000000..c0c9e55
 --- /dev/null
 +++ b/plugins/codex/agents/codex-reviewer.md
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,56 @@
 +---
 +name: codex-reviewer
-+description: Internal bridge for fresh, isolated, read-only Codex plan reviews requested by the codex-collaboration skill
++description: Internal bridge for fresh, isolated, read-only Codex reviews requested by the codex-collaboration skill
 +model: sonnet
 +tools: Bash, Read
 +---
 +
-+Act only as a transport for one Codex plan-review job.
++Act only as a transport for one Codex review job.
 +
-+- The dispatch message's first line is `WORKTREE_ROOT: <absolute path>`; everything
-+  after that line is the delegation prompt. If the line is absent, use the
-+  invocation directory as the root. Every Bash call below is foreground and
-+  bounded — the two wait calls set the Bash tool's `timeout` to 600000
-+  explicitly; every other call is sub-second and stays under the tool's default
-+  bound. Never pass `run_in_background`, never sleep, never write a polling loop.
++- The dispatch message's first two lines are exactly `WORKTREE_ROOT: <absolute path>` and `REVIEW_OPERATION: <operation>`.
++  Require exactly one `WORKTREE_ROOT:` declaration and exactly one `REVIEW_OPERATION:` declaration,
++  in that order, and require the root to be
++  absolute. The only accepted values are `plan-review` and `diff-review`.
++  Missing, duplicated, ambiguous, out-of-order, or invalid declarations fail
++  before launch with one `CODEX_REVIEW_FAILURE:` line. Remove both envelope
++  lines; everything after them is the unchanged delegation prompt. Every Bash
++  call below is foreground and bounded — the two wait calls set the Bash tool's
++  `timeout` to 600000 explicitly; every other call is sub-second and stays under
++  the tool's default bound. Never pass `run_in_background`, never sleep, never
++  write a polling loop.
 +- Pre-flight with one fast foreground Bash call: `command -v codex-companion`. If
 +  the command is missing, immediately return
 +  `CODEX_REVIEW_FAILURE: codex-companion not on PATH` without running anything else.
 +- Write the delegation prompt, unchanged, to a temporary file outside the repository.
 +- Enqueue exactly one review with one sub-second foreground call:
-+  `cd "<worktree-root>" && codex-companion task --fresh --reviewer --background --json < "<tmpfile>"`.
++  `cd "<worktree-root>" && codex-companion task --fresh --reviewer <operation> --background --json < "<tmpfile>"`.
 +  The `cd` keys the runtime's job state to the reviewed worktree. Note the `jobId`
 +  from the printed JSON. From this moment a detached worker owns the review with
 +  its own 840 s budget; nothing that happens to you can stop it, and its result
@@ -544,7 +549,7 @@ index 1954274..2097f9f 100644
 +  supervisionTimer.unref();
 +
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..f7fe157 100644
+index 83df468..3c34f7a 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
 @@ -32,2 +31,0 @@ import {
@@ -569,7 +574,7 @@ index 83df468..f7fe157 100644
 +      "  node scripts/codex-companion.mjs setup [--disable-review-gate] [--json]",
 @@ -82 +88 @@ function printUsage() {
 -      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
-+      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--reviewer] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
++      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--reviewer <plan-review|diff-review>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
 @@ -198,4 +203,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 -  if (!config.stopReviewGate) {
 -    nextSteps.push("Optional: run `/codex:setup --enable-review-gate` to require a fresh review before stop.");
@@ -594,47 +599,63 @@ index 83df468..f7fe157 100644
 +  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)).filter(
 +    (job) => job.id !== options.excludeJobId
 +  );
+@@ -460 +459,0 @@ async function executeReviewRun(request) {
+-
+@@ -462,0 +462,2 @@ async function executeTaskRun(request) {
++  const reviewOperation = normalizeReviewOperation(request.reviewOperation, STORED_REVIEW_OPERATION_ERROR);
++  const isReviewer = reviewOperation !== null;
+@@ -464 +464,0 @@ async function executeTaskRun(request) {
+-
 @@ -467 +467,2 @@ async function executeTaskRun(request) {
 -    resumeLast: request.resumeLast
 +    resumeLast: request.resumeLast,
-+    reviewer: request.reviewer
++    reviewOperation
+@@ -491 +492 @@ async function executeTaskRun(request) {
+-    sandbox: request.write ? "workspace-write" : "read-only",
++    sandbox: isReviewer ? "read-only" : request.write ? "workspace-write" : "read-only",
 @@ -493,2 +494,4 @@ async function executeTaskRun(request) {
 -    persistThread: true,
 -    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
-+    persistThread: !request.reviewer,
-+    threadName: request.reviewer || resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
-+    reviewerJobId: request.reviewer ? request.jobId : null,
++    persistThread: !isReviewer,
++    threadName: isReviewer || resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
++    reviewerJobId: isReviewer ? request.jobId : null,
 +    timeoutMs: request.timeoutMs
 @@ -496,0 +500,4 @@ async function executeTaskRun(request) {
-+  if (request.reviewer && result.touchedFiles.length > 0) {
++  if (isReviewer && result.touchedFiles.length > 0) {
 +    throw new Error(`Read-only Codex reviewer reported file changes: ${result.touchedFiles.join(", ")}`);
 +  }
 +
+@@ -527 +534 @@ async function executeTaskRun(request) {
+-    jobClass: "task",
++    jobClass: isReviewer ? "review" : "task",
 @@ -540 +547,7 @@ function buildReviewJobMetadata(reviewName, target) {
 -function buildTaskRunMetadata({ prompt, resumeLast = false }) {
-+function buildTaskRunMetadata({ prompt, resumeLast = false, reviewer = false }) {
-+  if (reviewer) {
++function buildTaskRunMetadata({ prompt, resumeLast = false, reviewOperation = null }) {
++  if (reviewOperation !== null) {
 +    return {
-+      title: "Codex Plan Reviewer",
-+      summary: shorten(prompt || "Read-only plan review")
++      title: reviewOperation === "plan-review" ? "Codex Plan Review" : "Codex Diff Review",
++      summary: shorten(prompt || "Read-only review")
 +    };
 +  }
+@@ -564 +577 @@ function getJobKindLabel(kind, jobClass) {
+-  return jobClass === "review" ? "review" : "rescue";
++  return REVIEW_OPERATIONS.has(kind) ? kind : jobClass === "review" ? "review" : "rescue";
 @@ -592 +605 @@ function createTrackedProgress(job, options = {}) {
 -function buildTaskJob(workspaceRoot, taskMetadata, write) {
-+function buildTaskJob(workspaceRoot, taskMetadata, write, reviewer = false) {
++function buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation = null) {
 @@ -594,2 +607,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    prefix: "task",
 -    kind: "task",
-+    prefix: reviewer ? "reviewer" : "task",
-+    kind: reviewer ? "plan-review" : "task",
++    prefix: reviewOperation === null ? "task" : "reviewer",
++    kind: reviewOperation ?? "task",
 @@ -598 +611 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    jobClass: "task",
-+    jobClass: reviewer ? "review" : "task",
++    jobClass: reviewOperation === null ? "task" : "review",
 @@ -604 +617 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
-+function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, reviewer, timeoutMs, jobId }) {
++function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, reviewOperation, timeoutMs, jobId }) {
 @@ -611,0 +625,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
-+    reviewer,
++    reviewOperation,
 +    timeoutMs,
 @@ -671 +686 @@ async function runForegroundCommand(job, runner, options = {}) {
 -function spawnDetachedTaskWorker(cwd, jobId) {
@@ -701,49 +722,85 @@ index 83df468..f7fe157 100644
 +  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
 @@ -694,0 +761 @@ function enqueueBackgroundTask(cwd, job, request) {
 +    ...(deadlineAt ? { deadlineAt } : {}),
-@@ -764,2 +831,2 @@ async function handleTask(argv) {
+@@ -704,2 +771,2 @@ function enqueueBackgroundTask(cwd, job, request) {
+-      title: job.title,
+-      summary: job.summary,
++      kind: job.kind,
++      title: job.title, summary: job.summary,
+@@ -764 +831 @@ async function handleTask(argv) {
 -    valueOptions: ["model", "effort", "cwd", "prompt-file"],
--    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
-+    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms"],
-+    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "reviewer"],
++    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms", "reviewer"],
 @@ -782,0 +850,8 @@ async function handleTask(argv) {
-+  const reviewer = Boolean(options.reviewer);
-+  if (reviewer && (write || resumeLast)) {
++  const reviewOperation = normalizeReviewOperation(options.reviewer), isReviewer = reviewOperation !== null;
++  if (isReviewer && (write || resumeLast)) {
 +    throw new Error("Reviewer jobs must be fresh and read-only.");
 +  }
-+  const timeoutMs = options["timeout-ms"] == null ? (reviewer ? 840000 : null) : Number(options["timeout-ms"]);
++  const timeoutMs = options["timeout-ms"] == null ? (isReviewer ? 840000 : null) : Number(options["timeout-ms"]);
 +  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
 +    throw new Error("--timeout-ms must be a positive number.");
 +  }
 @@ -785 +860,2 @@ async function handleTask(argv) {
 -    resumeLast
 +    resumeLast,
-+    reviewer
++    reviewOperation
 @@ -792 +868 @@ async function handleTask(argv) {
 -    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
-+    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
++    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
 @@ -799,0 +876,2 @@ async function handleTask(argv) {
-+      reviewer,
++      reviewOperation,
 +      timeoutMs,
 @@ -807 +885 @@ async function handleTask(argv) {
 -  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
-+  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewer);
++  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
 @@ -817,0 +896,2 @@ async function handleTask(argv) {
-+        reviewer,
++        reviewOperation,
 +        timeoutMs,
-@@ -937 +1017 @@ function handleTaskResumeCandidate(argv) {
+@@ -874,2 +954,3 @@ async function handleTaskWorker(argv) {
+-    () =>
+-      executeTaskRun({
++    () => {
++      validateStoredReviewIdentity(storedJob, request);
++      return executeTaskRun({
+@@ -878 +959,2 @@ async function handleTaskWorker(argv) {
+-      }),
++      });
++    },
+@@ -937 +1019 @@ function handleTaskResumeCandidate(argv) {
 -  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
 +  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)));
-@@ -976 +1056,4 @@ async function handleCancel(argv) {
+@@ -976 +1058,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
-+    job.kind === "plan-review"
++    job.jobClass === "review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1070,3 @@ async function handleCancel(argv) {
-+  if (job.kind === "plan-review") {
+@@ -986,0 +1072,3 @@ async function handleCancel(argv) {
++  if (job.jobClass === "review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
+@@ -1023,0 +1112,22 @@ async function handleCancel(argv) {
++const REVIEW_OPERATIONS = new Set(["plan-review", "diff-review"]);
++const STORED_REVIEW_OPERATION_ERROR = "Stored review operation must be plan-review or diff-review.";
++const STORED_REVIEW_IDENTITY_ERROR = "Stored review identity must have matching kind, jobClass, and reviewOperation.";
++
++function normalizeReviewOperation(operation, diagnostic = "--reviewer must be plan-review or diff-review.") {
++  if (operation == null) {
++    return null;
++  }
++  if (!REVIEW_OPERATIONS.has(operation)) {
++    throw new Error(diagnostic);
++  }
++  return operation;
++}
++
++function validateStoredReviewIdentity(job, request) {
++  const operation = normalizeReviewOperation(request.reviewOperation, STORED_REVIEW_OPERATION_ERROR);
++  const isReview = operation !== null || job.jobClass === "review" || REVIEW_OPERATIONS.has(job.kind);
++  if (isReview && (job.jobClass !== "review" || job.kind !== operation)) {
++    throw new Error(STORED_REVIEW_IDENTITY_ERROR);
++  }
++}
++
 diff --git a/plugins/codex/scripts/lib/app-server.mjs b/plugins/codex/scripts/lib/app-server.mjs
 index 72b30a7..24dbf8f 100644
 --- a/plugins/codex/scripts/lib/app-server.mjs
@@ -1532,7 +1589,7 @@ index dd8fc37..34ab7c0 100644
 +  }
 +}
 diff --git a/plugins/codex/scripts/lib/render.mjs b/plugins/codex/scripts/lib/render.mjs
-index 2ec1852..76ae1db 100644
+index 2ec1852..996c678 100644
 --- a/plugins/codex/scripts/lib/render.mjs
 +++ b/plugins/codex/scripts/lib/render.mjs
 @@ -108,0 +109,12 @@ function formatCodexResumeCommand(job) {
@@ -1559,6 +1616,14 @@ index 2ec1852..76ae1db 100644
 +    lines.push(
 +      `  Overdue: ${job.overdueBy} past the recorded deadline ${job.deadlineAt}; the job is still ${job.status}. Cancel: /codex:cancel ${job.id}`
 +    );
++  }
+@@ -392,0 +413,7 @@ export function renderStoredJobResult(job, storedJob) {
++  if (
++    job.jobClass === "review" &&
++    (job.kind === "plan-review" || job.kind === "diff-review") &&
++    typeof storedJob?.result?.rawOutput === "string"
++  ) {
++    return `# ${job.title}\n\n${storedJob.result.rawOutput}`;
 +  }
 diff --git a/plugins/codex/scripts/lib/runtime-home.mjs b/plugins/codex/scripts/lib/runtime-home.mjs
 new file mode 100644
@@ -2056,7 +2121,7 @@ index 2da2349..29eb4f2 100644
 +}
 +
 diff --git a/plugins/codex/scripts/lib/tracked-jobs.mjs b/plugins/codex/scripts/lib/tracked-jobs.mjs
-index 9028690..923f864 100644
+index 9028690..1979459 100644
 --- a/plugins/codex/scripts/lib/tracked-jobs.mjs
 +++ b/plugins/codex/scripts/lib/tracked-jobs.mjs
 @@ -4 +4,12 @@ import process from "node:process";
@@ -2146,7 +2211,7 @@ index 9028690..923f864 100644
 +      // flip) reached the record first; keep what it wrote.
 +      return null;
 +    }
-+    if (current.kind === "plan-review") {
++    if (current.jobClass === "review") {
 +      // Cleanup precedes the terminal write: if this process dies between the
 +      // two, the record is still active and the next status read retries both.
 +      // The reverse order would leave a terminal record with a permanent leak
@@ -2171,7 +2236,7 @@ index 9028690..923f864 100644
 +  return reconciled ?? job;
 +}
 diff --git a/plugins/codex/scripts/session-lifecycle-hook.mjs b/plugins/codex/scripts/session-lifecycle-hook.mjs
-index 778571e..ba2b247 100644
+index 778571e..57684f4 100644
 --- a/plugins/codex/scripts/session-lifecycle-hook.mjs
 +++ b/plugins/codex/scripts/session-lifecycle-hook.mjs
 @@ -3,0 +4 @@ import fs from "node:fs";
@@ -2222,7 +2287,7 @@ index 778571e..ba2b247 100644
 +  // workspaceRoot: in the divergence case below they are different dirs, and the
 +  // runtime lives under this one. The `job.workspaceRoot` conjunct this
 +  // condition used to carry existed only because the path derived from it.
-+  if (job.kind === "plan-review") {
++  if (job.jobClass === "review") {
 +    cleanupReviewerRuntimeInStateDir(stateDir, job.id);
 @@ -47,4 +66,43 @@ function cleanupSessionJobs(cwd, sessionId) {
 -  const workspaceRoot = resolveWorkspaceRoot(cwd);
@@ -2333,7 +2398,7 @@ index 778571e..ba2b247 100644
 +        // session regardless of status, and a terminal record whose own cleanup
 +        // never completed (`withAppServer`'s `finally` can throw) would
 +        // otherwise keep its runtime dir forever now that the record survives.
-+        if (current.kind === "plan-review") {
++        if (current.jobClass === "review") {
 +          cleanupReviewerRuntimeInStateDir(stateDir, current.id);
 +        }
 +        continue;
@@ -3289,7 +3354,7 @@ index 0000000..c871991
 +  assert.equal(fs.existsSync(broker.sessionDir), false);
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
-index c34b060..9c9cc89 100644
+index c34b060..43bc066 100644
 --- a/tests/commands.test.mjs
 +++ b/tests/commands.test.mjs
 @@ -205 +205,27 @@ test("internal docs use task terminology for rescue runs", () => {
@@ -3303,18 +3368,18 @@ index c34b060..9c9cc89 100644
 +  assert.match(source, /elapsed or duration/);
 +});
 +
-+test("the reviewer bridge agent prescribes only bounded foreground calls", () => {
++test("the reviewer bridge validates and forwards one explicit operation envelope", () => {
 +  const agent = read("agents/codex-reviewer.md");
-+
-+  // The fixed sequence: enqueue on the runtime's detached background path,
-+  // bounded waits, failure marker.
-+  assert.match(agent, /task --fresh --reviewer --background --json/);
++  // Pin the ordered envelope and closed operation set.
++  assert.match(agent, /first two lines are exactly `WORKTREE_ROOT: <absolute path>` and `REVIEW_OPERATION: <operation>`/);
++  assert.match(agent, /exactly one `REVIEW_OPERATION:` declaration/);
++  assert.match(agent, /only accepted values are `plan-review` and `diff-review`/);
++  // Pin value forwarding, bounded waits, raw extraction, and failures.
++  assert.match(agent, /task --fresh --reviewer <operation> --background --json/);
 +  assert.match(agent, /--wait --timeout-ms 540000/);
++  assert.match(agent, /storedJob\?\.result\?\.rawOutput/);
 +  assert.match(agent, /CODEX_REVIEW_FAILURE:/);
-+
-+  // The twice-observed regression, pinned in both directions: the definition
-+  // must state the prohibition and must never re-prescribe harness
-+  // backgrounding or a completion-notification wait.
++  // Keep the foreground-only regression covered in both directions.
 +  assert.match(agent, /Never pass `run_in_background`/);
 +  assert.doesNotMatch(agent, /run_in_background:\s*true/);
 +  assert.doesNotMatch(agent, /completion notification/i);
@@ -3624,10 +3689,10 @@ index 0000000..3d8b555
 +});
 diff --git a/tests/liveness.test.mjs b/tests/liveness.test.mjs
 new file mode 100644
-index 0000000..beaa22c
+index 0000000..e400ea9
 --- /dev/null
 +++ b/tests/liveness.test.mjs
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,249 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -3840,43 +3905,68 @@ index 0000000..beaa22c
 +  assert.equal(payload.waitTimedOut, false);
 +});
 +
-+test("the dead-worker flip removes the reviewer runtime directory", async (t) => {
-+  const workspace = makeTempDir();
-+  const pid = await deadPid(t, workspace);
-+  const jobId = "reviewer-dead";
-+  const { jobFile } = seedJob(workspace, {
-+    id: jobId,
-+    kind: "plan-review",
-+    kindLabel: "review",
-+    title: "Isolated Plan Review",
-+    workspaceRoot: workspace,
-+    jobClass: "review",
-+    summary: "Review the proposed plan",
-+    write: false,
-+    createdAt: "2026-08-01T10:00:00.000Z",
-+    status: "running",
-+    startedAt: "2026-08-01T10:00:01.000Z",
-+    phase: "starting",
-+    pid,
-+    updatedAt: "2026-08-01T10:00:02.000Z"
++for (const operation of ["plan-review", "diff-review"]) {
++  test(`a dead ${operation} worker is failed without losing kind and its runtime is removed`, async (t) => {
++    const workspace = makeTempDir();
++    const pid = await deadPid(t, workspace);
++    const jobId = `reviewer-dead-${operation}`;
++    const { jobFile } = seedJob(workspace, {
++      id: jobId,
++      kind: operation,
++      kindLabel: operation,
++      title: operation === "plan-review" ? "Codex Plan Review" : "Codex Diff Review",
++      workspaceRoot: workspace,
++      jobClass: "review",
++      summary: "Review packet",
++      write: false,
++      createdAt: "2026-08-01T10:00:00.000Z",
++      status: "running",
++      startedAt: "2026-08-01T10:00:01.000Z",
++      phase: "starting",
++      pid,
++      updatedAt: "2026-08-01T10:00:02.000Z"
++    });
++    const runtimeHome = resolveReviewerRuntimeHome(workspace, jobId);
++    fs.mkdirSync(runtimeHome, { recursive: true });
++    fs.writeFileSync(path.join(runtimeHome, "config.toml"), 'model = "reviewer"\n', "utf8");
++
++    const result = run("node", [SCRIPT, "status", jobId, "--json"], { cwd: workspace });
++
++    assert.equal(result.status, 0, result.stderr);
++    const visible = JSON.parse(result.stdout).job;
++    const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
++    assert.equal(visible.status, "failed");
++    assert.equal(visible.kind, operation);
++    assert.equal(stored.status, "failed");
++    assert.equal(stored.kind, operation);
++    assert.equal(fs.existsSync(runtimeHome), false);
 +  });
-+  const runtimeHome = resolveReviewerRuntimeHome(workspace, jobId);
-+  fs.mkdirSync(runtimeHome, { recursive: true });
-+  fs.writeFileSync(path.join(runtimeHome, "config.toml"), 'model = "reviewer"\n', "utf8");
++}
+diff --git a/tests/render.test.mjs b/tests/render.test.mjs
+index ab68038..4217fce 100644
+--- a/tests/render.test.mjs
++++ b/tests/render.test.mjs
+@@ -59,0 +60,14 @@ test("renderStoredJobResult prefers rendered output for structured review jobs",
 +
-+  const result = run("node", [SCRIPT, "status", jobId, "--json"], { cwd: workspace });
-+
-+  assert.equal(result.status, 0, result.stderr);
-+  assert.equal(JSON.parse(result.stdout).job.status, "failed");
-+  assert.equal(JSON.parse(fs.readFileSync(jobFile, "utf8")).status, "failed");
-+  assert.equal(fs.existsSync(runtimeHome), false);
++test("transport review results identify the operation above unchanged raw output", () => {
++  for (const [kind, title] of [
++    ["plan-review", "Codex Plan Review"],
++    ["diff-review", "Codex Diff Review"]
++  ]) {
++    const rawOutput = "line one\nline two\n";
++    const output = renderStoredJobResult(
++      { id: `reviewer-${kind}`, kind, kindLabel: kind, status: "completed", title, jobClass: "review" },
++      { kind, jobClass: "review", result: { rawOutput } }
++    );
++    assert.equal(output, `# ${title}\n\n${rawOutput}`);
++  }
 +});
 diff --git a/tests/reviewer-detach.test.mjs b/tests/reviewer-detach.test.mjs
 new file mode 100644
-index 0000000..443512f
+index 0000000..5ba09d8
 --- /dev/null
 +++ b/tests/reviewer-detach.test.mjs
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,260 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -3886,6 +3976,7 @@ index 0000000..443512f
 +import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 +import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
++import { readJobFile, resolveJobFile, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env (via buildEnv), so pinning them here keeps every test in
@@ -3914,87 +4005,167 @@ index 0000000..443512f
 +  return canonicalHome;
 +}
 +
-+test("a background reviewer run survives its launcher and lands a verbatim durable result", async () => {
-+  const repo = makeReviewRepo();
-+  const binDir = makeTempDir();
-+  const canonicalHome = makeCanonicalHome();
-+  installFakeCodex(binDir, "slow-task");
-+  const env = { ...buildEnv(binDir), CODEX_HOME: canonicalHome };
++for (const operation of ["plan-review", "diff-review"]) {
++  test(`a background ${operation} survives its launcher and preserves operation identity`, async () => {
++    const repo = makeReviewRepo();
++    const binDir = makeTempDir();
++    const canonicalHome = makeCanonicalHome();
++    installFakeCodex(binDir, "slow-task");
++    const env = { ...buildEnv(binDir), CODEX_HOME: canonicalHome };
++    const title = operation === "plan-review" ? "Codex Plan Review" : "Codex Diff Review";
 +
-+  // Synchronous spawn: by the time `run` returns, the launcher process has
-+  // fully exited. Everything asserted after this line therefore happened under
-+  // the detached worker alone — completion is itself the survival proof, and
-+  // the queued (not completed) payload proves the enqueue returned before the
-+  // review ran. No stopwatch, no process-tree assertions.
-+  const launched = run("node", [SCRIPT, "task", "--fresh", "--reviewer", "--background", "--json"], {
-+    cwd: repo,
-+    env,
-+    input: "review the plan"
++    const launched = run(
++      "node",
++      [SCRIPT, "task", "--fresh", "--reviewer", operation, "--background", "--json"],
++      { cwd: repo, env, input: "review packet" }
++    );
++    assert.equal(launched.status, 0, launched.stderr);
++    const launch = JSON.parse(launched.stdout);
++    assert.equal(launch.status, "queued");
++    assert.equal(launch.kind, operation);
++    assert.equal(launch.title, title);
++    assert.match(launch.jobId, /^reviewer-/);
++
++    const waited = run(
++      "node",
++      [SCRIPT, "status", launch.jobId, "--wait", "--timeout-ms", "15000", "--json"],
++      { cwd: repo, env }
++    );
++    assert.equal(waited.status, 0, waited.stderr);
++    const statusJob = JSON.parse(waited.stdout).job;
++    assert.equal(statusJob.status, "completed");
++    assert.equal(statusJob.kind, operation);
++    assert.equal(statusJob.kindLabel, operation);
++    assert.equal(statusJob.jobClass, "review");
++    assert.equal(statusJob.title, title);
++
++    const collected = run("node", [SCRIPT, "result", launch.jobId, "--json"], { cwd: repo, env });
++    assert.equal(collected.status, 0, collected.stderr);
++    const result = JSON.parse(collected.stdout);
++    assert.equal(result.job.kind, operation);
++    assert.equal(result.storedJob.kind, operation);
++    assert.equal(result.storedJob.request.reviewOperation, operation);
++    assert.equal(result.storedJob.result.rawOutput, "Handled the requested task.\nTask prompt accepted.");
++
++    const human = run("node", [SCRIPT, "result", launch.jobId], { cwd: repo, env });
++    assert.equal(human.status, 0, human.stderr);
++    assert.ok(human.stdout.startsWith(`# ${title}\n\nHandled the requested task.\nTask prompt accepted.`), human.stdout);
++
++    const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
++    assert.equal(fakeState.lastThreadStart.sandbox, "read-only");
++    assert.equal(fakeState.lastCodexHome, resolveReviewerRuntimeHome(repo, launch.jobId));
++    assert.equal(fs.existsSync(fakeState.lastCodexHome), false);
++    assert.equal(fs.readFileSync(path.join(canonicalHome, "config.toml"), "utf8"), 'model = "canonical"\n');
 +  });
++}
 +
-+  assert.equal(launched.status, 0, launched.stderr);
-+  const launchPayload = JSON.parse(launched.stdout);
-+  assert.equal(launchPayload.status, "queued");
-+  assert.match(launchPayload.jobId, /^reviewer-/);
-+
-+  const waited = run(
-+    "node",
-+    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
-+    { cwd: repo, env }
-+  );
-+  assert.equal(waited.status, 0, waited.stderr);
-+  assert.equal(JSON.parse(waited.stdout).job.status, "completed");
-+
-+  // status --wait reported `completed`, so the record is terminal: one direct
-+  // `result` call must succeed — no retry loop.
-+  const collected = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], { cwd: repo, env });
-+  assert.equal(collected.status, 0, collected.stderr);
-+  const resultPayload = JSON.parse(collected.stdout);
-+  assert.equal(resultPayload.job.status, "completed");
-+  assert.equal(resultPayload.storedJob.kind, "plan-review");
-+  // Byte-for-byte: rawOutput is the reviewer's final message with no rendering,
-+  // no trailers — the field the bridge extracts and returns verbatim.
-+  assert.equal(resultPayload.storedJob.result.rawOutput, "Handled the requested task.\nTask prompt accepted.");
-+
-+  // Isolation held on the background path: the worker ran Codex in the per-job
-+  // reviewer runtime, read-only, and removed it on completion; the canonical
-+  // home was never touched.
-+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
-+  assert.equal(fakeState.lastThreadStart.sandbox, "read-only");
-+  assert.equal(fakeState.lastCodexHome, resolveReviewerRuntimeHome(repo, launchPayload.jobId));
-+  assert.equal(fs.existsSync(fakeState.lastCodexHome), false);
-+  assert.equal(fs.readFileSync(path.join(canonicalHome, "config.toml"), "utf8"), 'model = "canonical"\n');
-+});
-+
-+test("reviewer + write is still refused on the background path", () => {
-+  const repo = makeReviewRepo();
-+  const binDir = makeTempDir();
-+  installFakeCodex(binDir);
-+
-+  const result = run("node", [SCRIPT, "task", "--reviewer", "--write", "--background", "--json"], {
-+    cwd: repo,
-+    env: buildEnv(binDir),
-+    input: "review the plan"
-+  });
-+
-+  assert.notEqual(result.status, 0);
-+  assert.ok(result.stderr.includes(GUARD_MESSAGE), result.stderr);
-+});
-+
-+test("reviewer + resume is still refused on the background path", () => {
++test("reviewer operation is required and closed before launch", () => {
 +  const repo = makeReviewRepo();
 +  const binDir = makeTempDir();
 +  installFakeCodex(binDir);
 +
-+  const result = run("node", [SCRIPT, "task", "--reviewer", "--resume-last", "--background", "--json"], {
++  for (const args of [
++    [SCRIPT, "task", "--fresh", "--reviewer", "--background", "--json"],
++    [SCRIPT, "task", "--fresh", "--reviewer", "security-review", "--background", "--json"]
++  ]) {
++    const result = run("node", args, { cwd: repo, env: buildEnv(binDir), input: "review packet" });
++    assert.notEqual(result.status, 0, result.stdout);
++    assert.match(result.stderr, /--reviewer must be plan-review or diff-review\./);
++  }
++});
++
++function runCraftedReviewWorker({ jobId, kind, jobClass, reviewOperation }) {
++  const repo = makeReviewRepo();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const now = new Date().toISOString();
++  const request = {
 +    cwd: repo,
-+    env: buildEnv(binDir),
-+    input: "review the plan"
++    model: null,
++    effort: null,
++    prompt: "review packet",
++    write: false,
++    resumeLast: false,
++    timeoutMs: 5000,
++    jobId
++  };
++  if (reviewOperation !== undefined) request.reviewOperation = reviewOperation;
++  writeJobFile(repo, jobId, {
++    id: jobId,
++    kind,
++    kindLabel: kind,
++    title: "Codex Review",
++    workspaceRoot: repo,
++    jobClass,
++    summary: "Review packet",
++    write: false,
++    status: "queued",
++    phase: "queued",
++    createdAt: now,
++    updatedAt: now,
++    request
 +  });
 +
-+  assert.notEqual(result.status, 0);
-+  assert.ok(result.stderr.includes(GUARD_MESSAGE), result.stderr);
-+});
++  const worker = run("node", [SCRIPT, "task-worker", "--cwd", repo, "--job-id", jobId], {
++    cwd: repo,
++    env: buildEnv(binDir)
++  });
++  return {
++    worker,
++    stored: readJobFile(resolveJobFile(repo, jobId)),
++    executed: fs.existsSync(path.join(binDir, "fake-codex-state.json"))
++  };
++}
++
++for (const [name, record, diagnostic] of [
++  ["invalid operation", { kind: "diff-review", jobClass: "review", reviewOperation: "security-review" },
++    "Stored review operation must be plan-review or diff-review."],
++  ["missing operation", { kind: "plan-review", jobClass: "review", reviewOperation: undefined },
++    "Stored review identity must have matching kind, jobClass, and reviewOperation."],
++  ["inconsistent operation", { kind: "plan-review", jobClass: "review", reviewOperation: "diff-review" },
++    "Stored review identity must have matching kind, jobClass, and reviewOperation."]
++]) {
++  test(`task-worker rejects a crafted persisted review with ${name} before execution`, () => {
++    const result = runCraftedReviewWorker({ jobId: `reviewer-${name.replaceAll(" ", "-")}`, ...record });
++    assert.notEqual(result.worker.status, 0, result.worker.stdout);
++    assert.equal(result.stored.status, "failed");
++    assert.equal(result.stored.errorMessage, diagnostic);
++    assert.match(result.worker.stderr, new RegExp(diagnostic.replaceAll(".", "\\.")));
++    assert.equal(result.executed, false);
++  });
++}
++
++for (const operation of ["plan-review", "diff-review"]) {
++  test(`${operation} + write is still refused on the background path`, () => {
++    const repo = makeReviewRepo();
++    const binDir = makeTempDir();
++    installFakeCodex(binDir);
++
++    const result = run("node", [SCRIPT, "task", "--reviewer", operation, "--write", "--background", "--json"], {
++      cwd: repo,
++      env: buildEnv(binDir),
++      input: "review the plan"
++    });
++
++    assert.notEqual(result.status, 0);
++    assert.ok(result.stderr.includes(GUARD_MESSAGE), result.stderr);
++  });
++
++  test(`${operation} + resume is still refused on the background path`, () => {
++    const repo = makeReviewRepo();
++    const binDir = makeTempDir();
++    installFakeCodex(binDir);
++
++    const result = run(
++      "node",
++      [SCRIPT, "task", "--reviewer", operation, "--resume-last", "--background", "--json"],
++      { cwd: repo, env: buildEnv(binDir), input: "review the plan" }
++    );
++
++    assert.notEqual(result.status, 0);
++    assert.ok(result.stderr.includes(GUARD_MESSAGE), result.stderr);
++  });
++}
 +
 +test("the worker's internal timeout fails a background reviewer job and cleans its runtime", async () => {
 +  const repo = makeReviewRepo();
@@ -4008,7 +4179,7 @@ index 0000000..443512f
 +
 +  const launched = run(
 +    "node",
-+    [SCRIPT, "task", "--fresh", "--reviewer", "--background", "--timeout-ms", "1000", "--json"],
++    [SCRIPT, "task", "--fresh", "--reviewer", "plan-review", "--background", "--timeout-ms", "1000", "--json"],
 +    { cwd: repo, env, input: "review the plan" }
 +  );
 +  assert.equal(launched.status, 0, launched.stderr);
@@ -4026,8 +4197,38 @@ index 0000000..443512f
 +  assert.match(waitedPayload.job.errorMessage, /Codex job timed out after 1000ms\./);
 +  assert.equal(fs.existsSync(resolveReviewerRuntimeHome(repo, launchPayload.jobId)), false);
 +});
++
++for (const operation of ["plan-review", "diff-review"]) {
++  test(`cancelling ${operation} uses isolated review cleanup`, async () => {
++    const repo = makeReviewRepo();
++    const binDir = makeTempDir();
++    installFakeCodex(binDir, "interruptible-slow-task");
++    const env = buildEnv(binDir);
++    const launched = run(
++      "node",
++      [SCRIPT, "task", "--fresh", "--reviewer", operation, "--background", "--json"],
++      { cwd: repo, env, input: "review packet" }
++    );
++    assert.equal(launched.status, 0, launched.stderr);
++    const jobId = JSON.parse(launched.stdout).jobId;
++
++    const cancelled = run("node", [SCRIPT, "cancel", jobId, "--json"], { cwd: repo, env });
++    assert.equal(cancelled.status, 0, cancelled.stderr);
++    const cancelPayload = JSON.parse(cancelled.stdout);
++    assert.equal(cancelPayload.status, "cancelled");
++    assert.equal(cancelPayload.turnInterruptAttempted, false);
++    assert.equal("kind" in cancelPayload, false);
++
++    const collected = run("node", [SCRIPT, "result", jobId, "--json"], { cwd: repo, env });
++    assert.equal(collected.status, 0, collected.stderr);
++    const stored = JSON.parse(collected.stdout).storedJob;
++    assert.equal(stored.status, "cancelled");
++    assert.equal(stored.kind, operation);
++    assert.equal(fs.existsSync(resolveReviewerRuntimeHome(repo, jobId)), false);
++  });
++}
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
-index 8f27683..309c907 100644
+index 8f27683..692054c 100644
 --- a/tests/runtime.test.mjs
 +++ b/tests/runtime.test.mjs
 @@ -9 +9 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
@@ -4104,41 +4305,41 @@ index 8f27683..309c907 100644
 +  const [job] = listJobs(repo);
 +  const log = fs.readFileSync(job.logFile, "utf8");
 @@ -765,0 +798,74 @@ test("task --fresh is treated as routing control and does not leak into the prom
-+test("reviewer tasks run foreground in a fresh read-only runtime and clean it up", () => {
-+  const repo = makeTempDir();
-+  const binDir = makeTempDir();
-+  const canonicalHome = makeTempDir();
-+  const statePath = path.join(binDir, "fake-codex-state.json");
-+  installFakeCodex(binDir);
-+  initGitRepo(repo);
-+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
-+  run("git", ["add", "README.md"], { cwd: repo });
-+  run("git", ["commit", "-m", "init"], { cwd: repo });
-+  fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{}\n");
-+  fs.writeFileSync(path.join(canonicalHome, "config.toml"), "model = \"canonical\"\n");
++for (const operation of ["plan-review", "diff-review"]) {
++  test(`foreground ${operation} uses fresh read-only isolation`, () => {
++    const repo = makeTempDir();
++    const binDir = makeTempDir();
++    const canonicalHome = makeTempDir();
++    const statePath = path.join(binDir, "fake-codex-state.json");
++    installFakeCodex(binDir);
++    initGitRepo(repo);
++    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
++    run("git", ["add", "README.md"], { cwd: repo });
++    run("git", ["commit", "-m", "init"], { cwd: repo });
++    fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{}\n");
++    fs.writeFileSync(path.join(canonicalHome, "config.toml"), 'model = "canonical"\n');
 +
-+  const result = run(
-+    "node",
-+    [SCRIPT, "task", "--fresh", "--reviewer", "--timeout-ms", "5000", "--json", "review the plan"],
-+    {
-+      cwd: repo,
-+      env: { ...buildEnv(binDir), CODEX_HOME: canonicalHome }
-+    }
-+  );
++    const result = run(
++      "node",
++      [SCRIPT, "task", "--fresh", "--reviewer", operation, "--timeout-ms", "5000", "--json", "review packet"],
++      { cwd: repo, env: { ...buildEnv(binDir), CODEX_HOME: canonicalHome } }
++    );
 +
-+  assert.equal(result.status, 0, result.stderr);
-+  const [job] = listJobs(repo);
-+  assert.equal(job.kind, "plan-review");
-+  assert.equal(job.status, "completed");
-+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-+  assert.equal(fakeState.lastThreadStart.approvalPolicy, "never");
-+  assert.equal(fakeState.lastThreadStart.sandbox, "read-only");
-+  assert.equal(fakeState.lastThreadStart.ephemeral, true);
-+  assert.equal(fakeState.lastCodexHome, resolveReviewerRuntimeHome(repo, job.id));
-+  assert.notEqual(fakeState.lastCodexHome, canonicalHome);
-+  assert.equal(fs.existsSync(fakeState.lastCodexHome), false);
-+  assert.equal(fs.readFileSync(path.join(canonicalHome, "config.toml"), "utf8"), "model = \"canonical\"\n");
-+});
++    assert.equal(result.status, 0, result.stderr);
++    const [job] = listJobs(repo);
++    assert.equal(job.kind, operation);
++    assert.equal(job.kindLabel, operation);
++    assert.equal(job.jobClass, "review");
++    assert.equal(job.status, "completed");
++    const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
++    assert.equal(fakeState.lastThreadStart.approvalPolicy, "never");
++    assert.equal(fakeState.lastThreadStart.sandbox, "read-only");
++    assert.equal(fakeState.lastThreadStart.ephemeral, true);
++    assert.equal(fakeState.lastCodexHome, resolveReviewerRuntimeHome(repo, job.id));
++    assert.notEqual(fakeState.lastCodexHome, canonicalHome);
++    assert.equal(fs.existsSync(fakeState.lastCodexHome), false);
++  });
++}
 +
 +test("parallel reviewers in one worktree receive distinct mutable runtimes", async () => {
 +  const repo = makeTempDir();
@@ -4153,14 +4354,13 @@ index 8f27683..309c907 100644
 +  run("git", ["commit", "-m", "init"], { cwd: repo });
 +  fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{}\n");
 +  fs.writeFileSync(path.join(canonicalHome, "config.toml"), "model = \"canonical\"\n");
-+
-+  const args = [SCRIPT, "task", "--fresh", "--reviewer", "--timeout-ms", "5000", "--json", "review the plan"];
++  const args = (operation) => [SCRIPT, "task", "--fresh", "--reviewer", operation, "--timeout-ms", "5000", "--json", "review packet"];
 +  const [first, second] = await Promise.all([
-+    runChild(process.execPath, args, {
++    runChild(process.execPath, args("plan-review"), {
 +      cwd: repo,
 +      env: { ...buildEnv(firstBin), CODEX_HOME: canonicalHome }
 +    }),
-+    runChild(process.execPath, args, {
++    runChild(process.execPath, args("diff-review"), {
 +      cwd: repo,
 +      env: { ...buildEnv(secondBin), CODEX_HOME: canonicalHome }
 +    })
@@ -4168,8 +4368,9 @@ index 8f27683..309c907 100644
 +
 +  assert.equal(first.status, 0, first.stderr);
 +  assert.equal(second.status, 0, second.stderr);
-+  const jobs = listJobs(repo).filter((job) => job.kind === "plan-review");
++  const jobs = listJobs(repo).filter((job) => job.jobClass === "review");
 +  assert.equal(jobs.length, 2);
++  assert.deepEqual(new Set(jobs.map((job) => job.kind)), new Set(["plan-review", "diff-review"]));
 +  const firstState = JSON.parse(fs.readFileSync(path.join(firstBin, "fake-codex-state.json"), "utf8"));
 +  const secondState = JSON.parse(fs.readFileSync(path.join(secondBin, "fake-codex-state.json"), "utf8"));
 +  assert.notEqual(firstState.lastCodexHome, secondState.lastCodexHome);
@@ -4298,10 +4499,10 @@ index 0f8f57c..cafb91e 100644
 +    savedJobs.map((job) => job.id),
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
-index 0000000..05c264b
+index 0000000..1649fb3
 --- /dev/null
 +++ b/tests/worker-postmortem.test.mjs
-@@ -0,0 +1,857 @@
+@@ -0,0 +1,921 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -4703,6 +4904,9 @@ index 0000000..05c264b
 +    workspace,
 +    activeRecord(workspace, "reviewer-terminal-leak", null, sessionId, {
 +      kind: "plan-review",
++      kindLabel: "plan-review",
++      title: "Codex Plan Review",
++      jobClass: "review",
 +      status: "failed",
 +      phase: "failed",
 +      pid: null,
@@ -4724,6 +4928,59 @@ index 0000000..05c264b
 +  assert.equal(JSON.parse(fs.readFileSync(reviewerJobFile, "utf8")).status, "failed");
 +  assert.equal(fs.existsSync(reviewerRuntime), false, reviewerRuntime);
 +});
++
++for (const operation of ["plan-review", "diff-review"]) {
++  test(`SessionEnd shares live and terminal cleanup for ${operation}`, async (t) => {
++    const workspace = makeTempDir();
++    const sessionId = `sess-${operation}`;
++    const liveId = `reviewer-live-${operation}`;
++    const sleeper = spawnSleeper(t, workspace);
++    const liveRuntime = resolveReviewerRuntimeHome(workspace, liveId);
++    fs.mkdirSync(liveRuntime, { recursive: true });
++    const { jobFile: liveJobFile } = seedJob(
++      workspace,
++      activeRecord(workspace, liveId, sleeper.pid, sessionId, {
++        kind: operation,
++        kindLabel: operation,
++        title: operation === "plan-review" ? "Codex Plan Review" : "Codex Diff Review",
++        jobClass: "review"
++      })
++    );
++
++    const liveResult = runSessionEndHook(workspace, sessionId);
++    assert.equal(liveResult.status, 0, liveResult.stderr);
++    await waitFor(() => isPidGone(sleeper.pid));
++    const liveStored = JSON.parse(fs.readFileSync(liveJobFile, "utf8"));
++    assert.equal(liveStored.status, "cancelled");
++    assert.equal(liveStored.kind, operation);
++    assert.equal(fs.existsSync(liveRuntime), false);
++
++    const terminalId = `reviewer-terminal-${operation}`;
++    const terminalRuntime = resolveReviewerRuntimeHome(workspace, terminalId);
++    fs.mkdirSync(terminalRuntime, { recursive: true });
++    const { jobFile: terminalJobFile } = seedJob(
++      workspace,
++      activeRecord(workspace, terminalId, null, sessionId, {
++        kind: operation,
++        kindLabel: operation,
++        title: operation === "plan-review" ? "Codex Plan Review" : "Codex Diff Review",
++        jobClass: "review",
++        status: "failed",
++        phase: "failed",
++        pid: null,
++        completedAt: "2026-08-01T10:00:09.000Z",
++        errorMessage: DEAD_WORKER_MESSAGE(4242)
++      })
++    );
++
++    const terminalResult = runSessionEndHook(workspace, sessionId);
++    assert.equal(terminalResult.status, 0, terminalResult.stderr);
++    const terminalStored = JSON.parse(fs.readFileSync(terminalJobFile, "utf8"));
++    assert.equal(terminalStored.status, "failed");
++    assert.equal(terminalStored.kind, operation);
++    assert.equal(fs.existsSync(terminalRuntime), false);
++  });
++}
 +
 +test("session end applies the MAX_JOBS retention it used to get from deleting", () => {
 +  const workspace = makeTempDir();
@@ -4907,6 +5164,9 @@ index 0000000..05c264b
 +    stateWorkspace,
 +    activeRecord(movedWorkspace, "reviewer-divergent-terminal", null, sessionId, {
 +      kind: "plan-review",
++      kindLabel: "plan-review",
++      title: "Codex Plan Review",
++      jobClass: "review",
 +      status: "failed",
 +      phase: "failed",
 +      pid: null,
@@ -4919,7 +5179,10 @@ index 0000000..05c264b
 +  const { jobFile: activeJobFile } = seedJob(
 +    stateWorkspace,
 +    activeRecord(movedWorkspace, "reviewer-divergent-active", null, sessionId, {
-+      kind: "plan-review"
++      kind: "plan-review",
++      kindLabel: "plan-review",
++      title: "Codex Plan Review",
++      jobClass: "review"
 +    })
 +  );
 +
@@ -4945,17 +5208,19 @@ index 0000000..05c264b
 +  const jobsDir = path.join(resolveStateDir(repo), "jobs");
 +  const readRecord = (jobId) => JSON.parse(fs.readFileSync(path.join(jobsDir, `${jobId}.json`), "utf8"));
 +
-+  const reviewer = run("node", [SCRIPT, "task", "--fresh", "--reviewer", "--background", "--json"], {
-+    cwd: repo,
-+    env,
-+    input: "review the plan"
-+  });
-+  assert.equal(reviewer.status, 0, reviewer.stderr);
-+  const reviewerRecord = readRecord(JSON.parse(reviewer.stdout).jobId);
-+  // The reviewer default budget, exactly: enqueue time + 840000 ms. Basing the
-+  // deadline on the record's own createdAt is what makes this an exact delta
-+  // rather than a fuzzy window.
-+  assert.equal(Date.parse(reviewerRecord.deadlineAt) - Date.parse(reviewerRecord.createdAt), 840000);
++  for (const operation of ["plan-review", "diff-review"]) {
++    const reviewer = run(
++      "node",
++      [SCRIPT, "task", "--fresh", "--reviewer", operation, "--background", "--json"],
++      { cwd: repo, env, input: "review packet" }
++    );
++    assert.equal(reviewer.status, 0, reviewer.stderr);
++    const reviewerRecord = readRecord(JSON.parse(reviewer.stdout).jobId);
++    // The reviewer default budget, exactly: enqueue time + 840000 ms. Basing the
++    // deadline on the record's own createdAt is what makes this an exact delta
++    // rather than a fuzzy window.
++    assert.equal(Date.parse(reviewerRecord.deadlineAt) - Date.parse(reviewerRecord.createdAt), 840000);
++  }
 +
 +  const explicit = run(
 +    "node",

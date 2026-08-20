@@ -4,7 +4,8 @@ Read this when running `diff-review` — the correctness axis of the two-axis di
 review (the sdd skill defines the axes and owns dispatching the parallel native
 conformance axis — that axis never comes through this skill). SKILL.md owns the
 shared runtime contract: resolve policy, capability pre-flight, packet by paths,
-`WORKTREE_ROOT:` first line, one foreground `codex:codex-reviewer` dispatch,
+exact ordered first lines `WORKTREE_ROOT: <absolute path>` then
+`REVIEW_OPERATION: diff-review`, one foreground `codex:codex-reviewer` dispatch,
 validation, one-time native `reviewer` fallback on a real Codex failure, never a
 retry, concurrency never a fallback reason. The axis is never skipped. This
 operation adds one pre-flight of its own — the size pre-flight below — which runs

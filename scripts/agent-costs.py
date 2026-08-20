@@ -9,8 +9,9 @@ Two counting rules are load-bearing (see the transcript-mining report):
   * Assistant records are written once per content block and every copy repeats
     the same message.usage. Usage is deduped by message.id; summing naively
     over-counts tokens ~2.5x.
-  * Subagent transcripts hold ~64% of all tokens. They are attributed to the
-    root session that spawned them.
+  * Subagent transcripts hold ~64% of all tokens. Proven issue-owner transcripts
+    follow their agreeing issue worktree; rooted helper, reviewer, ambiguous,
+    and other non-owner transcripts remain overhead of the root session.
 
 Interpretation note — this is comparative telemetry, NOT billing data. The
 dominant token bucket, cache reads, measures logical context processing: every
@@ -60,6 +61,10 @@ COUNTER_FIELDS = ("models", "efforts", "stop_reasons", "phase_turns", "attr_turn
 LIST_FIELDS = ("agent_prompt_bytes", "agent_result_bytes")
 
 ISSUE_RE = re.compile(r"(?:^|[-/])(?:worktree-)?issue-(\d+)")
+ISSUE_WORKTREE_RE = re.compile(
+    r"(?:^|/)\.claude/worktrees/(?:worktree-)?issue-([1-9][0-9]*)-[^/]+(?:/|$)"
+)
+OWNER_AGENT_RE = re.compile(r"^aissue-([1-9][0-9]*)-owner-([1-9][0-9]*)-(.+)$")
 MULTI_ISSUE = "*"  # root session that roamed across several issue worktrees
 HOME = os.path.expanduser("~")
 
@@ -105,6 +110,28 @@ def classify_outcome(final_text):
     return "abandoned"
 
 
+def review_operation_from_envelope(rec):
+    """Return the operation from an exact sidechain root transport envelope."""
+    if (rec.get("type") != "user" or rec.get("isSidechain") is not True
+            or "parentUuid" not in rec or rec.get("parentUuid") is not None):
+        return None
+    content = (rec.get("message") or {}).get("content")
+    if not isinstance(content, str):
+        return None
+    lines = content.splitlines()
+    if len(lines) < 2 or not lines[0].startswith("WORKTREE_ROOT: "):
+        return None
+    if not os.path.isabs(lines[0][len("WORKTREE_ROOT: "):]):
+        return None
+    prefix = "REVIEW_OPERATION: "
+    if not lines[1].startswith(prefix):
+        return None
+    if sum(line.startswith(prefix) for line in lines) != 1:
+        return None
+    operation = lines[1][len(prefix):]
+    return operation if operation in ("plan-review", "diff-review") else None
+
+
 def scan_file(path):
     """Parse one transcript. Returns per-file usage, cost, turns, skills, cwds,
     plus the extended telemetry fields (models, efforts, agents, phases, ...)."""
@@ -120,7 +147,7 @@ def scan_file(path):
     efforts = Counter()
     stop_reasons = Counter()
     phase_turns = Counter()
-    attr_turns = Counter()
+    raw_attr_turns = Counter()
     agents_by_type = Counter()
     agent_statuses = Counter()
     agent_prompt_bytes = []
@@ -130,6 +157,9 @@ def scan_file(path):
     peak_ctx = 0
     current_phase = None
     final_text = ""
+    agent_ids = set()
+    review_operation = None
+    initial_record_pending = True
 
     try:
         fh = open(path, "r", errors="replace")
@@ -138,12 +168,18 @@ def scan_file(path):
     with fh:
         for line in fh:
             # Cheap prefilter. Assistant records carry usage and tool_use; user
-            # records matter only when short (a possible "proceed" nudge) or when
-            # they carry an Agent result; system records only for agents_killed.
-            if '"type":"assistant"' in line:
+            # records matter only when short (a possible "proceed" nudge), when
+            # they carry an Agent result, or when they carry the exact review
+            # envelope marker; system records only for agents_killed. The first
+            # valid JSON record is always parsed because only it may be envelope
+            # evidence.
+            if initial_record_pending:
+                pass
+            elif '"type":"assistant"' in line:
                 pass
             elif '"type":"user"' in line:
-                if '"agentType"' not in line and len(line) > 4096:
+                if ('"agentType"' not in line and "REVIEW_OPERATION:" not in line
+                        and len(line) > 4096):
                     continue
             elif '"type":"system"' in line:
                 if '"subtype":"agents_killed"' not in line:
@@ -154,7 +190,12 @@ def scan_file(path):
                 rec = json.loads(line)
             except ValueError:
                 continue
+            is_initial_record = initial_record_pending
+            initial_record_pending = False
             rtype = rec.get("type")
+            agent_id = rec.get("agentId")
+            if agent_id:
+                agent_ids.add(str(agent_id))
 
             if rtype == "system":
                 if rec.get("subtype") == "agents_killed":
@@ -164,6 +205,8 @@ def scan_file(path):
             if rtype == "user":
                 msg = rec.get("message") or {}
                 content = msg.get("content")
+                if is_initial_record:
+                    review_operation = review_operation_from_envelope(rec)
                 tur = rec.get("toolUseResult")
                 if isinstance(tur, dict) and "agentType" in tur:
                     # An Agent subagent's result. Dedup by the tool_result id.
@@ -264,7 +307,7 @@ def scan_file(path):
                 stop_reasons[str(sreason)] += 1
             askill = rec.get("attributionSkill")
             if askill:
-                attr_turns[str(askill)] += 1
+                raw_attr_turns[str(askill)] += 1
             if current_phase is not None:
                 phase_turns[current_phase] += 1
 
@@ -291,6 +334,12 @@ def scan_file(path):
                 f_in * p_in + c_out * p_out + cw_1h * p_1h + cw_5m * p_5m + c_read * p_read
             ) / 1e6
 
+    attr_turns = Counter()
+    for skill, count in raw_attr_turns.items():
+        if skill == "codex-collaboration" and review_operation:
+            skill = f"{skill}/{review_operation}"
+        attr_turns[skill] += count
+
     return {
         "fresh": fresh,
         "cache_create": cache_create,
@@ -313,7 +362,48 @@ def scan_file(path):
         "interventions": interventions,
         "peak_ctx": peak_ctx,
         "final_text": final_text,
+        "agent_id": next(iter(agent_ids)) if len(agent_ids) == 1 else None,
+        "review_operation": review_operation,
     }
+
+
+def owner_issue(result):
+    """Return an issue only for an owner identity with agreeing cwd evidence."""
+    match = OWNER_AGENT_RE.fullmatch(result.get("agent_id") or "")
+    if not match:
+        return None
+    cwd_issues = {
+        cwd_match.group(1)
+        for cwd in result.get("cwds", {})
+        for cwd_match in ISSUE_WORKTREE_RE.finditer(cwd)
+    }
+    if len(cwd_issues) != 1:
+        return None
+    issue = next(iter(cwd_issues))
+    return issue if issue == match.group(1) else None
+
+
+def scan_paths(paths, executor_factory=ProcessPoolExecutor):
+    """Scan in order, falling back all-or-nothing when a process pool fails."""
+    paths = list(paths)
+    try:
+        with executor_factory(max_workers=os.cpu_count() or 4) as pool:
+            return list(pool.map(scan_file, paths, chunksize=8))
+    except Exception as error:
+        print(
+            f"Process pool unavailable ({type(error).__name__}); scanning sequentially.",
+            file=sys.stderr,
+        )
+    return [scan_file(path) for path in paths]
+
+
+def fold_scan_totals(results):
+    """Fold additive global fields once, preserving raw scan-result order."""
+    totals = dict.fromkeys(SUM_FIELDS, 0)
+    for result in results:
+        for field in SUM_FIELDS:
+            totals[field] += result[field]
+    return totals
 
 
 def find_sessions(root, cutoff):
@@ -466,6 +556,71 @@ def group_outcome(g):
     return "abandoned"
 
 
+def build_groups(sessions, per_session, project_filter=None):
+    """Partition ordered scan results into one destination per transcript."""
+    groups = {}
+    retained_results = []
+    kept_sessions = kept_files = 0
+
+    for idx, (dir_name, _root_files, _sub_files) in enumerate(sessions):
+        entries = per_session.get(idx)
+        if not entries:
+            continue
+
+        root_cwds = Counter()
+        for is_root, result in entries:
+            if is_root:
+                root_cwds.update(result["cwds"])
+        project = project_name(dir_name, root_cwds)
+        if project_filter and project_filter.lower() not in project.lower():
+            continue
+
+        attributed = [
+            (is_root, result, None if is_root else owner_issue(result))
+            for is_root, result in entries
+        ]
+        owner_issues = {issue for _is_root, _result, issue in attributed if issue}
+        root_issue = (
+            MULTI_ISSUE if len(owner_issues) >= 2 else issue_key(dir_name, root_cwds)
+        )
+        root_key = (project, root_issue)
+        root_group = groups.setdefault(root_key, new_group())
+        root_group["sessions"] += 1
+
+        session_skills = defaultdict(Counter)
+        for is_root, result, issue in attributed:
+            destination = root_key if is_root or issue is None else (project, issue)
+            group = groups.setdefault(destination, new_group())
+            retained_results.append(result)
+
+            for field in SUM_FIELDS:
+                group[field] += result[field]
+            for field in COUNTER_FIELDS:
+                group[field].update(result[field])
+            for field in LIST_FIELDS:
+                group[field].extend(result[field])
+            group["agents_killed"] += result["agents_killed"]
+            group["peak_ctx"] = max(group["peak_ctx"], result["peak_ctx"])
+            if is_root:
+                group["interventions"] += result["interventions"]
+                if result["final_text"]:
+                    group["outcomes"].append(classify_outcome(result["final_text"]))
+            else:
+                group["subagents"] += 1
+            session_skills[destination].update(result["skills"])
+
+        for destination, skills in session_skills.items():
+            loads = sum(skills.values())
+            group = groups[destination]
+            group["skill_loads"] += loads
+            group["repeats"] += loads - len(skills)
+
+        kept_sessions += 1
+        kept_files += len(entries)
+
+    return groups, retained_results, kept_sessions, kept_files
+
+
 def artifact_stats(paths):
     """Filesystem pass over spec/plan markdown artifacts.
 
@@ -545,7 +700,7 @@ def print_artifact_stats(per_class):
         )
 
 
-def main():
+def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=35, help="window in days by file mtime (0 = all)")
     ap.add_argument("--project", help="only projects whose name contains this substring")
@@ -563,7 +718,7 @@ def main():
         help="also analyze spec/plan markdown under PATH (repeatable): bytes, "
              "fenced-code share, decision-ledger share",
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     root = Path(args.projects_dir)
     if not root.is_dir():
@@ -580,52 +735,15 @@ def main():
     if not jobs:
         sys.exit("no transcripts in window")
 
+    results = scan_paths([path for _idx, _is_root, path in jobs], executor_factory)
     per_session = defaultdict(list)
-    with ProcessPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
-        results = pool.map(scan_file, [f for _, _, f in jobs], chunksize=8)
-        for (idx, is_root, _), result in zip(jobs, results):
-            if result:
-                per_session[idx].append((is_root, result))
+    for (idx, is_root, _path), result in zip(jobs, results):
+        if result:
+            per_session[idx].append((is_root, result))
 
-    groups = {}
-    kept_sessions = kept_files = 0
-    for idx, (dir_name, _root_files, sub_files) in enumerate(sessions):
-        entries = per_session.get(idx)
-        if not entries:
-            continue
-        root_cwds = Counter()
-        for is_root, r in entries:
-            if is_root:
-                root_cwds.update(r["cwds"])
-        project = project_name(dir_name, root_cwds)
-        if args.project and args.project.lower() not in project.lower():
-            continue
-        kept_sessions += 1
-        kept_files += len(entries)
-        issue = issue_key(dir_name, root_cwds)
-        g = groups.setdefault((project, issue), new_group())
-        g["sessions"] += 1
-        g["subagents"] += len(sub_files)
-        session_skills = Counter()
-        for is_root, r in entries:
-            for field in SUM_FIELDS:
-                g[field] += r[field]
-            for field in COUNTER_FIELDS:
-                g[field].update(r[field])
-            for field in LIST_FIELDS:
-                g[field].extend(r[field])
-            g["agents_killed"] += r["agents_killed"]
-            if r["peak_ctx"] > g["peak_ctx"]:
-                g["peak_ctx"] = r["peak_ctx"]
-            if is_root:
-                g["interventions"] += r["interventions"]
-                if r["final_text"]:
-                    g["outcomes"].append(classify_outcome(r["final_text"]))
-            session_skills.update(r["skills"])
-        loads = sum(session_skills.values())
-        g["skill_loads"] += loads
-        # A repeat is a load of a skill this root session had already loaded.
-        g["repeats"] += loads - len(session_skills)
+    groups, retained_results, kept_sessions, kept_files = build_groups(
+        sessions, per_session, args.project
+    )
 
     if not groups:
         sys.exit("no sessions matched the filters")
@@ -662,10 +780,9 @@ def main():
         ["l", "l", "r", "r", "r", "r", "r", "r", "r"],
     )
 
-    tot = {
-        k: sum(g[k] for g in groups.values())
-        for k in SUM_FIELDS + ("subagents", "skill_loads", "repeats")
-    }
+    tot = fold_scan_totals(retained_results)
+    for field in ("subagents", "skill_loads", "repeats"):
+        tot[field] = sum(group[field] for group in groups.values())
     if len(ordered) > args.top:
         print(f"\n... {len(ordered) - args.top} more groups not shown (--top {len(ordered)} for all)")
     print(

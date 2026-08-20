@@ -1,36 +1,36 @@
-"""Offline tests for scripts/agent-costs.py against tiny synthetic transcripts.
+# Task 2: Attribute Transcript Telemetry and Add Ordered Pool Fallback
 
-Covers the load-bearing counting rules (message-ID usage dedup, the tool-use-ID
-and tool-result-ID guards), token accounting, model/effort extraction, peak
-per-turn context, outcome derivation, the proceed-nudge matcher, and the
-artifact pass. Runs entirely offline: fixtures are built in a temp dir.
+**Files:**
+- Modify: `scripts/agent-costs.py`
+- Modify: `tests/test_agent_costs.py`
 
-Run: python3 -m unittest -v tests/test_agent_costs.py
-"""
+**Interfaces:**
+- Consumes: the ordered `(session_index, is_root, transcript_path)` jobs from `find_sessions`; top-level transcript `agentId`, assistant `cwd`, initial sidechain user envelope, and existing `attributionSkill`; existing additive scan-result fields and report tables.
+- Produces: `scan_paths(paths, executor_factory=ProcessPoolExecutor) -> list[dict | None]`, preserving input order and performing all-or-nothing sequential fallback with one stderr line; injected executors make the successful and fallback paths deterministic under test (D8).
+- Produces: `owner_issue(result) -> str | None`, returning an issue only when one owner-shaped `agent_id` agrees with exactly one own-cwd issue.
+- Produces: `fold_scan_totals(results) -> dict`, folding `SUM_FIELDS` once in supplied order for global tokens/turns/cost.
+- Produces: `build_groups(sessions, per_session, project_filter=None) -> (groups, retained_results, kept_sessions, kept_files)`, partitioning already-scanned results without rescanning or duplication.
+- Produces: `main(argv=None, *, executor_factory=ProcessPoolExecutor)`, keeping the CLI unchanged while allowing focused injected-executor tests.
+- Produces in each scan result: `agent_id: str | None` and `review_operation: "plan-review" | "diff-review" | None`; qualifying assistant turns remain in existing `attr_turns` under `codex-collaboration/<operation>`.
 
-import contextlib
-import importlib.util
-import io
-import json
-import tempfile
-import unittest
-from pathlib import Path
-from unittest import mock
+**Invariants:**
+- Every non-`None` scan result has one destination. Proven owner transcripts move all additive/counter/list/peak fields together to their issue; root and every other transcript remain in the root group (D3).
+- Owner identity must full-match `^aissue-([1-9][0-9]*)-owner-([1-9][0-9]*)-(.+)$`; cwd evidence must contain exactly one issue number and equal the identity number (D3).
+- Each non-root transcript increments `subagents` only in its destination. Session count, root outcome, and intervention semantics remain in the root group (D3).
+- Two or more distinct proven owner issue numbers force only the root group to `(multi-issue)`; zero/one owner retains the existing root directory/cwd issue resolution (D3).
+- The initial operation envelope must be a sidechain root user record with `parentUuid: null`, first line `WORKTREE_ROOT: <absolute path>`, and second line exactly `REVIEW_OPERATION: plan-review` or `REVIEW_OPERATION: diff-review`. No other word occurrence qualifies attribution (D4).
+- The cheap user-record prefilter admits a large valid envelope. It does not widen ordinary long-user scanning beyond the exact envelope marker (D4).
+- Parallel values are fully materialized inside the protected boundary. A construction, map, iteration, or context-manager teardown exception discards the attempt and sequentially scans every path once in original order; sequential errors propagate (D5).
+- Global `fresh`, `cache_create`, `cache_read`, `output`, `turns`, and `cost` are folded directly from retained raw results in stable order before group partitioning (D5).
+- The successful-executor and forced-fallback report bytes are identical, the successful executor emits no stderr, and the six-transcript fixture's raw cost matches literal `0.0113625` to 12 decimal places before group totals are compared (D8).
+- The module counting-rule prose describes the live partition: proven issue-owner transcripts follow their issue worktree, while rooted helper/reviewer overhead remains with root (D8).
+- Pricing, model mapping, report headings/layout, and root-overhead cost policy remain unchanged.
 
-REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "agent-costs.py"
+- [ ] **Step 1: Write scanner-evidence and fallback tests**
 
-_spec = importlib.util.spec_from_file_location("agent_costs", SCRIPT)
-agent_costs = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(agent_costs)
+Replace the `assistant` helper in `tests/test_agent_costs.py` with this exact production-shaped extension, then add `envelope_user`:
 
-
-def record(rec):
-    """Compact JSON line, matching the real transcripts' non-spaced encoding
-    (scan_file's prefilter looks for '"type":"assistant"' without spaces)."""
-    return json.dumps(rec, separators=(",", ":")) + "\n"
-
-
+```python
 def assistant(msg_id, usage=None, content=None, model="claude-opus-5",
               effort="xhigh", stop_reason="tool_use", cwd="/Users/me/repo",
               agent_id=None, attribution_skill=None, sidechain=False):
@@ -67,147 +67,18 @@ def envelope_user(agent_id, cwd, operation, *, packet="review packet", parent_uu
             ),
         },
     })
+```
 
+Add these complete scanner contracts to `ScanFileTest`:
 
-USAGE_1 = {"input_tokens": 10, "output_tokens": 20,
-           "cache_read_input_tokens": 100, "cache_creation_input_tokens": 5}
-USAGE_2 = {"input_tokens": 1, "output_tokens": 2,
-           "cache_read_input_tokens": 300, "cache_creation_input_tokens": 0}
-
-
-class ScanFileTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.dir = Path(self.tmp.name)
-
-    def write(self, name, lines):
-        p = self.dir / name
-        p.write_text("".join(lines))
-        return p
-
-    def scan(self, lines):
-        return agent_costs.scan_file(self.write("t.jsonl", lines))
-
-    def test_usage_deduped_by_message_id(self):
-        # The same message written twice (one record per content block) must
-        # count its usage exactly once.
-        skill_block = {"type": "tool_use", "id": "toolu_1",
-                       "name": "Skill", "input": {"skill": "sdd"}}
-        lines = [
-            assistant("msg_1", usage=USAGE_1, content=[skill_block]),
-            assistant("msg_1", usage=USAGE_1, content=[{"type": "text", "text": "hi"}]),
-            assistant("msg_2", usage=USAGE_2),
-        ]
-        r = self.scan(lines)
-        self.assertEqual(r["turns"], 2)
-        self.assertEqual(r["fresh"], 11)
-        self.assertEqual(r["output"], 22)
-        self.assertEqual(r["cache_read"], 400)
-        self.assertEqual(r["cache_create"], 5)
-
-    def test_tool_use_id_guard(self):
-        # A replayed tool_use block (same block id) must not double-count the
-        # Skill load or the Agent launch.
-        skill_block = {"type": "tool_use", "id": "toolu_s",
-                       "name": "Skill", "input": {"skill": "from-issue"}}
-        agent_block = {"type": "tool_use", "id": "toolu_a", "name": "Agent",
-                       "input": {"subagent_type": "implementer", "prompt": "x" * 120}}
-        lines = [
-            assistant("msg_1", usage=USAGE_1, content=[skill_block, agent_block]),
-            # duplicate record of the same message repeating both blocks
-            assistant("msg_1", usage=USAGE_1, content=[skill_block, agent_block]),
-        ]
-        r = self.scan(lines)
-        self.assertEqual(r["skills"], {"from-issue": 1})
-        self.assertEqual(r["agents_by_type"], {"implementer": 1})
-        self.assertEqual(r["agent_prompt_bytes"], [120])
-
-    def test_tool_result_id_guard_and_result_bytes(self):
-        result_line = record({
-            "type": "user",
-            "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "toolu_a", "content": "done"},
-            ]},
-            "toolUseResult": {"agentType": "reviewer", "status": "completed",
-                              "content": "y" * 200},
-        })
-        r = self.scan([result_line, result_line])  # exact replay
-        self.assertEqual(r["agent_statuses"], {"completed": 1})
-        self.assertEqual(r["agent_result_bytes"], [200])
-
-    def test_model_effort_stop_reason_extraction(self):
-        lines = [
-            assistant("m1", usage=USAGE_1, model="claude-opus-5", effort="xhigh",
-                      stop_reason="tool_use"),
-            assistant("m2", usage=USAGE_2, model="claude-sonnet-5", effort="high",
-                      stop_reason="end_turn"),
-        ]
-        r = self.scan(lines)
-        self.assertEqual(r["models"], {"claude-opus-5": 1, "claude-sonnet-5": 1})
-        self.assertEqual(r["efforts"], {"xhigh": 1, "high": 1})
-        self.assertEqual(r["stop_reasons"], {"tool_use": 1, "end_turn": 1})
-
-    def test_peak_context_is_max_single_turn_footprint(self):
-        lines = [
-            assistant("m1", usage=USAGE_1),  # 10 + 100 + 5 = 115
-            assistant("m2", usage=USAGE_2),  # 1 + 300 + 0 = 301
-        ]
-        r = self.scan(lines)
-        self.assertEqual(r["peak_ctx"], 301)
-
-    def test_cost_uses_model_family_pricing(self):
-        lines = [assistant("m1", usage=USAGE_1, model="claude-sonnet-5")]
-        r = self.scan(lines)
-        # sonnet: in 3.0, out 15.0, cache_write_5m 3.75, cache_read 0.30 per Mtok
-        expected = (10 * 3.0 + 20 * 15.0 + 5 * 3.75 + 100 * 0.30) / 1e6
-        self.assertAlmostEqual(r["cost"], expected, places=12)
-
-    def test_proceed_nudges_counted_and_bounded(self):
-        def user(text, sidechain=False):
-            return record({"type": "user", "isSidechain": sidechain,
-                           "message": {"role": "user", "content": text}})
-        lines = [
-            user("proceed"),
-            user("ok, continue"),
-            user("sorry proceed"),
-            user("yes, lets do the handoff"),   # instruction, not a nudge
-            user("proceed", sidechain=True),    # sidechain records don't count
-            user("what are the issue numbers"),
-        ]
-        r = self.scan(lines)
-        self.assertEqual(r["interventions"], 3)
-
-    def test_phase_marker_turn_attribution(self):
-        lines = [
-            assistant("m1", usage=USAGE_1,
-                      content=[{"type": "text", "text": "Starting Phase 0 now"}]),
-            assistant("m2", usage=USAGE_2),
-            assistant("m3", usage=USAGE_1 | {"input_tokens": 7},
-                      content=[{"type": "text", "text": "## Phase 5 — review"}]),
-        ]
-        r = self.scan(lines)
-        self.assertEqual(r["phase_turns"], {"0": 2, "5": 1})
-
-    def test_agents_killed_and_final_text(self):
-        lines = [
-            assistant("m1", usage=USAGE_1,
-                      content=[{"type": "text", "text": "PR merged, issue closed."}]),
-            record({"type": "system", "subtype": "agents_killed"}),
-        ]
-        r = self.scan(lines)
-        self.assertEqual(r["agents_killed"], 1)
-        self.assertIn("merged", r["final_text"])
-
+```python
     def test_owner_identity_and_own_cwd_evidence_must_agree(self):
         issue_7 = "/Users/me/repo/.claude/worktrees/worktree-issue-7-widget"
         issue_8 = "/Users/me/repo/.claude/worktrees/worktree-issue-8-other"
         cases = [
             ("aissue-7-owner-2-deadbeef", [issue_7], "7"),
-            ("aissue-7-owner-2-deadbeef", [f"{issue_7}/scripts"], "7"),
             ("aissue-7-owner-2-deadbeef", [issue_8], None),
             ("aissue-7-owner-2-deadbeef", [issue_7, issue_8], None),
-            ("aissue-7-owner-2-deadbeef", ["/tmp/issue-7-not-a-worktree"], None),
             ("areviewer-7-deadbeef", [issue_7], None),
             ("aissue-7-owner-0-deadbeef", [issue_7], None),
         ]
@@ -247,13 +118,6 @@ class ScanFileTest(unittest.TestCase):
             }),
             envelope_user("ahelper", cwd, "plan-review", parent_uuid="not-root"),
             record({
-                "type": "user", "isSidechain": True, "agentId": "ahelper", "cwd": cwd,
-                "message": {
-                    "role": "user",
-                    "content": f"WORKTREE_ROOT: {cwd}\nREVIEW_OPERATION: diff-review\npacket",
-                },
-            }),
-            record({
                 "type": "user", "isSidechain": True, "agentId": "ahelper", "parentUuid": None,
                 "message": {"role": "user", "content": f"REVIEW_OPERATION: plan-review\nWORKTREE_ROOT: {cwd}\npacket"},
             }),
@@ -269,40 +133,11 @@ class ScanFileTest(unittest.TestCase):
                 ])
                 self.assertIsNone(result["review_operation"])
                 self.assertEqual(result["attr_turns"], {"codex-collaboration": 1})
+```
 
-    def test_only_one_declaration_in_the_initial_envelope_is_evidence(self):
-        cwd = "/Users/me/repo/.claude/worktrees/worktree-issue-7-widget"
-        initial_prose = record({
-            "type": "user", "isSidechain": True, "agentId": "ahelper", "parentUuid": None,
-            "message": {"role": "user", "content": "Review this packet."},
-        })
-        later_envelope = self.scan([
-            initial_prose,
-            envelope_user("ahelper", cwd, "plan-review"),
-            assistant(
-                "m1", usage=USAGE_1, cwd=cwd, agent_id="ahelper",
-                attribution_skill="codex-collaboration", sidechain=True,
-            ),
-        ])
-        self.assertIsNone(later_envelope["review_operation"])
-        self.assertEqual(later_envelope["attr_turns"], {"codex-collaboration": 1})
+Add `import contextlib`, `import io`, and `from unittest import mock`, then add `ExecutorFallbackTest`; no external dependency is allowed.
 
-        for extra_operation in ("diff-review", "plan-review"):
-            with self.subTest(extra_operation=extra_operation):
-                duplicate = self.scan([
-                    envelope_user(
-                        "ahelper", cwd, "diff-review",
-                        packet=f"REVIEW_OPERATION: {extra_operation}\nreview packet",
-                    ),
-                    assistant(
-                        "m1", usage=USAGE_1, cwd=cwd, agent_id="ahelper",
-                        attribution_skill="codex-collaboration", sidechain=True,
-                    ),
-                ])
-                self.assertIsNone(duplicate["review_operation"])
-                self.assertEqual(duplicate["attr_turns"], {"codex-collaboration": 1})
-
-
+```python
 class ExecutorFallbackTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -314,24 +149,15 @@ class ExecutorFallbackTest(unittest.TestCase):
             self.paths.append(path)
 
     def assert_fallback(self, executor_factory, exception_name):
-        original_scan = agent_costs.scan_file
-        scanned = []
-
-        def recording_scan(path):
-            scanned.append(path)
-            return original_scan(path)
-
         stderr = io.StringIO()
-        with mock.patch.object(agent_costs, "scan_file", side_effect=recording_scan):
-            with contextlib.redirect_stderr(stderr):
-                actual = agent_costs.scan_paths(self.paths, executor_factory=executor_factory)
-        expected = [original_scan(path) for path in self.paths]
+        with contextlib.redirect_stderr(stderr):
+            actual = agent_costs.scan_paths(self.paths, executor_factory=executor_factory)
+        expected = [agent_costs.scan_file(path) for path in self.paths]
         self.assertEqual(actual, expected)
         self.assertEqual(
             stderr.getvalue(),
             f"Process pool unavailable ({exception_name}); scanning sequentially.\n",
         )
-        return scanned
 
     def test_pool_construction_failure_falls_back_in_order(self):
         class ConstructionFailure:
@@ -361,26 +187,7 @@ class ExecutorFallbackTest(unittest.TestCase):
 
                 return values()
 
-        scanned = self.assert_fallback(IterationFailure, "RuntimeError")
-        self.assertEqual(scanned, [self.paths[0]] + self.paths)
-
-    def test_teardown_failure_discards_complete_mapping_and_rescans_all(self):
-        class TeardownFailure:
-            def __init__(self, **_kwargs):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                raise OSError("pool teardown failed")
-
-            def map(self, function, paths, chunksize):
-                del chunksize
-                return [function(path) for path in paths]
-
-        scanned = self.assert_fallback(TeardownFailure, "OSError")
-        self.assertEqual(scanned, self.paths + self.paths)
+        self.assert_fallback(IterationFailure, "RuntimeError")
 
     def test_sequential_scanner_failure_is_not_swallowed(self):
         class ConstructionFailure:
@@ -390,60 +197,13 @@ class ExecutorFallbackTest(unittest.TestCase):
         with mock.patch.object(agent_costs, "scan_file", side_effect=ValueError("bad transcript")):
             with self.assertRaisesRegex(ValueError, "bad transcript"):
                 agent_costs.scan_paths(self.paths, executor_factory=ConstructionFailure)
+```
 
+- [ ] **Step 2: Write the synthetic multi-issue report and stdout-equivalence test**
 
-class OutcomeTest(unittest.TestCase):
-    def test_completed(self):
-        self.assertEqual(agent_costs.classify_outcome("PR #12 merged; issue closed."),
-                         "completed")
-        self.assertEqual(agent_costs.classify_outcome("review_state: clean, done"),
-                         "completed")
+Replace `EndToEndTest.setUp` with this production-shaped single dispatcher session:
 
-    def test_blocked(self):
-        self.assertEqual(agent_costs.classify_outcome(
-            "Cannot proceed: needs your decision on the schema."), "blocked")
-        self.assertEqual(agent_costs.classify_outcome("BLOCKED on missing token"),
-                         "blocked")
-
-    def test_abandoned(self):
-        self.assertEqual(agent_costs.classify_outcome("Reading the next file."),
-                         "abandoned")
-
-    def test_group_rollup_prefers_completed(self):
-        g = agent_costs.new_group()
-        g["outcomes"] = ["abandoned", "blocked", "completed"]
-        self.assertEqual(agent_costs.group_outcome(g), "completed")
-        g["outcomes"] = ["abandoned", "blocked"]
-        self.assertEqual(agent_costs.group_outcome(g), "blocked")
-        g["outcomes"] = []
-        self.assertEqual(agent_costs.group_outcome(g), "-")
-
-
-class ArtifactStatsTest(unittest.TestCase):
-    def test_fenced_and_decision_shares(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            specs = Path(tmp) / "specs"
-            specs.mkdir()
-            (specs / "2026-01-01-thing-spec.md").write_text(
-                "# Spec\n\nBody text.\n\n"
-                "## Decision ledger\n\n"
-                "| D1 | keep JSON | ADR-001 | rejected sqlite |\n"
-                "| D2 | one file | CONTEXT.md | rejected split |\n\n"
-                "## Other\n\n"
-                "```python\nprint('hi')\n```\n"
-            )
-            stats = agent_costs.artifact_stats([str(specs)])
-            spec = stats["spec"]
-            self.assertEqual(spec["files"], 1)
-            self.assertEqual(spec["ledger_rows"], 2)
-            self.assertGreater(spec["decision"], 0)
-            self.assertGreater(spec["fenced"], 0)
-            self.assertGreater(spec["bytes"], spec["decision"])
-
-
-class EndToEndTest(unittest.TestCase):
-    """main() over a fake projects dir: grouping, issue keys, output sections."""
-
+```python
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -500,7 +260,11 @@ class EndToEndTest(unittest.TestCase):
                 encoding="utf-8",
             )
         self.projects = str(root)
+```
 
+Add this helper and test to `EndToEndTest`:
+
+```python
     class DeterministicExecutor:
         def __init__(self, **_kwargs):
             pass
@@ -598,7 +362,70 @@ class EndToEndTest(unittest.TestCase):
                 r"\AProcess pool unavailable \([A-Za-z_][A-Za-z0-9_]*\); "
                 r"scanning sequentially\.\n\Z",
             )
+```
 
+The helper's cwd names issue 7 while its `agentId` is not owner-shaped. The unique-model and simultaneous raw/group equalities above prove it stayed in root overhead and that partitioning neither copied nor omitted a transcript.
 
-if __name__ == "__main__":
-    unittest.main()
+- [ ] **Step 3: Run the focused suite and observe the base failure**
+
+Run:
+
+```bash
+python3 -m unittest -v tests/test_agent_costs.py
+```
+
+Expected at starting commit `e15909b`: FAIL. The observed base failure is the existing `EndToEndTest` subprocess exiting 1 at `ProcessPoolExecutor(...)` construction with `PermissionError: [Errno 1] Operation not permitted`; after adding the new tests, `scan_paths`, `owner_issue`, `fold_scan_totals`, injected `main`, identity evidence, operation qualification, and partitioned rows are also absent. All other 14 baseline telemetry tests pass.
+
+- [ ] **Step 4: Implement transcript evidence extraction**
+
+In `scripts/agent-costs.py`:
+
+- Rewrite the module counting-rule prose to describe the post-implementation behavior: proven issue-owner transcripts follow their agreeing issue worktree; rooted helper, reviewer, ambiguous, and other non-owner transcripts remain root-session overhead. This is live behavior after the code change, not a historical or prospective claim (D8).
+- Add `OWNER_AGENT_RE` as the exact full-match regex in the invariants. While scanning parsed records, collect non-empty top-level `agentId` values; return a single value only when all observed identities agree, otherwise `None`.
+- Add an exact initial-envelope parser. It accepts only `type == "user"`, `isSidechain is True`, `parentUuid is None`, string content, absolute `WORKTREE_ROOT:` first line, and one closed-set `REVIEW_OPERATION:` second line. Record at most one `review_operation`; conflicting valid root envelopes yield `None` rather than guessing.
+- Change the cheap user prefilter so a long line containing the exact `REVIEW_OPERATION:` marker is parsed even without `agentType`; retain the 4096-byte fast path for unrelated user records.
+- Accumulate assistant attribution into a temporary raw counter. After the entire file has resolved one unambiguous initial operation (or `None`), qualify only raw `codex-collaboration` turns as `codex-collaboration/<operation>`; preserve every other key exactly. This prevents a later conflicting root envelope from leaving an already-qualified prefix.
+- Implement `owner_issue(result)` from `result["agent_id"]` and the set of issue numbers found in `result["cwds"]`. Require one cwd issue and exact equality with the regex capture.
+
+Do not infer identity from filenames, directories, prompt prose, skill attribution, or reviewer names.
+
+- [ ] **Step 5: Implement all-or-nothing ordered scanning and raw totals**
+
+Implement `scan_paths` so the entire `list(pool.map(...))` and context-manager exit are inside one `try`. Catch `Exception`, print the exact one-line disclosure with `type(error).__name__`, and return a fresh sequential list comprehension over every original path. Do not catch `BaseException`; do not wrap the sequential retry.
+
+Refactor `main(argv=None, *, executor_factory=ProcessPoolExecutor)` to parse `argv`, call `scan_paths` once, and zip the returned list with `jobs` only after the boundary returns. Implement `fold_scan_totals` as an explicit in-order loop over `SUM_FIELDS`; do not use group subtotals or reorder cost terms.
+
+Extract the session partition into `build_groups(sessions, per_session, project_filter=None)` returning `(groups, retained_results, kept_sessions, kept_files)`, with this algorithm:
+
+1. Determine root cwd/project and apply `--project` filtering exactly as today.
+2. Determine every non-root result's `owner_issue`; collect distinct proven owner issues.
+3. Choose the root key: `(multi-issue)` for two or more distinct owners, otherwise the existing `issue_key(dir_name, root_cwds)` result.
+4. Send roots and unproven non-roots to the root key; send each proven owner result to its issue key.
+5. Merge every result's `SUM_FIELDS`, `COUNTER_FIELDS`, `LIST_FIELDS`, `skills`, `agents_killed`, and `peak_ctx` only into that destination. Increment `subagents` once for a non-root result in its destination.
+6. Add `sessions`, root-only `interventions`, and root-only classified outcome only to the root group. Compute skill loads/repeats separately per destination within the session so moved owner skill data travels with the owner.
+7. Return groups plus the retained ordered raw results/counters needed by `main`. Use `fold_scan_totals` over those retained results for displayed global turns/token buckets/cost; keep existing report format and group sorting.
+
+No transcript may be copied into both root and owner groups. Peak context remains a max within the selected destination.
+
+- [ ] **Step 6: Verify focused, workflow, and repository gates**
+
+Run:
+
+```bash
+python3 -m unittest -v tests/test_agent_costs.py
+just agent-workflow-tests
+just build
+git diff --check -- scripts/agent-costs.py tests/test_agent_costs.py
+```
+
+Expected: telemetry tests PASS including construction and partial-iteration fallback; all workflow tests PASS (the base's sole `ProcessPoolExecutor` failure is gone); Nix evaluation/build PASS; `git diff --check` exits 0 with no output. Any changed TOTAL token bucket/turn/cost, missing `(multi-issue)` root row, helper leakage into issue 7, unqualified operation, duplicate assignment, swallowed sequential error, or extra stderr line is incomplete.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add scripts/agent-costs.py tests/test_agent_costs.py
+git commit -m "feat(issue-48): attribute orchestration telemetry" \
+  -m "Co-Authored-By: Codex <noreply@openai.com>"
+```
+
+Expected: signed commit succeeds. `git diff --stat HEAD~2..HEAD -- patches/agent-plugins/codex-plugin-cc.patch lib/agent-plugins.nix home/common/claude-code/skills/codex-collaboration/SKILL.md home/common/agent-skills/tests/test_workflow_skill_contracts.py scripts/agent-costs.py tests/test_agent_costs.py` names only the six implementation-owned repository files and summarizes both vertical slices; unrelated branch commits are outside this scoped path list.
