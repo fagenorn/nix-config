@@ -172,9 +172,131 @@ For `failed`, `artifact` is exactly `null` before a root exists or exactly
 exists; metrics, budget status, and violations are forbidden in both failed
 rows. `complete` plus any status other than `within_budget` is a contract error.
 
-### Phases 5, 6, 7
+### Mandatory direct implementation-owner rollover
 
-Already out-of-context and unchanged by autonomous mode: Phase 5 dispatches the reviewer (or
-`codex-collaboration`) with `REVIEW-CONTRACT.md`'s path, Phase 6 runs subagent-driven development, and
-Phase 7 dispatches `ship-issue` with `auto: true` in its handoff. Verifying findings and dispositioning
-them stays with you.
+This section applies to every module-owned direct autonomous run. Phase 5 is
+the last phase owned by the controller that acquired the persisted
+`direct-owner` envelope; implementation and delivery belong to one fresh owner.
+
+#### Mandatory transfer gate
+
+First, finish Phase 5 and confirm that the controller has
+dispositioned every Blocking and accepted Should-fix finding. Apply accepted
+review edits and any decision-ledger writes, then commit the reviewed plan and
+ledger. After the last mutation, run fresh
+`artifact-budget check --kind design-spec` and
+`artifact-budget check --kind implementation-plan` checks. Retain each
+checker's `root_bytes`, `total_bytes`, `file_count`, and
+`largest_member_bytes`, and require both results to be `within_budget`. If a
+commit hook changes either artifact, repeat the check and commit sequence until
+the committed roots and retained measurements agree.
+
+Once no conversational dependency remains, call `workflow-state progress` for
+completed Phase 5 with truthful available usage and the exact gate values
+`next_needs_context=false`, `artifacts_sufficient=true`, and
+`remainder_self_contained=true`. Require the persisted action to be `delegate`;
+then dispatch exactly one fresh issue owner at the existing
+`from-issue-phase-delegate` tier. This mandatory transfer includes
+mechanical-only direct autonomous runs.
+
+The continuation is one closed JSON object shaped like this representative
+value:
+
+```json
+{
+  "owner": {
+    "interface_version": 1,
+    "kind": "owner",
+    "ledger_repo_root": "/absolute/primary-checkout",
+    "run_id": "direct-74-000001",
+    "issue": 74,
+    "attempt": 1,
+    "owner": "74:1",
+    "action_id": "74:1:1",
+    "launch_kind": "spawn",
+    "worktree": "/absolute/issue-worktree",
+    "handoff_path": null,
+    "deadline_at": "2026-08-20T12:00:00Z"
+  },
+  "spec_artifact": {
+    "kind": "design-spec",
+    "path": ".claude/specs/issue-74.md",
+    "metrics": {
+      "root_bytes": 1000,
+      "total_bytes": 1000,
+      "file_count": 1,
+      "largest_member_bytes": 1000
+    },
+    "budget_status": "within_budget"
+  },
+  "plan_artifact": {
+    "kind": "implementation-plan",
+    "path": ".claude/plans/issue-74.md",
+    "metrics": {
+      "root_bytes": 2000,
+      "total_bytes": 6000,
+      "file_count": 3,
+      "largest_member_bytes": 2000
+    },
+    "budget_status": "within_budget"
+  }
+}
+```
+
+Pass the unchanged owner object and the two measured artifact blocks only:
+no artifact contents, no task-member paths, no review transcript,
+no conversation summary, no alternate worktree,
+no reconstructed lifecycle field, and no authorization flag. Repository
+bindings are re-resolved in the delegated worktree.
+
+#### Fresh delegated owner
+
+Before reading either artifact,
+verify that the worktree and branch match the owner envelope. Verify the
+current clean HEAD, then verify that both roots are tracked at that HEAD. Next,
+independently run `artifact-budget check` for each root and compare all four metrics
+with the continuation. Any mismatch stops the attempt as a contract failure.
+
+After those checks pass, adopt the owner envelope as the existing lifecycle
+identity; the fresh owner must not call `direct-owner` or perform any other
+acquisition. It must begin at Phase 6, invoke `sdd` with the reviewed plan, and
+validate the SDD producer report under the existing contract. It then dispatches
+a fresh Phase-7 ship owner with `auto: true`, validates that owner's ship-summary
+report, calls the terminal procedure's single `workflow-state finish`, and must
+return only the exact canonical JSON printed by that command.
+
+For mechanical-only direct autonomous work, the fresh owner invokes the
+existing mechanical Phase-6 mechanic/reviewer route without changing its order
+or ownership, then performs the same fresh shipping and terminal sequence.
+
+#### Earlier controller stop
+
+The earlier controller's
+post-delegation action set is exactly validate, relay, and stop. For the
+received bytes, run
+`artifact-budget validate-report --boundary ship-summary`; after successful
+validation, relay the canonical bytes unchanged to its caller and stop.
+
+The earlier controller does not invoke `sdd`.
+It does not edit implementation files.
+It does not reacquire or call `direct-owner`.
+It does not start or create a new attempt.
+It does not dispatch a second owner.
+It does not call `workflow-state finish` after delegation.
+It does not continue after the delegated report. A dispatch failure is the only
+terminal result it persists, and that failure is
+never permission to implement locally.
+
+### Other Phase 5–7 routes
+
+Mechanical-only module-owned direct autonomous runs are excluded from this section
+because they use the mandatory rollover above. The existing
+mechanical-only ordering and ownership for other acquisition routes remains
+unchanged.
+
+Dispatcher-owned autonomous, explicitly durable interactive, and ledger-free
+interactive owners retain their existing behavior: Phase 5 dispatches the
+reviewer (or `codex-collaboration`) with `REVIEW-CONTRACT.md`'s path, Phase 6
+runs `sdd`, and Phase 7 dispatches `ship-issue` with the appropriate handoff.
+Reviewer, SDD, and shipping contracts remain unchanged for these routes, and
+the owning controller continues to verify and disposition findings.
