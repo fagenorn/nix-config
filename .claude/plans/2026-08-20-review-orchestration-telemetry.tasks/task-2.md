@@ -6,7 +6,7 @@
 
 **Interfaces:**
 - Consumes: the ordered `(session_index, is_root, transcript_path)` jobs from `find_sessions`; top-level transcript `agentId`, assistant `cwd`, initial sidechain user envelope, and existing `attributionSkill`; existing additive scan-result fields and report tables.
-- Produces: `scan_paths(paths, executor_factory=ProcessPoolExecutor) -> list[dict | None]`, preserving input order and performing all-or-nothing sequential fallback with one stderr line.
+- Produces: `scan_paths(paths, executor_factory=ProcessPoolExecutor) -> list[dict | None]`, preserving input order and performing all-or-nothing sequential fallback with one stderr line; injected executors make the successful and fallback paths deterministic under test (D8).
 - Produces: `owner_issue(result) -> str | None`, returning an issue only when one owner-shaped `agent_id` agrees with exactly one own-cwd issue.
 - Produces: `fold_scan_totals(results) -> dict`, folding `SUM_FIELDS` once in supplied order for global tokens/turns/cost.
 - Produces: `build_groups(sessions, per_session, project_filter=None) -> (groups, retained_results, kept_sessions, kept_files)`, partitioning already-scanned results without rescanning or duplication.
@@ -22,6 +22,8 @@
 - The cheap user-record prefilter admits a large valid envelope. It does not widen ordinary long-user scanning beyond the exact envelope marker (D4).
 - Parallel values are fully materialized inside the protected boundary. A construction, map, iteration, or context-manager teardown exception discards the attempt and sequentially scans every path once in original order; sequential errors propagate (D5).
 - Global `fresh`, `cache_create`, `cache_read`, `output`, `turns`, and `cost` are folded directly from retained raw results in stable order before group partitioning (D5).
+- The successful-executor and forced-fallback report bytes are identical, the successful executor emits no stderr, and the six-transcript fixture's raw cost is exactly `0.0113625` before group totals are compared (D8).
+- The module counting-rule prose describes the live partition: proven issue-owner transcripts follow their issue worktree, while rooted helper/reviewer overhead remains with root (D8).
 - Pricing, model mapping, report headings/layout, and root-overhead cost policy remain unchanged.
 
 - [ ] **Step 1: Write scanner-evidence and fallback tests**
@@ -263,6 +265,20 @@ Replace `EndToEndTest.setUp` with this production-shaped single dispatcher sessi
 Add this helper and test to `EndToEndTest`:
 
 ```python
+    class DeterministicExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def map(self, function, paths, chunksize):
+            del chunksize
+            return [function(path) for path in paths]
+
     def run_main(self, executor_factory):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -273,26 +289,27 @@ Add this helper and test to `EndToEndTest`:
             )
         return stdout.getvalue(), stderr.getvalue()
 
-    def test_dispatcher_owners_reviews_and_fallback_are_truthful(self):
+    def test_dispatcher_owners_reviews_and_forced_fallback_are_truthful(self):
         class ConstructionFailure:
             def __init__(self, **_kwargs):
                 raise PermissionError("semaphores denied")
 
-        normal_stdout, _normal_stderr = self.run_main(agent_costs.ProcessPoolExecutor)
+        successful_stdout, successful_stderr = self.run_main(self.DeterministicExecutor)
         fallback_stdout, fallback_stderr = self.run_main(ConstructionFailure)
-        self.assertEqual(fallback_stdout, normal_stdout)
+        self.assertEqual(successful_stderr, "")
+        self.assertEqual(fallback_stdout, successful_stdout)
         self.assertEqual(
             fallback_stderr,
             "Process pool unavailable (PermissionError); scanning sequentially.\n",
         )
 
-        self.assertRegex(normal_stdout, r"(?m)^#7\s+repo\s+")
-        self.assertRegex(normal_stdout, r"(?m)^#8\s+repo\s+")
-        self.assertRegex(normal_stdout, r"(?m)^\(multi-issue\)\s+repo\s+")
-        self.assertIn("codex-collaboration/plan-review 1", normal_stdout)
-        self.assertIn("codex-collaboration/diff-review 1", normal_stdout)
-        self.assertIn("6 transcripts", normal_stdout)
-        self.assertIn("5 subagents", normal_stdout)
+        self.assertRegex(successful_stdout, r"(?m)^#7\s+repo\s+")
+        self.assertRegex(successful_stdout, r"(?m)^#8\s+repo\s+")
+        self.assertRegex(successful_stdout, r"(?m)^\(multi-issue\)\s+repo\s+")
+        self.assertIn("codex-collaboration/plan-review 1", successful_stdout)
+        self.assertIn("codex-collaboration/diff-review 1", successful_stdout)
+        self.assertIn("6 transcripts", successful_stdout)
+        self.assertIn("5 subagents", successful_stdout)
 
         sessions = list(agent_costs.find_sessions(Path(self.projects), None))
         jobs = [
@@ -307,11 +324,12 @@ Add this helper and test to `EndToEndTest`:
         self.assertEqual(direct["output"], 120)
         self.assertEqual(direct["cache_create"], 30)
         self.assertEqual(direct["cache_read"], 600)
-        self.assertIn("6 turns", normal_stdout)
-        self.assertIn("fresh 60", normal_stdout)
-        self.assertIn("cache_create 30", normal_stdout)
-        self.assertIn("cache_read 600", normal_stdout)
-        self.assertIn("output 120", normal_stdout)
+        self.assertEqual(direct["cost"], 0.0113625)
+        self.assertIn("6 turns", successful_stdout)
+        self.assertIn("fresh 60", successful_stdout)
+        self.assertIn("cache_create 30", successful_stdout)
+        self.assertIn("cache_read 600", successful_stdout)
+        self.assertIn("output 120", successful_stdout)
 
         per_session = agent_costs.defaultdict(list)
         for (session_index, is_root, _path), result in zip(jobs, ordered_results):
@@ -332,6 +350,18 @@ Add this helper and test to `EndToEndTest`:
         self.assertEqual(len(retained), 6)
         self.assertEqual(kept_sessions, 1)
         self.assertEqual(kept_files, 6)
+
+    def test_default_executor_degrades_concisely_when_environment_restricts_it(self):
+        expected_stdout, expected_stderr = self.run_main(self.DeterministicExecutor)
+        stdout, stderr = self.run_main(agent_costs.ProcessPoolExecutor)
+        self.assertEqual(expected_stderr, "")
+        self.assertEqual(stdout, expected_stdout)
+        if stderr:
+            self.assertRegex(
+                stderr,
+                r"\AProcess pool unavailable \([A-Za-z_][A-Za-z0-9_]*\); "
+                r"scanning sequentially\.\n\Z",
+            )
 ```
 
 The helper's cwd names issue 7 while its `agentId` is not owner-shaped. The unique-model and simultaneous raw/group equalities above prove it stayed in root overhead and that partitioning neither copied nor omitted a transcript.
@@ -350,6 +380,7 @@ Expected at starting commit `e15909b`: FAIL. The observed base failure is the ex
 
 In `scripts/agent-costs.py`:
 
+- Rewrite the module counting-rule prose to describe the post-implementation behavior: proven issue-owner transcripts follow their agreeing issue worktree; rooted helper, reviewer, ambiguous, and other non-owner transcripts remain root-session overhead. This is live behavior after the code change, not a historical or prospective claim (D8).
 - Add `OWNER_AGENT_RE` as the exact full-match regex in the invariants. While scanning parsed records, collect non-empty top-level `agentId` values; return a single value only when all observed identities agree, otherwise `None`.
 - Add an exact initial-envelope parser. It accepts only `type == "user"`, `isSidechain is True`, `parentUuid is None`, string content, absolute `WORKTREE_ROOT:` first line, and one closed-set `REVIEW_OPERATION:` second line. Record at most one `review_operation`; conflicting valid root envelopes yield `None` rather than guessing.
 - Change the cheap user prefilter so a long line containing the exact `REVIEW_OPERATION:` marker is parsed even without `agentType`; retain the 4096-byte fast path for unrelated user records.

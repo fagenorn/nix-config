@@ -25,12 +25,12 @@
 
 ## Test seams
 
-- Companion CLI subprocess plus durable request/job records: shared cases for both operations; negative CLI and worker-side persisted-value validation.
+- Companion CLI subprocess plus durable request/job records: shared cases for both operations; every existing bare call site migrated to a valid operation value; negative CLI and worker-side persisted-value validation with truthful non-zero exit.
 - Status, human result, JSON result, cancellation, raw-output durability, and identical isolated-runtime cleanup for both operations.
 - Dead-worker reconciliation and SessionEnd live/terminal/retention behavior parameterized over both operation kinds.
 - Transcript scanner extraction of owner identity, own cwd evidence, and exact initial review envelope, including rejection of ambiguous/mismatched/prose-only evidence.
 - One synthetic dispatcher session containing two owners, one helper, one plan-review transport, and one diff-review transport; separate issue rows, explicit multi-issue overhead, operation-qualified attribution, and one destination per transcript.
-- Injected executor factories that fail at construction and after yielding a prefix; ordered sequential values and complete report stdout remain equal, with one concise stderr disclosure.
+- An injected deterministic successful executor with empty stderr, plus injected failures at construction/after a yielded prefix and a separate default-executor degradation case; ordered values and complete report stdout remain equal, with one concise fallback disclosure.
 - Regenerated patched-tree focused/full Node tests, `python3 -m unittest -v tests/test_agent_costs.py`, `just agent-workflow-tests`, and `just build`.
 
 ## Task index
@@ -41,9 +41,22 @@ Task 2 — Attribute transcript telemetry and add ordered pool fallback — `scr
 
 ## Decisions
 
-- Review transport, record shape, validation boundaries, lifecycle classification, and shared operation coverage are fixed by D1, D2, and D6.
+- Review transport, record shape, validation boundaries, all-callsite CLI migration, lifecycle classification, and shared operation coverage are fixed by D1, D2, D6, and D7.
 - Owner attribution and explicit root overhead are fixed by D3; review-operation evidence is fixed by D4.
-- Pool fallback, ordered raw totals, and equivalence coverage are fixed by D5–D6.
-- No new planning decision was required: the two task boundaries are the two independently testable vertical slices already selected by the accepted design.
+- Pool fallback, ordered raw totals, literal synthetic cost, and non-vacuous equivalence coverage are fixed by D5, D6, and D8.
+- Cancellation identity is authoritative in the durable record/result; the cancel acknowledgement does not gain a redundant kind field (D9).
+
+## Phase 5 review
+
+**Provenance:** reviewer `native Codex reviewer`; job ID unavailable; review base `e66f199d79562930a9dde95726c406e711dad340`; fallback: none.
+
+| Finding | Disposition | Plan change |
+|---------|-------------|-------------|
+| B1 | Applied | Worker invalid-operation test now expects non-zero exit and the exact durable failed record/diagnostic (D7). |
+| B2 | Applied | Task 1 inventories and migrates help plus every bare guard, timeout, parallel-isolation, deadline, and remaining `--reviewer` call site before the full suite (D7). |
+| S1 | Applied | Synthetic telemetry pins raw `cost == 0.0113625` before any grouped comparison (D8). |
+| S2 | Applied | Task 2 rewrites the module counting-rule prose to describe proven-owner movement and rooted overhead. |
+| S3 | Applied | Successful-executor stdout/stderr is deterministic; forced/default fallback behavior is tested separately (D8). |
+| Review D1 | Applied — smaller scope | Cancellation preserves operation in the durable cancelled record/result and shared cleanup; no new cancel-response field (D9). |
 
 ---

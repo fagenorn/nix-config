@@ -19,13 +19,13 @@
 
 **Interfaces:**
 - Consumes: the collaboration dispatch's exact two-line envelope and the existing `task`, `task-worker`, `status`, `result`, and `cancel` commands; `createReviewerRuntime`/`cleanupReviewerRuntime`; durable job files with `kind`, `kindLabel`, `jobClass`, `request`, and status fields.
-- Produces: value-bearing CLI `task --reviewer <plan-review|diff-review>`; persisted `request.reviewOperation: "plan-review" | "diff-review"`; records and JSON payloads whose `kind`/`kindLabel` equal that value; operation-specific title; common `jobClass: "review"`; human result headed by the operation-specific title with unchanged raw output beneath it.
+- Produces: value-bearing CLI `task --reviewer <plan-review|diff-review>`; persisted `request.reviewOperation: "plan-review" | "diff-review"`; durable records plus launch/status/result JSON whose `kind`/`kindLabel` equal that value; operation-specific title; common `jobClass: "review"`; human result headed by the operation-specific title with unchanged raw output beneath it.
 - Produces: bridge contract requiring exactly one `REVIEW_OPERATION:` line immediately after `WORKTREE_ROOT:` and forwarding it to `--reviewer`; the bridge continues to return `storedJob.result.rawOutput` unchanged.
 
 **Invariants:**
 - The only accepted review-operation values are `plan-review` and `diff-review`; missing, duplicated, ambiguous, or unsupported declarations fail before launch, and a crafted invalid stored request fails before reviewer execution (D1).
 - `reviewOperation !== null` alone selects fresh/read-only/no-persistence/840000 ms reviewer execution; the operation value does not change runtime policy (D1).
-- Launch JSON, durable request/job, status JSON/human label, result JSON/human heading, title, and cancellation payload never collapse `diff-review` to `plan-review` or generic `review` (D1).
+- Launch JSON, durable request/job, status JSON/human label, result JSON/human heading, and title never collapse `diff-review` to `plan-review` or generic `review` (D1, D9). Cancellation preserves the operation in the durable cancelled record returned by `result --json` and performs shared reviewer cleanup; the cancel acknowledgement need not add `kind` (D9).
 - Raw reviewer output is byte-identical in `storedJob.result.rawOutput` and starts immediately below the human operation header; the collaboration bridge extracts the raw field, not the human rendering (D1).
 - Once a valid record exists, cancellation, dead-worker cleanup, SessionEnd cleanup/terminalization, and retention use `jobClass === "review"` plus existing status predicates; a legacy `plan-review` record with `jobClass: "review"` remains supported without migration (D2).
 - Both operation kinds receive distinct per-job runtime homes, read-only sandboxing, cleanup-before-terminal-write, no thread persistence, and the same timeout (D2).
@@ -161,10 +161,11 @@ test("task-worker rejects a crafted persisted review operation before execution"
     cwd: repo,
     env: buildEnv(binDir)
   });
-  assert.equal(worker.status, 0, worker.stderr);
+  assert.notEqual(worker.status, 0, worker.stdout);
   const stored = readJobFile(resolveJobFile(repo, jobId));
   assert.equal(stored.status, "failed");
-  assert.match(stored.errorMessage, /Stored review operation must be plan-review or diff-review\./);
+  assert.equal(stored.errorMessage, "Stored review operation must be plan-review or diff-review.");
+  assert.match(worker.stderr, /Stored review operation must be plan-review or diff-review\./);
 });
 ```
 
@@ -342,6 +343,7 @@ for (const operation of ["plan-review", "diff-review"]) {
     const cancelPayload = JSON.parse(cancelled.stdout);
     assert.equal(cancelPayload.status, "cancelled");
     assert.equal(cancelPayload.turnInterruptAttempted, false);
+    assert.equal("kind" in cancelPayload, false);
 
     const collected = run("node", [SCRIPT, "result", jobId, "--json"], { cwd: repo, env });
     assert.equal(collected.status, 0, collected.stderr);
@@ -352,6 +354,15 @@ for (const operation of ["plan-review", "diff-review"]) {
   });
 }
 ```
+
+Migrate every pre-existing bare CLI use in the patched upstream tree before running any full suite (D7). The live p9 tree has exactly these categories and all must change:
+
+- `plugins/codex/scripts/codex-companion.mjs` usage text: render `--reviewer <plan-review|diff-review>`, never bare `[--reviewer]`.
+- `tests/reviewer-detach.test.mjs`: pass an explicit valid operation in the write guard, resume guard, and 1000 ms internal-timeout cases. Run both guard cases for each operation; the timeout case may use `plan-review` because the shared success/cancel/liveness cases already prove identical runtime policy.
+- `tests/runtime.test.mjs`: the shared foreground case above replaces its bare call. Change the parallel-isolation test so its two concurrent argv arrays use `plan-review` and `diff-review` respectively, then assert both operation kinds exist and their runtime homes differ.
+- `tests/worker-postmortem.test.mjs`: replace the bare reviewer deadline launch with a loop over both operations and retain the exact `deadlineAt - createdAt == 840000` assertion for each.
+- `tests/commands.test.mjs` and `plugins/codex/agents/codex-reviewer.md`: use the value-bearing bridge form already pinned above.
+- Run `rg -n -- '--reviewer' plugins/codex tests` in the scratch tree and inspect every result. Only value-bearing syntax, the missing-value negative test, and prose explicitly describing that negative case may remain; migrate any additional bare call site discovered from concurrent upstream/test changes instead of weakening the gate.
 
 In `tests/runtime.test.mjs`, replace the single foreground reviewer test with:
 
@@ -403,7 +414,7 @@ env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANS
   tests/liveness.test.mjs tests/runtime.test.mjs tests/worker-postmortem.test.mjs
 ```
 
-Expected at starting commit `e15909b`: FAIL for one reason across the new cases — `--reviewer` is boolean, the CLI always persists `kind: "plan-review"`, its request stores `reviewer: true`, human raw results have no operation header, and the lifecycle still has literal `kind === "plan-review"` branches. The existing plan-review behavior remains green.
+Expected at starting commit `e15909b`: FAIL for one reason across the new cases — `--reviewer` is boolean, the CLI always persists `kind: "plan-review"`, its request stores `reviewer: true`, human raw results have no operation header, and the lifecycle still has literal `kind === "plan-review"` branches. The crafted worker test exits non-zero because `runTrackedJob` durably records and then rethrows the validation error (D7). Existing plan-review behavior remains green.
 
 Run in the repository worktree:
 
@@ -419,7 +430,7 @@ Expected at `e15909b`: FAIL — `SKILL.md` dispatches only `WORKTREE_ROOT:` and 
 In scratch `plugins/codex/scripts/codex-companion.mjs`:
 
 - Define one authoritative `REVIEW_OPERATIONS = new Set(["plan-review", "diff-review"])` and a validator that returns the value or throws the exact CLI/worker diagnostics pinned above. Do not silently default.
-- Move `reviewer` from `booleanOptions` to `valueOptions`. Normalize `options.reviewer` before constructing metadata, requests, or jobs. Keep `--reviewer` incompatible with `--write` and resume modes.
+- Move `reviewer` from `booleanOptions` to `valueOptions`. Normalize `options.reviewer` before constructing metadata, requests, or jobs. Keep `--reviewer` incompatible with `--write` and resume modes, update the usage text, and migrate every existing call site listed in Step 1 (D7).
 - Rename internal boolean plumbing to `reviewOperation`; derive a local `isReviewer = reviewOperation !== null` only for shared runtime policy. `buildTaskRequest` emits `reviewOperation`, never a redundant boolean. `executeTaskRun` revalidates a stored non-null operation before `ensureCodexAvailable` or runtime construction.
 - `buildTaskRunMetadata` returns `Codex Plan Review` or `Codex Diff Review`; `buildTaskJob` persists `kind` and `kindLabel` equal to the operation and `jobClass: "review"`; launch payload includes `kind`.
 - Read-only sandbox, no thread persistence/name, `reviewerJobId`, touched-file refusal, and the 840000 ms default all derive from `isReviewer` and are otherwise unchanged.
