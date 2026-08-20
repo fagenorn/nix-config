@@ -65,6 +65,8 @@ Add the following complete tests to `WorkflowSkillContractsTest`:
             "recorded_worktree",
             "candidate_worktree",
             "retain every fact previously requested during this acquisition",
+            "carry all collected facts into each later strict request",
+            "never send a fact kind before the helper requests it",
             "call `direct-owner` again",
             "kind: owner",
             "adopt",

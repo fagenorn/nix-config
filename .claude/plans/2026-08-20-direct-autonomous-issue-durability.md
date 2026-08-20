@@ -11,7 +11,7 @@
 
 ## Global Constraints
 
-- `.claude/specs/2026-08-20-direct-autonomous-issue-durability-design.md` is authoritative; implementations cite D1–D15 and do not duplicate its decision rationale.
+- `.claude/specs/2026-08-20-direct-autonomous-issue-durability-design.md` is authoritative; implementations cite D1–D16 and do not duplicate its decision rationale.
 - Phase-0 scope is direct lifecycle acquisition plus the `from-issue` adapter only. Do not change dispatcher request/response envelopes, ordinary interactive-direct ledger-free behavior, or the existing explicitly durable interactive route.
 - `workflow-state` remains Python-standard-library-only and performs no tracker query, Git inspection, owner spawn, waiter installation, process-liveness check, or wall-clock read. Every decision instant and normalized observation comes from the request.
 - The exact public acquisition command is `workflow-state direct-owner --repo-root <absolute-ledger-repository-root> --request-file <absolute-json-path>` with direct interface version 1 and only the strict request/response shapes in D2/D6.
@@ -78,5 +78,6 @@ Task 2 — Route direct autonomous from-issue through durable acquisition — `.
 | --- | --- |
 | Current-round-only observations cannot converge against the stateless helper | accepted — Task 2 retains all previously requested observation kinds within the current acquisition and never invents an unrequested kind per D15 |
 | Revised Phase-1 contract test dropped the ordered exact-path three-way and no-fallthrough proof | accepted — Task 2 restores the complete ordered assertions before its fix round |
+| D15 contract test pins retention but not later-request resend and never-unrequested boundaries | accepted — Task 2 asserts all three rules in order per D16 |
 
 ---
