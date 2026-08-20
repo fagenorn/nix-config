@@ -109,7 +109,10 @@ At that checkpoint the current controller calls progress for completed Phase 5
 with `next_needs_context=false`, `artifacts_sufficient=true`, and
 `remainder_self_contained=true`, while reporting available usage truthfully. It
 requires the persisted response action to be `delegate`. Only after that durable
-write does it dispatch one fresh issue owner. It does not call SDD, run an
+write does it dispatch one fresh issue owner at the repository's issue-owner
+tier. A commit hook that changed either artifact invalidates its measurement and
+must be followed by the established recheck-and-commit sequence before this
+gate. The earlier controller does not call SDD, run an
 implementation command, edit an implementation file, reacquire through
 `direct-owner`, create a new attempt, or dispatch a second replacement issue
 owner. A dispatch failure may be terminally persisted by the current controller,
@@ -121,9 +124,9 @@ runs remain outside this durable rollover contract.
 
 ### Fresh implementation-owner interface
 
-The delegation prompt is a small continuation interface, not a transcript. It
-declares direct autonomous mode, the Phase-6 entry point, and the exact worktree,
-then carries three machine-shaped blocks:
+The delegation prompt is a small continuation interface, not a transcript. Its
+standing instructions declare direct autonomous mode and the Phase-6 entry point,
+then refer to three machine-shaped blocks:
 
 1. The canonical direct-owner `owner` object unchanged, including
    `interface_version`, `kind`, `ledger_repo_root`, `run_id`, `issue`, `attempt`,
@@ -140,9 +143,10 @@ authorization flag. Repository bindings are resolved from the delegated owner's
 worktree instead of being copied into a second continuation schema.
 
 Before reading either artifact, the fresh owner verifies that the worktree and
-branch match the envelope, independently checks both roots with the artifact
-budget module, and compares all four metrics with the prompt. It adopts the
-envelope rather than calling direct-owner and begins at Phase 6. It invokes the
+branch match the envelope, that both roots are tracked at the current clean HEAD,
+independently checks both roots with the artifact budget module, and compares all
+four metrics with the prompt. It adopts the envelope rather than calling
+direct-owner and begins at Phase 6. It invokes the
 current SDD skill, validates the SDD report, then uses the existing fresh Phase-7
 ship-owner handoff. It remains the lifecycle owner: after the ship report or any
 execution stop, it validates the ship-summary candidate, calls `finish` with the
@@ -199,11 +203,12 @@ Existing handed-off resume with `matching_issue_branch` is unchanged.
 
 ### Documentation and compatibility
 
-The accepted issue-33 phase-order statement is amended to name the direct-only
-exception, and the accepted issue-73 acquisition statement is amended to name
-the Phase-0 absent-reservation resume. These are point-in-time decision records,
-so amendment markers preserve their original claims and history rather than
-silently rewriting them.
+Implementation appends explicit amendment markers to the accepted issue-33
+phase-order statement and the accepted issue-73 acquisition statement in the
+same commits that make the direct-only order and Phase-0 absent-reservation
+resume true. These are point-in-time decision records, so the markers preserve
+their original claims and history rather than making an unshipped design read as
+live behavior or silently rewriting it.
 
 No glossary or ADR tree is created. The repository has no governing domain map,
 the terms are lifecycle implementation terms already defined by accepted specs,
