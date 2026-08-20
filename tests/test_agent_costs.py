@@ -245,6 +245,13 @@ class ScanFileTest(unittest.TestCase):
             }),
             envelope_user("ahelper", cwd, "plan-review", parent_uuid="not-root"),
             record({
+                "type": "user", "isSidechain": True, "agentId": "ahelper", "cwd": cwd,
+                "message": {
+                    "role": "user",
+                    "content": f"WORKTREE_ROOT: {cwd}\nREVIEW_OPERATION: diff-review\npacket",
+                },
+            }),
+            record({
                 "type": "user", "isSidechain": True, "agentId": "ahelper", "parentUuid": None,
                 "message": {"role": "user", "content": f"REVIEW_OPERATION: plan-review\nWORKTREE_ROOT: {cwd}\npacket"},
             }),

@@ -110,7 +110,7 @@ def classify_outcome(final_text):
 def review_operation_from_envelope(rec):
     """Return the operation from an exact sidechain root transport envelope."""
     if (rec.get("type") != "user" or rec.get("isSidechain") is not True
-            or rec.get("parentUuid") is not None):
+            or "parentUuid" not in rec or rec.get("parentUuid") is not None):
         return None
     content = (rec.get("message") or {}).get("content")
     if not isinstance(content, str):
