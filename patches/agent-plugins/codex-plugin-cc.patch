@@ -549,7 +549,7 @@ index 1954274..2097f9f 100644
 +  supervisionTimer.unref();
 +
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..d0dc464 100644
+index 83df468..3c34f7a 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
 @@ -32,2 +31,0 @@ import {
@@ -755,22 +755,33 @@ index 83df468..d0dc464 100644
 @@ -817,0 +896,2 @@ async function handleTask(argv) {
 +        reviewOperation,
 +        timeoutMs,
-@@ -937 +1017 @@ function handleTaskResumeCandidate(argv) {
+@@ -874,2 +954,3 @@ async function handleTaskWorker(argv) {
+-    () =>
+-      executeTaskRun({
++    () => {
++      validateStoredReviewIdentity(storedJob, request);
++      return executeTaskRun({
+@@ -878 +959,2 @@ async function handleTaskWorker(argv) {
+-      }),
++      });
++    },
+@@ -937 +1019 @@ function handleTaskResumeCandidate(argv) {
 -  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
 +  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)));
-@@ -976 +1056,4 @@ async function handleCancel(argv) {
+@@ -976 +1058,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
 +    job.jobClass === "review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1070,3 @@ async function handleCancel(argv) {
+@@ -986,0 +1072,3 @@ async function handleCancel(argv) {
 +  if (job.jobClass === "review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
-@@ -1023,0 +1110,13 @@ async function handleCancel(argv) {
+@@ -1023,0 +1112,22 @@ async function handleCancel(argv) {
 +const REVIEW_OPERATIONS = new Set(["plan-review", "diff-review"]);
 +const STORED_REVIEW_OPERATION_ERROR = "Stored review operation must be plan-review or diff-review.";
++const STORED_REVIEW_IDENTITY_ERROR = "Stored review identity must have matching kind, jobClass, and reviewOperation.";
 +
 +function normalizeReviewOperation(operation, diagnostic = "--reviewer must be plan-review or diff-review.") {
 +  if (operation == null) {
@@ -780,6 +791,14 @@ index 83df468..d0dc464 100644
 +    throw new Error(diagnostic);
 +  }
 +  return operation;
++}
++
++function validateStoredReviewIdentity(job, request) {
++  const operation = normalizeReviewOperation(request.reviewOperation, STORED_REVIEW_OPERATION_ERROR);
++  const isReview = operation !== null || job.jobClass === "review" || REVIEW_OPERATIONS.has(job.kind);
++  if (isReview && (job.jobClass !== "review" || job.kind !== operation)) {
++    throw new Error(STORED_REVIEW_IDENTITY_ERROR);
++  }
 +}
 +
 diff --git a/plugins/codex/scripts/lib/app-server.mjs b/plugins/codex/scripts/lib/app-server.mjs
@@ -3944,10 +3963,10 @@ index ab68038..4217fce 100644
 +});
 diff --git a/tests/reviewer-detach.test.mjs b/tests/reviewer-detach.test.mjs
 new file mode 100644
-index 0000000..00e9dbe
+index 0000000..5ba09d8
 --- /dev/null
 +++ b/tests/reviewer-detach.test.mjs
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,260 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -4055,48 +4074,66 @@ index 0000000..00e9dbe
 +  }
 +});
 +
-+test("task-worker rejects a crafted persisted review operation before execution", () => {
++function runCraftedReviewWorker({ jobId, kind, jobClass, reviewOperation }) {
 +  const repo = makeReviewRepo();
 +  const binDir = makeTempDir();
 +  installFakeCodex(binDir);
-+  const jobId = "reviewer-invalid-operation";
 +  const now = new Date().toISOString();
++  const request = {
++    cwd: repo,
++    model: null,
++    effort: null,
++    prompt: "review packet",
++    write: false,
++    resumeLast: false,
++    timeoutMs: 5000,
++    jobId
++  };
++  if (reviewOperation !== undefined) request.reviewOperation = reviewOperation;
 +  writeJobFile(repo, jobId, {
 +    id: jobId,
-+    kind: "diff-review",
-+    kindLabel: "diff-review",
-+    title: "Codex Diff Review",
++    kind,
++    kindLabel: kind,
++    title: "Codex Review",
 +    workspaceRoot: repo,
-+    jobClass: "review",
++    jobClass,
 +    summary: "Review packet",
 +    write: false,
 +    status: "queued",
 +    phase: "queued",
 +    createdAt: now,
 +    updatedAt: now,
-+    request: {
-+      cwd: repo,
-+      model: null,
-+      effort: null,
-+      prompt: "review packet",
-+      write: false,
-+      resumeLast: false,
-+      reviewOperation: "security-review",
-+      timeoutMs: 5000,
-+      jobId
-+    }
++    request
 +  });
 +
 +  const worker = run("node", [SCRIPT, "task-worker", "--cwd", repo, "--job-id", jobId], {
 +    cwd: repo,
 +    env: buildEnv(binDir)
 +  });
-+  assert.notEqual(worker.status, 0, worker.stdout);
-+  const stored = readJobFile(resolveJobFile(repo, jobId));
-+  assert.equal(stored.status, "failed");
-+  assert.equal(stored.errorMessage, "Stored review operation must be plan-review or diff-review.");
-+  assert.match(worker.stderr, /Stored review operation must be plan-review or diff-review\./);
-+});
++  return {
++    worker,
++    stored: readJobFile(resolveJobFile(repo, jobId)),
++    executed: fs.existsSync(path.join(binDir, "fake-codex-state.json"))
++  };
++}
++
++for (const [name, record, diagnostic] of [
++  ["invalid operation", { kind: "diff-review", jobClass: "review", reviewOperation: "security-review" },
++    "Stored review operation must be plan-review or diff-review."],
++  ["missing operation", { kind: "plan-review", jobClass: "review", reviewOperation: undefined },
++    "Stored review identity must have matching kind, jobClass, and reviewOperation."],
++  ["inconsistent operation", { kind: "plan-review", jobClass: "review", reviewOperation: "diff-review" },
++    "Stored review identity must have matching kind, jobClass, and reviewOperation."]
++]) {
++  test(`task-worker rejects a crafted persisted review with ${name} before execution`, () => {
++    const result = runCraftedReviewWorker({ jobId: `reviewer-${name.replaceAll(" ", "-")}`, ...record });
++    assert.notEqual(result.worker.status, 0, result.worker.stdout);
++    assert.equal(result.stored.status, "failed");
++    assert.equal(result.stored.errorMessage, diagnostic);
++    assert.match(result.worker.stderr, new RegExp(diagnostic.replaceAll(".", "\\.")));
++    assert.equal(result.executed, false);
++  });
++}
 +
 +for (const operation of ["plan-review", "diff-review"]) {
 +  test(`${operation} + write is still refused on the background path`, () => {

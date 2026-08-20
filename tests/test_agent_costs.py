@@ -268,6 +268,38 @@ class ScanFileTest(unittest.TestCase):
                 self.assertIsNone(result["review_operation"])
                 self.assertEqual(result["attr_turns"], {"codex-collaboration": 1})
 
+    def test_only_one_declaration_in_the_initial_envelope_is_evidence(self):
+        cwd = "/Users/me/repo/.claude/worktrees/worktree-issue-7-widget"
+        initial_prose = record({
+            "type": "user", "isSidechain": True, "agentId": "ahelper", "parentUuid": None,
+            "message": {"role": "user", "content": "Review this packet."},
+        })
+        later_envelope = self.scan([
+            initial_prose,
+            envelope_user("ahelper", cwd, "plan-review"),
+            assistant(
+                "m1", usage=USAGE_1, cwd=cwd, agent_id="ahelper",
+                attribution_skill="codex-collaboration", sidechain=True,
+            ),
+        ])
+        self.assertIsNone(later_envelope["review_operation"])
+        self.assertEqual(later_envelope["attr_turns"], {"codex-collaboration": 1})
+
+        for extra_operation in ("diff-review", "plan-review"):
+            with self.subTest(extra_operation=extra_operation):
+                duplicate = self.scan([
+                    envelope_user(
+                        "ahelper", cwd, "diff-review",
+                        packet=f"REVIEW_OPERATION: {extra_operation}\nreview packet",
+                    ),
+                    assistant(
+                        "m1", usage=USAGE_1, cwd=cwd, agent_id="ahelper",
+                        attribution_skill="codex-collaboration", sidechain=True,
+                    ),
+                ])
+                self.assertIsNone(duplicate["review_operation"])
+                self.assertEqual(duplicate["attr_turns"], {"codex-collaboration": 1})
+
 
 class ExecutorFallbackTest(unittest.TestCase):
     def setUp(self):
@@ -280,15 +312,24 @@ class ExecutorFallbackTest(unittest.TestCase):
             self.paths.append(path)
 
     def assert_fallback(self, executor_factory, exception_name):
+        original_scan = agent_costs.scan_file
+        scanned = []
+
+        def recording_scan(path):
+            scanned.append(path)
+            return original_scan(path)
+
         stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            actual = agent_costs.scan_paths(self.paths, executor_factory=executor_factory)
-        expected = [agent_costs.scan_file(path) for path in self.paths]
+        with mock.patch.object(agent_costs, "scan_file", side_effect=recording_scan):
+            with contextlib.redirect_stderr(stderr):
+                actual = agent_costs.scan_paths(self.paths, executor_factory=executor_factory)
+        expected = [original_scan(path) for path in self.paths]
         self.assertEqual(actual, expected)
         self.assertEqual(
             stderr.getvalue(),
             f"Process pool unavailable ({exception_name}); scanning sequentially.\n",
         )
+        return scanned
 
     def test_pool_construction_failure_falls_back_in_order(self):
         class ConstructionFailure:
@@ -319,6 +360,24 @@ class ExecutorFallbackTest(unittest.TestCase):
                 return values()
 
         self.assert_fallback(IterationFailure, "RuntimeError")
+
+    def test_teardown_failure_discards_complete_mapping_and_rescans_all(self):
+        class TeardownFailure:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                raise OSError("pool teardown failed")
+
+            def map(self, function, paths, chunksize):
+                del chunksize
+                return [function(path) for path in paths]
+
+        scanned = self.assert_fallback(TeardownFailure, "OSError")
+        self.assertEqual(scanned, self.paths + self.paths)
 
     def test_sequential_scanner_failure_is_not_swallowed(self):
         class ConstructionFailure:

@@ -123,6 +123,8 @@ def review_operation_from_envelope(rec):
     prefix = "REVIEW_OPERATION: "
     if not lines[1].startswith(prefix):
         return None
+    if sum(line.startswith(prefix) for line in lines) != 1:
+        return None
     operation = lines[1][len(prefix):]
     return operation if operation in ("plan-review", "diff-review") else None
 
@@ -153,7 +155,8 @@ def scan_file(path):
     current_phase = None
     final_text = ""
     agent_ids = set()
-    review_operations = set()
+    review_operation = None
+    initial_record_pending = True
 
     try:
         fh = open(path, "r", errors="replace")
@@ -164,8 +167,12 @@ def scan_file(path):
             # Cheap prefilter. Assistant records carry usage and tool_use; user
             # records matter only when short (a possible "proceed" nudge), when
             # they carry an Agent result, or when they carry the exact review
-            # envelope marker; system records only for agents_killed.
-            if '"type":"assistant"' in line:
+            # envelope marker; system records only for agents_killed. The first
+            # valid JSON record is always parsed because only it may be envelope
+            # evidence.
+            if initial_record_pending:
+                pass
+            elif '"type":"assistant"' in line:
                 pass
             elif '"type":"user"' in line:
                 if ('"agentType"' not in line and "REVIEW_OPERATION:" not in line
@@ -180,6 +187,8 @@ def scan_file(path):
                 rec = json.loads(line)
             except ValueError:
                 continue
+            is_initial_record = initial_record_pending
+            initial_record_pending = False
             rtype = rec.get("type")
             agent_id = rec.get("agentId")
             if agent_id:
@@ -193,9 +202,8 @@ def scan_file(path):
             if rtype == "user":
                 msg = rec.get("message") or {}
                 content = msg.get("content")
-                operation = review_operation_from_envelope(rec)
-                if operation:
-                    review_operations.add(operation)
+                if is_initial_record:
+                    review_operation = review_operation_from_envelope(rec)
                 tur = rec.get("toolUseResult")
                 if isinstance(tur, dict) and "agentType" in tur:
                     # An Agent subagent's result. Dedup by the tool_result id.
@@ -323,7 +331,6 @@ def scan_file(path):
                 f_in * p_in + c_out * p_out + cw_1h * p_1h + cw_5m * p_5m + c_read * p_read
             ) / 1e6
 
-    review_operation = next(iter(review_operations)) if len(review_operations) == 1 else None
     attr_turns = Counter()
     for skill, count in raw_attr_turns.items():
         if skill == "codex-collaboration" and review_operation:
