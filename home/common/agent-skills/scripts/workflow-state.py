@@ -1101,6 +1101,8 @@ def validate_direct_owner_request(value: Any) -> dict[str, Any]:
     ):
         raise WorkflowError("unsupported direct owner interface version")
     issue = require_plain_int(request["issue"], "direct owner issue", minimum=1)
+    if not RUN_ID_PATTERN.fullmatch(f"direct-{issue}-000001"):
+        raise WorkflowError("direct owner issue exceeds the run ID length limit")
     require_plain_int(
         request["attempt_budget_minutes"],
         "attempt_budget_minutes",
@@ -1509,9 +1511,11 @@ def _apply_one_issue_policy(
         assert ledger_issue is not None
         ledger_issue["outcome"] = outcome
     attempt_number = 2 if retryable else 1
-    deadline_at = format_utc(
-        now_value + timedelta(minutes=attempt_budget_minutes)
-    )
+    try:
+        deadline_value = now_value + timedelta(minutes=attempt_budget_minutes)
+    except OverflowError as error:
+        raise WorkflowError("attempt deadline is out of range") from error
+    deadline_at = format_utc(deadline_value)
     attempt = new_control_attempt(
         issue=issue, attempt_number=attempt_number,
         worktree=selected_path, now=now, deadline_at=deadline_at,

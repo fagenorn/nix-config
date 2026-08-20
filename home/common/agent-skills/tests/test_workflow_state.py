@@ -3068,6 +3068,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "version": {**valid, "interface_version": 2},
             "boolean version": {**valid, "interface_version": True},
             "boolean issue": {**valid, "issue": True},
+            "oversized issue": {**valid, "issue": int("9" * 115)},
             "zero budget": {**valid, "attempt_budget_minutes": 0},
             "boolean budget": {**valid, "attempt_budget_minutes": True},
             "nonboolean new run": {**valid, "new_run": 1},
@@ -3083,6 +3084,23 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 self.assertEqual(completed.returncode, 2)
                 self.assertEqual(completed.stdout, "")
         self.assertFalse(self.workflows_dir.exists())
+
+    def test_direct_owner_rejects_an_unrepresentable_deadline_without_traceback(self):
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        rejected = self.direct_owner_raw(
+            now="9999-12-31T23:59:59Z",
+            attempt_budget_minutes=1,
+            tracker=self.tracker_fact(73),
+            worktree=self.worktree_fact(
+                73, candidate={"path": candidate, "state": "absent"},
+            ),
+            ok=False,
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertEqual(rejected.stdout, "")
+        self.assertIn("attempt deadline is out of range", rejected.stderr)
+        self.assertNotIn("Traceback", rejected.stderr)
+        self.assertFalse((self.workflows_dir / "direct-73-000001").exists())
 
     def test_direct_owner_requires_explicit_unavailable_authorization_to_resume_active(self):
         owner = self.acquire_direct()
