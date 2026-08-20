@@ -2254,6 +2254,55 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 self.assertEqual(result, expected_attempt)
                 self.assertEqual(self.state_path.read_bytes(), expected_bytes)
 
+    def test_zero_sequence_direct_shaped_dispatcher_keeps_non_direct_progress_and_reopen_bytes(self):
+        self.run_id = "direct-14-000000"
+        self.init_run()
+        worktree = os.path.abspath(self.root / "zero-sequence-worktree")
+        self.spawn(issue=14, worktree=worktree)
+        result = self.progress(
+            issue=14, phase=1, turn_count=118, context_tokens=20000,
+            remainder_self_contained=True,
+        )
+        expected_inputs = {
+            "turn_count": 118, "context_tokens": 20000,
+            "turn_ceiling": 120, "context_ceiling": 150000,
+            "turn_headroom": 2, "context_headroom": 10000,
+            "next_needs_context": True, "artifacts_sufficient": False,
+            "remainder_self_contained": True,
+        }
+        expected_attempt = {
+            "issue": 14, "attempt": 1, "owner": "14:1",
+            "worktree": worktree, "started_at": DEFAULT_NOW,
+            "deadline_at": "2026-08-13T20:30:00Z", "state": "active",
+            "launch_kind": "fresh", "launches": [{
+                "kind": "fresh", "owner": "14:1",
+                "worktree": worktree, "at": DEFAULT_NOW,
+            }],
+            "prior_attempt": None, "result": None, "finished_at": None,
+            "result_source": None, "handoff_path": None, "phase": 1,
+            "last_progress_at": DEFAULT_NOW, "phase_action": "handoff",
+            "phase_inputs": expected_inputs,
+        }
+        expected_state = {
+            "schema_version": 1, "run_id": self.run_id,
+            "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
+            "issues": {"14": {
+                "issue": 14, "attempts": [expected_attempt], "outcome": None,
+            }},
+        }
+        expected_bytes = (json.dumps(
+            expected_state, sort_keys=True, separators=(",", ":")
+        ) + "\n").encode()
+        self.assertEqual(result, expected_attempt)
+        self.assertEqual(self.state_path.read_bytes(), expected_bytes)
+
+        reopened = self.control_raw(
+            now=DEFAULT_NOW, issues=[14], tracker=[self.tracker_fact(14)],
+            worktrees=[], max_parallel=1,
+        )
+        self.assertEqual(reopened.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), expected_bytes)
+
     def test_phase_action_validation_is_bound_to_run_identity(self):
         self.run_id = "dispatcher-corruption"
         self.init_run()

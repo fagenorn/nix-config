@@ -686,7 +686,20 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("mechanical-only direct autonomous", transfer)
         self.assert_ordered(
             delegated,
-            "verify that the worktree and branch match the owner envelope",
+            "Before reading either artifact",
+            "`branchPattern` and `worktreePrefix`",
+            "decimal `owner.issue`",
+            "final path component",
+            "binding-derived accepted branch regex",
+            "`expected_branch`",
+            "`git -C owner.worktree branch --show-current`",
+            "equal `expected_branch`",
+            "mismatch is a contract failure",
+            "both roots are tracked",
+        )
+        self.assert_ordered(
+            delegated,
+            "mismatch is a contract failure",
             "current clean HEAD",
             "both roots are tracked",
             "independently run `artifact-budget check`",
@@ -994,6 +1007,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertNotIn(retired_policy_anchor, expected)
 
     def test_auto_mode_never_skips_durable_checkpoints_or_terminal_writes(self):
+        checkpoint_contract = self.section(
+            self.auto, "## The self-answer pattern", "## When *not* to auto-resolve"
+        )
         self.assertIn("never skips `workflow-state progress`", self.auto)
         self.assertIn("every phase checkpoint", self.auto)
         self.assert_ordered(
@@ -1008,6 +1024,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "workflow-state finish",
             "notification",
         )
+        self.assertNotIn(
+            "For every terminal result, call `workflow-state finish`",
+            checkpoint_contract,
+        )
+        for relay_exception in (
+            "successful direct Phase-5 relay",
+            "delegated fresh owner has already persisted",
+            "must not call `workflow-state finish` again",
+            "delegated-owner dispatch failure",
+        ):
+            self.assertIn(relay_exception, checkpoint_contract)
 
     def test_handoff_supports_safe_durable_destination_and_temp_default(self):
         self.assertIn(".superpowers/workflows/<run-id>/handoffs/", self.handoff)

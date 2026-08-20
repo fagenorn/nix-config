@@ -36,8 +36,13 @@ Auto-resolving a checkpoint never skips `workflow-state progress`: persist the
 gate decision at every phase checkpoint and obey its returned action before the
 next phase starts. If it returns a durable handoff, invoke `handoff` at the
 per-run destination, finalize it through `workflow-state progress`, and stop.
-For every terminal result, call `workflow-state finish` successfully before any
-notification to the dispatcher; persistence always precedes notification.
+For every ordinarily owned terminal result, call `workflow-state finish`
+successfully before any notification to the dispatcher; persistence always
+precedes notification. The only exception is the successful direct Phase-5 relay:
+the delegated fresh owner has already persisted the canonical terminal result, so
+the earlier controller must not call `workflow-state finish` again. A
+delegated-owner dispatch failure remains an ordinarily owned terminal result and
+must be persisted before notification.
 
 Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`,
 `ship-issue`) don't know about `--auto`. *You* carry the autonomous-mode context — when one tells you
@@ -251,11 +256,19 @@ bindings are re-resolved in the delegated worktree.
 
 #### Fresh delegated owner
 
-Before reading either artifact,
-verify that the worktree and branch match the owner envelope. Verify the
-current clean HEAD, then verify that both roots are tracked at that HEAD. Next,
-independently run `artifact-budget check` for each root and compare all four metrics
-with the continuation. Any mismatch stops the attempt as a contract failure.
+Before reading either artifact, re-resolve `branchPattern` and `worktreePrefix`
+from repository bindings in `owner.worktree`. Quote the pattern's literal bytes,
+substitute decimal `owner.issue` for `<num>` and
+`[a-z0-9][a-z0-9-]*` for `<slug>`, and accept exactly the resulting pattern with
+either the resolved prefix or no prefix. Take normalized `owner.worktree`'s final path component
+and require it to match that binding-derived accepted branch regex; that component
+is the deterministic `expected_branch`. Require
+`git -C owner.worktree branch --show-current` to equal `expected_branch`. A
+pattern, path, or current-branch mismatch is a contract failure before either
+artifact root is read. Only after that branch check, verify the current clean HEAD,
+then verify that both roots are tracked at that HEAD. Next, independently run `artifact-budget check`
+for each root and compare all four metrics with the
+continuation. Any mismatch stops the attempt as a contract failure.
 
 After those checks pass, adopt the owner envelope as the existing lifecycle
 identity; the fresh owner must not call `direct-owner` or perform any other

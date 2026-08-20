@@ -323,6 +323,12 @@ def validate_launch_event(value: Any, *, owner: str, worktree: str) -> None:
     parse_utc(value["at"], "launch time")
 
 
+def is_reserved_direct_run_id(run_id: str) -> bool:
+    """Return whether ``run_id`` is owned exclusively by direct-owner."""
+    match = DIRECT_RUN_ID_PATTERN.fullmatch(run_id)
+    return match is not None and int(match.group(2)) >= 1
+
+
 def select_phase_action(
     *,
     run_id: str,
@@ -346,7 +352,7 @@ def select_phase_action(
     complete order: eligible ``fresh_start``, unknown usage, near-ceiling usage,
     self-contained delegation, work that needs no context, then ``continue``.
     """
-    if DIRECT_RUN_ID_PATTERN.fullmatch(run_id):
+    if is_reserved_direct_run_id(run_id):
         if remainder_self_contained:
             return "delegate"
         if not next_needs_context and artifacts_sufficient:
@@ -1180,8 +1186,7 @@ def bootstrap_response(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def reject_reserved_direct_run_id(run_id: str) -> None:
-    match = DIRECT_RUN_ID_PATTERN.fullmatch(run_id)
-    if match is not None and int(match.group(2)) >= 1:
+    if is_reserved_direct_run_id(run_id):
         raise WorkflowError("direct run identities are reserved for direct-owner")
 
 
@@ -1392,12 +1397,10 @@ def _apply_one_issue_policy(
             validate_handoff_path(run_dir, latest["handoff_path"])
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
-        direct_run_match = DIRECT_RUN_ID_PATTERN.fullmatch(run_dir.name)
         absent_phase_zero_direct_reservation = bool(
             handed_off
             and latest["phase"] == 0
-            and direct_run_match is not None
-            and int(direct_run_match.group(2)) >= 1
+            and is_reserved_direct_run_id(run_dir.name)
             and recorded is not None
             and recorded["state"] == "absent"
         )
