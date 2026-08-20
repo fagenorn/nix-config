@@ -8,13 +8,14 @@ artifact pass. Runs entirely offline: fixtures are built in a temp dir.
 Run: python3 -m unittest -v tests/test_agent_costs.py
 """
 
+import contextlib
 import importlib.util
+import io
 import json
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "agent-costs.py"
@@ -31,17 +32,39 @@ def record(rec):
 
 
 def assistant(msg_id, usage=None, content=None, model="claude-opus-5",
-              effort="xhigh", stop_reason="tool_use", cwd="/Users/me/repo"):
+              effort="xhigh", stop_reason="tool_use", cwd="/Users/me/repo",
+              agent_id=None, attribution_skill=None, sidechain=False):
     return record({
         "type": "assistant",
         "cwd": cwd,
         "effort": effort,
+        "agentId": agent_id,
+        "attributionSkill": attribution_skill,
+        "isSidechain": sidechain,
         "message": {
             "id": msg_id,
             "model": model,
             "stop_reason": stop_reason,
             "usage": usage,
             "content": content or [],
+        },
+    })
+
+
+def envelope_user(agent_id, cwd, operation, *, packet="review packet", parent_uuid=None):
+    return record({
+        "type": "user",
+        "isSidechain": True,
+        "agentId": agent_id,
+        "cwd": cwd,
+        "parentUuid": parent_uuid,
+        "message": {
+            "role": "user",
+            "content": (
+                f"WORKTREE_ROOT: {cwd}\n"
+                f"REVIEW_OPERATION: {operation}\n"
+                f"{packet}"
+            ),
         },
     })
 
@@ -176,6 +199,129 @@ class ScanFileTest(unittest.TestCase):
         self.assertEqual(r["agents_killed"], 1)
         self.assertIn("merged", r["final_text"])
 
+    def test_owner_identity_and_own_cwd_evidence_must_agree(self):
+        issue_7 = "/Users/me/repo/.claude/worktrees/worktree-issue-7-widget"
+        issue_8 = "/Users/me/repo/.claude/worktrees/worktree-issue-8-other"
+        cases = [
+            ("aissue-7-owner-2-deadbeef", [issue_7], "7"),
+            ("aissue-7-owner-2-deadbeef", [issue_8], None),
+            ("aissue-7-owner-2-deadbeef", [issue_7, issue_8], None),
+            ("areviewer-7-deadbeef", [issue_7], None),
+            ("aissue-7-owner-0-deadbeef", [issue_7], None),
+        ]
+        for agent_id, cwds, expected in cases:
+            with self.subTest(agent_id=agent_id, cwds=cwds):
+                lines = [
+                    assistant(f"m{index}", usage=USAGE_1, cwd=cwd, agent_id=agent_id, sidechain=True)
+                    for index, cwd in enumerate(cwds)
+                ]
+                self.assertEqual(agent_costs.owner_issue(self.scan(lines)), expected)
+
+    def test_exact_initial_envelope_qualifies_codex_skill_attribution(self):
+        cwd = "/Users/me/repo/.claude/worktrees/worktree-issue-7-widget"
+        for operation in ("plan-review", "diff-review"):
+            with self.subTest(operation=operation):
+                packet = "x" * 5000
+                result = self.scan([
+                    envelope_user("acodex-reviewer-7-deadbeef", cwd, operation, packet=packet),
+                    assistant(
+                        "m1",
+                        usage=USAGE_1,
+                        cwd=cwd,
+                        agent_id="acodex-reviewer-7-deadbeef",
+                        attribution_skill="codex-collaboration",
+                        sidechain=True,
+                    ),
+                ])
+                self.assertEqual(result["review_operation"], operation)
+                self.assertEqual(result["attr_turns"], {f"codex-collaboration/{operation}": 1})
+
+    def test_operation_words_outside_exact_root_envelope_are_not_evidence(self):
+        cwd = "/Users/me/repo/.claude/worktrees/worktree-issue-7-widget"
+        malformed = [
+            record({
+                "type": "user", "isSidechain": True, "agentId": "ahelper", "parentUuid": None,
+                "message": {"role": "user", "content": "Discuss diff-review in prose"},
+            }),
+            envelope_user("ahelper", cwd, "plan-review", parent_uuid="not-root"),
+            record({
+                "type": "user", "isSidechain": True, "agentId": "ahelper", "parentUuid": None,
+                "message": {"role": "user", "content": f"REVIEW_OPERATION: plan-review\nWORKTREE_ROOT: {cwd}\npacket"},
+            }),
+        ]
+        for index, first_record in enumerate(malformed):
+            with self.subTest(index=index):
+                result = self.scan([
+                    first_record,
+                    assistant(
+                        "m1", usage=USAGE_1, cwd=cwd, agent_id="ahelper",
+                        attribution_skill="codex-collaboration", sidechain=True,
+                    ),
+                ])
+                self.assertIsNone(result["review_operation"])
+                self.assertEqual(result["attr_turns"], {"codex-collaboration": 1})
+
+
+class ExecutorFallbackTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.paths = []
+        for index, usage in enumerate((USAGE_1, USAGE_2)):
+            path = Path(self.tmp.name) / f"{index}.jsonl"
+            path.write_text(assistant(f"m{index}", usage=usage), encoding="utf-8")
+            self.paths.append(path)
+
+    def assert_fallback(self, executor_factory, exception_name):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            actual = agent_costs.scan_paths(self.paths, executor_factory=executor_factory)
+        expected = [agent_costs.scan_file(path) for path in self.paths]
+        self.assertEqual(actual, expected)
+        self.assertEqual(
+            stderr.getvalue(),
+            f"Process pool unavailable ({exception_name}); scanning sequentially.\n",
+        )
+
+    def test_pool_construction_failure_falls_back_in_order(self):
+        class ConstructionFailure:
+            def __init__(self, **_kwargs):
+                raise PermissionError("semaphores denied")
+
+        self.assert_fallback(ConstructionFailure, "PermissionError")
+
+    def test_partial_iteration_failure_discards_prefix_and_rescans_all(self):
+        class IterationFailure:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def map(self, function, paths, chunksize):
+                del chunksize
+                paths = list(paths)
+
+                def values():
+                    yield function(paths[0])
+                    raise RuntimeError("worker stream failed")
+
+                return values()
+
+        self.assert_fallback(IterationFailure, "RuntimeError")
+
+    def test_sequential_scanner_failure_is_not_swallowed(self):
+        class ConstructionFailure:
+            def __init__(self, **_kwargs):
+                raise PermissionError("semaphores denied")
+
+        with mock.patch.object(agent_costs, "scan_file", side_effect=ValueError("bad transcript")):
+            with self.assertRaisesRegex(ValueError, "bad transcript"):
+                agent_costs.scan_paths(self.paths, executor_factory=ConstructionFailure)
+
 
 class OutcomeTest(unittest.TestCase):
     def test_completed(self):
@@ -233,48 +379,156 @@ class EndToEndTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
-        proj = root / "-Users-me-repo"
-        proj.mkdir()
-        wt_cwd = "/Users/me/repo/.claude/worktrees/worktree-issue-7-widget"
-        (proj / "sess1.jsonl").write_text("".join([
-            assistant("m1", usage=USAGE_1, cwd=wt_cwd, content=[
-                {"type": "tool_use", "id": "t1", "name": "Skill",
-                 "input": {"skill": "from-issue"}},
-            ]),
-            assistant("m2", usage=USAGE_2, cwd=wt_cwd, content=[
-                {"type": "text", "text": "PR merged and issue #7 closed."},
-            ], stop_reason="end_turn"),
-        ]))
-        subdir = proj / "sess1" / "subagents"
-        subdir.mkdir(parents=True)
-        (subdir / "agent-a.jsonl").write_text(
-            assistant("s1", usage=USAGE_1, cwd=wt_cwd, model="claude-sonnet-5",
-                      effort="high"),
+        project = root / "-Users-me-repo"
+        project.mkdir()
+        issue_7 = "/Users/me/repo/.claude/worktrees/worktree-issue-7-widget"
+        issue_8 = "/Users/me/repo/.claude/worktrees/worktree-issue-8-other"
+        (project / "sess1.jsonl").write_text(
+            assistant(
+                "root-1",
+                usage=USAGE_1,
+                cwd="/Users/me/repo",
+                content=[{"type": "text", "text": "Dispatcher completed."}],
+                stop_reason="end_turn",
+            ),
+            encoding="utf-8",
         )
+        subdir = project / "sess1" / "subagents"
+        subdir.mkdir(parents=True)
+        (subdir / "owner-7.jsonl").write_text(
+            assistant(
+                "owner-7-1", usage=USAGE_1, cwd=issue_7,
+                agent_id="aissue-7-owner-1-owner7", sidechain=True,
+            ),
+            encoding="utf-8",
+        )
+        (subdir / "owner-8.jsonl").write_text(
+            assistant(
+                "owner-8-1", usage=USAGE_1, cwd=issue_8,
+                agent_id="aissue-8-owner-2-owner8", sidechain=True,
+            ),
+            encoding="utf-8",
+        )
+        (subdir / "helper.jsonl").write_text(
+            assistant(
+                "helper-1", usage=USAGE_1, cwd=issue_7,
+                model="claude-helper-root-only", agent_id="ahelper-7-helper",
+                sidechain=True,
+            ),
+            encoding="utf-8",
+        )
+        for operation, cwd in (("plan-review", issue_7), ("diff-review", issue_8)):
+            agent_id = f"acodex-{operation}-transport"
+            (subdir / f"{operation}.jsonl").write_text(
+                "".join([
+                    envelope_user(agent_id, cwd, operation),
+                    assistant(
+                        f"{operation}-1", usage=USAGE_1, cwd=cwd,
+                        agent_id=agent_id, attribution_skill="codex-collaboration",
+                        sidechain=True,
+                    ),
+                ]),
+                encoding="utf-8",
+            )
         self.projects = str(root)
 
-    def run_script(self, *extra):
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), "--projects-dir", self.projects,
-             "--days", "0", *extra],
-            capture_output=True, text=True, timeout=120,
+    class DeterministicExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def map(self, function, paths, chunksize):
+            del chunksize
+            return [function(path) for path in paths]
+
+    def run_main(self, executor_factory):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            agent_costs.main(
+                ["--projects-dir", self.projects, "--days", "0"],
+                executor_factory=executor_factory,
+            )
+        return stdout.getvalue(), stderr.getvalue()
+
+    def test_dispatcher_owners_reviews_and_forced_fallback_are_truthful(self):
+        class ConstructionFailure:
+            def __init__(self, **_kwargs):
+                raise PermissionError("semaphores denied")
+
+        successful_stdout, successful_stderr = self.run_main(self.DeterministicExecutor)
+        fallback_stdout, fallback_stderr = self.run_main(ConstructionFailure)
+        self.assertEqual(successful_stderr, "")
+        self.assertEqual(fallback_stdout, successful_stdout)
+        self.assertEqual(
+            fallback_stderr,
+            "Process pool unavailable (PermissionError); scanning sequentially.\n",
         )
 
-    def test_end_to_end_grouping_and_sections(self):
-        res = self.run_script()
-        self.assertEqual(res.returncode, 0, res.stderr)
-        out = res.stdout
-        self.assertIn("#7", out)          # issue key from the worktree cwd
-        self.assertIn("repo", out)        # project name trimmed at the dot-dir
-        self.assertIn("completed", out)   # outcome derived from the final message
-        self.assertIn("TOTAL", out)
-        self.assertIn("NOT billing data", out)
-        # 3 deduped turns across root + subagent: fresh 10+1+10=21 output 20+2+20=42
-        self.assertIn("3 turns", out)
-        self.assertIn("xhigh 2", out)
-        self.assertIn("high 1", out)
-        self.assertIn("claude-opus-5 2", out)
-        self.assertIn("claude-sonnet-5 1", out)
+        self.assertRegex(successful_stdout, r"(?m)^#7\s+repo\s+")
+        self.assertRegex(successful_stdout, r"(?m)^#8\s+repo\s+")
+        self.assertRegex(successful_stdout, r"(?m)^\(multi-issue\)\s+repo\s+")
+        self.assertIn("codex-collaboration/plan-review 1", successful_stdout)
+        self.assertIn("codex-collaboration/diff-review 1", successful_stdout)
+        self.assertIn("6 transcripts", successful_stdout)
+        self.assertIn("5 subagents", successful_stdout)
+
+        sessions = list(agent_costs.find_sessions(Path(self.projects), None))
+        jobs = [
+            (index, is_root, path)
+            for index, (_home, roots, subs) in enumerate(sessions)
+            for is_root, path in [(True, path) for path in roots] + [(False, path) for path in subs]
+        ]
+        ordered_results = [agent_costs.scan_file(path) for _index, _is_root, path in jobs]
+        direct = agent_costs.fold_scan_totals([result for result in ordered_results if result])
+        self.assertEqual(direct["turns"], 6)
+        self.assertEqual(direct["fresh"], 60)
+        self.assertEqual(direct["output"], 120)
+        self.assertEqual(direct["cache_create"], 30)
+        self.assertEqual(direct["cache_read"], 600)
+        self.assertAlmostEqual(direct["cost"], 0.0113625, places=12)
+        self.assertIn("6 turns", successful_stdout)
+        self.assertIn("fresh 60", successful_stdout)
+        self.assertIn("cache_create 30", successful_stdout)
+        self.assertIn("cache_read 600", successful_stdout)
+        self.assertIn("output 120", successful_stdout)
+
+        per_session = agent_costs.defaultdict(list)
+        for (session_index, is_root, _path), result in zip(jobs, ordered_results):
+            if result:
+                per_session[session_index].append((is_root, result))
+        groups, retained, kept_sessions, kept_files = agent_costs.build_groups(sessions, per_session)
+        root_group = groups[("repo", agent_costs.MULTI_ISSUE)]
+        self.assertEqual(root_group["models"]["claude-helper-root-only"], 1)
+        self.assertNotIn("claude-helper-root-only", groups[("repo", "7")]["models"])
+        self.assertEqual(root_group["sessions"], 1)
+        self.assertEqual(groups[("repo", "7")]["sessions"], 0)
+        self.assertEqual(groups[("repo", "8")]["sessions"], 0)
+        self.assertEqual(sum(group["subagents"] for group in groups.values()), 5)
+        self.assertEqual(sum(group["turns"] for group in groups.values()), direct["turns"])
+        for field in agent_costs.TOKEN_FIELDS:
+            self.assertEqual(sum(group[field] for group in groups.values()), direct[field])
+        self.assertAlmostEqual(sum(group["cost"] for group in groups.values()), direct["cost"], places=12)
+        self.assertEqual(len(retained), 6)
+        self.assertEqual(kept_sessions, 1)
+        self.assertEqual(kept_files, 6)
+
+    def test_default_executor_degrades_concisely_when_environment_restricts_it(self):
+        expected_stdout, expected_stderr = self.run_main(self.DeterministicExecutor)
+        stdout, stderr = self.run_main(agent_costs.ProcessPoolExecutor)
+        self.assertEqual(expected_stderr, "")
+        self.assertEqual(stdout, expected_stdout)
+        if stderr:
+            self.assertRegex(
+                stderr,
+                r"\AProcess pool unavailable \([A-Za-z_][A-Za-z0-9_]*\); "
+                r"scanning sequentially\.\n\Z",
+            )
 
 
 if __name__ == "__main__":
