@@ -6,7 +6,7 @@
 
 **Goal:** Produce one compact, reproducible evidence report that truthfully certifies or rejects the controller-input budget for representative run `direct-75-000002` without altering the deployed lifecycle.
 
-**Architecture:** One Markdown report advances through two immutable evidence checkpoints. The fresh delegated owner first commits facts available before shipping with verdict `pending`; after the run is durably terminal and both controller prefixes are closed, a separate read-only certifier seals the same report on a follow-up branch and derives the closed verdict from a reproduction matrix.
+**Architecture:** One Markdown report advances through two immutable evidence checkpoints. The fresh delegated owner first commits facts available before shipping with verdict `pending`; after the run is durably terminal and every D2-required controller prefix is closed, a separate read-only certifier seals the same report on a follow-up branch and derives the closed verdict from a reproduction matrix.
 
 **Tech stack:** Markdown, Git, POSIX shell, `jq`, `readlink`, platform `stat`, `realpath`, `cmp`, `shasum -a 256`, Codex rollout JSONL, and the workflow-state JSON ledger.
 
@@ -28,7 +28,7 @@
 
 ## Test seams
 
-- Deployment seam: compare installed `SKILL.md`, `AUTO.md`, and `workflow-state` bytes with `f3fac9554761d0c3085d70bf4526cf3e7486de3e`, prove they differ from `c780b38f613c59a7d6674dc081d9f67666054ebf`, resolve `/run/current-system`, and assert `merge_time <= activation_time < process/session_start`.
+- Deployment seam: capture `/run/current-system` and installed `SKILL.md`, `AUTO.md`, and `workflow-state` resolutions in bounded structured rollout records; replay those records and compare the exact immutable resolved store-path bytes with `f3fac9554761d0c3085d70bf4526cf3e7486de3e`, prove they differ from `c780b38f613c59a7d6674dc081d9f67666054ebf`, and assert `merge_time <= activation_time < process/session_start`.
 - Lifecycle seam: require the sealed Phase-5 observation and terminal ledger to agree on run `direct-75-000002`, attempt `1`, owner `75:1`, action `delegate` at Phase 5, unchanged envelope, a distinct later fresh-owner session, and one durable terminal result.
 - Controller seam: build the complete role inventory, apply D2, extract one D3 maximum record from each required sealed prefix, validate paired counters, and require every logical value to be at most `150000` for an all-pass result.
 - Ownership seam: diff the issue-74 deployment merge to reviewed HEAD and inspect structured dispatches; before rollover, only the design and complete plan package may change and no SDD task may launch, while the first SDD launch belongs to the fresh owner.
@@ -49,7 +49,7 @@ Task 2 — Seal the post-terminal certification — `.claude/specs/2026-08-20-di
 ## Phase 5 standards review
 
 - Reviewer: `native-codex`; job `phase5-plan-review-75-1`; base `f3fac9554761d0c3085d70bf4526cf3e7486de3e`; native fallback not used.
-- B1 — accepted and applied per D9: Task 1 now seals only the exact Phase-5 `delegate` observation prefix and leaves both terminal controller prefixes and maximum-input records to Task 2.
+- B1 — accepted and applied per D9: Task 1 now seals only the exact Phase-5 `delegate` observation prefix and leaves every D2-required terminal controller prefix and maximum-input record to Task 2.
 - S1 — accepted and applied: both structural tests now require exactly one verdict line, with the expected pending or closed state.
 - Discussion findings: none.
 

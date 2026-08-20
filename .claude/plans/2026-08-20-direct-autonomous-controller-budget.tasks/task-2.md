@@ -4,14 +4,14 @@
 - Modify: `.claude/specs/2026-08-20-direct-autonomous-controller-budget-evidence.md`
 
 **Interfaces:**
-- Consumes: Task 1's merged pending report and its containing full commit; the representative-run merge commit; canonical terminal ledger bytes for `direct-75-000002`; the unchanged pre-rollover sealed prefix; the fresh controller's closed prefix ending at terminal relay/task completion; the complete structured role inventory; D1–D8.
+- Consumes: Task 1's merged pending report and its containing full commit; the representative-run merge commit; canonical terminal ledger bytes for `direct-75-000002`; the unchanged pre-rollover sealed prefix; every D2-required controller's closed prefix ending at terminal relay/task completion; the complete structured role inventory; D1–D8.
 - Produces: the same evidence report with no `pending`/`remaining` dispositions, exact terminal anchors and per-controller maximum records, a replayed reproduction matrix, and one D8 final verdict. Its containing final evidence commit is identified by the D7 path-scoped query from a clean checkout.
 
 **Invariants:**
 - A separate post-terminal certifier starts from `origin/main` containing the representative-run merge, creates an ordinary follow-up branch, and verifies the canonical ledger is terminal before editing. It is not either lifecycle controller.
 - This task never calls `workflow-state`, `direct-owner`, SDD, ship/release commands, activation, or any command that mutates the ledger/run. It reads runtime evidence and writes only the report.
 - The ledger's exact bytes, size, and SHA-256 are captured before the report edit and must be byte-identical after verification and commit. The pre-rollover prefix must still match Task 1's size/digest.
-- Both required controller prefixes end at that controller's terminal relay/task-complete record. Later appended conversation bytes are excluded. Every unexpected authority-bearing session is promoted to a required controller per D2.
+- Every D2-required controller prefix ends at that controller's terminal relay/task-complete record. Later appended conversation bytes are excluded. Every unexpected authority-bearing session is promoted to a required controller per D2.
 - For every required controller, D3 is applied independently inside its sealed prefix. The chosen row carries one timestamp plus paired integer logical/cached values and derived fresh value; the ceiling is evaluated only against logical input.
 - Any observed deployment, lifecycle, ownership, counter, or ceiling failure is retained as `fail`; otherwise an unavailable required fact is `unknown`. D8 is applied mechanically and cannot be overridden by narrative.
 - The historical rows are rechecked from the two Task-1 fixed paths and remain descriptive. No new trace, transcript copy, percentage, aggregation, or causal claim is introduced.
@@ -19,7 +19,7 @@
 
 - [ ] **Step 1: Write and run the final-report structural test after proving the terminal precondition**
 
-First resolve the canonical ledger path from the merged pending report's owner envelope. Read it with `jq` and require exactly one attempt for issue `75` matching run `direct-75-000002`, attempt `1`, owner `75:1`, the recorded worktree, non-null `finished_at`, non-null `result`, non-null `result_source`, and terminal attempt/outcome state. Locate each controller's terminal relay/task-complete record and prove both prefix endpoints exist. Stop without editing if either condition is absent.
+First resolve the canonical ledger path from the merged pending report's owner envelope. Read it with `jq` and require exactly one attempt for issue `75` matching run `direct-75-000002`, attempt `1`, owner `75:1`, the recorded worktree, non-null `finished_at`, non-null `result`, non-null `result_source`, and terminal attempt/outcome state. Locate every D2-required controller's terminal relay/task-complete record and prove every required prefix endpoint exists. Stop without editing if the terminal-ledger condition or any required endpoint is absent.
 
 Then run:
 
@@ -52,7 +52,7 @@ Expected: FAIL because Task 1's merged report still contains verdict `pending` a
 
 - [ ] **Step 2: Seal the runtime evidence and extract each controller maximum**
 
-Record the terminal ledger's absolute path, exact full byte count, and `shasum -a 256` before editing. Extract only compact run/issue/attempt/owner/worktree/state/finished/result/result-source fields. Recompute the pre-rollover prefix digest over Task 1's exact byte count. Determine the fresh controller's prefix endpoint at its terminal relay/task-complete record, then record its absolute path, exact covered bytes, SHA-256, `session_meta.id`, and start timestamp.
+Record the terminal ledger's absolute path, exact full byte count, and `shasum -a 256` before editing. Extract only compact run/issue/attempt/owner/worktree/state/finished/result/result-source fields. Recompute the pre-rollover prefix digest over Task 1's exact byte count. Determine every D2-required controller's prefix endpoint at its terminal relay/task-complete record, then record each absolute path, exact covered bytes, SHA-256, `session_meta.id`, and start timestamp.
 
 For each D2-required controller prefix, run the following `jq` algorithm over exactly `head -c <covered-bytes> <absolute-log-path>`; substitute literal size/path in the report's reproduction row:
 
@@ -97,7 +97,7 @@ Replace every terminal-dependent pending statement with the compact observed val
 
 - `Verdict and scope`: full representative-run merge; exact terminal run/attempt/owner/worktree; one-trace scope; D7 final-evidence-commit query; final verdict derived only after the matrix is complete.
 - `Deployment freshness`: replay all Task-1 comparisons and timestamp ordering against the same immutable merge/base and sealed session anchors.
-- `Lifecycle trace`: final role inventory, both controller identities/prefix anchors, Phase-5 sealed `delegate`, distinct fresh adoption, and terminal ledger path/bytes/digest/result.
+- `Lifecycle trace`: final role inventory, every D2-required controller identity/prefix anchor, Phase-5 sealed `delegate`, the fresh adoption comparison or explicit unavailable result, and terminal ledger path/bytes/digest/result.
 - `Controller input`: one complete row per D2-required controller using the D3 object. Keep logical, cached, and fresh separate; give each row `pass`, `fail`, or `unknown`.
 - `Pre-rollover boundary`: replay the reviewed Git diff and sealed dispatch inventory; record whether only the design/plan package changed before rollover and whether the first SDD launch belonged to the fresh owner.
 - `Historical comparison`: retain exact rechecked rows and say only whether each measurable issue-75 controller is at/below `150000` and descriptively lower than each historical observation, with scope/runtime/workflow limitations.
