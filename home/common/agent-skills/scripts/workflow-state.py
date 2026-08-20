@@ -325,6 +325,7 @@ def validate_launch_event(value: Any, *, owner: str, worktree: str) -> None:
 
 def select_phase_action(
     *,
+    run_id: str,
     turn_count: int | None,
     context_tokens: int | None,
     turn_ceiling: int,
@@ -335,16 +336,33 @@ def select_phase_action(
     artifacts_sufficient: bool,
     remainder_self_contained: bool,
 ) -> str:
-    """Select the phase-boundary action from the phase budget and the three booleans.
+    """Select the phase-boundary action from run identity and phase inputs.
 
     The phase budget is the turn and context ceilings with their headrooms; this
     function never sees the attempt budget's wall clock, and ``delegate`` does not
-    reset it. ``fresh_start`` comes first because a disposable conversation with
-    sufficient artifacts is the cheapest transition at any budget level. Unknown
-    usage and at-ceiling usage both yield ``handoff`` before ``delegate`` is
-    considered, so a persisted ``delegate`` implies measured usage strictly below
-    both ceilings.
+    reset it. Reserved module-owned direct runs select a self-contained remainder
+    first, then an eligible ``fresh_start``, known near-ceiling usage, work that
+    needs no context, and otherwise ``continue``. Every non-direct run retains the
+    complete order: eligible ``fresh_start``, unknown usage, near-ceiling usage,
+    self-contained delegation, work that needs no context, then ``continue``.
     """
+    if DIRECT_RUN_ID_PATTERN.fullmatch(run_id):
+        if remainder_self_contained:
+            return "delegate"
+        if not next_needs_context and artifacts_sufficient:
+            return "fresh_start"
+        if (
+            turn_count is not None
+            and turn_count >= turn_ceiling - turn_headroom
+        ) or (
+            context_tokens is not None
+            and context_tokens >= context_ceiling - context_headroom
+        ):
+            return "handoff"
+        if not next_needs_context:
+            return "handoff"
+        return "continue"
+
     if not next_needs_context and artifacts_sufficient:
         return "fresh_start"
     if turn_count is None or context_tokens is None:
@@ -392,7 +410,9 @@ def validate_phase_inputs(value: Any) -> dict[str, Any]:
     return value
 
 
-def validate_attempt(value: Any, *, issue: int, expected_number: int) -> None:
+def validate_attempt(
+    value: Any, *, issue: int, expected_number: int, run_id: str
+) -> None:
     if not isinstance(value, dict) or set(value) != ATTEMPT_FIELDS:
         raise WorkflowError("invalid attempt schema")
     if value["issue"] != issue or value["attempt"] != expected_number:
@@ -470,7 +490,7 @@ def validate_attempt(value: Any, *, issue: int, expected_number: int) -> None:
         ):
             raise WorkflowError("invalid phase action")
         phase_inputs = validate_phase_inputs(value["phase_inputs"])
-        if select_phase_action(**phase_inputs) != value["phase_action"]:
+        if select_phase_action(run_id=run_id, **phase_inputs) != value["phase_action"]:
             raise WorkflowError("phase action does not match persisted inputs")
     if value["state"] == "handed_off":
         if value["phase_action"] != "handoff" or value["handoff_path"] is None:
@@ -510,7 +530,9 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
         if not isinstance(attempts, list) or len(attempts) > 2:
             raise WorkflowError("invalid attempts list")
         for number, attempt in enumerate(attempts, start=1):
-            validate_attempt(attempt, issue=issue, expected_number=number)
+            validate_attempt(
+                attempt, issue=issue, expected_number=number, run_id=run_id
+            )
             started_at = parse_utc(attempt["started_at"], "attempt start time")
             if started_at < created_at:
                 raise WorkflowError("attempt starts before run creation")
@@ -2198,7 +2220,7 @@ def command_progress(args: argparse.Namespace) -> int:
         "remainder_self_contained": args.remainder_self_contained,
     }
     validate_phase_inputs(phase_inputs)
-    action = select_phase_action(**phase_inputs)
+    action = select_phase_action(run_id=args.run_id, **phase_inputs)
     if args.handoff_path is not None and action != "handoff":
         raise WorkflowError("handoff path is only valid for a handoff action")
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)

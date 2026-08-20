@@ -212,6 +212,11 @@ stays unguarded; see Out of scope.
 5. `not next_needs_context` → `handoff`
 6. → `continue`
 
+> (**amended by issue 74's direct-autonomous-implementation-owner-rollover
+> design, D1/D2** — issue 74 adds a reserved module-owned direct exception whose
+> self-contained remainder delegates before usage, while the issue-33 order
+> above remains the complete order for every non-direct run.)
+
 Rationale for this exact order (per D5): `fresh_start` stays first because
 `not next_needs_context and artifacts_sufficient` means the conversation is
 *disposable* and a new session reconstructs from committed artifacts — the
