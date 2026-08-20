@@ -11,7 +11,7 @@
 
 ## Global Constraints
 
-- `.claude/specs/2026-08-20-direct-autonomous-issue-durability-design.md` is authoritative; implementations cite D1–D14 and do not duplicate its decision rationale.
+- `.claude/specs/2026-08-20-direct-autonomous-issue-durability-design.md` is authoritative; implementations cite D1–D15 and do not duplicate its decision rationale.
 - Phase-0 scope is direct lifecycle acquisition plus the `from-issue` adapter only. Do not change dispatcher request/response envelopes, ordinary interactive-direct ledger-free behavior, or the existing explicitly durable interactive route.
 - `workflow-state` remains Python-standard-library-only and performs no tracker query, Git inspection, owner spawn, waiter installation, process-liveness check, or wall-clock read. Every decision instant and normalized observation comes from the request.
 - The exact public acquisition command is `workflow-state direct-owner --repo-root <absolute-ledger-repository-root> --request-file <absolute-json-path>` with direct interface version 1 and only the strict request/response shapes in D2/D6.
@@ -44,7 +44,7 @@ Task 2 — Route direct autonomous from-issue through durable acquisition — `.
 ## Decisions
 
 - Task 1 implements the shared acquisition boundary, strict wire shapes, namespace/locking model, authorization rules, compact projections, public capability split, and helper-prose correction per D1–D7 and D11–D13.
-- Task 2 implements the invocation-shape adapter boundary, adjacent handoff/worktree contracts, external-observation loop, and predecessor-spec amendment per D2, D6, D8, D10, and D13.
+- Task 2 implements the invocation-shape adapter boundary, adjacent handoff/worktree contracts, convergent external-observation loop, and predecessor-spec amendment per D2, D6, D8, D10, D13, and D15.
 - Both tasks prove only the public seams selected by D9/D12; no private implementation function becomes a test API.
 
 ## Phase-5 review provenance and dispositions
@@ -71,5 +71,12 @@ Task 2 — Route direct autonomous from-issue through durable acquisition — `.
 | Finding | Disposition |
 | --- | --- |
 | Strict-request tests omit boolean version/budget, zero budget, non-boolean authorizations, and a missing member | accepted — Task 1 adds the complete mutation-free failure matrix per D14 |
+
+### Phase-6 plan correction
+
+| Finding | Disposition |
+| --- | --- |
+| Current-round-only observations cannot converge against the stateless helper | accepted — Task 2 retains all previously requested observation kinds within the current acquisition and never invents an unrequested kind per D15 |
+| Revised Phase-1 contract test dropped the ordered exact-path three-way and no-fallthrough proof | accepted — Task 2 restores the complete ordered assertions before its fix round |
 
 ---

@@ -7,7 +7,7 @@
 - Test: `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 
 **Interfaces:**
-- Consumes: Task 1's strict `workflow-state direct-owner --repo-root <root> --request-file <absolute-path>` command and its `observe | owner | terminal` responses; the existing tracker/worktree adapters; the existing dispatcher lifecycle envelope; D2/D6/D8–D10/D12/D13.
+- Consumes: Task 1's strict `workflow-state direct-owner --repo-root <root> --request-file <absolute-path>` command and its `observe | owner | terminal` responses; the existing tracker/worktree adapters; the existing dispatcher lifecycle envelope; D2/D6/D8–D10/D12/D13/D15.
 - Produces: one explicit `### Direct autonomous acquisition` adapter contract in `from-issue/SKILL.md` and matching false-by-default authorization rules in `AUTO.md`.
 - Preserves: dispatcher-envelope adoption without `direct-owner`; ordinary interactive direct ledger-free behavior; explicit durable interactive `init-run`/`control`; Phase 0–7, `progress`, `finish`, and terminal-return contracts after an owner response is adopted.
 
@@ -15,7 +15,7 @@
 - Invocation selection is exhaustive and ordered: supplied dispatcher envelope wins unchanged; `--auto` without an envelope uses only `direct-owner`; interactive direct without explicit durability remains ledger-free; existing explicit durable interactive use remains `init-run` plus `control`.
 - Before the first direct call, resolve the immutable absolute ledger repository root, attempt budget, issue, and current UTC instant through existing bindings/adapters. Each call writes an absolute temporary request file with exactly the version-1 fields and passes only that file/root to `direct-owner`.
 - Always send both flags. Default both to false. Set `owner_unavailable` true only when the current user instruction explicitly authorizes takeover of the currently discovered unexpired active attempt; set `new_run` true only when it explicitly authorizes a new run after terminal replay. Never infer either from restart, missing/silent process state, active ledger, tracker reopening, terminal response, or a request to continue.
-- On `observe`, accept only the three exact requirement shapes. Query tracker only for `tracker`; inspect exactly the returned path only for `recorded_worktree`; reserve and verify one absent issue-branch candidate only for `candidate_worktree`. Put only current requested facts into the next strict request, call again, and fail loudly on unknown/duplicate/malformed requirements.
+- On `observe`, accept only the three exact requirement shapes. Query tracker only for `tracker`; inspect exactly the returned path only for `recorded_worktree`; reserve and verify one absent issue-branch candidate only for `candidate_worktree`. For the duration of this acquisition, retain every observation kind the helper has requested and carry all collected facts into each later strict request, refreshing a value when its external state may have changed; never send a fact kind before the helper requests it. Clear the observation set on `owner`, `terminal`, or failure. Call again and fail loudly on unknown/duplicate/malformed requirements (per D15).
 - On `owner`, validate the exact closed shape, adopt `ledger_repo_root`, run, issue, attempt, owner, action ID, worktree, handoff, deadline, and launch kind as the invocation's lifecycle identity, then continue the existing Phase 0–7 owner flow. Do not spawn or reserve another owner/worktree.
 - On `terminal`, validate and return the compact response unchanged to the caller, stop before Phase 1, and install no wait observer. A loud helper error is surfaced; it is never bypassed through `init-run`, `control`, a fabricated envelope, or the ledger-free path.
 - Direct acquisition never consumes or interprets dispatcher summaries, deltas, wait IDs, `wait`, or `finalize`. Dispatcher and explicit-durable interactive prose retain their existing bounded `init-run`/`control` behavior.
@@ -64,6 +64,7 @@ Add the following complete tests to `WorkflowSkillContractsTest`:
             "tracker",
             "recorded_worktree",
             "candidate_worktree",
+            "retain every fact previously requested during this acquisition",
             "call `direct-owner` again",
             "kind: owner",
             "adopt",
@@ -139,12 +140,25 @@ Replace the global handoff/worktree assertions with acquisition-specific contrac
 
     def test_lifecycle_phase_one_paths_are_acquisition_mode_specific(self):
         phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")
-        self.assertIn("dispatcher-owned or direct-autonomous lifecycle envelope", phase_one)
-        self.assertIn("use its exact absolute `worktree`", phase_one)
-        self.assertIn("adopt it", phase_one)
-        self.assertIn("Do not re-create it, do not move it, do not reset it", phase_one)
-        self.assertIn("ledger-free interactive direct", phase_one)
-        self.assertIn("standard `worktrees` flow", phase_one)
+        self.assert_ordered(
+            phase_one,
+            "dispatcher-owned or direct-autonomous lifecycle envelope",
+            "use its exact absolute `worktree`",
+            "**Absent** from both the filesystem",
+            "checked out on this issue's branch",
+            "adopt it",
+            "Do not re-create it, do not move it, do not reset it",
+            "a different branch",
+            "fail the attempt through the terminal return procedure",
+            "never choose another path",
+        )
+        self.assertIn("fail the attempt", phase_one)
+        self.assert_ordered(
+            phase_one,
+            "No lifecycle acquisition falls through to ordinary worktree creation",
+            "ledger-free interactive direct",
+            "standard `worktrees` flow",
+        )
 ```
 
 The revised assertions must prove that dispatcher-owned handoffs name `control`, direct autonomous handoffs name `direct-owner`, and neither route falls through to ordinary worktree creation.
@@ -160,7 +174,7 @@ Expected: FAIL in the new subsection/routing tests because direct standalone cur
 Within `## Lifecycle identity` in `from-issue/SKILL.md`, preserve the shared exact lifecycle identity rules and replace the ambiguous direct-standalone paragraphs with these behavior-complete subsections:
 
 1. `### Dispatcher-owned acquisition`: when all five dispatcher envelope fields are supplied, validate/adopt them unchanged and never call `direct-owner`.
-2. `### Direct autonomous acquisition`: when the invocation contains literal `--auto` and has no envelope, resolve the immutable ledger repository root, construct the strict request with injected current UTC and configured attempt budget, send both false-by-default authorization flags, and loop only on the helper's closed response discriminator. Spell out exact requirement-to-adapter mapping and owner-field adoption. State that terminal returns unchanged with no waiter and helper refusal is terminal for acquisition, not a fallback signal.
+2. `### Direct autonomous acquisition`: when the invocation contains literal `--auto` and has no envelope, resolve the immutable ledger repository root, construct the strict request with injected current UTC and configured attempt budget, send both false-by-default authorization flags, and loop only on the helper's closed response discriminator. Spell out exact requirement-to-adapter mapping, retain/resend all previously requested observation kinds within the current acquisition without inventing an unrequested kind (per D15), and spell out owner-field adoption. State that terminal returns unchanged with no waiter and helper refusal is terminal for acquisition, not a fallback signal.
 3. `### Interactive direct acquisition`: without `--auto` or an explicit durability request, retain the ordinary ledger-free worktree flow and compact direct return.
 4. `### Explicit durable interactive acquisition`: preserve the current `init-run` bootstrap, normalized tracker/worktree request with `max_parallel: 1`, `control`, exact single `spawn` adoption, and no-waiter behavior.
 
