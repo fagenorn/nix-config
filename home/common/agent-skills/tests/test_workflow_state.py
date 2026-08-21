@@ -4099,5 +4099,55 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(direct_retry["worktree"], direct_worktree)
 
 
+class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
+    """Cover the installed layout, where the policy is a home-manager symlink."""
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_installed_symlinked_policy_validates_a_terminal_result(self):
+        scripts = Path(__file__).parents[1] / "scripts"
+        policy = Path(__file__).parents[1] / "artifact-budget-policy.json"
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            binaries = home / ".agents/bin"
+            library = home / ".agents/lib/python"
+            share = home / ".agents/share"
+            for directory in (binaries, library, share):
+                directory.mkdir(parents=True)
+            installed_script = binaries / "workflow-state.py"
+            installed_script.write_bytes((scripts / "workflow-state.py").read_bytes())
+            wrapper = binaries / "artifact-budget"
+            wrapper.write_bytes((scripts / "artifact-budget").read_bytes())
+            wrapper.chmod(0o755)
+            (library / "artifact_budget.py").write_bytes(
+                (scripts / "artifact_budget.py").read_bytes()
+            )
+            # home-manager installs the policy as a store symlink, never a copy.
+            (share / "artifact-budget-policy.json").symlink_to(policy)
+
+            probe = (
+                "import importlib.util, json, sys\n"
+                "spec = importlib.util.spec_from_file_location('ws', sys.argv[1])\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(module)\n"
+                "_, resolved = module.artifact_budget_paths()\n"
+                "summary = module.terminal_result(1320, 'stopped', 'attempt deadline expired')\n"
+                "print(json.dumps({'policy': str(resolved), 'state': summary['state']}))\n"
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", probe, str(installed_script)],
+                capture_output=True, text=True, check=False,
+                env={**os.environ, "HOME": str(home)},
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            observed = json.loads(completed.stdout)
+            self.assertEqual(observed["state"], "stopped")
+            # The explicit --policy argument must name the resolved regular file:
+            # artifact-budget refuses a symlink passed as --policy.
+            self.assertFalse(Path(observed["policy"]).is_symlink())
+            self.assertEqual(
+                Path(observed["policy"]).resolve(), policy.resolve()
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
