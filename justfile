@@ -132,3 +132,11 @@ agent-costs *args:
 gc generations="5":
   nix-env --delete-generations {{generations}}
   nix-store --gc
+
+# Throwaway prototype (issue #86): drive release transactions across unlike project shapes
+prototype-release-transactions *args:
+  python3 prototype-release-transactions/tui.py {{args}}
+
+# Same prototype, headless: sweep every project shape x scenario and print where each lands
+prototype-release-transactions-sweep *args:
+  python3 prototype-release-transactions/drive.py {{args}}
