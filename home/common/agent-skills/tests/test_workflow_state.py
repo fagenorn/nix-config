@@ -2139,7 +2139,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                     "turn_count": None,
                     "context_tokens": None,
                 },
-                "handoff",
+                "continue",
             ),
         ]
         for index, (overrides, expected_action) in enumerate(cases, start=1):
@@ -2367,7 +2367,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             artifacts_sufficient=False,
             remainder_self_contained=True,
         )
-        self.assertEqual(unknown_usage["phase_action"], "handoff")
+        self.assertEqual(unknown_usage["phase_action"], "continue")
 
         at_context_ceiling = self.progress(
             issue=14,
@@ -2394,6 +2394,41 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             remainder_self_contained=True,
         )
         self.assertEqual(at_turn_ceiling["phase_action"], "handoff")
+
+    def test_unknown_usage_continues_a_dispatched_run_across_phase_gates(self):
+        """A harness with no context-token count must not pin a run to handoff.
+
+        Omitting --context-tokens is the truthful report on a harness that exposes
+        no authoritative count. Treating that as a budget signal handed every
+        dispatched owner off at its first phase gate.
+        """
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+        for phase in (0, 1, 2):
+            decision = self.progress(
+                issue=14,
+                attempt=1,
+                phase=phase,
+                now=f"2026-08-13T20:0{phase}:00Z",
+                turn_count=None,
+                context_tokens=None,
+                next_needs_context=True,
+                artifacts_sufficient=False,
+                remainder_self_contained=False,
+            )
+            with self.subTest(phase=phase):
+                self.assertEqual(
+                    (decision["phase_action"], decision["state"]),
+                    ("continue", "active"),
+                )
+
+        # A measured near-ceiling count is still a handoff.
+        at_ceiling = self.progress(
+            issue=14, attempt=1, phase=3, now="2026-08-13T20:03:00Z",
+            turn_count=118, context_tokens=None, next_needs_context=True,
+            artifacts_sufficient=False, remainder_self_contained=False,
+        )
+        self.assertEqual(at_ceiling["phase_action"], "handoff")
 
     def test_durable_handoff_requires_safe_file_and_resumes_same_attempt(self):
         self.init_run()

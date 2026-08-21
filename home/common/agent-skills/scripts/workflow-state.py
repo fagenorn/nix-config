@@ -364,8 +364,13 @@ def select_phase_action(
     reset it. Reserved module-owned direct runs select a self-contained remainder
     first, then an eligible ``fresh_start``, known near-ceiling usage, work that
     needs no context, and otherwise ``continue``. Every non-direct run retains the
-    complete order: eligible ``fresh_start``, unknown usage, near-ceiling usage,
+    complete order: eligible ``fresh_start``, known near-ceiling usage, measured
     self-contained delegation, work that needs no context, then ``continue``.
+
+    Unmeasurable usage is not a budget signal. A harness that exposes no
+    authoritative context-token count would otherwise pin every non-direct run to
+    ``handoff`` at its first phase gate, so an unknown count only withholds
+    ``delegate`` -- which still requires usage measured below both ceilings.
     """
     if is_reserved_direct_run_id(run_id):
         if remainder_self_contained:
@@ -386,14 +391,19 @@ def select_phase_action(
 
     if not next_needs_context and artifacts_sufficient:
         return "fresh_start"
-    if turn_count is None or context_tokens is None:
-        return "handoff"
     if (
-        turn_count >= turn_ceiling - turn_headroom
-        or context_tokens >= context_ceiling - context_headroom
+        turn_count is not None
+        and turn_count >= turn_ceiling - turn_headroom
+    ) or (
+        context_tokens is not None
+        and context_tokens >= context_ceiling - context_headroom
     ):
         return "handoff"
-    if remainder_self_contained:
+    if (
+        remainder_self_contained
+        and turn_count is not None
+        and context_tokens is not None
+    ):
         return "delegate"
     if not next_needs_context:
         return "handoff"
