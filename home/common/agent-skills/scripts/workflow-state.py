@@ -266,16 +266,31 @@ def validate_result(value: Any, *, expected_issue: int | None = None) -> dict[st
 
 def artifact_budget_paths() -> tuple[list[str], Path | None]:
     """Resolve the Task-1 CLI and its repository/installed policy."""
+
+    def trusted_policy(path: Path) -> Path | None:
+        """Resolve a policy path for an explicit ``--policy`` argument.
+
+        artifact-budget resolves only its own default policy path; an explicit
+        ``--policy`` symlink is refused by its ``O_NOFOLLOW`` read. The installed
+        policy is a store symlink under home-manager, so pass the resolved target.
+        """
+        try:
+            return path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+
     script_dir = Path(__file__).resolve().parent
     source_module = script_dir / "artifact_budget.py"
     source_policy = script_dir.parent / "artifact-budget-policy.json"
     if source_module.is_file() and source_policy.is_file():
-        return [sys.executable, str(source_module)], source_policy
+        return [sys.executable, str(source_module)], trusted_policy(source_policy)
     installed_cli = Path(__file__).parent / "artifact-budget"
     installed_policy = Path(__file__).parent.parent / "share/artifact-budget-policy.json"
     if not installed_cli.is_file():
         installed_cli = Path.home() / ".agents/bin/artifact-budget"
-    return [str(installed_cli)], installed_policy if installed_policy.is_file() else None
+    return [str(installed_cli)], (
+        trusted_policy(installed_policy) if installed_policy.is_file() else None
+    )
 
 
 def artifact_budget_validate(
