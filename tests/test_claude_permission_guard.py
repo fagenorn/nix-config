@@ -103,6 +103,26 @@ print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
             *guard_args, env=env,
         )
 
+    def invoke_command_in(self, command, cwd, *guard_args, env=None):
+        return self.invoke_raw(
+            json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "cwd": str(cwd),
+            }),
+            *guard_args, env=env,
+        )
+
+    def make_repo(self, origin):
+        """A throwaway git repo whose origin remote is `origin`."""
+        root = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        for argv in (
+            ["git", "init", "--quiet"],
+            ["git", "remote", "add", "origin", origin],
+        ):
+            subprocess.run(argv, cwd=root, check=True, capture_output=True)
+        return root
+
     def test_generated_allow_surface_is_exact_and_ordered(self):
         self.assertEqual(EXPECTED_ALLOW, self.settings["permissions"]["allow"])
 
@@ -137,6 +157,52 @@ print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
                 result = self.invoke_command(command)
                 self.assertEqual(2, result.returncode)
                 self.assertIn("lifecycle guard: unsafe branch deletion:", result.stderr)
+
+    def test_merge_guard_is_scoped_to_its_own_repository(self):
+        # The merge grammar is bound to REPOSITORY, so outside that repository
+        # it can never be satisfied and its one accepted form would resolve a
+        # same-numbered PR in the wrong repo. Defer to normal permissions there
+        # instead of blocking every other repository's merges.
+        elsewhere = self.make_repo("https://github.com/fagenorn/argus.git")
+        for command in (
+            "gh pr merge 107 --repo fagenorn/argus --merge --delete-branch",
+            "gh pr merge 107 --repo fagenorn/argus --squash",
+            "workflow-state finish --notes 'blocked, cannot gh pr merge yet'",
+        ):
+            with self.subTest(command=command):
+                result = self.invoke_command_in(command, elsewhere)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_merge_guard_still_blocks_inside_its_own_repository(self):
+        for origin in (
+            "https://github.com/fagenorn/nix-config.git",
+            "git@github.com:fagenorn/nix-config.git",
+        ):
+            with self.subTest(origin=origin):
+                result = self.invoke_command_in(
+                    "gh pr merge 1 --repo someone/else --merge --delete-branch",
+                    self.make_repo(origin),
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+
+    def test_merge_guard_fails_closed_when_repository_is_unknown(self):
+        plain = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        for cwd in (plain, self.make_repo("https://example.invalid/x/y.git")):
+            with self.subTest(cwd=str(cwd)):
+                result = self.invoke_command_in(
+                    "gh pr merge 1 --repo someone/else --merge --delete-branch", cwd
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+
+    def test_branch_delete_guard_stays_global(self):
+        elsewhere = self.make_repo("https://github.com/fagenorn/argus.git")
+        blocked = self.invoke_command_in("git branch -d topic; true", elsewhere)
+        self.assertEqual(2, blocked.returncode)
+        self.assertIn("lifecycle guard: unsafe branch deletion:", blocked.stderr)
+        allowed = self.invoke_command_in("git branch -d issue-30-safe", elsewhere)
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
 
     def test_unsafe_merge_shapes_fail_before_network(self):
         cases = (

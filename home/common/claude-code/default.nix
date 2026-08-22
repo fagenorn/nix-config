@@ -105,6 +105,42 @@ let
           return number, subject
 
 
+      def detect_repository(git_bin, cwd, timeout):
+          """Return the owner/name slug of cwd's origin remote, or None."""
+          if not isinstance(cwd, str) or not cwd:
+              return None
+          try:
+              child = subprocess.run(
+                  [git_bin, "-C", cwd, "remote", "get-url", "origin"],
+                  capture_output=True,
+                  text=True,
+                  timeout=timeout,
+                  check=False,
+              )
+          except (subprocess.TimeoutExpired, OSError):
+              return None
+          if child.returncode != 0:
+              return None
+          url = child.stdout.strip()
+          if url.endswith(".git"):
+              url = url[: -len(".git")]
+          for prefix in (
+              "git@github.com:",
+              "ssh://git@github.com/",
+              "https://github.com/",
+              "http://github.com/",
+          ):
+              if url.startswith(prefix):
+                  slug = url[len(prefix):]
+                  break
+          else:
+              return None
+          parts = slug.strip("/").split("/")
+          if len(parts) != 2 or not parts[0] or not parts[1]:
+              return None
+          return "/".join(parts)
+
+
       def main():
           parser = argparse.ArgumentParser()
           parser.add_argument("--git-bin", default=DEFAULT_GIT_BIN)
@@ -162,6 +198,18 @@ let
                   return block("unsafe branch deletion: branch validation timed out")
               if ref_check.returncode != 0:
                   return block("unsafe branch deletion: invalid branch name")
+              return 0
+
+          # The merge grammar below is specific to REPOSITORY. In any other
+          # repository it can never be satisfied, and its one accepted form
+          # would resolve a same-numbered PR in the WRONG repository, so defer
+          # to normal permissions rather than blocking every other repo's
+          # merges. Branch-deletion guarding above stays global.
+          # (Found blocking fagenorn/argus PR 107, 2026-08-22.)
+          repository = detect_repository(
+              args.git_bin, payload.get("cwd"), args.child_timeout_seconds
+          )
+          if repository is not None and repository != REPOSITORY:
               return 0
 
           merge_parts = parse_merge_raw(command)
