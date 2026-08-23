@@ -51,6 +51,9 @@ PHASE_5_REVIEW_CONTRACT = FROM_ISSUE_DIR / "REVIEW-CONTRACT.md"
 CODEX_PLAN_REVIEW = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/PLAN-REVIEW.md"
 )
+CODEX_COLLABORATION_EVALS = (
+    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/evals/evals.json"
+)
 
 # The Phase-5 degradation boundary, spelled once for the whole module: the skill
 # and its eval are both checked against these two strings so they cannot drift.
@@ -86,6 +89,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.sdd = SDD.read_text(encoding="utf-8")
         cls.phase_5_review_contract = PHASE_5_REVIEW_CONTRACT.read_text(encoding="utf-8")
         cls.codex_plan_review = CODEX_PLAN_REVIEW.read_text(encoding="utf-8")
+        cls.codex_collaboration_evals = json.loads(
+            CODEX_COLLABORATION_EVALS.read_text(encoding="utf-8")
+        )
         cls.standards_review = (FROM_ISSUE_DIR / "standards-review.md").read_text(
             encoding="utf-8"
         )
@@ -1476,6 +1482,56 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("`WORKTREE_ROOT: <absolute worktree root>`", launch)
         self.assertIn("`REVIEW_OPERATION: <plan-review|diff-review>`", launch)
         self.assert_ordered(launch, "WORKTREE_ROOT:", "REVIEW_OPERATION:", "Launch mechanics")
+
+    def test_codex_collaboration_states_a_per_operation_wall_clock(self):
+        # A deliberate second copy of the runtime's per-operation budget: callers
+        # schedule around the number and prose cannot be derived from a patch, so
+        # the copy is pinned here instead (D8).
+        launch = self.section(
+            self.collaboration,
+            "Build the operation's packet",
+            "Parallel reviews are valid.",
+        )
+        self.assertIn("roughly 28 minutes of wall clock for `plan-review`", launch)
+        self.assertIn("roughly 14 minutes for `diff-review`", launch)
+        for stale in ("~14 min", "~15 min"):
+            with self.subTest(stale=stale, doc="SKILL.md"):
+                self.assertNotIn(stale, self.collaboration)
+        # The eval grades a model against this same number; unpinned, it would
+        # keep grading against a figure the skill no longer states (D15).
+        evals = json.dumps(self.codex_collaboration_evals)
+        self.assertIn("~28 min of external wall clock", evals)
+        self.assertIn("~28 minutes for plan-review", evals)
+        self.assertNotIn("~15 min", evals)
+
+    def test_codex_collaboration_never_reports_sandbox_limits_as_findings(self):
+        # The rule lives in the packet-borne shared rules, not in the Launch
+        # paragraph, because only these bullets travel to the reviewer (D14).
+        rules = self.section(
+            self.collaboration,
+            "## Read-only rules (both operations)",
+            "## Launch",
+        )
+        self.assert_ordered(
+            rules,
+            "limitation of your own execution environment is never a finding",
+            "denies every write",
+            "could not verify",
+            "unresolved unknowns",
+            "still reportable",
+            "anchor it in the artifact",
+        )
+        # Stop provoking it as well as prohibiting it: neither packet may hand a
+        # read-only reviewer commands that read as instructions (D7).
+        for name, packet in (
+            ("PLAN-REVIEW.md", self.codex_plan_review),
+            ("DIFF-REVIEW.md", self.diff_review),
+        ):
+            with self.subTest(packet=name):
+                self.assertIn("not a request to execute anything", packet)
+        self.assertIn(
+            "so the reviewer need not re-measure them", self.codex_plan_review
+        )
 
     def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
         # The gate states a policy and calls the helper; the accounting itself
