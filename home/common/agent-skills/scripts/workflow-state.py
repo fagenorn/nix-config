@@ -25,6 +25,7 @@ ATTEMPT_STATES = frozenset(
 )
 RESULT_STATES = frozenset({"merged", "stopped", "failed"})
 RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused", "stalled"})
+SYNTHETIC_RESULT_SOURCES = frozenset({"expiry", "stalled"})
 BLOCKED_ON_VALUES = frozenset(
     {"usage_limit", "transport", "human_gate", "external", "unknown"}
 )
@@ -43,6 +44,7 @@ RESULT_FIELDS = (
 )
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+MERGE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 DIRECT_RUN_ID_PATTERN = re.compile(r"^direct-([1-9][0-9]*)-([0-9]{6})$")
 PHASE_ACTIONS = frozenset({"continue", "fresh_start", "handoff", "delegate"})
 PHASE_INPUT_FIELDS = (
@@ -57,7 +59,7 @@ PHASE_INPUT_FIELDS = (
     "remainder_self_contained",
 )
 STATE_FIELDS = frozenset(
-    {"schema_version", "run_id", "created_at", "updated_at", "issues"}
+    {"schema_version", "run_id", "created_at", "updated_at", "prior_run", "issues"}
 )
 ISSUE_FIELDS = frozenset({"issue", "attempts", "outcome"})
 ATTEMPT_FIELDS = frozenset(
@@ -118,8 +120,11 @@ DIRECT_OWNER_REQUEST_FIELDS = frozenset(
         "owner_unavailable",
         "tracker",
         "worktree",
+        "forge",
     }
 )
+FORGE_OBSERVATION_FIELDS = frozenset({"state", "url", "merge_sha"})
+FORGE_STATES = frozenset({"none", "open", "closed", "merged"})
 TRACKER_OBSERVATION_FIELDS = frozenset(
     {"issue", "state", "open_blockers", "decision_blockers"}
 )
@@ -565,6 +570,12 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
         )
     if value["run_id"] != run_id:
         raise WorkflowError("workflow state run identity does not match requested run")
+    prior_run = value["prior_run"]
+    if prior_run is not None:
+        if not isinstance(prior_run, str) or not RUN_ID_PATTERN.fullmatch(prior_run):
+            raise WorkflowError("invalid prior run identity")
+        if prior_run == run_id:
+            raise WorkflowError("run cannot precede itself")
     created_at = parse_utc(value["created_at"], "run creation time")
     updated_at = parse_utc(value["updated_at"], "run update time")
     if updated_at < created_at:
@@ -818,14 +829,15 @@ def ensure_gitignore(workflows_dir: Path) -> None:
 
 
 def upgrade_state(value: Any) -> Any:
-    """Fill the suspension fields into a prior-version ledger, in memory.
+    """Fill the suspension fields and the lineage link into a prior-version
+    ledger, in memory.
 
-    Attempt records are validated against an exact field set, so a ledger
-    written before the suspension model would otherwise stop loading the moment
-    this helper is deployed — stranding every in-flight run. A prior-version
-    ledger is upgraded here with the documented defaults and persists in the new
-    shape on its next write; any other version is left for ``validate_state`` to
-    reject (per D15).
+    Run and attempt records are validated against an exact field set, so a
+    ledger written before the suspension model would otherwise stop loading the
+    moment this helper is deployed — stranding every in-flight run. A
+    prior-version ledger is upgraded here with the documented defaults and
+    persists in the new shape on its next write; any other version is left for
+    ``validate_state`` to reject (per D15).
     """
     if (
         not isinstance(value, dict)
@@ -845,6 +857,7 @@ def upgrade_state(value: Any) -> Any:
                     continue
                 for field, default in SUSPENSION_DEFAULTS.items():
                     attempt.setdefault(field, default)
+    value.setdefault("prior_run", None)
     value["schema_version"] = SCHEMA_VERSION
     return value
 
@@ -950,6 +963,31 @@ def phase_notes_maximum() -> int:
     return maximum
 
 
+def new_run_state(
+    *,
+    run_id: str,
+    now: str,
+    issues: dict[str, Any],
+    prior_run: str | None = None,
+) -> dict[str, Any]:
+    """Create one run's durable state, linked to the run it succeeds.
+
+    ``prior_run`` is the identity of the run this one continues — only the
+    direct-owner ``new_run`` escape hatch has a predecessor, and recording it
+    keeps an issue's history one readable chain instead of N unlinked run
+    directories (per D5). The link always points at a lower direct sequence, so
+    the chain cannot cycle.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "created_at": now,
+        "updated_at": now,
+        "prior_run": prior_run,
+        "issues": issues,
+    }
+
+
 def terminal_result(issue: int, state: str, notes: str) -> dict[str, Any]:
     if len(notes) > phase_notes_maximum():
         raise WorkflowError("generated terminal notes exceed the policy limit")
@@ -964,6 +1002,55 @@ def terminal_result(issue: int, state: str, notes: str) -> dict[str, Any]:
         "report_path": None,
         "notes": notes,
     })
+
+
+def reconciled_result(issue: int, url: str, merge_sha: str) -> dict[str, Any]:
+    """The terminal record a merged pull request writes into a stale ledger.
+
+    Only what the forge itself observed is asserted: the issue is not claimed
+    closed and no delivery detail is claimed present, because reconciliation
+    saw a merge, not a report (per D3). That is also why this record is checked
+    against the ledger's own result schema rather than the ship-summary
+    boundary — the boundary is the contract for an owner's report, where a
+    ``merged`` row means the owner also closed the issue and cleaned up.
+    """
+    return validate_result({
+        "issue": issue,
+        "state": "merged",
+        "pr_url": url,
+        "merge_sha": merge_sha,
+        "issue_closed": False,
+        "discussion_items": [],
+        "detail_state": "none",
+        "report_path": None,
+        "notes": "reconciled from forge observation",
+    }, expected_issue=issue)
+
+
+def reconcile_merged_attempt(
+    ledger_issue: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    forge: dict[str, Any],
+    now: str,
+) -> None:
+    """Close out an attempt the forge has already merged.
+
+    The ledger, not the forge, is what the next owner reads, so a merged pull
+    request has to land in it before ownership is granted again — otherwise the
+    stale record is rediscovered by hand, run after run. The record is marked
+    ``superseded``: it was written by the lifecycle from an observation, not
+    reported by an owner (per D3, D11).
+    """
+    result = reconciled_result(
+        attempt["issue"], forge["url"], forge["merge_sha"]
+    )
+    attempt["state"] = "merged"
+    attempt["blocked_on"] = None
+    attempt["result"] = result
+    attempt["finished_at"] = finish_time(attempt, now)
+    attempt["result_source"] = "superseded"
+    ledger_issue["outcome"] = copy.deepcopy(result)
 
 
 def retain_worktree(notes: str, worktree: str, report_path: str | None = None) -> str:
@@ -1184,6 +1271,49 @@ def validate_owner_observation(value: Any) -> dict[str, Any]:
     return observation
 
 
+def issue_branch_prefix(issue: int) -> str:
+    """The stable head of one issue's branch name under ``branchNaming``.
+
+    The pattern is ``issue-<num>-<slug>`` and the slug is the acquiring owner's
+    to know, so the requirement names the prefix every candidate branch shares.
+    """
+    return f"issue-{issue}-"
+
+
+def validate_forge_observation(value: Any) -> dict[str, Any]:
+    """Check one issue branch's pull-request state as the owner observed it.
+
+    A merge SHA is exactly what a merge produces, so it is required for
+    ``merged`` and refused everywhere else; ``none`` means no pull request
+    exists, which leaves nothing to carry a URL. Reconciliation writes this
+    observation into the ledger permanently, so it is checked before it can.
+    """
+    observation = require_exact_fields(
+        value, FORGE_OBSERVATION_FIELDS, "forge observation"
+    )
+    if (
+        not isinstance(observation["state"], str)
+        or observation["state"] not in FORGE_STATES
+    ):
+        raise WorkflowError("invalid forge state")
+    for field in ("url", "merge_sha"):
+        if observation[field] is not None and (
+            not isinstance(observation[field], str) or not observation[field]
+        ):
+            raise WorkflowError(f"invalid forge {field}: expected string or null")
+    if (observation["merge_sha"] is not None) != (observation["state"] == "merged"):
+        raise WorkflowError("only a merged pull request carries a merge sha")
+    if observation["merge_sha"] is not None and not MERGE_SHA_PATTERN.fullmatch(
+        observation["merge_sha"]
+    ):
+        raise WorkflowError("invalid forge merge sha")
+    if observation["state"] == "none" and observation["url"] is not None:
+        raise WorkflowError("an absent pull request carries no url")
+    if observation["state"] == "merged" and observation["url"] is None:
+        raise WorkflowError("a merged pull request requires its url")
+    return observation
+
+
 def validate_worktree_observation(value: Any) -> dict[str, Any]:
     observation = require_exact_fields(
         value, WORKTREE_OBSERVATION_FIELDS, "worktree observation"
@@ -1337,6 +1467,8 @@ def validate_direct_owner_request(value: Any) -> dict[str, Any]:
         worktree = validate_worktree_observation(request["worktree"])
         if worktree["issue"] != issue:
             raise WorkflowError("worktree observation does not match requested issue")
+    if request["forge"] is not None:
+        request["forge"] = validate_forge_observation(request["forge"])
     return request
 
 
@@ -1382,14 +1514,7 @@ def command_init_run(args: argparse.Namespace) -> int:
     def initialize(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         if state is not None:
             return state, False
-        created = {
-            "schema_version": SCHEMA_VERSION,
-            "run_id": args.run_id,
-            "created_at": now,
-            "updated_at": now,
-            "issues": {},
-        }
-        state = created
+        state = new_run_state(run_id=args.run_id, now=now, issues={})
         return state, True
 
     state = transact(
@@ -1493,8 +1618,15 @@ def _apply_one_issue_policy(
     run_dir: Path,
     retained_worktree: str | None = None,
     resume_suspended: bool = False,
+    forge: dict[str, Any] | None = None,
+    require_forge: bool = False,
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
+
+    ``require_forge`` says the caller must observe the issue branch's pull
+    request before it may take or keep ownership, and ``forge`` carries that
+    observation once it has. Only the acquiring direct owner is asked for it —
+    it is the one that reads the forge anyway (per D3).
 
     ``resume_suspended`` says the caller can drive a suspension back to work
     through the recorded-worktree ladder. The direct owner can — one re-entry
@@ -1577,6 +1709,12 @@ def _apply_one_issue_policy(
         )
     )
 
+    def forge_requirement() -> list[dict[str, Any]] | None:
+        """The observation the caller still owes before it may take the issue."""
+        if not require_forge or forge is not None:
+            return None
+        return [{"kind": "forge_pr", "path": issue_branch_prefix(issue)}]
+
     if current_owner_unavailable and not active_unexpired:
         raise WorkflowError("owner_unavailable is not applicable")
 
@@ -1584,6 +1722,13 @@ def _apply_one_issue_policy(
         active_unexpired or handed_off or suspended or retryable
     ):
         return decision("terminal", expired=False)
+
+    if forge is not None and forge["state"] == "merged" and latest is not None:
+        # Reconciliation precedes ownership: whatever this request would have
+        # earned, a merged pull request has already ended the work (per D3).
+        assert ledger_issue is not None
+        reconcile_merged_attempt(ledger_issue, latest, forge=forge, now=now)
+        return decision("reconcile", changed=True, expired=False)
 
     if active_unexpired and not current_owner_unavailable:
         return decision("idle", expired=False)
@@ -1594,6 +1739,12 @@ def _apply_one_issue_policy(
             return decision("idle", desired="resume", expired=False)
         if handed_off:
             validate_handoff_path(run_dir, latest["handoff_path"])
+        unobserved_forge = forge_requirement()
+        if unobserved_forge is not None:
+            return decision(
+                "observe", desired="resume", requirements=unobserved_forge,
+                expired=False,
+            )
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
         absent_phase_zero_direct_reservation = bool(
@@ -1644,6 +1795,13 @@ def _apply_one_issue_policy(
                 else "fogged" if tracker["decision_blockers"] else "blocked"
             ),
             blockers=blockers,
+        )
+
+    unobserved_forge = forge_requirement()
+    if unobserved_forge is not None:
+        return decision(
+            "observe", requirements=unobserved_forge,
+            desired="retry" if retryable else "spawn", expired=expired,
         )
 
     if retryable and latest is not None and latest["attempt"] >= 2:
@@ -2264,6 +2422,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 )
             else:
                 retained_worktree = None
+                prior_run = None
                 if request["new_run"]:
                     assert greatest is not None
                     if greatest[0] >= 999999:
@@ -2271,6 +2430,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     run_sequence = greatest[0] + 1
                     terminal_issue = greatest[4]["issues"][str(issue)]
                     retained_worktree = terminal_issue["attempts"][-1]["worktree"]
+                    prior_run = greatest[1]
                     run_id = f"direct-{issue}-{run_sequence:06d}"
                     run_dir = workflows_dir / run_id
                     state_path = run_dir / "state.json"
@@ -2315,6 +2475,8 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     run_dir=run_dir,
                     retained_worktree=retained_worktree,
                     resume_suspended=True,
+                    forge=request["forge"],
+                    require_forge=True,
                 )
                 operation = policy["operation"]
                 if operation == "idle":
@@ -2341,6 +2503,17 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         source="tracker", reason=policy["tracker_reason"],
                         blockers=policy["blockers"], result=None,
                     )
+                elif operation == "reconcile":
+                    assert state is not None
+                    state["issues"][str(issue)] = policy["issue_state"]
+                    state["updated_at"] = request["now"]
+                    validate_state(state, run_id=run_id)
+                    atomic_write_state(run_dir, state_path, state)
+                    response = direct_terminal(
+                        issue=issue, run_id=run_id, source="lifecycle",
+                        reason="merged", blockers=[],
+                        result=policy["issue_state"]["outcome"],
+                    )
                 elif operation in {"spawn", "resume", "retry", "refuse"}:
                     if state is None:
                         ensure_gitignore(workflows_dir)
@@ -2357,13 +2530,11 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                             os.fdopen(new_lock_descriptor, "r+b")
                         )
                         fcntl.flock(new_lock.fileno(), fcntl.LOCK_EX)
-                        state = {
-                            "schema_version": SCHEMA_VERSION,
-                            "run_id": run_id,
-                            "created_at": request["now"],
-                            "updated_at": request["now"],
-                            "issues": {str(issue): policy["issue_state"]},
-                        }
+                        state = new_run_state(
+                            run_id=run_id, now=request["now"],
+                            issues={str(issue): policy["issue_state"]},
+                            prior_run=prior_run,
+                        )
                     else:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
@@ -2538,11 +2709,14 @@ def command_finish(args: argparse.Namespace) -> int:
 
     A finish at or after the attempt budget's ``deadline_at`` records the reported
     result rather than a synthetic expiry: the wall clock bounds how long an owner
-    may keep working, not whether the work it finished is real. A synthetic
-    ``result_source == "expiry"`` record on the issue's latest attempt, and only
-    there, is therefore provisional and is overwritten by the owner's own report;
-    since the reaper now suspends instead of stopping, such a record only reaches
-    this ledger from a pre-suspension run (per D2, D15).
+    may keep working, not whether the work it finished is real. A *synthetic*
+    record on the issue's latest attempt — one the lifecycle wrote about the
+    environment (``expiry``, ``stalled``), not about the work — is therefore
+    provisional and is replaced wholesale by the owner's own report, whatever it
+    says. An ``owner``, ``refused`` or ``superseded`` record is a verdict and is
+    never overwritten, which is where write-once means something (per D3, D11).
+    Legacy ``expiry`` records only reach this ledger from a pre-suspension run
+    (per D2, D15).
     """
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
@@ -2581,7 +2755,7 @@ def command_finish(args: argparse.Namespace) -> int:
             return result, False
         if (
             args.attempt == len(issue_state["attempts"])
-            and attempt["result_source"] == "expiry"
+            and attempt["result_source"] in SYNTHETIC_RESULT_SOURCES
             and outcome == existing
         ):
             attempt["state"] = result["state"]

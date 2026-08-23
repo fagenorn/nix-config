@@ -230,9 +230,12 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
     def control(self, **request_fields):
         return json.loads(self.control_raw(**request_fields).stdout)
 
+    UNOBSERVED = object()
+
     def direct_request(self, *, issue=73, now="2026-08-20T10:00:00Z",
                        attempt_budget_minutes=180, new_run=False,
-                       owner_unavailable=False, tracker=None, worktree=None):
+                       owner_unavailable=False, tracker=None, worktree=None,
+                       forge=UNOBSERVED):
         return {
             "interface_version": 1,
             "issue": issue,
@@ -242,7 +245,13 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "owner_unavailable": owner_unavailable,
             "tracker": tracker,
             "worktree": worktree,
+            "forge": self.no_pull_request() if forge is self.UNOBSERVED else forge,
         }
+
+    @staticmethod
+    def no_pull_request():
+        """The forge observation for an issue whose branch has no PR."""
+        return {"state": "none", "url": None, "merge_sha": None}
 
     def direct_owner_raw(self, *, request=None, ok=True, **request_fields):
         value = request if request is not None else self.direct_request(**request_fields)
@@ -529,7 +538,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         loading and keep driving the retry ladder and the provisional-result
         override, so the tests that pin those rules seed the record directly.
         `prior_schema` writes it under the previous `schema_version` without the
-        suspension fields — the on-disk shape a live run carries across deploy.
+        suspension fields or the run lineage link — the on-disk shape a live run
+        carries across deploy.
         """
         state = self.read_state()
         issue_state = state["issues"][str(issue)]
@@ -551,6 +561,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         state["updated_at"] = now
         if prior_schema:
             state["schema_version"] = state["schema_version"] - 1
+            state.pop("prior_run", None)
             for record in issue_state["attempts"]:
                 for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
                     record.pop(field, None)
@@ -2048,6 +2059,45 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn("conflicting terminal result", rejected.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
 
+    def test_owner_report_supersedes_the_stalled_synthetic_stop(self):
+        self.init_run()
+        worktree = self.root / "wt-stalled"
+        self.spawn(issue=14, worktree=worktree, budget_minutes=10)
+        for index in range(3):
+            self.suspend(
+                issue=14, attempt=1, blocked_on="usage_limit",
+                now=f"2026-08-13T20:0{index + 1}:00Z",
+            )
+            self.reactivate(issue=14)
+        self.suspend(
+            issue=14, attempt=1, blocked_on="usage_limit",
+            now="2026-08-13T20:08:00Z",
+        )
+        stalled = self.read_state()["issues"]["14"]["attempts"][-1]
+        self.assertEqual(stalled["result_source"], "stalled")
+
+        reported = {**self.merged_result(), "notes": "shipped after the stall"}
+        stdout_json = self.finish(1, reported, now="2026-08-13T20:30:00Z")
+        state = self.read_state()
+        attempt = state["issues"]["14"]["attempts"][-1]
+        self.assertEqual(attempt["state"], "merged")
+        self.assertEqual(attempt["result_source"], "owner")
+        self.assertEqual(attempt["finished_at"], "2026-08-13T20:30:00Z")
+        self.assertEqual(attempt["result"]["notes"], "shipped after the stall")
+        self.assertEqual(state["issues"]["14"]["outcome"], attempt["result"])
+        self.assertEqual(stdout_json, attempt["result"])
+
+        before = self.state_path.read_bytes()
+        rejected = self.finish(
+            1, {**self.merged_result(), "notes": "second owner report"},
+            now="2026-08-13T20:35:00Z", ok=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn(
+            "conflicting terminal result for issue 14 attempt 1", rejected.stderr
+        )
+        self.assertEqual(self.state_path.read_bytes(), before)
+
     def test_finish_rejects_time_before_last_progress(self):
         self.init_run()
         self.spawn(issue=14, worktree=self.root / "wt-a")
@@ -2339,6 +2389,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 expected_state = {
                     "schema_version": 2, "run_id": run_id,
                     "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
+                    "prior_run": None,
                     "issues": {"14": {
                         "issue": 14, "attempts": [expected_attempt],
                         "outcome": None,
@@ -2383,6 +2434,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         expected_state = {
             "schema_version": 2, "run_id": self.run_id,
             "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
+            "prior_run": None,
             "issues": {"14": {
                 "issue": 14, "attempts": [expected_attempt], "outcome": None,
             }},
@@ -2865,6 +2917,10 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
     def test_invalid_schema_state_and_action_are_rejected_without_changes(self):
         corruptions = (
             ("schema", lambda state: state.__setitem__("schema_version", 99)),
+            (
+                "lineage",
+                lambda state: state.__setitem__("prior_run", state["run_id"]),
+            ),
             (
                 "state",
                 lambda state: state["issues"]["14"]["attempts"][0].__setitem__(
@@ -3385,6 +3441,26 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "both flags": {**valid, "new_run": True, "owner_unavailable": True},
             "tracker mismatch": {**valid, "tracker": self.tracker_fact(74)},
             "worktree mismatch": {**valid, "worktree": self.worktree_fact(74)},
+            "unknown forge field": {
+                **valid, "forge": {**self.no_pull_request(), "extra": None},
+            },
+            "unknown forge state": {
+                **valid, "forge": {**self.no_pull_request(), "state": "draft"},
+            },
+            "merged forge without a sha": {**valid, "forge": {
+                "state": "merged",
+                "url": "https://github.com/fagenorn/nix-config/pull/78",
+                "merge_sha": None,
+            }},
+            "unmerged forge with a sha": {**valid, "forge": {
+                **self.no_pull_request(),
+                "merge_sha": "f3fac95aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }},
+            "abbreviated merge sha": {**valid, "forge": {
+                "state": "merged",
+                "url": "https://github.com/fagenorn/nix-config/pull/78",
+                "merge_sha": "f3fac95",
+            }},
         }
         for label, request in cases.items():
             with self.subTest(label=label):
@@ -4271,6 +4347,172 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(len(persisted["attempts"]), 1)
         self.assertEqual(persisted["attempts"][0]["worktree"], owner["worktree"])
 
+    def test_direct_new_run_records_the_prior_run_link(self):
+        owner = self.acquire_direct(issue=31)
+        self.run_id = owner["run_id"]
+        self.finish(
+            1,
+            {
+                **self.merged_result(31), "state": "stopped", "pr_url": None,
+                "merge_sha": None, "issue_closed": False,
+                "notes": "semantic stop",
+            },
+            issue=31, now="2026-08-20T10:05:00Z",
+        )
+        tracker = self.tracker_fact(31)
+        renewed = self.direct_owner(
+            issue=31, new_run=True, now="2026-08-20T10:10:00Z", tracker=tracker,
+            worktree=self.worktree_fact(31, recorded={
+                "path": owner["worktree"], "state": "matching_issue_branch",
+            }),
+        )
+        self.assertEqual(renewed["kind"], "owner")
+        self.assertEqual(renewed["run_id"], "direct-31-000002")
+        successor = json.loads(
+            self.direct_state_path(renewed["run_id"]).read_text()
+        )
+        self.assertEqual(successor["prior_run"], owner["run_id"])
+        predecessor = json.loads(
+            self.direct_state_path(owner["run_id"]).read_text()
+        )
+        self.assertIsNone(predecessor["prior_run"])
+
+    def test_merged_forge_observation_reconciles_before_ownership(self):
+        owner = self.acquire_direct(issue=32)
+        self.run_id = owner["run_id"]
+        self.suspend(
+            issue=32, attempt=1, blocked_on="human_gate",
+            now="2026-08-20T10:30:00Z",
+        )
+        reconciled = self.direct_owner(
+            issue=32, now="2026-08-20T11:00:00Z",
+            worktree=self.worktree_fact(32, recorded={
+                "path": owner["worktree"], "state": "matching_issue_branch",
+            }),
+            forge={
+                "state": "merged",
+                "url": "https://github.com/fagenorn/nix-config/pull/78",
+                "merge_sha": "f3fac95aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            },
+        )
+        state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
+        attempt = state["issues"]["32"]["attempts"][-1]
+        self.assertEqual(reconciled, {
+            "interface_version": 1, "kind": "terminal", "issue": 32,
+            "run_id": owner["run_id"], "source": "lifecycle", "reason": "merged",
+            "blockers": [], "result": attempt["result"],
+            "reentry": "/from-issue 32 --auto",
+        })
+        self.assertEqual(attempt["state"], "merged")
+        self.assertEqual(attempt["result_source"], "superseded")
+        self.assertIsNone(attempt["blocked_on"])
+        self.assertEqual(attempt["finished_at"], "2026-08-20T11:00:00Z")
+        self.assertEqual(attempt["result"], {
+            "issue": 32, "state": "merged",
+            "pr_url": "https://github.com/fagenorn/nix-config/pull/78",
+            "merge_sha": "f3fac95aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "issue_closed": False, "discussion_items": [],
+            "detail_state": "none", "report_path": None,
+            "notes": "reconciled from forge observation",
+        })
+        self.assertEqual(state["issues"]["32"]["outcome"], attempt["result"])
+        # The reconciled record is terminal: a later re-entry replays it.
+        self.assertEqual(
+            self.direct_owner(issue=32, now="2026-08-20T11:05:00Z"), reconciled
+        )
+
+    def test_merged_forge_reconciles_a_stale_record_instead_of_retrying(self):
+        owner = self.acquire_direct(issue=34)
+        self.run_id = owner["run_id"]
+        self.legacy_expiry_record(issue=34, now="2026-08-20T13:00:00Z")
+        reconciled = self.direct_owner(
+            issue=34, now="2026-08-20T13:30:00Z",
+            forge={
+                "state": "merged",
+                "url": "https://github.com/fagenorn/nix-config/pull/79",
+                "merge_sha": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+            },
+        )
+        self.assertEqual((reconciled["kind"], reconciled["reason"]),
+                         ("terminal", "merged"))
+        persisted = json.loads(
+            self.direct_state_path(owner["run_id"]).read_text()
+        )["issues"]["34"]
+        self.assertEqual(len(persisted["attempts"]), 1)
+        attempt = persisted["attempts"][-1]
+        self.assertEqual(attempt["state"], "merged")
+        self.assertEqual(attempt["result_source"], "superseded")
+        self.assertEqual(
+            attempt["result"]["merge_sha"],
+            "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        )
+        self.assertEqual(persisted["outcome"], attempt["result"])
+        # A reconciled record is a verdict: no owner may overwrite it.
+        rejected = self.finish(
+            1, self.merged_result(34), issue=34,
+            now="2026-08-20T14:00:00Z", ok=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("conflicting terminal result", rejected.stderr)
+
+    def test_open_or_closed_forge_leaves_the_ladder_unchanged(self):
+        for index, forge_state in enumerate(("open", "closed")):
+            issue = 35 + index
+            with self.subTest(forge_state=forge_state):
+                owner = self.acquire_direct(issue=issue)
+                self.run_id = owner["run_id"]
+                self.suspend(
+                    issue=issue, attempt=1, blocked_on="usage_limit",
+                    now="2026-08-20T10:30:00Z",
+                )
+                resumed = self.direct_owner(
+                    issue=issue, now="2026-08-20T11:00:00Z",
+                    worktree=self.worktree_fact(issue, recorded={
+                        "path": owner["worktree"],
+                        "state": "matching_issue_branch",
+                    }),
+                    forge={
+                        "state": forge_state,
+                        "url": "https://github.com/fagenorn/nix-config/pull/80",
+                        "merge_sha": None,
+                    },
+                )
+                self.assertEqual((resumed["kind"], resumed["launch_kind"]),
+                                 ("owner", "resume"))
+                attempt = json.loads(
+                    self.direct_state_path(owner["run_id"]).read_text()
+                )["issues"][str(issue)]["attempts"][-1]
+                self.assertEqual(attempt["state"], "active")
+                self.assertIsNone(attempt["result"])
+
+    def test_unobserved_forge_yields_a_forge_pr_requirement(self):
+        # The tracker rung comes first: a closed or blocked issue ends the
+        # request without anyone reading the forge.
+        self.assertEqual(
+            self.direct_owner(
+                issue=33, now="2026-08-20T10:00:00Z", forge=None,
+            )["requirements"],
+            [{"kind": "tracker"}],
+        )
+        needed = self.direct_owner(
+            issue=33, now="2026-08-20T10:00:00Z",
+            tracker=self.tracker_fact(33), forge=None,
+        )
+        self.assertEqual(needed, {
+            "interface_version": 1, "kind": "observe", "issue": 33,
+            "run_id": "direct-33-000001",
+            "requirements": [{"kind": "forge_pr", "path": "issue-33-"}],
+        })
+        self.assertFalse((self.workflows_dir / "direct-33-000001").exists())
+        # An observed forge without a pull request continues the ladder.
+        self.assertEqual(
+            self.direct_owner(
+                issue=33, now="2026-08-20T10:00:00Z",
+                tracker=self.tracker_fact(33),
+            )["requirements"],
+            [{"kind": "candidate_worktree"}],
+        )
+
     def test_direct_expiry_retries_on_absent_candidate_then_refuses_attempt_two(self):
         owner = self.acquire_direct(attempt_budget_minutes=30)
         tracker = self.tracker_fact(73)
@@ -4473,6 +4715,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         state = self.read_state()
         current_version = state["schema_version"]
         state["schema_version"] = current_version - 1
+        state.pop("prior_run", None)
         for attempt in state["issues"]["17"]["attempts"]:
             for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
                 attempt.pop(field, None)
@@ -4484,6 +4727,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         upgraded = self.read_state()
         self.assertEqual(upgraded["schema_version"], current_version)
+        self.assertIsNone(upgraded["prior_run"])
         latest = upgraded["issues"]["17"]["attempts"][-1]
         self.assertEqual(latest["stalled_resumes"], 0)
         self.assertEqual(latest["suspend_phase"], 0)
