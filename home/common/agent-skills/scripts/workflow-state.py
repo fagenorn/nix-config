@@ -30,6 +30,7 @@ BLOCKED_ON_VALUES = frozenset(
     {"usage_limit", "transport", "human_gate", "external", "unknown"}
 )
 OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown"}
+AUTO_RESUMABLE_BLOCKED_ON = frozenset({"usage_limit", "transport", "unknown"})
 STALL_LIMIT = 3
 RESULT_FIELDS = (
     "issue",
@@ -160,6 +161,7 @@ CONTROL_SUMMARY_FIELDS = frozenset(
         "owner",
         "worktree",
         "deadline_at",
+        "blocked_on",
         "blockers",
         "result",
     }
@@ -1601,6 +1603,7 @@ def control_summary(
         "owner": None if latest is None else latest["owner"],
         "worktree": None if latest is None else latest["worktree"],
         "deadline_at": None if latest is None else latest["deadline_at"],
+        "blocked_on": None if latest is None else latest["blocked_on"],
         "blockers": blockers,
         "result": result,
     }
@@ -1617,7 +1620,7 @@ def _apply_one_issue_policy(
     dispatch_permitted: bool,
     run_dir: Path,
     retained_worktree: str | None = None,
-    resume_suspended: bool = False,
+    human_directed: bool = False,
     forge: dict[str, Any] | None = None,
     require_forge: bool = False,
 ) -> dict[str, Any]:
@@ -1628,11 +1631,12 @@ def _apply_one_issue_policy(
     observation once it has. Only the acquiring direct owner is asked for it —
     it is the one that reads the forge anyway (per D3).
 
-    ``resume_suspended`` says the caller can drive a suspension back to work
-    through the recorded-worktree ladder. The direct owner can — one re-entry
-    command is the whole flow (per D2, D9) — so a suspended latest attempt is
-    resumable there; a caller that cannot leaves the suspension untouched and
-    projects it as it stands.
+    Every caller drives an environmentally suspended attempt back to work
+    through the recorded-worktree ladder: a quota wall, a transport failure or a
+    silent owner is an interruption the retry itself survives, so re-entry alone
+    clears it (per D2, D9). ``human_directed`` says a person asked for this
+    re-entry, which is the only thing that clears a `human_gate`/`external`
+    suspension — the orchestrated sweep leaves those parked and reports them.
     """
     if ledger_issue is not None:
         issue = ledger_issue["issue"]
@@ -1692,7 +1696,9 @@ def _apply_one_issue_policy(
         latest is not None and latest["state"] == "handed_off" and not expired
     )
     suspended = bool(
-        latest is not None and latest["state"] == "suspended" and resume_suspended
+        latest is not None
+        and latest["state"] == "suspended"
+        and (human_directed or latest["blocked_on"] in AUTO_RESUMABLE_BLOCKED_ON)
     )
     retryable = bool(
         latest is not None
@@ -1747,10 +1753,13 @@ def _apply_one_issue_policy(
             )
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
-        absent_phase_zero_direct_reservation = bool(
+        # A pause taken at Phase 0 predates the worktree: the attempt reserved a
+        # path it never created, so "absent" is the reservation intact, not a
+        # mismatch. That is true of any run id — an orchestrated Phase-0 handoff
+        # would otherwise strand for want of a worktree it never had (per D7).
+        absent_phase_zero_pause = bool(
             (handed_off or suspended)
             and latest["phase"] == 0
-            and is_reserved_direct_run_id(run_dir.name)
             and recorded is not None
             and recorded["state"] == "absent"
         )
@@ -1758,7 +1767,7 @@ def _apply_one_issue_policy(
             recorded is None
             or (
                 recorded["state"] != "matching_issue_branch"
-                and not absent_phase_zero_direct_reservation
+                and not absent_phase_zero_pause
             )
         ):
             return decision(
@@ -2013,6 +2022,15 @@ def command_control(args: argparse.Namespace) -> int:
         for issue in request["issues"]:
             if capacity <= 0 or analysis[issue]["desired"] != "resume":
                 continue
+            observation = worktree_by_issue.get(issue)
+            if observation is None or observation["recorded"] is None:
+                # The sweep resumes handoffs and suspensions that needed no
+                # observation while they sat parked, so an issue the caller said
+                # nothing about is a round it still owes: the summary reports the
+                # pause and its worktree, and the next sweep resumes it. A
+                # worktree observed as absent or mismatched stays a refusal (per
+                # D9).
+                continue
             result = apply_policy(issue, True)
             if result["operation"] == "observe":
                 raise WorkflowError(
@@ -2186,33 +2204,12 @@ def command_control(args: argparse.Namespace) -> int:
             if deadlines else None
         )
 
-        pending_external = False
-        for issue in request["issues"]:
-            issue_state = state["issues"].get(str(issue))
-            tracker = tracker_by_issue[issue]
-            if issue_state is None or not issue_state["attempts"]:
-                if tracker["state"] != "closed":
-                    pending_external = True
-                continue
-            latest = issue_state["attempts"][-1]
-            if (
-                tracker["state"] == "open"
-                and (
-                    (latest["state"] == "failed" and latest["result_source"] == "owner")
-                    or (latest["state"] == "stopped" and latest["result_source"] == "expiry")
-                )
-                and latest["attempt"] < 2
-            ):
-                pending_external = True
-
-        if next_deadline is None and not pending_external:
+        # A wait must name the instant it ends. With no deadline armed there is
+        # nothing left for this sweep to wake up for, so control renders the
+        # summaries and returns to the caller instead of parking forever on a
+        # notification that may never arrive (per D9, D12).
+        if next_deadline is None:
             actions.append({"id": "finalize", "kind": "finalize"})
-        elif next_deadline is None:
-            actions.append({
-                "id": "wait:external", "kind": "wait",
-                "wake_on": ["owner_notification", "tracker_change"],
-                "deadline_at": None,
-            })
         else:
             actions.append({
                 "id": f"wait:{next_deadline}", "kind": "wait",
@@ -2474,7 +2471,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     dispatch_permitted=True,
                     run_dir=run_dir,
                     retained_worktree=retained_worktree,
-                    resume_suspended=True,
+                    human_directed=True,
                     forge=request["forge"],
                     require_forge=True,
                 )

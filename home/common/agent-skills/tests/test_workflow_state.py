@@ -1,5 +1,4 @@
 import copy
-from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -11,11 +10,6 @@ import unittest
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
 DEFAULT_NOW = "2026-08-13T20:00:00Z"
-
-
-def shift_minutes(stamp, minutes):
-    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-    return (parsed + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
 
 
 class WorkflowStateLifecycleTest(unittest.TestCase):
@@ -413,7 +407,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         for summary in response["summaries"]:
             self.assertEqual(set(summary), {
                 "issue", "state", "attempt", "owner", "worktree",
-                "deadline_at", "blockers", "result",
+                "deadline_at", "blocked_on", "blockers", "result",
             })
             self.assertIs(type(summary["issue"]), int)
             self.assertIn(summary["state"], {
@@ -423,9 +417,11 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             self.assertIsInstance(summary["blockers"], list)
             self.assertTrue(summary["attempt"] is None or
                             type(summary["attempt"]) is int)
-            for field in ("owner", "worktree", "deadline_at"):
+            for field in ("owner", "worktree", "deadline_at", "blocked_on"):
                 self.assertTrue(summary[field] is None or
                                 isinstance(summary[field], str))
+            self.assertTrue(summary["blocked_on"] is None or
+                            summary["state"] == "suspended")
             for blocker in summary["blockers"]:
                 self.assertEqual(set(blocker), {"kind", "issue", "url"})
                 self.assertIn(blocker["kind"], {"issue", "decision"})
@@ -476,8 +472,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 self.assertTrue(set(action["wake_on"]) <= {
                     "owner_notification", "tracker_change", "deadline",
                 })
-                self.assertTrue(action["deadline_at"] is None or
-                                isinstance(action["deadline_at"], str))
+                # A wait always names the instant it ends; a deadline-less wait
+                # is outlawed, control finalizes instead.
+                self.assertIsInstance(action["deadline_at"], str)
             elif action["kind"] == "finalize":
                 self.assertEqual(action, {"id": "finalize", "kind": "finalize"})
             else:
@@ -503,32 +500,6 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "--now", now,
             ok=ok,
         )
-
-    def reactivate(self, *, issue, budget_minutes=60):
-        """Flip a suspended attempt back to active by hand.
-
-        `direct-owner` resumes a suspension for a direct run; the orchestrated
-        control sweep does not yet, so a control run's stall counter can only be
-        exercised by rewriting the persisted attempt the way a resume does.
-        """
-        state = self.read_state()
-        attempt = state["issues"][str(issue)]["attempts"][-1]
-        self.assertEqual(attempt["state"], "suspended")
-        at = shift_minutes(attempt["launches"][-1]["at"], 1)
-        attempt.update({
-            "state": "active",
-            "blocked_on": None,
-            "launch_kind": "resume",
-            "deadline_at": shift_minutes(at, budget_minutes),
-        })
-        attempt["launches"].append({
-            "kind": "resume",
-            "owner": attempt["owner"],
-            "worktree": attempt["worktree"],
-            "at": at,
-        })
-        state["updated_at"] = at
-        self.write_state(state)
 
     def legacy_expiry_record(self, *, issue, now, prior_schema=False):
         """Stamp the terminal reaper record written before the suspension model.
@@ -705,7 +676,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(response["summaries"][0], {
             "issue": 47, "state": "active", "attempt": 1, "owner": "47:1",
             "worktree": paths[47], "deadline_at": "2026-08-19T15:00:00Z",
-            "blockers": [], "result": None,
+            "blocked_on": None, "blockers": [], "result": None,
         })
         self.assertEqual(response["deltas"][0], {
             "issue": 47, "attempt": 1, "kind": "spawned", "state": "active",
@@ -756,7 +727,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             len([a for a in response["actions"] if a["kind"] != "wait"]), 2
         )
 
-    def test_control_returns_external_wait_and_finalize_from_current_facts(self):
+    def test_control_finalizes_on_blocked_issues_from_current_facts(self):
         self.init_run(now="2026-08-19T12:00:00Z")
         waiting = self.control(
             now="2026-08-19T12:00:00Z",
@@ -768,12 +739,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(waiting["summaries"][0]["blockers"], [
             {"kind": "issue", "issue": 40, "url": None}
         ])
-        self.assertEqual(waiting["actions"], [{
-            "id": "wait:external",
-            "kind": "wait",
-            "wake_on": ["owner_notification", "tracker_change"],
-            "deadline_at": None,
-        }])
+        # Nothing is running, so no deadline can end a wait: control renders the
+        # blockers and returns instead of parking on a notification (per D12).
+        self.assertEqual(waiting["actions"], [{"id": "finalize", "kind": "finalize"}])
         self.assertIsNone(waiting["next_deadline"])
         fogged = self.control(
             now="2026-08-19T12:00:30Z", issues=[47],
@@ -1159,12 +1127,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual([s["state"] for s in response["summaries"]],
                          ["blocked", "blocked"])
         self.assertEqual(response["deltas"], [])
-        self.assertEqual(response["actions"], [{
-            "id": "wait:external",
-            "kind": "wait",
-            "wake_on": ["owner_notification", "tracker_change"],
-            "deadline_at": None,
-        }])
+        self.assertEqual(response["actions"], [{"id": "finalize", "kind": "finalize"}])
         self.assertIsNone(response["next_deadline"])
         self.assertEqual(self.read_state()["issues"], {})
 
@@ -2066,9 +2029,12 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         for index in range(3):
             self.suspend(
                 issue=14, attempt=1, blocked_on="usage_limit",
-                now=f"2026-08-13T20:0{index + 1}:00Z",
+                now=f"2026-08-13T20:0{2 * index + 1}:00Z",
             )
-            self.reactivate(issue=14)
+            self.resume(
+                issue=14, worktree=worktree,
+                now=f"2026-08-13T20:0{2 * index + 2}:00Z",
+            )
         self.suspend(
             issue=14, attempt=1, blocked_on="usage_limit",
             now="2026-08-13T20:08:00Z",
@@ -3642,7 +3608,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn("recorded worktree path does not match ledger", wrong.stderr)
         self.assertEqual(path.read_bytes(), before)
 
-        self.run_id = "dispatcher-phase-zero"
+        # The exception is bounded by the phase, not by who dispatches: an
+        # orchestrated handoff past Phase 0 owns a worktree it must still show.
+        self.run_id = "dispatcher-phase-one"
         self.init_run(now="2026-08-20T10:00:00Z")
         dispatched = self.spawn(
             issue=77, worktree=self.root / "dispatcher-77",
@@ -3650,7 +3618,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         handoff = self.write_handoff(77)
         self.progress(
-            issue=77, phase=0, now="2026-08-20T10:01:00Z",
+            issue=77, phase=1, now="2026-08-20T10:01:00Z",
             turn_count=118, handoff_path=handoff,
         )
         before = self.state_path.read_bytes()
@@ -3664,7 +3632,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn("matching recorded worktree", rejected.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
 
-    def test_zero_sequence_direct_shaped_dispatcher_rejects_absent_resume_without_mutation(self):
+    def test_zero_sequence_direct_shaped_dispatcher_resumes_an_absent_reservation(self):
+        """The Phase-0 absent exception no longer reads the run id (per D7)."""
         self.run_id = "direct-78-000000"
         self.init_run(now="2026-08-20T10:00:00Z")
         dispatched = self.spawn(
@@ -3676,17 +3645,20 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             issue=78, phase=0, now="2026-08-20T10:01:00Z",
             turn_count=118, handoff_path=handoff,
         )
-        before = self.state_path.read_bytes()
-        rejected = self.control_raw(
+        resumed = self.control(
             now="2026-08-20T10:02:00Z", issues=[78],
             tracker=[self.tracker_fact(78)],
             worktrees=[self.worktree_fact(78, recorded={
                 "path": dispatched["worktree"], "state": "absent",
-            })], max_parallel=1, ok=False,
+            })], max_parallel=1,
         )
-        self.assertEqual(self.state_path.read_bytes(), before)
-        self.assertEqual(rejected.returncode, 2)
-        self.assertIn("matching recorded worktree", rejected.stderr)
+        self.assert_control_response_shape(resumed)
+        action = self.dispatch_action(resumed, "resume")
+        self.assertEqual(action["worktree"], dispatched["worktree"])
+        self.assertEqual(action["handoff_path"], str(handoff))
+        attempt = self.read_state()["issues"]["78"]["attempts"][-1]
+        self.assertEqual(attempt["state"], "active")
+        self.assertEqual(len(attempt["launches"]), 2)
 
     def test_absent_direct_handoff_materializes_exact_worktree_then_records_phase_one(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -3917,7 +3889,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 "summaries": [{
                     "issue": 73, "state": "closed", "attempt": None,
                     "owner": None, "worktree": None, "deadline_at": None,
-                    "blockers": [], "result": None,
+                    "blocked_on": None, "blockers": [], "result": None,
                 }],
                 "deltas": [], "actions": [{"id": "finalize", "kind": "finalize"}],
                 "next_deadline": None,
@@ -4665,12 +4637,15 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         for index in range(3):
             completed = self.suspend(
                 issue=16, attempt=1, blocked_on="usage_limit",
-                now=f"2026-08-13T20:0{index + 1}:00Z",
+                now=f"2026-08-13T20:0{2 * index + 1}:00Z",
             )
             envelope = json.loads(completed.stdout)
             self.assertEqual(envelope["kind"], "suspended")
             self.assertEqual(envelope["stalled_resumes"], index)
-            self.reactivate(issue=16)
+            self.resume(
+                issue=16, worktree=worktree,
+                now=f"2026-08-13T20:0{2 * index + 2}:00Z",
+            )
         final = self.suspend(
             issue=16, attempt=1, blocked_on="usage_limit",
             now="2026-08-13T20:08:00Z",
@@ -4747,6 +4722,138 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("unsupported workflow state schema version", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_control_auto_resumes_suspended_attempts(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-41")
+        self.spawn(issue=41, worktree=worktree, budget_minutes=10)
+        self.expire(issue=41, worktree=worktree, now="2026-08-13T20:10:00Z")
+        self.assertEqual(
+            self.read_state()["issues"]["41"]["attempts"][-1]["blocked_on"],
+            "unknown",
+        )
+        response = self.control(
+            now="2026-08-13T21:00:00Z",
+            issues=[41],
+            tracker=[self.tracker_fact(41)],
+            worktrees=[self.worktree_fact(41, recorded={
+                "path": os.path.abspath(worktree),
+                "state": "matching_issue_branch",
+            })],
+        )
+        self.assert_control_response_shape(response)
+        kinds = [(action["kind"], action.get("issue")) for action in response["actions"]]
+        self.assertIn(("resume", 41), kinds)
+        self.assertIn(
+            {"issue": 41, "attempt": 1, "kind": "resumed", "state": "active"},
+            response["deltas"],
+        )
+        attempt = self.read_state()["issues"]["41"]["attempts"][-1]
+        self.assertEqual(attempt["state"], "active")
+        self.assertIsNone(attempt["blocked_on"])
+        self.assertEqual(attempt["deadline_at"], "2026-08-13T21:30:00Z")
+
+    def test_control_never_emits_a_deadline_less_wait(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-42")
+        self.spawn(issue=42, worktree=worktree, budget_minutes=10)
+        self.suspend(
+            issue=42, attempt=1, blocked_on="human_gate",
+            now="2026-08-13T20:05:00Z",
+        )
+        response = self.control(
+            now="2026-08-13T20:06:00Z",
+            issues=[42],
+            tracker=[self.tracker_fact(42)],
+            worktrees=[self.worktree_fact(42, recorded={
+                "path": os.path.abspath(worktree),
+                "state": "matching_issue_branch",
+            })],
+        )
+        self.assert_control_response_shape(response)
+        self.assertEqual(response["actions"][-1], {"id": "finalize", "kind": "finalize"})
+        for action in response["actions"]:
+            if action["kind"] == "wait":
+                self.assertIsNotNone(action["deadline_at"])
+        summary = next(s for s in response["summaries"] if s["issue"] == 42)
+        self.assertEqual(summary["state"], "suspended")
+        self.assertEqual(summary["blocked_on"], "human_gate")
+
+    def test_human_gate_suspension_is_not_auto_resumed(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-43")
+        self.spawn(issue=43, worktree=worktree, budget_minutes=10)
+        self.suspend(
+            issue=43, attempt=1, blocked_on="external",
+            now="2026-08-13T20:05:00Z",
+        )
+        before = self.state_path.read_bytes()
+        response = self.control(
+            now="2026-08-13T20:06:00Z",
+            issues=[43],
+            tracker=[self.tracker_fact(43)],
+            worktrees=[self.worktree_fact(43, recorded={
+                "path": os.path.abspath(worktree),
+                "state": "matching_issue_branch",
+            })],
+        )
+        self.assert_control_response_shape(response)
+        self.assertEqual([a for a in response["actions"] if a["kind"] == "resume"], [])
+        self.assertEqual(response["deltas"], [])
+        attempt = self.read_state()["issues"]["43"]["attempts"][-1]
+        self.assertEqual(attempt["state"], "suspended")
+        self.assertEqual(attempt["blocked_on"], "external")
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_orchestrated_phase_zero_handoff_resumes_with_absent_worktree(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-44")
+        self.spawn(issue=44, worktree=worktree)
+        handoff = self.write_handoff(44)
+        self.progress(
+            issue=44, phase=0, now="2026-08-13T20:01:00Z",
+            turn_count=118, context_tokens=20000, handoff_path=handoff,
+        )
+        self.assertEqual(
+            self.read_state()["issues"]["44"]["attempts"][-1]["state"], "handed_off"
+        )
+        completed = self.control_raw(
+            now="2026-08-13T20:05:00Z",
+            issues=[44],
+            tracker=[self.tracker_fact(44)],
+            worktrees=[self.worktree_fact(44, recorded={
+                "path": os.path.abspath(worktree), "state": "absent",
+            })],
+            ok=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        response = json.loads(completed.stdout)
+        self.assert_control_response_shape(response)
+        self.assertIn("resume", [action["kind"] for action in response["actions"]])
+        attempt = self.read_state()["issues"]["44"]["attempts"][-1]
+        self.assertEqual(attempt["state"], "active")
+        self.assertEqual(attempt["worktree"], os.path.abspath(worktree))
+
+    def test_control_leaves_an_unobserved_resume_for_the_next_round(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-45")
+        self.spawn(issue=45, worktree=worktree, budget_minutes=10)
+        self.expire(issue=45, worktree=worktree, now="2026-08-13T20:10:00Z")
+        before = self.state_path.read_bytes()
+        completed = self.control_raw(
+            now="2026-08-13T21:00:00Z",
+            issues=[45],
+            tracker=[self.tracker_fact(45)],
+            worktrees=[],
+            ok=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        response = json.loads(completed.stdout)
+        self.assert_control_response_shape(response)
+        self.assertEqual(response["actions"], [{"id": "finalize", "kind": "finalize"}])
+        self.assertEqual(response["summaries"][0]["state"], "suspended")
+        self.assertEqual(response["summaries"][0]["blocked_on"], "unknown")
         self.assertEqual(self.state_path.read_bytes(), before)
 
 
