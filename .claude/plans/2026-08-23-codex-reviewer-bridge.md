@@ -41,10 +41,44 @@ Task 3 — Sandbox limits are not findings; per-operation wall clock — `home/c
 
 Order: 1 → 3 (Task 3's caller-facing sentence states the wall clock Task 1's registry makes true). Task 2 is independent of both and may run at any point.
 
+## Pre-merge gate
+
+Task 1 Step 1 re-checks `patchRevision` **before** implementation. That check
+cannot see a concurrent patch edit that lands on the integration branch
+afterwards, and the shipping flow's integration sync is a generic `git merge`
+that CLAUDE.md says cannot surface this collision: a textually-merged
+zero-context patch applies at lenient offsets with no error, and an identical
+`patchRevision` bump on both sides never enters git's conflict list. D10 places
+the authoritative check *before merging*, so this gate runs there too — once,
+after the last integration-branch sync and before the merge (per D10, D16).
+
+```bash
+git fetch origin main
+git diff --name-only "$(git merge-base HEAD origin/main)" origin/main -- \
+  patches/agent-plugins/codex-plugin-cc.patch lib/agent-plugins.nix
+```
+
+Expected: **no output**. Any output means `main` advanced one of the two files
+after this branch's base. STOP and reconcile per D10 — apply each side to its own
+scratch clone of the pinned rev, three-way merge the plugin **source trees**,
+regenerate with `git diff -U0 <pin>`, set `patchRevision` above whatever `main`
+now carries, and re-run Task 1's suite and `just build`. Never merge the patch
+text, and never rely on git conflict detection to catch this.
+
 ## Decisions
 
 The spec owns the single decision ledger (D1–D15). Tasks cite rows inline; planning appended D12–D15 — the sixth coupled patch file and the seam-1 split, the machine-readable wait-count phrasing, the read-only rule's placement in the packet-borne rules, and pinning both wall-clock restatements.
 
 Two corrections this plan inherits from the ledger rather than from the spec's prose: the patch moves **six** files, not the five the spec's *Patch workflow* paragraph names (per D12), and the read-only rule lands in `## Read-only rules (both operations)`, not in the Launch paragraph the *Decisions* section pointed at (per D14).
+
+## Standards review provenance
+
+- **Reviewer:** Codex (`codex-collaboration` `plan-review`), isolated read-only runtime — fresh `CODEX_HOME`, approval policy `never`, sandbox `read-only`. No fallback: the Codex run completed and validated, so the one-time native fallback was not used.
+- **Reviewed at:** base SHA `a3e13184274507e7c7f7623a3773df752af39678`, plan HEAD `6322af0a71b0e7147f26cfb2dd573dead88faaae`, branch `worktree-issue-104-codex-reviewer-bridge`.
+- **Focus:** none configured (`codex.planReview.focus` unset); standard bar applied.
+- **Findings:** 2 Blocking, 2 Should fix, 1 Discussion. **Accepted and applied: 4** (both Blocking, both Should fix). **Rejected: 0. Deferred: 0.** Each was re-verified against the live worktree before it was applied.
+  - *Blocking* — the `patchRevision` collision check ran only before implementation, not before merging (per D16); the dictated registry comment restated a relative-speed premise this spec's own Evidence section disproves (per D18).
+  - *Should fix* — the budget assertions compared the registry against itself rather than pinning D1's values, and the wrapper's two independent `grep -q`s accepted an export placed after the `exec` (both per D17).
+  - *Discussion* — D-104-01 confirmed all five acceptance criteria have owning tasks and that delivering criterion 2 as a wrapper-constructed guarantee still satisfies it (per D5). No edit required.
 
 ---

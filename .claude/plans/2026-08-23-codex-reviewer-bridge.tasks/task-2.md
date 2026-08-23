@@ -72,11 +72,15 @@ Expected: the nix-darwin build succeeds and refreshes `./result`. An eval error 
 set -- $(nix-store --query --requisites ./result | grep -- '-codex-companion$')
 if [ "$#" -ne 1 ]; then echo "expected exactly one codex-companion store path; found $#" >&2; exit 1; fi
 WRAPPER="$1/bin/codex-companion"
-grep -q 'export PATH="$HOME/.agents/bin:$PATH"' "$WRAPPER" || {
-  echo "the built wrapper does not prepend the helper directory" >&2; exit 1; }
-grep -q 'codex-companion.mjs "$@"' "$WRAPPER" || {
-  echo "the built wrapper no longer execs the companion runtime" >&2; exit 1; }
-env -i HOME="$HOME" PATH=/usr/bin:/bin sh -c '"$0" nonexistent-subcommand >/dev/null 2>&1; echo "wrapper exit: $?"' "$WRAPPER"
+EXPORT_LINE=$(grep -n 'export PATH="$HOME/.agents/bin:$PATH"' "$WRAPPER" | cut -d: -f1)
+EXEC_LINE=$(grep -n 'codex-companion.mjs "$@"' "$WRAPPER" | cut -d: -f1)
+[ "$(printf '%s\n' "$EXPORT_LINE" | grep -c .)" = 1 ] || {
+  echo "expected exactly one helper-directory export in the built wrapper" >&2; exit 1; }
+[ "$(printf '%s\n' "$EXEC_LINE" | grep -c .)" = 1 ] || {
+  echo "expected exactly one exec of the companion runtime" >&2; exit 1; }
+[ "$EXPORT_LINE" -lt "$EXEC_LINE" ] || {
+  echo "the export does not precede the exec, so no child ever inherits it" >&2; exit 1; }
+env -i HOME="$HOME" PATH=/usr/bin:/bin sh -c '"$0" nonexistent-subcommand >/dev/null 2>&1; echo "wrapper exit (diagnostic only): $?"' "$WRAPPER"
 ```
 
 Expected: the discovery finds exactly one store path; both `grep -q` checks pass; the last line prints a `wrapper exit:` status — any status is acceptable, the point is that the wrapper runs to completion from a scrubbed environment holding only `HOME`, which is the launch shape the export exists for. If the first grep fails, the `''$` escaping in Step 2 resolved at eval time and the script hardcodes a path or an empty string; re-read the built file and fix the escaping.

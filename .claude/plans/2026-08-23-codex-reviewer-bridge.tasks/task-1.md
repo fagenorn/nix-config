@@ -153,9 +153,12 @@ Create `plugins/codex/scripts/lib/review-operations.mjs` in the scratch clone. F
 // from these keys, so an operation cannot exist without a budget and a budget
 // cannot exist for an operation the runtime rejects.
 //
-// plan-review is the slower, right-censored operation — it reads a whole plan
-// package against an issue, a spec and a coding bar — and gets twice the wall of
-// diff-review, which reviews one bounded diff. A Map rather than an object so a
+// plan-review carries twice diff-review's wall. The evidence is asymmetric
+// truncation, not a measured speed gap: across 83 surveyed reviewer jobs the
+// shared 840 s wall killed ten plan-reviews against one diff-review, and
+// plan-review's p90 sat at 730 s hard against that wall — the signature of a
+// right-censored distribution whose observed median understates the honest one.
+// A Map rather than an object so a
 // lookup of an inherited property name cannot resolve to something non-undefined
 // and impersonate a registered operation.
 export const REVIEWER_BUDGETS_MS = new Map([
@@ -251,8 +254,15 @@ just build
 set -- $(nix-store --query --requisites ./result | grep -- '-codex-plugin-cc-.*\.p11$')
 if [ "$#" -ne 1 ]; then echo "expected exactly one p11 plugin store path; found $#" >&2; exit 1; fi
 PLUGIN_STORE="$1"
-node -e 'import(process.argv[1]).then((m) => console.log(JSON.stringify([...m.REVIEWER_BUDGETS_MS])))' \
-  "$PLUGIN_STORE/plugins/codex/scripts/lib/review-operations.mjs"
+node -e 'import(process.argv[1]).then((m) => {
+  const actual = JSON.stringify([...m.REVIEWER_BUDGETS_MS].sort());
+  const expected = JSON.stringify([["diff-review", 840000], ["plan-review", 1680000]]);
+  if (actual !== expected) {
+    console.error(`built registry is ${actual}, expected ${expected}`);
+    process.exit(1);
+  }
+  console.log(actual);
+})' "$PLUGIN_STORE/plugins/codex/scripts/lib/review-operations.mjs"
 grep -q 'Wait with at most four foreground calls' "$PLUGIN_STORE/plugins/codex/agents/codex-reviewer.md" || exit 1
 if grep -q '840' "$PLUGIN_STORE/plugins/codex/agents/codex-reviewer.md"; then
   echo "the transport definition still names a retired budget constant" >&2; exit 1
