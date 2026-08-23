@@ -45,7 +45,12 @@ workspace/worktree root. Build one self-contained delegation prompt containing:
    intersect. A worktree `GROUNDING.md` is a routing hint for this selection,
    never a substitute for it. Only when the project has no map, fall back to
    the `docPaths.{context,standards,architecture}` whole-doc paths.
-6. Relevant manifests and inferred verification commands.
+6. Relevant manifests and inferred verification commands, labelled in the packet
+   as context describing how this work is verified elsewhere — explicitly not a
+   request to execute anything. Item 3's four metrics are supplied so the
+   reviewer need not re-measure them, and the caller has already validated them
+   at its own input gate; a reviewer shelling out to `artifact-budget` is
+   exceeding its contract, not filling a gap in it.
 7. The configured `codex.planReview.focus`, when non-empty.
 8. The absolute path to the caller's review contract (`REVIEW-CONTRACT.md`) —
    the common-miss checklist and coding bar travel by path, with concrete

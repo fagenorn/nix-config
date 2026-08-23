@@ -12,7 +12,16 @@ let
   # `command -v` pre-flight) invokes it by name; without this every spawned
   # session gets exit 127 (observed: nodo evidence run, 2026-08-09). The
   # runtime is self-contained (node built-ins + relative lib imports only).
+  #
+  # The agent helpers ride down the same wrapper. `~/.agents/bin` reaches a
+  # reviewer today only because home.sessionPath put it in the launching login
+  # shell and the whole chain inherited it; a scrubbed or non-login parent
+  # silently loses it and the reviewer's bare-name `artifact-budget` call gets
+  # exit 127. Exporting here makes the guarantee a construction rather than an
+  # inheritance. Unconditional on purpose: on a machine whose shell already
+  # exported it the entry appears twice, which is inert.
   codexCompanionBin = pkgs.writeShellScriptBin "codex-companion" ''
+    export PATH="$HOME/.agents/bin:$PATH"
     exec ${pkgs.nodejs}/bin/node ${agentPlugins.codex}/plugins/codex/scripts/codex-companion.mjs "$@"
   '';
 

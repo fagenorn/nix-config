@@ -50,6 +50,15 @@ Include these verbatim in substance in every packet:
   transcript, and do not review outside the assigned scope.
 - Inspect the live files at HEAD. Paths and summaries are routing context,
   never substitutes for reading the worktree.
+- A limitation of your own execution environment is never a finding. The sandbox
+  is `read-only` and denies every write, `TMPDIR` included, so test runners,
+  mutation checks and anything else needing scratch space cannot run here and are
+  not expected to. Report what you could not verify where you already report what
+  you could not read, and in each finding's unresolved unknowns field — never as
+  a `Blocking` / `Should fix` / `Critical` / `Important` / `Minor` item. A defect
+  in the artifact under review is still reportable when a failed command is what
+  exposed it; anchor it in the artifact with evidence, not in the transcript of
+  the denial.
 
 ## Launch
 
@@ -86,11 +95,17 @@ the bridge key runtime job state to the reviewed worktree, and the second
 preserves the operation across the detached transport. Launch mechanics live
 solely in that agent's definition. This selection changes only the Claude
 transport tier; it does not select or change the external Codex runtime model.
-The contract: the review runs
-fresh in an isolated read-only Codex runtime (fresh `CODEX_HOME`, approval
-policy `never`, sandbox `read-only`), survives the bridge's own lifetime, and is
-bounded by the runtime's internal ~14 min budget — expect up to ~15 minutes wall
-clock. The bridge returns the reviewer's output verbatim, or a single
+The contract: the review runs fresh in an isolated read-only Codex runtime
+(fresh `CODEX_HOME`, approval policy `never`, sandbox `read-only`), survives the
+bridge's own lifetime, and is bounded by a per-operation runtime budget — expect
+up to roughly 28 minutes of wall clock for `plan-review` and roughly 14 minutes
+for `diff-review`. The bridge's own wait is uniform and wider than either
+budget: it returns `CODEX_REVIEW_FAILURE` only after roughly 2160 s of bounded
+waiting — four bounded 540 s calls — so a wedged worker can hold you well past
+the review's own budget. Schedule against the per-operation budget and plan for
+the ~2160 s bounded-wait figure; it bounds the bridge's own waiting, not the
+hold itself, so it is a planning figure rather than a guaranteed ceiling. The
+bridge returns the reviewer's output verbatim, or a single
 `CODEX_REVIEW_FAILURE:` line carrying the review job's recorded error.
 
 Parallel reviews are valid. A queued or active review is never a reason to use a

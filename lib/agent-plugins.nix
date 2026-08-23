@@ -3,7 +3,7 @@
   pkgs,
 }:
 let
-  patchRevision = 10;
+  patchRevision = 11;
   shortRevision = revision: builtins.substring 0 8 revision;
 
   codexRevision = inputs.codex-plugin-cc.rev or "db52e28f4d9ded852ab3942cea316258ae4ef346";
