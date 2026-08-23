@@ -409,6 +409,14 @@ class OutcomeTest(unittest.TestCase):
         self.assertEqual(agent_costs.classify_outcome("Reading the next file."),
                          "abandoned")
 
+    def test_canonical_suspension_line_classifies_interrupted(self):
+        line = "Suspended (blocked_on=usage_limit). Resume: /from-issue 101 --auto"
+        self.assertEqual(agent_costs.classify_outcome(line), "interrupted")
+
+    def test_interrupted_beats_blocked_regex_overlap(self):
+        line = "Work paused. Suspended (blocked_on=human_gate). Resume: /from-issue 7 --auto"
+        self.assertEqual(agent_costs.classify_outcome(line), "interrupted")
+
     def test_group_rollup_prefers_completed(self):
         g = agent_costs.new_group()
         g["outcomes"] = ["abandoned", "blocked", "completed"]
@@ -417,6 +425,15 @@ class OutcomeTest(unittest.TestCase):
         self.assertEqual(agent_costs.group_outcome(g), "blocked")
         g["outcomes"] = []
         self.assertEqual(agent_costs.group_outcome(g), "-")
+
+    def test_group_rollup_precedence_with_interrupted(self):
+        g = agent_costs.new_group()
+        g["outcomes"] = ["interrupted", "abandoned"]
+        self.assertEqual(agent_costs.group_outcome(g), "interrupted")
+        g["outcomes"] = ["blocked", "interrupted"]
+        self.assertEqual(agent_costs.group_outcome(g), "interrupted")
+        g["outcomes"] = ["completed", "interrupted"]
+        self.assertEqual(agent_costs.group_outcome(g), "completed")
 
 
 class ArtifactStatsTest(unittest.TestCase):
