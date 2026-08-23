@@ -28,8 +28,8 @@
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-mkdir -p "$(git rev-parse --git-dir)/gates"
-cat > "$(git rev-parse --git-dir)/gates/task-2.sh" <<'GATE'
+mkdir -p "$(git rev-parse --show-toplevel)/.superpowers/gates"
+cat > "$(git rev-parse --show-toplevel)/.superpowers/gates/task-2.sh" <<'GATE'
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -60,15 +60,20 @@ done
 
 echo "task-2 gate: PASS"
 GATE
-bash "$(git rev-parse --git-dir)/gates/task-2.sh"
+bash "$(git rev-parse --show-toplevel)/.superpowers/gates/task-2.sh"
 ```
 
 Expected at this task's starting commit: **FAIL** with
 `FAIL: the skillsDir comment still states a skill count`. Check A is the falsifying one —
 the module reads `the 8 global skills` while `home/common/agent-skills/skills/` holds 16
-directories. Checks B through E pass only after Step 2 (B) or already (C, D, E). If check A
-does not fail here, the comment is not in the state this task assumes — stop and read
-`sed -n '908,913p' home/common/claude-code/default.nix` before editing.
+directories. The gate is fail-fast, so A is the only failure you will observe.
+
+At the base commit: **A and D both fail** — they are keyed to the same stale count, A in the
+module and D repo-wide — and **B fails**, because it asserts the corrected comment Step 2 has
+not written yet. Only **C and E** pass beforehand and are true regression guards.
+
+If check A does not fail here, the comment is not in the state this task assumes — stop and
+read `sed -n '908,913p' home/common/claude-code/default.nix` before editing.
 
 - [ ] **Step 2: Delete the count**
 
@@ -92,7 +97,7 @@ one authoritative home for its own size (per D5).
 
 - [ ] **Step 3: Verify**
 
-Run: `bash "$(git rev-parse --git-dir)/gates/task-2.sh"`
+Run: `bash "$(git rev-parse --show-toplevel)/.superpowers/gates/task-2.sh"`
 Expected: `task-2 gate: PASS`, exit 0, no `FAIL:` line.
 
 Run: `git diff HEAD --numstat -- home/common/claude-code/default.nix && git diff HEAD --name-only`

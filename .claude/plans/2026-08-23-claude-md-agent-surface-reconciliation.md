@@ -52,8 +52,15 @@ content assertions. No new file, no new dependency, no new test.
   `enabledPlugins` / `extraKnownMarketplaces` / `home.file.".claude/skills/<name>"` in
   `home/common/claude-code/default.nix`, `marketplaceName` in `lib/agent-plugins.nix`, the
   contents of `patches/agent-plugins/`, the set of `home.file.".codex/…"` declarations, and
-  the live `~/.codex/config.toml`. It proves the prose agrees with the configuration; it
-  proves nothing about taste or completeness.
+  the live `~/.codex/config.toml`. **Scope of that proof, stated exactly** (per D14): the gate
+  pins the enabled-plugin count and both plugin names, each plugin's marketplace and that
+  marketplace's source type, the `nix-codex` marketplace name, the one-file
+  `patches/agent-plugins/` count, the two `~/.claude/skills` Claude-only links, the complete
+  set of `home.file.".codex/…"` declarations, and the absence of a store-backed marketplace in
+  the live Codex config. It does **not** pin the pinned flake input, the patch wiring inside
+  `lib/agent-plugins.nix`, or the generated UI/UX skill's two destinations — sentences resting
+  on those are verified by hand at authoring time and carry no automated guard. The gate
+  proves the claims it enumerates and nothing about taste, completeness, or prose quality.
 - **`just build` is the seam for the `.nix` edit only** (per D7). It runs in Task 2 because
   a `.nix` file is touched and the repo rule is unconditional. It proves the flake still
   evaluates and the darwin system still builds. It says nothing about `CLAUDE.md`; Task 1
@@ -63,8 +70,13 @@ content assertions. No new file, no new dependency, no new test.
   why-not module comment, and `CLAUDE.md` is checked by exact stale-phrase absence rather
   than by word absence, because the corrected clause itself names Superpowers.
 
-Gate scripts are written to `"$(git rev-parse --git-dir)/gates/"` — outside the working
-tree, so they are never committed and never collide with a parallel run.
+Gate scripts are written to `"$(git rev-parse --show-toplevel)/.superpowers/gates/"` — inside
+the working tree but ignored via `.superpowers/` in `.git/info/exclude`, so they are never
+committed, and per-worktree, so they never collide with a parallel run. Deliberately **not**
+under `.git/`: Claude Code treats `.git/` as a protected path and denies agent writes there,
+which would block the sdd implementer subagent that has to run these gates
+(`home/common/agent-skills/skills/sdd/scripts/sdd-workspace:11-15` records the same
+constraint and the same working-tree remedy).
 
 ## Task index
 
@@ -88,12 +100,16 @@ decision ledger; its rows are cited here by ID and never restated.
 - Task 1 implements **D1** (record `orchestrate-issues` as Claude-only rather than exposing
   it), **D2** (the corrected install surface), **D3** (explain `~/.codex/skills/`; the
   one-time removal goes in the commit body and never gates the ship phase), **D4** (split
-  the overloaded bullet), **D6** (the `.superpowers/` clause is present-tense fact, not
-  changelog) and **D10** (hedged on precedence: "duplicates", never "overrides").
+  the overloaded bullet), **D6 as amended by D13** (the `.superpowers/` clause is
+  present-tense fact, not changelog — and names three distinct homes, not one directory) and
+  **D10** (hedged on precedence: "duplicates", never "overrides").
 - Task 2 implements **D5** (delete the count rather than update it) and **D7** (`just build`
   runs because a `.nix` file is touched).
 - Planning appended **D11** (how the spec's `git grep -in superpower` seam is scoped to
   something achievable) and **D12** (why this plan ships as a two-member package).
+- The Phase-5 standards review appended **D13** (the corrected `.superpowers/` prose) and
+  **D14** (gate location outside `.git/`, and the gate's proof scope stated by enumeration).
+  Both tasks carry D14; Task 1 carries D13.
 
 Carry into the handoff, not into a task: the spec asks that the owner be told the stale
 `~/.codex/skills/codebase-design` copy predates the **test seam** definition the `design`,
@@ -102,3 +118,18 @@ from a smaller vocabulary than the shared tree defines. That is context for the 
 cleanup, not work this plan performs.
 
 ---
+
+## Standards review provenance
+
+- **Reviewer:** Codex, in an isolated read-only runtime (fresh `CODEX_HOME`, approval policy
+  `never`, sandbox `read-only`). No native fallback was used.
+- **Reviewed at:** base SHA `a3e13184274507e7c7f7623a3773df752af39678`, branch
+  `worktree-issue-105`, plan package HEAD `43a9821`.
+- **Focus:** none configured (`codex.planReview.focus` unset); standard review bar applied.
+- **Findings:** 4 raised — 2 Blocking, 2 Should fix, 0 Discussion. **4 accepted, 0 rejected,
+  0 deferred.** Every finding was re-verified against the live worktree before it was applied.
+- **Dispositions:** the gate-location blocker and the gate's overstated proof scope are
+  recorded together as **D14**; the `.superpowers/` prose blocker is recorded as **D13**,
+  which amends **D6**. The two pre-edit gate narratives were corrected in `task-1.md` and
+  `task-2.md` as routine factual fixes and carry no ledger row.
+- The reviewer's transcript is deliberately not stored in this repository.

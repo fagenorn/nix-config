@@ -31,13 +31,14 @@
 
 - [ ] **Step 1: Install the content-assertion gate and watch it fail**
 
-The gate lives outside the working tree so it is never committed and never collides with a
-parallel run.
+The gate lives at `.superpowers/gates/` — in the working tree but ignored (`.superpowers/` is
+in `.git/info/exclude`), so it is never committed and never collides with a parallel run. It is
+deliberately not under `.git/`, which Claude Code protects against agent writes.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-mkdir -p "$(git rev-parse --git-dir)/gates"
-cat > "$(git rev-parse --git-dir)/gates/task-1.sh" <<'GATE'
+mkdir -p "$(git rev-parse --show-toplevel)/.superpowers/gates"
+cat > "$(git rev-parse --show-toplevel)/.superpowers/gates/task-1.sh" <<'GATE'
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -64,8 +65,11 @@ for p in 'skill-creator@claude-plugins-official' 'codex@nix-codex'; do
   grep -qF -- "\"$p\" = true;" "$M" || fail "$p is not an enabled plugin in $M"
   need "\`$p\`"
 done
-grep -qF 'source = "github";' "$M" || fail "no github marketplace source in $M"
-grep -qF 'source = "directory";' "$M" || fail "no directory marketplace source in $M"
+# pin each marketplace to its own source type, not just that both types appear somewhere
+sed -n '/claude-plugins-official.source = {/,/};/p' "$M" | grep -qF 'source = "github";' \
+  || fail "claude-plugins-official is not a github marketplace in $M"
+sed -n '/nix-codex.source = {/,/};/p' "$M" | grep -qF 'source = "directory";' \
+  || fail "nix-codex is not a directory marketplace in $M"
 need 'a `github` marketplace'
 need 'a `directory` marketplace'
 grep -qF 'marketplaceName = "nix-codex";' lib/agent-plugins.nix || fail 'nix-codex is not the marketplace name in lib/agent-plugins.nix'
@@ -110,15 +114,25 @@ if [ -n "$stray" ]; then fail "live Superpowers reference outside the state path
 
 echo "task-1 gate: PASS"
 GATE
-bash "$(git rev-parse --git-dir)/gates/task-1.sh"
+bash "$(git rev-parse --show-toplevel)/.superpowers/gates/task-1.sh"
 ```
 
 Expected at the base commit: **FAIL**, on check A's first line —
 `FAIL: stale clause still present: Superpowers and `codex-plugin-cc` are built from pinned
-inputs plus repo-owned patches`. Checks A (all three) and B (`Two skills stay out of the
-shared tree`) are all failing at this point; C through H already pass and are regression
-guards. If check A does *not* fail here, `CLAUDE.md` is not at the state this task assumes —
-stop and re-read line 61 before editing.
+inputs plus repo-owned patches`. The gate is fail-fast (`set -euo pipefail`, and `fail()`
+exits 1), so check A's first line is the only failure you will actually observe — the rest of
+the run is not reached.
+
+For the record, the gate mixes two kinds of assertion and they do **not** all pass before the
+edit. Failing at the base commit: all of A, all of B, and every `need` in C, D and E, because
+those assert prose that Step 2 has not written yet. Passing at the base commit: the `grep`
+assertions inside C, D and E that read the live modules (`enabledPlugins`, the marketplace
+sources, `marketplaceName`, the `patches/agent-plugins/` count, the two `~/.claude/skills`
+links, the `home.file.".codex/` declaration set, the live `~/.codex/config.toml`), plus F, G
+and H. Only that second group is a regression guard; the first group is the falsifier.
+
+If check A does *not* fail here, `CLAUDE.md` is not at the state this task assumes — stop and
+re-read line 61 before editing.
 
 - [ ] **Step 2: Replace line 61 with the two corrected bullets**
 
@@ -140,7 +154,7 @@ First bullet — the shared surface:
 Second bullet — the Claude-only surface and the plugins:
 
 ```text
-  - Two skills stay out of the shared tree and are linked only into `~/.claude/skills/` from `home/common/claude-code/skills/`: `codex-collaboration`, because a Codex session able to load the Claude→Codex bridge would recursively delegate to itself, and `orchestrate-issues`, because it fans issues out to background agents and correlates host task notifications — Claude-harness features Codex lacks, so a Codex session runs `/from-issue` per issue instead. Plugins: `codex-plugin-cc` is the one plugin built from a pinned input plus a repo-owned patch (`patches/agent-plugins/codex-plugin-cc.patch`, the only patch in that directory); `lib/agent-plugins.nix` patches it into a store path and names its marketplace `nix-codex`. Claude enables two plugins from marketplaces of two different source types — `skill-creator@claude-plugins-official` from a `github` marketplace and `codex@nix-codex` from a `directory` marketplace pointed at that store path. Codex has no Nix-declared marketplace: its marketplaces and plugins are runtime-managed inside `~/.codex/config.toml`, which Nix does not own. The `.superpowers/` paths throughout `home/common/agent-skills/` name the workflow-state directory the pipeline scripts create in whichever repo they run in; the name is historical and there is no Superpowers input, patch, marketplace or plugin in this repo.
+  - Two skills stay out of the shared tree and are linked only into `~/.claude/skills/` from `home/common/claude-code/skills/`: `codex-collaboration`, because a Codex session able to load the Claude→Codex bridge would recursively delegate to itself, and `orchestrate-issues`, because it fans issues out to background agents and correlates host task notifications — Claude-harness features Codex lacks, so a Codex session runs `/from-issue` per issue instead. Plugins: `codex-plugin-cc` is the one plugin built from a pinned input plus a repo-owned patch (`patches/agent-plugins/codex-plugin-cc.patch`, the only patch in that directory); `lib/agent-plugins.nix` patches it into a store path and names its marketplace `nix-codex`. Claude enables two plugins from marketplaces of two different source types — `skill-creator@claude-plugins-official` from a `github` marketplace and `codex@nix-codex` from a `directory` marketplace pointed at that store path. Codex has no Nix-declared marketplace: its marketplaces and plugins are runtime-managed inside `~/.codex/config.toml`, which Nix does not own. The `.superpowers/` paths throughout `home/common/agent-skills/` are pipeline state and artifact locations that share a historical name, each with its own home: the lifecycle ledger under the repository root a caller supplies explicitly, per-plan `sdd` task artifacts in the current working tree, and delivery detail beneath the primary checkout. The name is historical; there is no Superpowers input, patch, marketplace or plugin in this repo.
 ```
 
 Touch nothing else. In particular, leave line 62 (the `codex-plugin-cc.patch` editing
@@ -150,7 +164,7 @@ line 62's *patch-editing* procedure.
 
 - [ ] **Step 3: Verify**
 
-Run: `bash "$(git rev-parse --git-dir)/gates/task-1.sh"`
+Run: `bash "$(git rev-parse --show-toplevel)/.superpowers/gates/task-1.sh"`
 Expected: `task-1 gate: PASS`, exit 0, no `FAIL:` line.
 
 Then confirm the edit is exactly one line out and two lines in, and touches no other file:
