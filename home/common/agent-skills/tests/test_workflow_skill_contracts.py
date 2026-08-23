@@ -1487,19 +1487,31 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # A deliberate second copy of the runtime's per-operation budget: callers
         # schedule around the number and prose cannot be derived from a patch, so
         # the copy is pinned here instead (D8).
-        launch = self.section(
-            self.collaboration,
-            "Build the operation's packet",
-            "Parallel reviews are valid.",
+        # Whitespace-normalized like the other wrapped-prose contracts in this
+        # module: line breaks must not be part of what is pinned, and the
+        # negative guards below only bite on normalized text — a retired figure
+        # that came back across a line wrap (`~14\nmin`) would otherwise slip
+        # past the very check that exists to catch it.
+        launch = " ".join(
+            self.section(
+                self.collaboration,
+                "Build the operation's packet",
+                "Parallel reviews are valid.",
+            ).split()
         )
+        collaboration = " ".join(self.collaboration.split())
         self.assertIn("roughly 28 minutes of wall clock for `plan-review`", launch)
         self.assertIn("roughly 14 minutes for `diff-review`", launch)
         for stale in ("~14 min", "~15 min"):
             with self.subTest(stale=stale, doc="SKILL.md"):
-                self.assertNotIn(stale, self.collaboration)
+                self.assertNotIn(stale, collaboration)
         # The eval grades a model against this same number; unpinned, it would
-        # keep grading against a figure the skill no longer states (D15).
-        evals = json.dumps(self.codex_collaboration_evals)
+        # keep grading against a figure the skill no longer states (D15). JSON
+        # cannot carry a raw newline inside a string, so the wrap arrives as the
+        # two-character escape `\n` — collapse that first, then whitespace.
+        evals = " ".join(
+            json.dumps(self.codex_collaboration_evals).replace("\\n", " ").split()
+        )
         self.assertIn("~28 min of external wall clock", evals)
         self.assertIn("~28 minutes for plan-review", evals)
         self.assertNotIn("~15 min", evals)
@@ -1507,10 +1519,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_codex_collaboration_never_reports_sandbox_limits_as_findings(self):
         # The rule lives in the packet-borne shared rules, not in the Launch
         # paragraph, because only these bullets travel to the reviewer (D14).
-        rules = self.section(
-            self.collaboration,
-            "## Read-only rules (both operations)",
-            "## Launch",
+        # Whitespace-normalized for the same reason as above: every fragment
+        # here is wrapped prose, so a reflow must not decide the verdict.
+        rules = " ".join(
+            self.section(
+                self.collaboration,
+                "## Read-only rules (both operations)",
+                "## Launch",
+            ).split()
         )
         self.assert_ordered(
             rules,
@@ -1523,15 +1539,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         # Stop provoking it as well as prohibiting it: neither packet may hand a
         # read-only reviewer commands that read as instructions (D7).
+        plan_review = " ".join(self.codex_plan_review.split())
         for name, packet in (
-            ("PLAN-REVIEW.md", self.codex_plan_review),
-            ("DIFF-REVIEW.md", self.diff_review),
+            ("PLAN-REVIEW.md", plan_review),
+            ("DIFF-REVIEW.md", " ".join(self.diff_review.split())),
         ):
             with self.subTest(packet=name):
                 self.assertIn("not a request to execute anything", packet)
-        self.assertIn(
-            "so the reviewer need not re-measure them", self.codex_plan_review
-        )
+        self.assertIn("so the reviewer need not re-measure them", plan_review)
 
     def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
         # The gate states a policy and calls the helper; the accounting itself

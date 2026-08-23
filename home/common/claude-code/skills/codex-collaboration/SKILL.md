@@ -95,13 +95,15 @@ the bridge key runtime job state to the reviewed worktree, and the second
 preserves the operation across the detached transport. Launch mechanics live
 solely in that agent's definition. This selection changes only the Claude
 transport tier; it does not select or change the external Codex runtime model.
-The contract: the review runs
-fresh in an isolated read-only Codex runtime (fresh `CODEX_HOME`, approval
-policy `never`, sandbox `read-only`), survives the bridge's own lifetime, and is
-bounded by a per-operation runtime budget — expect up to
-roughly 28 minutes of wall clock for `plan-review` and
-roughly 14 minutes for `diff-review`.
-The bridge returns the reviewer's output verbatim, or a single
+The contract: the review runs fresh in an isolated read-only Codex runtime
+(fresh `CODEX_HOME`, approval policy `never`, sandbox `read-only`), survives the
+bridge's own lifetime, and is bounded by a per-operation runtime budget — expect
+up to roughly 28 minutes of wall clock for `plan-review` and roughly 14 minutes
+for `diff-review`. The bridge's own wait is uniform and wider than either
+budget: it waits up to 2160 s — four bounded 540 s calls — before returning
+`CODEX_REVIEW_FAILURE`, so a wedged worker can hold you well past the review's
+own budget. Schedule on the budget, but treat 2160 s as the worst case you can
+be held for. The bridge returns the reviewer's output verbatim, or a single
 `CODEX_REVIEW_FAILURE:` line carrying the review job's recorded error.
 
 Parallel reviews are valid. A queued or active review is never a reason to use a

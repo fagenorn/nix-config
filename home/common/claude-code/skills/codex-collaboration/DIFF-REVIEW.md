@@ -92,9 +92,9 @@ not that packet plus tweaks. It contains exactly:
    producer report, plus the plan path (routing context for what the tasks
    were). No shard list or diff contents ride in the packet.
 5. Inferred verify commands, labelled in the packet as context describing how
-   this change is verified elsewhere — explicitly
-   not a request to execute anything, because the runtime is read-only and
-   cannot run them — plus every applicable `AGENTS.md`/`CLAUDE.md`.
+   this change is verified elsewhere — explicitly not a request to execute
+   anything, because the runtime is read-only and cannot run them — plus every
+   applicable `AGENTS.md`/`CLAUDE.md`.
 6. The standards layers matching the diff's file types
    (`~/.agents/standards/the-bar.md`, its `stacks/` shards, project
    `docs/standards/` shards whose globs intersect).
