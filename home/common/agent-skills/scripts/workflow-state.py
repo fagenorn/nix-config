@@ -16,12 +16,22 @@ import tempfile
 from typing import Any, Callable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PRIOR_SCHEMA_VERSION = SCHEMA_VERSION - 1
 CONTROL_INTERFACE_VERSION = 1
 DIRECT_OWNER_INTERFACE_VERSION = 1
-ATTEMPT_STATES = frozenset({"active", "handed_off", "stopped", "failed", "merged"})
+ATTEMPT_STATES = frozenset(
+    {"active", "handed_off", "suspended", "stopped", "failed", "merged"}
+)
 RESULT_STATES = frozenset({"merged", "stopped", "failed"})
-RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused"})
+RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused", "stalled"})
+SYNTHETIC_RESULT_SOURCES = frozenset({"expiry", "stalled"})
+BLOCKED_ON_VALUES = frozenset(
+    {"usage_limit", "transport", "human_gate", "external", "unknown"}
+)
+OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown"}
+AUTO_RESUMABLE_BLOCKED_ON = frozenset({"usage_limit", "transport", "unknown"})
+STALL_LIMIT = 3
 RESULT_FIELDS = (
     "issue",
     "state",
@@ -35,6 +45,7 @@ RESULT_FIELDS = (
 )
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+MERGE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 DIRECT_RUN_ID_PATTERN = re.compile(r"^direct-([1-9][0-9]*)-([0-9]{6})$")
 PHASE_ACTIONS = frozenset({"continue", "fresh_start", "handoff", "delegate"})
 PHASE_INPUT_FIELDS = (
@@ -49,7 +60,7 @@ PHASE_INPUT_FIELDS = (
     "remainder_self_contained",
 )
 STATE_FIELDS = frozenset(
-    {"schema_version", "run_id", "created_at", "updated_at", "issues"}
+    {"schema_version", "run_id", "created_at", "updated_at", "prior_run", "issues"}
 )
 ISSUE_FIELDS = frozenset({"issue", "attempts", "outcome"})
 ATTEMPT_FIELDS = frozenset(
@@ -72,8 +83,16 @@ ATTEMPT_FIELDS = frozenset(
         "last_progress_at",
         "phase_action",
         "phase_inputs",
+        "blocked_on",
+        "suspend_phase",
+        "stalled_resumes",
     }
 )
+SUSPENSION_DEFAULTS = {
+    "blocked_on": None,
+    "suspend_phase": None,
+    "stalled_resumes": 0,
+}
 LAUNCH_FIELDS = frozenset({"kind", "owner", "worktree", "at"})
 
 BOOTSTRAP_FIELDS = frozenset({"interface_version", "run_id", "requirements"})
@@ -102,8 +121,11 @@ DIRECT_OWNER_REQUEST_FIELDS = frozenset(
         "owner_unavailable",
         "tracker",
         "worktree",
+        "forge",
     }
 )
+FORGE_OBSERVATION_FIELDS = frozenset({"state", "url", "merge_sha"})
+FORGE_STATES = frozenset({"none", "open", "closed", "merged"})
 TRACKER_OBSERVATION_FIELDS = frozenset(
     {"issue", "state", "open_blockers", "decision_blockers"}
 )
@@ -139,6 +161,7 @@ CONTROL_SUMMARY_FIELDS = frozenset(
         "owner",
         "worktree",
         "deadline_at",
+        "blocked_on",
         "blockers",
         "result",
     }
@@ -150,6 +173,7 @@ CONTROL_SUMMARY_STATES = frozenset(
         "fogged",
         "active",
         "handed_off",
+        "suspended",
         "merged",
         "stopped",
         "failed",
@@ -483,11 +507,22 @@ def validate_attempt(
     result = value["result"]
     if result is not None:
         result = validate_result(result, expected_issue=issue)
-    if value["state"] in {"active", "handed_off"}:
+    if value["state"] in {"active", "handed_off", "suspended"}:
         if result is not None:
             raise WorkflowError("nonterminal attempt must not carry a terminal result")
     elif result is None or result["state"] != value["state"]:
         raise WorkflowError("terminal attempt state and result must match")
+    if value["state"] == "suspended":
+        if (
+            not isinstance(value["blocked_on"], str)
+            or value["blocked_on"] not in BLOCKED_ON_VALUES
+        ):
+            raise WorkflowError("invalid suspended attempt cause")
+    elif value["blocked_on"] is not None:
+        raise WorkflowError("only a suspended attempt carries a suspension cause")
+    if value["suspend_phase"] is not None:
+        require_plain_int(value["suspend_phase"], "attempt suspend phase")
+    require_plain_int(value["stalled_resumes"], "attempt stalled resumes")
     result_source = value["result_source"]
     if (result is None) != (value["finished_at"] is None) or (result is None) != (
         result_source is None
@@ -537,6 +572,12 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
         )
     if value["run_id"] != run_id:
         raise WorkflowError("workflow state run identity does not match requested run")
+    prior_run = value["prior_run"]
+    if prior_run is not None:
+        if not isinstance(prior_run, str) or not RUN_ID_PATTERN.fullmatch(prior_run):
+            raise WorkflowError("invalid prior run identity")
+        if prior_run == run_id:
+            raise WorkflowError("run cannot precede itself")
     created_at = parse_utc(value["created_at"], "run creation time")
     updated_at = parse_utc(value["updated_at"], "run update time")
     if updated_at < created_at:
@@ -789,6 +830,40 @@ def ensure_gitignore(workflows_dir: Path) -> None:
     fsync_directory(workflows_dir)
 
 
+def upgrade_state(value: Any) -> Any:
+    """Fill the suspension fields and the lineage link into a prior-version
+    ledger, in memory.
+
+    Run and attempt records are validated against an exact field set, so a
+    ledger written before the suspension model would otherwise stop loading the
+    moment this helper is deployed — stranding every in-flight run. A
+    prior-version ledger is upgraded here with the documented defaults and
+    persists in the new shape on its next write; any other version is left for
+    ``validate_state`` to reject (per D15).
+    """
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != PRIOR_SCHEMA_VERSION
+    ):
+        return value
+    issues = value.get("issues")
+    if isinstance(issues, dict):
+        for issue_value in issues.values():
+            if not isinstance(issue_value, dict):
+                continue
+            attempts = issue_value.get("attempts")
+            if not isinstance(attempts, list):
+                continue
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                for field, default in SUSPENSION_DEFAULTS.items():
+                    attempt.setdefault(field, default)
+    value.setdefault("prior_run", None)
+    value["schema_version"] = SCHEMA_VERSION
+    return value
+
+
 def read_locked_state(state_path: Path, run_id: str) -> dict[str, Any]:
     require_regular_path(state_path, "workflow state", allow_missing=False)
     try:
@@ -797,7 +872,7 @@ def read_locked_state(state_path: Path, run_id: str) -> dict[str, Any]:
             value = json.load(source)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid workflow state JSON: {error}") from error
-    return validate_state(value, run_id=run_id)
+    return validate_state(upgrade_state(value), run_id=run_id)
 
 
 def fsync_directory(directory: Path) -> None:
@@ -890,6 +965,31 @@ def phase_notes_maximum() -> int:
     return maximum
 
 
+def new_run_state(
+    *,
+    run_id: str,
+    now: str,
+    issues: dict[str, Any],
+    prior_run: str | None = None,
+) -> dict[str, Any]:
+    """Create one run's durable state, linked to the run it succeeds.
+
+    ``prior_run`` is the identity of the run this one continues — only the
+    direct-owner ``new_run`` escape hatch has a predecessor, and recording it
+    keeps an issue's history one readable chain instead of N unlinked run
+    directories (per D5). The link always points at a lower direct sequence, so
+    the chain cannot cycle.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "created_at": now,
+        "updated_at": now,
+        "prior_run": prior_run,
+        "issues": issues,
+    }
+
+
 def terminal_result(issue: int, state: str, notes: str) -> dict[str, Any]:
     if len(notes) > phase_notes_maximum():
         raise WorkflowError("generated terminal notes exceed the policy limit")
@@ -904,6 +1004,87 @@ def terminal_result(issue: int, state: str, notes: str) -> dict[str, Any]:
         "report_path": None,
         "notes": notes,
     })
+
+
+def reconciled_result(
+    issue: int,
+    url: str,
+    merge_sha: str,
+    *,
+    prior_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The terminal record a merged pull request writes into a stale ledger.
+
+    Only what the forge itself observed is asserted: the issue is not claimed
+    closed, because reconciliation saw a merge, not a report (per D3). That is
+    also why this record is checked against the ledger's own result schema
+    rather than the ship-summary boundary — the boundary is the contract for an
+    owner's report, where a ``merged`` row means the owner also closed the issue
+    and cleaned up.
+
+    When ``prior_result`` is the attempt's own result and it already carries a
+    delivery-detail pointer — a non-null ``report_path`` or a ``detail_state``
+    other than ``"none"`` — that pointer is the only durable record of what the
+    owner reported, so it is carried forward instead of being discarded, and the
+    note records that a prior owner verdict was superseded. A synthetic record
+    (expiry/stalled) or any result with no delivery pointer reconciles to the
+    bare forge observation exactly as before.
+    """
+    detail_state = "none"
+    report_path: str | None = None
+    notes = "reconciled from forge observation"
+    if prior_result is not None and (
+        prior_result["report_path"] is not None
+        or prior_result["detail_state"] != "none"
+    ):
+        detail_state = prior_result["detail_state"]
+        report_path = prior_result["report_path"]
+        superseded = f"{notes}; superseded owner {prior_result['state']} verdict"
+        maximum = phase_notes_maximum()
+        notes = superseded if len(superseded) <= maximum else superseded[:maximum]
+    return validate_result({
+        "issue": issue,
+        "state": "merged",
+        "pr_url": url,
+        "merge_sha": merge_sha,
+        "issue_closed": False,
+        "discussion_items": [],
+        "detail_state": detail_state,
+        "report_path": report_path,
+        "notes": notes,
+    }, expected_issue=issue)
+
+
+def reconcile_merged_attempt(
+    ledger_issue: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    forge: dict[str, Any],
+    now: str,
+) -> None:
+    """Close out an attempt the forge has already merged.
+
+    The ledger, not the forge, is what the next owner reads, so a merged pull
+    request has to land in it before ownership is granted again — otherwise the
+    stale record is rediscovered by hand, run after run. The record is marked
+    ``superseded``: it was written by the lifecycle from an observation, not
+    reported by an owner (per D3, D11).
+
+    If the attempt being closed already carries an owner-authored result with a
+    delivery-detail pointer (a ``failed``/``owner`` latest routes here rather
+    than into terminal replay), that pointer is preserved through the supersede
+    rather than discarded.
+    """
+    result = reconciled_result(
+        attempt["issue"], forge["url"], forge["merge_sha"],
+        prior_result=attempt["result"],
+    )
+    attempt["state"] = "merged"
+    attempt["blocked_on"] = None
+    attempt["result"] = result
+    attempt["finished_at"] = finish_time(attempt, now)
+    attempt["result_source"] = "superseded"
+    ledger_issue["outcome"] = copy.deepcopy(result)
 
 
 def retain_worktree(notes: str, worktree: str, report_path: str | None = None) -> str:
@@ -942,10 +1123,12 @@ def stop_attempt(
 ) -> dict[str, Any]:
     """Stamp a terminal stopped record.
 
-    ``source`` says who ended the attempt and must be a member of ``RESULT_SOURCES``;
-    ``now`` is the already-formatted RFC3339 UTC instant at which the record was
-    written, which for an ``expiry`` is at or after the attempt budget's
-    ``deadline_at``.
+    ``source`` says who ended the attempt and must be a member of
+    ``RESULT_SOURCES``; ``now`` is the already-formatted RFC3339 UTC instant at
+    which the record was written. No writer passes ``expiry`` any more — an
+    expired deadline suspends instead (per D2) — so a live ``expiry`` record only
+    reaches this ledger from a pre-suspension run, where it stays at or after
+    the attempt budget's ``deadline_at`` (per D15).
     """
     result = terminal_result(
         attempt["issue"], "stopped", f"{reason}; worktree: {attempt['worktree']}"
@@ -954,7 +1137,105 @@ def stop_attempt(
     attempt["result"] = result
     attempt["finished_at"] = finish_time(attempt, now)
     attempt["result_source"] = source
+    attempt["blocked_on"] = None
     return result
+
+
+def reentry_command(issue: int) -> str:
+    """The single line that resumes one issue's run (per D14)."""
+    return f"/from-issue {issue} --auto"
+
+
+def suspend_attempt(attempt: dict[str, Any], *, blocked_on: str, now: str) -> bool:
+    """Park an attempt at an environmental interruption without ending it.
+
+    Quota walls, transport failures and human-only gates are not verdicts about
+    the work, so they leave the attempt resumable: no result, no finish time, no
+    result source, and no attempt consumed (per D2).
+
+    Returns ``True`` when the attempt is now suspended. A suspension that would
+    be the third consecutive one at the same recorded phase is a zombie loop, so
+    the attempt is stopped with the synthetic ``stalled`` source instead and
+    ``False`` is returned — the caller stashes that terminal record as the
+    issue's outcome (per D8).
+    """
+    if blocked_on not in BLOCKED_ON_VALUES:
+        raise WorkflowError("invalid suspension cause")
+    phase = attempt["phase"]
+    stalled_resumes = (
+        attempt["stalled_resumes"] + 1 if attempt["suspend_phase"] == phase else 0
+    )
+    if stalled_resumes >= STALL_LIMIT:
+        stop_attempt(
+            attempt,
+            reason="suspension stalled without phase progress",
+            now=now,
+            source="stalled",
+        )
+        return False
+    attempt["state"] = "suspended"
+    attempt["blocked_on"] = blocked_on
+    attempt["suspend_phase"] = phase
+    attempt["stalled_resumes"] = stalled_resumes
+    return True
+
+
+def attempt_deadline(now: str, attempt_budget_minutes: int) -> str:
+    """The instant an attempt's wall-clock budget window closes."""
+    try:
+        deadline_value = parse_utc(now, "budget window start") + timedelta(
+            minutes=attempt_budget_minutes
+        )
+    except OverflowError as error:
+        raise WorkflowError("attempt deadline is out of range") from error
+    return format_utc(deadline_value)
+
+
+def resume_attempt(
+    attempt: dict[str, Any], *, now: str, attempt_budget_minutes: int | None = None
+) -> None:
+    """Relaunch an attempt in place under its own identity.
+
+    A resume appends a launch event, clears any suspension cause and flips the
+    state back to ``active``. It consumes no attempt and moves no lineage, which
+    is what makes it free to repeat (per D2, D5).
+
+    ``attempt_budget_minutes`` re-bases the budget window, and the progress clock
+    with it: a suspension resume passes the fresh full window D8 grants it, since
+    an interruption may outlast the window the attempt started with. A resume
+    inside the attempt's own live window — a handoff rollover, a dead-owner
+    takeover — leaves it ``None`` and keeps the original deadline.
+
+    ``suspend_phase`` and ``stalled_resumes`` deliberately survive a resume: they
+    are the anti-zombie bound's memory across the suspend/resume cycle (per D8).
+    """
+    if attempt_budget_minutes is not None:
+        attempt["deadline_at"] = attempt_deadline(now, attempt_budget_minutes)
+        attempt["last_progress_at"] = now
+    attempt["state"] = "active"
+    attempt["blocked_on"] = None
+    attempt["launch_kind"] = "resume"
+    attempt["launches"].append({
+        "kind": "resume",
+        "owner": attempt["owner"],
+        "worktree": attempt["worktree"],
+        "at": now,
+    })
+
+
+def demote_expired_attempt(
+    ledger_issue: dict[str, Any], attempt: dict[str, Any], *, now: str
+) -> None:
+    """Reap an attempt past its deadline into a resumable suspension.
+
+    The reaper cannot know why the owner went silent, so the cause is ``unknown``
+    and no issue outcome is written — an expired deadline bounds how long an
+    owner may hold the issue, and says nothing about the work (per D2). Only the
+    stall escalation inside ``suspend_attempt`` writes a terminal record, and
+    that one is the issue's outcome (per D8).
+    """
+    if not suspend_attempt(attempt, blocked_on="unknown", now=now):
+        ledger_issue["outcome"] = copy.deepcopy(attempt["result"])
 
 
 def require_exact_fields(value: Any, fields: frozenset[str], label: str) -> dict[str, Any]:
@@ -1021,6 +1302,49 @@ def validate_owner_observation(value: Any) -> dict[str, Any]:
         or observation["state"] not in OWNER_OBSERVATION_STATES
     ):
         raise WorkflowError("invalid owner state")
+    return observation
+
+
+def issue_branch_prefix(issue: int) -> str:
+    """The stable head of one issue's branch name under ``branchNaming``.
+
+    The pattern is ``issue-<num>-<slug>`` and the slug is the acquiring owner's
+    to know, so the requirement names the prefix every candidate branch shares.
+    """
+    return f"issue-{issue}-"
+
+
+def validate_forge_observation(value: Any) -> dict[str, Any]:
+    """Check one issue branch's pull-request state as the owner observed it.
+
+    A merge SHA is exactly what a merge produces, so it is required for
+    ``merged`` and refused everywhere else; ``none`` means no pull request
+    exists, which leaves nothing to carry a URL. Reconciliation writes this
+    observation into the ledger permanently, so it is checked before it can.
+    """
+    observation = require_exact_fields(
+        value, FORGE_OBSERVATION_FIELDS, "forge observation"
+    )
+    if (
+        not isinstance(observation["state"], str)
+        or observation["state"] not in FORGE_STATES
+    ):
+        raise WorkflowError("invalid forge state")
+    for field in ("url", "merge_sha"):
+        if observation[field] is not None and (
+            not isinstance(observation[field], str) or not observation[field]
+        ):
+            raise WorkflowError(f"invalid forge {field}: expected string or null")
+    if (observation["merge_sha"] is not None) != (observation["state"] == "merged"):
+        raise WorkflowError("only a merged pull request carries a merge sha")
+    if observation["merge_sha"] is not None and not MERGE_SHA_PATTERN.fullmatch(
+        observation["merge_sha"]
+    ):
+        raise WorkflowError("invalid forge merge sha")
+    if observation["state"] == "none" and observation["url"] is not None:
+        raise WorkflowError("an absent pull request carries no url")
+    if observation["state"] == "merged" and observation["url"] is None:
+        raise WorkflowError("a merged pull request requires its url")
     return observation
 
 
@@ -1177,6 +1501,8 @@ def validate_direct_owner_request(value: Any) -> dict[str, Any]:
         worktree = validate_worktree_observation(request["worktree"])
         if worktree["issue"] != issue:
             raise WorkflowError("worktree observation does not match requested issue")
+    if request["forge"] is not None:
+        request["forge"] = validate_forge_observation(request["forge"])
     return request
 
 
@@ -1222,14 +1548,7 @@ def command_init_run(args: argparse.Namespace) -> int:
     def initialize(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         if state is not None:
             return state, False
-        created = {
-            "schema_version": SCHEMA_VERSION,
-            "run_id": args.run_id,
-            "created_at": now,
-            "updated_at": now,
-            "issues": {},
-        }
-        state = created
+        state = new_run_state(run_id=args.run_id, now=now, issues={})
         return state, True
 
     state = transact(
@@ -1237,6 +1556,17 @@ def command_init_run(args: argparse.Namespace) -> int:
     )
     print_json(bootstrap_response(state))
     return 0
+
+
+def tracker_halt_reason(tracker: dict[str, Any]) -> str | None:
+    """Why the tracker says this issue is not workable, or ``None`` if it is."""
+    if tracker["state"] == "closed":
+        return "closed"
+    if tracker["decision_blockers"]:
+        return "fogged"
+    if tracker["open_blockers"]:
+        return "blocked"
+    return None
 
 
 def control_blockers(tracker: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1279,6 +1609,7 @@ def new_control_attempt(
         "last_progress_at": now,
         "phase_action": None,
         "phase_inputs": None,
+        **SUSPENSION_DEFAULTS,
     }
 
 
@@ -1315,6 +1646,7 @@ def control_summary(
         "owner": None if latest is None else latest["owner"],
         "worktree": None if latest is None else latest["worktree"],
         "deadline_at": None if latest is None else latest["deadline_at"],
+        "blocked_on": None if latest is None else latest["blocked_on"],
         "blockers": blockers,
         "result": result,
     }
@@ -1331,8 +1663,24 @@ def _apply_one_issue_policy(
     dispatch_permitted: bool,
     run_dir: Path,
     retained_worktree: str | None = None,
+    human_directed: bool = False,
+    forge: dict[str, Any] | None = None,
+    require_forge: bool = False,
 ) -> dict[str, Any]:
-    """Derive and apply the shared lifecycle policy for exactly one issue."""
+    """Derive and apply the shared lifecycle policy for exactly one issue.
+
+    ``require_forge`` says the caller must observe the issue branch's pull
+    request before it may take or keep ownership, and ``forge`` carries that
+    observation once it has. Only the acquiring direct owner is asked for it —
+    it is the one that reads the forge anyway (per D3).
+
+    Every caller drives an environmentally suspended attempt back to work
+    through the recorded-worktree ladder: a quota wall, a transport failure or a
+    silent owner is an interruption the retry itself survives, so re-entry alone
+    clears it (per D2, D9). ``human_directed`` says a person asked for this
+    re-entry, which is the only thing that clears a `human_gate`/`external`
+    suspension — the orchestrated sweep leaves those parked and reports them.
+    """
     if ledger_issue is not None:
         issue = ledger_issue["issue"]
     elif tracker is not None:
@@ -1390,6 +1738,11 @@ def _apply_one_issue_policy(
     handed_off = bool(
         latest is not None and latest["state"] == "handed_off" and not expired
     )
+    suspended = bool(
+        latest is not None
+        and latest["state"] == "suspended"
+        and (human_directed or latest["blocked_on"] in AUTO_RESUMABLE_BLOCKED_ON)
+    )
     retryable = bool(
         latest is not None
         and (
@@ -1405,27 +1758,65 @@ def _apply_one_issue_policy(
         )
     )
 
+    def forge_requirement() -> list[dict[str, Any]] | None:
+        """The observation the caller still owes before it may take the issue."""
+        if not require_forge or forge is not None:
+            return None
+        return [{"kind": "forge_pr", "path": issue_branch_prefix(issue)}]
+
     if current_owner_unavailable and not active_unexpired:
         raise WorkflowError("owner_unavailable is not applicable")
 
-    if latest is not None and not (active_unexpired or handed_off or retryable):
+    if latest is not None and not (
+        active_unexpired or handed_off or suspended or retryable
+    ):
         return decision("terminal", expired=False)
+
+    if forge is not None and forge["state"] == "merged" and latest is not None:
+        # Reconciliation precedes ownership: whatever this request would have
+        # earned, a merged pull request has already ended the work (per D3).
+        assert ledger_issue is not None
+        reconcile_merged_attempt(ledger_issue, latest, forge=forge, now=now)
+        return decision("reconcile", changed=True, expired=False)
 
     if active_unexpired and not current_owner_unavailable:
         return decision("idle", expired=False)
 
-    if active_unexpired or handed_off:
+    if suspended and tracker is not None:
+        # A suspension is a parked interruption, not a claim on the issue: once
+        # the tracker says the work is closed or blocked there is nothing for a
+        # re-entry to resume, so it is reported exactly the way the retry lane
+        # reports a closed issue instead of flipping the attempt back to active.
+        # The reaper's demotion lands here now rather than in the retry lane,
+        # which is what makes this reachable (per D3, D9).
+        halted = tracker_halt_reason(tracker)
+        if halted is not None:
+            return decision(
+                "terminal", expired=False, tracker_reason=halted,
+                blockers=control_blockers(tracker),
+            )
+
+    if active_unexpired or handed_off or suspended:
         assert latest is not None
         if not dispatch_permitted:
             return decision("idle", desired="resume", expired=False)
         if handed_off:
             validate_handoff_path(run_dir, latest["handoff_path"])
+        unobserved_forge = forge_requirement()
+        if unobserved_forge is not None:
+            return decision(
+                "observe", desired="resume", requirements=unobserved_forge,
+                expired=False,
+            )
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
-        absent_phase_zero_direct_reservation = bool(
-            handed_off
+        # A pause taken at Phase 0 predates the worktree: the attempt reserved a
+        # path it never created, so "absent" is the reservation intact, not a
+        # mismatch. That is true of any run id — an orchestrated Phase-0 handoff
+        # would otherwise strand for want of a worktree it never had (per D7).
+        absent_phase_zero_pause = bool(
+            (handed_off or suspended)
             and latest["phase"] == 0
-            and is_reserved_direct_run_id(run_dir.name)
             and recorded is not None
             and recorded["state"] == "absent"
         )
@@ -1433,7 +1824,7 @@ def _apply_one_issue_policy(
             recorded is None
             or (
                 recorded["state"] != "matching_issue_branch"
-                and not absent_phase_zero_direct_reservation
+                and not absent_phase_zero_pause
             )
         ):
             return decision(
@@ -1442,12 +1833,10 @@ def _apply_one_issue_policy(
                 ],
                 expired=False,
             )
-        latest["state"] = "active"
-        latest["launch_kind"] = "resume"
-        latest["launches"].append({
-            "kind": "resume", "owner": latest["owner"],
-            "worktree": latest["worktree"], "at": now,
-        })
+        resume_attempt(
+            latest, now=now,
+            attempt_budget_minutes=attempt_budget_minutes if suspended else None,
+        )
         return decision("resume", changed=True, expired=False)
 
     needs_new_work = latest is None or retryable
@@ -1459,21 +1848,23 @@ def _apply_one_issue_policy(
 
     assert tracker is not None
     blockers = control_blockers(tracker)
-    if tracker["state"] == "closed" or tracker["decision_blockers"] or tracker["open_blockers"]:
+    halt_reason = tracker_halt_reason(tracker)
+    if halt_reason is not None:
         changed = False
         if expired:
             assert latest is not None and ledger_issue is not None
-            ledger_issue["outcome"] = stop_attempt(
-                latest, reason="attempt deadline expired", now=now, source="expiry"
-            )
+            demote_expired_attempt(ledger_issue, latest, now=now)
             changed = True
         return decision(
             "terminal", changed=changed, expired=expired,
-            tracker_reason=(
-                "closed" if tracker["state"] == "closed"
-                else "fogged" if tracker["decision_blockers"] else "blocked"
-            ),
-            blockers=blockers,
+            tracker_reason=halt_reason, blockers=blockers,
+        )
+
+    unobserved_forge = forge_requirement()
+    if unobserved_forge is not None:
+        return decision(
+            "observe", requirements=unobserved_forge,
+            desired="retry" if retryable else "spawn", expired=expired,
         )
 
     if retryable and latest is not None and latest["attempt"] >= 2:
@@ -1481,11 +1872,8 @@ def _apply_one_issue_policy(
         if not dispatch_permitted:
             return decision("idle", desired="refuse", expired=expired)
         if expired:
-            outcome = stop_attempt(
-                latest, reason="attempt deadline expired", now=now, source="expiry"
-            )
             assert ledger_issue is not None
-            ledger_issue["outcome"] = outcome
+            demote_expired_attempt(ledger_issue, latest, now=now)
         worktrees = ", ".join(
             attempt["worktree"] for attempt in ledger_issue["attempts"][:2]
         )
@@ -1494,6 +1882,7 @@ def _apply_one_issue_policy(
             f"Fresh retry refused after attempts 1 and 2; worktrees: {worktrees}",
         )
         latest["state"] = "failed"
+        latest["blocked_on"] = None
         latest["result"] = result
         latest["finished_at"] = finish_time(latest, now)
         latest["result_source"] = "refused"
@@ -1503,9 +1892,7 @@ def _apply_one_issue_policy(
     if not dispatch_permitted:
         if expired:
             assert latest is not None and ledger_issue is not None
-            ledger_issue["outcome"] = stop_attempt(
-                latest, reason="attempt deadline expired", now=now, source="expiry"
-            )
+            demote_expired_attempt(ledger_issue, latest, now=now)
             return decision(
                 "idle", changed=True, desired="retry" if retryable else "spawn",
                 expired=True,
@@ -1570,20 +1957,12 @@ def _apply_one_issue_policy(
 
     desired = "retry" if retryable else "spawn"
     if expired and latest is not None:
-        outcome = stop_attempt(
-            latest, reason="attempt deadline expired", now=now, source="expiry"
-        )
         assert ledger_issue is not None
-        ledger_issue["outcome"] = outcome
+        demote_expired_attempt(ledger_issue, latest, now=now)
     attempt_number = 2 if retryable else 1
-    try:
-        deadline_value = now_value + timedelta(minutes=attempt_budget_minutes)
-    except OverflowError as error:
-        raise WorkflowError("attempt deadline is out of range") from error
-    deadline_at = format_utc(deadline_value)
     attempt = new_control_attempt(
-        issue=issue, attempt_number=attempt_number,
-        worktree=selected_path, now=now, deadline_at=deadline_at,
+        issue=issue, attempt_number=attempt_number, worktree=selected_path,
+        now=now, deadline_at=attempt_deadline(now, attempt_budget_minutes),
     )
     if ledger_issue is None:
         ledger_issue = {"issue": issue, "attempts": [attempt], "outcome": None}
@@ -1697,6 +2076,18 @@ def command_control(args: argparse.Namespace) -> int:
         for issue in request["issues"]:
             if capacity <= 0 or analysis[issue]["desired"] != "resume":
                 continue
+            observation = worktree_by_issue.get(issue)
+            if (
+                analysis[issue]["attempt"]["state"] == "suspended"
+                and (observation is None or observation["recorded"] is None)
+            ):
+                # A suspension is the one pause the caller had no prior reason to
+                # observe — it was terminal until this sweep learned to resume it
+                # — so saying nothing about its worktree is a round still owed,
+                # not a fault: the summary reports the pause and its worktree,
+                # and the next sweep resumes it. A handoff, and any worktree
+                # observed as absent or mismatched, stays a refusal (per D9).
+                continue
             result = apply_policy(issue, True)
             if result["operation"] == "observe":
                 raise WorkflowError(
@@ -1807,10 +2198,14 @@ def command_control(args: argparse.Namespace) -> int:
                 and result["changed"]
                 and result["operation"] != "refuse"
             ):
+                number = analysis[issue]["attempt"]["attempt"]
                 deltas.append({
                     "issue": issue,
-                    "attempt": analysis[issue]["attempt"]["attempt"],
-                    "kind": "expired", "state": "stopped",
+                    "attempt": number,
+                    "kind": "expired",
+                    "state": state["issues"][str(issue)]["attempts"][number - 1][
+                        "state"
+                    ],
                 })
 
         for issue in proposal_order:
@@ -1866,33 +2261,12 @@ def command_control(args: argparse.Namespace) -> int:
             if deadlines else None
         )
 
-        pending_external = False
-        for issue in request["issues"]:
-            issue_state = state["issues"].get(str(issue))
-            tracker = tracker_by_issue[issue]
-            if issue_state is None or not issue_state["attempts"]:
-                if tracker["state"] != "closed":
-                    pending_external = True
-                continue
-            latest = issue_state["attempts"][-1]
-            if (
-                tracker["state"] == "open"
-                and (
-                    (latest["state"] == "failed" and latest["result_source"] == "owner")
-                    or (latest["state"] == "stopped" and latest["result_source"] == "expiry")
-                )
-                and latest["attempt"] < 2
-            ):
-                pending_external = True
-
-        if next_deadline is None and not pending_external:
+        # A wait must name the instant it ends. With no deadline armed there is
+        # nothing left for this sweep to wake up for, so control renders the
+        # summaries and returns to the caller instead of parking forever on a
+        # notification that may never arrive (per D9, D12).
+        if next_deadline is None:
             actions.append({"id": "finalize", "kind": "finalize"})
-        elif next_deadline is None:
-            actions.append({
-                "id": "wait:external", "kind": "wait",
-                "wake_on": ["owner_notification", "tracker_change"],
-                "deadline_at": None,
-            })
         else:
             actions.append({
                 "id": f"wait:{next_deadline}", "kind": "wait",
@@ -1918,7 +2292,7 @@ def direct_run_is_terminal(issue_state: dict[str, Any]) -> bool:
     if not issue_state["attempts"]:
         return False
     latest = issue_state["attempts"][-1]
-    if latest["state"] in {"active", "handed_off"}:
+    if latest["state"] in {"active", "handed_off", "suspended"}:
         return False
     if (
         latest["state"] == "failed" and latest["result_source"] == "owner"
@@ -1945,6 +2319,12 @@ def direct_terminal(
     *, issue: int, run_id: str | None, source: str, reason: str,
     blockers: list[dict[str, Any]], result: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Replay one issue's terminal record to a direct owner.
+
+    The envelope carries the re-entry line so the caller never composes it: a
+    terminal replay is exactly where a human decides whether to re-enter, and
+    the one command that does it is the same one everywhere (per D14).
+    """
     return {
         "interface_version": DIRECT_OWNER_INTERFACE_VERSION,
         "kind": "terminal",
@@ -1954,6 +2334,7 @@ def direct_terminal(
         "reason": reason,
         "blockers": blockers,
         "result": copy.deepcopy(result),
+        "reentry": reentry_command(issue),
     }
 
 
@@ -2060,6 +2441,22 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 and direct_run_is_terminal(selected[4]["issues"][str(issue)])
             )
 
+            selected_attempts = (
+                [] if selected is None
+                else selected[4]["issues"][str(issue)]["attempts"]
+            )
+            if (
+                request["new_run"]
+                and selected_attempts
+                and selected_attempts[-1]["state"] == "suspended"
+            ):
+                # A suspension is resumed in place and consumes no attempt, so
+                # it must never become an escape hatch into run fan-out: the
+                # re-entry command already reaches the work (per D5, D13).
+                raise WorkflowError(
+                    "new_run is not applicable: suspended attempt is resumable"
+                )
+
             if request["new_run"]:
                 if not retained or not selected_is_terminal or nonterminal:
                     raise WorkflowError("new_run is not applicable")
@@ -2079,6 +2476,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 )
             else:
                 retained_worktree = None
+                prior_run = None
                 if request["new_run"]:
                     assert greatest is not None
                     if greatest[0] >= 999999:
@@ -2086,6 +2484,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     run_sequence = greatest[0] + 1
                     terminal_issue = greatest[4]["issues"][str(issue)]
                     retained_worktree = terminal_issue["attempts"][-1]["worktree"]
+                    prior_run = greatest[1]
                     run_id = f"direct-{issue}-{run_sequence:06d}"
                     run_dir = workflows_dir / run_id
                     state_path = run_dir / "state.json"
@@ -2129,6 +2528,9 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     dispatch_permitted=True,
                     run_dir=run_dir,
                     retained_worktree=retained_worktree,
+                    human_directed=True,
+                    forge=request["forge"],
+                    require_forge=True,
                 )
                 operation = policy["operation"]
                 if operation == "idle":
@@ -2155,6 +2557,17 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         source="tracker", reason=policy["tracker_reason"],
                         blockers=policy["blockers"], result=None,
                     )
+                elif operation == "reconcile":
+                    assert state is not None
+                    state["issues"][str(issue)] = policy["issue_state"]
+                    state["updated_at"] = request["now"]
+                    validate_state(state, run_id=run_id)
+                    atomic_write_state(run_dir, state_path, state)
+                    response = direct_terminal(
+                        issue=issue, run_id=run_id, source="lifecycle",
+                        reason="merged", blockers=[],
+                        result=policy["issue_state"]["outcome"],
+                    )
                 elif operation in {"spawn", "resume", "retry", "refuse"}:
                     if state is None:
                         ensure_gitignore(workflows_dir)
@@ -2171,13 +2584,11 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                             os.fdopen(new_lock_descriptor, "r+b")
                         )
                         fcntl.flock(new_lock.fileno(), fcntl.LOCK_EX)
-                        state = {
-                            "schema_version": SCHEMA_VERSION,
-                            "run_id": run_id,
-                            "created_at": request["now"],
-                            "updated_at": request["now"],
-                            "issues": {str(issue): policy["issue_state"]},
-                        }
+                        state = new_run_state(
+                            run_id=run_id, now=request["now"],
+                            issues={str(issue): policy["issue_state"]},
+                            prior_run=prior_run,
+                        )
                     else:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
@@ -2305,15 +2716,61 @@ def command_progress(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_suspend(args: argparse.Namespace) -> int:
+    """Record an owner's graceful exit at an environmental interruption.
+
+    The owner names the cause it can see (``unknown`` stays reserved for the
+    reaper, which cannot); the envelope carries back the re-entry line that
+    resumes the run, so callers never compose it themselves (per D2, D14).
+    """
+    now_value = parse_utc(args.now, "--now")
+    now = format_utc(now_value)
+
+    def suspend(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        assert state is not None
+        issue_state = state["issues"].get(str(args.issue))
+        if issue_state is None:
+            raise WorkflowError(f"unknown issue identity: {args.issue}")
+        if args.attempt > len(issue_state["attempts"]):
+            raise WorkflowError(
+                f"unknown attempt identity: issue {args.issue} attempt {args.attempt}"
+            )
+        attempt = issue_state["attempts"][args.attempt - 1]
+        if attempt["state"] != "active":
+            raise WorkflowError("only an active attempt can suspend")
+        if now_value < parse_utc(attempt["last_progress_at"], "attempt progress time"):
+            raise WorkflowError("suspend time must not move backward")
+        suspended = suspend_attempt(attempt, blocked_on=args.blocked_on, now=now)
+        state["updated_at"] = now
+        if not suspended:
+            issue_state["outcome"] = copy.deepcopy(attempt["result"])
+            return attempt, True
+        return {
+            "kind": "suspended",
+            "issue": attempt["issue"],
+            "attempt": attempt["attempt"],
+            "blocked_on": attempt["blocked_on"],
+            "stalled_resumes": attempt["stalled_resumes"],
+            "reentry": reentry_command(attempt["issue"]),
+        }, True
+
+    print_json(transact(args.repo_root, args.run_id, suspend))
+    return 0
+
+
 def command_finish(args: argparse.Namespace) -> int:
     """Record an owner's reported terminal result for one attempt.
 
     A finish at or after the attempt budget's ``deadline_at`` records the reported
     result rather than a synthetic expiry: the wall clock bounds how long an owner
-    may keep working, not whether the work it finished is real. The stopped record
-    that ``control`` writes when the attempt budget runs out is therefore provisional
-    — ``result_source == "expiry"`` on the issue's latest attempt, and only there, is
-    overwritten by the owner's own report.
+    may keep working, not whether the work it finished is real. A *synthetic*
+    record on the issue's latest attempt — one the lifecycle wrote about the
+    environment (``expiry``, ``stalled``), not about the work — is therefore
+    provisional and is replaced wholesale by the owner's own report, whatever it
+    says. An ``owner``, ``refused`` or ``superseded`` record is a verdict and is
+    never overwritten, which is where write-once means something (per D3, D11).
+    Legacy ``expiry`` records only reach this ledger from a pre-suspension run
+    (per D2, D15).
     """
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
@@ -2352,7 +2809,7 @@ def command_finish(args: argparse.Namespace) -> int:
             return result, False
         if (
             args.attempt == len(issue_state["attempts"])
-            and attempt["result_source"] == "expiry"
+            and attempt["result_source"] in SYNTHETIC_RESULT_SOURCES
             and outcome == existing
         ):
             attempt["state"] = result["state"]
@@ -2416,6 +2873,15 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("--attempt", required=True, type=positive_int)
     finish.add_argument("--result-file", required=True)
     finish.set_defaults(handler=command_finish)
+
+    suspend = subparsers.add_parser("suspend")
+    add_run_arguments(suspend)
+    suspend.add_argument("--issue", required=True, type=positive_int)
+    suspend.add_argument("--attempt", required=True, type=positive_int)
+    suspend.add_argument(
+        "--blocked-on", required=True, choices=sorted(OWNER_BLOCKED_ON_VALUES)
+    )
+    suspend.set_defaults(handler=command_suspend)
 
     progress = subparsers.add_parser("progress")
     add_run_arguments(progress)

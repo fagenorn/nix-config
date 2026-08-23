@@ -25,11 +25,15 @@ Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
   the resolved `agentBudgetMinutes` as request `attempt_budget_minutes` and the
   resolved `maxParallel` as request `max_parallel`. Do not copy either default
   or calculate capacity in this adapter.
-- Choose or accept a stable `run_id`. Resolve the dispatcher's absolute
-  repository root once as `ledger_repo_root`; it remains the exact immutable
-  value for the run, independent of any issue worktree.
+- Resolve the dispatcher's absolute repository root once as `ledger_repo_root`;
+  it remains the exact immutable value for the run, independent of any issue
+  worktree. Then select the `run_id` per the run-reuse rule in §2 — reuse an
+  existing non-final run for the same issue set before minting a new one.
 
 ## 2. Bootstrap and observe
+
+Before `init-run`, list `<ledger_repo_root>/.superpowers/workflows/` for an existing run whose state covers the same issue set and still has any non-final attempt or a missing outcome; reuse that run id.
+Only when none matches do you mint a new one (per D13) — a re-invocation over a run with suspended attempts is the sweep asking to resume them, not a fresh fan-out.
 
 At the start of a run or after adapter restart, call:
 
@@ -162,8 +166,9 @@ For `wait`, adapter state consists only of `current_wait_id` and
 - Each wake carries its wait ID; ignore it unless it equals `current_wait_id`;
   a stale wake cannot trigger control or disturb the replacement observer.
 
-Arm the one-shot observer for the returned wake conditions and optional
-deadline. No polling or repeated short sleeps are allowed.
+Arm the one-shot observer for the returned wake conditions and its `deadline_at`.
+control never returns a deadline-less wait; every wait carries deadline_at, and when nothing can proceed without a human, control returns finalize instead.
+No polling or repeated short sleeps are allowed.
 
 For `finalize`, first clear `current_wait_id`, then cancel the outstanding handle
 (a missing/already-exited handle is harmless), and clear
@@ -173,9 +178,12 @@ report.
 ## 5. Final report
 
 Render a `finalize` action from the bounded summaries in the same control response.
-Produce a per-issue table with issue, state, PR, and one-line reason,
-then group every `discussion_items` entry by issue and call out anything needing
-a human. Do not perform a second ledger read or reconstruct omitted history.
+Produce a per-issue table with issue, state, PR, one-line reason, `blocked_on`,
+and a re-entry line — `/from-issue <issue> --auto` for an issue suspended on a
+human gate, and the orchestrate re-invocation itself for the whole run — every
+column sourced from those finalize summaries. Then group every `discussion_items`
+entry by issue and call out anything needing a human. Do not perform a second
+ledger read or reconstruct omitted history.
 
 ## Notes
 

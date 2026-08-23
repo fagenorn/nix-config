@@ -87,6 +87,8 @@ BLOCKED_RE = re.compile(
     r"stopp(?:ed|ing)\s+(?:here|before|at)|waiting\s+(?:for|on)\s+(?:you|input|human|user)|"
     r"needs?\s+(?:your|human|user)\s+(?:input|decision|review|call)|abort(?:ed|ing)?)", re.I)
 WEAK_DONE_RE = re.compile(r"\b(complete[d.!]?|done[.!]?|finished|succeeded|passes)\b", re.I)
+# Canonical suspension stop line: "Suspended (blocked_on=<value>). Resume: <command>".
+INTERRUPTED_RE = re.compile(r"suspended \(blocked_on=", re.IGNORECASE)
 
 
 def model_family(model):
@@ -100,9 +102,13 @@ def model_family(model):
 
 
 def classify_outcome(final_text):
-    """completed | blocked | abandoned from a session's final assistant message."""
+    """completed | interrupted | blocked | abandoned from a session's final message."""
     if STRONG_DONE_RE.search(final_text):
         return "completed"
+    # Must precede BLOCKED_RE: the canonical line's "blocked_on" substring would
+    # otherwise match BLOCKED_RE first and mislabel a suspension as blocked.
+    if INTERRUPTED_RE.search(final_text):
+        return "interrupted"
     if BLOCKED_RE.search(final_text):
         return "blocked"
     if WEAK_DONE_RE.search(final_text):
@@ -551,6 +557,8 @@ def group_outcome(g):
         return "-"
     if "completed" in outcomes:
         return "completed"
+    if "interrupted" in outcomes:
+        return "interrupted"
     if "blocked" in outcomes:
         return "blocked"
     return "abandoned"

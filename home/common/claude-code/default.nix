@@ -24,6 +24,7 @@ let
       #!${pkgs.python3}/bin/python3
       import argparse
       import json
+      import re
       import shlex
       import subprocess
       import sys
@@ -32,14 +33,52 @@ let
       DEFAULT_GIT_BIN = "${pkgs.git}/bin/git"
       DEFAULT_GH_BIN = "${pkgs.gh}/bin/gh"
       DEFAULT_JQ_BIN = "${pkgs.jq}/bin/jq"
-      REPOSITORY = "fagenorn/nix-config"
-      MAIN_BRANCH = "main"
-      PR_URL_PREFIX = f"https://github.com/{REPOSITORY}/pull/"
-      PROTECTION_ENDPOINT = f"repos/{REPOSITORY}/branches/{MAIN_BRANCH}/protection"
+      AUTHORIZED_OWNER = "fagenorn"
       CHILD_DIAGNOSTIC_LIMIT = 240
-      BRANCH_LITERAL = "git branch -d"
-      MERGE_LITERAL = "gh pr merge"
+      # The guarded verbs, as raw text and as token sequences. Order matters: the
+      # first match at a token wins, and no sequence is a prefix of another.
+      GUARDED_LITERALS = (
+          ("gh pr merge", "merge"),
+          ("gh pr create", "pr-create"),
+          ("git branch -d", "branch"),
+          ("git push", "push"),
+      )
+      GUARDED_TOKEN_LITERALS = (
+          (["gh", "pr", "merge"], "merge"),
+          (["gh", "pr", "create"], "pr-create"),
+          (["git", "branch", "-d"], "branch"),
+          (["git", "push"], "push"),
+      )
+      OPERATION_LABELS = {
+          "merge": "merge",
+          "pr-create": "PR creation",
+          "branch": "branch deletion",
+          "push": "push",
+      }
+      # Words that keep the command position open: shell keywords that introduce a
+      # command, and wrappers that hand the rest of the words to another command.
+      COMMAND_KEYWORDS = frozenset({
+          "!", "time", "if", "then", "elif", "else", "while", "until", "do", "done",
+          "in", "coproc",
+      })
+      COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "nohup", "sudo"})
+      # Programs whose argument is shell source. Arbitrary shell cannot be parsed
+      # here, so a guarded verb anywhere in such a segment is refused outright.
+      SHELL_EVALUATORS = frozenset({"eval", "sh", "bash", "zsh", "dash", "ksh"})
+      # Characters that end a word and re-open the command position: subshells,
+      # groups, `case` arms and command substitution all start a command after one.
+      OPERATOR_CHARS = "(){}`"
+      PR_CREATE_FLAGS = ("--repo", "--base", "--head", "--title", "--body")
+      ASSIGNMENT_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+      SLUG_PATTERN = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
+      REF_NAME_PATTERN = re.compile(r"[A-Za-z0-9._/-]+")
+      # Path components that make a token a namespaced ref rather than a branch
+      # name: `git push origin refs/heads/main` and `heads/main` both update the
+      # branch `main`, so they must never be compared as plain names.
+      REF_NAMESPACE_COMPONENTS = frozenset({"refs", "heads", "tags", "remotes"})
+      SEGMENT_SEPARATORS = frozenset(";&|\n")
       UNSAFE_BRANCH_CHARS = set(";&|<>$`\\\n\r*?[]{}()#~")
+      UNSAFE_TEXT_CHARS = frozenset('"$`\\\0\r')
 
 
       def block(reason):
@@ -71,7 +110,426 @@ let
           return block(f"{reason}: {bounded_child_diagnostic(child)}")
 
 
-      def parse_merge_raw(command):
+      def read_heredoc_delimiter(command, index):
+          """Consume the `<<`/`<<-` redirection starting at `index`.
+
+          Returns (next_index, delimiter, strip_tabs); delimiter is None when the
+          redirection is malformed.
+          """
+          length = len(command)
+          cursor = index + 2
+          strip_tabs = False
+          if cursor < length and command[cursor] == "-":
+              strip_tabs = True
+              cursor += 1
+          while cursor < length and command[cursor] in " \t":
+              cursor += 1
+          delimiter = []
+          quote = None
+          while cursor < length:
+              character = command[cursor]
+              if quote is not None:
+                  if character == quote:
+                      quote = None
+                  else:
+                      delimiter.append(character)
+                  cursor += 1
+                  continue
+              if character in "'\"":
+                  quote = character
+                  cursor += 1
+                  continue
+              if character == "\\" and cursor + 1 < length:
+                  delimiter.append(command[cursor + 1])
+                  cursor += 2
+                  continue
+              if character in " \t\n;&|<>()":
+                  break
+              delimiter.append(character)
+              cursor += 1
+          if quote is not None or not delimiter:
+              return cursor, None, False
+          return cursor, "".join(delimiter), strip_tabs
+
+
+      def skip_heredoc_bodies(command, index, pending):
+          """Skip `pending` heredoc bodies. Returns None when one is unterminated."""
+          length = len(command)
+          for delimiter, strip_tabs in pending:
+              closed = False
+              while index < length:
+                  end = command.find("\n", index)
+                  if end == -1:
+                      line = command[index:]
+                      index = length
+                  else:
+                      line = command[index:end]
+                      index = end + 1
+                  candidate = line.lstrip("\t") if strip_tabs else line
+                  if candidate == delimiter:
+                      closed = True
+                      break
+              if not closed:
+                  return None
+          return index
+
+
+      def split_segments(command):
+          """Split a shell command into its top-level segments.
+
+          Quoted interiors stay inside their segment; comments and heredoc bodies are
+          dropped. Neither can therefore open a command position. Returns None when
+          the string cannot be parsed (unterminated quote or heredoc), which the
+          caller treats as a fail-closed signal.
+          """
+          segments = []
+          current = []
+          pending = []
+          quote = None
+          index = 0
+          length = len(command)
+          while index < length:
+              character = command[index]
+              if quote == "'":
+                  current.append(character)
+                  if character == "'":
+                      quote = None
+                  index += 1
+                  continue
+              if character == "\\" and index + 1 < length:
+                  current.append(character)
+                  current.append(command[index + 1])
+                  index += 2
+                  continue
+              if quote == '"':
+                  current.append(character)
+                  if character == '"':
+                      quote = None
+                  index += 1
+                  continue
+              if character in "'\"":
+                  quote = character
+                  current.append(character)
+                  index += 1
+                  continue
+              if character == "#" and (not current or current[-1] in " \t"):
+                  while index < length and command[index] != "\n":
+                      index += 1
+                  continue
+              if character == "<" and command.startswith("<<", index):
+                  if command.startswith("<<<", index):
+                      current.append("<<<")
+                      index += 3
+                      continue
+                  cursor, delimiter, strip_tabs = read_heredoc_delimiter(command, index)
+                  if delimiter is None:
+                      return None
+                  current.append(command[index:cursor])
+                  pending.append((delimiter, strip_tabs))
+                  index = cursor
+                  continue
+              if character == "\n":
+                  # Heredoc bodies begin after the newline that ends the line which
+                  # declared them — never at an earlier `;`/`&`/`|` on that line.
+                  segments.append("".join(current))
+                  current = []
+                  index += 1
+                  if pending:
+                      index = skip_heredoc_bodies(command, index, pending)
+                      if index is None:
+                          return None
+                      pending = []
+                  continue
+              if character in SEGMENT_SEPARATORS:
+                  segments.append("".join(current))
+                  current = []
+                  while (
+                      index < length
+                      and command[index] in SEGMENT_SEPARATORS
+                      and command[index] != "\n"
+                  ):
+                      index += 1
+                  continue
+              current.append(character)
+              index += 1
+          if quote is not None or pending:
+              return None
+          segments.append("".join(current))
+          return segments
+
+
+      def tokenize_segment(segment):
+          """Split one segment into (value, is_operator) tokens.
+
+          Values are unquoted, so `"git" push` and `git  push` both tokenise to
+          ["git", "push"] while a quoted `'git push origin main'` stays one token and
+          can never match a multi-token verb. Returns None when the segment cannot be
+          tokenised, which the caller treats as fail-closed.
+          """
+          tokens = []
+          value = []
+          started = False
+          quote = None
+          index = 0
+          length = len(segment)
+          while index < length:
+              character = segment[index]
+              if quote == "'":
+                  if character == "'":
+                      quote = None
+                  else:
+                      value.append(character)
+                  index += 1
+                  continue
+              if character == "\\" and index + 1 < length:
+                  value.append(segment[index + 1])
+                  started = True
+                  index += 2
+                  continue
+              if quote == '"':
+                  if character == '"':
+                      quote = None
+                  else:
+                      value.append(character)
+                  index += 1
+                  continue
+              if character in "'\"":
+                  quote = character
+                  started = True
+                  index += 1
+                  continue
+              if character in " \t":
+                  if started:
+                      tokens.append(("".join(value), False))
+                      value = []
+                      started = False
+                  index += 1
+                  continue
+              if character in OPERATOR_CHARS:
+                  if started:
+                      tokens.append(("".join(value), False))
+                      value = []
+                      started = False
+                  tokens.append((character, True))
+                  index += 1
+                  continue
+              value.append(character)
+              started = True
+              index += 1
+          if quote is not None:
+              return None
+          if started:
+              tokens.append(("".join(value), False))
+          return tokens
+
+
+      def command_position_flags(tokens):
+          """Per token: does a simple command start here?"""
+          flags = [False] * len(tokens)
+          open_position = True
+          wrapper = None
+          for index, (value, operator) in enumerate(tokens):
+              if operator:
+                  open_position = True
+                  wrapper = None
+                  continue
+              if not open_position:
+                  continue
+              if ASSIGNMENT_PREFIX.match(value) is not None:
+                  continue
+              if value in COMMAND_KEYWORDS or value in COMMAND_WRAPPERS:
+                  wrapper = value
+                  continue
+              if wrapper is not None and value.startswith("-"):
+                  # Options belonging to the wrapper (`env -i`, `sudo -u anis`).
+                  continue
+              flags[index] = True
+              open_position = False
+          return flags
+
+
+      def unvalidatable(segment, reason):
+          """Every guarded verb mentioned in `segment`, all refused for `reason`."""
+          return [
+              (operation, segment, reason)
+              for literal, operation in GUARDED_LITERALS
+              if literal in segment
+          ]
+
+
+      def guarded_operations(command):
+          """(operation, segment, problem) for every guarded verb the shell would run.
+
+          `problem` is None when the segment can be handed to that verb's grammar,
+          and a reason when the verb sits where the guard cannot validate it: an
+          unparseable command, shell source passed to `eval`/`sh -c`, or a position
+          that is not a command position (an argument to some other program). Those
+          are refused rather than waved through — the parser and the shell have to
+          agree, and where they cannot the guard fails closed.
+          """
+          segments = split_segments(command)
+          if segments is None:
+              return unvalidatable(command, "the command could not be parsed")
+          found = []
+          for segment in segments:
+              tokens = tokenize_segment(segment)
+              if tokens is None:
+                  found.extend(unvalidatable(segment, "the segment could not be tokenised"))
+                  continue
+              flags = command_position_flags(tokens)
+              values = [value for value, _ in tokens]
+              if any(
+                  flag and value in SHELL_EVALUATORS
+                  for flag, value in zip(flags, values)
+              ):
+                  found.extend(unvalidatable(
+                      segment, "shell source passed to an evaluator cannot be validated"
+                  ))
+                  continue
+              for index in range(len(values)):
+                  for literal_tokens, operation in GUARDED_TOKEN_LITERALS:
+                      if values[index:index + len(literal_tokens)] != literal_tokens:
+                          continue
+                      if flags[index]:
+                          found.append((operation, segment, None))
+                      else:
+                          found.append((
+                              operation,
+                              segment,
+                              "the verb is not in a command position the guard can "
+                              "validate; quote it if you only mean to mention it",
+                          ))
+                      break
+          return found
+
+
+      def detect_repository(git_bin, cwd, timeout):
+          """Return the owner/name slug of cwd's origin remote, or None."""
+          if not isinstance(cwd, str) or not cwd:
+              return None
+          try:
+              child = subprocess.run(
+                  [git_bin, "-C", cwd, "remote", "get-url", "origin"],
+                  capture_output=True,
+                  text=True,
+                  timeout=timeout,
+                  check=False,
+              )
+          except (subprocess.TimeoutExpired, OSError):
+              return None
+          if child.returncode != 0:
+              return None
+          url = child.stdout.strip()
+          if url.endswith(".git"):
+              url = url[: -len(".git")]
+          for prefix in (
+              "git@github.com:",
+              "ssh://git@github.com/",
+              "https://github.com/",
+              "http://github.com/",
+          ):
+              if url.startswith(prefix):
+                  slug = url[len(prefix):]
+                  break
+          else:
+              return None
+          slug = slug.strip("/")
+          if SLUG_PATTERN.fullmatch(slug) is None:
+              return None
+          return slug
+
+
+      def default_branch(git_bin, cwd, timeout):
+          """The branch origin/HEAD points at, or None when it cannot be resolved."""
+          if not isinstance(cwd, str) or not cwd:
+              return None
+          try:
+              child = subprocess.run(
+                  [git_bin, "-C", cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                  capture_output=True,
+                  text=True,
+                  timeout=timeout,
+                  check=False,
+              )
+          except (subprocess.TimeoutExpired, OSError):
+              return None
+          if child.returncode != 0:
+              return None
+          prefix = "origin/"
+          value = child.stdout.strip()
+          if not value.startswith(prefix):
+              return None
+          name = value[len(prefix):]
+          if REF_NAME_PATTERN.fullmatch(name) is None:
+              return None
+          return name
+
+
+      class Context:
+          """Injected dependencies plus the repository facts, resolved once."""
+
+          def __init__(self, args, cwd):
+              self.git_bin = args.git_bin
+              self.gh_bin = args.gh_bin
+              self.jq_bin = args.jq_bin
+              self.timeout = args.child_timeout_seconds
+              self.repository = detect_repository(self.git_bin, cwd, self.timeout)
+              self.base_branch = default_branch(self.git_bin, cwd, self.timeout)
+
+
+      def ownership_problem(repository):
+          """Why `repository` is outside standing authorization, or None."""
+          if repository is None:
+              return "repository unknown is outside standing authorization"
+          if repository.split("/", 1)[0] != AUTHORIZED_OWNER:
+              return f"repository {repository} is outside standing authorization"
+          return None
+
+
+      def branch_name_problem(git_bin, branch, timeout):
+          """Why `branch` is not a plain, safe branch name, or None."""
+          if not branch:
+              return "branch name must not be empty"
+          if branch.startswith("-"):
+              return "branch must not begin with a dash"
+          if ":" in branch or "+" in branch:
+              return "refspecs and force-pushes are not authorized"
+          if any(character in UNSAFE_BRANCH_CHARS for character in branch):
+              return "forbidden branch character"
+          if any(component in REF_NAMESPACE_COMPONENTS for component in branch.split("/")):
+              # `refs/heads/main` and `heads/main` both name the branch `main`, so a
+              # plain string comparison against the default branch would miss them.
+              return "namespaced refs are not authorized, name the branch directly"
+          try:
+              child = subprocess.run(
+                  [git_bin, "check-ref-format", "--branch", branch],
+                  capture_output=True,
+                  text=True,
+                  timeout=timeout,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return "branch validation timed out"
+          if child.returncode != 0:
+              return "invalid branch name"
+          return None
+
+
+      def free_text_problem(value, allow_newlines):
+          """Why `value` is not safe to hand to the shell verbatim, or None."""
+          if not value:
+              return "must not be empty"
+          forbidden = set(UNSAFE_TEXT_CHARS)
+          if not allow_newlines:
+              forbidden.add("\n")
+          if any(character in forbidden for character in value):
+              return "contains a forbidden character"
+          if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+              return "contains an unpaired surrogate"
+          return None
+
+
+      def parse_merge_raw(command, repository):
           prefix = "gh pr merge "
           if not command.startswith(prefix):
               return None
@@ -85,24 +543,211 @@ let
           ):
               return None
 
-          no_subject = f"--repo {REPOSITORY} --merge --delete-branch"
+          no_subject = f"--repo {repository} --merge --delete-branch"
           if remainder == no_subject:
               return number, None
 
-          subject_prefix = f'--repo {REPOSITORY} --merge --subject "'
+          subject_prefix = f'--repo {repository} --merge --subject "'
           subject_suffix = '" --delete-branch'
           if not remainder.startswith(subject_prefix) or not remainder.endswith(subject_suffix):
               return None
 
           subject = remainder[len(subject_prefix):-len(subject_suffix)]
-          forbidden = {'"', "$", "`", "\\", "\0", "\n", "\r"}
-          if (
-              not subject
-              or any(character in forbidden for character in subject)
-              or any(0xD800 <= ord(character) <= 0xDFFF for character in subject)
-          ):
+          if free_text_problem(subject, False) is not None:
               return None
           return number, subject
+
+
+      def validate_branch_delete(command, git_bin, timeout):
+          """Branch deletion is guarded in every repository, ownership aside."""
+          if any(character in UNSAFE_BRANCH_CHARS for character in command):
+              return block("unsafe branch deletion: forbidden raw command character")
+          try:
+              command_argv = shlex.split(command)
+          except ValueError as error:
+              return block(f"unsafe branch deletion: invalid command quoting: {error}")
+          if len(command_argv) != 4 or command_argv[:3] != ["git", "branch", "-d"]:
+              return block("unsafe branch deletion: expected exactly git branch -d <branch>")
+          branch = command_argv[3]
+          if branch.startswith("-"):
+              return block("unsafe branch deletion: branch must not begin with a dash")
+          try:
+              ref_check = subprocess.run(
+                  [git_bin, "check-ref-format", "--branch", branch],
+                  capture_output=True,
+                  text=True,
+                  timeout=timeout,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("unsafe branch deletion: branch validation timed out")
+          if ref_check.returncode != 0:
+              return block("unsafe branch deletion: invalid branch name")
+          return 0
+
+
+      def validate_push(segment, context):
+          problem = ownership_problem(context.repository)
+          if problem is not None:
+              return block(f"unsafe push: {problem}")
+          if any(character in UNSAFE_BRANCH_CHARS for character in segment):
+              return block("unsafe push: forbidden raw command character")
+          try:
+              command_argv = shlex.split(segment)
+          except ValueError as error:
+              return block(f"unsafe push: invalid command quoting: {error}")
+          if len(command_argv) == 5 and command_argv[:4] == ["git", "push", "-u", "origin"]:
+              branch = command_argv[4]
+          elif len(command_argv) == 4 and command_argv[:3] == ["git", "push", "origin"]:
+              branch = command_argv[3]
+          else:
+              return block("unsafe push: expected exactly git push [-u] origin <branch>")
+          reason = branch_name_problem(context.git_bin, branch, context.timeout)
+          if reason is not None:
+              return block(f"unsafe push: {reason}")
+          if context.base_branch is None:
+              return block("unsafe push: cannot resolve the repository default branch")
+          if branch == context.base_branch:
+              return block(f"unsafe push: refusing to push the default branch {branch}")
+          return 0
+
+
+      def validate_pr_create(segment, context):
+          problem = ownership_problem(context.repository)
+          if problem is not None:
+              return block(f"unsafe PR creation: {problem}")
+          try:
+              command_argv = shlex.split(segment)
+          except ValueError as error:
+              return block(f"unsafe PR creation: invalid command quoting: {error}")
+          if len(command_argv) != 13 or command_argv[:3] != ["gh", "pr", "create"]:
+              return block(
+                  "unsafe PR creation: expected exactly gh pr create --repo <repo> "
+                  "--base <base> --head <head> --title <title> --body <body>"
+              )
+          if tuple(command_argv[3::2]) != PR_CREATE_FLAGS:
+              return block(
+                  "unsafe PR creation: flags must be --repo --base --head --title --body in order"
+              )
+          repository_argument, base, head, title, body = command_argv[4::2]
+          if repository_argument != context.repository:
+              return block(
+                  f"unsafe PR creation: --repo {repository_argument} is not the "
+                  f"current repository {context.repository}"
+              )
+          reason = branch_name_problem(context.git_bin, head, context.timeout)
+          if reason is not None:
+              return block(f"unsafe PR creation: head {reason}")
+          for name, value, allow_newlines in (("title", title, False), ("body", body, True)):
+              text_problem = free_text_problem(value, allow_newlines)
+              if text_problem is not None:
+                  return block(f"unsafe PR creation: {name} {text_problem}")
+          if context.base_branch is None:
+              return block("unsafe PR creation: cannot resolve the repository default branch")
+          if base != context.base_branch:
+              return block(
+                  f"unsafe PR creation: --base must be the default branch {context.base_branch}"
+              )
+          if head == base:
+              return block("unsafe PR creation: head and base must differ")
+          return 0
+
+
+      def validate_merge(command, context):
+          problem = ownership_problem(context.repository)
+          if problem is not None:
+              return block(f"unsafe merge: {problem}")
+          repository = context.repository
+          merge_parts = parse_merge_raw(command, repository)
+          if merge_parts is None:
+              return block("unsafe merge: command does not match the guarded merge grammar")
+          number, subject = merge_parts
+          try:
+              command_argv = shlex.split(command)
+          except ValueError as error:
+              return block(f"unsafe merge: invalid command quoting: {error}")
+          expected_argv = [
+              "gh", "pr", "merge", number, "--repo", repository, "--merge",
+          ]
+          if subject is not None:
+              expected_argv.extend(["--subject", subject])
+          expected_argv.append("--delete-branch")
+          if command_argv != expected_argv:
+              return block("unsafe merge: tokenised command does not match guarded argv")
+          if context.base_branch is None:
+              return block("unsafe merge: cannot resolve the repository default branch")
+          base = context.base_branch
+
+          try:
+              pr_lookup = subprocess.run(
+                  [
+                      context.gh_bin, "pr", "view", number, "--repo", repository,
+                      "--json", "state,baseRefName,url",
+                  ],
+                  capture_output=True,
+                  text=True,
+                  timeout=context.timeout,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("PR lookup timed out")
+          if pr_lookup.returncode != 0:
+              return block_child_failure("PR lookup failed", pr_lookup)
+
+          try:
+              pr_predicate_query = (
+                  f'.state == "OPEN" and .baseRefName == "{base}" and '
+                  f'(.url | startswith("https://github.com/{repository}/pull/"))'
+              )
+              pr_predicate = subprocess.run(
+                  [
+                      context.jq_bin,
+                      "-e",
+                      pr_predicate_query,
+                  ],
+                  input=pr_lookup.stdout,
+                  capture_output=True,
+                  text=True,
+                  timeout=context.timeout,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("PR predicate timed out")
+          if pr_predicate.returncode != 0:
+              return block_child_failure("PR predicate failed", pr_predicate)
+
+          try:
+              protection_lookup = subprocess.run(
+                  [context.gh_bin, "api", f"repos/{repository}/branches/{base}/protection"],
+                  capture_output=True,
+                  text=True,
+                  timeout=context.timeout,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("protection lookup timed out")
+          if protection_lookup.returncode != 0:
+              return block_child_failure("protection lookup failed", protection_lookup)
+
+          try:
+              protection_predicate = subprocess.run(
+                  [
+                      context.jq_bin,
+                      "-e",
+                      "(.required_status_checks.contexts | length) > 0 "
+                      "and .enforce_admins.enabled == true",
+                  ],
+                  input=protection_lookup.stdout,
+                  capture_output=True,
+                  text=True,
+                  timeout=context.timeout,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("protection predicate timed out")
+          if protection_predicate.returncode != 0:
+              return block_child_failure("protection predicate failed", protection_predicate)
+          return 0
 
 
       def main():
@@ -127,129 +772,27 @@ let
           if not isinstance(command, str):
               return block("invalid hook input: expected tool_input.command to be a string")
 
-          if command.startswith(MERGE_LITERAL):
-              operation = "merge"
-          elif command.startswith(BRANCH_LITERAL):
-              operation = "branch"
-          elif BRANCH_LITERAL in command:
-              operation = "branch"
-          elif MERGE_LITERAL in command:
-              operation = "merge"
-          else:
-              return 0
-
-          if operation == "branch":
-              if any(character in UNSAFE_BRANCH_CHARS for character in command):
-                  return block("unsafe branch deletion: forbidden raw command character")
-              try:
-                  command_argv = shlex.split(command)
-              except ValueError as error:
-                  return block(f"unsafe branch deletion: invalid command quoting: {error}")
-              if len(command_argv) != 4 or command_argv[:3] != ["git", "branch", "-d"]:
-                  return block("unsafe branch deletion: expected exactly git branch -d <branch>")
-              branch = command_argv[3]
-              if branch.startswith("-"):
-                  return block("unsafe branch deletion: branch must not begin with '-'")
-              try:
-                  ref_check = subprocess.run(
-                      [args.git_bin, "check-ref-format", "--branch", branch],
-                      capture_output=True,
-                      text=True,
-                      timeout=args.child_timeout_seconds,
-                      check=False,
+          context = None
+          for operation, segment, problem in guarded_operations(command):
+              if problem is not None:
+                  return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
+              if operation == "branch":
+                  # Branch deletion is judged on the whole command, in every
+                  # repository: it needs no forge state and tolerates no chaining.
+                  status = validate_branch_delete(
+                      command, args.git_bin, args.child_timeout_seconds
                   )
-              except subprocess.TimeoutExpired:
-                  return block("unsafe branch deletion: branch validation timed out")
-              if ref_check.returncode != 0:
-                  return block("unsafe branch deletion: invalid branch name")
-              return 0
-
-          merge_parts = parse_merge_raw(command)
-          if merge_parts is None:
-              return block("unsafe merge: command does not match the guarded merge grammar")
-          number, subject = merge_parts
-          try:
-              command_argv = shlex.split(command)
-          except ValueError as error:
-              return block(f"unsafe merge: invalid command quoting: {error}")
-          expected_argv = [
-              "gh", "pr", "merge", number, "--repo", REPOSITORY, "--merge",
-          ]
-          if subject is not None:
-              expected_argv.extend(["--subject", subject])
-          expected_argv.append("--delete-branch")
-          if command_argv != expected_argv:
-              return block("unsafe merge: tokenised command does not match guarded argv")
-
-          try:
-              pr_lookup = subprocess.run(
-                  [
-                      args.gh_bin, "pr", "view", number, "--repo", REPOSITORY,
-                      "--json", "state,baseRefName,url",
-                  ],
-                  capture_output=True,
-                  text=True,
-                  timeout=args.child_timeout_seconds,
-                  check=False,
-              )
-          except subprocess.TimeoutExpired:
-              return block("PR lookup timed out")
-          if pr_lookup.returncode != 0:
-              return block_child_failure("PR lookup failed", pr_lookup)
-
-          try:
-              pr_predicate_query = (
-                  f'.state == "OPEN" and .baseRefName == "{MAIN_BRANCH}" and '
-                  f'(.url | startswith("{PR_URL_PREFIX}"))'
-              )
-              pr_predicate = subprocess.run(
-                  [
-                      args.jq_bin,
-                      "-e",
-                      pr_predicate_query,
-                  ],
-                  input=pr_lookup.stdout,
-                  capture_output=True,
-                  text=True,
-                  timeout=args.child_timeout_seconds,
-                  check=False,
-              )
-          except subprocess.TimeoutExpired:
-              return block("PR predicate timed out")
-          if pr_predicate.returncode != 0:
-              return block_child_failure("PR predicate failed", pr_predicate)
-
-          try:
-              protection_lookup = subprocess.run(
-                  [args.gh_bin, "api", PROTECTION_ENDPOINT],
-                  capture_output=True,
-                  text=True,
-                  timeout=args.child_timeout_seconds,
-                  check=False,
-              )
-          except subprocess.TimeoutExpired:
-              return block("protection lookup timed out")
-          if protection_lookup.returncode != 0:
-              return block_child_failure("protection lookup failed", protection_lookup)
-
-          try:
-              protection_predicate = subprocess.run(
-                  [
-                      args.jq_bin,
-                      "-e",
-                      '(.required_status_checks.contexts | index("Nix Eval")) != null '
-                      'and .enforce_admins.enabled == true',
-                  ],
-                  input=protection_lookup.stdout,
-                  capture_output=True,
-                  text=True,
-                  timeout=args.child_timeout_seconds,
-                  check=False,
-              )
-          except subprocess.TimeoutExpired:
-              return block("protection predicate timed out")
-          if protection_predicate.returncode != 0:
-              return block_child_failure("protection predicate failed", protection_predicate)
+              else:
+                  if context is None:
+                      context = Context(args, payload.get("cwd"))
+                  if operation == "push":
+                      status = validate_push(segment, context)
+                  elif operation == "pr-create":
+                      status = validate_pr_create(segment, context)
+                  else:
+                      status = validate_merge(command, context)
+              if status != 0:
+                  return status
           return 0
 
 
@@ -302,8 +845,9 @@ let
       }
     ];
 
-    # The broad branch-delete and PR-merge entries are usable only through the lifecycle
-    # guard above. Bare `Agent` remains inert while defaultMode is "auto".
+    # The broad push, PR-create, branch-delete and PR-merge entries are usable only
+    # through the lifecycle guard above, which adjudicates every one of them at the
+    # command position of a segment. Bare `Agent` remains inert while defaultMode is "auto".
     permissions = {
       defaultMode = "auto";
       allow = [
@@ -320,6 +864,8 @@ let
         "Bash(git worktree list:*)"
         "Bash(git worktree remove:*)"
         "Bash(git worktree prune:*)"
+        "Bash(git push:*)"
+        "Bash(gh pr create:*)"
         "Bash(git branch -d:*)"
         "Bash(gh pr merge:*)"
         "Agent"

@@ -951,6 +951,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         ):
             self.assertIn(forbidden_inference, combined)
         self.assertIn("current user instruction explicitly authorizes", combined)
+        self.assertIn(
+            "resuming a `suspended` attempt requires neither `new_run` nor "
+            "`owner_unavailable`",
+            self.auto,
+        )
 
     def test_adjacent_from_issue_acquisition_modes_remain_unchanged(self):
         identity = self.section(
@@ -978,19 +983,93 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertNotIn("direct-owner", durable)
 
-    def test_from_issue_routes_a_deadline_rejected_progress_to_the_terminal_return(self):
-        # A progress call rejected past the attempt budget's deadline is a
-        # verdict, not a harness fault: the owner persists its truthful state
-        # rather than retrying the checkpoint.
+    def test_from_issue_routes_a_deadline_rejected_progress_to_the_suspension_procedure(self):
+        # A progress call rejected past the attempt budget's deadline is now an
+        # environmental interruption, not a semantic verdict: the reaper demotes
+        # the expired attempt to suspended(unknown), so the owner follows the
+        # suspension procedure (print the re-entry line and stop) rather than
+        # writing a terminal finish, which the helper would reject on a
+        # non-active attempt.
         self.assert_ordered(
             self.from_issue,
             "Obey the returned action exactly",
             "attempt budget's deadline has passed",
             "cannot record progress at or after attempt deadline",
             "progress requires an active attempt",
-            "terminal return procedure",
+            "suspension procedure",
             "Persistence precedes notification",
         )
+
+    def test_authorization_truth_is_single_and_shared(self):
+        sentence = (
+            "Standing authorization exists exactly where the lifecycle guard grants it: "
+            "pushing a non-default branch, opening a PR to the default branch, and the "
+            "guarded merge, in fagenorn-owned repositories; everywhere else these commands "
+            "stay per-action gated — suspend with blocked_on=human_gate and print the "
+            "re-entry line instead of dying at the prompt."
+        )
+        self.assertIn(sentence, self.ship_issue)
+        self.assertIn(sentence, self.from_issue)
+        self.assertNotIn("Don't re-prompt for `git push`", self.ship_issue)
+        self.assertNotIn(
+            "Push, PR open/merge, force-push, and hook bypass stay per-action gated.",
+            self.from_issue,
+        )
+
+    def test_suspension_procedure_pins_verb_line_and_distinction(self):
+        suspension = self.section(
+            self.from_issue, "## Suspension procedure", "## Phase 0"
+        )
+        self.assertIn(
+            "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--now <utc> --issue <n> --attempt <k> --blocked-on <value>",
+            suspension,
+        )
+        self.assertIn(
+            "Suspended (blocked_on=<value>). Resume: <reentry from the envelope>",
+            suspension,
+        )
+        self.assertIn(
+            "Handoff is the deliberate context rollover with a handoff document; "
+            "suspension is the environmental pause with none.",
+            suspension,
+        )
+        self.assertIn("no `finish` call", suspension)
+        self.assert_ordered(
+            suspension, "workflow-state suspend", "Suspended (blocked_on=", "stop",
+        )
+
+    def test_terminal_replay_relays_reentry(self):
+        terminal = self.section(
+            self.from_issue,
+            "## Terminal return procedure",
+            "## Suspension procedure",
+        )
+        self.assertIn("`reentry`", terminal)
+        self.assertIn("verbatim on its own line", terminal)
+
+    def test_orchestrate_reuses_nonfinal_runs(self):
+        bootstrap = self.section(
+            self.orchestrate, "## 2. Bootstrap and observe", "## 3. Decide"
+        )
+        self.assert_ordered(
+            bootstrap,
+            "existing run whose state covers the same issue set",
+            "non-final attempt",
+            "reuse that run id",
+            "workflow-state init-run",
+        )
+        self.assertNotRegex(
+            self.orchestrate, r"(?i)mint (?:a )?(?:fresh |new )?dated run"
+        )
+
+    def test_no_deadline_less_wait_is_armed(self):
+        self.assertIn(
+            "control never returns a deadline-less wait; every wait carries deadline_at, "
+            "and when nothing can proceed without a human, control returns finalize instead.",
+            self.orchestrate,
+        )
+        self.assertNotIn("and optional deadline", self.orchestrate)
 
     def test_orchestrate_evals_grade_control_and_reject_retired_policy(self):
         expected = " ".join(
@@ -1468,10 +1547,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         expected_occurrences = [
             "7. Merge                   → "
             f"{optional_subject} (true merge commit)",
-            'This skill IS the chain that "PR-handoff authorization" describes. '
-            "Don't re-prompt for `git push`, `gh pr create`, "
-            f"`{optional_subject}`, branch delete, or worktree remove. "
-            "Pause only where a phase says to.",
+            "In a qualifying repository this skill IS that chain: `git push`, "
+            "`gh pr create`, "
+            f"`{optional_subject}`, branch delete, and worktree remove need no "
+            "re-prompt; pause only where a phase says to.",
             rendered_subject,
         ]
         occurrences = [

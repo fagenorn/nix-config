@@ -14,8 +14,69 @@ EXPECTED_ALLOW = [
     "Bash(gh pr checks:*)", "Bash(gh issue view:*)", "Bash(gh issue list:*)",
     "Bash(git worktree add:*)", "Bash(git worktree list:*)",
     "Bash(git worktree remove:*)", "Bash(git worktree prune:*)",
+    "Bash(git push:*)", "Bash(gh pr create:*)",
     "Bash(git branch -d:*)", "Bash(gh pr merge:*)", "Agent",
 ]
+
+# Stand-in for `gh`. Answers the two lookups the guard makes for any slug and
+# any protected branch, so the merge path can be exercised in every fixture
+# repository. FAKE_<STAGE>_MODE injects failures; FAKE_<STAGE>_JSON overrides
+# the payload.
+FAKE_GH_SCRIPT = '''
+import os
+import sys
+import time
+
+argv = sys.argv[1:]
+stage = None
+number = ""
+slug = ""
+branch = ""
+if (
+    len(argv) == 7
+    and argv[0:2] == ["pr", "view"]
+    and argv[3] == "--repo"
+    and argv[5] == "--json"
+    and argv[6] == "state,baseRefName,url"
+):
+    stage, number, slug, branch = "pr", argv[2], argv[4], "main"
+elif len(argv) == 2 and argv[0] == "api":
+    parts = argv[1].split("/")
+    if (
+        len(parts) == 6
+        and parts[0] == "repos"
+        and parts[3] == "branches"
+        and parts[5] == "protection"
+    ):
+        stage = "protection"
+        slug = parts[1] + "/" + parts[2]
+        branch = parts[4]
+if stage is None:
+    print("unexpected fake-gh argv: " + repr(argv), file=sys.stderr)
+    raise SystemExit(64)
+
+mode = os.environ.get("FAKE_" + stage.upper() + "_MODE", "ok")
+if mode == "nonzero":
+    print("fake " + stage + " failure", file=sys.stderr)
+    raise SystemExit(9)
+if mode == "timeout":
+    time.sleep(2)
+if mode == "invalid":
+    print("{")
+    raise SystemExit(0)
+
+if stage == "pr":
+    default = (
+        '{"state":"OPEN","baseRefName":"' + branch + '",'
+        '"url":"https://github.com/' + slug + "/pull/" + number + '"}'
+    )
+else:
+    default = (
+        '{"required_status_checks":{"contexts":["Nix Eval"]},'
+        '"enforce_admins":{"enabled":true}}'
+    )
+print(os.environ.get("FAKE_" + stage.upper() + "_JSON", default))
+'''
 
 
 class ClaudePermissionGuardTest(unittest.TestCase):
@@ -54,35 +115,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
         cls.fixture_dir = tempfile.TemporaryDirectory()
         cls.fake_gh = Path(cls.fixture_dir.name) / "fake-gh"
-        cls.fake_gh.write_text(f"""#!{sys.executable}
-import os, sys, time
-expected_argv = {{
-    "pr": ["pr", "view", "1", "--repo", "fagenorn/nix-config",
-           "--json", "state,baseRefName,url"],
-    "protection": ["api", "repos/fagenorn/nix-config/branches/main/protection"],
-}}
-for stage, expected in expected_argv.items():
-    if sys.argv[1:] == expected:
-        break
-else:
-    print(f"unexpected fake-gh argv: {{sys.argv[1:]!r}}", file=sys.stderr)
-    raise SystemExit(64)
-mode = os.environ.get(f"FAKE_{{stage.upper()}}_MODE", "ok")
-if mode == "nonzero":
-    print(f"fake {{stage}} failure", file=sys.stderr)
-    raise SystemExit(9)
-if mode == "timeout":
-    time.sleep(2)
-if mode == "invalid":
-    print("{{")
-    raise SystemExit(0)
-default = ('{{"state":"OPEN","baseRefName":"main",'
-           '"url":"https://github.com/fagenorn/nix-config/pull/1"}}'
-           if stage == "pr" else
-           '{{"required_status_checks":{{"contexts":["Nix Eval"]}},'
-           '"enforce_admins":{{"enabled":true}}}}')
-print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
-""", encoding="utf-8")
+        cls.fake_gh.write_text(f"#!{sys.executable}\n" + FAKE_GH_SCRIPT, encoding="utf-8")
         cls.fake_gh.chmod(0o755)
 
     @classmethod
@@ -102,6 +135,45 @@ print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
             json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
             *guard_args, env=env,
         )
+
+    def invoke_command_in(self, command, cwd, *guard_args, env=None):
+        return self.invoke_raw(
+            json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "cwd": str(cwd),
+            }),
+            *guard_args, env=env,
+        )
+
+    def run_guard(self, command, cwd=None, env=None, guard_args=None):
+        """Invoke the guard with the fake `gh` wired in by default."""
+        if guard_args is None:
+            guard_args = ("--gh-bin", str(self.fake_gh))
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+        if cwd is not None:
+            payload["cwd"] = str(cwd)
+        return self.invoke_raw(json.dumps(payload), *guard_args, env=env)
+
+    def make_repo(self, origin, default_branch="main"):
+        """A throwaway git repo whose origin remote is `origin`.
+
+        `default_branch` becomes origin/HEAD, which is what the guard reads to
+        learn the integration branch; pass None to leave it unresolvable.
+        """
+        root = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        argv_list = [
+            ["git", "init", "--quiet"],
+            ["git", "remote", "add", "origin", origin],
+        ]
+        if default_branch is not None:
+            argv_list.append([
+                "git", "symbolic-ref", "refs/remotes/origin/HEAD",
+                f"refs/remotes/origin/{default_branch}",
+            ])
+        for argv in argv_list:
+            subprocess.run(argv, cwd=root, check=True, capture_output=True)
+        return root
 
     def test_generated_allow_surface_is_exact_and_ordered(self):
         self.assertEqual(EXPECTED_ALLOW, self.settings["permissions"]["allow"])
@@ -138,7 +210,241 @@ print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
                 self.assertEqual(2, result.returncode)
                 self.assertIn("lifecycle guard: unsafe branch deletion:", result.stderr)
 
+    def test_heredoc_and_quoted_mentions_pass_in_own_repo(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "cat > notes.md <<'EOF'\nrun gh pr merge 5 later\ngit push origin main\nEOF\n",
+            'echo "docs say gh pr create --repo x"',
+            "true # gh pr merge 9 --repo fagenorn/nix-config --merge --delete-branch",
+            "workflow-state finish --notes 'blocked, cannot gh pr merge yet'",
+            "rg -n 'git branch -d' docs/",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    # ------------------------------------------------------------------
+    # Adversarial table. Each case is one class of "the guard's parser and
+    # the shell disagree". Every command below really runs a guarded verb, so
+    # none of them may exit 0 unless its grammar legitimately passes.
+    # ------------------------------------------------------------------
+
+    def test_heredoc_declared_before_a_separator_guards_the_rest_of_the_line(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            ": <<EOF; git push --force origin main\nEOF\n",
+            ": <<EOF && git push --force origin main\nEOF\n",
+            ": <<EOF | git push --force origin main\nEOF\n",
+            "cat <<EOF; gh pr merge 107 --repo someoneelse/tool --merge --delete-branch\nEOF\n",
+            ": <<EOF; git branch -d main\nEOF\n",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, (command, result.stdout))
+        # The body itself is still inert: here the verb is genuinely inside it.
+        inert = self.run_guard(
+            "cat <<EOF; true\ngit push --force origin main\nEOF\n", cwd=repo)
+        self.assertEqual(0, inert.returncode, inert.stderr)
+
+    def test_namespaced_ref_spellings_of_the_default_branch_block(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "git push origin refs/heads/main",
+            "git push -u origin refs/heads/main",
+            "git push origin heads/main",
+            "git push origin remotes/origin/main",
+            "git push origin tags/v1",
+            "git push origin HEAD",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn("lifecycle guard: unsafe push:", result.stderr)
+        ok = self.run_guard("git push -u origin issue-101-topic", cwd=repo)
+        self.assertEqual(0, ok.returncode, ok.stderr)
+
+    def test_shell_equivalent_spellings_are_adjudicated(self):
+        # Every command here pushes the default branch, so a legitimate pass is
+        # impossible: exit 0 would mean the guard simply failed to see the verb.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "(git push origin main)",                             # subshell
+            "{ git push origin main; }",                          # group
+            "if true; then git push origin main; fi",             # then
+            "for x in a; do git push origin main; done",          # do
+            "while true; do git push origin main; done",          # while/do
+            "case x in a) git push origin main;; esac",           # case arm
+            "! git push origin main",                             # negation
+            "time git push origin main",                          # time keyword
+            "git  push origin main",                              # double space
+            "git\tpush origin main",                              # tab
+            '"git" push origin main',                             # quoted word
+            "x=$(git push origin main)",                          # substitution
+            "`git push origin main`",                             # backticks
+            "xargs git push origin main",                         # argv runner
+            "timeout 5 git push origin main",                     # argv runner
+            "nice git push origin main",                          # argv runner
+            "env -i git push origin main",                        # env options
+            "env FOO=bar git push origin main",                   # env assignment
+            "sudo -u anis git push origin main",                  # sudo options
+            "eval 'git push origin main'",                        # evaluator
+            "sh -c 'git push origin main'",                       # evaluator
+            "bash -c 'gh pr merge 1 --repo someoneelse/tool --merge --delete-branch'",
+            'echo "unterminated ; git push origin main',           # unparseable
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+
+    def test_whitespace_normalisation_still_accepts_a_valid_push(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in ("git  push -u origin topic", "git\tpush origin topic"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_push_grammar_accepts_only_plain_nondefault_branch(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        ok = self.run_guard("git push -u origin worktree-issue-101-quota", cwd=repo)
+        self.assertEqual(0, ok.returncode, ok.stderr)
+        self.assertEqual(0, self.run_guard("git push origin topic", cwd=repo).returncode)
+        for bad in (
+            "git push origin main",                       # default branch
+            "git push --force origin topic",              # force
+            "git push origin :topic",                     # delete refspec
+            "git push origin +topic",                     # force refspec
+            "git push upstream topic",                    # foreign remote
+            "git push --mirror origin",                   # mirror
+            "git push origin --delete topic",             # branch deletion
+            "git push origin --tags",                     # tags
+            "git push -u origin topic extra",             # extra refspec
+            "git push origin $(evil)",                    # command substitution
+            "git push",                                   # implicit remote
+            "git push -u origin topic && rm -rf /",       # chained second command is fine BUT
+        ):
+            with self.subTest(command=bad):
+                result = self.run_guard(bad, cwd=repo)
+                if bad.endswith("rm -rf /"):
+                    self.assertEqual(0, result.returncode, result.stderr)
+                else:
+                    self.assertEqual(2, result.returncode, bad)
+                    self.assertIn("lifecycle guard: unsafe push:", result.stderr)
+
+    def test_push_outside_fagenorn_blocks(self):
+        repo = self.make_repo("git@github.com:someoneelse/tool.git")
+        result = self.run_guard("git push -u origin topic", cwd=repo)
+        self.assertEqual(2, result.returncode)
+        self.assertIn("outside standing authorization", result.stderr)
+
+    def test_push_fails_closed_without_a_resolvable_default_branch(self):
+        repo = self.make_repo("git@github.com:fagenorn/argus.git", default_branch=None)
+        result = self.run_guard("git push -u origin topic", cwd=repo)
+        self.assertEqual(2, result.returncode)
+        self.assertIn("default branch", result.stderr)
+
+    def test_pr_create_grammar_and_base_check(self):
+        repo = self.make_repo("https://github.com/fagenorn/argus.git")
+        ok = self.run_guard(
+            'gh pr create --repo fagenorn/argus --base main --head issue-7-fix '
+            '--title "fix: guard" --body "Closes #7"', cwd=repo)
+        self.assertEqual(0, ok.returncode, ok.stderr)
+        for bad in (
+            # wrong repo
+            'gh pr create --repo fagenorn/nix-config --base main --head t --title "x" --body "y"',
+            # wrong base
+            'gh pr create --repo fagenorn/argus --base release --head t --title "x" --body "y"',
+            # unsafe title
+            'gh pr create --repo fagenorn/argus --base main --head t --title "$(pwn)" --body "y"',
+            # unsafe body
+            'gh pr create --repo fagenorn/argus --base main --head t --title "x" --body "`id`"',
+            # head is the base
+            'gh pr create --repo fagenorn/argus --base main --head main --title "x" --body "y"',
+            # wrong shape
+            'gh pr create --repo fagenorn/argus --base main --head t --fill',
+            # extra flag
+            'gh pr create --repo fagenorn/argus --base main --head t --title "x" --body "y" --draft',
+            # flag order
+            'gh pr create --base main --repo fagenorn/argus --head t --title "x" --body "y"',
+        ):
+            with self.subTest(command=bad):
+                result = self.run_guard(bad, cwd=repo)
+                self.assertEqual(2, result.returncode, bad)
+                self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
+
+    def test_pr_create_outside_fagenorn_blocks(self):
+        repo = self.make_repo("git@github.com:someoneelse/tool.git")
+        result = self.run_guard(
+            'gh pr create --repo someoneelse/tool --base main --head t '
+            '--title "x" --body "y"', cwd=repo)
+        self.assertEqual(2, result.returncode)
+        self.assertIn("outside standing authorization", result.stderr)
+
+    def test_merge_validates_in_every_fagenorn_repo_and_blocks_elsewhere(self):
+        argus = self.make_repo("git@github.com:fagenorn/argus.git")
+        merge = "gh pr merge 107 --repo fagenorn/argus --merge --delete-branch"
+        good = self.run_guard(merge, cwd=argus)
+        self.assertEqual(0, good.returncode, good.stderr)
+        foreign = self.make_repo("git@github.com:someoneelse/tool.git")
+        blocked = self.run_guard(
+            "gh pr merge 1 --repo someoneelse/tool --merge --delete-branch", cwd=foreign)
+        self.assertEqual(2, blocked.returncode)
+        self.assertIn("outside standing authorization", blocked.stderr)
+
+    def test_merge_guard_validates_other_fagenorn_repos(self):
+        # The merge grammar is templated on the detected repository, so a
+        # fagenorn-owned repo other than nix-config is validated, not deferred.
+        elsewhere = self.make_repo("https://github.com/fagenorn/argus.git")
+        allowed = self.run_guard(
+            "gh pr merge 107 --repo fagenorn/argus --merge --delete-branch", cwd=elsewhere)
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+        for command in (
+            "gh pr merge 107 --repo fagenorn/argus --squash",
+            "gh pr merge 107 --repo fagenorn/nix-config --merge --delete-branch",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=elsewhere)
+                self.assertEqual(2, result.returncode)
+                self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+
+    def test_merge_guard_still_blocks_inside_its_own_repository(self):
+        for origin in (
+            "https://github.com/fagenorn/nix-config.git",
+            "git@github.com:fagenorn/nix-config.git",
+        ):
+            with self.subTest(origin=origin):
+                result = self.run_guard(
+                    "gh pr merge 1 --repo someone/else --merge --delete-branch",
+                    cwd=self.make_repo(origin),
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+
+    def test_merge_guard_fails_closed_when_repository_is_unknown(self):
+        plain = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        for cwd in (plain, self.make_repo("https://example.invalid/x/y.git")):
+            with self.subTest(cwd=str(cwd)):
+                result = self.run_guard(
+                    "gh pr merge 1 --repo someone/else --merge --delete-branch", cwd=cwd
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+
+    def test_merge_guard_fails_closed_without_a_cwd(self):
+        result = self.run_guard(
+            "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("outside standing authorization", result.stderr)
+
+    def test_branch_delete_guard_stays_global(self):
+        elsewhere = self.make_repo("https://github.com/fagenorn/argus.git")
+        blocked = self.invoke_command_in("git branch -d topic; true", elsewhere)
+        self.assertEqual(2, blocked.returncode)
+        self.assertIn("lifecycle guard: unsafe branch deletion:", blocked.stderr)
+        allowed = self.invoke_command_in("git branch -d issue-30-safe", elsewhere)
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+
     def test_unsafe_merge_shapes_fail_before_network(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         cases = (
             "gh pr merge --repo fagenorn/nix-config --merge --delete-branch",
             "gh pr merge topic --repo fagenorn/nix-config --merge --delete-branch",
@@ -160,11 +466,12 @@ print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
         )
         for command in cases:
             with self.subTest(command=command):
-                result = self.invoke_command(command)
+                result = self.run_guard(command, cwd=repo)
                 self.assertEqual(2, result.returncode)
                 self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
 
     def test_merge_dependency_and_predicate_failures_block(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         command = (
             "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch"
         )
@@ -186,35 +493,41 @@ print(os.environ.get(f"FAKE_{{stage.upper()}}_JSON", default))
         )
         for env, reason, diagnostic in cases:
             with self.subTest(env=env):
-                result = self.invoke_command(command, *guard_args, env=env)
+                result = self.run_guard(command, cwd=repo, env=env, guard_args=guard_args)
                 self.assertEqual(2, result.returncode)
                 self.assertIn(f"lifecycle guard: {reason}", result.stderr)
                 if diagnostic is not None:
                     self.assertIn(diagnostic, result.stderr)
 
     def test_merge_dependency_fixture_can_reach_acceptance(self):
-        result = self.invoke_command(
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        result = self.run_guard(
             "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch",
-            "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.5",
+            cwd=repo,
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_safe_rendered_subject_can_reach_acceptance(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         for subject in ("feature (#30) [guarded]*?~", "git branch -d"):
             with self.subTest(subject=subject):
-                result = self.invoke_command(
-                    'gh pr merge 1 --repo fagenorn/nix-config --merge '
+                result = self.run_guard(
+                    "gh pr merge 1 --repo fagenorn/nix-config --merge "
                     f'--subject "{subject}" --delete-branch',
-                    "--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.5",
+                    cwd=repo,
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
 
     def test_unexpected_dependency_exception_blocks(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         missing_jq = Path(self.fixture_dir.name) / "missing-jq"
-        result = self.invoke_command(
+        result = self.run_guard(
             "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch",
-            "--gh-bin", str(self.fake_gh), "--jq-bin", str(missing_jq),
-            "--child-timeout-seconds", "0.5",
+            cwd=repo,
+            guard_args=(
+                "--gh-bin", str(self.fake_gh), "--jq-bin", str(missing_jq),
+                "--child-timeout-seconds", "0.5",
+            ),
         )
         self.assertEqual(2, result.returncode)
         self.assertIn("lifecycle guard: unexpected failure:", result.stderr)

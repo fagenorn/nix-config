@@ -13,7 +13,8 @@ the current user instruction explicitly authorizes that exact transition.
 Self-answering never infers `owner_unavailable` from a restart, missing process
 handle, silence, or an active ledger, and never infers `new_run` from terminal
 replay, a reopened tracker, or a desire to continue. Process, tracker, and
-terminal observations are facts, not authorization.
+terminal observations are facts, not authorization. A resume is not a takeover:
+resuming a `suspended` attempt requires neither `new_run` nor `owner_unavailable` — suspension is not a terminal replay, so re-entry clears it with both flags left `false`.
 
 ## The self-answer pattern
 
@@ -338,3 +339,9 @@ reviewer (or `codex-collaboration`) with `REVIEW-CONTRACT.md`'s path, Phase 6
 runs `sdd`, and Phase 7 dispatches `ship-issue` with the appropriate handoff.
 Reviewer, SDD, and shipping contracts remain unchanged for these routes, and
 the owning controller continues to verify and disposition findings.
+
+At any Phase-6 or Phase-7 push, PR-open, or merge gate the lifecycle guard does
+not stand — a repository the guard does not cover, or a merge it fails closed on
+— do not die at the prompt: follow `SKILL.md`'s suspension procedure, suspending
+`blocked_on: human_gate` and printing the canonical re-entry line, so a later
+human approval resumes the same attempt without penalty.
