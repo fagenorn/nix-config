@@ -1505,6 +1505,28 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for stale in ("~14 min", "~15 min"):
             with self.subTest(stale=stale, doc="SKILL.md"):
                 self.assertNotIn(stale, collaboration)
+        # The bridge's own wait is wider than either budget, so the caller is
+        # given that figure too (D8/D15, D20). Pin the arithmetic rather than
+        # the literal: the total is the wait count times the per-call bound, so
+        # retuning one number without the others goes red instead of shipping a
+        # sentence that no longer adds up.
+        bounded = re.search(
+            r"wait is uniform and wider than either budget: it returns "
+            r"`CODEX_REVIEW_FAILURE` only after roughly (\d+) s of bounded "
+            r"waiting[^.]*four bounded (\d+) s calls",
+            launch,
+        )
+        self.assertIsNotNone(bounded, launch)
+        self.assertEqual(int(bounded.group(1)), 4 * int(bounded.group(2)))
+        # Restated once as the figure to plan against — and it must be the same
+        # figure the sentence above derived.
+        restated = re.search(r"plan for the ~(\d+) s bounded-wait figure", launch)
+        self.assertIsNotNone(restated, launch)
+        self.assertEqual(restated.group(1), bounded.group(1))
+        # It bounds the bridge's waiting, not the hold: each of those four
+        # waits sits under a wider outer tool cap, so the total is never a
+        # guaranteed ceiling on how long a caller can be held (D20).
+        self.assertNotIn("the worst case you can be held for", collaboration)
         # The eval grades a model against this same number; unpinned, it would
         # keep grading against a figure the skill no longer states (D15). JSON
         # cannot carry a raw newline inside a string, so the wrap arrives as the
@@ -1538,15 +1560,32 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "anchor it in the artifact",
         )
         # Stop provoking it as well as prohibiting it: neither packet may hand a
-        # read-only reviewer commands that read as instructions (D7).
-        plan_review = " ".join(self.codex_plan_review.split())
+        # read-only reviewer commands that read as instructions (D7). The label
+        # has to sit on the enumerated packet item itself, so each assertion is
+        # scoped to that document's packet list — whole-document, the phrase
+        # could drift anywhere in the file and still pass the very check that
+        # exists to keep it attached to what the reviewer receives.
+        plan_packet = " ".join(
+            self.section(
+                self.codex_plan_review,
+                "## Build the review packet",
+                "## Reviewer contract",
+            ).split()
+        )
+        diff_packet = " ".join(
+            self.section(
+                self.diff_review,
+                "## Packet",
+                "### When the range is over budget",
+            ).split()
+        )
         for name, packet in (
-            ("PLAN-REVIEW.md", plan_review),
-            ("DIFF-REVIEW.md", " ".join(self.diff_review.split())),
+            ("PLAN-REVIEW.md", plan_packet),
+            ("DIFF-REVIEW.md", diff_packet),
         ):
             with self.subTest(packet=name):
                 self.assertIn("not a request to execute anything", packet)
-        self.assertIn("so the reviewer need not re-measure them", plan_review)
+        self.assertIn("so the reviewer need not re-measure them", plan_packet)
 
     def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
         # The gate states a policy and calls the helper; the accounting itself

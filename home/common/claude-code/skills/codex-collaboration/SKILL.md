@@ -100,10 +100,12 @@ The contract: the review runs fresh in an isolated read-only Codex runtime
 bridge's own lifetime, and is bounded by a per-operation runtime budget — expect
 up to roughly 28 minutes of wall clock for `plan-review` and roughly 14 minutes
 for `diff-review`. The bridge's own wait is uniform and wider than either
-budget: it waits up to 2160 s — four bounded 540 s calls — before returning
-`CODEX_REVIEW_FAILURE`, so a wedged worker can hold you well past the review's
-own budget. Schedule on the budget, but treat 2160 s as the worst case you can
-be held for. The bridge returns the reviewer's output verbatim, or a single
+budget: it returns `CODEX_REVIEW_FAILURE` only after roughly 2160 s of bounded
+waiting — four bounded 540 s calls — so a wedged worker can hold you well past
+the review's own budget. Schedule against the per-operation budget and plan for
+the ~2160 s bounded-wait figure; it bounds the bridge's own waiting, not the
+hold itself, so it is a planning figure rather than a guaranteed ceiling. The
+bridge returns the reviewer's output verbatim, or a single
 `CODEX_REVIEW_FAILURE:` line carrying the review job's recorded error.
 
 Parallel reviews are valid. A queued or active review is never a reason to use a
