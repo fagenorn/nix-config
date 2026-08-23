@@ -57,13 +57,15 @@ keep an observation kind `null` until the helper requests it:
   "new_run": false,
   "owner_unavailable": false,
   "tracker": null,
-  "worktree": null
+  "worktree": null,
+  "forge": null
 }
 ```
 
 The concrete `issue`, `now`, and `attempt_budget_minutes` values above stand for
-the values just resolved; they are not fixed literals. Keep the unrequested
-nullable observation slot `null`, and add no keys. Invoke only:
+the values just resolved; they are not fixed literals. Keep every unrequested
+nullable observation slot (`tracker`, `worktree`, `forge`) `null`, and add no
+keys. Invoke only:
 
 ```text
 workflow-state direct-owner --repo-root <ledger_repo_root> --request-file <absolute-json-path>
@@ -82,14 +84,16 @@ Validate the response as exactly one closed discriminator and continue as
 follows:
 
 1. **`kind: observe`** — require exactly `interface_version`, `kind`, `issue`,
-   nullable `run_id`, and `requirements`, then accept only the three exact
+   nullable `run_id`, and `requirements`, then accept only the four exact
    requirement shapes, in the returned order: `{"kind":"tracker"}`;
-   `{"kind":"recorded_worktree", "path":"<absolute-path>"}`; or
-   `{"kind":"candidate_worktree"}`. For
+   `{"kind":"recorded_worktree", "path":"<absolute-path>"}`;
+   `{"kind":"candidate_worktree"}`; or
+   `{"kind":"forge_pr", "path":"<issue-branch-prefix>"}`. For
    `tracker`, query the existing tracker adapter only. For
    `recorded_worktree`, inspect exactly the returned path only. For
    `candidate_worktree`, reserve and verify one absent issue-branch candidate
-   only. For the duration of this acquisition, retain every fact previously requested during this acquisition;
+   only. For `forge_pr`, observe only the issue branch's pull request at the
+   returned prefix and populate the request's `forge` slot. For the duration of this acquisition, retain every fact previously requested during this acquisition;
    carry all collected facts into each later strict request, refreshing a value
    when its external state may have changed; never send a fact kind before the helper requests it.
    Write a new absolute request file and call `direct-owner` again. Unknown,
@@ -100,9 +104,9 @@ follows:
    invocation's complete persisted lifecycle identity. Continue the existing
    Phase 0–7 owner flow. Do not spawn or reserve another owner or worktree.
 3. **`kind: terminal`** — require exactly `interface_version`, `kind`, `issue`,
-   nullable `run_id`, `source`, `reason`, `blockers`, and nullable `result`;
-   return the compact response unchanged to the caller, stop before Phase 1,
-   and install no waiter.
+   nullable `run_id`, `source`, `reason`, `blockers`, nullable `result`, and
+   `reentry`; return the compact response unchanged to the caller, stop before
+   Phase 1, and install no waiter.
 
 Clear the retained observation set on `owner`, `terminal`, or any failure.
 
@@ -235,13 +239,14 @@ semantics unchanged.
 If `workflow-state progress` is rejected because the
 attempt budget's deadline has passed — either
 `cannot record progress at or after attempt deadline`, or
-`progress requires an active attempt` when the dispatcher's deadline observer
-reconciled the attempt to `stopped` first — that is one verdict, not a harness
-fault and not a reason to retry it or to doubt your identity: go straight to
-the terminal return procedure and record your
-truthful state with `workflow-state finish`, which preserves a result reported at
-or after the deadline and supersedes a provisional expiry.
-Persistence precedes notification.
+`progress requires an active attempt` when the lazy reaper demoted the attempt
+to `suspended(unknown)` first — that is an environmental interruption, not a
+semantic verdict, not a harness fault, and not a reason to retry it or to doubt
+your identity: the expired attempt is now a resumable suspension, so follow the
+suspension procedure — print the canonical re-entry line and stop, and never
+write a terminal `workflow-state finish` for it (the helper rejects a finish on
+a non-active attempt). Persistence precedes notification: the reaper's
+suspension is already durable before you print.
 
 Without lifecycle identity, apply the same action order locally with the
 120-turn/150000-token ceilings and default interactive handoff behavior.
@@ -265,8 +270,34 @@ canonical terminal bytes. Its only terminal work is the validate-and-relay stop
 defined in `AUTO.md`; the delegated owner already performed the single durable
 `finish`.
 
+When acquisition returns a terminal replay (`kind: terminal`) rather than an owner, print that envelope's `reentry` field to the user verbatim on its own line before relaying the compact response unchanged; a replay writes no `finish`.
+
 The rule is: failure to persist is a failure to finish. Surface it and never report the issue as merged or completed.
 Without lifecycle identity, send the same compact schema directly.
+
+## Suspension procedure
+
+Suspend — do not finish — when an environmental interruption pauses the work
+rather than resolving it: an imminent quota or session limit, a repeated
+transport failure, a permission prompt only a human can approve, or an external
+wait. A suspension parks the attempt without ending it — it consumes no attempt,
+needs no authorization phrase, and re-entry resumes it in place. Call:
+
+```text
+workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --issue <n> --attempt <k> --blocked-on <value>
+```
+
+with `<value>` one of `usage_limit`, `transport`, `human_gate`, or `external`
+(the reaper alone owns `unknown`). Then print the canonical line as the final
+user-facing output:
+
+```text
+Suspended (blocked_on=<value>). Resume: <reentry from the envelope>
+```
+
+That line is the last thing you emit — stop there, make no `finish` call, and
+emit no result JSON. Suspension is NOT a terminal return.
+Handoff is the deliberate context rollover with a handoff document; suspension is the environmental pause with none.
 
 ## Phase 0 — Investigate
 
@@ -394,7 +425,7 @@ failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8;
 
 ## Notes
 
-- Standing local-commit authorization covers spec, plan, doc, and fix commits (where the project documents it; otherwise follow the user's commit policy). Push, PR open/merge, force-push, and hook bypass stay per-action gated.
+- Standing local-commit authorization covers spec, plan, doc, and fix commits (where the project documents it; otherwise follow the user's commit policy). Standing authorization exists exactly where the lifecycle guard grants it: pushing a non-default branch, opening a PR to the default branch, and the guarded merge, in fagenorn-owned repositories; everywhere else these commands stay per-action gated — suspend with blocked_on=human_gate and print the re-entry line instead of dying at the prompt.
 - Append `Co-Authored-By` unless `commit.coAuthoredBy` is false. **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
 - **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`**; derive the slug from `repoSlug` if configured, else `git remote get-url origin`.
 - If a phase reveals the previous one was wrong, back up to that phase and redo it. Don't paper over it.
