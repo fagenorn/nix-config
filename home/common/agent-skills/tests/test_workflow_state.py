@@ -498,8 +498,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
     def reactivate(self, *, issue, budget_minutes=60):
         """Flip a suspended attempt back to active by hand.
 
-        The resume verb lands in Task 2; until then the stall counter can only
-        be exercised by rewriting the persisted attempt the way a resume will.
+        `direct-owner` resumes a suspension for a direct run; the orchestrated
+        control sweep does not yet, so a control run's stall counter can only be
+        exercised by rewriting the persisted attempt the way a resume does.
         """
         state = self.read_state()
         attempt = state["issues"][str(issue)]["attempts"][-1]
@@ -3759,6 +3760,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                     "interface_version": 1, "kind": "terminal", "issue": 73,
                     "run_id": None, "source": "tracker", "reason": reason,
                     "blockers": blockers, "result": None,
+                    "reentry": "/from-issue 73 --auto",
                 })
                 self.assertFalse(
                     self.direct_state_path("direct-73-000002").exists()
@@ -3786,6 +3788,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                     "interface_version": 1, "kind": "terminal", "issue": 73,
                     "run_id": None, "source": "tracker", "reason": reason,
                     "blockers": blockers, "result": None,
+                    "reentry": "/from-issue 73 --auto",
                 })
                 self.assertFalse(any(
                     path.name.startswith("direct-73-")
@@ -4152,26 +4155,121 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(state_path.read_bytes(), before)
         self.assertFalse((self.workflows_dir / "direct-73-000002").exists())
 
-    def test_direct_reentry_over_a_suspended_attempt_fails_loudly(self):
+    def test_direct_owner_resumes_a_suspension_in_a_fresh_budget_window(self):
+        owner = self.acquire_direct()
+        self.run_id = owner["run_id"]
+        self.suspend(
+            issue=73, attempt=1, blocked_on="usage_limit",
+            now="2026-08-20T10:30:00Z",
+        )
+        needed = self.direct_owner(now="2026-08-20T15:00:00Z")
+        self.assertEqual(needed, {
+            "interface_version": 1, "kind": "observe", "issue": 73,
+            "run_id": owner["run_id"], "requirements": [{
+                "kind": "recorded_worktree", "path": owner["worktree"],
+            }],
+        })
+        resumed = self.direct_owner(
+            now="2026-08-20T15:00:00Z",
+            worktree=self.worktree_fact(73, recorded={
+                "path": owner["worktree"], "state": "matching_issue_branch",
+            }),
+        )
+        self.assertEqual(resumed, {
+            **owner, "action_id": "73:1:2", "launch_kind": "resume",
+            "deadline_at": "2026-08-20T18:00:00Z",
+        })
+        attempt = json.loads(
+            self.direct_state_path(owner["run_id"]).read_text()
+        )["issues"]["73"]["attempts"][-1]
+        self.assertEqual(attempt["state"], "active")
+        self.assertIsNone(attempt["blocked_on"])
+        self.assertIsNone(attempt["result"])
+        self.assertEqual((attempt["attempt"], attempt["prior_attempt"]), (1, None))
+        self.assertEqual(attempt["started_at"], "2026-08-20T10:00:00Z")
+        self.assertEqual(attempt["last_progress_at"], "2026-08-20T15:00:00Z")
+        self.assertEqual(attempt["launches"], [
+            {"kind": "fresh", "owner": "73:1", "worktree": owner["worktree"],
+             "at": "2026-08-20T10:00:00Z"},
+            {"kind": "resume", "owner": "73:1", "worktree": owner["worktree"],
+             "at": "2026-08-20T15:00:00Z"},
+        ])
+        self.assertEqual((attempt["suspend_phase"], attempt["stalled_resumes"]),
+                         (0, 0))
+        self.assertFalse(self.direct_state_path("direct-73-000002").exists())
+        # The window is fresh, not merely restated: the resumed owner can work.
+        self.assertEqual(
+            self.progress(issue=73, now="2026-08-20T15:30:00Z")["phase_action"],
+            "continue",
+        )
+
+    def test_second_reentry_over_the_resumed_attempt_refuses_without_mutation(self):
         owner = self.acquire_direct()
         self.run_id = owner["run_id"]
         self.suspend(
             issue=73, attempt=1, blocked_on="transport",
             now="2026-08-20T10:30:00Z",
         )
+        matching = self.worktree_fact(73, recorded={
+            "path": owner["worktree"], "state": "matching_issue_branch",
+        })
+        self.direct_owner(now="2026-08-20T11:00:00Z", worktree=matching)
         state_path = self.direct_state_path(owner["run_id"])
         before = state_path.read_bytes()
-        rejected = self.direct_owner_raw(
-            now="2026-08-20T11:00:00Z", tracker=self.tracker_fact(73),
+        again = self.direct_owner_raw(
+            now="2026-08-20T11:05:00Z", worktree=matching, ok=False,
+        )
+        self.assertEqual(again.returncode, 2)
+        self.assertEqual(again.stdout, "")
+        self.assertIn("direct run has an active owner", again.stderr)
+        self.assertEqual(state_path.read_bytes(), before)
+
+    def test_owner_unavailable_is_not_applicable_to_a_suspended_attempt(self):
+        owner = self.acquire_direct()
+        self.run_id = owner["run_id"]
+        self.suspend(
+            issue=73, attempt=1, blocked_on="human_gate",
+            now="2026-08-20T10:30:00Z",
+        )
+        state_path = self.direct_state_path(owner["run_id"])
+        before = state_path.read_bytes()
+        refused = self.direct_owner_raw(
+            now="2026-08-20T11:00:00Z", owner_unavailable=True,
             worktree=self.worktree_fact(73, recorded={
                 "path": owner["worktree"], "state": "matching_issue_branch",
             }),
             ok=False,
         )
-        self.assertEqual(rejected.returncode, 2)
-        self.assertEqual(rejected.stdout, "")
-        self.assertIn("suspended attempt awaits resume", rejected.stderr)
+        self.assertEqual(refused.returncode, 2)
+        self.assertEqual(refused.stdout, "")
+        self.assertIn("owner_unavailable is not applicable", refused.stderr)
         self.assertEqual(state_path.read_bytes(), before)
+
+    def test_phase_zero_suspension_resumes_its_exact_absent_reservation(self):
+        owner = self.acquire_direct()
+        self.run_id = owner["run_id"]
+        self.suspend(
+            issue=73, attempt=1, blocked_on="usage_limit",
+            now="2026-08-20T10:05:00Z",
+        )
+        alternate = os.path.abspath(self.root / "alternate-worktree-73")
+        resumed = self.direct_owner(
+            now="2026-08-20T10:06:00Z",
+            worktree=self.worktree_fact(
+                73,
+                recorded={"path": owner["worktree"], "state": "absent"},
+                candidate={"path": alternate, "state": "absent"},
+            ),
+        )
+        self.assertEqual(resumed, {
+            **owner, "action_id": "73:1:2", "launch_kind": "resume",
+            "deadline_at": "2026-08-20T13:06:00Z",
+        })
+        persisted = json.loads(
+            self.direct_state_path(owner["run_id"]).read_text()
+        )["issues"]["73"]
+        self.assertEqual(len(persisted["attempts"]), 1)
+        self.assertEqual(persisted["attempts"][0]["worktree"], owner["worktree"])
 
     def test_direct_expiry_retries_on_absent_candidate_then_refuses_attempt_two(self):
         owner = self.acquire_direct(attempt_budget_minutes=30)
@@ -4207,6 +4305,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 "result": json.loads(
                     self.direct_state_path(owner["run_id"]).read_text()
                 )["issues"]["73"]["outcome"],
+                "reentry": "/from-issue 73 --auto",
             },
         )
         state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
@@ -4228,6 +4327,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "interface_version": 1, "kind": "terminal", "issue": 73,
             "run_id": merged_owner["run_id"], "source": "lifecycle",
             "reason": "merged", "blockers": [], "result": merged,
+            "reentry": "/from-issue 73 --auto",
         })
 
         stopped_owner = self.acquire_direct(issue=74)
@@ -4244,6 +4344,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "interface_version": 1, "kind": "terminal", "issue": 74,
             "run_id": stopped_owner["run_id"], "source": "lifecycle",
             "reason": "stopped", "blockers": [], "result": stopped,
+            "reentry": "/from-issue 74 --auto",
         })
 
     def test_direct_and_control_project_the_same_one_issue_retry_policy(self):

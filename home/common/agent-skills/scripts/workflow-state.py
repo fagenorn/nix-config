@@ -1059,6 +1059,49 @@ def suspend_attempt(attempt: dict[str, Any], *, blocked_on: str, now: str) -> bo
     return True
 
 
+def attempt_deadline(now: str, attempt_budget_minutes: int) -> str:
+    """The instant an attempt's wall-clock budget window closes."""
+    try:
+        deadline_value = parse_utc(now, "budget window start") + timedelta(
+            minutes=attempt_budget_minutes
+        )
+    except OverflowError as error:
+        raise WorkflowError("attempt deadline is out of range") from error
+    return format_utc(deadline_value)
+
+
+def resume_attempt(
+    attempt: dict[str, Any], *, now: str, attempt_budget_minutes: int | None = None
+) -> None:
+    """Relaunch an attempt in place under its own identity.
+
+    A resume appends a launch event, clears any suspension cause and flips the
+    state back to ``active``. It consumes no attempt and moves no lineage, which
+    is what makes it free to repeat (per D2, D5).
+
+    ``attempt_budget_minutes`` re-bases the budget window, and the progress clock
+    with it: a suspension resume passes the fresh full window D8 grants it, since
+    an interruption may outlast the window the attempt started with. A resume
+    inside the attempt's own live window — a handoff rollover, a dead-owner
+    takeover — leaves it ``None`` and keeps the original deadline.
+
+    ``suspend_phase`` and ``stalled_resumes`` deliberately survive a resume: they
+    are the anti-zombie bound's memory across the suspend/resume cycle (per D8).
+    """
+    if attempt_budget_minutes is not None:
+        attempt["deadline_at"] = attempt_deadline(now, attempt_budget_minutes)
+        attempt["last_progress_at"] = now
+    attempt["state"] = "active"
+    attempt["blocked_on"] = None
+    attempt["launch_kind"] = "resume"
+    attempt["launches"].append({
+        "kind": "resume",
+        "owner": attempt["owner"],
+        "worktree": attempt["worktree"],
+        "at": now,
+    })
+
+
 def demote_expired_attempt(
     ledger_issue: dict[str, Any], attempt: dict[str, Any], *, now: str
 ) -> None:
@@ -1449,8 +1492,16 @@ def _apply_one_issue_policy(
     dispatch_permitted: bool,
     run_dir: Path,
     retained_worktree: str | None = None,
+    resume_suspended: bool = False,
 ) -> dict[str, Any]:
-    """Derive and apply the shared lifecycle policy for exactly one issue."""
+    """Derive and apply the shared lifecycle policy for exactly one issue.
+
+    ``resume_suspended`` says the caller can drive a suspension back to work
+    through the recorded-worktree ladder. The direct owner can — one re-entry
+    command is the whole flow (per D2, D9) — so a suspended latest attempt is
+    resumable there; a caller that cannot leaves the suspension untouched and
+    projects it as it stands.
+    """
     if ledger_issue is not None:
         issue = ledger_issue["issue"]
     elif tracker is not None:
@@ -1508,6 +1559,9 @@ def _apply_one_issue_policy(
     handed_off = bool(
         latest is not None and latest["state"] == "handed_off" and not expired
     )
+    suspended = bool(
+        latest is not None and latest["state"] == "suspended" and resume_suspended
+    )
     retryable = bool(
         latest is not None
         and (
@@ -1526,13 +1580,15 @@ def _apply_one_issue_policy(
     if current_owner_unavailable and not active_unexpired:
         raise WorkflowError("owner_unavailable is not applicable")
 
-    if latest is not None and not (active_unexpired or handed_off or retryable):
+    if latest is not None and not (
+        active_unexpired or handed_off or suspended or retryable
+    ):
         return decision("terminal", expired=False)
 
     if active_unexpired and not current_owner_unavailable:
         return decision("idle", expired=False)
 
-    if active_unexpired or handed_off:
+    if active_unexpired or handed_off or suspended:
         assert latest is not None
         if not dispatch_permitted:
             return decision("idle", desired="resume", expired=False)
@@ -1541,7 +1597,7 @@ def _apply_one_issue_policy(
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
         absent_phase_zero_direct_reservation = bool(
-            handed_off
+            (handed_off or suspended)
             and latest["phase"] == 0
             and is_reserved_direct_run_id(run_dir.name)
             and recorded is not None
@@ -1560,12 +1616,10 @@ def _apply_one_issue_policy(
                 ],
                 expired=False,
             )
-        latest["state"] = "active"
-        latest["launch_kind"] = "resume"
-        latest["launches"].append({
-            "kind": "resume", "owner": latest["owner"],
-            "worktree": latest["worktree"], "at": now,
-        })
+        resume_attempt(
+            latest, now=now,
+            attempt_budget_minutes=attempt_budget_minutes if suspended else None,
+        )
         return decision("resume", changed=True, expired=False)
 
     needs_new_work = latest is None or retryable
@@ -1685,14 +1739,9 @@ def _apply_one_issue_policy(
         assert ledger_issue is not None
         demote_expired_attempt(ledger_issue, latest, now=now)
     attempt_number = 2 if retryable else 1
-    try:
-        deadline_value = now_value + timedelta(minutes=attempt_budget_minutes)
-    except OverflowError as error:
-        raise WorkflowError("attempt deadline is out of range") from error
-    deadline_at = format_utc(deadline_value)
     attempt = new_control_attempt(
-        issue=issue, attempt_number=attempt_number,
-        worktree=selected_path, now=now, deadline_at=deadline_at,
+        issue=issue, attempt_number=attempt_number, worktree=selected_path,
+        now=now, deadline_at=attempt_deadline(now, attempt_budget_minutes),
     )
     if ledger_issue is None:
         ledger_issue = {"issue": issue, "attempts": [attempt], "outcome": None}
@@ -2058,6 +2107,12 @@ def direct_terminal(
     *, issue: int, run_id: str | None, source: str, reason: str,
     blockers: list[dict[str, Any]], result: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Replay one issue's terminal record to a direct owner.
+
+    The envelope carries the re-entry line so the caller never composes it: a
+    terminal replay is exactly where a human decides whether to re-enter, and
+    the one command that does it is the same one everywhere (per D14).
+    """
     return {
         "interface_version": DIRECT_OWNER_INTERFACE_VERSION,
         "kind": "terminal",
@@ -2067,6 +2122,7 @@ def direct_terminal(
         "reason": reason,
         "blockers": blockers,
         "result": copy.deepcopy(result),
+        "reentry": reentry_command(issue),
     }
 
 
@@ -2177,16 +2233,17 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 [] if selected is None
                 else selected[4]["issues"][str(issue)]["attempts"]
             )
-            if selected_attempts and selected_attempts[-1]["state"] == "suspended":
-                # A suspension is resumed in place: it consumes no attempt and
-                # must never become an escape hatch into run fan-out (per D5,
-                # D13). The resume itself is not built yet, so refuse loudly
-                # rather than walk into a half-built path.
-                if request["new_run"]:
-                    raise WorkflowError(
-                        "new_run is not applicable: suspended attempt is resumable"
-                    )
-                raise WorkflowError("suspended attempt awaits resume")
+            if (
+                request["new_run"]
+                and selected_attempts
+                and selected_attempts[-1]["state"] == "suspended"
+            ):
+                # A suspension is resumed in place and consumes no attempt, so
+                # it must never become an escape hatch into run fan-out: the
+                # re-entry command already reaches the work (per D5, D13).
+                raise WorkflowError(
+                    "new_run is not applicable: suspended attempt is resumable"
+                )
 
             if request["new_run"]:
                 if not retained or not selected_is_terminal or nonterminal:
@@ -2257,6 +2314,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     dispatch_permitted=True,
                     run_dir=run_dir,
                     retained_worktree=retained_worktree,
+                    resume_suspended=True,
                 )
                 operation = policy["operation"]
                 if operation == "idle":
