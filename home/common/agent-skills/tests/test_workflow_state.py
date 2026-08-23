@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,11 @@ import unittest
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
 DEFAULT_NOW = "2026-08-13T20:00:00Z"
+
+
+def shift_minutes(stamp, minutes):
+    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    return (parsed + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
 
 
 class WorkflowStateLifecycleTest(unittest.TestCase):
@@ -403,7 +409,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             self.assertIs(type(summary["issue"]), int)
             self.assertIn(summary["state"], {
                 "queued", "blocked", "fogged", "active", "handed_off",
-                "merged", "stopped", "failed", "closed",
+                "suspended", "merged", "stopped", "failed", "closed",
             })
             self.assertIsInstance(summary["blockers"], list)
             self.assertTrue(summary["attempt"] is None or
@@ -470,6 +476,85 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
 
     def read_state(self):
         return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def write_state(self, state):
+        self.state_path.write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+    def suspend(self, *, issue, attempt, blocked_on, now, ok=True):
+        return self.run_cli(
+            "suspend",
+            "--repo-root", self.root,
+            "--run-id", self.run_id,
+            "--issue", issue,
+            "--attempt", attempt,
+            "--blocked-on", blocked_on,
+            "--now", now,
+            ok=ok,
+        )
+
+    def reactivate(self, *, issue, budget_minutes=60):
+        """Flip a suspended attempt back to active by hand.
+
+        The resume verb lands in Task 2; until then the stall counter can only
+        be exercised by rewriting the persisted attempt the way a resume will.
+        """
+        state = self.read_state()
+        attempt = state["issues"][str(issue)]["attempts"][-1]
+        self.assertEqual(attempt["state"], "suspended")
+        at = shift_minutes(attempt["launches"][-1]["at"], 1)
+        attempt.update({
+            "state": "active",
+            "blocked_on": None,
+            "launch_kind": "resume",
+            "deadline_at": shift_minutes(at, budget_minutes),
+        })
+        attempt["launches"].append({
+            "kind": "resume",
+            "owner": attempt["owner"],
+            "worktree": attempt["worktree"],
+            "at": at,
+        })
+        state["updated_at"] = at
+        self.write_state(state)
+
+    def legacy_expiry_record(self, *, issue, now, prior_schema=False):
+        """Stamp the terminal reaper record written before the suspension model.
+
+        The reaper now demotes an expired attempt to `suspended`, but ledgers
+        holding the old `stopped`/`result_source="expiry"` shape must keep
+        loading and keep driving the retry ladder and the provisional-result
+        override, so the tests that pin those rules seed the record directly.
+        `prior_schema` writes it under the previous `schema_version` without the
+        suspension fields — the on-disk shape a live run carries across deploy.
+        """
+        state = self.read_state()
+        issue_state = state["issues"][str(issue)]
+        attempt = issue_state["attempts"][-1]
+        result = {
+            **self.merged_result(issue),
+            "state": "stopped", "pr_url": None, "merge_sha": None,
+            "issue_closed": False,
+            "notes": (
+                f"attempt deadline expired; worktree: {attempt['worktree']}"
+            ),
+        }
+        attempt.update({
+            "state": "stopped", "blocked_on": None,
+            "result": copy.deepcopy(result), "finished_at": now,
+            "result_source": "expiry",
+        })
+        issue_state["outcome"] = copy.deepcopy(result)
+        state["updated_at"] = now
+        if prior_schema:
+            state["schema_version"] = state["schema_version"] - 1
+            for record in issue_state["attempts"]:
+                for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
+                    record.pop(field, None)
+        self.write_state(state)
+        return result
 
     @staticmethod
     def merged_result(issue=14):
@@ -1808,7 +1893,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "issue": 14, "attempt": 2, "kind": "retry_refused", "state": "failed",
         }])
 
-    def test_owner_death_expiry_stops_active_attempt_with_worktree(self):
+    def test_owner_death_expiry_reports_a_suspended_summary_with_its_worktree(self):
+        """A silent owner leaves resumable work, not a verdict, in the projection."""
         self.init_run()
         worktree = self.root / "silent-owner"
         launched = self.spawn(issue=14, worktree=worktree, budget_minutes=10)
@@ -1816,18 +1902,15 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             issue=14, worktree=worktree, now="2026-08-13T20:10:00Z"
         )
         self.assert_control_response_shape(reconciled)
-        self.assertEqual(reconciled["deltas"], [{
-            "issue": 14, "attempt": 1, "kind": "expired", "state": "stopped",
-        }])
-        attempt = self.read_state()["issues"]["14"]["attempts"][0]
-        outcome = self.read_state()["issues"]["14"]["outcome"]
+        summary = reconciled["summaries"][0]
         self.assertEqual(launched["deadline_at"], "2026-08-13T20:10:00Z")
-        self.assertEqual((attempt["state"], outcome["state"]), ("stopped", "stopped"))
-        self.assertIn(os.path.abspath(worktree), outcome["notes"])
-        self.assertLessEqual(len(outcome["notes"]), 500)
-        self.assertEqual(attempt["result_source"], "expiry")
-        self.assertEqual(attempt["finished_at"], "2026-08-13T20:10:00Z")
-        self.assertGreaterEqual(attempt["finished_at"], attempt["deadline_at"])
+        self.assertEqual(summary["state"], "suspended")
+        self.assertEqual(summary["worktree"], os.path.abspath(worktree))
+        self.assertIsNone(summary["result"])
+        self.assertEqual(
+            self.read_state()["issues"]["14"]["attempts"][0]["worktree"],
+            os.path.abspath(worktree),
+        )
 
     def test_owner_failed_retry_and_refusal_stamp_their_result_source(self):
         self.init_run()
@@ -1883,11 +1966,13 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(outcome, attempt["result"])
         self.assertEqual(stdout_json, attempt["result"])
 
-    def test_expiry_result_is_provisional_until_the_owner_reports(self):
+    def test_legacy_expiry_record_stays_provisional_until_the_owner_reports(self):
         self.init_run()
         worktree = self.root / "wt-a"
         self.spawn(issue=14, worktree=worktree, budget_minutes=10)
-        self.expire(issue=14, worktree=worktree, now="2026-08-13T20:10:00Z")
+        self.legacy_expiry_record(
+            issue=14, now="2026-08-13T20:10:00Z", prior_schema=True
+        )
         attempt = self.read_state()["issues"]["14"]["attempts"][0]
         self.assertEqual(attempt["state"], "stopped")
         self.assertEqual(attempt["result_source"], "expiry")
@@ -1899,6 +1984,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
         state = self.read_state()
         attempt = state["issues"]["14"]["attempts"][0]
+        self.assertEqual(state["schema_version"], 2)
+        self.assertIsNone(attempt["blocked_on"])
+        self.assertEqual(attempt["stalled_resumes"], 0)
         self.assertEqual(attempt["state"], "merged")
         self.assertEqual(attempt["result_source"], "owner")
         self.assertEqual(attempt["finished_at"], "2026-08-13T20:20:00Z")
@@ -1924,7 +2012,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.init_run()
         worktree = self.root / "wt-a"
         self.spawn(issue=14, worktree=worktree, budget_minutes=10)
-        self.expire(issue=14, worktree=worktree, now="2026-08-13T20:10:00Z")
+        self.legacy_expiry_record(issue=14, now="2026-08-13T20:10:00Z")
         self.retry(issue=14, worktree=worktree, now="2026-08-13T20:15:00Z")
         before = self.state_path.read_bytes()
         rejected = self.finish(
@@ -1987,11 +2075,11 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn("active attempt", rejected.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
 
-    def test_owner_death_expiry_can_use_the_single_fresh_retry(self):
+    def test_legacy_expiry_record_can_use_the_single_fresh_retry(self):
         self.init_run()
         worktree = self.root / "silent-owner"
         self.spawn(issue=14, worktree=worktree, budget_minutes=10)
-        self.expire(issue=14, worktree=worktree, now="2026-08-13T20:10:00Z")
+        self.legacy_expiry_record(issue=14, now="2026-08-13T20:10:00Z")
         retried = self.retry(
             issue=14, worktree=self.root / "retry-owner",
             now="2026-08-13T20:11:00Z",
@@ -2027,6 +2115,11 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
 
         self.expire(issue=14, worktree=first_worktree, now="2026-08-13T20:31:00Z")
+        suspended = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(suspended["state"], "suspended")
+        self.assertIsNone(suspended["finished_at"])
+
+        self.legacy_expiry_record(issue=14, now="2026-08-13T20:31:00Z")
         stopped = self.read_state()["issues"]["14"]["attempts"][0]
         self.assertEqual(stopped["state"], "stopped")
         self.assertEqual(stopped["result_source"], "expiry")
@@ -2049,10 +2142,10 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         shared = self.root / "wt-issue-14"
         resolved = os.path.abspath(shared)
         self.spawn(issue=14, worktree=shared, budget_minutes=10)
-        self.expire(issue=14, worktree=shared, now="2026-08-13T20:10:00Z")
+        self.fail_owner(issue=14, attempt=1, now="2026-08-13T20:05:00Z")
         first = self.read_state()["issues"]["14"]["attempts"][0]
-        self.assertEqual(first["state"], "stopped")
-        self.assertEqual(first["result_source"], "expiry")
+        self.assertEqual(first["state"], "failed")
+        self.assertEqual(first["result_source"], "owner")
         self.assertEqual(first["worktree"], resolved)
 
         retried = self.retry(issue=14, worktree=shared, now="2026-08-13T20:15:00Z")
@@ -2239,9 +2332,11 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                     "result_source": None, "handoff_path": None, "phase": 1,
                     "last_progress_at": DEFAULT_NOW, "phase_action": "handoff",
                     "phase_inputs": expected_inputs,
+                    "blocked_on": None, "suspend_phase": None,
+                    "stalled_resumes": 0,
                 }
                 expected_state = {
-                    "schema_version": 1, "run_id": run_id,
+                    "schema_version": 2, "run_id": run_id,
                     "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
                     "issues": {"14": {
                         "issue": 14, "attempts": [expected_attempt],
@@ -2282,9 +2377,10 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "result_source": None, "handoff_path": None, "phase": 1,
             "last_progress_at": DEFAULT_NOW, "phase_action": "handoff",
             "phase_inputs": expected_inputs,
+            "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
         }
         expected_state = {
-            "schema_version": 1, "run_id": self.run_id,
+            "schema_version": 2, "run_id": self.run_id,
             "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
             "issues": {"14": {
                 "issue": 14, "attempts": [expected_attempt], "outcome": None,
@@ -2519,17 +2615,14 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn("handoff path does not exist", rejected.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
 
-    def test_late_handoff_control_expires_and_permits_fresh_retry(self):
+    def test_late_handoff_legacy_expiry_permits_fresh_retry(self):
         self.init_run()
         worktree = self.root / "wt-a"
         self.spawn(issue=14, worktree=worktree)
         handoff_path = self.write_handoff(14)
         self.progress(turn_count=118, context_tokens=20000, handoff_path=handoff_path)
 
-        completed = self.expire(
-            issue=14, worktree=worktree, now="2026-08-13T20:31:00Z"
-        )
-        self.assert_control_response_shape(completed)
+        self.legacy_expiry_record(issue=14, now="2026-08-13T20:31:00Z")
         persisted = self.read_state()["issues"]["14"]
         self.assertEqual(persisted["outcome"]["state"], "stopped")
         self.assertIn(os.path.abspath(worktree), persisted["outcome"]["notes"])
@@ -2545,7 +2638,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             self.read_state()["issues"]["14"]["attempts"][1]["prior_attempt"], 1
         )
 
-    def test_control_expires_unresumed_handoff_and_permits_fresh_retry(self):
+    def test_control_suspends_unresumed_handoff_without_losing_it(self):
         self.init_run()
         worktree = self.root / "wt-a"
         self.spawn(issue=14, worktree=worktree)
@@ -2556,17 +2649,17 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             issue=14, worktree=worktree, now="2026-08-13T20:31:00Z"
         )
         self.assert_control_response_shape(reconciled)
+        self.assertEqual(reconciled["deltas"], [{
+            "issue": 14, "attempt": 1, "kind": "expired", "state": "suspended",
+        }])
         persisted = self.read_state()["issues"]["14"]
         attempt = persisted["attempts"][0]
-        self.assertEqual((attempt["state"], persisted["outcome"]["state"]), ("stopped", "stopped"))
+        self.assertEqual(attempt["state"], "suspended")
+        self.assertEqual(attempt["blocked_on"], "unknown")
         self.assertEqual(attempt["handoff_path"], str(handoff_path))
-        self.assertIn(os.path.abspath(worktree), persisted["outcome"]["notes"])
-
-        retried = self.retry(
-            issue=14, worktree=self.root / "wt-b",
-            now="2026-08-13T20:32:00Z",
-        )
-        self.assertEqual((retried["attempt"], retried["kind"]), (2, "retry"))
+        self.assertEqual(attempt["phase_action"], "handoff")
+        self.assertIsNone(persisted["outcome"])
+        self.assertTrue(handoff_path.is_file())
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
     def test_handoff_symlink_escape_is_rejected_without_state_change(self):
@@ -2698,7 +2791,13 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         final_state = self.read_state()
         self.assertEqual(set(final_state["issues"]), {"14", "15", "16"})
         self.assertEqual(final_state["issues"]["14"]["outcome"], durable_result)
-        self.assertEqual(final_state["issues"]["15"]["outcome"]["state"], "stopped")
+        self.assertIsNone(final_state["issues"]["15"]["outcome"])
+        self.assertEqual(
+            final_state["issues"]["15"]["attempts"][-1]["state"], "suspended"
+        )
+        self.assertEqual(
+            final_state["issues"]["15"]["attempts"][-1]["blocked_on"], "unknown"
+        )
         self.assertIsNone(final_state["issues"]["16"]["outcome"])
         self.assertEqual(
             final_state["issues"]["16"]["attempts"][-1]["state"], "handed_off"
@@ -4132,6 +4231,134 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(control_retry["kind"], direct_retry["launch_kind"])
         self.assertEqual(control_retry["worktree"], control_worktree)
         self.assertEqual(direct_retry["worktree"], direct_worktree)
+
+    def test_expiry_demotes_active_attempt_to_suspended(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-14")
+        self.spawn(issue=14, worktree=worktree, budget_minutes=10)
+        response = self.expire(issue=14, worktree=worktree, now="2026-08-13T20:10:00Z")
+        self.assertEqual(response["deltas"], [
+            {"issue": 14, "attempt": 1, "kind": "expired", "state": "suspended"},
+        ])
+        state = self.read_state()
+        attempt = state["issues"]["14"]["attempts"][-1]
+        self.assertEqual(attempt["state"], "suspended")
+        self.assertEqual(attempt["blocked_on"], "unknown")
+        self.assertIsNone(attempt["result"])
+        self.assertIsNone(attempt["finished_at"])
+        self.assertIsNone(attempt["result_source"])
+        self.assertIsNone(state["issues"]["14"]["outcome"])
+
+    def test_suspend_subcommand_records_blocked_on_and_reentry(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-15")
+        self.spawn(issue=15, worktree=worktree, budget_minutes=10)
+        completed = self.suspend(
+            issue=15, attempt=1, blocked_on="usage_limit",
+            now="2026-08-13T20:05:00Z",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        envelope = json.loads(completed.stdout)
+        self.assertEqual(envelope, {
+            "kind": "suspended", "issue": 15, "attempt": 1,
+            "blocked_on": "usage_limit", "stalled_resumes": 0,
+            "reentry": "/from-issue 15 --auto",
+        })
+        attempt = self.read_state()["issues"]["15"]["attempts"][-1]
+        self.assertEqual(attempt["state"], "suspended")
+        self.assertEqual(attempt["blocked_on"], "usage_limit")
+        self.assertEqual(attempt["suspend_phase"], 0)
+        self.assertEqual(attempt["stalled_resumes"], 0)
+        self.assertIsNone(attempt["result"])
+
+    def test_third_stalled_suspension_escalates_to_synthetic_stop(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-16")
+        self.spawn(issue=16, worktree=worktree, budget_minutes=10)
+        for index in range(3):
+            completed = self.suspend(
+                issue=16, attempt=1, blocked_on="usage_limit",
+                now=f"2026-08-13T20:0{index + 1}:00Z",
+            )
+            envelope = json.loads(completed.stdout)
+            self.assertEqual(envelope["kind"], "suspended")
+            self.assertEqual(envelope["stalled_resumes"], index)
+            self.reactivate(issue=16)
+        final = self.suspend(
+            issue=16, attempt=1, blocked_on="usage_limit",
+            now="2026-08-13T20:08:00Z",
+        )
+        attempt = json.loads(final.stdout)
+        self.assertEqual(attempt["state"], "stopped")
+        self.assertEqual(attempt["result_source"], "stalled")
+        self.assertIsNone(attempt["blocked_on"])
+        self.assertIn("stalled without phase progress", attempt["result"]["notes"])
+        persisted = self.read_state()["issues"]["16"]
+        self.assertEqual(persisted["attempts"][-1], attempt)
+        self.assertEqual(persisted["outcome"], attempt["result"])
+
+    def test_suspend_rejects_a_nonactive_attempt_and_the_reserved_cause(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-18")
+        self.spawn(issue=18, worktree=worktree, budget_minutes=10)
+        self.suspend(
+            issue=18, attempt=1, blocked_on="transport",
+            now="2026-08-13T20:02:00Z",
+        )
+        before = self.state_path.read_bytes()
+        repeated = self.suspend(
+            issue=18, attempt=1, blocked_on="transport",
+            now="2026-08-13T20:03:00Z", ok=False,
+        )
+        self.assertNotEqual(repeated.returncode, 0)
+        self.assertIn("only an active attempt can suspend", repeated.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+        reserved = self.suspend(
+            issue=18, attempt=1, blocked_on="unknown",
+            now="2026-08-13T20:04:00Z", ok=False,
+        )
+        self.assertNotEqual(reserved.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_prior_schema_ledger_upgrades_on_load(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-17")
+        self.spawn(issue=17, worktree=worktree, budget_minutes=10)
+        state = self.read_state()
+        current_version = state["schema_version"]
+        state["schema_version"] = current_version - 1
+        for attempt in state["issues"]["17"]["attempts"]:
+            for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
+                attempt.pop(field, None)
+        self.write_state(state)
+        completed = self.suspend(
+            issue=17, attempt=1, blocked_on="external",
+            now="2026-08-13T20:02:00Z",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        upgraded = self.read_state()
+        self.assertEqual(upgraded["schema_version"], current_version)
+        latest = upgraded["issues"]["17"]["attempts"][-1]
+        self.assertEqual(latest["stalled_resumes"], 0)
+        self.assertEqual(latest["suspend_phase"], 0)
+        self.assertEqual(latest["blocked_on"], "external")
+
+    def test_future_schema_ledger_is_rejected_without_changes(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-19")
+        self.spawn(issue=19, worktree=worktree, budget_minutes=10)
+        state = self.read_state()
+        state["schema_version"] = state["schema_version"] + 1
+        self.write_state(state)
+        before = self.state_path.read_bytes()
+        rejected = self.suspend(
+            issue=19, attempt=1, blocked_on="external",
+            now="2026-08-13T20:02:00Z", ok=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("unsupported workflow state schema version", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
 
 
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):

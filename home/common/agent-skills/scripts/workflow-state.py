@@ -16,12 +16,20 @@ import tempfile
 from typing import Any, Callable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PRIOR_SCHEMA_VERSION = SCHEMA_VERSION - 1
 CONTROL_INTERFACE_VERSION = 1
 DIRECT_OWNER_INTERFACE_VERSION = 1
-ATTEMPT_STATES = frozenset({"active", "handed_off", "stopped", "failed", "merged"})
+ATTEMPT_STATES = frozenset(
+    {"active", "handed_off", "suspended", "stopped", "failed", "merged"}
+)
 RESULT_STATES = frozenset({"merged", "stopped", "failed"})
-RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused"})
+RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused", "stalled"})
+BLOCKED_ON_VALUES = frozenset(
+    {"usage_limit", "transport", "human_gate", "external", "unknown"}
+)
+OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown"}
+STALL_LIMIT = 3
 RESULT_FIELDS = (
     "issue",
     "state",
@@ -72,8 +80,16 @@ ATTEMPT_FIELDS = frozenset(
         "last_progress_at",
         "phase_action",
         "phase_inputs",
+        "blocked_on",
+        "suspend_phase",
+        "stalled_resumes",
     }
 )
+SUSPENSION_DEFAULTS = {
+    "blocked_on": None,
+    "suspend_phase": None,
+    "stalled_resumes": 0,
+}
 LAUNCH_FIELDS = frozenset({"kind", "owner", "worktree", "at"})
 
 BOOTSTRAP_FIELDS = frozenset({"interface_version", "run_id", "requirements"})
@@ -150,6 +166,7 @@ CONTROL_SUMMARY_STATES = frozenset(
         "fogged",
         "active",
         "handed_off",
+        "suspended",
         "merged",
         "stopped",
         "failed",
@@ -483,11 +500,22 @@ def validate_attempt(
     result = value["result"]
     if result is not None:
         result = validate_result(result, expected_issue=issue)
-    if value["state"] in {"active", "handed_off"}:
+    if value["state"] in {"active", "handed_off", "suspended"}:
         if result is not None:
             raise WorkflowError("nonterminal attempt must not carry a terminal result")
     elif result is None or result["state"] != value["state"]:
         raise WorkflowError("terminal attempt state and result must match")
+    if value["state"] == "suspended":
+        if (
+            not isinstance(value["blocked_on"], str)
+            or value["blocked_on"] not in BLOCKED_ON_VALUES
+        ):
+            raise WorkflowError("invalid suspended attempt cause")
+    elif value["blocked_on"] is not None:
+        raise WorkflowError("only a suspended attempt carries a suspension cause")
+    if value["suspend_phase"] is not None:
+        require_plain_int(value["suspend_phase"], "attempt suspend phase")
+    require_plain_int(value["stalled_resumes"], "attempt stalled resumes")
     result_source = value["result_source"]
     if (result is None) != (value["finished_at"] is None) or (result is None) != (
         result_source is None
@@ -789,6 +817,38 @@ def ensure_gitignore(workflows_dir: Path) -> None:
     fsync_directory(workflows_dir)
 
 
+def upgrade_state(value: Any) -> Any:
+    """Fill the suspension fields into a prior-version ledger, in memory.
+
+    Attempt records are validated against an exact field set, so a ledger
+    written before the suspension model would otherwise stop loading the moment
+    this helper is deployed — stranding every in-flight run. A prior-version
+    ledger is upgraded here with the documented defaults and persists in the new
+    shape on its next write; any other version is left for ``validate_state`` to
+    reject (per D15).
+    """
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != PRIOR_SCHEMA_VERSION
+    ):
+        return value
+    issues = value.get("issues")
+    if isinstance(issues, dict):
+        for issue_value in issues.values():
+            if not isinstance(issue_value, dict):
+                continue
+            attempts = issue_value.get("attempts")
+            if not isinstance(attempts, list):
+                continue
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                for field, default in SUSPENSION_DEFAULTS.items():
+                    attempt.setdefault(field, default)
+    value["schema_version"] = SCHEMA_VERSION
+    return value
+
+
 def read_locked_state(state_path: Path, run_id: str) -> dict[str, Any]:
     require_regular_path(state_path, "workflow state", allow_missing=False)
     try:
@@ -797,7 +857,7 @@ def read_locked_state(state_path: Path, run_id: str) -> dict[str, Any]:
             value = json.load(source)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid workflow state JSON: {error}") from error
-    return validate_state(value, run_id=run_id)
+    return validate_state(upgrade_state(value), run_id=run_id)
 
 
 def fsync_directory(directory: Path) -> None:
@@ -942,10 +1002,12 @@ def stop_attempt(
 ) -> dict[str, Any]:
     """Stamp a terminal stopped record.
 
-    ``source`` says who ended the attempt and must be a member of ``RESULT_SOURCES``;
-    ``now`` is the already-formatted RFC3339 UTC instant at which the record was
-    written, which for an ``expiry`` is at or after the attempt budget's
-    ``deadline_at``.
+    ``source`` says who ended the attempt and must be a member of
+    ``RESULT_SOURCES``; ``now`` is the already-formatted RFC3339 UTC instant at
+    which the record was written. No writer passes ``expiry`` any more — an
+    expired deadline suspends instead (per D2) — so a live ``expiry`` record only
+    reaches this ledger from a pre-suspension run, where it stays at or after
+    the attempt budget's ``deadline_at`` (per D15).
     """
     result = terminal_result(
         attempt["issue"], "stopped", f"{reason}; worktree: {attempt['worktree']}"
@@ -954,7 +1016,62 @@ def stop_attempt(
     attempt["result"] = result
     attempt["finished_at"] = finish_time(attempt, now)
     attempt["result_source"] = source
+    attempt["blocked_on"] = None
     return result
+
+
+def reentry_command(issue: int) -> str:
+    """The single line that resumes one issue's run (per D14)."""
+    return f"/from-issue {issue} --auto"
+
+
+def suspend_attempt(attempt: dict[str, Any], *, blocked_on: str, now: str) -> bool:
+    """Park an attempt at an environmental interruption without ending it.
+
+    Quota walls, transport failures and human-only gates are not verdicts about
+    the work, so they leave the attempt resumable: no result, no finish time, no
+    result source, and no attempt consumed (per D2).
+
+    Returns ``True`` when the attempt is now suspended. A suspension that would
+    be the third consecutive one at the same recorded phase is a zombie loop, so
+    the attempt is stopped with the synthetic ``stalled`` source instead and
+    ``False`` is returned — the caller stashes that terminal record as the
+    issue's outcome (per D8).
+    """
+    if blocked_on not in BLOCKED_ON_VALUES:
+        raise WorkflowError("invalid suspension cause")
+    phase = attempt["phase"]
+    stalled_resumes = (
+        attempt["stalled_resumes"] + 1 if attempt["suspend_phase"] == phase else 0
+    )
+    if stalled_resumes >= STALL_LIMIT:
+        stop_attempt(
+            attempt,
+            reason="suspension stalled without phase progress",
+            now=now,
+            source="stalled",
+        )
+        return False
+    attempt["state"] = "suspended"
+    attempt["blocked_on"] = blocked_on
+    attempt["suspend_phase"] = phase
+    attempt["stalled_resumes"] = stalled_resumes
+    return True
+
+
+def demote_expired_attempt(
+    ledger_issue: dict[str, Any], attempt: dict[str, Any], *, now: str
+) -> None:
+    """Reap an attempt past its deadline into a resumable suspension.
+
+    The reaper cannot know why the owner went silent, so the cause is ``unknown``
+    and no issue outcome is written — an expired deadline bounds how long an
+    owner may hold the issue, and says nothing about the work (per D2). Only the
+    stall escalation inside ``suspend_attempt`` writes a terminal record, and
+    that one is the issue's outcome (per D8).
+    """
+    if not suspend_attempt(attempt, blocked_on="unknown", now=now):
+        ledger_issue["outcome"] = copy.deepcopy(attempt["result"])
 
 
 def require_exact_fields(value: Any, fields: frozenset[str], label: str) -> dict[str, Any]:
@@ -1279,6 +1396,7 @@ def new_control_attempt(
         "last_progress_at": now,
         "phase_action": None,
         "phase_inputs": None,
+        **SUSPENSION_DEFAULTS,
     }
 
 
@@ -1463,9 +1581,7 @@ def _apply_one_issue_policy(
         changed = False
         if expired:
             assert latest is not None and ledger_issue is not None
-            ledger_issue["outcome"] = stop_attempt(
-                latest, reason="attempt deadline expired", now=now, source="expiry"
-            )
+            demote_expired_attempt(ledger_issue, latest, now=now)
             changed = True
         return decision(
             "terminal", changed=changed, expired=expired,
@@ -1481,11 +1597,8 @@ def _apply_one_issue_policy(
         if not dispatch_permitted:
             return decision("idle", desired="refuse", expired=expired)
         if expired:
-            outcome = stop_attempt(
-                latest, reason="attempt deadline expired", now=now, source="expiry"
-            )
             assert ledger_issue is not None
-            ledger_issue["outcome"] = outcome
+            demote_expired_attempt(ledger_issue, latest, now=now)
         worktrees = ", ".join(
             attempt["worktree"] for attempt in ledger_issue["attempts"][:2]
         )
@@ -1494,6 +1607,7 @@ def _apply_one_issue_policy(
             f"Fresh retry refused after attempts 1 and 2; worktrees: {worktrees}",
         )
         latest["state"] = "failed"
+        latest["blocked_on"] = None
         latest["result"] = result
         latest["finished_at"] = finish_time(latest, now)
         latest["result_source"] = "refused"
@@ -1503,9 +1617,7 @@ def _apply_one_issue_policy(
     if not dispatch_permitted:
         if expired:
             assert latest is not None and ledger_issue is not None
-            ledger_issue["outcome"] = stop_attempt(
-                latest, reason="attempt deadline expired", now=now, source="expiry"
-            )
+            demote_expired_attempt(ledger_issue, latest, now=now)
             return decision(
                 "idle", changed=True, desired="retry" if retryable else "spawn",
                 expired=True,
@@ -1570,11 +1682,8 @@ def _apply_one_issue_policy(
 
     desired = "retry" if retryable else "spawn"
     if expired and latest is not None:
-        outcome = stop_attempt(
-            latest, reason="attempt deadline expired", now=now, source="expiry"
-        )
         assert ledger_issue is not None
-        ledger_issue["outcome"] = outcome
+        demote_expired_attempt(ledger_issue, latest, now=now)
     attempt_number = 2 if retryable else 1
     try:
         deadline_value = now_value + timedelta(minutes=attempt_budget_minutes)
@@ -1807,10 +1916,14 @@ def command_control(args: argparse.Namespace) -> int:
                 and result["changed"]
                 and result["operation"] != "refuse"
             ):
+                number = analysis[issue]["attempt"]["attempt"]
                 deltas.append({
                     "issue": issue,
-                    "attempt": analysis[issue]["attempt"]["attempt"],
-                    "kind": "expired", "state": "stopped",
+                    "attempt": number,
+                    "kind": "expired",
+                    "state": state["issues"][str(issue)]["attempts"][number - 1][
+                        "state"
+                    ],
                 })
 
         for issue in proposal_order:
@@ -2305,15 +2418,58 @@ def command_progress(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_suspend(args: argparse.Namespace) -> int:
+    """Record an owner's graceful exit at an environmental interruption.
+
+    The owner names the cause it can see (``unknown`` stays reserved for the
+    reaper, which cannot); the envelope carries back the re-entry line that
+    resumes the run, so callers never compose it themselves (per D2, D14).
+    """
+    now_value = parse_utc(args.now, "--now")
+    now = format_utc(now_value)
+
+    def suspend(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        assert state is not None
+        issue_state = state["issues"].get(str(args.issue))
+        if issue_state is None:
+            raise WorkflowError(f"unknown issue identity: {args.issue}")
+        if args.attempt > len(issue_state["attempts"]):
+            raise WorkflowError(
+                f"unknown attempt identity: issue {args.issue} attempt {args.attempt}"
+            )
+        attempt = issue_state["attempts"][args.attempt - 1]
+        if attempt["state"] != "active":
+            raise WorkflowError("only an active attempt can suspend")
+        if now_value < parse_utc(attempt["last_progress_at"], "attempt progress time"):
+            raise WorkflowError("suspend time must not move backward")
+        suspended = suspend_attempt(attempt, blocked_on=args.blocked_on, now=now)
+        state["updated_at"] = now
+        if not suspended:
+            issue_state["outcome"] = copy.deepcopy(attempt["result"])
+            return attempt, True
+        return {
+            "kind": "suspended",
+            "issue": attempt["issue"],
+            "attempt": attempt["attempt"],
+            "blocked_on": attempt["blocked_on"],
+            "stalled_resumes": attempt["stalled_resumes"],
+            "reentry": reentry_command(attempt["issue"]),
+        }, True
+
+    print_json(transact(args.repo_root, args.run_id, suspend))
+    return 0
+
+
 def command_finish(args: argparse.Namespace) -> int:
     """Record an owner's reported terminal result for one attempt.
 
     A finish at or after the attempt budget's ``deadline_at`` records the reported
     result rather than a synthetic expiry: the wall clock bounds how long an owner
-    may keep working, not whether the work it finished is real. The stopped record
-    that ``control`` writes when the attempt budget runs out is therefore provisional
-    — ``result_source == "expiry"`` on the issue's latest attempt, and only there, is
-    overwritten by the owner's own report.
+    may keep working, not whether the work it finished is real. A synthetic
+    ``result_source == "expiry"`` record on the issue's latest attempt, and only
+    there, is therefore provisional and is overwritten by the owner's own report;
+    since the reaper now suspends instead of stopping, such a record only reaches
+    this ledger from a pre-suspension run (per D2, D15).
     """
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
@@ -2416,6 +2572,15 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("--attempt", required=True, type=positive_int)
     finish.add_argument("--result-file", required=True)
     finish.set_defaults(handler=command_finish)
+
+    suspend = subparsers.add_parser("suspend")
+    add_run_arguments(suspend)
+    suspend.add_argument("--issue", required=True, type=positive_int)
+    suspend.add_argument("--attempt", required=True, type=positive_int)
+    suspend.add_argument(
+        "--blocked-on", required=True, choices=sorted(OWNER_BLOCKED_ON_VALUES)
+    )
+    suspend.set_defaults(handler=command_suspend)
 
     progress = subparsers.add_parser("progress")
     add_run_arguments(progress)
