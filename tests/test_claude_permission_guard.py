@@ -223,6 +223,86 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
+    # ------------------------------------------------------------------
+    # Adversarial table. Each case is one class of "the guard's parser and
+    # the shell disagree". Every command below really runs a guarded verb, so
+    # none of them may exit 0 unless its grammar legitimately passes.
+    # ------------------------------------------------------------------
+
+    def test_heredoc_declared_before_a_separator_guards_the_rest_of_the_line(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            ": <<EOF; git push --force origin main\nEOF\n",
+            ": <<EOF && git push --force origin main\nEOF\n",
+            ": <<EOF | git push --force origin main\nEOF\n",
+            "cat <<EOF; gh pr merge 107 --repo someoneelse/tool --merge --delete-branch\nEOF\n",
+            ": <<EOF; git branch -d main\nEOF\n",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, (command, result.stdout))
+        # The body itself is still inert: here the verb is genuinely inside it.
+        inert = self.run_guard(
+            "cat <<EOF; true\ngit push --force origin main\nEOF\n", cwd=repo)
+        self.assertEqual(0, inert.returncode, inert.stderr)
+
+    def test_namespaced_ref_spellings_of_the_default_branch_block(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "git push origin refs/heads/main",
+            "git push -u origin refs/heads/main",
+            "git push origin heads/main",
+            "git push origin remotes/origin/main",
+            "git push origin tags/v1",
+            "git push origin HEAD",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn("lifecycle guard: unsafe push:", result.stderr)
+        ok = self.run_guard("git push -u origin issue-101-topic", cwd=repo)
+        self.assertEqual(0, ok.returncode, ok.stderr)
+
+    def test_shell_equivalent_spellings_are_adjudicated(self):
+        # Every command here pushes the default branch, so a legitimate pass is
+        # impossible: exit 0 would mean the guard simply failed to see the verb.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "(git push origin main)",                             # subshell
+            "{ git push origin main; }",                          # group
+            "if true; then git push origin main; fi",             # then
+            "for x in a; do git push origin main; done",          # do
+            "while true; do git push origin main; done",          # while/do
+            "case x in a) git push origin main;; esac",           # case arm
+            "! git push origin main",                             # negation
+            "time git push origin main",                          # time keyword
+            "git  push origin main",                              # double space
+            "git\tpush origin main",                              # tab
+            '"git" push origin main',                             # quoted word
+            "x=$(git push origin main)",                          # substitution
+            "`git push origin main`",                             # backticks
+            "xargs git push origin main",                         # argv runner
+            "timeout 5 git push origin main",                     # argv runner
+            "nice git push origin main",                          # argv runner
+            "env -i git push origin main",                        # env options
+            "env FOO=bar git push origin main",                   # env assignment
+            "sudo -u anis git push origin main",                  # sudo options
+            "eval 'git push origin main'",                        # evaluator
+            "sh -c 'git push origin main'",                       # evaluator
+            "bash -c 'gh pr merge 1 --repo someoneelse/tool --merge --delete-branch'",
+            'echo "unterminated ; git push origin main',           # unparseable
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+
+    def test_whitespace_normalisation_still_accepts_a_valid_push(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in ("git  push -u origin topic", "git\tpush origin topic"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, result.stderr)
+
     def test_push_grammar_accepts_only_plain_nondefault_branch(self):
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         ok = self.run_guard("git push -u origin worktree-issue-101-quota", cwd=repo)

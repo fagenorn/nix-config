@@ -35,21 +35,47 @@ let
       DEFAULT_JQ_BIN = "${pkgs.jq}/bin/jq"
       AUTHORIZED_OWNER = "fagenorn"
       CHILD_DIAGNOSTIC_LIMIT = 240
-      # Command-opening literals the guard adjudicates, longest-prefix-free so the
-      # first match wins. Anything not opening a segment is none of our business.
+      # The guarded verbs, as raw text and as token sequences. Order matters: the
+      # first match at a token wins, and no sequence is a prefix of another.
       GUARDED_LITERALS = (
           ("gh pr merge", "merge"),
           ("gh pr create", "pr-create"),
           ("git branch -d", "branch"),
           ("git push", "push"),
       )
-      # Words that hand the rest of the segment to another command; stripped so a
-      # guarded verb behind them is still seen in command position.
+      GUARDED_TOKEN_LITERALS = (
+          (["gh", "pr", "merge"], "merge"),
+          (["gh", "pr", "create"], "pr-create"),
+          (["git", "branch", "-d"], "branch"),
+          (["git", "push"], "push"),
+      )
+      OPERATION_LABELS = {
+          "merge": "merge",
+          "pr-create": "PR creation",
+          "branch": "branch deletion",
+          "push": "push",
+      }
+      # Words that keep the command position open: shell keywords that introduce a
+      # command, and wrappers that hand the rest of the words to another command.
+      COMMAND_KEYWORDS = frozenset({
+          "!", "time", "if", "then", "elif", "else", "while", "until", "do", "done",
+          "in", "coproc",
+      })
       COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "nohup", "sudo"})
+      # Programs whose argument is shell source. Arbitrary shell cannot be parsed
+      # here, so a guarded verb anywhere in such a segment is refused outright.
+      SHELL_EVALUATORS = frozenset({"eval", "sh", "bash", "zsh", "dash", "ksh"})
+      # Characters that end a word and re-open the command position: subshells,
+      # groups, `case` arms and command substitution all start a command after one.
+      OPERATOR_CHARS = "(){}`"
       PR_CREATE_FLAGS = ("--repo", "--base", "--head", "--title", "--body")
       ASSIGNMENT_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
       SLUG_PATTERN = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
       REF_NAME_PATTERN = re.compile(r"[A-Za-z0-9._/-]+")
+      # Path components that make a token a namespaced ref rather than a branch
+      # name: `git push origin refs/heads/main` and `heads/main` both update the
+      # branch `main`, so they must never be compared as plain names.
+      REF_NAMESPACE_COMPONENTS = frozenset({"refs", "heads", "tags", "remotes"})
       SEGMENT_SEPARATORS = frozenset(";&|\n")
       UNSAFE_BRANCH_CHARS = set(";&|<>$`\\\n\r*?[]{}()#~")
       UNSAFE_TEXT_CHARS = frozenset('"$`\\\0\r')
@@ -202,6 +228,18 @@ let
                   pending.append((delimiter, strip_tabs))
                   index = cursor
                   continue
+              if character == "\n":
+                  # Heredoc bodies begin after the newline that ends the line which
+                  # declared them — never at an earlier `;`/`&`/`|` on that line.
+                  segments.append("".join(current))
+                  current = []
+                  index += 1
+                  if pending:
+                      index = skip_heredoc_bodies(command, index, pending)
+                      if index is None:
+                          return None
+                      pending = []
+                  continue
               if character in SEGMENT_SEPARATORS:
                   segments.append("".join(current))
                   current = []
@@ -211,13 +249,6 @@ let
                       and command[index] != "\n"
                   ):
                       index += 1
-                  if index < length and command[index] == "\n":
-                      index += 1
-                  if pending:
-                      index = skip_heredoc_bodies(command, index, pending)
-                      if index is None:
-                          return None
-                      pending = []
                   continue
               current.append(character)
               index += 1
@@ -227,63 +258,149 @@ let
           return segments
 
 
-      def strip_leading_assignments(segment):
-          """`segment` without its leading whitespace and NAME=value words."""
+      def tokenize_segment(segment):
+          """Split one segment into (value, is_operator) tokens.
+
+          Values are unquoted, so `"git" push` and `git  push` both tokenise to
+          ["git", "push"] while a quoted `'git push origin main'` stays one token and
+          can never match a multi-token verb. Returns None when the segment cannot be
+          tokenised, which the caller treats as fail-closed.
+          """
+          tokens = []
+          value = []
+          started = False
+          quote = None
           index = 0
           length = len(segment)
-          while True:
-              while index < length and segment[index] in " \t":
+          while index < length:
+              character = segment[index]
+              if quote == "'":
+                  if character == "'":
+                      quote = None
+                  else:
+                      value.append(character)
                   index += 1
-              match = ASSIGNMENT_PREFIX.match(segment, index)
-              if match is None:
-                  return segment[index:]
-              cursor = match.end()
-              quote = None
-              while cursor < length:
-                  character = segment[cursor]
-                  if quote is not None:
-                      if character == quote:
-                          quote = None
-                  elif character in "'\"":
-                      quote = character
-                  elif character in " \t":
-                      break
-                  cursor += 1
-              index = cursor
-
-
-      def command_position(segment):
-          """`segment` reduced to the command it actually runs."""
-          rest = segment
-          for _ in range(8):
-              rest = strip_leading_assignments(rest)
-              parts = rest.split(None, 1)
-              if len(parts) == 2 and parts[0] in COMMAND_WRAPPERS:
-                  rest = parts[1]
                   continue
-              return rest
-          return rest
+              if character == "\\" and index + 1 < length:
+                  value.append(segment[index + 1])
+                  started = True
+                  index += 2
+                  continue
+              if quote == '"':
+                  if character == '"':
+                      quote = None
+                  else:
+                      value.append(character)
+                  index += 1
+                  continue
+              if character in "'\"":
+                  quote = character
+                  started = True
+                  index += 1
+                  continue
+              if character in " \t":
+                  if started:
+                      tokens.append(("".join(value), False))
+                      value = []
+                      started = False
+                  index += 1
+                  continue
+              if character in OPERATOR_CHARS:
+                  if started:
+                      tokens.append(("".join(value), False))
+                      value = []
+                      started = False
+                  tokens.append((character, True))
+                  index += 1
+                  continue
+              value.append(character)
+              started = True
+              index += 1
+          if quote is not None:
+              return None
+          if started:
+              tokens.append(("".join(value), False))
+          return tokens
+
+
+      def command_position_flags(tokens):
+          """Per token: does a simple command start here?"""
+          flags = [False] * len(tokens)
+          open_position = True
+          wrapper = None
+          for index, (value, operator) in enumerate(tokens):
+              if operator:
+                  open_position = True
+                  wrapper = None
+                  continue
+              if not open_position:
+                  continue
+              if ASSIGNMENT_PREFIX.match(value) is not None:
+                  continue
+              if value in COMMAND_KEYWORDS or value in COMMAND_WRAPPERS:
+                  wrapper = value
+                  continue
+              if wrapper is not None and value.startswith("-"):
+                  # Options belonging to the wrapper (`env -i`, `sudo -u anis`).
+                  continue
+              flags[index] = True
+              open_position = False
+          return flags
+
+
+      def unvalidatable(segment, reason):
+          """Every guarded verb mentioned in `segment`, all refused for `reason`."""
+          return [
+              (operation, segment, reason)
+              for literal, operation in GUARDED_LITERALS
+              if literal in segment
+          ]
 
 
       def guarded_operations(command):
-          """(operation, segment) pairs whose literal opens a command position."""
+          """(operation, segment, problem) for every guarded verb the shell would run.
+
+          `problem` is None when the segment can be handed to that verb's grammar,
+          and a reason when the verb sits where the guard cannot validate it: an
+          unparseable command, shell source passed to `eval`/`sh -c`, or a position
+          that is not a command position (an argument to some other program). Those
+          are refused rather than waved through — the parser and the shell have to
+          agree, and where they cannot the guard fails closed.
+          """
           segments = split_segments(command)
           if segments is None:
-              # Unparseable input: adjudicate every literal that appears at all, so
-              # the grammars below get their say instead of the command sliding past.
-              return [
-                  (operation, command)
-                  for literal, operation in GUARDED_LITERALS
-                  if literal in command
-              ]
-          operations = []
+              return unvalidatable(command, "the command could not be parsed")
+          found = []
           for segment in segments:
-              head = command_position(segment)
-              for literal, operation in GUARDED_LITERALS:
-                  if head == literal or head.startswith(literal + " ") or head.startswith(literal + "\t"):
-                      operations.append((operation, segment))
+              tokens = tokenize_segment(segment)
+              if tokens is None:
+                  found.extend(unvalidatable(segment, "the segment could not be tokenised"))
+                  continue
+              flags = command_position_flags(tokens)
+              values = [value for value, _ in tokens]
+              if any(
+                  flag and value in SHELL_EVALUATORS
+                  for flag, value in zip(flags, values)
+              ):
+                  found.extend(unvalidatable(
+                      segment, "shell source passed to an evaluator cannot be validated"
+                  ))
+                  continue
+              for index in range(len(values)):
+                  for literal_tokens, operation in GUARDED_TOKEN_LITERALS:
+                      if values[index:index + len(literal_tokens)] != literal_tokens:
+                          continue
+                      if flags[index]:
+                          found.append((operation, segment, None))
+                      else:
+                          found.append((
+                              operation,
+                              segment,
+                              "the verb is not in a command position the guard can "
+                              "validate; quote it if you only mean to mention it",
+                          ))
                       break
-          return operations
+          return found
 
 
       def detect_repository(git_bin, cwd, timeout):
@@ -374,11 +491,15 @@ let
           if not branch:
               return "branch name must not be empty"
           if branch.startswith("-"):
-              return "branch must not begin with '-'"
+              return "branch must not begin with a dash"
           if ":" in branch or "+" in branch:
               return "refspecs and force-pushes are not authorized"
           if any(character in UNSAFE_BRANCH_CHARS for character in branch):
               return "forbidden branch character"
+          if any(component in REF_NAMESPACE_COMPONENTS for component in branch.split("/")):
+              # `refs/heads/main` and `heads/main` both name the branch `main`, so a
+              # plain string comparison against the default branch would miss them.
+              return "namespaced refs are not authorized, name the branch directly"
           try:
               child = subprocess.run(
                   [git_bin, "check-ref-format", "--branch", branch],
@@ -652,7 +773,9 @@ let
               return block("invalid hook input: expected tool_input.command to be a string")
 
           context = None
-          for operation, segment in guarded_operations(command):
+          for operation, segment, problem in guarded_operations(command):
+              if problem is not None:
+                  return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
               if operation == "branch":
                   # Branch deletion is judged on the whole command, in every
                   # repository: it needs no forge state and tolerates no chaining.
