@@ -19,10 +19,10 @@ index 937a303..f418e48 100644
 -
 diff --git a/plugins/codex/agents/codex-reviewer.md b/plugins/codex/agents/codex-reviewer.md
 new file mode 100644
-index 0000000..94bfc8f
+index 0000000..1aa0a4e
 --- /dev/null
 +++ b/plugins/codex/agents/codex-reviewer.md
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,57 @@
 +---
 +name: codex-reviewer
 +description: Internal bridge for fresh, isolated, read-only Codex reviews requested by the codex-collaboration skill
@@ -50,8 +50,9 @@ index 0000000..94bfc8f
 +- Enqueue exactly one review with one sub-second foreground call:
 +  `cd "<worktree-root>" && codex-companion task --fresh --reviewer <operation> --background --json < "<tmpfile>"`.
 +  The `cd` keys the runtime's job state to the reviewed worktree. Note the `jobId`
-+  from the printed JSON. From this moment a detached worker owns the review; nothing that happens to you can stop it, and its result
-+  is durable in the job record.
++  from the printed JSON. From this moment a detached worker owns the review;
++  nothing that happens to you can stop it, and its result is durable in the job
++  record.
 +- Wait with at most four foreground calls, run one after the other only while the
 +  job is still `queued` or `running`:
 +  `cd "<worktree-root>" && codex-companion status <jobId> --wait --timeout-ms 540000 --json`
@@ -3389,7 +3390,7 @@ index 0000000..c871991
 +  assert.equal(fs.existsSync(broker.sessionDir), false);
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
-index c34b060..f034490 100644
+index c34b060..1c65055 100644
 --- a/tests/commands.test.mjs
 +++ b/tests/commands.test.mjs
 @@ -6,0 +7,9 @@ import { fileURLToPath } from "node:url";
@@ -3402,7 +3403,7 @@ index c34b060..f034490 100644
 +  ["one", 1], ["two", 2], ["three", 3], ["four", 4], ["five", 5], ["six", 6]
 +]);
 +
-@@ -205 +214,52 @@ test("internal docs use task terminology for rescue runs", () => {
+@@ -205 +214,74 @@ test("internal docs use task terminology for rescue runs", () => {
 -test("hooks keep session-end cleanup and stop gating enabled", () => {
 +test("the status command preserves the overdue marker when it re-renders the table", () => {
 +  const source = read("commands/status.md");
@@ -3429,7 +3430,14 @@ index c34b060..f034490 100644
 +  // What the transport may never carry again is a worker-side budget claim or
 +  // the retired constant. This is precise about its subject: 540000, 600000 and
 +  // 2160 are the transport's own measurements and stay legal.
-+  assert.doesNotMatch(agent, /worker(?:'s)?[^.\n]*budget/i);
++  //
++  // Collapse whitespace first: the file wraps at 80 columns, so the prohibited
++  // claim is normally split across a line break ("owns the review with" /
++  // "its own 840 s budget"). A line-bounded pattern could never match it, which
++  // is exactly how the retired claim would slip back in. The sentence, not the
++  // line, is the unit. The retained "the worker's own timeout is the
++  // correctness bound." stays legal: no `budget` before its period.
++  assert.doesNotMatch(agent.replace(/\s+/g, " "), /worker(?:'s)?[^.]*budget/i);
 +  assert.doesNotMatch(agent, /\b840\b/);
 +  assert.match(agent, /storedJob\?\.result\?\.rawOutput/);
 +  assert.match(agent, /CODEX_REVIEW_FAILURE:/);
@@ -3439,6 +3447,18 @@ index c34b060..f034490 100644
 +  assert.doesNotMatch(agent, /completion notification/i);
 +});
 +
++test("the reviewer registry carries exactly the two sized operations", () => {
++  // The literals themselves. Every other budget assertion in this suite compares
++  // a record against the registry, so a drift of the registry's own values would
++  // stay green everywhere else; this is the one pin that would not. Sorted, so
++  // the pin is independent of insertion order, and deepEqual over the full entry
++  // list also forbids a third operation appearing without a decision.
++  assert.deepEqual(
++    [...REVIEWER_BUDGETS_MS].sort(),
++    [["diff-review", 840000], ["plan-review", 1680000]]
++  );
++});
++
 +test("the transport's bounded-wait ceiling still covers the slowest reviewer budget", () => {
 +  const agent = read("agents/codex-reviewer.md");
 +  const countWord = agent.match(/Wait with at most (\w+) foreground calls/)?.[1];
@@ -3446,6 +3466,9 @@ index c34b060..f034490 100644
 +  const perCallMs = Number(agent.match(/--wait --timeout-ms (\d+)/)?.[1]);
 +  assert.ok(Number.isFinite(perCallMs) && perCallMs > 0, "no per-call wait bound in the definition");
 +  const ceilingMs = WAIT_COUNT_WORDS.get(countWord) * perCallMs;
++  // The prose figure must be the ceiling this test just computed, not a literal
++  // that survives a change to the wait count.
++  assert.match(agent, new RegExp(`after ${ceilingMs / 1000}s of bounded waits`));
 +  const largestBudgetMs = Math.max(...REVIEWER_BUDGETS_MS.values());
 +  // The enforced half of `ceiling > startup + budget`: startup is measured in
 +  // seconds and is not a constant, so the test pins the part that is one.
@@ -3456,14 +3479,14 @@ index c34b060..f034490 100644
 +});
 +
 +test("hooks keep session lifecycle cleanup without a Stop review gate", () => {
-@@ -209 +269,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
+@@ -209 +291,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
 -  assert.match(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /"Stop"/);
-@@ -217 +278 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -217 +300 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]'/);
 +  assert.match(setup, /argument-hint:\s*'\[--disable-review-gate\]'/);
-@@ -223 +283,0 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -223 +305,0 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(readme, /\/codex:setup --enable-review-gate/);
 diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
 index f83c96a..6920c62 100644
