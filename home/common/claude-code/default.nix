@@ -916,7 +916,7 @@ in
     # ~/.claude/CLAUDE.md — global user instructions (read-only store symlink is safe; static).
     memory.source = ../agent-guidance/AGENTS.md;
 
-    # ~/.claude/skills/<name>/ — the 8 global skills, recursively symlinked (multi-file skills
+    # ~/.claude/skills/<name>/ — the global skills, recursively symlinked (multi-file skills
     # like prototype/ keep SKILL.md + UI.md + LOGIC.md). ~/.claude/skills stays a real dir.
     skillsDir = ../agent-skills/skills;
 
