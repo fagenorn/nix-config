@@ -19,7 +19,7 @@ index 937a303..f418e48 100644
 -
 diff --git a/plugins/codex/agents/codex-reviewer.md b/plugins/codex/agents/codex-reviewer.md
 new file mode 100644
-index 0000000..c0c9e55
+index 0000000..94bfc8f
 --- /dev/null
 +++ b/plugins/codex/agents/codex-reviewer.md
 @@ -0,0 +1,56 @@
@@ -39,7 +39,7 @@ index 0000000..c0c9e55
 +  Missing, duplicated, ambiguous, out-of-order, or invalid declarations fail
 +  before launch with one `CODEX_REVIEW_FAILURE:` line. Remove both envelope
 +  lines; everything after them is the unchanged delegation prompt. Every Bash
-+  call below is foreground and bounded — the two wait calls set the Bash tool's
++  call below is foreground and bounded — each wait call sets the Bash tool's
 +  `timeout` to 600000 explicitly; every other call is sub-second and stays under
 +  the tool's default bound. Never pass `run_in_background`, never sleep, never
 +  write a polling loop.
@@ -50,15 +50,15 @@ index 0000000..c0c9e55
 +- Enqueue exactly one review with one sub-second foreground call:
 +  `cd "<worktree-root>" && codex-companion task --fresh --reviewer <operation> --background --json < "<tmpfile>"`.
 +  The `cd` keys the runtime's job state to the reviewed worktree. Note the `jobId`
-+  from the printed JSON. From this moment a detached worker owns the review with
-+  its own 840 s budget; nothing that happens to you can stop it, and its result
++  from the printed JSON. From this moment a detached worker owns the review; nothing that happens to you can stop it, and its result
 +  is durable in the job record.
-+- Wait with at most two foreground calls, run one after the other only while the
++- Wait with at most four foreground calls, run one after the other only while the
 +  job is still `queued` or `running`:
 +  `cd "<worktree-root>" && codex-companion status <jobId> --wait --timeout-ms 540000 --json`
 +  — each with the Bash tool's `timeout` parameter set to 600000. Read
-+  `job.status` from the printed JSON (the command exits 0 either way). Two
-+  540 s waits cover the worker's 840 s budget plus startup with margin.
++  `job.status` from the printed JSON (the command exits 0 either way). Stop as
++  soon as the status leaves `queued`/`running`: four is a ceiling, not a sequence
++  to complete.
 +- If `job.status` is `completed`, collect the result with one foreground call
 +  (temp paths beside the prompt file):
 +  `cd "<worktree-root>" && codex-companion result <jobId> --json > "<tmpdir>/result.json" && node -e 'const fs=require("node:fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))?.storedJob?.result?.rawOutput;if(typeof o!=="string"||!o)process.exit(3);fs.writeFileSync(process.argv[2],o)' "<tmpdir>/result.json" "<tmpdir>/review.md"`,
@@ -68,10 +68,10 @@ index 0000000..c0c9e55
 +- If `job.status` is `failed` or `cancelled`, return one line:
 +  `CODEX_REVIEW_FAILURE: ` followed by the job's `errorMessage`, else its
 +  `summary`, else `job <jobId> ended <status>`.
-+- If the job is still `queued` or `running` after the second wait, return one line:
-+  `CODEX_REVIEW_FAILURE: job <jobId> still <status> after 1080s of bounded waits
-+  (worker budget is 840s); check codex-companion status <jobId>`. Do not cancel
-+  the job — the worker's own timeout is the correctness bound.
++- If the job is still `queued` or `running` after the last wait, return one line:
++  `CODEX_REVIEW_FAILURE: job <jobId> still <status> after 2160s of bounded waits;
++  check codex-companion status <jobId>`. Do not cancel the job — the worker's own
++  timeout is the correctness bound.
 +- If any prescribed command itself fails, return a single line beginning
 +  `CODEX_REVIEW_FAILURE:` followed by its stderr or exit status.
 +- Run the whole sequence in this one turn without pausing; stopping early only
@@ -549,7 +549,7 @@ index 1954274..2097f9f 100644
 +  supervisionTimer.unref();
 +
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..3c34f7a 100644
+index 83df468..7e1ca90 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
 @@ -32,2 +31,0 @@ import {
@@ -562,25 +562,26 @@ index 83df468..3c34f7a 100644
 -  SESSION_ID_ENV
 +  SESSION_ID_ENV,
 +  setConfigRetainingActive
-@@ -54,0 +56 @@ import {
+@@ -54,0 +56,2 @@ import {
++import { REVIEW_OPERATIONS, reviewerBudgetMs } from "./lib/review-operations.mjs";
 +import { cleanupReviewerRuntime } from "./lib/runtime-home.mjs";
-@@ -70,0 +73,4 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
+@@ -70,0 +74,4 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 +// Node's maximum setTimeout delay (2^31 - 1 ms, ~24.9 days). A larger delay is
 +// silently clamped to 1 ms, so this is the ceiling on a timeout the worker can
 +// actually enforce — and therefore on one a job record may advertise.
 +const MAX_ENFORCEABLE_TIMEOUT_MS = 2147483647;
-@@ -79 +85 @@ function printUsage() {
+@@ -79 +86 @@ function printUsage() {
 -      "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
 +      "  node scripts/codex-companion.mjs setup [--disable-review-gate] [--json]",
-@@ -82 +88 @@ function printUsage() {
+@@ -82 +89 @@ function printUsage() {
 -      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
 +      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--reviewer <plan-review|diff-review>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
-@@ -198,4 +203,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
+@@ -198,4 +204,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 -  if (!config.stopReviewGate) {
 -    nextSteps.push("Optional: run `/codex:setup --enable-review-gate` to require a fresh review before stop.");
 -  }
 -
-@@ -230,4 +232,4 @@ async function handleSetup(argv) {
+@@ -230,4 +233,4 @@ async function handleSetup(argv) {
 -    setConfig(workspaceRoot, "stopReviewGate", true);
 -    actionsTaken.push(`Enabled the stop-time review gate for ${workspaceRoot}.`);
 -  } else if (options["disable-review-gate"]) {
@@ -589,46 +590,46 @@ index 83df468..3c34f7a 100644
 +  }
 +  if (getConfig(workspaceRoot).stopReviewGate || options["disable-review-gate"]) {
 +    setConfigRetainingActive(workspaceRoot, "stopReviewGate", false);
-@@ -290,4 +291,0 @@ function renderStatusPayload(report, asJson) {
+@@ -290,4 +292,0 @@ function renderStatusPayload(report, asJson) {
 -function isActiveJobStatus(status) {
 -  return status === "queued" || status === "running";
 -}
 -
-@@ -339 +337,3 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
+@@ -339 +338,3 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
 -  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
 +  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)).filter(
 +    (job) => job.id !== options.excludeJobId
 +  );
-@@ -460 +459,0 @@ async function executeReviewRun(request) {
+@@ -460 +460,0 @@ async function executeReviewRun(request) {
 -
-@@ -462,0 +462,2 @@ async function executeTaskRun(request) {
+@@ -462,0 +463,2 @@ async function executeTaskRun(request) {
 +  const reviewOperation = normalizeReviewOperation(request.reviewOperation, STORED_REVIEW_OPERATION_ERROR);
 +  const isReviewer = reviewOperation !== null;
-@@ -464 +464,0 @@ async function executeTaskRun(request) {
+@@ -464 +465,0 @@ async function executeTaskRun(request) {
 -
-@@ -467 +467,2 @@ async function executeTaskRun(request) {
+@@ -467 +468,2 @@ async function executeTaskRun(request) {
 -    resumeLast: request.resumeLast
 +    resumeLast: request.resumeLast,
 +    reviewOperation
-@@ -491 +492 @@ async function executeTaskRun(request) {
+@@ -491 +493 @@ async function executeTaskRun(request) {
 -    sandbox: request.write ? "workspace-write" : "read-only",
 +    sandbox: isReviewer ? "read-only" : request.write ? "workspace-write" : "read-only",
-@@ -493,2 +494,4 @@ async function executeTaskRun(request) {
+@@ -493,2 +495,4 @@ async function executeTaskRun(request) {
 -    persistThread: true,
 -    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
 +    persistThread: !isReviewer,
 +    threadName: isReviewer || resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
 +    reviewerJobId: isReviewer ? request.jobId : null,
 +    timeoutMs: request.timeoutMs
-@@ -496,0 +500,4 @@ async function executeTaskRun(request) {
+@@ -496,0 +501,4 @@ async function executeTaskRun(request) {
 +  if (isReviewer && result.touchedFiles.length > 0) {
 +    throw new Error(`Read-only Codex reviewer reported file changes: ${result.touchedFiles.join(", ")}`);
 +  }
 +
-@@ -527 +534 @@ async function executeTaskRun(request) {
+@@ -527 +535 @@ async function executeTaskRun(request) {
 -    jobClass: "task",
 +    jobClass: isReviewer ? "review" : "task",
-@@ -540 +547,7 @@ function buildReviewJobMetadata(reviewName, target) {
+@@ -540 +548,7 @@ function buildReviewJobMetadata(reviewName, target) {
 -function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 +function buildTaskRunMetadata({ prompt, resumeLast = false, reviewOperation = null }) {
 +  if (reviewOperation !== null) {
@@ -637,30 +638,30 @@ index 83df468..3c34f7a 100644
 +      summary: shorten(prompt || "Read-only review")
 +    };
 +  }
-@@ -564 +577 @@ function getJobKindLabel(kind, jobClass) {
+@@ -564 +578 @@ function getJobKindLabel(kind, jobClass) {
 -  return jobClass === "review" ? "review" : "rescue";
 +  return REVIEW_OPERATIONS.has(kind) ? kind : jobClass === "review" ? "review" : "rescue";
-@@ -592 +605 @@ function createTrackedProgress(job, options = {}) {
+@@ -592 +606 @@ function createTrackedProgress(job, options = {}) {
 -function buildTaskJob(workspaceRoot, taskMetadata, write) {
 +function buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation = null) {
-@@ -594,2 +607,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -594,2 +608,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    prefix: "task",
 -    kind: "task",
 +    prefix: reviewOperation === null ? "task" : "reviewer",
 +    kind: reviewOperation ?? "task",
-@@ -598 +611 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -598 +612 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    jobClass: "task",
 +    jobClass: reviewOperation === null ? "task" : "review",
-@@ -604 +617 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -604 +618 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
 +function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, reviewOperation, timeoutMs, jobId }) {
-@@ -611,0 +625,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
+@@ -611,0 +626,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
 +    reviewOperation,
 +    timeoutMs,
-@@ -671 +686 @@ async function runForegroundCommand(job, runner, options = {}) {
+@@ -671 +687 @@ async function runForegroundCommand(job, runner, options = {}) {
 -function spawnDetachedTaskWorker(cwd, jobId) {
 +function spawnDetachedTaskWorker(cwd, jobId, logFile) {
-@@ -672,0 +688,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -672,0 +689,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  // Same shape as spawnBrokerProcess. The child inherits an O_APPEND fd on the
 +  // job log, so everything it writes to fd 1/2 is appended to the file the job
 +  // record already points at via logFile — including output no application code
@@ -671,12 +672,12 @@ index 83df468..3c34f7a 100644
 +  // O_APPEND on the same inode from the same process, so the two interleave
 +  // chronologically: the last progress line, then the trail that ended it.
 +  const logFd = fs.openSync(logFile, "a");
-@@ -677 +702 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -677 +703 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 -    stdio: "ignore",
 +    stdio: ["ignore", logFd, logFd],
-@@ -680,0 +706 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -680,0 +707 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  fs.closeSync(logFd);
-@@ -683,0 +710,35 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -683,0 +711,35 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +function resolveJobDeadline(createdAt, timeoutMs) {
 +  // The issue's definition: enqueue time + timeout, and a deadline exists only
 +  // when a timeout does. Measured from the record's own createdAt rather than a
@@ -712,7 +713,7 @@ index 83df468..3c34f7a 100644
 +  return deadline.toISOString();
 +}
 +
-@@ -688 +749,6 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -688 +750,6 @@ function enqueueBackgroundTask(cwd, job, request) {
 -  const child = spawnDetachedTaskWorker(cwd, job.id);
 +  // Resolved before the spawn. It depends only on the record's createdAt and the
 +  // request's timeoutMs, both already known here, and anything that goes wrong
@@ -720,66 +721,67 @@ index 83df468..3c34f7a 100644
 +  // job record at all — unreachable, unreportable, and never reaped.
 +  const deadlineAt = resolveJobDeadline(job.createdAt, request.timeoutMs);
 +  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
-@@ -694,0 +761 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -694,0 +762 @@ function enqueueBackgroundTask(cwd, job, request) {
 +    ...(deadlineAt ? { deadlineAt } : {}),
-@@ -704,2 +771,2 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -704,2 +772,2 @@ function enqueueBackgroundTask(cwd, job, request) {
 -      title: job.title,
 -      summary: job.summary,
 +      kind: job.kind,
 +      title: job.title, summary: job.summary,
-@@ -764 +831 @@ async function handleTask(argv) {
+@@ -764 +832 @@ async function handleTask(argv) {
 -    valueOptions: ["model", "effort", "cwd", "prompt-file"],
 +    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms", "reviewer"],
-@@ -782,0 +850,8 @@ async function handleTask(argv) {
+@@ -782,0 +851,10 @@ async function handleTask(argv) {
 +  const reviewOperation = normalizeReviewOperation(options.reviewer), isReviewer = reviewOperation !== null;
 +  if (isReviewer && (write || resumeLast)) {
 +    throw new Error("Reviewer jobs must be fresh and read-only.");
 +  }
-+  const timeoutMs = options["timeout-ms"] == null ? (isReviewer ? 840000 : null) : Number(options["timeout-ms"]);
++  const timeoutMs = options["timeout-ms"] == null
++    ? (isReviewer ? reviewerBudgetMs(reviewOperation) : null)
++    : Number(options["timeout-ms"]);
 +  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
 +    throw new Error("--timeout-ms must be a positive number.");
 +  }
-@@ -785 +860,2 @@ async function handleTask(argv) {
+@@ -785 +863,2 @@ async function handleTask(argv) {
 -    resumeLast
 +    resumeLast,
 +    reviewOperation
-@@ -792 +868 @@ async function handleTask(argv) {
+@@ -792 +871 @@ async function handleTask(argv) {
 -    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
-@@ -799,0 +876,2 @@ async function handleTask(argv) {
+@@ -799,0 +879,2 @@ async function handleTask(argv) {
 +      reviewOperation,
 +      timeoutMs,
-@@ -807 +885 @@ async function handleTask(argv) {
+@@ -807 +888 @@ async function handleTask(argv) {
 -  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
-@@ -817,0 +896,2 @@ async function handleTask(argv) {
+@@ -817,0 +899,2 @@ async function handleTask(argv) {
 +        reviewOperation,
 +        timeoutMs,
-@@ -874,2 +954,3 @@ async function handleTaskWorker(argv) {
+@@ -874,2 +957,3 @@ async function handleTaskWorker(argv) {
 -    () =>
 -      executeTaskRun({
 +    () => {
 +      validateStoredReviewIdentity(storedJob, request);
 +      return executeTaskRun({
-@@ -878 +959,2 @@ async function handleTaskWorker(argv) {
+@@ -878 +962,2 @@ async function handleTaskWorker(argv) {
 -      }),
 +      });
 +    },
-@@ -937 +1019 @@ function handleTaskResumeCandidate(argv) {
+@@ -937 +1022 @@ function handleTaskResumeCandidate(argv) {
 -  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
 +  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)));
-@@ -976 +1058,4 @@ async function handleCancel(argv) {
+@@ -976 +1061,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
 +    job.jobClass === "review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1072,3 @@ async function handleCancel(argv) {
+@@ -986,0 +1075,3 @@ async function handleCancel(argv) {
 +  if (job.jobClass === "review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
-@@ -1023,0 +1112,22 @@ async function handleCancel(argv) {
-+const REVIEW_OPERATIONS = new Set(["plan-review", "diff-review"]);
+@@ -1023,0 +1115,21 @@ async function handleCancel(argv) {
 +const STORED_REVIEW_OPERATION_ERROR = "Stored review operation must be plan-review or diff-review.";
 +const STORED_REVIEW_IDENTITY_ERROR = "Stored review identity must have matching kind, jobClass, and reviewOperation.";
 +
@@ -1625,6 +1627,39 @@ index 2ec1852..996c678 100644
 +  ) {
 +    return `# ${job.title}\n\n${storedJob.result.rawOutput}`;
 +  }
+diff --git a/plugins/codex/scripts/lib/review-operations.mjs b/plugins/codex/scripts/lib/review-operations.mjs
+new file mode 100644
+index 0000000..661d99d
+--- /dev/null
++++ b/plugins/codex/scripts/lib/review-operations.mjs
+@@ -0,0 +1,27 @@
++// The reviewer operation registry: the single place that says which review
++// operations exist and what each one may spend. The closed set below is derived
++// from these keys, so an operation cannot exist without a budget and a budget
++// cannot exist for an operation the runtime rejects.
++//
++// plan-review carries twice diff-review's wall. The evidence is asymmetric
++// truncation, not a measured speed gap: across 83 surveyed reviewer jobs the
++// shared 840 s wall killed ten plan-reviews against one diff-review, and
++// plan-review's p90 sat at 730 s hard against that wall — the signature of a
++// right-censored distribution whose observed median understates the honest one.
++//
++// A Map rather than an object so a lookup of an inherited property name cannot
++// resolve to something non-undefined and impersonate a registered operation.
++export const REVIEWER_BUDGETS_MS = new Map([
++  ["plan-review", 1680000],
++  ["diff-review", 840000]
++]);
++
++export const REVIEW_OPERATIONS = new Set(REVIEWER_BUDGETS_MS.keys());
++
++export function reviewerBudgetMs(operation) {
++  const budget = REVIEWER_BUDGETS_MS.get(operation);
++  if (budget === undefined) {
++    throw new Error(`No reviewer budget is registered for ${operation}.`);
++  }
++  return budget;
++}
 diff --git a/plugins/codex/scripts/lib/runtime-home.mjs b/plugins/codex/scripts/lib/runtime-home.mjs
 new file mode 100644
 index 0000000..aff6584
@@ -3354,10 +3389,20 @@ index 0000000..c871991
 +  assert.equal(fs.existsSync(broker.sessionDir), false);
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
-index c34b060..43bc066 100644
+index c34b060..f034490 100644
 --- a/tests/commands.test.mjs
 +++ b/tests/commands.test.mjs
-@@ -205 +205,27 @@ test("internal docs use task terminology for rescue runs", () => {
+@@ -6,0 +7,9 @@ import { fileURLToPath } from "node:url";
++import { REVIEWER_BUDGETS_MS } from "../plugins/codex/scripts/lib/review-operations.mjs";
++
++// The definition spells its wait count, like every other quantity in that
++// Sonnet-facing file. A closed table keeps an unrecognised word a loud failure
++// instead of a silently unparsed one (D13).
++const WAIT_COUNT_WORDS = new Map([
++  ["one", 1], ["two", 2], ["three", 3], ["four", 4], ["five", 5], ["six", 6]
++]);
++
+@@ -205 +214,52 @@ test("internal docs use task terminology for rescue runs", () => {
 -test("hooks keep session-end cleanup and stop gating enabled", () => {
 +test("the status command preserves the overdue marker when it re-renders the table", () => {
 +  const source = read("commands/status.md");
@@ -3377,6 +3422,15 @@ index c34b060..43bc066 100644
 +  // Pin value forwarding, bounded waits, raw extraction, and failures.
 +  assert.match(agent, /task --fresh --reviewer <operation> --background --json/);
 +  assert.match(agent, /--wait --timeout-ms 540000/);
++  // The transport's own numbers stay; the wait count and the ceiling it measures
++  // are pinned here so the invariant test below has a stable subject.
++  assert.match(agent, /Wait with at most four foreground calls/);
++  assert.match(agent, /after 2160s of bounded waits/);
++  // What the transport may never carry again is a worker-side budget claim or
++  // the retired constant. This is precise about its subject: 540000, 600000 and
++  // 2160 are the transport's own measurements and stay legal.
++  assert.doesNotMatch(agent, /worker(?:'s)?[^.\n]*budget/i);
++  assert.doesNotMatch(agent, /\b840\b/);
 +  assert.match(agent, /storedJob\?\.result\?\.rawOutput/);
 +  assert.match(agent, /CODEX_REVIEW_FAILURE:/);
 +  // Keep the foreground-only regression covered in both directions.
@@ -3385,15 +3439,31 @@ index c34b060..43bc066 100644
 +  assert.doesNotMatch(agent, /completion notification/i);
 +});
 +
++test("the transport's bounded-wait ceiling still covers the slowest reviewer budget", () => {
++  const agent = read("agents/codex-reviewer.md");
++  const countWord = agent.match(/Wait with at most (\w+) foreground calls/)?.[1];
++  assert.ok(WAIT_COUNT_WORDS.has(countWord), `unrecognised wait count: ${countWord}`);
++  const perCallMs = Number(agent.match(/--wait --timeout-ms (\d+)/)?.[1]);
++  assert.ok(Number.isFinite(perCallMs) && perCallMs > 0, "no per-call wait bound in the definition");
++  const ceilingMs = WAIT_COUNT_WORDS.get(countWord) * perCallMs;
++  const largestBudgetMs = Math.max(...REVIEWER_BUDGETS_MS.values());
++  // The enforced half of `ceiling > startup + budget`: startup is measured in
++  // seconds and is not a constant, so the test pins the part that is one.
++  assert.ok(
++    ceilingMs > largestBudgetMs,
++    `bounded-wait ceiling ${ceilingMs}ms must exceed the largest reviewer budget ${largestBudgetMs}ms`
++  );
++});
++
 +test("hooks keep session lifecycle cleanup without a Stop review gate", () => {
-@@ -209 +235,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
+@@ -209 +269,2 @@ test("hooks keep session-end cleanup and stop gating enabled", () => {
 -  assert.match(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /stop-review-gate-hook\.mjs/);
 +  assert.doesNotMatch(source, /"Stop"/);
-@@ -217 +244 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -217 +278 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]'/);
 +  assert.match(setup, /argument-hint:\s*'\[--disable-review-gate\]'/);
-@@ -223 +249,0 @@ test("setup command can offer Codex install and still points users to codex logi
+@@ -223 +283,0 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(readme, /\/codex:setup --enable-review-gate/);
 diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
 index f83c96a..6920c62 100644
@@ -3963,10 +4033,10 @@ index ab68038..4217fce 100644
 +});
 diff --git a/tests/reviewer-detach.test.mjs b/tests/reviewer-detach.test.mjs
 new file mode 100644
-index 0000000..5ba09d8
+index 0000000..25152d2
 --- /dev/null
 +++ b/tests/reviewer-detach.test.mjs
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,265 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -3977,6 +4047,7 @@ index 0000000..5ba09d8
 +import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
 +import { readJobFile, resolveJobFile, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
++import { REVIEWER_BUDGETS_MS } from "../plugins/codex/scripts/lib/review-operations.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env (via buildEnv), so pinning them here keeps every test in
@@ -4045,6 +4116,10 @@ index 0000000..5ba09d8
 +    assert.equal(result.job.kind, operation);
 +    assert.equal(result.storedJob.kind, operation);
 +    assert.equal(result.storedJob.request.reviewOperation, operation);
++    // The budget the worker actually races against, read off the durable record
++    // rather than off the constant: a registry the value never reaches is not a
++    // budget. `upsertJob` merges, so the enqueued request survives to here.
++    assert.equal(result.storedJob.request.timeoutMs, REVIEWER_BUDGETS_MS.get(operation));
 +    assert.equal(result.storedJob.result.rawOutput, "Handled the requested task.\nTask prompt accepted.");
 +
 +    const human = run("node", [SCRIPT, "result", launch.jobId], { cwd: repo, env });
@@ -4499,10 +4574,10 @@ index 0f8f57c..cafb91e 100644
 +    savedJobs.map((job) => job.id),
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
-index 0000000..1649fb3
+index 0000000..bd7dd0e
 --- /dev/null
 +++ b/tests/worker-postmortem.test.mjs
-@@ -0,0 +1,921 @@
+@@ -0,0 +1,925 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -4514,6 +4589,7 @@ index 0000000..1649fb3
 +import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
 +import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 +import { resolveReviewerRuntimeHome } from "../plugins/codex/scripts/lib/runtime-home.mjs";
++import { REVIEWER_BUDGETS_MS } from "../plugins/codex/scripts/lib/review-operations.mjs";
 +
 +// State resolvers read these variables at call time, and spawned CLI children
 +// inherit process.env (via buildEnv), so pinning them here keeps every test in
@@ -5216,10 +5292,13 @@ index 0000000..1649fb3
 +    );
 +    assert.equal(reviewer.status, 0, reviewer.stderr);
 +    const reviewerRecord = readRecord(JSON.parse(reviewer.stdout).jobId);
-+    // The reviewer default budget, exactly: enqueue time + 840000 ms. Basing the
-+    // deadline on the record's own createdAt is what makes this an exact delta
-+    // rather than a fuzzy window.
-+    assert.equal(Date.parse(reviewerRecord.deadlineAt) - Date.parse(reviewerRecord.createdAt), 840000);
++    // The reviewer default budget for this operation, exactly: enqueue time plus
++    // the registered budget. Basing the deadline on the record's own createdAt is
++    // what makes this an exact delta rather than a fuzzy window.
++    assert.equal(
++      Date.parse(reviewerRecord.deadlineAt) - Date.parse(reviewerRecord.createdAt),
++      REVIEWER_BUDGETS_MS.get(operation)
++    );
 +  }
 +
 +  const explicit = run(
