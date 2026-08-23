@@ -4393,6 +4393,102 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             self.direct_owner(issue=32, now="2026-08-20T11:05:00Z"), reconciled
         )
 
+    def test_merged_forge_reconcile_preserves_the_superseded_owner_detail(self):
+        # A merged pull request is ground truth and supersedes an owner's own
+        # failed verdict (per D3), but the owner's durable delivery pointer is
+        # the only record of what was reported and must survive the supersede.
+        owner = self.acquire_direct(issue=38)
+        self.run_id = owner["run_id"]
+        report_path = ".superpowers/issue-delivery/38/run-1/ship-review.json"
+        owner_result = {
+            "issue": 38, "state": "failed", "pr_url": None, "merge_sha": None,
+            "issue_closed": False, "discussion_items": [],
+            "detail_state": "present", "report_path": report_path,
+            "notes": f"owner verdict; details: {report_path}",
+        }
+        state = self.read_state()
+        issue_state = state["issues"]["38"]
+        attempt = issue_state["attempts"][-1]
+        attempt.update({
+            "state": "failed", "blocked_on": None,
+            "result": copy.deepcopy(owner_result),
+            "finished_at": "2026-08-20T10:30:00Z",
+            "result_source": "owner",
+        })
+        issue_state["outcome"] = copy.deepcopy(owner_result)
+        state["updated_at"] = "2026-08-20T10:30:00Z"
+        self.write_state(state)
+
+        reconciled = self.direct_owner(
+            issue=38, now="2026-08-20T11:00:00Z",
+            worktree=self.worktree_fact(38, recorded={
+                "path": owner["worktree"], "state": "matching_issue_branch",
+            }),
+            forge={
+                "state": "merged",
+                "url": "https://github.com/fagenorn/nix-config/pull/81",
+                "merge_sha": "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+            },
+        )
+        self.assertEqual((reconciled["kind"], reconciled["reason"]),
+                         ("terminal", "merged"))
+        persisted = json.loads(
+            self.direct_state_path(owner["run_id"]).read_text()
+        )["issues"]["38"]
+        attempt = persisted["attempts"][-1]
+        self.assertEqual(attempt["state"], "merged")
+        self.assertEqual(attempt["result_source"], "superseded")
+        result = attempt["result"]
+        self.assertEqual(result["state"], "merged")
+        self.assertEqual(
+            result["merge_sha"],
+            "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+        )
+        self.assertEqual(
+            result["pr_url"], "https://github.com/fagenorn/nix-config/pull/81"
+        )
+        # The owner's delivery pointer is carried forward, not nulled.
+        self.assertEqual(result["report_path"], report_path)
+        self.assertEqual(result["detail_state"], "present")
+        # The note records that a prior owner verdict was superseded.
+        self.assertIn("reconciled from forge observation", result["notes"])
+        self.assertIn("superseded", result["notes"])
+        self.assertIn("owner", result["notes"])
+        self.assertIn("failed", result["notes"])
+        self.assertLessEqual(len(result["notes"]), 500)
+        self.assertEqual(persisted["outcome"], result)
+        self.assertEqual(reconciled["result"], result)
+
+    def test_merged_forge_reconcile_over_synthetic_record_keeps_no_detail(self):
+        # The common case is untouched: reconciling over a synthetic reaper
+        # record (no owner report, no delivery pointer) still yields the bare
+        # forge observation with no report_path and an unchanged note.
+        owner = self.acquire_direct(issue=39)
+        self.run_id = owner["run_id"]
+        self.legacy_expiry_record(issue=39, now="2026-08-20T13:00:00Z")
+        reconciled = self.direct_owner(
+            issue=39, now="2026-08-20T13:30:00Z",
+            forge={
+                "state": "merged",
+                "url": "https://github.com/fagenorn/nix-config/pull/82",
+                "merge_sha": "d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+            },
+        )
+        persisted = json.loads(
+            self.direct_state_path(owner["run_id"]).read_text()
+        )["issues"]["39"]
+        result = persisted["attempts"][-1]["result"]
+        self.assertEqual(result, {
+            "issue": 39, "state": "merged",
+            "pr_url": "https://github.com/fagenorn/nix-config/pull/82",
+            "merge_sha": "d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+            "issue_closed": False, "discussion_items": [],
+            "detail_state": "none", "report_path": None,
+            "notes": "reconciled from forge observation",
+        })
+        self.assertEqual(persisted["outcome"], result)
+        self.assertEqual(reconciled["result"], result)
+
     def test_merged_forge_reconciles_a_stale_record_instead_of_retrying(self):
         owner = self.acquire_direct(issue=34)
         self.run_id = owner["run_id"]

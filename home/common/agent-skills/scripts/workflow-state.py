@@ -1006,16 +1006,42 @@ def terminal_result(issue: int, state: str, notes: str) -> dict[str, Any]:
     })
 
 
-def reconciled_result(issue: int, url: str, merge_sha: str) -> dict[str, Any]:
+def reconciled_result(
+    issue: int,
+    url: str,
+    merge_sha: str,
+    *,
+    prior_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """The terminal record a merged pull request writes into a stale ledger.
 
     Only what the forge itself observed is asserted: the issue is not claimed
-    closed and no delivery detail is claimed present, because reconciliation
-    saw a merge, not a report (per D3). That is also why this record is checked
-    against the ledger's own result schema rather than the ship-summary
-    boundary — the boundary is the contract for an owner's report, where a
-    ``merged`` row means the owner also closed the issue and cleaned up.
+    closed, because reconciliation saw a merge, not a report (per D3). That is
+    also why this record is checked against the ledger's own result schema
+    rather than the ship-summary boundary — the boundary is the contract for an
+    owner's report, where a ``merged`` row means the owner also closed the issue
+    and cleaned up.
+
+    When ``prior_result`` is the attempt's own result and it already carries a
+    delivery-detail pointer — a non-null ``report_path`` or a ``detail_state``
+    other than ``"none"`` — that pointer is the only durable record of what the
+    owner reported, so it is carried forward instead of being discarded, and the
+    note records that a prior owner verdict was superseded. A synthetic record
+    (expiry/stalled) or any result with no delivery pointer reconciles to the
+    bare forge observation exactly as before.
     """
+    detail_state = "none"
+    report_path: str | None = None
+    notes = "reconciled from forge observation"
+    if prior_result is not None and (
+        prior_result["report_path"] is not None
+        or prior_result["detail_state"] != "none"
+    ):
+        detail_state = prior_result["detail_state"]
+        report_path = prior_result["report_path"]
+        superseded = f"{notes}; superseded owner {prior_result['state']} verdict"
+        maximum = phase_notes_maximum()
+        notes = superseded if len(superseded) <= maximum else superseded[:maximum]
     return validate_result({
         "issue": issue,
         "state": "merged",
@@ -1023,9 +1049,9 @@ def reconciled_result(issue: int, url: str, merge_sha: str) -> dict[str, Any]:
         "merge_sha": merge_sha,
         "issue_closed": False,
         "discussion_items": [],
-        "detail_state": "none",
-        "report_path": None,
-        "notes": "reconciled from forge observation",
+        "detail_state": detail_state,
+        "report_path": report_path,
+        "notes": notes,
     }, expected_issue=issue)
 
 
@@ -1043,9 +1069,15 @@ def reconcile_merged_attempt(
     stale record is rediscovered by hand, run after run. The record is marked
     ``superseded``: it was written by the lifecycle from an observation, not
     reported by an owner (per D3, D11).
+
+    If the attempt being closed already carries an owner-authored result with a
+    delivery-detail pointer (a ``failed``/``owner`` latest routes here rather
+    than into terminal replay), that pointer is preserved through the supersede
+    rather than discarded.
     """
     result = reconciled_result(
-        attempt["issue"], forge["url"], forge["merge_sha"]
+        attempt["issue"], forge["url"], forge["merge_sha"],
+        prior_result=attempt["result"],
     )
     attempt["state"] = "merged"
     attempt["blocked_on"] = None
