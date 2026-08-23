@@ -53,13 +53,20 @@ gone 'Claude installs both through local marketplaces'
 gone 'native `superpowers:*` plugin from its Nix-declared personal marketplace'
 
 # B - the overloaded bullet is now two bullets, each appearing exactly once (D4)
-need 'Global guidance has one source at'
-need 'Two skills stay out of the shared tree'
-[ "$(grep -c 'Global guidance has one source at' CLAUDE.md)" -eq 1 ] || fail 'shared-surface bullet is not unique'
-[ "$(grep -c 'Two skills stay out of the shared tree' CLAUDE.md)" -eq 1 ] || fail 'Claude-only bullet is not unique'
+need '  - Global guidance has one source at'
+need '  - Two skills stay out of the shared tree'
+# anchored to the two-space `  - ` list-item prefix: uniqueness of a floating phrase would not
+# prove the two sibling bullets the prose claims
+[ "$(grep -c '^  - Global guidance has one source at' CLAUDE.md)" -eq 1 ] || fail 'shared-surface bullet is not a unique two-space-indented list item'
+[ "$(grep -c '^  - Two skills stay out of the shared tree' CLAUDE.md)" -eq 1 ] || fail 'Claude-only bullet is not a unique two-space-indented list item'
 
 # C - every plugin and marketplace claim matches the live modules (D2)
-n=$(sed -n '/enabledPlugins = {/,/};/p' "$M" | grep -c '= true;')
+# count off a captured block, not a pipeline: `grep -c` exits 1 on zero matches, which under
+# `set -euo pipefail` would abort the assignment and swallow the diagnostic below
+block=$(sed -n '/enabledPlugins = {/,/};/p' "$M")
+gs=0
+n=$(printf '%s\n' "$block" | grep -c '= true;') || gs=$?
+[ "$gs" -le 1 ] || fail "counting enabledPlugins entries failed with status $gs"
 [ "$n" -eq 2 ] || fail "enabledPlugins holds $n entries; the prose says two plugins"
 for p in 'skill-creator@claude-plugins-official' 'codex@nix-codex'; do
   grep -qF -- "\"$p\" = true;" "$M" || fail "$p is not an enabled plugin in $M"
@@ -74,7 +81,10 @@ need 'a `github` marketplace'
 need 'a `directory` marketplace'
 grep -qF 'marketplaceName = "nix-codex";' lib/agent-plugins.nix || fail 'nix-codex is not the marketplace name in lib/agent-plugins.nix'
 need '`nix-codex`'
-n=$(ls -1 patches/agent-plugins | wc -l | tr -d ' ')
+gs=0
+listing=$(ls -1 patches/agent-plugins) || gs=$?
+[ "$gs" -eq 0 ] || fail "cannot list patches/agent-plugins (status $gs)"
+if [ -z "$listing" ]; then n=0; else n=$(printf '%s\n' "$listing" | wc -l | tr -d ' '); fi
 [ "$n" -eq 1 ] || fail "patches/agent-plugins holds $n files; the prose says one patch"
 need 'the only patch in that directory'
 
@@ -86,8 +96,13 @@ done
 need '/from-issue'
 
 # E - Nix's writes under ~/.codex/ are exactly what the prose claims (D2, D3)
-decls=$(git grep -l 'home.file.".codex/' -- '*.nix' | tr '\n' ' ')
-[ "$decls" = "home/common/agent-guidance/default.nix " ] || fail "unexpected ~/.codex home.file declarations: $decls"
+# pin the declarations themselves, not the file list: `git grep -l` prints a matching file once,
+# so a second `home.file.".codex/…"` line in the same module would leave the set unchanged
+gs=0
+decls=$(git grep 'home.file.".codex/' -- '*.nix') || gs=$?
+[ "$gs" -le 1 ] || fail "the ~/.codex declaration sweep's git grep failed with status $gs"
+[ "$decls" = 'home/common/agent-guidance/default.nix:  home.file.".codex/AGENTS.md".source = ./AGENTS.md;' ] \
+  || fail "unexpected ~/.codex home.file declarations: $decls"
 grep -qF 'model_reasoning_effort' home/common/codex/default.nix || fail 'the codex module no longer splices model_reasoning_effort'
 need '`~/.codex/skills/` is Codex'
 need 'duplicates the managed `~/.agents/skills/` link of the same name'
@@ -109,7 +124,15 @@ done
 if grep -qE '[0-9]+ global skills' CLAUDE.md; then fail 'CLAUDE.md restates a skill count'; fi
 
 # H - scoped Superpowers sweep (D11)
-stray=$(git grep -In -i superpower -- ':!.claude/plans' ':!.claude/specs' ':!CLAUDE.md' ':!home/common/codex/default.nix' | grep -v '\.superpowers' || true)
+# status 1 is "no matches" and is the expected clean result; anything above 1 is a broken search
+# (bad pathspec, not a repo) and must not be flattened into an empty, PASS-looking $stray. The
+# search is kept out of a pipeline so `pipefail` cannot hide its status behind the filter's.
+gs=0
+raw=$(git grep -In -i superpower -- ':!.claude/plans' ':!.claude/specs' ':!CLAUDE.md' ':!home/common/codex/default.nix') || gs=$?
+[ "$gs" -le 1 ] || fail "the Superpowers sweep's git grep failed with status $gs"
+fs=0
+stray=$(printf '%s\n' "$raw" | grep -v '\.superpowers') || fs=$?
+[ "$fs" -le 1 ] || fail "the Superpowers sweep's filter grep failed with status $fs"
 if [ -n "$stray" ]; then fail "live Superpowers reference outside the state paths: $stray"; fi
 
 echo "task-1 gate: PASS"

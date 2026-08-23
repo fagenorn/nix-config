@@ -46,10 +46,15 @@ grep -qF '# like prototype/ keep SKILL.md + UI.md + LOGIC.md). ~/.claude/skills 
   || fail 'the second comment line changed; this edit is one line only'
 
 # C - comment-only: the option binding is untouched
-grep -qF 'skillsDir = ../agent-skills/skills;' "$M" || fail 'the skillsDir binding changed'
+# anchored past leading whitespace so a `#`-commented copy of the binding cannot satisfy it
+grep -qE '^[[:space:]]*skillsDir = \.\./agent-skills/skills;' "$M" || fail 'the skillsDir binding changed'
 
 # D - no skill count restated anywhere in the live configuration or the context doc (D5)
-stray=$(git grep -InE '[0-9]+ global skills' -- ':!.claude/plans' ':!.claude/specs' || true)
+# status 1 is "no matches" and is the expected clean result; anything above 1 is a broken search
+# (bad pathspec, not a repo) and must not be flattened into an empty, PASS-looking $stray
+gs=0
+stray=$(git grep -InE '[0-9]+ global skills' -- ':!.claude/plans' ':!.claude/specs') || gs=$?
+[ "$gs" -le 1 ] || fail "the skill-count sweep's git grep failed with status $gs"
 if [ -n "$stray" ]; then fail "a skill count is restated: $stray"; fi
 
 # E - the comment's surviving example is still true
