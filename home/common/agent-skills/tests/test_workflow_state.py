@@ -4129,6 +4129,50 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(terminal_takeover.returncode, 2)
         self.assertEqual(state_path.read_bytes(), before)
 
+    def test_new_run_is_rejected_while_latest_attempt_is_suspended(self):
+        owner = self.acquire_direct()
+        self.run_id = owner["run_id"]
+        self.suspend(
+            issue=73, attempt=1, blocked_on="usage_limit",
+            now="2026-08-20T10:30:00Z",
+        )
+        state_path = self.direct_state_path(owner["run_id"])
+        before = state_path.read_bytes()
+        refused = self.direct_owner_raw(
+            now="2026-08-20T11:00:00Z", new_run=True,
+            tracker=self.tracker_fact(73),
+            worktree=self.worktree_fact(73, recorded={
+                "path": owner["worktree"], "state": "matching_issue_branch",
+            }),
+            ok=False,
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertEqual(refused.stdout, "")
+        self.assertIn("suspended attempt is resumable", refused.stderr)
+        self.assertEqual(state_path.read_bytes(), before)
+        self.assertFalse((self.workflows_dir / "direct-73-000002").exists())
+
+    def test_direct_reentry_over_a_suspended_attempt_fails_loudly(self):
+        owner = self.acquire_direct()
+        self.run_id = owner["run_id"]
+        self.suspend(
+            issue=73, attempt=1, blocked_on="transport",
+            now="2026-08-20T10:30:00Z",
+        )
+        state_path = self.direct_state_path(owner["run_id"])
+        before = state_path.read_bytes()
+        rejected = self.direct_owner_raw(
+            now="2026-08-20T11:00:00Z", tracker=self.tracker_fact(73),
+            worktree=self.worktree_fact(73, recorded={
+                "path": owner["worktree"], "state": "matching_issue_branch",
+            }),
+            ok=False,
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertEqual(rejected.stdout, "")
+        self.assertIn("suspended attempt awaits resume", rejected.stderr)
+        self.assertEqual(state_path.read_bytes(), before)
+
     def test_direct_expiry_retries_on_absent_candidate_then_refuses_attempt_two(self):
         owner = self.acquire_direct(attempt_budget_minutes=30)
         tracker = self.tracker_fact(73)

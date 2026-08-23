@@ -2031,7 +2031,7 @@ def direct_run_is_terminal(issue_state: dict[str, Any]) -> bool:
     if not issue_state["attempts"]:
         return False
     latest = issue_state["attempts"][-1]
-    if latest["state"] in {"active", "handed_off"}:
+    if latest["state"] in {"active", "handed_off", "suspended"}:
         return False
     if (
         latest["state"] == "failed" and latest["result_source"] == "owner"
@@ -2172,6 +2172,21 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 selected is not None
                 and direct_run_is_terminal(selected[4]["issues"][str(issue)])
             )
+
+            selected_attempts = (
+                [] if selected is None
+                else selected[4]["issues"][str(issue)]["attempts"]
+            )
+            if selected_attempts and selected_attempts[-1]["state"] == "suspended":
+                # A suspension is resumed in place: it consumes no attempt and
+                # must never become an escape hatch into run fan-out (per D5,
+                # D13). The resume itself is not built yet, so refuse loudly
+                # rather than walk into a half-built path.
+                if request["new_run"]:
+                    raise WorkflowError(
+                        "new_run is not applicable: suspended attempt is resumable"
+                    )
+                raise WorkflowError("suspended attempt awaits resume")
 
             if request["new_run"]:
                 if not retained or not selected_is_terminal or nonterminal:
