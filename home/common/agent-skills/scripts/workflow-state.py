@@ -1526,6 +1526,17 @@ def command_init_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def tracker_halt_reason(tracker: dict[str, Any]) -> str | None:
+    """Why the tracker says this issue is not workable, or ``None`` if it is."""
+    if tracker["state"] == "closed":
+        return "closed"
+    if tracker["decision_blockers"]:
+        return "fogged"
+    if tracker["open_blockers"]:
+        return "blocked"
+    return None
+
+
 def control_blockers(tracker: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {"kind": "issue", "issue": issue, "url": None}
@@ -1739,6 +1750,20 @@ def _apply_one_issue_policy(
     if active_unexpired and not current_owner_unavailable:
         return decision("idle", expired=False)
 
+    if suspended and tracker is not None:
+        # A suspension is a parked interruption, not a claim on the issue: once
+        # the tracker says the work is closed or blocked there is nothing for a
+        # re-entry to resume, so it is reported exactly the way the retry lane
+        # reports a closed issue instead of flipping the attempt back to active.
+        # The reaper's demotion lands here now rather than in the retry lane,
+        # which is what makes this reachable (per D3, D9).
+        halted = tracker_halt_reason(tracker)
+        if halted is not None:
+            return decision(
+                "terminal", expired=False, tracker_reason=halted,
+                blockers=control_blockers(tracker),
+            )
+
     if active_unexpired or handed_off or suspended:
         assert latest is not None
         if not dispatch_permitted:
@@ -1791,7 +1816,8 @@ def _apply_one_issue_policy(
 
     assert tracker is not None
     blockers = control_blockers(tracker)
-    if tracker["state"] == "closed" or tracker["decision_blockers"] or tracker["open_blockers"]:
+    halt_reason = tracker_halt_reason(tracker)
+    if halt_reason is not None:
         changed = False
         if expired:
             assert latest is not None and ledger_issue is not None
@@ -1799,11 +1825,7 @@ def _apply_one_issue_policy(
             changed = True
         return decision(
             "terminal", changed=changed, expired=expired,
-            tracker_reason=(
-                "closed" if tracker["state"] == "closed"
-                else "fogged" if tracker["decision_blockers"] else "blocked"
-            ),
-            blockers=blockers,
+            tracker_reason=halt_reason, blockers=blockers,
         )
 
     unobserved_forge = forge_requirement()
@@ -2023,13 +2045,16 @@ def command_control(args: argparse.Namespace) -> int:
             if capacity <= 0 or analysis[issue]["desired"] != "resume":
                 continue
             observation = worktree_by_issue.get(issue)
-            if observation is None or observation["recorded"] is None:
-                # The sweep resumes handoffs and suspensions that needed no
-                # observation while they sat parked, so an issue the caller said
-                # nothing about is a round it still owes: the summary reports the
-                # pause and its worktree, and the next sweep resumes it. A
-                # worktree observed as absent or mismatched stays a refusal (per
-                # D9).
+            if (
+                analysis[issue]["attempt"]["state"] == "suspended"
+                and (observation is None or observation["recorded"] is None)
+            ):
+                # A suspension is the one pause the caller had no prior reason to
+                # observe — it was terminal until this sweep learned to resume it
+                # — so saying nothing about its worktree is a round still owed,
+                # not a fault: the summary reports the pause and its worktree,
+                # and the next sweep resumes it. A handoff, and any worktree
+                # observed as absent or mismatched, stays a refusal (per D9).
                 continue
             result = apply_policy(issue, True)
             if result["operation"] == "observe":

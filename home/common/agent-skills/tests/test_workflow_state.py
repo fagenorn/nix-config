@@ -4856,6 +4856,78 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(response["summaries"][0]["blocked_on"], "unknown")
         self.assertEqual(self.state_path.read_bytes(), before)
 
+    def test_control_still_demands_the_worktree_of_an_unobserved_handoff(self):
+        """Only a suspension is owed an observation round; a handoff is not."""
+        self.init_run()
+        worktree = self.root / "wt-46"
+        self.spawn(issue=46, worktree=worktree)
+        handoff = self.write_handoff(46)
+        self.progress(
+            issue=46, phase=1, now="2026-08-13T20:01:00Z",
+            turn_count=118, handoff_path=handoff,
+        )
+        self.assertEqual(
+            self.read_state()["issues"]["46"]["attempts"][-1]["state"], "handed_off"
+        )
+        before = self.state_path.read_bytes()
+        rejected = self.control_raw(
+            now="2026-08-13T20:02:00Z",
+            issues=[46],
+            tracker=[self.tracker_fact(46)],
+            worktrees=[],
+            ok=False,
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertEqual(rejected.stdout, "")
+        self.assertIn(
+            "resume control action requires a matching recorded worktree observation",
+            rejected.stderr,
+        )
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_a_halted_tracker_parks_a_suspension_instead_of_resuming_it(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-91")
+        self.spawn(issue=91, worktree=worktree, budget_minutes=10)
+        self.expire(issue=91, worktree=worktree, now="2026-08-13T20:10:00Z")
+        suspended = self.read_state()["issues"]["91"]["attempts"][-1]
+        self.assertEqual(suspended["state"], "suspended")
+        before = self.state_path.read_bytes()
+        halted = {
+            "closed": self.tracker_fact(91, state="closed"),
+            "blocked": self.tracker_fact(91, open_blockers=[40]),
+            "fogged": self.tracker_fact(91, decision_blockers=[
+                {"issue": 41, "url": "https://github.com/fagenorn/nix-config/issues/41"},
+            ]),
+        }
+        for reason, tracker in halted.items():
+            with self.subTest(reason=reason):
+                response = self.control(
+                    now="2026-08-13T21:00:00Z",
+                    issues=[91],
+                    tracker=[tracker],
+                    worktrees=[self.worktree_fact(91, recorded={
+                        "path": os.path.abspath(worktree),
+                        "state": "matching_issue_branch",
+                    })],
+                )
+                self.assert_control_response_shape(response)
+                # The retry lane's closed-issue path demotes nothing that is
+                # already demoted and dispatches nothing: no action, no delta.
+                self.assertEqual(
+                    [a for a in response["actions"] if a["kind"] == "resume"], []
+                )
+                self.assertEqual(
+                    response["actions"], [{"id": "finalize", "kind": "finalize"}]
+                )
+                self.assertEqual(response["deltas"], [])
+                self.assertEqual(response["summaries"][0]["state"], "suspended")
+                self.assertEqual(response["summaries"][0]["blocked_on"], "unknown")
+                self.assertEqual(
+                    self.read_state()["issues"]["91"]["attempts"][-1], suspended
+                )
+                self.assertEqual(self.state_path.read_bytes(), before)
+
 
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
     """Cover the installed layout, where the policy is a home-manager symlink."""
