@@ -83,7 +83,7 @@ EXEC_LINE=$(grep -n 'codex-companion.mjs "$@"' "$WRAPPER" | cut -d: -f1)
 env -i HOME="$HOME" PATH=/usr/bin:/bin sh -c '"$0" nonexistent-subcommand >/dev/null 2>&1; echo "wrapper exit (diagnostic only): $?"' "$WRAPPER"
 ```
 
-Expected: the discovery finds exactly one store path; both `grep -q` checks pass; the last line prints a `wrapper exit:` status — any status is acceptable, the point is that the wrapper runs to completion from a scrubbed environment holding only `HOME`, which is the launch shape the export exists for. If the first grep fails, the `''$` escaping in Step 2 resolved at eval time and the script hardcodes a path or an empty string; re-read the built file and fix the escaping.
+Expected: the discovery finds exactly one store path; the export and the `exec` are each found exactly once; and the export's line number is strictly less than the `exec`'s — an export placed after the `exec` is unreachable and fails here rather than passing two independent presence greps. The last line prints a `wrapper exit (diagnostic only):` status; any status is acceptable, since its point is only that the wrapper runs to completion from a scrubbed environment holding just `HOME`, which is the launch shape the export exists for. If the export line is not found at all, the `''$` escaping in Step 2 resolved at eval time and the script hardcodes a path or an empty string; re-read the built file and fix the escaping.
 
 - [ ] **Step 5: Commit**
 

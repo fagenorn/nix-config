@@ -158,9 +158,9 @@ Create `plugins/codex/scripts/lib/review-operations.mjs` in the scratch clone. F
 // shared 840 s wall killed ten plan-reviews against one diff-review, and
 // plan-review's p90 sat at 730 s hard against that wall — the signature of a
 // right-censored distribution whose observed median understates the honest one.
-// A Map rather than an object so a
-// lookup of an inherited property name cannot resolve to something non-undefined
-// and impersonate a registered operation.
+//
+// A Map rather than an object so a lookup of an inherited property name cannot
+// resolve to something non-undefined and impersonate a registered operation.
 export const REVIEWER_BUDGETS_MS = new Map([
   ["plan-review", 1680000],
   ["diff-review", 840000]
@@ -270,7 +270,7 @@ fi
 grep -q 'patchRevision = 11;' lib/agent-plugins.nix || exit 1
 ```
 
-Expected: `just build` succeeds; the discovery finds exactly one `.p11` path; the `node -e` line prints exactly `[["plan-review",1680000],["diff-review",840000]]`; both `grep -q` presence checks pass and the prohibition check does not fire.
+Expected: `just build` succeeds; the discovery finds exactly one `.p11` path; the `node -e` assertion exits 0 and prints its sorted comparison subject, `[["diff-review",840000],["plan-review",1680000]]` — it exits 1 with a `built registry is …, expected …` diff on any other value, which is what pins D1's two literals independently of the registry-derived tests; both `grep -q` presence checks pass and the prohibition check does not fire.
 
 - [ ] **Step 11: Commit**
 
