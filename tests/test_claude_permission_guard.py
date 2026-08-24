@@ -27,6 +27,14 @@ import os
 import sys
 import time
 
+# The guard must scrub the gh-recognised token variables from its lookups (the
+# harness token is narrower than the keyring credential). Refusing to answer
+# when one is visible makes every merge-path test double as that assertion.
+for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+    if name in os.environ:
+        print("fake gh saw " + name + " in its environment", file=sys.stderr)
+        raise SystemExit(64)
+
 argv = sys.argv[1:]
 stage = None
 number = ""
@@ -504,6 +512,65 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         result = self.run_guard(
             "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch",
             cwd=repo,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_merge_accepts_the_exact_unset_token_prefix(self):
+        # `unsetGithubToken` repositories run the merge as
+        # `unset GITHUB_TOKEN && gh pr merge ...` so gh falls back to the
+        # keyring credential; exactly that literal prefix is grammatical.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "unset GITHUB_TOKEN && gh pr merge 1 --repo fagenorn/nix-config "
+            "--merge --delete-branch",
+            "unset GITHUB_TOKEN && gh pr merge 1 --repo fagenorn/nix-config "
+            '--merge --subject "feature (#30)" --delete-branch',
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_prefixed_merge_reaches_acceptance_on_the_integration_base(self):
+        # The real-world shape that motivated the prefix: a nodocom ship-issue
+        # merge onto the declared integration branch `dev`.
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        result = self.run_guard(
+            "unset GITHUB_TOKEN && gh pr merge 42 --repo elevenyellow/nodocom "
+            "--merge --delete-branch",
+            cwd=repo,
+            env={"FAKE_PR_JSON":
+                 '{"state":"OPEN","baseRefName":"dev",'
+                 '"url":"https://github.com/elevenyellow/nodocom/pull/42"}'},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_prefixed_merge_near_misses_fail_closed(self):
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        merge = "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch"
+        for command in (
+            f"unset PATH && {merge}",                               # wrong variable
+            f"unset GITHUB_TOKEN GH_TOKEN && {merge}",              # extra variable
+            f"unset GITHUB_TOKEN; {merge}",                         # wrong separator
+            f"unset GITHUB_TOKEN &&{merge}",                        # missing space
+            f"unset  GITHUB_TOKEN && {merge}",                      # doubled space
+            f"unset GITHUB_TOKEN && unset GITHUB_TOKEN && {merge}", # doubled prefix
+            f"unset GITHUB_TOKEN && {merge} && true",               # trailing chain
+            f"true && unset GITHUB_TOKEN && {merge}",               # leading chain
+            f"FOO=bar unset GITHUB_TOKEN && {merge}",               # leading assignment
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+
+    def test_merge_lookups_drop_env_github_tokens(self):
+        # Deterministic version of the fake gh's env check: inject both tokens
+        # into the guard's own environment and require acceptance anyway.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        result = self.run_guard(
+            "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch",
+            cwd=repo,
+            env={"GITHUB_TOKEN": "github_pat_fake", "GH_TOKEN": "gho_fake"},
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
