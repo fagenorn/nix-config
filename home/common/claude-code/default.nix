@@ -58,6 +58,7 @@ let
       #!${pkgs.python3}/bin/python3
       import argparse
       import json
+      import os
       import re
       import shlex
       import subprocess
@@ -70,6 +71,19 @@ let
       AUTHORIZED_OWNERS = frozenset({${lib.concatMapStringsSep ", " (owner: "\"${owner}\"") authorizedOwners}})
       INTEGRATION_BASES = {${lib.concatStringsSep ", " (lib.mapAttrsToList (repo: base: "\"${repo}\": \"${base}\"") integrationBases)}}
       CHILD_DIAGNOSTIC_LIMIT = 240
+      # The harness exports a fine-grained GITHUB_TOKEN that gh prefers over the
+      # keyring credential, and its reach is narrower — it cannot see every
+      # authorized owner's org. The guard's forge lookups drop the env tokens so
+      # validation observes GitHub with the keyring credential, the same auth
+      # the `unset GITHUB_TOKEN && ` form of the guarded command will use. A
+      # machine with no keyring auth still fails closed at the lookup.
+      GH_ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
+      # Repositories whose skills config sets `unsetGithubToken: true` run every
+      # gh call as `unset GITHUB_TOKEN && gh ...` (the exact spelling ship-issue
+      # prescribes). The merge grammar accepts that one literal prefix and
+      # nothing looser; the remainder must still match the guarded merge argv in
+      # full, so nothing else can ride along.
+      UNSET_GITHUB_TOKEN_PREFIX = "unset GITHUB_TOKEN && "
       # The guarded verbs, as raw text and as token sequences. Order matters: the
       # first match at a token wins, and no sequence is a prefix of another.
       GUARDED_LITERALS = (
@@ -143,6 +157,14 @@ let
 
       def block_child_failure(reason, child):
           return block(f"{reason}: {bounded_child_diagnostic(child)}")
+
+
+      def gh_lookup_env():
+          """os.environ with the gh-recognised token variables removed."""
+          environment = dict(os.environ)
+          for name in GH_ENV_TOKEN_NAMES:
+              environment.pop(name, None)
+          return environment
 
 
       def read_heredoc_delimiter(command, index):
@@ -710,6 +732,12 @@ let
           if problem is not None:
               return block(f"unsafe merge: {problem}")
           repository = context.repository
+          # The one sanctioned prefix: `unsetGithubToken` repositories run the
+          # merge as `unset GITHUB_TOKEN && gh pr merge ...`. Strip exactly that
+          # literal and judge the remainder as the whole command, so the merge
+          # still tolerates no other chaining.
+          if command.startswith(UNSET_GITHUB_TOKEN_PREFIX):
+              command = command[len(UNSET_GITHUB_TOKEN_PREFIX):]
           merge_parts = parse_merge_raw(command, repository)
           if merge_parts is None:
               return block("unsafe merge: command does not match the guarded merge grammar")
@@ -740,6 +768,7 @@ let
                   text=True,
                   timeout=context.timeout,
                   check=False,
+                  env=gh_lookup_env(),
               )
           except subprocess.TimeoutExpired:
               return block("PR lookup timed out")
@@ -788,6 +817,7 @@ let
                   text=True,
                   timeout=context.timeout,
                   check=False,
+                  env=gh_lookup_env(),
               )
           except subprocess.TimeoutExpired:
               return block("protection lookup timed out")
