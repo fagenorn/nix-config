@@ -21,6 +21,31 @@ review_package_module = types.ModuleType("review_package")
 SourceFileLoader("review_package", str(COMMAND)).exec_module(review_package_module)
 
 
+# An artifact_budget shim: the real API when imported, a hard refusal when run
+# as a script. review-package uses both faces — check_artifact/load_limits
+# in-process, then `sys.executable <artifact_budget.__file__> validate-report`
+# for the producer report — so only the second one may fail (D16). The
+# sys.modules registration is load-bearing: dataclasses resolves
+# cls.__module__ through sys.modules while exec_module runs.
+REPORT_VALIDATOR_STUB = '''import sys
+
+if __name__ == "__main__":
+    sys.stderr.write("stub validator refuses validate-report\\n")
+    raise SystemExit(9)
+
+import types
+from importlib.machinery import SourceFileLoader
+
+_real = types.ModuleType("_real_artifact_budget")
+sys.modules["_real_artifact_budget"] = _real
+SourceFileLoader("_real_artifact_budget", REAL_MODULE_PATH).exec_module(_real)
+ArtifactBudgetError = _real.ArtifactBudgetError
+CheckResult = _real.CheckResult
+check_artifact = _real.check_artifact
+load_limits = _real.load_limits
+'''
+
+
 class ReviewPackageCliTest(unittest.TestCase):
     def run_git(self, repo: Path, *args: str, text: bool = True):
         return subprocess.run(["git", "-C", str(repo), *args], check=True,
@@ -304,6 +329,54 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout)["artifact"]["budget_status"],
                              "within_budget")
 
+    def test_detail_publishes_from_a_primary_whose_common_dir_is_not_dot_git(self):
+        """Identity first, primary second — the rule `sdd-workspace` applies.
+
+        A `git init --separate-git-dir=` checkout reports a common dir named
+        after the target, and a submodule working tree reports
+        `<super>/.git/modules/<name>`; both own their common dir, so both are
+        the primary. Demanding the `.git` name before deciding which checkout
+        this is refused them here while `sdd-workspace` accepted them all run
+        long — and delivery-detail publication is the last step of a run, so
+        the refusal landed only at completion, after the work it publishes.
+        """
+        with tempfile.TemporaryDirectory() as raw:
+            # Resolved: on macOS the temp root reaches through /var -> /private/var,
+            # and the common dir git reports below is the physical path.
+            directory = Path(raw).resolve()
+            main = directory / "main"
+            main.mkdir()
+            subprocess.run(
+                ["git", "init", "-q", "--separate-git-dir",
+                 str(directory / "gd"), str(main)],
+                check=True, capture_output=True,
+            )
+            _, env = self.setup_repo(main)
+            common = self.run_git(
+                main, "rev-parse", "--path-format=absolute", "--git-common-dir",
+            ).strip()
+            self.assertEqual(Path(common), directory / "gd")
+            (main / "seed.txt").write_text("seed\n", encoding="utf-8")
+            head = self.commit(main, "seed", env)
+            # `--branch` must name the checkout's current branch; `git init`
+            # picks the default branch from ambient config, so pin it here.
+            self.run_git(main, "branch", "-M", "issue-49")
+            source = main / "findings.json"
+            source.write_text(json.dumps({
+                "interface_version": 1,
+                "findings": [{
+                    "axis": "ship", "severity": "Minor", "status": "minor",
+                    "text": "Retain this detail", "ruling": None,
+                }],
+            }), encoding="utf-8")
+            out = main / ".superpowers/issue-delivery/49/run-1" / f"sdd-{head}.json"
+            result = self.invoke_detail(main, source, env, head=head, output=out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["artifact"]["path"],
+                             out.relative_to(main).as_posix())
+            self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["purpose"],
+                             "delivery-detail")
+
     def test_detail_mode_rejects_untrusted_destinations_and_identity(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -574,3 +647,36 @@ class ReviewPackageCliTest(unittest.TestCase):
                 snapshots.append((out.read_bytes(),
                     [(p.name, p.read_bytes()) for p in sorted((repo / "review.shards").iterdir())]))
         self.assertEqual(snapshots[0], snapshots[1])
+
+    def test_report_validation_failure_removes_the_report_candidate(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "repo"
+            repo.mkdir()
+            plan, env = self.setup_repo(repo)
+            (repo / "a.txt").write_text("before\n", encoding="utf-8")
+            base = self.commit(repo, "base", env)
+            (repo / "a.txt").write_text("after\n", encoding="utf-8")
+            head = self.commit(repo, "change a", env)
+
+            shim = Path(env["PYTHONPATH"]) / "artifact_budget.py"
+            shim.unlink()
+            shim.write_text(
+                REPORT_VALIDATOR_STUB.replace("REAL_MODULE_PATH", repr(str(MODULE))),
+                encoding="utf-8",
+            )
+            scratch = Path(raw) / "tmp"
+            scratch.mkdir()
+            env["TMPDIR"] = str(scratch)
+
+            result = self.invoke(repo, plan, base, head, repo / "review.json", env)
+
+            # Non-vacuity: the run reached the candidate rather than refusing at
+            # bootstrap. "validator unavailable" here would mean the shim broke
+            # the in-process API and nothing was ever created to clean up.
+            self.assertEqual(result.stderr, "review-package: generation failed\n")
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(
+                sorted(p.name for p in scratch.glob("review-package-report-*.json")),
+                [],
+            )

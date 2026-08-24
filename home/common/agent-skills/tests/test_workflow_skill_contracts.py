@@ -60,6 +60,121 @@ CODEX_COLLABORATION_EVALS = (
 GATE_LINE_BOUNDARY = "≤1,000 product lines"
 GATE_FILE_BOUNDARY = "≤20 product files"
 
+SKILL_ROOTS = (
+    REPO_ROOT / "home/common/agent-skills/skills",
+    REPO_ROOT / "home/common/claude-code/skills",
+)
+
+# The producer-report candidate contract, spelled once for the whole corpus so
+# the four skills that carry it cannot drift apart (D1).
+REPORT_CANDIDATE_CLAUSE = (
+    "a report candidate outside every working tree — create it with `mktemp "
+    '"${TMPDIR:-/tmp}/producer-report-XXXXXX.json"` (the explicit `XXXXXX` '
+    "template works on both macOS/BSD and Linux) — invoke `artifact-budget "
+    "validate-report --boundary producer --input <report-candidate>`, and "
+    "remove that candidate under an unconditional cleanup that runs on every "
+    "outcome, including validation rejection and failure: a shell `trap` on "
+    "`EXIT HUP INT TERM`, or the equivalent `finally`"
+)
+
+# One literal for all three lifecycle request-file prescriptions (D17).
+REQUEST_FILE_HOME = "a new absolute temporary request file beneath `${TMPDIR:-/tmp}`"
+REQUEST_FILE_INVOCATION = "--request-file <absolute-json-path>"
+
+# The terminal result file is the same class of control-plane scratch, so it
+# shares that home; unlike the request file the helper consumes within the call,
+# it outlives its own validation and carries the report candidate's cleanup.
+RESULT_FILE_HOME = (
+    "a new absolute temporary result file beneath `${TMPDIR:-/tmp}`, removed "
+    "under an unconditional cleanup that runs on every outcome, including "
+    "validation rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, "
+    "or the equivalent `finally`"
+)
+RESULT_FILE_INVOCATION = "--result-file <path>"
+
+# "sibling <=2 words> candidate" — the in-working-tree prescription being
+# removed. The bounded gap keeps it off handoff's legitimate
+# "candidate ... sibling temporary" sentences, where the words appear in the
+# other order (D2).
+SIBLING_CANDIDATE_RE = re.compile(r"sibling(?:\s+\S+){0,2}\s+candidate")
+
+SDD_SCRIPTS = REPO_ROOT / "home/common/agent-skills/skills/sdd/scripts"
+
+# The superseded claim: the workspace has not been repo-root-relative since the
+# primary-checkout move (D3).
+REPO_ROOT_WORKSPACE_LITERAL = "<repo-root>/.superpowers/sdd"
+
+# Every `.superpowers/` home the corpus is allowed to name, spelled once (D10).
+SUPERPOWERS_SEGMENTS = {"workflows", "issue-delivery", "sdd", "ship-review"}
+SUPERPOWERS_SEGMENT_RE = re.compile(r"\.superpowers/([A-Za-z0-9_.-]+)")
+
+SHIP_REVIEW_EXCEPTION = (
+    "the one exception to the rule that workflow scratch never lives in a "
+    "working tree"
+)
+
+# The orphaned-bucket prune, spelled once (D5, D8).
+WORKTREE_BUCKET_LITERAL = "`<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`"
+
+# What `git clean -fdx` actually destroys after Task 3 moved the ledger out of
+# the feature worktree.
+CLEAN_SCRATCH_CLAUSE = (
+    "in a feature worktree that is `ship-issue`'s retained Minor/Discussion "
+    "detail, and in the primary checkout it is every plan's SDD workspace"
+)
+
+GITIGNORE = REPO_ROOT / ".gitignore"
+
+SCRATCH_IGNORE_PATTERNS = (
+    ".superpowers/",
+    ".worktrees/",
+    "**/.claude/worktrees/",
+    "*.tmp.??????",
+    "producer-report-*.json",
+    "review-package-report-*.json",
+)
+
+# Every ephemeral shape a workflow run has produced or been told to produce.
+IGNORED_SHAPES = (
+    ".superpowers/sdd/primary/plan/progress.md",
+    ".superpowers/workflows/run-1/state.json",
+    "home/common/.superpowers/sdd/x",
+    ".worktrees/issue-102/file.txt",
+    ".claude/worktrees/worktree-issue-102/README.md",
+    ".claude/worktrees/wt/.superpowers/sdd/primary/p/progress.md",
+    "nested/.claude/worktrees/w/file",
+    ".claude/plans/task-1-brief.md.tmp.aB3xY9",
+    "producer-report-Ab12Cd.json",
+    "review-package-report-xyz789.json",
+    ".claude/specs/producer-report-XXXXXX.json",
+)
+
+# Real repository content that must stay visible to `git status`.
+KEPT_SHAPES = (
+    ".gitignore",
+    "CLAUDE.md",
+    "justfile",
+    ".claude/settings.json",
+    ".claude/specs/2026-08-23-workflow-scratch-containment-design.md",
+    ".claude/plans/2026-08-23-workflow-scratch-containment.md",
+    ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-1.md",
+    "home/common/agent-skills/skills/sdd/scripts/sdd-workspace",
+    "home/common/agent-skills/tests/test_sdd_workspace.py",
+    "handoff-notes.md",
+)
+
+
+def normalized(text):
+    """Collapse every whitespace run to one space (the corpus hard-wraps ~80c)."""
+    return re.sub(r"\s+", " ", text)
+
+
+def corpus_documents():
+    """Every skill document in both skill trees, as (path, text) pairs."""
+    for root in SKILL_ROOTS:
+        for path in sorted(root.rglob("*.md")):
+            yield path, path.read_text(encoding="utf-8")
+
 
 def nested_workflow_documents():
     for directory in (FROM_ISSUE_DIR, SDD_DIR):
@@ -309,8 +424,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("report only the root path and four metrics", self.writing_plans)
         for forbidden in ("open_items:", "decisions:", "adr_paths:", "summary:"):
             self.assertNotRegex(self.writing_plans, rf"(?m)^\s*{re.escape(forbidden)}")
-        self.assert_ordered(self.writing_plans, "candidate JSON", "validate-report",
-                            "validated stdout bytes")
+        self.assert_ordered(normalized(self.writing_plans),
+                            "report candidate outside every working tree",
+                            "validate-report", "validated stdout bytes")
 
     def test_design_and_grill_measure_after_last_write_and_stop_truthfully(self):
         for producer in (self.design, self.grill):
@@ -336,7 +452,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "final `within_budget` result",
             "commit the completed spec in the worktree",
             "construct, validate, and emit the `complete` producer report",
-            "candidate JSON file",
+            "report candidate outside every working tree",
             "validate-report --boundary producer",
             "validated stdout bytes",
         )
@@ -376,11 +492,72 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             for decision in ("(D5)", "(D11, D14)"):
                 self.assertIn(decision, producer)
             self.assertIn("phase_reports.notes_max_characters", producer)
-            self.assert_ordered(producer, "candidate JSON", "validate-report --boundary producer",
+            self.assert_ordered(normalized(producer),
+                                "report candidate outside every working tree",
+                                "validate-report --boundary producer",
                                 "validated stdout")
             self.assertIn("never inline artifact contents", producer)
             for forbidden in ("spec_path:", "adr_paths:", "decisions:", "open_items:", "summary:"):
                 self.assertNotRegex(producer, rf"(?m)^\s*{re.escape(forbidden)}")
+
+    def test_four_producer_skills_share_one_report_candidate_clause(self):
+        clause = normalized(REPORT_CANDIDATE_CLAUSE)
+        for name, text in (
+            ("design", self.design),
+            ("grill-with-docs", self.grill),
+            ("writing-plans", self.writing_plans),
+            ("handoff", self.handoff),
+        ):
+            with self.subTest(skill=name):
+                self.assertIn(clause, normalized(text))
+
+    def test_handoff_failure_reemit_uses_a_fresh_report_candidate(self):
+        self.assertIn(
+            "a fresh report candidate created and cleaned up the same way",
+            normalized(self.handoff),
+        )
+
+    def test_handoff_keeps_the_publication_sibling(self):
+        text = normalized(self.handoff)
+        self.assertIn("as a sibling temporary regular file", text)
+        self.assertIn("written as a sibling of the durable destination", text)
+
+    def test_no_skill_prescribes_a_sibling_candidate(self):
+        offenders = [
+            f"{path.relative_to(REPO_ROOT)}: {match.group(0)!r}"
+            for path, text in corpus_documents()
+            for match in SIBLING_CANDIDATE_RE.finditer(normalized(text))
+        ]
+        self.assertEqual(offenders, [])
+
+    def assert_every_carrier_states_the_temp_home(self, invocation, home, minimum):
+        carriers = [
+            (str(path.relative_to(REPO_ROOT)), normalized(text))
+            for path, text in corpus_documents()
+            if invocation in normalized(text)
+        ]
+        names = [name for name, _ in carriers]
+        # Non-vacuity: the rule must have something to police.
+        self.assertGreaterEqual(len(carriers), minimum, names)
+        missing = [name for name, text in carriers if home not in text]
+        self.assertEqual(missing, [])
+
+    def test_request_file_prescriptions_name_the_temp_home(self):
+        self.assertEqual(normalized(self.from_issue).count(REQUEST_FILE_HOME), 2)
+        self.assertEqual(normalized(self.orchestrate).count(REQUEST_FILE_HOME), 1)
+
+    def test_result_file_prescription_names_the_temp_home(self):
+        self.assertEqual(normalized(self.from_issue).count(RESULT_FILE_HOME), 1)
+
+    def test_every_request_file_invocation_names_the_temp_home(self):
+        self.assert_every_carrier_states_the_temp_home(
+            REQUEST_FILE_INVOCATION, REQUEST_FILE_HOME, 2
+        )
+
+    def test_every_result_file_invocation_names_the_temp_home(self):
+        self.assert_every_carrier_states_the_temp_home(
+            RESULT_FILE_INVOCATION, RESULT_FILE_HOME, 1
+        )
 
     def test_from_issue_validates_artifacts_before_every_phase_advance(self):
         self.assert_ordered(self.from_issue, "validate the returned state", "artifact-budget check",
@@ -1833,6 +2010,121 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         ):
             with self.subTest(dispatch_id=dispatch_id):
                 self.assertIn(dispatch_id, ship_skill)
+
+    def test_sdd_documents_the_primary_rooted_bucketed_workspace(self):
+        text = normalized(self.sdd)
+        self.assertIn(
+            "`<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`",
+            text,
+        )
+        self.assertIn(
+            "`primary` for the primary checkout itself and `wt-<worktree-name>` "
+            "for a linked worktree",
+            text,
+        )
+        self.assertIn(
+            "`git clean -fdx` in the primary checkout destroys the workspace",
+            text,
+        )
+
+    def test_no_document_or_script_claims_a_repo_root_workspace(self):
+        offenders = [
+            str(path.relative_to(REPO_ROOT))
+            for path, text in corpus_documents()
+            if REPO_ROOT_WORKSPACE_LITERAL in text
+        ]
+        offenders += [
+            str(path.relative_to(REPO_ROOT))
+            for path in sorted(SDD_SCRIPTS.iterdir())
+            if path.is_file()
+            and REPO_ROOT_WORKSPACE_LITERAL in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_superpowers_homes_are_a_closed_allowlist(self):
+        found: dict[str, set[str]] = {}
+        for path, text in corpus_documents():
+            for match in SUPERPOWERS_SEGMENT_RE.finditer(text):
+                found.setdefault(match.group(1), set()).add(
+                    str(path.relative_to(REPO_ROOT))
+                )
+        self.assertEqual(set(found), SUPERPOWERS_SEGMENTS, found)
+
+    def test_ship_review_is_the_single_documented_exception(self):
+        carriers = [
+            str(path.relative_to(REPO_ROOT))
+            for path, text in corpus_documents()
+            if ".superpowers/ship-review" in text
+        ]
+        self.assertEqual(
+            carriers, ["home/common/agent-skills/skills/ship-issue/REVIEW.md"]
+        )
+        self.assertIn(SHIP_REVIEW_EXCEPTION, normalized(self.ship_review))
+
+    def test_ship_issue_prunes_the_removed_worktrees_sdd_bucket(self):
+        text = normalized(self.ship_issue)
+        self.assertIn(WORKTREE_BUCKET_LITERAL, text)
+        self.assertIn(
+            "Remove only that one worktree's bucket — never `primary/`, and "
+            "never another worktree's.",
+            text,
+        )
+
+    def test_worktrees_names_the_scratch_git_clean_destroys(self):
+        text = normalized(self.worktrees)
+        self.assertIn(CLEAN_SCRATCH_CLAUSE, text)
+        self.assertNotIn("(ledgers, review packages)", text)
+
+    def test_gitignore_is_tracked_and_carries_the_backstop(self):
+        subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "--error-unmatch", ".gitignore"],
+            check=True, capture_output=True,
+        )
+        lines = GITIGNORE.read_text(encoding="utf-8").splitlines()
+        for pattern in SCRATCH_IGNORE_PATTERNS:
+            with self.subTest(pattern=pattern):
+                self.assertIn(pattern, lines)
+
+    def test_gitignore_ignores_leaked_shapes_in_an_isolated_repository(self):
+        """Check the patterns in a throwaway repo, never in this one.
+
+        This repository's .git/info/exclude already ignores the same shapes, so
+        running `git check-ignore` here would pass even against an empty
+        .gitignore — a vacuous pass. Global and system git config are disabled
+        too, so a machine-local core.excludesFile cannot decide a keep shape
+        for us (D12).
+        """
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "repo"
+            home = Path(raw) / "home"
+            home.mkdir()
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+            })
+            for redirect_var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+                env.pop(redirect_var, None)
+            subprocess.run(
+                ["git", "init", "-q", "-b", "main", str(repo)],
+                env=env, check=True,
+            )
+            (repo / ".gitignore").write_bytes(GITIGNORE.read_bytes())
+
+            def status(candidate):
+                return subprocess.run(
+                    ["git", "-C", str(repo), "-c", f"core.excludesFile={os.devnull}",
+                     "check-ignore", "-q", "--no-index", candidate],
+                    env=env, capture_output=True, check=False,
+                ).returncode
+
+            for shape in IGNORED_SHAPES:
+                with self.subTest(ignored=shape):
+                    self.assertEqual(status(shape), 0)
+            for shape in KEPT_SHAPES:
+                with self.subTest(kept=shape):
+                    self.assertEqual(status(shape), 1)
 
 
 # --- codebase-design vocabulary package (issue 42) -------------------------

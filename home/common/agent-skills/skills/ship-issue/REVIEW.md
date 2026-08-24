@@ -82,12 +82,17 @@ user-facing — surface those with a doc-grounded prompt. Then continue.
 
 Before Phase 8 may remove anything, collect every Minor/Discussion item from
 either review path as the strict non-empty findings input. First, write the retained candidate
-at `.superpowers/ship-review/<issue>/retained-detail.json` in the
-feature worktree. Run `artifact-budget validate-detail-input` on that no-follow
-file and consume canonical stdout before invoking review-package's
-`delivery-detail` mode (`~/.agents/bin/review-package`). Supply issue/branch/run/head identity only; the producer
-derives the per-run leaf beneath the primary checkout's
-`.superpowers/issue-delivery/` home and enforces no-clobber publication.
+at `.superpowers/ship-review/<issue>/retained-detail.json` in the feature
+worktree. That worktree-local path is deliberate and is the one exception to
+the rule that workflow scratch never lives in a working tree: on publication
+failure this flow re-reads the retained candidate and keeps the worktree, so
+the candidate's lifetime is meant to be the worktree's. Do not relocate it to
+`$TMPDIR` or the primary checkout. Run `artifact-budget validate-detail-input`
+on that no-follow file and consume canonical stdout before invoking
+review-package's `delivery-detail` mode (`~/.agents/bin/review-package`).
+Supply issue/branch/run/head identity only; the producer derives the per-run
+leaf beneath the primary checkout's `.superpowers/issue-delivery/` home and
+enforces no-clobber publication.
 
 On success, independently check the returned review-package root, set
 `detail_state: "present"`, put its single main-root-relative path in

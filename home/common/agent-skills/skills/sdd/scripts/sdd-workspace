@@ -1,18 +1,41 @@
 #!/usr/bin/env bash
-# Resolve and ensure the working-tree directory SDD uses for one plan's
-# short-lived artifacts: task briefs, implementer reports, review packages,
-# and the progress ledger. Print the plan directory's absolute path.
+# Resolve and ensure the directory SDD uses for one plan's short-lived
+# artifacts: task briefs, implementer reports, review packages, and the
+# progress ledger. Print the plan directory's absolute path.
 #
-# One directory per plan (.superpowers/sdd/<plan-basename>/) so a follow-up
-# plan in the same working tree can never read or overwrite another plan's
-# artifacts. A stale ledger misread as current progress makes controllers
-# skip whole task sequences — plan-scoping removes that failure structurally.
+# The workspace is rooted at the PRIMARY checkout — the working tree that owns
+# the common Git directory — resolved from git, never assumed to be the process
+# cwd's toplevel. Run from a linked worktree, a cwd-rooted workspace nests a
+# second ledger inside that worktree: the substitution the lifecycle contract
+# forbids for state that must outlive one checkout.
 #
-# The workspace lives in the working tree (not under .git/) because Claude Code
+# Within the primary the path is .superpowers/sdd/<bucket>/<plan-basename>/,
+# where <bucket> is `primary` for the primary checkout itself and
+# `wt-<worktree-name>` for a linked worktree. One directory per plan so a
+# follow-up plan can never read or overwrite another plan's artifacts; one
+# bucket per checkout so a second attempt at the same plan on another branch
+# cannot read the first attempt's completed-task lines. A stale ledger misread
+# as current progress makes controllers skip whole task sequences. The bucket
+# narrows that failure: two checkouts running one plan never share a ledger. It
+# does not make a stale read impossible — a bucket outlives the worktree that
+# named it, which is why ship-issue removes a feature worktree's bucket when it
+# removes the worktree.
+#
+# Which checkout this is gets decided BEFORE the primary is derived. A checkout
+# whose git dir is its own common dir is the primary, whatever that dir is
+# called: a submodule sees <super>/.git/modules/<name> and a
+# --separate-git-dir= checkout sees the bare git-dir path, and for both the
+# answer is simply `git rev-parse --show-toplevel`. Only the linked-worktree
+# branch may assume the common dir is named .git and that the primary is its
+# parent, because only there is that true.
+#
+# The workspace lives in a working tree (not under .git/) because Claude Code
 # treats .git/ as a protected path and denies agent writes there — which blocks
 # an implementer subagent from writing its report file. A self-ignoring
 # .gitignore at .superpowers/sdd/ keeps every plan's workspace out of
-# `git status` and out of accidental commits without modifying any tracked file.
+# `git status` and out of accidental commits without modifying any tracked
+# file; a project whose own .gitignore already covers these shapes gets it
+# twice over, and a project whose .gitignore does not gets it only from here.
 #
 # Single source of truth for the workspace location, so task-brief and
 # review-package cannot drift to different directories.
@@ -32,9 +55,50 @@ slug=$(basename "$plan" .md)
 [ -n "$slug" ] && [ "$slug" != "." ] && [ "$slug" != ".." ] \
   || { echo "cannot derive a workspace name from: $plan" >&2; exit 2; }
 
-root=$(git rev-parse --show-toplevel)
-base="$root/.superpowers/sdd"
-dir="$base/$slug"
-mkdir -p "$dir"
-printf '*\n' > "$base/.gitignore"
-cd "$dir" && pwd
+gitdir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || gitdir=
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
+[ -n "$gitdir" ] && [ -n "$common" ] \
+  || { echo "cannot resolve checkout identity" >&2; exit 2; }
+
+if [ "$gitdir" = "$common" ]; then
+  # This checkout owns the common dir: it IS the primary, whatever the dir is
+  # named. No basename check here — that is what breaks submodules and
+  # --separate-git-dir checkouts.
+  primary=$(git rev-parse --path-format=absolute --show-toplevel 2>/dev/null) || primary=
+  [ -n "$primary" ] && [ -d "$primary" ] && [ ! -L "$primary" ] \
+    || { echo "invalid primary checkout" >&2; exit 2; }
+  bucket=primary
+else
+  # A linked worktree: exactly one component under <common>/worktrees/.
+  name=${gitdir#"$common/worktrees/"}
+  [ "$gitdir" = "$common/worktrees/$name" ] \
+    && [ -n "$name" ] && [ "$name" != "." ] && [ "$name" != ".." ] \
+    && [ "${name#*/}" = "$name" ] \
+    || { echo "cannot resolve checkout identity" >&2; exit 2; }
+  [ "$(basename "$common")" = ".git" ] \
+    || { echo "invalid common Git directory" >&2; exit 2; }
+  primary=$(dirname "$common")
+  shown=$(git -C "$primary" rev-parse --path-format=absolute --show-toplevel 2>/dev/null) || shown=
+  [ "$shown" = "$primary" ] && [ -d "$primary" ] && [ ! -L "$primary" ] \
+    || { echo "invalid primary checkout" >&2; exit 2; }
+  bucket="wt-$name"
+fi
+
+base="$primary/.superpowers/sdd"
+dir="$base/$bucket/$slug"
+# Both `mkdir -p` and `>` follow symlinks, so a link left on any component by a
+# stale run or a competing checkout silently redirects this plan's briefs and
+# ledger out of the primary just resolved — and a linked .gitignore truncates
+# whatever it points at. The bucket only isolates ledgers while every component
+# really lives beneath $primary. Descend one component at a time, refusing a
+# link BEFORE creating anything through it; a single `mkdir -p "$dir"` would
+# already have written the whole chain into the link's target. `$bucket` and
+# `$slug` are single components by construction, so these four are the whole
+# path.
+for step in "$primary/.superpowers" "$base" "$base/$bucket" "$dir"; do
+  [ ! -L "$step" ] && mkdir -p "$step" \
+    || { echo "cannot create the SDD workspace beneath: $primary" >&2; exit 2; }
+done
+[ ! -L "$base/.gitignore" ] && printf '*\n' > "$base/.gitignore" \
+  || { echo "cannot create the SDD workspace beneath: $primary" >&2; exit 2; }
+printf '%s\n' "$dir"

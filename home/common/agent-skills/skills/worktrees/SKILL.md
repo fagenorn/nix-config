@@ -11,7 +11,7 @@ Guarantee an isolated workspace exists, then hand control back. The caller owns 
 
 Creating a worktree is safe and needs no confirmation. Removing one, discarding changes in one, or deleting its branch is destructive: do it only when the caller's flow authorizes it (from-issue's orphan cleanup, ship-issue's post-merge cleanup) or the user asks. Uncommitted work in a worktree you didn't create is never yours to discard — report it.
 
-Never repair a worktree with `git reset --hard`, `git checkout --`, `git clean -fdx`, or `git branch -D`. Those destroy state you cannot see the value of; describe the situation instead. `git clean -fdx` also deletes git-ignored scratch (ledgers, review packages) that a run in progress depends on.
+Never repair a worktree with `git reset --hard`, `git checkout --`, `git clean -fdx`, or `git branch -D`. Those destroy state you cannot see the value of; describe the situation instead. `git clean -fdx` also deletes git-ignored scratch a run in progress depends on: in a feature worktree that is `ship-issue`'s retained Minor/Discussion detail, and in the primary checkout it is every plan's SDD workspace.
 
 ## Already positioned? Skip the call
 

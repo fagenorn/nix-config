@@ -244,9 +244,13 @@ For `failed`, the artifact is null or contains only the known root `kind` and
 `path`. Legacy producer-specific lists or summary fields are contract errors.
 Notes point to the root/spec when needed and remain within shared policy; report only the root path and four metrics, never artifact contents or member paths.
 
-Write this object as UTF-8 to a sibling temporary candidate JSON file, run
-`artifact-budget validate-report --boundary producer --input <candidate>`,
-delete the candidate, and return only the exact validated stdout bytes. Validator
-exit 2 is `failed`; do not emit the candidate or a prose fallback. Do not offer
-an execution choice, invoke an execution skill, or start implementing — the
-caller owns standards review and execution.
+Write this object as UTF-8 to a report candidate outside every working tree —
+create it with `mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"` (the
+explicit `XXXXXX` template works on both macOS/BSD and Linux) — invoke
+`artifact-budget validate-report --boundary producer --input <report-candidate>`,
+and remove that candidate under an unconditional cleanup that runs on every
+outcome, including validation rejection and failure: a shell `trap` on `EXIT HUP
+INT TERM`, or the equivalent `finally`. Return only the exact validated stdout
+bytes. Validator exit 2 is `failed`; do not emit the candidate or a prose
+fallback. Do not offer an execution choice, invoke an execution skill, or start
+implementing — the caller owns standards review and execution.

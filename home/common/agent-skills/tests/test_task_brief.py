@@ -88,3 +88,26 @@ class TaskBriefPackageTest(unittest.TestCase):
             self.assertEqual(result.returncode, 3)
             self.assertEqual(out.read_bytes(), b"valid-old-brief")
             self.assertNotIn("Permission denied", result.stderr)
+
+    def test_failed_member_copy_leaves_no_temporary_sibling(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root, env = self.make_repo(Path(raw))
+            self.write_package(root)
+            marker = Path(raw) / "cp-was-called"
+            stub = Path(raw) / "bin/cp"
+            stub.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+            stub.chmod(0o755)
+            out_dir = Path(raw) / "briefs"
+            out_dir.mkdir()
+            out = out_dir / "brief.md"
+
+            result = subprocess.run(
+                [str(TASK_BRIEF), str(root), "1", str(out)], env=env,
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            # Non-vacuity: the copy branch was reached, not some earlier refusal.
+            self.assertTrue(marker.exists())
+            self.assertFalse(out.exists())
+            self.assertEqual(sorted(p.name for p in out_dir.iterdir()), [])

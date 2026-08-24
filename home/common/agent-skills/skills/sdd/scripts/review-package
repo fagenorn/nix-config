@@ -379,17 +379,39 @@ def _real_directory(path: Path) -> None:
 
 
 def _primary_checkout(repo: Path) -> Path:
+    """The working tree that owns the common Git directory.
+
+    Identity first, primary second — the same order `sdd-workspace` applies
+    (issue 102, D19), and for the same reason. A checkout whose git dir *is*
+    its common dir is the primary whatever that dir is named: a submodule
+    working tree reports `<super>/.git/modules/<name>` and a
+    `git init --separate-git-dir=` checkout reports the bare git-dir path.
+    Demanding the `.git` name before deciding which checkout this is refuses
+    both, and `delivery-detail` publication is the last step of a run — so the
+    refusal would land only at completion, after the work it was meant to
+    publish. The `.git` name and the `dirname` derivation stay on the
+    linked-worktree branch, the one place they are the validation that the
+    primary really is the common dir's parent.
+    """
+    raw_git = _run_git(repo, "rev-parse", "--path-format=absolute", "--git-dir")
+    assert isinstance(raw_git, str)
+    gitdir = Path(os.path.abspath(raw_git.strip()))
     raw = _run_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
     assert isinstance(raw, str)
     common = Path(os.path.abspath(raw.strip()))
-    if common.name != ".git":
-        raise InvocationError("invalid common Git directory")
-    _real_directory(common)
-    primary = common.parent
-    shown = _run_git(primary, "rev-parse", "--show-toplevel")
-    assert isinstance(shown, str)
-    if Path(os.path.abspath(shown.strip())) != primary:
-        raise InvocationError("invalid primary checkout")
+    if gitdir == common:
+        shown = _run_git(repo, "rev-parse", "--show-toplevel")
+        assert isinstance(shown, str)
+        primary = Path(os.path.abspath(shown.strip()))
+    else:
+        if common.name != ".git":
+            raise InvocationError("invalid common Git directory")
+        _real_directory(common)
+        primary = common.parent
+        shown = _run_git(primary, "rev-parse", "--show-toplevel")
+        assert isinstance(shown, str)
+        if Path(os.path.abspath(shown.strip())) != primary:
+            raise InvocationError("invalid primary checkout")
     _real_directory(primary)
     return primary
 
