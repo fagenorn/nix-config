@@ -329,6 +329,54 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout)["artifact"]["budget_status"],
                              "within_budget")
 
+    def test_detail_publishes_from_a_primary_whose_common_dir_is_not_dot_git(self):
+        """Identity first, primary second — the rule `sdd-workspace` applies.
+
+        A `git init --separate-git-dir=` checkout reports a common dir named
+        after the target, and a submodule working tree reports
+        `<super>/.git/modules/<name>`; both own their common dir, so both are
+        the primary. Demanding the `.git` name before deciding which checkout
+        this is refused them here while `sdd-workspace` accepted them all run
+        long — and delivery-detail publication is the last step of a run, so
+        the refusal landed only at completion, after the work it publishes.
+        """
+        with tempfile.TemporaryDirectory() as raw:
+            # Resolved: on macOS the temp root reaches through /var -> /private/var,
+            # and the common dir git reports below is the physical path.
+            directory = Path(raw).resolve()
+            main = directory / "main"
+            main.mkdir()
+            subprocess.run(
+                ["git", "init", "-q", "--separate-git-dir",
+                 str(directory / "gd"), str(main)],
+                check=True, capture_output=True,
+            )
+            _, env = self.setup_repo(main)
+            common = self.run_git(
+                main, "rev-parse", "--path-format=absolute", "--git-common-dir",
+            ).strip()
+            self.assertEqual(Path(common), directory / "gd")
+            (main / "seed.txt").write_text("seed\n", encoding="utf-8")
+            head = self.commit(main, "seed", env)
+            # `--branch` must name the checkout's current branch; `git init`
+            # picks the default branch from ambient config, so pin it here.
+            self.run_git(main, "branch", "-M", "issue-49")
+            source = main / "findings.json"
+            source.write_text(json.dumps({
+                "interface_version": 1,
+                "findings": [{
+                    "axis": "ship", "severity": "Minor", "status": "minor",
+                    "text": "Retain this detail", "ruling": None,
+                }],
+            }), encoding="utf-8")
+            out = main / ".superpowers/issue-delivery/49/run-1" / f"sdd-{head}.json"
+            result = self.invoke_detail(main, source, env, head=head, output=out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["artifact"]["path"],
+                             out.relative_to(main).as_posix())
+            self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["purpose"],
+                             "delivery-detail")
+
     def test_detail_mode_rejects_untrusted_destinations_and_identity(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)

@@ -200,6 +200,49 @@ class SddWorkspaceTest(unittest.TestCase):
             self.assertEqual(result.stderr, "cannot resolve checkout identity\n")
             self.assertFalse((primary / ".superpowers").exists())
 
+    def test_a_symlinked_workspace_component_refuses_before_writing_through(self):
+        """`mkdir -p` and `>` follow links; the guard has to refuse first.
+
+        A link left on any component by a stale run or a competing checkout
+        would put this plan's briefs and ledger outside the primary the
+        script just resolved, and a linked `.gitignore` would truncate
+        whatever it points at — both of which defeat the bucket. Each
+        subTest plants one link over a decoy and asserts the decoy is still
+        exactly as it was: no chain created inside it, no file rewritten.
+        """
+        components = (
+            ".superpowers",
+            ".superpowers/sdd",
+            ".superpowers/sdd/primary",
+            ".superpowers/sdd/primary/plan",
+            ".superpowers/sdd/.gitignore",
+        )
+        for component in components:
+            with self.subTest(component=component), \
+                    tempfile.TemporaryDirectory() as raw:
+                base = Path(raw).resolve()
+                primary, plan = self.make_primary(base)
+                decoy = base / "decoy"
+                decoy.mkdir()
+                witness = decoy / "evidence.txt"
+                witness.write_text("keep\n", encoding="utf-8")
+                link = primary / component
+                link.parent.mkdir(parents=True, exist_ok=True)
+                if link.name == ".gitignore":
+                    link.symlink_to(witness)
+                else:
+                    link.symlink_to(decoy, target_is_directory=True)
+                result = self.invoke(primary, plan)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(
+                    result.stderr,
+                    f"cannot create the SDD workspace beneath: {primary}\n",
+                )
+                self.assertEqual(witness.read_text(encoding="utf-8"), "keep\n")
+                self.assertEqual([entry.name for entry in decoy.iterdir()],
+                                 ["evidence.txt"])
+
     def test_missing_plan_file_still_refuses(self):
         with tempfile.TemporaryDirectory() as raw:
             primary, _ = self.make_primary(Path(raw).resolve())

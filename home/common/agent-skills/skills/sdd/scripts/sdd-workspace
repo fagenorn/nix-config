@@ -65,7 +65,7 @@ if [ "$gitdir" = "$common" ]; then
   # named. No basename check here — that is what breaks submodules and
   # --separate-git-dir checkouts.
   primary=$(git rev-parse --path-format=absolute --show-toplevel 2>/dev/null) || primary=
-  [ -n "$primary" ] && [ -d "$primary" ] \
+  [ -n "$primary" ] && [ -d "$primary" ] && [ ! -L "$primary" ] \
     || { echo "invalid primary checkout" >&2; exit 2; }
   bucket=primary
 else
@@ -86,6 +86,19 @@ fi
 
 base="$primary/.superpowers/sdd"
 dir="$base/$bucket/$slug"
-mkdir -p "$dir" && printf '*\n' > "$base/.gitignore" \
+# Both `mkdir -p` and `>` follow symlinks, so a link left on any component by a
+# stale run or a competing checkout silently redirects this plan's briefs and
+# ledger out of the primary just resolved — and a linked .gitignore truncates
+# whatever it points at. The bucket only isolates ledgers while every component
+# really lives beneath $primary. Descend one component at a time, refusing a
+# link BEFORE creating anything through it; a single `mkdir -p "$dir"` would
+# already have written the whole chain into the link's target. `$bucket` and
+# `$slug` are single components by construction, so these four are the whole
+# path.
+for step in "$primary/.superpowers" "$base" "$base/$bucket" "$dir"; do
+  [ ! -L "$step" ] && mkdir -p "$step" \
+    || { echo "cannot create the SDD workspace beneath: $primary" >&2; exit 2; }
+done
+[ ! -L "$base/.gitignore" ] && printf '*\n' > "$base/.gitignore" \
   || { echo "cannot create the SDD workspace beneath: $primary" >&2; exit 2; }
 printf '%s\n' "$dir"
