@@ -1,3 +1,13 @@
 result
 __pycache__/
 *.pyc
+
+# Ephemeral agent-workflow scratch. Their real homes are the primary checkout's
+# .superpowers/ and $TMPDIR; these patterns are only the backstop, tracked here
+# because .git/info/exclude is machine-local and invisible to every other clone.
+.superpowers/
+.worktrees/
+**/.claude/worktrees/
+*.tmp.??????
+producer-report-*.json
+review-package-report-*.json

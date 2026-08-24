@@ -123,6 +123,46 @@ CLEAN_SCRATCH_CLAUSE = (
     "detail, and in the primary checkout it is every plan's SDD workspace"
 )
 
+GITIGNORE = REPO_ROOT / ".gitignore"
+
+SCRATCH_IGNORE_PATTERNS = (
+    ".superpowers/",
+    ".worktrees/",
+    "**/.claude/worktrees/",
+    "*.tmp.??????",
+    "producer-report-*.json",
+    "review-package-report-*.json",
+)
+
+# Every ephemeral shape a workflow run has produced or been told to produce.
+IGNORED_SHAPES = (
+    ".superpowers/sdd/primary/plan/progress.md",
+    ".superpowers/workflows/run-1/state.json",
+    "home/common/.superpowers/sdd/x",
+    ".worktrees/issue-102/file.txt",
+    ".claude/worktrees/worktree-issue-102/README.md",
+    ".claude/worktrees/wt/.superpowers/sdd/primary/p/progress.md",
+    "nested/.claude/worktrees/w/file",
+    ".claude/plans/task-1-brief.md.tmp.aB3xY9",
+    "producer-report-Ab12Cd.json",
+    "review-package-report-xyz789.json",
+    ".claude/specs/producer-report-XXXXXX.json",
+)
+
+# Real repository content that must stay visible to `git status`.
+KEPT_SHAPES = (
+    ".gitignore",
+    "CLAUDE.md",
+    "justfile",
+    ".claude/settings.json",
+    ".claude/specs/2026-08-23-workflow-scratch-containment-design.md",
+    ".claude/plans/2026-08-23-workflow-scratch-containment.md",
+    ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-1.md",
+    "home/common/agent-skills/skills/sdd/scripts/sdd-workspace",
+    "home/common/agent-skills/tests/test_sdd_workspace.py",
+    "handoff-notes.md",
+)
+
 
 def normalized(text):
     """Collapse every whitespace run to one space (the corpus hard-wraps ~80c)."""
@@ -2880,6 +2920,52 @@ path_unchanged_since() { return 0; }
             ).returncode,
             0,
         )
+
+    def test_gitignore_is_tracked_and_carries_the_backstop(self):
+        subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "--error-unmatch", ".gitignore"],
+            check=True, capture_output=True,
+        )
+        lines = GITIGNORE.read_text(encoding="utf-8").splitlines()
+        for pattern in SCRATCH_IGNORE_PATTERNS:
+            with self.subTest(pattern=pattern):
+                self.assertIn(pattern, lines)
+
+    def test_gitignore_ignores_leaked_shapes_in_an_isolated_repository(self):
+        """Check the patterns in a throwaway repo, never in this one.
+
+        This repository's .git/info/exclude already ignores the same shapes, so
+        running `git check-ignore` here would pass even against an empty
+        .gitignore — a vacuous pass. Global and system git config are disabled
+        too, so a machine-local core.excludesFile cannot decide a keep shape
+        for us (D12).
+        """
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "repo"
+            home = Path(raw) / "home"
+            home.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            (repo / ".gitignore").write_bytes(GITIGNORE.read_bytes())
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+            })
+
+            def status(candidate):
+                return subprocess.run(
+                    ["git", "-C", str(repo), "check-ignore", "-q", "--no-index",
+                     candidate],
+                    env=env, capture_output=True, check=False,
+                ).returncode
+
+            for shape in IGNORED_SHAPES:
+                with self.subTest(ignored=shape):
+                    self.assertEqual(status(shape), 0)
+            for shape in KEPT_SHAPES:
+                with self.subTest(kept=shape):
+                    self.assertEqual(status(shape), 1)
 
 
 if __name__ == "__main__":
