@@ -42,10 +42,13 @@ let
   # repository absent from this set keeps the default-branch-only rule, and the
   # default branch stays acceptable everywhere.
   #
-  # This widens which branch may be targeted, never what a merge demands of it:
-  # the merge still refuses a base without required status checks and
-  # `enforce_admins`, so naming a branch here does not make an unprotected one
-  # mergeable.
+  # Declaring a branch here widens which branch may be targeted AND waives the
+  # merge's forge-protection demand for that branch: an integration branch is
+  # the development-pace branch, deliberately unprotected, and its CI gate
+  # lives in the shipping flow's wait-for-checks (nodo's CI is path-filtered,
+  # so no required status check could report on every PR shape anyway). The
+  # default branch keeps the full demand — required status checks plus
+  # enforce_admins — even if it is ever also declared here.
   integrationBases = {
     "elevenyellow/nodocom" = "dev";
   };
@@ -809,6 +812,20 @@ let
               return block("unsafe merge: cannot read the PR base branch")
           if base not in allowed_bases:
               return block(f"unsafe merge: PR base {base} is not an authorized base")
+
+          # A declared integration branch is deliberately exempt from the
+          # protection demand: it is the development-pace branch, and its CI
+          # gate lives in the shipping flow's wait-for-checks (nodo's CI is
+          # path-filtered, so no required check could report on every PR shape
+          # anyway). The default branch keeps the full demand — even if it is
+          # ever also declared as the integration base.
+          integration_base = INTEGRATION_BASES.get(repository)
+          if (
+              integration_base is not None
+              and base == integration_base
+              and base != context.base_branch
+          ):
+              return 0
 
           try:
               protection_lookup = subprocess.run(
