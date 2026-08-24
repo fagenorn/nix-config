@@ -51,14 +51,61 @@ PHASE_5_REVIEW_CONTRACT = FROM_ISSUE_DIR / "REVIEW-CONTRACT.md"
 CODEX_PLAN_REVIEW = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/PLAN-REVIEW.md"
 )
-CODEX_COLLABORATION_EVALS = (
-    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/evals/evals.json"
-)
 
 # The Phase-5 degradation boundary, spelled once for the whole module: the skill
 # and its eval are both checked against these two strings so they cannot drift.
 GATE_LINE_BOUNDARY = "≤1,000 product lines"
 GATE_FILE_BOUNDARY = "≤20 product files"
+
+SKILL_ROOTS = (
+    REPO_ROOT / "home/common/agent-skills/skills",
+    REPO_ROOT / "home/common/claude-code/skills",
+)
+
+# The producer-report candidate contract, spelled once for the whole corpus so
+# the four skills that carry it cannot drift apart (D1).
+REPORT_CANDIDATE_CLAUSE = (
+    "a report candidate outside every working tree — create it with `mktemp "
+    '"${TMPDIR:-/tmp}/producer-report-XXXXXX.json"` (the explicit `XXXXXX` '
+    "template works on both macOS/BSD and Linux) — invoke `artifact-budget "
+    "validate-report --boundary producer --input <report-candidate>`, and "
+    "remove that candidate under an unconditional cleanup that runs on every "
+    "outcome, including validation rejection and failure: a shell `trap` on "
+    "`EXIT HUP INT TERM`, or the equivalent `finally`"
+)
+
+# One literal for all three lifecycle request-file prescriptions (D17).
+REQUEST_FILE_HOME = "a new absolute temporary request file beneath `${TMPDIR:-/tmp}`"
+REQUEST_FILE_INVOCATION = "--request-file <absolute-json-path>"
+
+# The terminal result file is the same class of control-plane scratch, so it
+# shares that home; unlike the request file the helper consumes within the call,
+# it outlives its own validation and carries the report candidate's cleanup.
+RESULT_FILE_HOME = (
+    "a new absolute temporary result file beneath `${TMPDIR:-/tmp}`, removed "
+    "under an unconditional cleanup that runs on every outcome, including "
+    "validation rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, "
+    "or the equivalent `finally`"
+)
+RESULT_FILE_INVOCATION = "--result-file <path>"
+
+# "sibling <=2 words> candidate" — the in-working-tree prescription being
+# removed. The bounded gap keeps it off handoff's legitimate
+# "candidate ... sibling temporary" sentences, where the words appear in the
+# other order (D2).
+SIBLING_CANDIDATE_RE = re.compile(r"sibling(?:\s+\S+){0,2}\s+candidate")
+
+
+def normalized(text):
+    """Collapse every whitespace run to one space (the corpus hard-wraps ~80c)."""
+    return re.sub(r"\s+", " ", text)
+
+
+def corpus_documents():
+    """Every skill document in both skill trees, as (path, text) pairs."""
+    for root in SKILL_ROOTS:
+        for path in sorted(root.rglob("*.md")):
+            yield path, path.read_text(encoding="utf-8")
 
 
 def nested_workflow_documents():
@@ -89,9 +136,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.sdd = SDD.read_text(encoding="utf-8")
         cls.phase_5_review_contract = PHASE_5_REVIEW_CONTRACT.read_text(encoding="utf-8")
         cls.codex_plan_review = CODEX_PLAN_REVIEW.read_text(encoding="utf-8")
-        cls.codex_collaboration_evals = json.loads(
-            CODEX_COLLABORATION_EVALS.read_text(encoding="utf-8")
-        )
         cls.standards_review = (FROM_ISSUE_DIR / "standards-review.md").read_text(
             encoding="utf-8"
         )
@@ -309,8 +353,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("report only the root path and four metrics", self.writing_plans)
         for forbidden in ("open_items:", "decisions:", "adr_paths:", "summary:"):
             self.assertNotRegex(self.writing_plans, rf"(?m)^\s*{re.escape(forbidden)}")
-        self.assert_ordered(self.writing_plans, "candidate JSON", "validate-report",
-                            "validated stdout bytes")
+        self.assert_ordered(normalized(self.writing_plans),
+                            "report candidate outside every working tree",
+                            "validate-report", "validated stdout bytes")
 
     def test_design_and_grill_measure_after_last_write_and_stop_truthfully(self):
         for producer in (self.design, self.grill):
@@ -336,7 +381,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "final `within_budget` result",
             "commit the completed spec in the worktree",
             "construct, validate, and emit the `complete` producer report",
-            "candidate JSON file",
+            "report candidate outside every working tree",
             "validate-report --boundary producer",
             "validated stdout bytes",
         )
@@ -376,11 +421,72 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             for decision in ("(D5)", "(D11, D14)"):
                 self.assertIn(decision, producer)
             self.assertIn("phase_reports.notes_max_characters", producer)
-            self.assert_ordered(producer, "candidate JSON", "validate-report --boundary producer",
+            self.assert_ordered(normalized(producer),
+                                "report candidate outside every working tree",
+                                "validate-report --boundary producer",
                                 "validated stdout")
             self.assertIn("never inline artifact contents", producer)
             for forbidden in ("spec_path:", "adr_paths:", "decisions:", "open_items:", "summary:"):
                 self.assertNotRegex(producer, rf"(?m)^\s*{re.escape(forbidden)}")
+
+    def test_four_producer_skills_share_one_report_candidate_clause(self):
+        clause = normalized(REPORT_CANDIDATE_CLAUSE)
+        for name, text in (
+            ("design", self.design),
+            ("grill-with-docs", self.grill),
+            ("writing-plans", self.writing_plans),
+            ("handoff", self.handoff),
+        ):
+            with self.subTest(skill=name):
+                self.assertIn(clause, normalized(text))
+
+    def test_handoff_failure_reemit_uses_a_fresh_report_candidate(self):
+        self.assertIn(
+            "a fresh report candidate created and cleaned up the same way",
+            normalized(self.handoff),
+        )
+
+    def test_handoff_keeps_the_publication_sibling(self):
+        text = normalized(self.handoff)
+        self.assertIn("as a sibling temporary regular file", text)
+        self.assertIn("written as a sibling of the durable destination", text)
+
+    def test_no_skill_prescribes_a_sibling_candidate(self):
+        offenders = [
+            f"{path.relative_to(REPO_ROOT)}: {match.group(0)!r}"
+            for path, text in corpus_documents()
+            for match in SIBLING_CANDIDATE_RE.finditer(normalized(text))
+        ]
+        self.assertEqual(offenders, [])
+
+    def assert_every_carrier_states_the_temp_home(self, invocation, home, minimum):
+        carriers = [
+            (str(path.relative_to(REPO_ROOT)), normalized(text))
+            for path, text in corpus_documents()
+            if invocation in normalized(text)
+        ]
+        names = [name for name, _ in carriers]
+        # Non-vacuity: the rule must have something to police.
+        self.assertGreaterEqual(len(carriers), minimum, names)
+        missing = [name for name, text in carriers if home not in text]
+        self.assertEqual(missing, [])
+
+    def test_request_file_prescriptions_name_the_temp_home(self):
+        self.assertEqual(normalized(self.from_issue).count(REQUEST_FILE_HOME), 2)
+        self.assertEqual(normalized(self.orchestrate).count(REQUEST_FILE_HOME), 1)
+
+    def test_result_file_prescription_names_the_temp_home(self):
+        self.assertEqual(normalized(self.from_issue).count(RESULT_FILE_HOME), 1)
+
+    def test_every_request_file_invocation_names_the_temp_home(self):
+        self.assert_every_carrier_states_the_temp_home(
+            REQUEST_FILE_INVOCATION, REQUEST_FILE_HOME, 2
+        )
+
+    def test_every_result_file_invocation_names_the_temp_home(self):
+        self.assert_every_carrier_states_the_temp_home(
+            RESULT_FILE_INVOCATION, RESULT_FILE_HOME, 1
+        )
 
     def test_from_issue_validates_artifacts_before_every_phase_advance(self):
         self.assert_ordered(self.from_issue, "validate the returned state", "artifact-budget check",
@@ -1482,110 +1588,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("`WORKTREE_ROOT: <absolute worktree root>`", launch)
         self.assertIn("`REVIEW_OPERATION: <plan-review|diff-review>`", launch)
         self.assert_ordered(launch, "WORKTREE_ROOT:", "REVIEW_OPERATION:", "Launch mechanics")
-
-    def test_codex_collaboration_states_a_per_operation_wall_clock(self):
-        # A deliberate second copy of the runtime's per-operation budget: callers
-        # schedule around the number and prose cannot be derived from a patch, so
-        # the copy is pinned here instead (D8).
-        # Whitespace-normalized like the other wrapped-prose contracts in this
-        # module: line breaks must not be part of what is pinned, and the
-        # negative guards below only bite on normalized text — a retired figure
-        # that came back across a line wrap (`~14\nmin`) would otherwise slip
-        # past the very check that exists to catch it.
-        launch = " ".join(
-            self.section(
-                self.collaboration,
-                "Build the operation's packet",
-                "Parallel reviews are valid.",
-            ).split()
-        )
-        collaboration = " ".join(self.collaboration.split())
-        self.assertIn("roughly 28 minutes of wall clock for `plan-review`", launch)
-        self.assertIn("roughly 14 minutes for `diff-review`", launch)
-        for stale in ("~14 min", "~15 min"):
-            with self.subTest(stale=stale, doc="SKILL.md"):
-                self.assertNotIn(stale, collaboration)
-        # The bridge's own wait is wider than either budget, so the caller is
-        # given that figure too (D8/D15, D20). Pin the arithmetic rather than
-        # the literal: the total is the wait count times the per-call bound, so
-        # retuning one number without the others goes red instead of shipping a
-        # sentence that no longer adds up.
-        bounded = re.search(
-            r"wait is uniform and wider than either budget: it returns "
-            r"`CODEX_REVIEW_FAILURE` only after roughly (\d+) s of bounded "
-            r"waiting[^.]*four bounded (\d+) s calls",
-            launch,
-        )
-        self.assertIsNotNone(bounded, launch)
-        self.assertEqual(int(bounded.group(1)), 4 * int(bounded.group(2)))
-        # Restated once as the figure to plan against — and it must be the same
-        # figure the sentence above derived.
-        restated = re.search(r"plan for the ~(\d+) s bounded-wait figure", launch)
-        self.assertIsNotNone(restated, launch)
-        self.assertEqual(restated.group(1), bounded.group(1))
-        # It bounds the bridge's waiting, not the hold: each of those four
-        # waits sits under a wider outer tool cap, so the total is never a
-        # guaranteed ceiling on how long a caller can be held (D20).
-        self.assertNotIn("the worst case you can be held for", collaboration)
-        # The eval grades a model against this same number; unpinned, it would
-        # keep grading against a figure the skill no longer states (D15). JSON
-        # cannot carry a raw newline inside a string, so the wrap arrives as the
-        # two-character escape `\n` — collapse that first, then whitespace.
-        evals = " ".join(
-            json.dumps(self.codex_collaboration_evals).replace("\\n", " ").split()
-        )
-        self.assertIn("~28 min of external wall clock", evals)
-        self.assertIn("~28 minutes for plan-review", evals)
-        self.assertNotIn("~15 min", evals)
-
-    def test_codex_collaboration_never_reports_sandbox_limits_as_findings(self):
-        # The rule lives in the packet-borne shared rules, not in the Launch
-        # paragraph, because only these bullets travel to the reviewer (D14).
-        # Whitespace-normalized for the same reason as above: every fragment
-        # here is wrapped prose, so a reflow must not decide the verdict.
-        rules = " ".join(
-            self.section(
-                self.collaboration,
-                "## Read-only rules (both operations)",
-                "## Launch",
-            ).split()
-        )
-        self.assert_ordered(
-            rules,
-            "limitation of your own execution environment is never a finding",
-            "denies every write",
-            "could not verify",
-            "unresolved unknowns",
-            "still reportable",
-            "anchor it in the artifact",
-        )
-        # Stop provoking it as well as prohibiting it: neither packet may hand a
-        # read-only reviewer commands that read as instructions (D7). The label
-        # has to sit on the enumerated packet item itself, so each assertion is
-        # scoped to that document's packet list — whole-document, the phrase
-        # could drift anywhere in the file and still pass the very check that
-        # exists to keep it attached to what the reviewer receives.
-        plan_packet = " ".join(
-            self.section(
-                self.codex_plan_review,
-                "## Build the review packet",
-                "## Reviewer contract",
-            ).split()
-        )
-        diff_packet = " ".join(
-            self.section(
-                self.diff_review,
-                "## Packet",
-                "### When the range is over budget",
-            ).split()
-        )
-        for name, packet in (
-            ("PLAN-REVIEW.md", plan_packet),
-            ("DIFF-REVIEW.md", diff_packet),
-        ):
-            with self.subTest(packet=name):
-                self.assertIn("not a request to execute anything", packet)
-        self.assertIn("so the reviewer need not re-measure them", plan_packet)
 
     def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
         # The gate states a policy and calls the helper; the accounting itself

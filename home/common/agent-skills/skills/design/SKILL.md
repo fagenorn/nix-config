@@ -117,9 +117,14 @@ Return exactly one producer report (D11, D14). Its closed state row is `state: c
 report must never inline artifact contents, decision-ledger rows, policy, logs, or
 member lists. The committed root carries all detail.
 
-Only after the last artifact check, write the object as UTF-8 to a sibling temporary
-candidate JSON file, invoke `artifact-budget validate-report --boundary producer
---input <candidate>`, and remove the candidate on every outcome. Return only the
-exact validated stdout bytes. Validation exit 2 is `failed`: emit no Markdown,
-YAML, candidate JSON, truncated text, or prose fallback. Do not invoke
-`writing-plans`, start implementing, or offer to — the caller owns the next phase.
+Only after the last artifact check, write the object as UTF-8 to a report
+candidate outside every working tree — create it with `mktemp
+"${TMPDIR:-/tmp}/producer-report-XXXXXX.json"` (the explicit `XXXXXX` template
+works on both macOS/BSD and Linux) — invoke `artifact-budget validate-report
+--boundary producer --input <report-candidate>`, and remove that candidate under
+an unconditional cleanup that runs on every outcome, including validation
+rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, or the equivalent
+`finally`. Return only the exact validated stdout bytes. Validation exit 2 is
+`failed`: emit no Markdown, YAML, candidate JSON, truncated text, or prose
+fallback. Do not invoke `writing-plans`, start implementing, or offer to — the
+caller owns the next phase.

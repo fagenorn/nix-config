@@ -44,7 +44,8 @@ resolve through the existing bindings and adapters the immutable absolute ledger
 repository root (`ledger_repo_root`), positive issue and configured positive
 attempt budget. Resolve a fresh current RFC3339 UTC instant for every request,
 including before the first call. For every call, write a new absolute temporary
-request file containing exactly this version-1 shape. For each request, populate
+request file beneath `${TMPDIR:-/tmp}` containing exactly this version-1 shape.
+For each request, populate
 every observation kind the helper has requested at least once during this acquisition;
 keep an observation kind `null` until the helper requests it:
 
@@ -96,8 +97,9 @@ follows:
    returned prefix and populate the request's `forge` slot. For the duration of this acquisition, retain every fact previously requested during this acquisition;
    carry all collected facts into each later strict request, refreshing a value
    when its external state may have changed; never send a fact kind before the helper requests it.
-   Write a new absolute request file and call `direct-owner` again. Unknown,
-   duplicate, or malformed requirements fail loudly.
+   Write a new absolute temporary request file beneath `${TMPDIR:-/tmp}` and
+   call `direct-owner` again. Unknown, duplicate, or malformed requirements
+   fail loudly.
 2. **`kind: owner`** — validate the exact closed response shape, then adopt its
    `ledger_repo_root`, `run_id`, `issue`, `attempt`, `owner`, `action_id`,
    `launch_kind`, `worktree`, `handoff_path`, and `deadline_at` as this
@@ -254,8 +256,11 @@ Without lifecycle identity, apply the same action order locally with the
 ## Terminal return procedure
 
 Use this one procedure for Phase-0 content stops, attempt budget stops, execution failure,
-and Phase-7 success whenever lifecycle identity exists. Assemble a temporary JSON
-file with exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`,
+and Phase-7 success whenever lifecycle identity exists. Assemble a new absolute
+temporary result file beneath `${TMPDIR:-/tmp}`, removed under an unconditional
+cleanup that runs on every outcome, including validation rejection and failure:
+a shell `trap` on `EXIT HUP INT TERM`, or the equivalent `finally`. Its JSON
+holds exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`,
 `discussion_items`, `detail_state`, `report_path`, and `notes`. Validate the
 candidate with `artifact-budget validate-report --boundary ship-summary`; use
 only its canonical stdout as the `--result-file` bytes. The policy's

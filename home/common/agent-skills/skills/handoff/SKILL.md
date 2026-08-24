@@ -24,6 +24,14 @@ For that caller-provided destination, write and fsync the full candidate as a
 sibling temporary regular file without following any leaf. Do not open the
 destination for writing and do not publish yet.
 
+Two temporaries are involved in the durable publication route below and must not
+be confused. The sibling temporary holds the checked artifact bytes and is
+written as a sibling of the durable destination, because the install is a
+same-directory hard-link or atomic replace — sibling placement is a correctness
+requirement, not a convenience. The report candidate holds the producer-report
+JSON, is never published, has no life beyond the call, and therefore lives in OS
+temp. The default nondurable candidate above is neither and needs no protocol.
+
 ## Candidate budget state machine
 
 Measurement and remediation follow the authoritative final-writer rule (D5).
@@ -66,12 +74,17 @@ Bound `notes` using only the shared policy's
 `phase_reports.notes_max_characters`. Reports must never inline artifact contents,
 member lists, policy, logs, lifecycle rows, or diff content.
 
-Only after the last artifact check, serialize the row as UTF-8 to a separate sibling
-report candidate JSON file, invoke `artifact-budget validate-report --boundary producer --input <report-candidate>`, remove the report candidate on every outcome,
-and hold only the exact validated stdout bytes. Validation exit 2 is `failed`: emit
-no Markdown, YAML, candidate JSON, truncated text, or prose fallback. It must also
-leave the existing destination byte-identical and remove unpublished temporary
-names.
+Only after the last artifact check, serialize the row as UTF-8 to a report
+candidate outside every working tree — create it with `mktemp
+"${TMPDIR:-/tmp}/producer-report-XXXXXX.json"` (the explicit `XXXXXX` template
+works on both macOS/BSD and Linux) — invoke `artifact-budget validate-report
+--boundary producer --input <report-candidate>`, and remove that candidate under
+an unconditional cleanup that runs on every outcome, including validation
+rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, or the equivalent
+`finally`. Hold only the exact validated stdout bytes. Validation exit 2 is
+`failed`: emit no Markdown, YAML, candidate JSON, truncated text, or prose
+fallback. It must also leave the existing destination byte-identical and remove
+unpublished temporary names.
 
 Only an exit-0 artifact check and an exit-0 report validation may reach durable
 publication. When the destination is missing, install the checked sibling file
@@ -82,7 +95,7 @@ When an existing regular destination is present, open and read it before writing
 verify that the same regular file is still at the leaf, then atomically replace it
 with the checked sibling temporary file. Fsync the parent directory. Publication
 failure cleans the unpublished file and is `failed`; discard the held success bytes,
-write the root-only failed row to a new sibling report candidate, validate and remove
+write the root-only failed row to a fresh report candidate created and cleaned up the same way, validate and remove
 it by the same protocol, and return only that validated stdout. If this validation
 also exits 2, emit nothing rather than substitute a prose result. On publication
 success, return only the previously validated stdout bytes, whose root path is the

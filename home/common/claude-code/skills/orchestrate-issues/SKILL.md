@@ -82,7 +82,8 @@ inherited handle.
 
 ## 3. Decide
 
-Invoke the helper with the request file:
+Invoke the helper with a new absolute temporary request file beneath
+`${TMPDIR:-/tmp}`:
 
 ```text
 workflow-state control --repo-root <ledger_repo_root> --run-id <run-id> --request-file <absolute-json-path>
