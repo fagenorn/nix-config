@@ -226,18 +226,24 @@ to remove the worktree.
 2. Remove the worktree from the main repo root, never from inside the worktree:
    ```
    MAIN_ROOT=$(git -C "$(git rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
+   BUCKET="$MAIN_ROOT/.superpowers/sdd/wt-$(basename "$(git -C <worktree-path> rev-parse --path-format=absolute --git-dir)")"
    cd "$MAIN_ROOT"
    git worktree remove <worktree-path>
    git worktree prune
    git branch -d <branch>
    ```
 
-   After the worktree is gone, remove that worktree's now-orphaned SDD bucket at
-   `<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`. Nothing else prunes it:
-   the bucket lives in the primary checkout and outlives the worktree that named it,
-   so a later worktree recreated under the same name would resolve to this attempt's
-   ledger and read its `Task <N>: complete` lines as its own. Remove only that one
-   worktree's bucket — never `primary/`, and never another worktree's.
+   After the worktree is gone, remove the `$BUCKET` directory recorded above —
+   the shape `<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`,
+   captured from the worktree's own git directory before removal rather than
+   guessed from its path, because a stale registration under the same
+   basename makes `git worktree add` register `<name>1` instead of `<name>`,
+   and guessing would delete another worktree's bucket. Nothing else prunes
+   it: the bucket lives in the primary checkout and outlives the worktree
+   that named it, so a later worktree recreated under the same name would
+   resolve to this attempt's ledger and read its `Task <N>: complete` lines
+   as its own. Remove only that one worktree's bucket — never `primary/`,
+   and never another worktree's.
 
 3. If `git worktree remove` refuses on the rebased-branch case (see `docPaths.gitWorktrees`): confirm the PR landed via `gh pr view`, then retry with `ExitWorktree action: "remove", discard_changes: true` — the "discarded N commits" wording is misleading; the content is on the integration branch.
 

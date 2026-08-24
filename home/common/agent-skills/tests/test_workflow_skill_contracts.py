@@ -2015,7 +2015,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_ship_issue_prunes_the_removed_worktrees_sdd_bucket(self):
         text = normalized(self.ship_issue)
         self.assertIn(WORKTREE_BUCKET_LITERAL, text)
-        self.assertIn("Remove only that one worktree's bucket", text)
+        self.assertIn(
+            "Remove only that one worktree's bucket — never `primary/`, and "
+            "never another worktree's.",
+            text,
+        )
 
     def test_worktrees_names_the_scratch_git_clean_destroys(self):
         text = normalized(self.worktrees)
