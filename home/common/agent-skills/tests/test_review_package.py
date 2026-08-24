@@ -21,6 +21,31 @@ review_package_module = types.ModuleType("review_package")
 SourceFileLoader("review_package", str(COMMAND)).exec_module(review_package_module)
 
 
+# An artifact_budget shim: the real API when imported, a hard refusal when run
+# as a script. review-package uses both faces — check_artifact/load_limits
+# in-process, then `sys.executable <artifact_budget.__file__> validate-report`
+# for the producer report — so only the second one may fail (D16). The
+# sys.modules registration is load-bearing: dataclasses resolves
+# cls.__module__ through sys.modules while exec_module runs.
+REPORT_VALIDATOR_STUB = '''import sys
+
+if __name__ == "__main__":
+    sys.stderr.write("stub validator refuses validate-report\\n")
+    raise SystemExit(9)
+
+import types
+from importlib.machinery import SourceFileLoader
+
+_real = types.ModuleType("_real_artifact_budget")
+sys.modules["_real_artifact_budget"] = _real
+SourceFileLoader("_real_artifact_budget", REAL_MODULE_PATH).exec_module(_real)
+ArtifactBudgetError = _real.ArtifactBudgetError
+CheckResult = _real.CheckResult
+check_artifact = _real.check_artifact
+load_limits = _real.load_limits
+'''
+
+
 class ReviewPackageCliTest(unittest.TestCase):
     def run_git(self, repo: Path, *args: str, text: bool = True):
         return subprocess.run(["git", "-C", str(repo), *args], check=True,
@@ -574,3 +599,36 @@ class ReviewPackageCliTest(unittest.TestCase):
                 snapshots.append((out.read_bytes(),
                     [(p.name, p.read_bytes()) for p in sorted((repo / "review.shards").iterdir())]))
         self.assertEqual(snapshots[0], snapshots[1])
+
+    def test_report_validation_failure_removes_the_report_candidate(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "repo"
+            repo.mkdir()
+            plan, env = self.setup_repo(repo)
+            (repo / "a.txt").write_text("before\n", encoding="utf-8")
+            base = self.commit(repo, "base", env)
+            (repo / "a.txt").write_text("after\n", encoding="utf-8")
+            head = self.commit(repo, "change a", env)
+
+            shim = Path(env["PYTHONPATH"]) / "artifact_budget.py"
+            shim.unlink()
+            shim.write_text(
+                REPORT_VALIDATOR_STUB.replace("REAL_MODULE_PATH", repr(str(MODULE))),
+                encoding="utf-8",
+            )
+            scratch = Path(raw) / "tmp"
+            scratch.mkdir()
+            env["TMPDIR"] = str(scratch)
+
+            result = self.invoke(repo, plan, base, head, repo / "review.json", env)
+
+            # Non-vacuity: the run reached the candidate rather than refusing at
+            # bootstrap. "validator unavailable" here would mean the shim broke
+            # the in-process API and nothing was ever created to clean up.
+            self.assertEqual(result.stderr, "review-package: generation failed\n")
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(
+                sorted(p.name for p in scratch.glob("review-package-report-*.json")),
+                [],
+            )
