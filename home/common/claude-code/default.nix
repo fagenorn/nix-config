@@ -25,6 +25,31 @@ let
     exec ${pkgs.nodejs}/bin/node ${agentPlugins.codex}/plugins/codex/scripts/codex-companion.mjs "$@"
   '';
 
+  # The GitHub owners whose repositories carry standing authorization for the
+  # guarded verbs (push, PR creation, merge). Membership is the whole of the
+  # ownership test, so adding a name here hands every repository under it the
+  # standing chain — keep the list to owners whose repos we actually ship from.
+  # Branch deletion stays guarded regardless of ownership.
+  authorizedOwners = [
+    "fagenorn"
+    "elevenyellow"
+  ];
+
+  # Repositories whose integration branch is not the branch origin/HEAD points
+  # at. The guard otherwise requires every guarded PR to be opened against, and
+  # merged into, the default branch; nodo integrates on `dev` and promotes to
+  # `main` only at release, so both verbs have to accept that branch there. A
+  # repository absent from this set keeps the default-branch-only rule, and the
+  # default branch stays acceptable everywhere.
+  #
+  # This widens which branch may be targeted, never what a merge demands of it:
+  # the merge still refuses a base without required status checks and
+  # `enforce_admins`, so naming a branch here does not make an unprotected one
+  # mergeable.
+  integrationBases = {
+    "elevenyellow/nodocom" = "dev";
+  };
+
   lifecycleGuard = pkgs.writeTextFile {
     name = "claude-bash-lifecycle-guard";
     executable = true;
@@ -42,7 +67,8 @@ let
       DEFAULT_GIT_BIN = "${pkgs.git}/bin/git"
       DEFAULT_GH_BIN = "${pkgs.gh}/bin/gh"
       DEFAULT_JQ_BIN = "${pkgs.jq}/bin/jq"
-      AUTHORIZED_OWNER = "fagenorn"
+      AUTHORIZED_OWNERS = frozenset({${lib.concatMapStringsSep ", " (owner: "\"${owner}\"") authorizedOwners}})
+      INTEGRATION_BASES = {${lib.concatStringsSep ", " (lib.mapAttrsToList (repo: base: "\"${repo}\": \"${base}\"") integrationBases)}}
       CHILD_DIAGNOSTIC_LIMIT = 240
       # The guarded verbs, as raw text and as token sequences. Order matters: the
       # first match at a token wins, and no sequence is a prefix of another.
@@ -490,9 +516,24 @@ let
           """Why `repository` is outside standing authorization, or None."""
           if repository is None:
               return "repository unknown is outside standing authorization"
-          if repository.split("/", 1)[0] != AUTHORIZED_OWNER:
+          if repository.split("/", 1)[0] not in AUTHORIZED_OWNERS:
               return f"repository {repository} is outside standing authorization"
           return None
+
+
+      def authorized_bases(repository, base_branch):
+          """The branches a guarded PR may target in `repository`.
+
+          Always the default branch, plus the repository's declared integration
+          branch when it has one. Membership decides only what may be TARGETED;
+          the merge's protection requirement is applied to whichever base the PR
+          actually carries.
+          """
+          bases = {base_branch}
+          integration_base = INTEGRATION_BASES.get(repository)
+          if integration_base is not None:
+              bases.add(integration_base)
+          return bases
 
 
       def branch_name_problem(git_bin, branch, timeout):
@@ -653,9 +694,11 @@ let
                   return block(f"unsafe PR creation: {name} {text_problem}")
           if context.base_branch is None:
               return block("unsafe PR creation: cannot resolve the repository default branch")
-          if base != context.base_branch:
+          allowed_bases = authorized_bases(context.repository, context.base_branch)
+          if base not in allowed_bases:
               return block(
-                  f"unsafe PR creation: --base must be the default branch {context.base_branch}"
+                  "unsafe PR creation: --base must be one of "
+                  + ", ".join(sorted(allowed_bases))
               )
           if head == base:
               return block("unsafe PR creation: head and base must differ")
@@ -685,7 +728,7 @@ let
               return block("unsafe merge: tokenised command does not match guarded argv")
           if context.base_branch is None:
               return block("unsafe merge: cannot resolve the repository default branch")
-          base = context.base_branch
+          allowed_bases = authorized_bases(repository, context.base_branch)
 
           try:
               pr_lookup = subprocess.run(
@@ -704,8 +747,11 @@ let
               return block_child_failure("PR lookup failed", pr_lookup)
 
           try:
+              base_predicate = " or ".join(
+                  f'.baseRefName == "{candidate}"' for candidate in sorted(allowed_bases)
+              )
               pr_predicate_query = (
-                  f'.state == "OPEN" and .baseRefName == "{base}" and '
+                  f'.state == "OPEN" and ({base_predicate}) and '
                   f'(.url | startswith("https://github.com/{repository}/pull/"))'
               )
               pr_predicate = subprocess.run(
@@ -724,6 +770,16 @@ let
               return block("PR predicate timed out")
           if pr_predicate.returncode != 0:
               return block_child_failure("PR predicate failed", pr_predicate)
+
+          # Protection is demanded of the branch this PR actually targets, not of
+          # the default branch. The predicate above already confined it to
+          # `allowed_bases`, so this reads back one of those names.
+          try:
+              base = json.loads(pr_lookup.stdout)["baseRefName"]
+          except (ValueError, KeyError):
+              return block("unsafe merge: cannot read the PR base branch")
+          if base not in allowed_bases:
+              return block(f"unsafe merge: PR base {base} is not an authorized base")
 
           try:
               protection_lookup = subprocess.run(
