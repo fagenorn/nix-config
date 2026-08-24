@@ -21,7 +21,7 @@
 - `.superpowers/ship-review/<issue>/retained-detail.json` stays in the feature worktree (per D7). It is the single named exception, not a leak.
 - Nothing in this plan deletes a `.superpowers/` directory inside another worktree (per D8).
 - `CLAUDE.md` was already corrected in the design commit (per D13). No task re-edits it; Task 6 verifies the shipped behaviour matches it.
-- Run all verification from the worktree root `/Users/anis/tmp/nix-config/.claude/worktrees/worktree-issue-102` unless a step says otherwise.
+- Run all verification from the worktree root `/Users/anis/tmp/nix-config/.claude/worktrees/worktree-issue-102-workflow-scratch-containment` unless a step says otherwise.
 
 ## Test seams
 
@@ -45,11 +45,37 @@ Task 6 — Forced-failure cleanup pins, residual containment, rollout — home/c
 
 Order: 3 → 4 (Task 4's prose describes behaviour Task 3 implements). Tasks 1, 2 and 5 are independent of everything. Task 6 last: it runs both whole-repo gates and asserts this worktree carries no stray report candidate or temporary — while deliberately leaving this run's own pre-Task-3 `.superpowers/` ledger alone — which is only meaningful once every other task has landed.
 
+## Execution state
+
+Execution on this branch did not start from zero. A previous ledger-free owner
+implemented Tasks 1, 2 and 3 and committed them, together with this plan and the
+spec, as the single commit `503f7dc`; it died before any per-task review ran and
+left no `sdd` ledger. Attempt 1 of run `direct-102-000001` resumed that branch
+(per D25) and seeded the plan's `sdd` workspace ledger from the observed branch
+state (per D26).
+
+- **Tasks 1, 2, 3 — implemented, unreviewed.** Present at `503f7dc` and verified
+  green at resume: `just agent-workflow-tests` runs 427 tests OK, the Task-1
+  corpus grep for the retired wording prints nothing, and `test_sdd_workspace.py`
+  contributes 8 passing tests through the `agent-workflow-tests` recipe. Each
+  still owes the first-pass full-lane review its lane requires; the ledger says
+  so per task, and the review scope is that task's `## Task index` file set
+  within `503f7dc`.
+- **Tasks 4, 5, 6 — not started.** `sdd/SKILL.md` carries no primary-checkout
+  wording, the tracked `.gitignore` still holds only `result`, `__pycache__/`
+  and `*.pyc`, and neither forced-failure pin exists.
+
+The three landed tasks share one commit, so their diffs are not separable by
+commit range; scope each review by files, not by revision. The mandatory final
+two-axis review still covers the whole branch, `503f7dc` included.
+
 ## Decisions
 
 The spec owns the single issue-level decision ledger (D1–D17); tasks cite rows by ID and never restate them. Planning appended D15 (the exit-2 driver the spec named cannot reach step 4 — corrected to a decoy bare repository), D16 (the report-validation shim must register itself in `sys.modules` or the run stops at "validator unavailable" — a vacuous pass), and D17 (one identical literal for all three request-file prescriptions plus a corpus rule, so the assertion is an occurrence count rather than three positional greps).
 
 Phase-5 standards review added D18–D24 and amended D5 in place (a narrowed claim, not a reversal).
+
+Attempt 1 of run `direct-102-000001` appended D25–D27 when it resumed this branch: how the pre-existing worktree was adopted, why the seeded `sdd` ledger says `implemented` rather than `complete` for Tasks 1–3, and why the standards review above is not re-run. They record the resume, not the build — no task text changed.
 
 Two facts every task must hold: the cleanup code at `task-brief:97` (`trap … EXIT HUP INT TERM`) and in `review-package._validated_report` (`finally: unlink`) is **already correct**. What issue #102's second acceptance criterion is missing is a *test* that forces those branches, not a fix — Task 6 adds regression pins, and no task may "make them fail first" by breaking working cleanup.
 

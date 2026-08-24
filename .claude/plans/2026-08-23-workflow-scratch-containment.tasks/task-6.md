@@ -151,7 +151,7 @@ Expected: `CLAUDE.md claim present`. `CLAUDE.md` was corrected in the design com
 ```bash
 primary=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
 plan=.claude/plans/2026-08-23-workflow-scratch-containment.md
-expected="$primary/.superpowers/sdd/wt-worktree-issue-102/2026-08-23-workflow-scratch-containment"
+expected="$primary/.superpowers/sdd/wt-worktree-issue-102-workflow-scratch-containment/2026-08-23-workflow-scratch-containment"
 actual=$(home/common/agent-skills/skills/sdd/scripts/sdd-workspace "$plan")
 if [ "$actual" != "$expected" ]; then
   echo "resolved to $actual, expected $expected"; exit 1
