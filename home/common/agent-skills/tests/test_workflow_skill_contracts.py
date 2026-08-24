@@ -1910,6 +1910,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn("~/.agents/bin/agent-evidence", text)
         with self.subTest(skill="ship-issue"):
             self.assertIn("~/.agents/bin/diff-scope", self.ship_issue)
+        # ship-issue's Phase-8 detail producer lives in the sdd skill tree but
+        # is consumed by bare name from outside that skill, so it must be
+        # exposed in ~/.agents/bin — together with the sdd-workspace sibling it
+        # resolves via Path(__file__).with_name.
+        for entry in ('".agents/bin/review-package"', '".agents/bin/sdd-workspace"'):
+            with self.subTest(entry=entry):
+                self.assertIn(entry, nix_module)
+        with self.subTest(skill="ship-issue detail producer"):
+            self.assertIn("~/.agents/bin/review-package", self.ship_issue)
 
     def test_research_requires_corroborated_validated_observations(self):
         heading = "## Live availability and blocking evidence"

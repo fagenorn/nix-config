@@ -17,10 +17,14 @@ Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
 
 ## 1. Resolve issue set and bindings
 
-- Explicit numbers: preserve the caller's order.
+- Explicit numbers: preserve the caller's order, and set request
+  `human_directed` to `true` for this run. Naming an issue is the caller
+  authorizing that issue by name, exactly as `/from-issue <num>` does.
 - `--label X` / `--milestone Y`: resolve the ordered issue numbers with one
-  configured tracker-list call. The tracker CLI and `unsetGithubToken` come from
-  `.claude/skills.config.json`, through the same bindings used by `from-issue`.
+  configured tracker-list call, and set request `human_directed` to `false`. A
+  set the caller never enumerated carries no per-issue authorization. The
+  tracker CLI and `unsetGithubToken` come from `.claude/skills.config.json`,
+  through the same bindings used by `from-issue`.
 - Call `~/.agents/bin/resolve-bindings` once for both orchestration limits. Put
   the resolved `agentBudgetMinutes` as request `attempt_budget_minutes` and the
   resolved `maxParallel` as request `max_parallel`. Do not copy either default
@@ -70,8 +74,9 @@ an owner result.
 
 For every control call, write one temporary absolute JSON request containing
 exactly the version-1 fields `interface_version`, `now`, `max_parallel`,
-`attempt_budget_minutes`, ordered `issues`, and the normalized `tracker`,
-`owners`, and `worktrees` arrays. Do not add raw issue text or helper history.
+`attempt_budget_minutes`, `human_directed`, ordered `issues`, and the
+normalized `tracker`, `owners`, and `worktrees` arrays. Do not add raw issue
+text or helper history.
 At start/resume and after each current owner notification, tracker change, or
 current wait-ID wake, refresh the external facts needed by that request.
 

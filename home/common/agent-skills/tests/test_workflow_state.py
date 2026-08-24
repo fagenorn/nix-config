@@ -196,12 +196,14 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         }
 
     def control_request(self, *, now, issues, tracker, worktrees, owners=None,
-                        max_parallel=2, attempt_budget_minutes=30):
+                        max_parallel=2, attempt_budget_minutes=30,
+                        human_directed=False):
         return {
             "interface_version": 1,
             "now": now,
             "max_parallel": max_parallel,
             "attempt_budget_minutes": attempt_budget_minutes,
+            "human_directed": human_directed,
             "issues": issues,
             "tracker": tracker,
             "owners": [] if owners is None else owners,
@@ -4901,6 +4903,74 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(attempt["state"], "suspended")
         self.assertEqual(attempt["blocked_on"], "external")
         self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_human_directed_control_resumes_a_gated_suspension(self):
+        # A sweep the caller named issue-by-issue carries the same consent a
+        # direct owner does, so it clears `human_gate`/`external` the way
+        # re-entry always has. A `--label`/`--milestone` sweep sends
+        # human_directed=false and still leaves them parked.
+        self.init_run()
+        gates = {45: "human_gate", 46: "external"}
+        for issue in gates:
+            self.spawn(
+                issue=issue, worktree=str(Path(self.root) / f"wt-{issue}"),
+                budget_minutes=10,
+            )
+        for issue, blocked_on in gates.items():
+            self.suspend(
+                issue=issue, attempt=1, blocked_on=blocked_on,
+                now="2026-08-13T20:05:00Z",
+            )
+
+        def observations():
+            return [
+                self.worktree_fact(issue, recorded={
+                    "path": os.path.abspath(str(Path(self.root) / f"wt-{issue}")),
+                    "state": "matching_issue_branch",
+                })
+                for issue in (45, 46)
+            ]
+
+        parked = self.state_path.read_bytes()
+        swept = self.control(
+            now="2026-08-13T20:06:00Z", issues=[45, 46],
+            tracker=[self.tracker_fact(45), self.tracker_fact(46)],
+            worktrees=observations(), human_directed=False,
+        )
+        self.assert_control_response_shape(swept)
+        self.assertEqual([a for a in swept["actions"] if a["kind"] == "resume"], [])
+        self.assertEqual(swept["deltas"], [])
+        self.assertEqual(self.state_path.read_bytes(), parked)
+
+        directed = self.control(
+            now="2026-08-13T20:07:00Z", issues=[45, 46],
+            tracker=[self.tracker_fact(45), self.tracker_fact(46)],
+            worktrees=observations(), human_directed=True,
+        )
+        self.assert_control_response_shape(directed)
+        resumed = {a["issue"] for a in directed["actions"] if a["kind"] == "resume"}
+        self.assertEqual(resumed, {45, 46})
+        for issue in (45, 46):
+            self.assertIn(
+                {"issue": issue, "attempt": 1, "kind": "resumed", "state": "active"},
+                directed["deltas"],
+            )
+            attempt = self.read_state()["issues"][str(issue)]["attempts"][-1]
+            self.assertEqual(attempt["state"], "active")
+            self.assertIsNone(attempt["blocked_on"])
+
+    def test_control_rejects_a_non_boolean_human_directed(self):
+        self.init_run()
+        for bad in ("true", 1, None):
+            request = self.control_request(
+                now="2026-08-13T20:06:00Z", issues=[47],
+                tracker=[self.tracker_fact(47)], worktrees=[],
+            )
+            request["human_directed"] = bad
+            refused = self.control_raw(request=request, ok=False)
+            self.assertEqual(refused.returncode, 2)
+            self.assertEqual(refused.stdout, "")
+            self.assertIn("invalid control human_directed", refused.stderr)
 
     def test_orchestrated_phase_zero_handoff_resumes_with_absent_worktree(self):
         self.init_run()

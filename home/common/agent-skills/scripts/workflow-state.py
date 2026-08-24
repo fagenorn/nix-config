@@ -105,6 +105,7 @@ CONTROL_REQUEST_FIELDS = frozenset(
         "now",
         "max_parallel",
         "attempt_budget_minutes",
+        "human_directed",
         "issues",
         "tracker",
         "owners",
@@ -1392,6 +1393,8 @@ def validate_control_request(value: Any) -> dict[str, Any]:
     require_plain_int(
         request["attempt_budget_minutes"], "attempt_budget_minutes", minimum=1
     )
+    if type(request["human_directed"]) is not bool:
+        raise WorkflowError("invalid control human_directed")
 
     issues = request["issues"]
     if not isinstance(issues, list):
@@ -1678,8 +1681,11 @@ def _apply_one_issue_policy(
     through the recorded-worktree ladder: a quota wall, a transport failure or a
     silent owner is an interruption the retry itself survives, so re-entry alone
     clears it (per D2, D9). ``human_directed`` says a person asked for this
-    re-entry, which is the only thing that clears a `human_gate`/`external`
-    suspension — the orchestrated sweep leaves those parked and reports them.
+    re-entry by name, which is the only thing that clears a
+    `human_gate`/`external` suspension: a direct owner always carries it, and an
+    orchestrated sweep carries it exactly when the caller listed the issue
+    numbers itself. A `--label`/`--milestone` sweep never does, so it leaves
+    those parked and reports them.
     """
     if ledger_issue is not None:
         issue = ledger_issue["issue"]
@@ -2039,6 +2045,7 @@ def command_control(args: argparse.Namespace) -> int:
                 current_owner_unavailable=owner_is_unavailable(issue_state),
                 dispatch_permitted=False,
                 run_dir=run_dir,
+                human_directed=request["human_directed"],
             )
 
         occupied = 0
@@ -2069,6 +2076,7 @@ def command_control(args: argparse.Namespace) -> int:
                 current_owner_unavailable=owner_is_unavailable(issue_state),
                 dispatch_permitted=dispatch_permitted,
                 run_dir=run_dir,
+                human_directed=request["human_directed"],
             )
             planned[issue] = result
             return result
