@@ -23,8 +23,9 @@ network layer every ~30s while Bash blocks, costing zero model turns until it
 returns.
 
 **Why improvised polling is banned.** Transcript mining found one session that
-ran a bare `gh pr checks <n> | grep <check>` 244 times, plus sessions burning
-dozens of `gh run view` re-runs and `true`/`:`/`date` no-op keep-alive turns;
+ran a bare `gh pr checks <n>`, filtered for a single check, 244 times, plus
+sessions burning dozens of `gh run view` re-runs and `true`/`:`/`date` no-op
+keep-alive turns;
 every such poll is a full model turn that re-reads the entire session prefix.
 Never run `gh pr checks` without `--watch` more than once per phase, never
 re-run `gh run view`/`tail` on a loop, never emit no-op commands to pass time.

@@ -79,6 +79,13 @@ Subagent (reviewer, Sonnet/high as selected above):
     Then the three sections below — every line a verdict, a finding with
     file:line, or a check you ran; no preamble, no closing summary.
 
+    Deliver the verdict and sections yourself, as your own final message. Launch
+    any subagent by type only, never by name: a subagent cannot spawn a named
+    teammate, and a named launch returns an error instead of work. Never deliver it
+    via SendMessage: you were not given a recipient name, and agent-type names like
+    `general-purpose` are not addressable recipients. Read a file before writing to
+    it: overwriting content you have not read destroys work you cannot see.
+
     ### Coverage
     ✅ | ❌ per spec requirement / plan task, one line each.
 

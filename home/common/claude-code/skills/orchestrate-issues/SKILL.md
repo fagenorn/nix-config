@@ -20,7 +20,8 @@ Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
 - Explicit numbers: preserve the caller's order.
 - `--label X` / `--milestone Y`: resolve the ordered issue numbers with one
   configured tracker-list call. The tracker CLI and `unsetGithubToken` come from
-  `.claude/skills.config.json`, through the same bindings used by `from-issue`.
+  `.claude/skills.config.json` when present, through the same bindings used by
+  `from-issue`.
 - Call `~/.agents/bin/resolve-bindings` once for both orchestration limits. Put
   the resolved `agentBudgetMinutes` as request `attempt_budget_minutes` and the
   resolved `maxParallel` as request `max_parallel`. Do not copy either default

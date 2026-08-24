@@ -105,9 +105,12 @@ Subagent (the explicitly selected implementer or mechanic above):
 
     Then report back with ONLY (under 15 lines — detail lives in the file). Reporting
     back means ending your turn with this as your final message — the controller reads
-    your final message directly. Never deliver it via SendMessage: you were not given a
-    recipient name, and agent-type names like `general-purpose` are not addressable
-    recipients. Do not wait for an acknowledgment.
+    your final message directly. Launch any subagent by type only, never by name: a
+    subagent cannot spawn a named teammate, and a named launch returns an error instead
+    of work. Never deliver it via SendMessage: you were not given a recipient name, and
+    agent-type names like `general-purpose` are not addressable recipients. Read a file
+    before writing to it: overwriting content you have not read destroys work you
+    cannot see. Do not wait for an acknowledgment.
     - **Status:** DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT
     - Commits created (short SHA + subject)
     - One-line test summary (e.g. "14/14 passing, output pristine")

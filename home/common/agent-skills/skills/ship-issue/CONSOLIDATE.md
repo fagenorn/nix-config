@@ -2,7 +2,7 @@
 
 Phase 3 of `ship-issue`. Mine the session for high-signal learnings and promote them to docs that already exist — or drop them.
 
-Project-agnostic: destination paths come from `.claude/skills.config.json` (`docPaths.*`, `specDir`, `planDir`) as resolved by the parent skill. A destination the project doesn't declare has no home — see the table below.
+Project-agnostic: destination paths come from `.claude/skills.config.json` (`docPaths.*`, `specDir`, `planDir`) when present, as resolved by the parent skill. A destination the project doesn't declare has no home — see the table below.
 
 ## The bar
 

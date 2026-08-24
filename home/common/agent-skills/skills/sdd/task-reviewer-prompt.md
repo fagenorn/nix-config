@@ -154,6 +154,14 @@ Subagent (reviewer, Opus/high as selected above):
       diff alone, and what the controller should check — report alongside the
       ✅/❌ verdict for everything you could verify]
 
+    Deliver the sections below yourself, as your own final message. Launch any
+    subagent by type only, never by name: a subagent cannot spawn a named
+    teammate, and a named launch returns an error instead of work. Never
+    deliver it via SendMessage: you were not given a recipient name, and
+    agent-type names like `general-purpose` are not addressable recipients.
+    Read a file before writing to it: overwriting content you have not read
+    destroys work you cannot see.
+
     ### Strengths
     [What's well done? Be specific.]
 

@@ -9,9 +9,10 @@ Write the plan for an engineer who is skilled but has zero context for this code
 
 **Save the package root to** `<planDir>/YYYY-MM-DD-<feature-name>.md`
 (`planDir` from `~/.agents/bin/resolve-bindings`; helper missing →
-`.claude/skills.config.json`, default `.claude/plans`) and its task members to
-the sibling `<planDir>/<stem>.tasks/` directory, committed in the worktree you
-were called in. For example, the first member is `<stem>.tasks/task-1.md`.
+`.claude/skills.config.json` if it exists, default `.claude/plans`) and its
+task members to the sibling `<planDir>/<stem>.tasks/` directory, committed in
+the worktree you were called in. For example, the first member is
+`<stem>.tasks/task-1.md`.
 The root path remains the public plan path (D3, D6).
 
 ## Payload discipline

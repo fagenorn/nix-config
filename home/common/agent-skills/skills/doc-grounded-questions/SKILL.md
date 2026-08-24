@@ -9,7 +9,7 @@ Before asking the user a design question or presenting options during a planning
 
 ## Project bindings (resolve first)
 
-Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
+Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config if it exists and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
 
 **Keys this skill uses:** `docPaths.{contextMap,context,standards,architecture}`, `docPaths.adrDir` (legacy override only — ADR homes normally come from the map), and `projectHints` (optional vocab / review-hints appendix). All optional — none configured → discovery below.
 

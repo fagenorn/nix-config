@@ -43,7 +43,7 @@ repos) only when cited; the standards layers that apply
 (`~/.agents/standards/the-bar.md`, its `stacks/` shards matching the diff's file types, and the
 project's `docs/standards/` shards whose globs intersect). Only when the project has no map, fall
 back to reading `docPaths.{context,standards,architecture}` whole. Then
-read the issue body (`<tracker-cli> issue view <num>` — prefix with `unset GITHUB_TOKEN &&` only if
+read the issue body (`<tracker-cli> issue view <num>` — prefix with `env -u GITHUB_TOKEN` only if
 `unsetGithubToken` is true), the spec at `<spec-path>`, and the validated plan
 root plus every member.
 

@@ -26,7 +26,7 @@ docs/
 
 `docs/areas/system/` is the reserved pseudo-area for decisions that belong to no single area. Its map row is real — gist "decisions spanning areas", `governs:` glob `*` — and its `CONTEXT.md` is a stub of a few lines, because every grounding pass loads it. **There is no central `docs/adr/`**: every ADR lives in exactly one `docs/areas/<slug>/adr/`, so tooling has one shape and no special cases.
 
-Prefer `.claude/skills.config.json`'s `docPaths.contextMap` / `docPaths.context` when set. (Two legacy layouts survive where a repo still uses them — a root `CONTEXT-MAP.md` with code-colocated area files, and flat `docs/<slug>/` areas beside a central `docs/adr/`. Follow what a repo actually has rather than imposing this tree on it mid-migration.)
+Prefer `.claude/skills.config.json`'s `docPaths.contextMap` / `docPaths.context` when present. (Two legacy layouts survive where a repo still uses them — a root `CONTEXT-MAP.md` with code-colocated area files, and flat `docs/<slug>/` areas beside a central `docs/adr/`. Follow what a repo actually has rather than imposing this tree on it mid-migration.)
 
 Skill output is not documentation and does not live here: specs, plans, handoffs and notes go to `.claude/specs/`, `.claude/plans/`, `.claude/handoffs/`, `.claude/notes/`.
 

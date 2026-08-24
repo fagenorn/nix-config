@@ -272,7 +272,7 @@ Without lifecycle identity, send the same compact schema directly.
 
 Build a shared mental model *before* the brainstorm. No files yet. Read `investigate.md` for the pre-flight queries and the note structure. (When `issueTracker.kind=none`, skip the fetch and PR pre-flight.)
 
-**Pre-flight** — two sessions racing on one issue is the most expensive failure this flow produces. Run the PR pre-flight per `investigate.md` (open PR → stop; merged → stop; closed-unmerged → judge). Then `git worktree list | grep <worktreePrefix>issue-<num>-`:
+**Pre-flight** — two sessions racing on one issue is the most expensive failure this flow produces. Run the PR pre-flight per `investigate.md` (open PR → stop; merged → stop; closed-unmerged → judge). Then `git worktree list` and look in its output for a `<worktreePrefix>issue-<num>-` entry:
 
 - none → continue;
 - one → **inspect before touching it**; a "clean" tree can still hold committed work that only ships at Phase 7. Check four signals: unpushed commits (`git log origin/<integration-branch>..<branch> --oneline`); workflow-state ledger attempts naming it that are `active` or `handed_off`; tracker/PR state referencing the branch; spec/plan artifacts under `specDir`/`planDir` inside it. If **any** exist → resume that worktree (interactively, propose resume and wait; in `--auto`, prefer resume, and on conflicting signals stop as blocked through the terminal return procedure). Deletion (`git worktree remove` + `git branch -D`) only when **provably disposable**: zero commits ahead, no active or handed-off ledger attempt, no spec/plan artifacts, no uncommitted work;

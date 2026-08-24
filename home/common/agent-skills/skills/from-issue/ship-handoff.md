@@ -48,6 +48,11 @@ and `notes`. `discussion_items: []` because non-empty details are moved to the
 single report. `detail_state` is `none`, `present`, or failure-only `unpublished`
 per the validator matrix. With `unpublished`, name the readable retained source
 in notes, keep the worktree, and do not claim merge success. Never inline detail.
+Launch any subagent by type only, never by name: a subagent cannot spawn a named
+teammate, and a named launch returns an error instead of work. Never deliver it via
+SendMessage: you were not given a recipient name, and agent-type names like
+`general-purpose` are not addressable recipients. Read a file before writing to it:
+overwriting content you have not read destroys work you cannot see.
 ```
 
 ## Inline fallback (no ship-issue skill)

@@ -57,11 +57,148 @@ CODEX_PLAN_REVIEW = (
 GATE_LINE_BOUNDARY = "≤1,000 product lines"
 GATE_FILE_BOUNDARY = "≤20 product files"
 
+# Every document under from-issue/ or sdd/ whose whole body is one unlabeled
+# fenced block pasted into a subagent dispatch.
+DISPATCH_PROMPT_TEMPLATES = (
+    SDD_DIR / "implementer-prompt.md",
+    SDD_DIR / "task-reviewer-prompt.md",
+    SDD_DIR / "re-review-prompt.md",
+    SDD_DIR / "correctness-reviewer-prompt.md",
+    SDD_DIR / "conformance-reviewer-prompt.md",
+    FROM_ISSUE_DIR / "ship-handoff.md",
+)
+
+# Documents that carry exactly one unlabeled fence but are not dispatch
+# prompts, each excluded deliberately: FROM_ISSUE's `## The flow` fence is an
+# ASCII flow diagram in the orchestrator document, not a prompt.
+NON_TEMPLATE_SINGLE_FENCE_DOCS = frozenset({FROM_ISSUE})
+
+# One authoritative home for each clause pasted into all six dispatch prompts.
+LEAF_LAUNCH_CLAUSE = (
+    "Launch any subagent by type only, never by name: a subagent cannot spawn "
+    "a named teammate, and a named launch returns an error instead of work."
+)
+LEAF_DELIVERY_CLAUSE = (
+    "Never deliver it via SendMessage: you were not given a recipient name, "
+    "and agent-type names like `general-purpose` are not addressable recipients."
+)
+READ_BEFORE_WRITE_CLAUSE = (
+    "Read a file before writing to it: overwriting content you have not read "
+    "destroys work you cannot see."
+)
+
 
 def nested_workflow_documents():
     for directory in (FROM_ISSUE_DIR, SDD_DIR):
         for path in sorted(directory.glob("*.md")):
             yield path, path.read_text(encoding="utf-8")
+
+
+# Every skill document either agent can load, and the bindings-config presence
+# guard checked across all of them. The register is closed at two phrasings so
+# the assertion stays one rule with no exception list.
+SKILL_TREES = (
+    REPO_ROOT / "home/common/agent-skills/skills",
+    REPO_ROOT / "home/common/claude-code/skills",
+)
+BINDINGS_CONFIG = ".claude/skills.config.json"
+GUARD_PHRASES = ("if it exists", "when present")
+
+
+def skill_documents():
+    for tree in SKILL_TREES:
+        for path in sorted(tree.rglob("*.md")):
+            if "evals" in path.parts:
+                continue
+            yield path, path.read_text(encoding="utf-8")
+
+
+# Every shell command a skill document shows, extracted by one rule with no
+# per-site exception list: fenced blocks whose info string names a shell, plus
+# inline code spans whose first token is a known command. Forbidden-form checks
+# run over placeholder-stripped text so `<pr-num>`-style angle placeholders and
+# the `<<<<` conflict markers named in prose never look like a redirect.
+SHELL_FENCE_INFO = frozenset({"bash", "sh", "shell", "console"})
+# First words that mark an inline code span as a shell command rather than prose.
+SHELL_COMMANDS = frozenset({
+    "artifact-budget", "cat", "cd", "cp", "env", "gh", "git", "glab", "grep",
+    "just", "ls", "mkdir", "mv", "node", "npm", "python3", "railway", "rm",
+    "sed", "unset",
+})
+PLACEHOLDER = re.compile(r"<[^<>\n]+>")
+INLINE_CODE = re.compile(r"`([^`\n]+)`")
+HEREDOC = re.compile(r"<<-?['\"]?[A-Za-z_][A-Za-z0-9_]*")
+CHAIN = re.compile(r"&&|\|\||;")
+REDIRECT = re.compile(r"[<>]")
+# A fence delimiter: a run of three or more backticks at any indentation. Both
+# the run length and the indentation matter. Fences are tracked as a stack and
+# the innermost enclosing info string decides, because skill documents wrap
+# shell examples inside longer-delimited template blocks. A length-blind toggle
+# desynchronises inside such a block — it reads the inner opener as a close —
+# and then misclassifies every fence after it, which can turn prose into a
+# shell example. An indented fence under a list item is still a fence, so its
+# body is never scanned as prose.
+FENCE = re.compile(r"^\s*(`{3,})(.*)$")
+
+
+def command_head(command):
+    tokens = command.split()
+    if not tokens:
+        return ""
+    head = re.sub(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}", "", tokens[0])
+    return re.sub(r"^[A-Za-z_][A-Za-z0-9_]*=\$?\(?", "", head)
+
+
+def shell_commands(text):
+    fences = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        fence = FENCE.match(line)
+        if fence is not None:
+            run, info = len(fence.group(1)), fence.group(2).strip()
+            # Only a bare delimiter at least as long as the innermost opener
+            # closes it; anything else opens a nested fence.
+            if fences and not info and run >= fences[-1][0]:
+                fences.pop()
+            else:
+                fences.append((run, info))
+            continue
+        if fences:
+            if fences[-1][1] in SHELL_FENCE_INFO:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    yield line_number, stripped
+            continue
+        for span in INLINE_CODE.findall(line):
+            candidate = span.strip()
+            if candidate and command_head(candidate) in SHELL_COMMANDS:
+                yield line_number, candidate
+
+
+def without_placeholders(command):
+    return PLACEHOLDER.sub("", command)
+
+
+def normalized(text):
+    return " ".join(text.split())
+
+
+def unlabeled_fenced_blocks(text):
+    blocks = []
+    info = None
+    body = []
+    for line in text.splitlines():
+        if line.startswith("```"):
+            if info is None:
+                info = line[3:].strip()
+                body = []
+            else:
+                if info == "":
+                    blocks.append("\n".join(body))
+                info = None
+            continue
+        if info is not None:
+            body.append(line)
+    return blocks
 
 
 class WorkflowSkillContractsTest(unittest.TestCase):
@@ -284,6 +421,109 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 with self.subTest(path=f"{path}:{line_number}"):
                     self.assertNotIn("name=", line)
                     self.assertNotIn("run_in_background", line)
+
+    def test_bindings_config_mentions_are_guarded_on_presence(self):
+        for path, text in skill_documents():
+            for paragraph in text.split("\n\n"):
+                if BINDINGS_CONFIG not in paragraph:
+                    continue
+                with self.subTest(path=str(path.relative_to(REPO_ROOT))):
+                    self.assertTrue(
+                        any(phrase in paragraph for phrase in GUARD_PHRASES),
+                        f"{path}: a paragraph naming {BINDINGS_CONFIG} carries no "
+                        f"presence guard; use one of {GUARD_PHRASES}",
+                    )
+
+    def test_skill_documents_show_no_heredoc(self):
+        for path, text in skill_documents():
+            relative = path.relative_to(REPO_ROOT)
+            for line_number, line in enumerate(text.splitlines(), 1):
+                match = HEREDOC.search(without_placeholders(line))
+                if match is None:
+                    continue
+                with self.subTest(path=f"{relative}:{line_number}"):
+                    self.fail(
+                        f"heredoc {match.group(0)!r} shown in a skill document; "
+                        "write the body with the file-writing tool and pass it "
+                        "by path instead"
+                    )
+
+    def test_skill_shell_examples_use_no_heredoc(self):
+        for path, text in skill_documents():
+            relative = path.relative_to(REPO_ROOT)
+            for line_number, command in shell_commands(text):
+                with self.subTest(path=f"{relative}:{line_number}"):
+                    self.assertIsNone(
+                        HEREDOC.search(without_placeholders(command)),
+                        f"heredoc in shell example: {command}",
+                    )
+
+    def test_skill_shell_examples_use_no_chain_operator(self):
+        for path, text in skill_documents():
+            relative = path.relative_to(REPO_ROOT)
+            for line_number, command in shell_commands(text):
+                with self.subTest(path=f"{relative}:{line_number}"):
+                    self.assertIsNone(
+                        CHAIN.search(without_placeholders(command)),
+                        f"chain operator in shell example: {command} — run one "
+                        "command per call and make a dependent step a second call",
+                    )
+
+    def test_skill_shell_examples_pipe_into_no_command(self):
+        for path, text in skill_documents():
+            relative = path.relative_to(REPO_ROOT)
+            for line_number, command in shell_commands(text):
+                # A chain operator is the chain check's finding, not this one:
+                # subtract `||` first so one defect reds exactly one test.
+                bare = without_placeholders(command).replace("||", "")
+                with self.subTest(path=f"{relative}:{line_number}"):
+                    self.assertNotIn(
+                        "|",
+                        bare,
+                        f"pipe in shell example: {command} — keep the command and "
+                        "put the filter in prose",
+                    )
+
+    def test_skill_shell_examples_use_no_redirect(self):
+        for path, text in skill_documents():
+            relative = path.relative_to(REPO_ROOT)
+            for line_number, command in shell_commands(text):
+                with self.subTest(path=f"{relative}:{line_number}"):
+                    self.assertIsNone(
+                        REDIRECT.search(without_placeholders(command)),
+                        f"redirect in shell example: {command} — write files with "
+                        "the file-writing tool and pass bodies by path",
+                    )
+
+    def test_dispatch_prompt_templates_are_enrolled(self):
+        discovered = []
+        for directory in (FROM_ISSUE_DIR, SDD_DIR):
+            for path in sorted(directory.glob("*.md")):
+                if path in NON_TEMPLATE_SINGLE_FENCE_DOCS:
+                    continue
+                text = path.read_text(encoding="utf-8")
+                if len(unlabeled_fenced_blocks(text)) == 1:
+                    discovered.append(path)
+        self.assertEqual(
+            sorted(discovered),
+            sorted(DISPATCH_PROMPT_TEMPLATES),
+            "a single-unlabeled-fence document under from-issue/ or sdd/ is not "
+            "enrolled in DISPATCH_PROMPT_TEMPLATES (or an enrolled template "
+            "stopped carrying exactly one unlabeled fence)",
+        )
+
+    def test_dispatch_prompts_carry_the_leaf_agent_clauses(self):
+        for path in DISPATCH_PROMPT_TEMPLATES:
+            blocks = unlabeled_fenced_blocks(path.read_text(encoding="utf-8"))
+            self.assertEqual(len(blocks), 1, f"{path}: expected one unlabeled fence")
+            prompt = normalized(blocks[0])
+            for clause in (
+                LEAF_LAUNCH_CLAUSE,
+                LEAF_DELIVERY_CLAUSE,
+                READ_BEFORE_WRITE_CLAUSE,
+            ):
+                with self.subTest(path=path.name, clause=clause[:40]):
+                    self.assertIn(clause, prompt)
 
     def test_sdd_resume_by_identity_instruction_exists(self):
         sdd_root = (SDD_DIR / "SKILL.md").read_text(encoding="utf-8")
@@ -596,6 +836,35 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "Report blocked",
             "ask for direction",
         )
+
+    def test_worktrees_names_the_refused_shell_forms_and_the_alternative(self):
+        guidance = self.section(
+            self.worktrees,
+            "## Shell forms the isolation checker refuses",
+            "## Detect existing isolation",
+        )
+        self.assert_ordered(
+            guidance,
+            "roughly **four times**",
+            "literal argument of a single invocation",
+            "a multi-clause chain, a redirect, and a heredoc fed to a command's stdin",
+            "One command per call",
+            "never a redirect or a heredoc",
+            "--body-file",
+            "git -C <path>",
+            "change the shell form, never the isolation",
+        )
+        probe = self.section(
+            self.worktrees,
+            "## Detect existing isolation",
+            "## Branch and prefix contract",
+        )
+        self.assertIn(
+            "git rev-parse --git-dir --git-common-dir "
+            "--show-superproject-working-tree",
+            probe,
+        )
+        self.assertIn("no line at all", probe)
 
     def test_owner_persists_exact_terminal_result_before_return(self):
         owner_return_section = self.section(

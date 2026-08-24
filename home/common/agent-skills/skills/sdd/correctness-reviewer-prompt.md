@@ -85,6 +85,12 @@ Subagent (reviewer, Opus/high for the native path selected above):
     clause opens with `scoped to <N> of <M> product files;` — after the em dash,
     never between the verdict word and the dash. When the packet says nothing about
     scoping, write the verdict exactly as above.
+    Deliver the verdict and sections yourself, as your own final message. Launch
+    any subagent by type only, never by name: a subagent cannot spawn a named
+    teammate, and a named launch returns an error instead of work. Never deliver it
+    via SendMessage: you were not given a recipient name, and agent-type names like
+    `general-purpose` are not addressable recipients. Read a file before writing to
+    it: overwriting content you have not read destroys work you cannot see.
     Then exactly three top-level sections — every line a finding or a check you
     ran; no preamble, no closing summary. Every finding carries a stable ID,
     live `path:line` evidence, confidence (`high` / `medium` / `low`), and

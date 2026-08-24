@@ -21,14 +21,25 @@ A worktree-failure audit found **43% of `EnterWorktree`/`ExitWorktree` errors ar
 - On leaving: `action: "keep"` whenever another session or agent may still be using the worktree. `"remove"` only when this flow created it and its work has landed.
 - Never call `ExitWorktree` from outside the worktree — `cd` in first.
 
+## Shell forms the isolation checker refuses
+
+The same audit found the **shell form** of a command costs roughly **four times** as many errors as the redundant-entry class above — the largest single class. The checker is static: it can confirm a command stays inside the worktree only when the target is a literal argument of a single invocation. Shell control flow and redirection hide the target, so they are refused. The three refused forms are a multi-clause chain, a redirect, and a heredoc fed to a command's stdin.
+
+What works instead:
+
+- One command per call. A dependent step is a second call, never a chain — no `&&`, no `||`, no `;`.
+- Create and truncate files with the file-writing tool, never a redirect or a heredoc. The tool takes an explicit path the checker can read.
+- Hand a long body to a CLI by path — `--body-file`, `--notes-file`, `-F <file>`, `@<file>` — after the file-writing tool has written it.
+- Carry paths inside the single invocation: absolute paths under the worktree root, or the tool's own directory flag such as `git -C <path>`. A prelude that `cd`s in and chains with `&&` is itself the refused chain.
+- Refused → change the shell form, never the isolation. Rewriting the command to work outside the worktree defeats the call that put you in it.
+
 ## Detect existing isolation
 
 ```bash
-[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ] &&
-  ! git rev-parse --show-superproject-working-tree 2>/dev/null | grep -q .
+git rev-parse --git-dir --git-common-dir --show-superproject-working-tree
 ```
 
-True → you are already in a linked worktree; report the path and branch and stop. (The submodule check matters: a submodule also has a distinct git-dir and is *not* isolation.)
+Compare the first two lines: different → you are already in a linked worktree; report the path and branch and stop. Identical → this is the default checkout. The superproject flag prints **no line at all** outside a submodule, so two lines is the normal case and a third line means a submodule: its first two lines match, so only the third line distinguishes it from the default checkout, and it is *not* isolation.
 
 ## Branch and prefix contract
 

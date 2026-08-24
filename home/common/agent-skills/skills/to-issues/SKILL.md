@@ -9,7 +9,7 @@ Break a plan into independently-grabbable issues using vertical slices (tracer b
 
 ## Project bindings (resolve first)
 
-This skill is project-agnostic. Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set (tracker kind/CLI, `specDir`, `planDir`, branches) from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
+This skill is project-agnostic. Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set (tracker kind/CLI, `specDir`, `planDir`, branches) from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config if it exists and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
 
 Keys this skill uses: `issueTracker{kind,cli}`, `docPaths{context,contextMap}` (optional, used only for grounding; `docPaths.adrDir` is a legacy override where a repo still has a central ADR directory).
 

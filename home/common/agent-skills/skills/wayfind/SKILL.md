@@ -11,7 +11,7 @@ This is **planning, not doing** — the pull to just do the work usually signals
 
 Each discipline's rationale — and the trap it prevents — is in [DISCIPLINE.md](./DISCIPLINE.md); read it when a rule feels skippable.
 
-Resolve tracker bindings from `.claude/skills.config.json` (`issueTracker{kind,cli}`, default GitHub/`gh`). `kind: none` → markdown under `.claude/wayfind/<effort>/`: `map.md` with `state: open|complete` front-matter; tickets `tickets/NNN-<slug>.md` with `type: wayfinder:<type>`, `state`, `assignee`, `blocked_by: [NNN, …]` above `## Question`; resolving appends `## Resolution` and flips `state`.
+Resolve tracker bindings from `.claude/skills.config.json` when present (`issueTracker{kind,cli}`, default GitHub/`gh`). `kind: none` → markdown under `.claude/wayfind/<effort>/`: `map.md` with `state: open|complete` front-matter; tickets `tickets/NNN-<slug>.md` with `type: wayfinder:<type>`, `state`, `assignee`, `blocked_by: [NNN, …]` above `## Question`; resolving appends `## Resolution` and flips `state`.
 
 ## The map
 

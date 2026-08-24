@@ -10,7 +10,7 @@ Counterpart to `to-issues` and `from-issue`. Take a worktree branch with the imp
 
 ## Project bindings (resolve first)
 
-Run `~/.agents/bin/resolve-bindings` from the worktree — it prints the standard binding set (`specDir`, `planDir`, branches, tracker kind/CLI, branch naming, commit flags) from `.claude/skills.config.json` plus auto-detection and the shared defaults. Helper missing → read the config and apply the defaults it documents. Verify commands: config, else the manifest (`package.json` scripts, `*.slnx`/`*.sln` → `dotnet test`, `Cargo.toml` → `cargo test`, `go.mod` → `go test`, `Makefile` → `make test`).
+Run `~/.agents/bin/resolve-bindings` from the worktree — it prints the standard binding set (`specDir`, `planDir`, branches, tracker kind/CLI, branch naming, commit flags) from `.claude/skills.config.json` plus auto-detection and the shared defaults. Helper missing → read the config if it exists and apply the defaults it documents. Verify commands: config, else the manifest (`package.json` scripts, `*.slnx`/`*.sln` → `dotnet test`, `Cargo.toml` → `cargo test`, `go.mod` → `go test`, `Makefile` → `make test`).
 
 Degrade gracefully: never read a configured doc/hints path that doesn't exist, never hard-fail on a missing optional binding. `issueTracker.kind=none` skips every issue/PR/CI step; the sync/verify/consolidate/merge machinery still applies.
 
@@ -61,7 +61,7 @@ Before forming *any* user-facing question this skill raises mid-flow, invoke the
 
 ## gh hygiene
 
-When `unsetGithubToken` is true, prefix every `gh` call with `unset GITHUB_TOKEN &&` — for harnesses whose exported token lacks access to the target org (default false). When `issueTracker.cli` is `glab`, substitute the equivalent `glab` verbs.
+When `unsetGithubToken` is true, prefix every `gh` call with `env -u GITHUB_TOKEN` — for harnesses whose exported token lacks access to the target org (default false). When `issueTracker.cli` is `glab`, substitute the equivalent `glab` verbs.
 
 Throughout, follow `writing-plans`' Payload discipline: targeted `rg` over whole-file reads, bounded reads, summarized command output, logs on disk, artifacts handed over as paths.
 
@@ -114,9 +114,11 @@ Test failures: separate *environmental* (container connectivity, missing network
 
 Skip entirely when `issueTracker.kind=none` (push the branch and stop, or merge locally per the user's request).
 
-```
-git push -u origin <branch>
-gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
+Write the body to a file with the file-writing tool first, then pass it by path — a heredoc
+into `gh` is one of the forms the worktree isolation checker refuses (see the `worktrees`
+skill). Body template:
+
+```markdown
 ## Summary
 <2-4 bullets of what shipped>
 
@@ -127,8 +129,11 @@ gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
 <plan-path>
 
 Closes #<num>
-EOF
-)"
+```
+
+```bash
+git push -u origin <branch>
+gh pr create --base <integrationBranch> --title "<title>" --body-file <pr-body-path>
 ```
 
 Title: the issue title verbatim unless the implementation deviated meaningfully. Under 70 chars; details go in the body.
@@ -179,7 +184,7 @@ If the fix changes unrelated behavior or the finding cannot be checked in that b
 
 ## Phase 6 — Wait for CI
 
-**Docs-only changes never wait for CI.** `git diff --name-only <base>..HEAD | sed 's/.*\.//' | sort -u` — every line `md` → skip straight to Phase 7 (a markdown-only diff cannot break a build); anything else → the phase runs normally.
+**Docs-only changes never wait for CI.** `git diff --name-only <base>..HEAD` — every path ends in `.md` → skip straight to Phase 7 (a markdown-only diff cannot break a build); anything else → the phase runs normally.
 
 Before blocking, verify the tip: `gh pr view <pr-num> --json headRefOid` must equal `git rev-parse HEAD`; diverged → the Phase 5 push didn't land, re-push first or CI grades stale code.
 

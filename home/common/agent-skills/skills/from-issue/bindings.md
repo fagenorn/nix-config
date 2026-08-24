@@ -11,4 +11,4 @@ Keys used: `integrationBranch`, `defaultBranch`, `issueTracker{kind,cli}`, `unse
 
 `<tracker-cli>` = resolved `issueTracker.cli`; `<integration-branch>`, `<default-branch>` likewise. When `issueTracker.kind=none`, skip every issue/PR-linkage step and operate on the branch alone (a "tracker URL" the user gives you is just a label).
 
-**tracker-cli hygiene.** When `unsetGithubToken` is true, prefix *every* `<tracker-cli>` call — including ones you add ad-hoc — with `unset GITHUB_TOKEN &&`; some harnesses export a token without the target org's access. When false (default), use the ambient credential.
+**tracker-cli hygiene.** When `unsetGithubToken` is true, prefix *every* `<tracker-cli>` call — including ones you add ad-hoc — with `env -u GITHUB_TOKEN`; some harnesses export a token without the target org's access. When false (default), use the ambient credential.
