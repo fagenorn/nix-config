@@ -232,6 +232,13 @@ to remove the worktree.
    git branch -d <branch>
    ```
 
+   After the worktree is gone, remove that worktree's now-orphaned SDD bucket at
+   `<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`. Nothing else prunes it:
+   the bucket lives in the primary checkout and outlives the worktree that named it,
+   so a later worktree recreated under the same name would resolve to this attempt's
+   ledger and read its `Task <N>: complete` lines as its own. Remove only that one
+   worktree's bucket — never `primary/`, and never another worktree's.
+
 3. If `git worktree remove` refuses on the rebased-branch case (see `docPaths.gitWorktrees`): confirm the PR landed via `gh pr view`, then retry with `ExitWorktree action: "remove", discard_changes: true` — the "discarded N commits" wording is misleading; the content is on the integration branch.
 
 4. Only after issue closure and worktree cleanup both succeed, construct the

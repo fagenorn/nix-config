@@ -23,10 +23,10 @@ other result shape is a contract error (D5, D6, D8).
 
 Conversation memory does not survive compaction; controllers that lost their place have re-dispatched entire completed task sequences. Track progress in a ledger file:
 
-- Each plan owns a workspace: `scripts/sdd-workspace PLAN_FILE` prints the plan's git-ignored directory (`<repo-root>/.superpowers/sdd/<plan-basename>/`) — home to every artifact for THIS plan: ledger, briefs, reports, review packages. Another plan's directory is never yours to read or write.
+- Each plan owns a workspace: `scripts/sdd-workspace PLAN_FILE` prints the plan's git-ignored directory beneath the **primary checkout** — `<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`, where `<checkout-bucket>` is `primary` for the primary checkout itself and `wt-<worktree-name>` for a linked worktree — home to every artifact for THIS plan: ledger, briefs, reports, review packages. It is never rooted at your cwd, so running from a linked worktree leaves no nested ledger inside it. Another plan's directory, and another checkout's bucket, is never yours to read or write.
 - Check `<workspace>/progress.md`. If its first line names your plan file, tasks with a `Task <N>: complete` line are DONE — resume at the first task without one; a task whose last line is a fix round resumes mid-loop. A ledger naming a different plan is not yours: leave it, start fresh.
 - Create the ledger with its identity as the first line: `# SDD ledger — plan: <plan file path>`.
-- After compaction, trust the ledger and `git log` over recollection. (`git clean -fdx` destroys the workspace; recover from `git log`.)
+- After compaction, trust the ledger and `git log` over recollection. (`git clean -fdx` in the primary checkout destroys the workspace; recover from `git log`.)
 
 **Initial validation is the only whole-package read.** After the successful
 checker result, read the root and every indexed member once in discovery order

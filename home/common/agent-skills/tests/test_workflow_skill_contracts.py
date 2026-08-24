@@ -98,6 +98,31 @@ RESULT_FILE_INVOCATION = "--result-file <path>"
 # other order (D2).
 SIBLING_CANDIDATE_RE = re.compile(r"sibling(?:\s+\S+){0,2}\s+candidate")
 
+SDD_SCRIPTS = REPO_ROOT / "home/common/agent-skills/skills/sdd/scripts"
+
+# The superseded claim: the workspace has not been repo-root-relative since the
+# primary-checkout move (D3).
+REPO_ROOT_WORKSPACE_LITERAL = "<repo-root>/.superpowers/sdd"
+
+# Every `.superpowers/` home the corpus is allowed to name, spelled once (D10).
+SUPERPOWERS_SEGMENTS = {"workflows", "issue-delivery", "sdd", "ship-review"}
+SUPERPOWERS_SEGMENT_RE = re.compile(r"\.superpowers/([A-Za-z0-9_.-]+)")
+
+SHIP_REVIEW_EXCEPTION = (
+    "the one exception to the rule that workflow scratch never lives in a "
+    "working tree"
+)
+
+# The orphaned-bucket prune, spelled once (D5, D8).
+WORKTREE_BUCKET_LITERAL = "`<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`"
+
+# What `git clean -fdx` actually destroys after Task 3 moved the ledger out of
+# the feature worktree.
+CLEAN_SCRATCH_CLAUSE = (
+    "in a feature worktree that is `ship-issue`'s retained Minor/Discussion "
+    "detail, and in the primary checkout it is every plan's SDD workspace"
+)
+
 
 def normalized(text):
     """Collapse every whitespace run to one space (the corpus hard-wraps ~80c)."""
@@ -1936,6 +1961,66 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         ):
             with self.subTest(dispatch_id=dispatch_id):
                 self.assertIn(dispatch_id, ship_skill)
+
+    def test_sdd_documents_the_primary_rooted_bucketed_workspace(self):
+        text = normalized(self.sdd)
+        self.assertIn(
+            "`<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`",
+            text,
+        )
+        self.assertIn(
+            "`primary` for the primary checkout itself and `wt-<worktree-name>` "
+            "for a linked worktree",
+            text,
+        )
+        self.assertIn(
+            "`git clean -fdx` in the primary checkout destroys the workspace",
+            text,
+        )
+
+    def test_no_document_or_script_claims_a_repo_root_workspace(self):
+        offenders = [
+            str(path.relative_to(REPO_ROOT))
+            for path, text in corpus_documents()
+            if REPO_ROOT_WORKSPACE_LITERAL in text
+        ]
+        offenders += [
+            str(path.relative_to(REPO_ROOT))
+            for path in sorted(SDD_SCRIPTS.iterdir())
+            if path.is_file()
+            and REPO_ROOT_WORKSPACE_LITERAL in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_superpowers_homes_are_a_closed_allowlist(self):
+        found: dict[str, set[str]] = {}
+        for path, text in corpus_documents():
+            for match in SUPERPOWERS_SEGMENT_RE.finditer(text):
+                found.setdefault(match.group(1), set()).add(
+                    str(path.relative_to(REPO_ROOT))
+                )
+        self.assertEqual(set(found), SUPERPOWERS_SEGMENTS, found)
+
+    def test_ship_review_is_the_single_documented_exception(self):
+        carriers = [
+            str(path.relative_to(REPO_ROOT))
+            for path, text in corpus_documents()
+            if ".superpowers/ship-review" in text
+        ]
+        self.assertEqual(
+            carriers, ["home/common/agent-skills/skills/ship-issue/REVIEW.md"]
+        )
+        self.assertIn(SHIP_REVIEW_EXCEPTION, normalized(self.ship_review))
+
+    def test_ship_issue_prunes_the_removed_worktrees_sdd_bucket(self):
+        text = normalized(self.ship_issue)
+        self.assertIn(WORKTREE_BUCKET_LITERAL, text)
+        self.assertIn("Remove only that one worktree's bucket", text)
+
+    def test_worktrees_names_the_scratch_git_clean_destroys(self):
+        text = normalized(self.worktrees)
+        self.assertIn(CLEAN_SCRATCH_CLAUSE, text)
+        self.assertNotIn("(ledgers, review packages)", text)
 
 
 # --- codebase-design vocabulary package (issue 42) -------------------------
