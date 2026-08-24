@@ -84,6 +84,23 @@ in
       executable = true;
     };
 
+    # ship-issue's Phase-8 delivery-detail producer. It lives in the sdd skill
+    # tree, but a consumer outside that skill knows it only by bare name — an
+    # agent that goes looking finds every other bare-name helper here, so this
+    # one has to be here too (observed: a ship-issue cleanup wrongly retained a
+    # worktree after concluding no producer existed on the machine). It resolves
+    # its workspace sibling via Path(__file__).with_name, so the two ship
+    # together: exposing one without the other breaks diff mode.
+    ".agents/bin/review-package" = {
+      source = ./skills/sdd/scripts/review-package;
+      executable = true;
+    };
+
+    ".agents/bin/sdd-workspace" = {
+      source = ./skills/sdd/scripts/sdd-workspace;
+      executable = true;
+    };
+
     ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
 

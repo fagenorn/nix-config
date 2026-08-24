@@ -212,7 +212,8 @@ After verifying the merge, ask the REMOTE whether the branch still exists — `g
 ## Phase 8 — Cleanup
 
 Before cleanup, take every non-empty Minor/Discussion finding retained per
-REVIEW.md and invoke review-package in `delivery-detail` mode. Independently run
+REVIEW.md and invoke review-package (`~/.agents/bin/review-package`) in
+`delivery-detail` mode. Independently run
 `artifact-budget check --kind review-package` on the returned durable root and
 compare metrics. Record the checked `detail_state` and single `report_path`, but
 do not construct or validate a successful `merged` ship summary yet. With non-empty findings,
