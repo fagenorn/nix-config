@@ -532,7 +532,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
     def test_prefixed_merge_reaches_acceptance_on_the_integration_base(self):
         # The real-world shape that motivated the prefix: a nodocom ship-issue
-        # merge onto the declared integration branch `dev`.
+        # merge onto the declared integration branch `dev`. The integration
+        # base is exempt from the protection demand, so the protection stage is
+        # poisoned here to prove the guard never even consults it.
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
         result = self.run_guard(
             "unset GITHUB_TOKEN && gh pr merge 42 --repo elevenyellow/nodocom "
@@ -540,9 +542,32 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             cwd=repo,
             env={"FAKE_PR_JSON":
                  '{"state":"OPEN","baseRefName":"dev",'
-                 '"url":"https://github.com/elevenyellow/nodocom/pull/42"}'},
+                 '"url":"https://github.com/elevenyellow/nodocom/pull/42"}',
+                 "FAKE_PROTECTION_MODE": "nonzero"},
         )
         self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_merge_protection_demand_follows_the_base_branch(self):
+        # In a repository with a declared integration base, a PR into that base
+        # merges without forge protection, while a PR into the default branch
+        # still demands it — the exemption follows the base, not the repo.
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        merge = "gh pr merge 7 --repo elevenyellow/nodocom --merge --delete-branch"
+        dev_pr = {
+            "FAKE_PROTECTION_MODE": "nonzero",
+            "FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"dev",'
+                            '"url":"https://github.com/elevenyellow/nodocom/pull/7"}',
+        }
+        allowed = self.run_guard(merge, cwd=repo, env=dev_pr)
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+        main_pr = {
+            "FAKE_PROTECTION_MODE": "nonzero",
+            "FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"main",'
+                            '"url":"https://github.com/elevenyellow/nodocom/pull/7"}',
+        }
+        blocked = self.run_guard(merge, cwd=repo, env=main_pr)
+        self.assertEqual(2, blocked.returncode)
+        self.assertIn("protection lookup failed", blocked.stderr)
 
     def test_prefixed_merge_near_misses_fail_closed(self):
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
