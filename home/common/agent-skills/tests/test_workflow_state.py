@@ -1279,7 +1279,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             ],
         )
 
-        # 3. Silent expiry retries on the recorded path while unrelated work starts.
+        # 3. Silent expiry resumes attempt 1 in place on the recorded path
+        #    while unrelated work starts.
         decision = self.control_raw(request=decision_request)
         decided = json.loads(decision.stdout)
         self.assertEqual([d["kind"] for d in decided["deltas"]],
@@ -1289,7 +1290,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(decided["actions"][0]["worktree"], paths[51])
         post_action_state = self.state_path.read_bytes()
 
-        # 4. The retried owner and unrelated active owner finish concurrently.
+        # 4. The resumed owner and unrelated active owner finish concurrently.
         finished = self.concurrent_finish(
             {51: (1, self.merged_result(51)), 53: (1, self.merged_result(53))},
             now="2026-08-19T12:40:00Z",
@@ -4615,7 +4616,6 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             [{"kind": "candidate_worktree"}],
         )
 
-
     def test_direct_terminal_replay_is_canonical_for_merged_and_owner_stopped(self):
         merged_owner = self.acquire_direct(issue=73)
         self.run_id = merged_owner["run_id"]
@@ -5578,6 +5578,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertNotIn("Traceback", rejected.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
+
 
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
     """Cover the installed layout, where the policy is a home-manager symlink."""

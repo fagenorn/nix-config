@@ -1161,11 +1161,15 @@ def suspend_attempt(attempt: dict[str, Any], *, blocked_on: str, now: str) -> bo
     the work, so they leave the attempt resumable: no result, no finish time, no
     result source, and no attempt consumed (per D2).
 
-    Returns ``True`` when the attempt is now suspended. A suspension that would
-    be the third consecutive one at the same recorded phase is a zombie loop, so
-    the attempt is stopped with the synthetic ``stalled`` source instead and
-    ``False`` is returned — the caller stashes that terminal record as the
-    issue's outcome (per D8).
+    Returns ``True`` when the attempt is now suspended. ``stalled_resumes``
+    counts the resumes already granted at this unchanged phase — 0 on the first
+    suspension there, then 1 and 2 — so three consecutive same-phase resumes
+    are granted and the fourth consecutive suspension at that phase is the
+    zombie loop: it stops the attempt with the synthetic ``stalled`` source
+    instead and returns ``False``, and the caller stashes that terminal record
+    as the issue's outcome (per D8). Counted from the other end, the spec's
+    "third consecutive resume without phase advance escalates" names the same
+    boundary: once that third resume is spent, no fourth is granted.
     """
     if blocked_on not in BLOCKED_ON_VALUES:
         raise WorkflowError("invalid suspension cause")
@@ -1241,9 +1245,12 @@ def demote_expired_attempt(
 
     ``_apply_one_issue_policy`` calls this once, before it derives any lane
     predicate, and that is the only call site. Every ``control`` or
-    ``direct-owner`` touch of an expired attempt therefore reaps it, whether or
-    not a dispatch slot is free, and everything downstream sees an ordinary
-    suspension rather than an expiry of its own (per D1).
+    ``direct-owner`` touch of an expired attempt that reaches this line
+    therefore reaps it, whether or not a dispatch slot is free, and everything
+    downstream sees an ordinary suspension rather than an expiry of its own
+    (per D1). The two branches sitting above this call are the exceptions: an
+    ``owner_unavailable`` observation on a non-active attempt raises, and the
+    hoisted forge-merged reconciliation returns, both without reaping.
 
     The reaper cannot know why the owner went silent, so the cause is ``unknown``
     and no issue outcome is written — an expired deadline bounds how long an
@@ -2244,7 +2251,6 @@ def command_control(args: argparse.Namespace) -> int:
                 analysis[issue]["expired"]
                 and result is not None
                 and result["changed"]
-                and result["operation"] != "refuse"
             ):
                 number = analysis[issue]["attempt"]["attempt"]
                 deltas.append({

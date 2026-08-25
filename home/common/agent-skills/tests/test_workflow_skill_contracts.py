@@ -1092,6 +1092,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "a terminal",
             collapsed,
         )
+        # The same rejection has a second meaning at the anti-zombie bound, and
+        # this owner is the one deciding whether to stop for a pause or for
+        # good, so the stalled branch has to be named here too (per D8).
+        self.assertIn(
+            "a `stopped(stalled)` terminal and the run is over, not paused",
+            collapsed,
+        )
 
     def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
         # The delegated ledger-only remainder is how a --auto run reaches its
