@@ -124,6 +124,27 @@ the reaped state it now reports is pinned rather than merely unobserved.
 | AC5 — the ledger's same-sweep-vs-next-sweep row; corrected from-issue and orchestrate-issues prose guarded by `test_workflow_skill_contracts.py` | spec row D2 (already committed), Task 4 |
 | AC6 — `just build` succeeds | Task 4 (whole-change gate) |
 
+## Standards review provenance
+
+- **Reviewer:** Codex, in an isolated read-only runtime (fresh `CODEX_HOME`,
+  approval policy `never`, sandbox `read-only`). No native fallback was used.
+- **Base SHA reviewed:** `3b049d0b83fc6443e92340c300e164198b17a3c4`, off
+  `origin/main` at `0fda99d1fc760103e22c342da46c49e075e15406`.
+- **Focus:** none configured (`codex.planReview.focus` unset); the standard bar
+  applied.
+- **Dispositions:** 4 findings, 4 accepted, 0 rejected, 0 deferred — three
+  `Blocking` (the permission-guard gate's missing `CLAUDE_SETTINGS_PATH` and the
+  `tail` pipelines that mask exit status; Task 4's absent-at-base proof failing
+  at base on a phrase that lives outside the asserted section; the final-report
+  prose promising a resume the policy does not guarantee) and one `Should fix`
+  (Task 1's red-phase failure count). All four were re-verified against the live
+  worktree before being applied. `Discussion`: none.
+- Spec rows **D15** and **D16** record the non-obvious half.
+- The reviewer could read every supplied artifact — the plan root and all four
+  indexed members. It could not fetch the live GitHub issue (no network in the
+  sandbox) and used the issue body supplied in the packet; it executed no tests
+  or builds, as its read-only contract requires.
+
 ## Decisions
 
 Spec rows D1–D12 are the design record; cite them, never restate them. Planning
@@ -148,13 +169,23 @@ Surface it as a ship-time discussion item.
 Whole-change gates, all run from the worktree root:
 
 ```sh
+set -o pipefail
 just agent-workflow-tests
-python3 tests/test_claude_permission_guard.py
+just show-claude-settings > "$TMPDIR/claude-settings.json" \
+  && CLAUDE_SETTINGS_PATH="$TMPDIR/claude-settings.json" \
+     python3 tests/test_claude_permission_guard.py
 just build
 ```
 
 `just agent-workflow-tests` is 455 tests and green at base; it covers
 `test_workflow_state.py` and `test_workflow_skill_contracts.py`, the two suites
 this change touches. The permission-guard suite is not in that recipe and is run
-separately; it must stay green untouched (Seam 4). Task 4 runs all three; every
-earlier task runs the single suite it moves.
+separately; it must stay green untouched (Seam 4). It reads its settings artifact
+from `CLAUDE_SETTINGS_PATH` at import (`tests/test_claude_permission_guard.py:10`,
+`SETTINGS_PATH = Path(os.environ["CLAUDE_SETTINGS_PATH"])`), so a bare `python3
+tests/test_claude_permission_guard.py` dies with a `KeyError` before collecting a
+single case; `just show-claude-settings` (`justfile:82`) is the recipe that
+produces that artifact, and it depends on `build`. Any gate that pipes a runner
+into `tail` runs under `set -o pipefail`, or the pipeline reports `tail`'s exit
+status and a red suite reads as green. Task 4 runs all three; every earlier task
+runs the single suite it moves.

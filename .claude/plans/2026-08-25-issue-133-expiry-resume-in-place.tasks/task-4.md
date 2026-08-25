@@ -71,7 +71,7 @@ and its three existing anchors, and replace its assertion block with:
             "`expired` delta",
             "consumes no attempt",
             "`resumed` on the same attempt",
-            "the next sweep resumes",
+            "a later eligible sweep resumes",
         )
         self.assertIn("never `retried` and never `retry_refused`", collapsed)
 ```
@@ -91,10 +91,26 @@ is permanently green:
 ```sh
 F=home/common/agent-skills/skills/from-issue/SKILL.md
 O=home/common/claude-code/skills/orchestrate-issues/SKILL.md
+# Scope the from-issue probe to the same section the contract test scopes to.
+# The assertions live inside `## Dispatch, phase-budget and attempt-budget
+# rules`, and "consumes no attempt" already appears *outside* it — in the
+# suspension procedure at SKILL.md:296 — so a file-wide grep would report a
+# false positive and stop the task before a line of prose is written.
+section() {
+  awk -v start="$2" -v end="$3" '
+    $0 == start { inside = 1; next }
+    $0 == end   { inside = 0 }
+    inside' "$1"
+}
 for phrase in "consumes no attempt" "resumes the same attempt" \
               "never opens a second attempt" "one fresh retry stays reserved"; do
-  if grep -q "$phrase" "$F"; then echo "already present in from-issue: $phrase"; exit 1; fi
+  if section "$F" "## Dispatch, phase-budget and attempt-budget rules" \
+                  "## Terminal return procedure" | grep -q "$phrase"; then
+    echo "already present in from-issue: $phrase"; exit 1
+  fi
 done
+# The orchestrate anchors are absent file-wide, which is the stronger proof, so
+# that probe stays unscoped.
 for phrase in "expired" "retried" "retry_refused" "resumed"; do
   if grep -q "$phrase" "$O"; then echo "already present in orchestrate: $phrase"; exit 1; fi
 done
@@ -136,11 +152,22 @@ It must contain the four anchors in order and the closing literal, and state:
 
 - an `expired` delta is an interruption that **consumes no attempt**;
 - it is followed either by a `resumed` on the same attempt in the same sweep,
-  or by a `suspended` summary that **the next sweep resumes**;
+  or by a `suspended` summary that **a later eligible sweep resumes**;
 - it is **never `retried` and never `retry_refused`**.
 
 Use backticks around the delta kinds exactly as the anchors spell them
 (`` `expired` delta ``, `` `resumed` on the same attempt ``).
+
+**"a later eligible sweep", not "the next sweep"** — and the sentence must not
+promise more than the policy delivers. A suspension arms no deadline
+(`command_control` builds `deadlines` only from `active`/`handed_off` attempts),
+so the sweep that parked the attempt renders `finalize` and there may be no next
+sweep at all; and a sweep that does run resumes only once the tracker is neither
+closed nor blocked (the suspended-plus-`tracker_halt_reason` branch returns a
+`terminal` instead), a slot is free, and the recorded worktree has been
+observed. Write the eligibility as a property of the resume, not a schedule:
+name the conditions in prose if it reads better, but do not paste a source line
+number into shipped skill prose.
 
 - [ ] **Step 5: Correct the helper's docstrings**
 
@@ -161,15 +188,26 @@ and is correct as it stands — **verify it, do not edit it.**
 - [ ] **Step 6: Verify**
 
 ```sh
+set -o pipefail
 python3 home/common/agent-skills/tests/test_workflow_skill_contracts.py 2>&1 | tail -5
 ```
-Expected: `OK`, zero failures and zero errors.
+Expected: `OK`, zero failures and zero errors. `set -o pipefail` is not
+decoration: without it the pipeline exits with `tail`'s status and a red suite
+reports success.
 
-Then run the whole-change gates from the worktree root:
+Then run the whole-change gates from the worktree root. The permission-guard
+suite reads its settings artifact from `CLAUDE_SETTINGS_PATH` at import time
+(`tests/test_claude_permission_guard.py:10`), so it must be produced first with
+`just show-claude-settings` (`justfile:82`, which depends on `build`) and bound
+through that variable; invoked bare it raises `KeyError: 'CLAUDE_SETTINGS_PATH'`
+before collecting a case, which is a broken gate, not a green one.
 
 ```sh
+set -o pipefail
 just agent-workflow-tests 2>&1 | tail -5
-python3 tests/test_claude_permission_guard.py 2>&1 | tail -5
+just show-claude-settings > "$TMPDIR/claude-settings.json" \
+  && CLAUDE_SETTINGS_PATH="$TMPDIR/claude-settings.json" \
+     python3 tests/test_claude_permission_guard.py 2>&1 | tail -5
 just build 2>&1 | tail -5
 ```
 Expected: `just agent-workflow-tests` reports `OK` over 455 tests plus the ones

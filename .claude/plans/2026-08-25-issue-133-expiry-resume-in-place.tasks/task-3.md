@@ -121,6 +121,7 @@ already says to pass it through on a `resume`.
 - [ ] **Step 4: Verify**
 
 ```sh
+set -o pipefail
 python3 home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -5
 ```
 Expected: `OK`, zero failures and zero errors — including

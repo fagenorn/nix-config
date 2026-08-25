@@ -346,9 +346,37 @@ state it reports is worth pinning. Replace its final assertion with:
 ```sh
 python3 home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -40
 ```
-Expected: failures in the five new tests plus the four re-pointed ones. The
-signature failures are `51:2:1 != 51:1:2` (a fresh attempt where a resume was
-expected), `'retried' != 'resumed'`, and `KeyError`/`StopIteration` from
+Expected: **six** named failures. Do not expect nine — three of the cases Step 1
+touches pin behaviour the base already has, and a green there is coverage
+working, not a failure to reproduce.
+
+Red at this commit, because each asserts the contract this task introduces:
+
+- `test_control_expiry_resumes_in_place_when_a_slot_is_free`
+- `test_control_double_expiry_resumes_twice_and_spends_no_retry`
+- `test_direct_expiry_resumes_in_place_and_ignores_the_candidate`
+- `test_control_combined_six_stage_single_ledger_replay`
+- `test_control_demo_3_expires_retries_and_fills_unrelated_capacity`
+- `test_control_attempt_two_deadline_emits_only_retry_refused`
+
+Green at this commit, by design — they are baseline-preserving regression
+coverage for the one expiry path the base already routes correctly (the
+no-dispatch demotion at `workflow-state.py:1921`, whose behaviour this task
+generalises rather than changes):
+
+- `test_control_expiry_parks_when_capacity_is_full_then_resumes_next_sweep`
+- `test_control_expiry_deltas_follow_reversed_request_order` (the strengthened
+  assertion from 1d)
+
+Either colour is acceptable for
+`test_control_expiry_parks_when_the_recorded_worktree_is_unobserved`: with a
+free slot the base reaches the retry lane before the suspended-attempt skip it
+is written against can apply, so whether the base's observation ladder happens
+to park it identically is not statically obvious. Record which it was and move
+on — do not edit the test to make it red.
+
+The signature failures are `51:2:1 != 51:1:2` (a fresh attempt where a resume
+was expected), `'retried' != 'resumed'`, and `KeyError`/`StopIteration` from
 `dispatch_action(response, "resume")` finding no resume action.
 
 - [ ] **Step 3: Reap first inside `_apply_one_issue_policy`**
@@ -494,6 +522,7 @@ stay as they are, and the resume pass's "round still owed" skip already tests
 - [ ] **Step 7: Verify**
 
 ```sh
+set -o pipefail
 python3 home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -5
 ```
 Expected: `OK`, 132 tests, zero failures and zero errors — the five new tests
