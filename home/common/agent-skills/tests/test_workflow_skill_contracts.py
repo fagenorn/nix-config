@@ -990,9 +990,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("optional lifecycle envelope", dispatcher)
         self.assertIn("all six dispatcher fields", dispatcher)
         self.assertIn("action_id", dispatcher)
-        for field in ("run_id", "attempt", "owner", "worktree", "ledger_repo_root",
-                      "action_id"):
+        for field in ("run_id", "attempt", "owner", "worktree", "ledger_repo_root"):
             self.assertIn(field, identity)
+        self.assertIn(
+            "`owner`, `action_id`, and normalized `worktree` as one identity",
+            normalized(identity),
+        )
         self.assertIn("immutable ledger_repo_root", identity)
         self.assertIn("separate owner worktree", identity)
         self.assertIn("Every `workflow-state` command", identity)

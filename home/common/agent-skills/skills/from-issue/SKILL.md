@@ -35,10 +35,10 @@ recompute it.
 ### Dispatcher-owned acquisition
 
 When a dispatcher supplies the optional lifecycle envelope, require
-all six dispatcher fields: `ledger_repo_root`, `run_id`, `attempt`, `owner`,
-`action_id`, and normalized `worktree`. Validate and adopt them unchanged. A
-partial envelope fails loudly; this route does not perform any other
-acquisition.
+all six dispatcher fields: `ledger_repo_root`, `run_id`, `attempt`,
+`owner`, `action_id`, and normalized `worktree`. Validate and adopt them
+unchanged. A partial envelope fails loudly; this route does not perform
+any other acquisition.
 
 ### Direct autonomous acquisition
 
