@@ -2581,6 +2581,24 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         source="tracker", reason=policy["tracker_reason"],
                         blockers=policy["blockers"], result=None,
                     )
+                elif operation == "terminal":
+                    # The one lifecycle terminal that carries no tracker reason:
+                    # the reaper's suspension was the fourth at an unchanged
+                    # phase, so `suspend_attempt` stopped the attempt instead
+                    # (per D4). The envelope equals the next call's replay,
+                    # which `direct_run_is_terminal` will route through
+                    # `direct_terminal` from the same stored fields.
+                    assert state is not None
+                    if policy["changed"]:
+                        state["issues"][str(issue)] = policy["issue_state"]
+                        state["updated_at"] = request["now"]
+                        validate_state(state, run_id=run_id)
+                        atomic_write_state(run_dir, state_path, state)
+                    response = direct_terminal(
+                        issue=issue, run_id=run_id, source="lifecycle",
+                        reason=policy["attempt"]["result"]["state"],
+                        blockers=[], result=policy["issue_state"]["outcome"],
+                    )
                 elif operation == "reconcile":
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]

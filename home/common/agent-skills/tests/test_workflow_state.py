@@ -5445,6 +5445,90 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIsNone(attempts[-1]["result_source"])
         self.assertIsNone(state["issues"]["73"]["outcome"])
 
+    def test_control_fourth_expiry_at_one_phase_escalates_to_a_synthetic_stop(self):
+        # `stalled_resumes` counts 0, 1, 2 across suspensions at an unchanged
+        # phase, so three expiry-driven resumes are free and the fourth expiry
+        # terminates the attempt (per D4). Before this change the retry lane
+        # stamped that terminal and then cleared it.
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-51")
+        self.spawn(issue=51, worktree=path, now="2026-08-19T12:00:00Z",
+                   budget_minutes=30)
+        observed = [self.worktree_fact(51, recorded={
+            "path": path, "state": "matching_issue_branch"})]
+
+        def sweep(moment):
+            return self.control(
+                now=moment, issues=[51], max_parallel=2,
+                attempt_budget_minutes=30,
+                tracker=[self.tracker_fact(51)], worktrees=observed,
+            )
+
+        for moment, launch in (
+            ("2026-08-19T12:30:00Z", "51:1:2"),
+            ("2026-08-19T13:00:00Z", "51:1:3"),
+            ("2026-08-19T13:30:00Z", "51:1:4"),
+        ):
+            self.assertEqual(self.dispatch_action(sweep(moment), "resume")["id"],
+                             launch)
+
+        escalated = sweep("2026-08-19T14:00:00Z")
+        self.assertEqual(escalated["deltas"], [
+            {"issue": 51, "attempt": 1, "kind": "expired", "state": "stopped"},
+        ])
+        self.assertEqual(escalated["actions"],
+                         [{"id": "finalize", "kind": "finalize"}])
+        issue_state = self.read_state()["issues"]["51"]
+        attempt = issue_state["attempts"][-1]
+        self.assertEqual(len(issue_state["attempts"]), 1)
+        self.assertEqual(
+            (attempt["state"], attempt["result_source"], attempt["blocked_on"]),
+            ("stopped", "stalled", None),
+        )
+        self.assertIn("stalled without phase progress", attempt["result"]["notes"])
+        self.assertEqual(issue_state["outcome"], attempt["result"])
+
+    def test_direct_expiry_escalation_matches_the_next_call_terminal_replay(self):
+        owner = self.acquire_direct(attempt_budget_minutes=30)
+        tracker = self.tracker_fact(73)
+        observed = self.worktree_fact(73, recorded={
+            "path": owner["worktree"], "state": "absent"})
+        for moment, launch in (
+            ("2026-08-20T10:30:00Z", "73:1:2"),
+            ("2026-08-20T11:00:00Z", "73:1:3"),
+            ("2026-08-20T11:30:00Z", "73:1:4"),
+        ):
+            resumed = self.direct_owner(
+                now=moment, attempt_budget_minutes=30, tracker=tracker,
+                worktree=observed,
+            )
+            self.assertEqual(resumed["action_id"], launch)
+
+        escalated = self.direct_owner_raw(
+            now="2026-08-20T12:00:00Z", attempt_budget_minutes=30,
+            tracker=tracker, worktree=observed,
+        )
+        envelope = json.loads(escalated.stdout)
+        state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
+        outcome = state["issues"]["73"]["outcome"]
+        self.assertEqual(envelope, {
+            "interface_version": 1, "kind": "terminal", "issue": 73,
+            "run_id": owner["run_id"], "source": "lifecycle",
+            "reason": "stopped", "blockers": [], "result": outcome,
+            "reentry": "/from-issue 73 --auto",
+        })
+        attempts = state["issues"]["73"]["attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[-1]["result_source"], "stalled")
+
+        # The next call reaches the same envelope through terminal replay, so
+        # the two must agree byte for byte (per D4).
+        replayed = self.direct_owner_raw(
+            now="2026-08-20T12:05:00Z", attempt_budget_minutes=30,
+            tracker=tracker, worktree=observed,
+        )
+        self.assertEqual(replayed.stdout, escalated.stdout)
+
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
     """Cover the installed layout, where the policy is a home-manager symlink."""
 
