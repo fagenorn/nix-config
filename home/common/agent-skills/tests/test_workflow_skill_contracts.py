@@ -391,6 +391,22 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for forbidden in ("attempts", "launches", "phase_inputs", "older results"):
             self.assertIn(forbidden, self.orchestrate)
 
+    def test_final_report_reads_an_expiry_as_an_interruption(self):
+        # The dispatcher renders what happened to a human. An `expired` delta
+        # is an interruption, not a consumed attempt (per D8, D10).
+        final_section = self.section(
+            self.orchestrate, "## 5. Final report", "## Notes"
+        )
+        collapsed = normalized(final_section)
+        self.assert_ordered(
+            collapsed,
+            "`expired` delta",
+            "consumes no attempt",
+            "`resumed` on the same attempt",
+            "a later eligible sweep resumes",
+        )
+        self.assertIn("never `retried` and never `retry_refused`", collapsed)
+
     def test_background_dispatch_flag_appears_only_in_orchestrate_issues(self):
         self.assertIn("run_in_background=true", self.orchestrate)
         for path, text in nested_workflow_documents():
@@ -1062,10 +1078,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "Persistence precedes notification",
             "wall-clock only",
             "never consults `last_progress_at`",
+            "consumes no attempt",
+            "resumes the same attempt",
+            "never opens a second attempt",
         )
         self.assertIn("blocked on a CI watch", collapsed)
         self.assertIn(
             "bounds how long an owner may hold the issue", collapsed
+        )
+        self.assertIn(
+            "the one fresh retry stays reserved for an attempt that reported "
+            "a terminal",
+            collapsed,
         )
 
     def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):

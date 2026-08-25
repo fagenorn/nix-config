@@ -191,6 +191,18 @@ column sourced from those finalize summaries. Then group every `discussion_items
 entry by issue and call out anything needing a human. Do not perform a second
 ledger read or reconstruct omitted history.
 
+An `expired` delta is an interruption, not a verdict on the work: it consumes
+no attempt, and the attempt number never advances because of it. It is
+followed either by a `resumed` on the same attempt in this same sweep, or by a
+`suspended` summary that a later eligible sweep resumes — eligible meaning
+that sweep finds the tracker neither closed nor blocked, a dispatch slot free,
+and that attempt's recorded worktree observed. A parked suspension arms no
+deadline of its own, so once nothing else in the run is still running the
+sweep renders `finalize` and the later sweep is the one a re-invocation
+starts; report such an issue as paused, not as progressing. An expiry is
+never `retried` and never `retry_refused`, so never report it as a spent
+attempt.
+
 ## Notes
 
 Claude-only skill: it depends on background agents and host task notifications,

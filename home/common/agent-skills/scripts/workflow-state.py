@@ -1210,9 +1210,12 @@ def resume_attempt(
 
     ``attempt_budget_minutes`` re-bases the budget window, and the progress clock
     with it: a suspension resume passes the fresh full window D8 grants it, since
-    an interruption may outlast the window the attempt started with. A resume
-    inside the attempt's own live window — a handoff rollover, a dead-owner
-    takeover — leaves it ``None`` and keeps the original deadline.
+    an interruption may outlast the window the attempt started with. An attempt
+    the reaper demoted for passing its deadline is one of those suspensions, so
+    a resumed expiry gets a whole new window rather than the remains of the one
+    it exhausted (per D1). A resume inside the attempt's own live window — a
+    handoff rollover, a dead-owner takeover — leaves it ``None`` and keeps the
+    original deadline.
 
     ``suspend_phase`` and ``stalled_resumes`` deliberately survive a resume: they
     are the anti-zombie bound's memory across the suspend/resume cycle (per D8).
@@ -1235,6 +1238,12 @@ def demote_expired_attempt(
     ledger_issue: dict[str, Any], attempt: dict[str, Any], *, now: str
 ) -> None:
     """Reap an attempt past its deadline into a resumable suspension.
+
+    ``_apply_one_issue_policy`` calls this once, before it derives any lane
+    predicate, and that is the only call site. Every ``control`` or
+    ``direct-owner`` touch of an expired attempt therefore reaps it, whether or
+    not a dispatch slot is free, and everything downstream sees an ordinary
+    suspension rather than an expiry of its own (per D1).
 
     The reaper cannot know why the owner went silent, so the cause is ``unknown``
     and no issue outcome is written — an expired deadline bounds how long an
@@ -1709,6 +1718,16 @@ def _apply_one_issue_policy(
     orchestrated sweep carries it exactly when the caller listed the issue
     numbers itself. A `--label`/`--milestone` sweep never does, so it leaves
     those parked and reports them.
+
+    An expired attempt is reaped before any lane predicate is derived: the
+    single ``demote_expired_attempt`` call turns it into a ``suspended``
+    attempt, or into a ``stopped(stalled)`` terminal at the anti-zombie bound.
+    ``handed_off``, ``suspended`` and ``retryable`` all read the post-reap
+    attempt, so an expiry reaches the suspension lane and never the retry lane
+    (per D1). The forge-merged reconciliation is hoisted above the reaper
+    because reconciliation precedes ownership: a stall escalation returns a
+    terminal, and without the hoist that return would come before a merged pull
+    request had ever been considered (per D3).
     """
     if ledger_issue is not None:
         issue = ledger_issue["issue"]

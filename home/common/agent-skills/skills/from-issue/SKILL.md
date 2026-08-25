@@ -256,7 +256,13 @@ the reaper compares the current instant against the attempt's `deadline_at`
 and never consults `last_progress_at`, so an attempt that is actively
 working — blocked on a CI watch, say — expires exactly like one whose owner
 is gone. A deadline bounds how long an owner may hold the issue; it says
-nothing about whether that owner is still running.
+nothing about whether that owner is still running. The reaper's suspension
+consumes no attempt: re-entry resumes the same attempt in place, on the same
+worktree, with a fresh full `attempt_budget_minutes` window and one more
+launch recorded against it. A deadline therefore never opens a second
+attempt, and the one fresh retry stays reserved for an attempt that reported
+a terminal — an owner-reported `failed`, or a legacy expiry-sourced `stopped`
+from before the suspension model.
 
 Without lifecycle identity, apply the same action order locally with the
 120-turn/150000-token ceilings and default interactive handoff behavior.
