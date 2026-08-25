@@ -23,19 +23,22 @@ an interactive direct invocation is ledger-free unless it explicitly requests
 durable orchestration.
 
 Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`,
-`issue`, `attempt`, `owner`, and normalized `worktree` as one identity; never
-guess a missing field. Preserve the immutable ledger_repo_root exactly as
-supplied, and keep it distinct from the separate owner worktree recorded on the
-attempt. Every `workflow-state` command in this owner or its delegated remainder
-uses `--repo-root <ledger_repo_root>`; never substitute the current checkout or
-owner worktree.
+`issue`, `attempt`, `owner`, `action_id`, and normalized `worktree` as one
+identity; never guess a missing field. Preserve the immutable ledger_repo_root
+exactly as supplied, and keep it distinct from the separate owner worktree
+recorded on the attempt. Every `workflow-state` command in this owner or its
+delegated remainder uses `--repo-root <ledger_repo_root>`; never substitute the
+current checkout or owner worktree. `action_id` is the one identity field that
+changes when the attempt is relaunched; pass it through verbatim and never
+recompute it.
 
 ### Dispatcher-owned acquisition
 
-When a dispatcher supplies the optional lifecycle envelope, require all five
-dispatcher fields: `ledger_repo_root`, `run_id`, `attempt`, `owner`, and
-normalized `worktree`. Validate and adopt them unchanged. A partial envelope
-fails loudly; this route does not perform any other acquisition.
+When a dispatcher supplies the optional lifecycle envelope, require
+all six dispatcher fields: `ledger_repo_root`, `run_id`, `attempt`, `owner`,
+`action_id`, and normalized `worktree`. Validate and adopt them unchanged. A
+partial envelope fails loudly; this route does not perform any other
+acquisition.
 
 ### Direct autonomous acquisition
 
@@ -415,7 +418,7 @@ degradation decision reads them.
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow; a fresh ~10k subagent returns one summary instead of ~100 turns over a 200–300k prefix.
 
-Read `ship-handoff.md` for the exact subagent prompt — it carries the lifecycle envelope (`ledger_repo_root`, run, attempt, owner), branch, worktree, artifact paths, `review_state`, and the fixed report schema. When `ship-issue` is absent, the same file's inline fallback applies.
+Read `ship-handoff.md` for the exact subagent prompt — it carries the lifecycle envelope (`ledger_repo_root`, run, attempt, owner, `action_id`), branch, worktree, artifact paths, `review_state`, and the fixed report schema. When `ship-issue` is absent, the same file's inline fallback applies.
 
 After receiving the ship report, from-issue owns the terminal durable write.
 Pipe its received bytes through `artifact-budget validate-report --boundary

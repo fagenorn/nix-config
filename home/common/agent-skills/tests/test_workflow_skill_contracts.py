@@ -573,6 +573,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn(field, text)
         self.assertIn("spec_artifact", self.ship_handoff)
         self.assertIn("plan_artifact", self.ship_handoff)
+        self.assertIn('"action_id"', self.ship_handoff)
+        self.assertIn(
+            "`action_id` is the `issue:attempt:launch` string the acquisition "
+            "envelope issued",
+            normalized(self.ship_handoff),
+        )
+        self.assertIn("passed through verbatim", normalized(self.ship_handoff))
         self.assertIn("never carry task member paths", self.ship_handoff)
         self.assertIn("never inline artifact contents", self.auto)
         for forbidden in ("decisions:", "open_items:", "adr_paths:", "summary:"):
@@ -981,7 +988,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "### Explicit durable interactive acquisition",
         )
         self.assertIn("optional lifecycle envelope", dispatcher)
-        for field in ("run_id", "attempt", "owner", "worktree", "ledger_repo_root"):
+        self.assertIn("all six dispatcher fields", dispatcher)
+        self.assertIn("action_id", dispatcher)
+        for field in ("run_id", "attempt", "owner", "worktree", "ledger_repo_root",
+                      "action_id"):
             self.assertIn(field, identity)
         self.assertIn("immutable ledger_repo_root", identity)
         self.assertIn("separate owner worktree", identity)
