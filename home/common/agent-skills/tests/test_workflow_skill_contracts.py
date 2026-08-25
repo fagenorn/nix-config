@@ -1047,6 +1047,27 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # suspend would park the successor's live attempt (per D8).
         self.assertNotIn("workflow-state suspend", phase_seven)
 
+    def test_expiry_prose_describes_the_wall_clock_the_reaper_actually_reads(self):
+        # The only skill-prose home that explains expiry to an owner. Prose that
+        # frames expiry as detecting a silent agent is wrong: the reaper compares
+        # instants and never looks at progress (per D11).
+        rules = self.section(
+            self.from_issue,
+            "## Dispatch, phase-budget and attempt-budget rules",
+            "## Terminal return procedure",
+        )
+        collapsed = normalized(rules)
+        self.assert_ordered(
+            collapsed,
+            "Persistence precedes notification",
+            "wall-clock only",
+            "never consults `last_progress_at`",
+        )
+        self.assertIn("blocked on a CI watch", collapsed)
+        self.assertIn(
+            "bounds how long an owner may hold the issue", collapsed
+        )
+
     def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
         # The delegated ledger-only remainder is how a --auto run reaches its
         # terminal write, so the guard has to live inside the bookkeeper's own

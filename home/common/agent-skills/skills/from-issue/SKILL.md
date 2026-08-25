@@ -251,7 +251,12 @@ your identity: the expired attempt is now a resumable suspension, so follow the
 suspension procedure — print the canonical re-entry line and stop, and never
 write a terminal `workflow-state finish` for it (the helper rejects a finish on
 a non-active attempt). Persistence precedes notification: the reaper's
-suspension is already durable before you print.
+suspension is already durable before you print. Expiry is wall-clock only:
+the reaper compares the current instant against the attempt's `deadline_at`
+and never consults `last_progress_at`, so an attempt that is actively
+working — blocked on a CI watch, say — expires exactly like one whose owner
+is gone. A deadline bounds how long an owner may hold the issue; it says
+nothing about whether that owner is still running.
 
 Without lifecycle identity, apply the same action order locally with the
 120-turn/150000-token ceilings and default interactive handoff behavior.
