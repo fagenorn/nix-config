@@ -1917,6 +1917,51 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                                    "## Phase 8 — Cleanup")
         self.assert_ordered(phase_seven, "check-launch", "--delete-branch")
 
+    def test_phase_six_tip_check_compares_against_the_reviewed_head(self):
+        phase_six = self.section(self.ship_issue, "## Phase 6 — Wait for CI",
+                                 "## Phase 7 — Merge")
+        collapsed = normalized(phase_six)
+        self.assert_ordered(collapsed, "headRefOid", "the reviewed `HEAD_SHA`",
+                            "unreviewed commits")
+        # The remedy that would make a superseded predecessor push the
+        # successor's unreviewed work, and the comparand that hid the problem.
+        self.assertNotIn("re-push first", phase_six)
+        self.assertNotIn("must equal `git rev-parse HEAD`", collapsed)
+        # The escalation is the existing genuinely-blocked stop, spelled out so
+        # an implementer cannot read "escalate" as "surface and continue".
+        for fragment in ("stop before the CI wait", "no further forge write",
+                         "keep the worktree", "`stopped` ship summary",
+                         "both SHAs"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, collapsed)
+        # The reviewed value is re-fixed where fixes land, not left at Phase 5.
+        self.assertIn("re-fix `HEAD_SHA` to that observed `headRefOid`",
+                      normalized(self.ship_review))
+
+    def test_ship_issue_evals_expect_the_reviewed_tip_check(self):
+        evals = {case["id"]: case for case in self.ship_issue_evals["evals"]}
+        phase_walk = normalized(evals[1]["expected_output"])
+        # The eval is the behavioural spec a graded run is scored against; left
+        # naming live `git rev-parse HEAD` it would fail a correct run and pass
+        # the defect this issue removes.
+        self.assertNotIn("headRefOid` against `git rev-parse HEAD`", phase_walk)
+        self.assert_ordered(phase_walk, "headRefOid", "the reviewed `HEAD_SHA`",
+                            "unreviewed commits")
+        # D23: the same reasoning applied to the guard -- eval 1's graded Phase-4
+        # walk must require `check-launch` before each of its two forge writes,
+        # or a run that omits the guard entirely still scores as a pass.
+        self.assertIn("check-launch", phase_walk)
+        self.assertIn("`## Launch guard`", phase_walk)
+        self.assert_ordered(phase_walk, "check-launch", "git push -u",
+                            "check-launch", "gh pr create")
+        apply_push = normalized(evals[2]["expected_output"])
+        # Phase 5 still verifies its own push against live HEAD -- that is the
+        # committed-and-pushed check, not a statement about what was reviewed --
+        # but it re-fixes the reviewed value, and Phase 6 does not repeat it.
+        self.assertIn("re-fix `HEAD_SHA`", apply_push)
+        self.assertNotIn("repeats the headRefOid equality check", apply_push)
+        self.assertIn("the reviewed `HEAD_SHA`", apply_push)
+
     def test_ship_owner_reads_the_ledger_but_never_writes_it(self):
         # AC3's invariant, previously unpinned. The read-only exception is named
         # so a reader cannot take the sentence as a ban on consulting the ledger.

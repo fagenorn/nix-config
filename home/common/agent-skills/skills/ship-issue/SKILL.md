@@ -246,7 +246,21 @@ If the fix changes unrelated behavior or the finding cannot be checked in that b
 
 **Docs-only changes never wait for CI.** `git diff --name-only <base>..HEAD | sed 's/.*\.//' | sort -u` — every line `md` → skip straight to Phase 7 (a markdown-only diff cannot break a build); anything else → the phase runs normally.
 
-Before blocking, verify the tip: `gh pr view <pr-num> --json headRefOid` must equal `git rev-parse HEAD`; diverged → the Phase 5 push didn't land, re-push first or CI grades stale code.
+Before blocking, verify the tip: `gh pr view <pr-num> --json headRefOid` must
+equal the reviewed `HEAD_SHA` — the value fixed in Phase 5 and re-fixed by
+REVIEW.md's step 5 after each applied fix lands — never `git rev-parse HEAD`
+read afresh. Two attempts of one issue share this checkout, so live local HEAD
+is not evidence about what was reviewed.
+
+Diverged → the PR head carries **unreviewed commits** on the branch. Never
+resolve it by re-pushing, resetting, re-reviewing or merging. In `--auto` this
+is the genuinely-blocked stop: stop before the CI wait and before the merge,
+make no further forge write, run no cleanup, keep the worktree and the branch,
+and return a truthful `stopped` ship summary naming both SHAs — the reviewed
+`HEAD_SHA` and the observed `headRefOid`. In interactive mode, surface and wait
+at the same point. Divergence here is also evidence of a superseded launch,
+which is why `## Launch guard` runs before the merge regardless of how this
+check came out.
 
 Then block with `gh`'s built-in watch — one Bash call, **300s timeout**:
 

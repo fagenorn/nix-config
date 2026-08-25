@@ -69,6 +69,9 @@ Phase 6 polling CI on the stale tip." Follow this order:
    `git push`.
 5. Verify the push landed: `gh pr view <pr-num> --json headRefOid` must equal
    `git rev-parse HEAD`. Diverged → the push didn't take; retry before Phase 6.
+   Once they match, re-fix `HEAD_SHA` to that observed `headRefOid`: the
+   reviewed head advances only when a fix has actually landed on the PR, and
+   Phase 6 compares against it.
 
 After step 5, a named finding from the full two-axis path gets SKILL.md's scoped
 `reviewer-lite` re-review over only that finding and the bounded fix diff —
