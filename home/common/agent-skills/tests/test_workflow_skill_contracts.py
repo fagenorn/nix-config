@@ -1014,6 +1014,47 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "send the exact JSON",
         )
 
+    def test_from_issue_revalidates_its_launch_before_the_terminal_finish(self):
+        # Without this the design refuses the forge write and then performs the
+        # ledger write from the very launch it just proved stale, because the
+        # ship owner and this parent share one identity (per D9).
+        phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
+        self.assert_ordered(
+            phase_seven,
+            "receiving the ship report",
+            "check-launch",
+            "workflow-state finish",
+        )
+        collapsed = normalized(phase_seven)
+        self.assertIn(
+            "~/.agents/bin/workflow-state check-launch --repo-root "
+            "<ledger_repo_root> --run-id <run-id> --action-id "
+            "<issue:attempt:launch>",
+            collapsed,
+        )
+        self.assertIn("this owner's own `action_id`", collapsed)
+        self.assertIn("write nothing", collapsed)
+        # The refusal is a stop, never a suspension: in the resume shape a
+        # suspend would park the successor's live attempt (per D8).
+        self.assertNotIn("workflow-state suspend", phase_seven)
+
+    def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
+        # The delegated ledger-only remainder is how a --auto run reaches its
+        # terminal write, so the guard has to live inside the bookkeeper's own
+        # command sequence, not in the parent that dispatches it (per D9).
+        collapsed = normalized(self.auto)
+        self.assert_ordered(
+            collapsed,
+            "ledger-only bookkeeper route",
+            "check-launch",
+            "workflow-state finish",
+        )
+        self.assertIn("executes exactly that sequence", collapsed)
+        self.assertNotIn("It executes only that command", collapsed)
+        self.assertIn("only after a `current: true` answer", collapsed)
+        self.assertIn("write nothing", collapsed)
+        self.assertNotIn("workflow-state suspend", self.auto)
+
     def test_lifecycle_phase_one_paths_are_acquisition_mode_specific(self):
         phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")
         self.assert_ordered(

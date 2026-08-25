@@ -299,8 +299,15 @@ After validating the ship owner's ship-summary bytes, call
 and finish invocation the ledger-only remainder; use truthful available usage
 and the same three gate values, require persisted `delegate`, and use the
 existing ledger-only bookkeeper route.
-Give the bookkeeper the exact `workflow-state finish` command. It executes only that command and relays its
-stdout; it decides nothing and edits nothing. The fresh implementation owner
+Give the bookkeeper an exact two-command sequence and nothing else: first
+`~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
+with this owner's own `action_id`, then the exact `workflow-state finish` command.
+It executes exactly that sequence and relays the `finish` stdout; it decides
+nothing and edits nothing. It runs `finish` only after a `current: true` answer
+from a well-formed `check-launch` on exit 0. On `current: false`, a non-zero
+exit, or output it cannot parse, it must write nothing, print the canonical
+re-entry line as its whole result, and stop — a superseded launch's ship report
+is not this run's terminal result to record. The fresh implementation owner
 must return only the exact canonical JSON printed by that durable finish.
 
 For mechanical-only direct autonomous work, the fresh owner invokes the
