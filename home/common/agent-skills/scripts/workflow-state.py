@@ -45,7 +45,13 @@ RESULT_FIELDS = (
 )
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-ACTION_ID_PATTERN = re.compile(r"^([1-9][0-9]*):([1-9][0-9]*):([1-9][0-9]*)$")
+# Each ordinal is bounded at 18 digits. No real lifecycle identity is remotely
+# that large, and an unbounded digit run would hand `int()` a value past
+# CPython's integer-string conversion limit -- an uncaught ValueError instead of
+# the controlled `invalid action_id` refusal every other malformed id gets.
+ACTION_ID_PATTERN = re.compile(
+    r"^([1-9][0-9]{0,17}):([1-9][0-9]{0,17}):([1-9][0-9]{0,17})$"
+)
 MERGE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 DIRECT_RUN_ID_PATTERN = re.compile(r"^direct-([1-9][0-9]*)-([0-9]{6})$")
 PHASE_ACTIONS = frozenset({"continue", "fresh_start", "handoff", "delegate"})

@@ -63,7 +63,9 @@ The lifecycle ledger reserves one worktree per issue and hands a retry the
 predecessor's worktree and branch on purpose, so a superseded attempt can still
 push, open a PR and merge. Before **every write to the forge or to `origin` this
 skill makes up to and including the merge**, re-validate that the handoff's
-launch identity is still the launch the ledger entitles:
+launch identity is still the launch the ledger entitles. The rule binds
+regardless of `issueTracker.kind`, so a `kind=none` invocation — which skips
+Phase 4's PR but still pushes the branch — guards that bare `origin` push too:
 
 ```
 ~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>

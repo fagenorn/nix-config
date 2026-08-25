@@ -5243,6 +5243,11 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
              {"action_id": "14:1:1", "run_id": "bad/run"}),
             ("action id with two components", {"action_id": "14:1"}),
             ("action id with a zero ordinal", {"action_id": "14:0:1"}),
+            # Well-formed-looking but absurd: an unbounded digit run reaches
+            # `int()` past CPython's 4300-digit conversion limit, which must
+            # still be the controlled refusal, not an uncaught ValueError.
+            ("action id with an oversized ordinal",
+             {"action_id": "1" * 5000 + ":1:1"}),
         )
         for label, kwargs in errors:
             with self.subTest(row=label):

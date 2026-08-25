@@ -1972,6 +1972,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "<issue:attempt:launch>",
             collapsed,
         )
+        # The one rule is indifferent to the tracker binding: a `kind=none`
+        # invocation skips Phase 4's PR but still pushes the branch to `origin`,
+        # and that push is a guarded write like any other.
+        self.assertIn("regardless of `issueTracker.kind`", collapsed)
         self.assertIn("Proceed only on `current: true`", collapsed)
         # Every refusal trigger, so a guard that degraded to "on a false answer"
         # would fail here rather than pass with a hole.
