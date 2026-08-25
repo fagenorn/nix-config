@@ -81,7 +81,7 @@ itself, so there is no `--issue`.
 four keys:
 
 ```json
-{"action_id":"<the echoed argument>","current":true,"current_action_id":"<action id or null>","reason":"<closed-set string>"}
+{"action_id":"<the echoed argument>","current":<bool>,"current_action_id":"<action id or null>","reason":"<closed-set string>"}
 ```
 
 - `current_action_id` — the identity the ledger currently entitles: rendered from
@@ -109,6 +109,14 @@ four keys:
   `current` is `true` only at row 7. Rows 4 and 6 are the two supersession
   shapes the issue names; keeping them distinct is what lets each test in the
   suite fail for exactly one reason (the-bar, *Tests that can fail*).
+
+**Terminology.** "Superseded" already has a narrower meaning in this ledger:
+`result_source: "superseded"` marks an attempt record that a *forge observation*
+reconciled. The `reason` values here mean something different — a *launch* that a
+newer launch or attempt displaced — and the two never appear in the same field.
+The issue's own vocabulary is "a predecessor whose attempt was superseded", so the
+`reason` names follow it rather than inventing a third word; this paragraph is
+where the two senses are pinned, since the repository has no glossary file.
 
 **Exit 2 — no answer.** The existing `main()` handler prints
 `workflow-state: <message>` to stderr and returns 2 for every `WorkflowError`
@@ -245,12 +253,25 @@ immediately before it.
 Phase 1's `git merge origin/<integrationBranch>` and Phase 3's local commits are
 not forge writes and are not guarded.
 
+The `action_id` the guard passes is the one the handoff carried, verbatim. The
+ship owner never recomputes it and never derives it from `attempt`: the launch
+ordinal is exactly the part it cannot know.
+
 **Without lifecycle identity the guard is skipped silently.** A standalone
 `/ship-issue <num>`, or a handoff whose lifecycle group is all-null, has no
 ledger, no attempts and no supersession mechanism, so there is nothing to
 consult. This is the same graceful degradation ship-issue already applies to
 absent optional bindings, and it is not a hole: the all-or-nothing validator
 means the group is never *partially* present.
+
+**That is the only skip, and it is a statement about the invocation, not about
+the environment.** Everywhere else this call fails closed rather than degrading.
+ship-issue's house rule is to skip an absent optional helper silently and never
+hard-fail on it; that rule does not apply here, and the prose says so explicitly,
+because an implementer following the house style would degrade the guard into a
+no-op precisely when the environment is broken. A missing `workflow-state`, a
+non-zero exit, or output that does not parse into the exact four-key object
+refuses the write.
 
 ### The refusal is a stop, not a suspension
 
@@ -276,8 +297,18 @@ launch owns nothing. So the refusal is:
    emits;
 4. return a truthful `stopped` ship summary whose notes name the refusal, the
    reported `reason`, this `action_id` and the reported `current_action_id`.
-   `stopped` is valid with `merge_sha: null` and `issue_closed: false`; `pr_url`
-   is the PR when one was opened and `null` otherwise.
+
+The refusal summary's exact field values, so no implementer has to infer them:
+`state: "stopped"`, `merge_sha: null`, `issue_closed: false`,
+`discussion_items: []`, `pr_url` the PR when one was already opened and `null`
+otherwise. `detail_state` is `"none"` with `report_path: null` when Phase 5
+retained nothing; when Phase 5 did retain readable Minor/Discussion findings, it
+is the existing failure-only `"unpublished"` shape — name the retained source in
+notes, keep the worktree, do not claim merge success — which is already exactly
+the rule for a keep-the-worktree failure. Phase 8 does not run: no delivery-detail
+package is published, because the successor owns that worktree and will produce
+its own. The retained candidate stays worktree-local and ends with the worktree,
+as `CLAUDE.md` says it is meant to.
 
 AC2's *intent* — "aborts without executing the write" — is fully met. Its
 literal prescription is not, and this row is the record of that departure.
@@ -296,14 +327,32 @@ forge. Phase 7 therefore gains one sentence: before the terminal
 `workflow-state finish` for a ship report, run `check-launch` with this owner's
 own `action_id`; on `current: false` or any helper failure, write nothing, print
 the canonical re-entry line, and stop. One sentence, one call, the same helper —
-and the trust boundary is now checked on both sides.
+and the trust boundary is now checked on both sides. Every ledger write a stale
+launch can still reach outside that path is inventoried in the next section.
 
-Ledger writes by a stale launch outside this one path — `progress` on the
-successor's active attempt, a `suspend` reached from the deadline-rejection
-route — remain reachable. They are pre-existing, they are not made worse here,
-and they are precisely what #125 closes by fencing custody inside the
-transaction core. This is a known limitation recorded in a design document, not
-a `TODO` in source (the-bar, *Production-grade by default*).
+### What this guard does not close
+
+Said plainly, so nobody reads the guard as a proof:
+
+- **A bounded TOCTOU window survives.** The check and the write are two commands,
+  not one transaction. Supersession that lands between them is not caught. What
+  changes is the size of the window: from the whole shipping run — sync, push, PR,
+  review, a CI watch that blocks for up to ~40 minutes, merge — down to the latency
+  of one forge command. Closing it entirely means fencing custody inside the
+  transaction core so the *write* carries the epoch, which is #125's slice and the
+  reason its fourth acceptance criterion is the same guarantee. This is an
+  owner-side advisory check, and calling it anything stronger would be papering over
+  the mechanism (the-bar, *Root causes*).
+- **Ledger writes by a stale launch outside D9's path stay reachable** — a
+  `progress` on the successor's active attempt, a `suspend` reached from the
+  deadline-rejection route. Pre-existing, not made worse here, and precisely what
+  #125 closes by fencing custody inside the transaction core.
+- **An unreaped expired attempt still answers `current`.** No successor launch
+  exists yet, so structurally nothing has superseded it. Expiry accounting is
+  #133's.
+
+These are recorded here, in a design document, rather than as a `TODO` in source
+(the-bar, *Production-grade by default*).
 
 ### The Phase-6 tip check
 
@@ -405,7 +454,17 @@ wrapper `suspend` uses. Required cases:
   complete list of lines containing that literal.
 - The new `## Launch guard` section contains the exact command line, "Proceed
   only on `current: true`", the refusal list, "no ledger write", the post-merge
-  exemption, and the ledger-free skip.
+  exemption, and the ledger-free skip. It asserts the refusal routes to the
+  **no-write stop** — the canonical re-entry line and a `stopped` summary — and
+  `assertNotIn("workflow-state suspend", guard)`. AC6's wording is "routes a
+  negative answer to suspension"; per D8 there is no suspension to route to, so
+  the contract pins the stop instead. A test asserting a `suspend` here would pin
+  the harm.
+- ship-issue's "A fresh ship owner never writes workflow-state itself" sentence,
+  in its `check-launch`-qualified form, gains an assertion. It is unpinned today,
+  and it is the invariant AC3 names ("a fresh ship owner still performs no ledger
+  write"); the two-file idiom of
+  `test_authorization_truth_is_single_and_shared` is the shape to follow.
 - from-issue Phase 7 ordering: "receiving the ship report" → `check-launch` →
   `workflow-state finish`, which also preserves the anchor order
   `test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops`
@@ -483,7 +542,11 @@ must be run separately with the built settings artifact.
   existing exact-argv shape; no `--match-head-commit`, no new verb, no change to
   `validate_push`. The guard validates command shape and repository state and
   continues not to know about lifecycle identity — the owner-side check is where
-  that knowledge belongs.
+  that knowledge belongs. No allow-surface entry is needed either: `workflow-state`
+  is not among the 18 allow entries today, and the existing `progress`, `suspend`
+  and `finish` calls already run under `defaultMode = "auto"` without one, so
+  `check-launch` runs the same way. The 17th handoff key is likewise no budget
+  concern — the handoff is about a kilobyte against `phase_reports.wire_max_bytes`.
 - **`control`'s `CONTROL_DISPATCH_KINDS`.** No action kind that stops a launch is
   added; the guard is advisory to the owner and changes nothing about dispatch.
 - **A `docs/` tree, a context map, or an ADR file.** This repository has none;
@@ -507,3 +570,6 @@ must be run separately with the built settings artifact.
 | D10 | Phase 6 compares `headRefOid` to the reviewed `HEAD_SHA` (re-fixed after each applied fix lands); divergence is "unreviewed commits on the branch". In `--auto`, "escalated" means: stop before the CI wait and the merge, no further forge write, no cleanup, keep worktree and branch, return a truthful `stopped` summary naming both SHAs. | Issue AC4; both attempts share one checkout, so live local `HEAD` is not evidence about what was reviewed. ship-issue's auto rules already define "genuinely blocked" as a return, and `--auto` never auto-resolves history. | "Re-push first" — makes the predecessor push the successor's unreviewed work. Re-reviewing the new head — silently re-legitimises commits the successor owns. |
 | D11 | The `CLAUDE.md` claim goes inside the existing per-checkout-bucket parenthesis; the wall-clock expiry statement is appended to from-issue's deadline-rejected-`progress` paragraph. | Issue AC7. That paragraph is the only skill-prose home that explains expiry to an owner; the "silent owner" framing lives in `workflow-state.py` docstrings, not skill prose. Appending preserves the anchor order the paragraph's existing contract test pins. | A new documentation file or section — this repo has no `docs/` tree and the fact belongs beside the sentence it completes. Editing the docstrings instead — they are not the prose the AC names. |
 | D12 | Without lifecycle identity (standalone `/ship-issue`, or an all-null lifecycle group) the guard is skipped silently. | ship-issue's stated policy of degrading gracefully on absent optional bindings; a ledger-free invocation has no attempts and no supersession mechanism, and the all-or-nothing validator means the group is never partially present. | Hard-failing without a ledger — breaks standalone `/ship-issue` outright for a hazard that cannot occur there. |
+| D13 | The guard fails closed on a missing helper, a non-zero exit, or unparseable output, explicitly overriding ship-issue's degrade-gracefully house rule for this one call; and the spec records the bounded TOCTOU window the check cannot close rather than implying it does. | the-bar *Root causes* ("no special case to hide a wrong shape") and *Production-grade by default* (known limitations belong in docs). ship-issue's degradation rule is written for optional bindings, not for a safety check. | Following the house degradation rule — turns the guard into a no-op exactly when the environment is broken. Claiming the window is closed — only transaction-core fencing (#125) closes it. |
+| D14 | The refusal returns `stopped` with `merge_sha: null`, `issue_closed: false`, `discussion_items: []`, `detail_state: "none"`/`report_path: null` — or the existing failure-only `"unpublished"` shape when Phase 5 retained readable findings — and skips Phase 8 entirely, publishing no delivery detail. | `validate_ship_summary_report` accepts exactly this for `stopped`; ship-issue already defines `unpublished` as the keep-the-worktree failure shape, so reusing it is less new machinery than inventing a rule. the-bar *Truthful terminal states*. | Publishing delivery detail anyway — records a delivery that did not happen, from an owner the ledger has disowned, into the successor's worktree. |
+| D15 | `reason`'s `superseded_attempt`/`superseded_launch` reuse the issue's vocabulary even though `result_source: "superseded"` already means something narrower; the spec pins both senses. | The issue's own wording ("a predecessor whose attempt was superseded"); the two values never share a field, and this repository has no glossary file, so the spec is the only home. | Coining `stale_*` — a third word for one idea, diverging from the issue that everything else here cites. |
