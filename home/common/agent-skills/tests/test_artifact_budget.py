@@ -288,8 +288,9 @@ class ArtifactBudgetCliTest(unittest.TestCase):
 
     def lifecycle(self):
         return {"ledger_repo_root": None, "run_id": None, "attempt": None,
-                "owner": None, "owner_worktree": None, "issue_number": 49,
-                "branch": "issue-49", "worktree_path": "/tmp/issue-49", "auto": True}
+                "owner": None, "owner_worktree": None, "action_id": None,
+                "issue_number": 49, "branch": "issue-49",
+                "worktree_path": "/tmp/issue-49", "auto": True}
 
     def test_ship_handoff_and_summary_matrices(self):
         detail = ".superpowers/issue-delivery/49/run-1/sdd-a.json"
@@ -336,6 +337,32 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         result = self.run_validate("ship-handoff", candidate, use_stdin=True)
         self.assertEqual((result.returncode, result.stdout, result.stderr),
                          (2, b"", b"artifact-budget: invalid report\n"))
+
+    def test_ship_handoff_lifecycle_group_is_all_or_nothing_with_the_launch(self):
+        present = {"ledger_repo_root": "/repo", "run_id": "issue-49-run",
+                   "attempt": 1, "owner": "49:1", "owner_worktree": "/repo/wt-49",
+                   "action_id": "49:1:1"}
+        base = {**self.lifecycle(), **present, "state": "complete",
+                "spec_artifact": self.full("design-spec"),
+                "plan_artifact": self.full("implementation-plan"),
+                "head_sha": "b" * 40, "review_state": "clean",
+                "report_path": None, "notes": "ok"}
+        self.assertEqual(self.run_validate("ship-handoff", base, True).returncode, 0)
+        rejected = (
+            # The launch alone, with the rest of the group absent.
+            {**base, **{name: None for name in present if name != "action_id"}},
+            # The rest of the group, with the launch absent — the shape the
+            # guard could not answer for.
+            {**base, "action_id": None},
+            # A non-string launch identity.
+            {**base, "action_id": 1},
+            # The key removed outright: the boundary is closed, not optional.
+            {key: value for key, value in base.items() if key != "action_id"},
+        )
+        for index, value in enumerate(rejected):
+            with self.subTest(row=index):
+                result = self.run_validate("ship-handoff", value, index % 2 == 1)
+                self.assertEqual((result.returncode, result.stdout), (2, b""))
 
     def test_unpublished_rejects_the_delivery_home_itself(self):
         candidate = self.make_sdd(

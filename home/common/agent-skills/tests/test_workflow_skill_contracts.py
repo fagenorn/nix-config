@@ -573,6 +573,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn(field, text)
         self.assertIn("spec_artifact", self.ship_handoff)
         self.assertIn("plan_artifact", self.ship_handoff)
+        self.assertIn('"action_id"', self.ship_handoff)
+        self.assertIn(
+            "`action_id` is the `issue:attempt:launch` string the acquisition "
+            "envelope issued",
+            normalized(self.ship_handoff),
+        )
+        self.assertIn("passed through verbatim", normalized(self.ship_handoff))
         self.assertIn("never carry task member paths", self.ship_handoff)
         self.assertIn("never inline artifact contents", self.auto)
         for forbidden in ("decisions:", "open_items:", "adr_paths:", "summary:"):
@@ -981,8 +988,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "### Explicit durable interactive acquisition",
         )
         self.assertIn("optional lifecycle envelope", dispatcher)
+        self.assertIn("all six dispatcher fields", dispatcher)
+        self.assertIn("action_id", dispatcher)
         for field in ("run_id", "attempt", "owner", "worktree", "ledger_repo_root"):
             self.assertIn(field, identity)
+        self.assertIn(
+            "`owner`, `action_id`, and normalized `worktree` as one identity",
+            normalized(identity),
+        )
         self.assertIn("immutable ledger_repo_root", identity)
         self.assertIn("separate owner worktree", identity)
         self.assertIn("Every `workflow-state` command", identity)
@@ -1000,6 +1013,92 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "workflow-state finish",
             "send the exact JSON",
         )
+
+    def test_from_issue_revalidates_its_launch_before_the_terminal_finish(self):
+        # Without this the design refuses the forge write and then performs the
+        # ledger write from the very launch it just proved stale, because the
+        # ship owner and this parent share one identity (per D9).
+        phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
+        self.assert_ordered(
+            phase_seven,
+            "receiving the ship report",
+            "check-launch",
+            "workflow-state finish",
+        )
+        collapsed = normalized(phase_seven)
+        self.assertIn(
+            "~/.agents/bin/workflow-state check-launch --repo-root "
+            "<ledger_repo_root> --run-id <run-id> --action-id "
+            "<issue:attempt:launch>",
+            collapsed,
+        )
+        self.assertIn("this owner's own `action_id`", collapsed)
+        self.assertIn("write nothing", collapsed)
+        # Name the line: inside this document the bare phrase "the canonical
+        # re-entry line" binds to the suspension procedure, whose banner needs
+        # the very write D8 forbids. ship-issue spells it out; so does this
+        # (per D24).
+        self.assertIn(
+            "the canonical re-entry line `/from-issue <num> --auto` on its own "
+            "line",
+            collapsed,
+        )
+        # The refusal is a stop, never a suspension: in the resume shape a
+        # suspend would park the successor's live attempt (per D8).
+        self.assertNotIn("workflow-state suspend", phase_seven)
+
+    def test_expiry_prose_describes_the_wall_clock_the_reaper_actually_reads(self):
+        # The only skill-prose home that explains expiry to an owner. Prose that
+        # frames expiry as detecting a silent agent is wrong: the reaper compares
+        # instants and never looks at progress (per D11).
+        rules = self.section(
+            self.from_issue,
+            "## Dispatch, phase-budget and attempt-budget rules",
+            "## Terminal return procedure",
+        )
+        collapsed = normalized(rules)
+        self.assert_ordered(
+            collapsed,
+            "Persistence precedes notification",
+            "wall-clock only",
+            "never consults `last_progress_at`",
+        )
+        self.assertIn("blocked on a CI watch", collapsed)
+        self.assertIn(
+            "bounds how long an owner may hold the issue", collapsed
+        )
+
+    def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
+        # The delegated ledger-only remainder is how a --auto run reaches its
+        # terminal write, so the guard has to live inside the bookkeeper's own
+        # command sequence, not in the parent that dispatches it (per D9).
+        # Scoped to the delegated-owner section: AUTO.md names
+        # `workflow-state finish` again outside it, so a whole-file ordering
+        # assertion would bind that anchor and stop pinning check-before-write.
+        delegated = self.section(
+            self.auto,
+            "#### Fresh delegated owner",
+            "#### Earlier controller stop",
+        )
+        collapsed = normalized(delegated)
+        self.assert_ordered(
+            collapsed,
+            "ledger-only bookkeeper route",
+            "check-launch",
+            "workflow-state finish",
+        )
+        self.assertIn("executes exactly that sequence", collapsed)
+        self.assertNotIn("It executes only that command", collapsed)
+        self.assertIn("only after a `current: true` answer", collapsed)
+        self.assertIn("write nothing", collapsed)
+        # The bookkeeper is the most exposed reader of the phrase — a cheap
+        # agent told to run an exact sequence and nothing else (per D24).
+        self.assertIn(
+            "the canonical re-entry line `/from-issue <num> --auto` on its own "
+            "line",
+            collapsed,
+        )
+        self.assertNotIn("workflow-state suspend", delegated)
 
     def test_lifecycle_phase_one_paths_are_acquisition_mode_specific(self):
         phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")
@@ -1863,6 +1962,106 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn(guard_and_fallback, phase_lines)
 
+    def test_ship_issue_guards_every_pre_merge_forge_write(self):
+        guard = self.section(self.ship_issue, "## Launch guard",
+                             "## Doc-grounded escalations")
+        collapsed = normalized(guard)
+        self.assertIn(
+            "~/.agents/bin/workflow-state check-launch --repo-root "
+            "<ledger_repo_root> --run-id <run-id> --action-id "
+            "<issue:attempt:launch>",
+            collapsed,
+        )
+        # The one rule is indifferent to the tracker binding: a `kind=none`
+        # invocation skips Phase 4's PR but still pushes the branch to `origin`,
+        # and that push is a guarded write like any other.
+        self.assertIn("regardless of `issueTracker.kind`", collapsed)
+        self.assertIn("Proceed only on `current: true`", collapsed)
+        # Every refusal trigger, so a guard that degraded to "on a false answer"
+        # would fail here rather than pass with a hole.
+        for trigger in ("`current: false`", "a non-zero exit", "a missing helper",
+                        "output that does not parse"):
+            with self.subTest(trigger=trigger):
+                self.assertIn(trigger, collapsed)
+        # The refusal is a no-write stop, not a suspension (per D8).
+        self.assertIn("no ledger write", collapsed)
+        self.assertIn("/from-issue <num> --auto", collapsed)
+        self.assertIn("`stopped` ship summary", collapsed)
+        self.assertNotIn("workflow-state suspend", guard)
+        # The post-merge exemption and the ledger-free skip.
+        self.assertIn("after the merge is verified", collapsed)
+        self.assertIn("skip the guard silently", collapsed)
+
+        # Phase 4: the query immediately precedes each of its two forge writes.
+        phase_four = self.section(self.ship_issue, "## Phase 4 — Open PR",
+                                  "## Summary")
+        self.assert_ordered(phase_four, "check-launch",
+                            "git push -u origin <branch>",
+                            "check-launch", "gh pr create")
+        # Phase 5's fix push is an instance of the same rule, not an exception.
+        self.assert_ordered(normalized(self.ship_review), "check-launch",
+                            "`git push`")
+        # Phase 7: the query precedes the merge. Anchor on --delete-branch: the
+        # literal `gh pr merge` is pinned line-by-line elsewhere in this file.
+        phase_seven = self.section(self.ship_issue, "## Phase 7 — Merge",
+                                   "## Phase 8 — Cleanup")
+        self.assert_ordered(phase_seven, "check-launch", "--delete-branch")
+
+    def test_phase_six_tip_check_compares_against_the_reviewed_head(self):
+        phase_six = self.section(self.ship_issue, "## Phase 6 — Wait for CI",
+                                 "## Phase 7 — Merge")
+        collapsed = normalized(phase_six)
+        self.assert_ordered(collapsed, "headRefOid", "the reviewed `HEAD_SHA`",
+                            "unreviewed commits")
+        # The remedy that would make a superseded predecessor push the
+        # successor's unreviewed work, and the comparand that hid the problem.
+        self.assertNotIn("re-push first", phase_six)
+        self.assertNotIn("must equal `git rev-parse HEAD`", collapsed)
+        # The escalation is the existing genuinely-blocked stop, spelled out so
+        # an implementer cannot read "escalate" as "surface and continue".
+        for fragment in ("stop before the CI wait", "no further forge write",
+                         "keep the worktree", "`stopped` ship summary",
+                         "both SHAs"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, collapsed)
+        # The reviewed value is re-fixed where fixes land, not left at Phase 5.
+        self.assertIn("re-fix `HEAD_SHA` to that observed `headRefOid`",
+                      normalized(self.ship_review))
+
+    def test_ship_issue_evals_expect_the_reviewed_tip_check(self):
+        evals = {case["id"]: case for case in self.ship_issue_evals["evals"]}
+        phase_walk = normalized(evals[1]["expected_output"])
+        # The eval is the behavioural spec a graded run is scored against; left
+        # naming live `git rev-parse HEAD` it would fail a correct run and pass
+        # the defect this issue removes.
+        self.assertNotIn("headRefOid` against `git rev-parse HEAD`", phase_walk)
+        self.assert_ordered(phase_walk, "headRefOid", "the reviewed `HEAD_SHA`",
+                            "unreviewed commits")
+        # D23: the same reasoning applied to the guard -- eval 1's graded Phase-4
+        # walk must require `check-launch` before each of its two forge writes,
+        # or a run that omits the guard entirely still scores as a pass.
+        self.assertIn("check-launch", phase_walk)
+        self.assertIn("`## Launch guard`", phase_walk)
+        self.assert_ordered(phase_walk, "check-launch", "git push -u",
+                            "check-launch", "gh pr create")
+        apply_push = normalized(evals[2]["expected_output"])
+        # Phase 5 still verifies its own push against live HEAD -- that is the
+        # committed-and-pushed check, not a statement about what was reviewed --
+        # but it re-fixes the reviewed value, and Phase 6 does not repeat it.
+        self.assertIn("re-fix `HEAD_SHA`", apply_push)
+        self.assertNotIn("repeats the headRefOid equality check", apply_push)
+        self.assertIn("the reviewed `HEAD_SHA`", apply_push)
+
+    def test_ship_owner_reads_the_ledger_but_never_writes_it(self):
+        # AC3's invariant, previously unpinned. The read-only exception is named
+        # so a reader cannot take the sentence as a ban on consulting the ledger.
+        self.assertIn(
+            "A fresh ship owner never writes workflow-state itself; the "
+            "read-only `check-launch` query of `## Launch guard` is the one "
+            "ledger call it makes.",
+            normalized(self.ship_issue),
+        )
+
     def test_phase0_size_note_delegates_counting_to_diff_scope(self):
         # Issues #21-#22 made diff-scope the accounting authority and retired the
         # hand-counted numstat arithmetic; this note is the only restatement of
@@ -1902,7 +2101,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             REPO_ROOT / "home/common/agent-skills/default.nix"
         ).read_text(encoding="utf-8")
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
-        for name, text in (("from-issue", self.from_issue), ("orchestrate", self.orchestrate)):
+        for name, text in (("from-issue", self.from_issue), ("orchestrate", self.orchestrate),
+                           ("ship-issue", self.ship_issue)):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/workflow-state", text)
         for name, text in (("research", self.research), ("certification", self.certification)):

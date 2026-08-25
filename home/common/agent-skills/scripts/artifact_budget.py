@@ -619,14 +619,15 @@ def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int) 
 
 def validate_ship_handoff_report(value: Mapping[str, object], notes_max_characters: int) -> None:
     keys = {"state", "ledger_repo_root", "run_id", "attempt", "owner", "owner_worktree",
-            "issue_number", "branch", "worktree_path", "spec_artifact", "plan_artifact",
-            "head_sha", "review_state", "auto", "report_path", "notes"}
+            "action_id", "issue_number", "branch", "worktree_path", "spec_artifact",
+            "plan_artifact", "head_sha", "review_state", "auto", "report_path", "notes"}
     if not _exact_keys(value, keys) or not _notes(value["notes"], notes_max_characters):
         raise ArtifactBudgetError("invalid ship handoff")
-    lifecycle = [value[name] for name in ("ledger_repo_root", "run_id", "attempt", "owner", "owner_worktree")]
+    lifecycle = [value[name] for name in
+                 ("ledger_repo_root", "run_id", "attempt", "owner", "owner_worktree", "action_id")]
     if not (all(item is None for item in lifecycle)
             or (_string(lifecycle[0]) and _string(lifecycle[1]) and _integer(lifecycle[2], minimum=1)
-                and _string(lifecycle[3]) and _string(lifecycle[4]))):
+                and _string(lifecycle[3]) and _string(lifecycle[4]) and _string(lifecycle[5]))):
         raise ArtifactBudgetError("invalid lifecycle identity")
     if (not _integer(value["issue_number"], minimum=1) or not _string(value["branch"])
             or not _string(value["worktree_path"]) or type(value["auto"]) is not bool):

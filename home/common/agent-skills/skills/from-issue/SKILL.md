@@ -23,19 +23,22 @@ an interactive direct invocation is ledger-free unless it explicitly requests
 durable orchestration.
 
 Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`,
-`issue`, `attempt`, `owner`, and normalized `worktree` as one identity; never
-guess a missing field. Preserve the immutable ledger_repo_root exactly as
-supplied, and keep it distinct from the separate owner worktree recorded on the
-attempt. Every `workflow-state` command in this owner or its delegated remainder
-uses `--repo-root <ledger_repo_root>`; never substitute the current checkout or
-owner worktree.
+`issue`, `attempt`, `owner`, `action_id`, and normalized `worktree` as one
+identity; never guess a missing field. Preserve the immutable ledger_repo_root
+exactly as supplied, and keep it distinct from the separate owner worktree
+recorded on the attempt. Every `workflow-state` command in this owner or its
+delegated remainder uses `--repo-root <ledger_repo_root>`; never substitute the
+current checkout or owner worktree. `action_id` is the one identity field that
+changes when the attempt is relaunched; pass it through verbatim and never
+recompute it.
 
 ### Dispatcher-owned acquisition
 
-When a dispatcher supplies the optional lifecycle envelope, require all five
-dispatcher fields: `ledger_repo_root`, `run_id`, `attempt`, `owner`, and
-normalized `worktree`. Validate and adopt them unchanged. A partial envelope
-fails loudly; this route does not perform any other acquisition.
+When a dispatcher supplies the optional lifecycle envelope, require
+all six dispatcher fields: `ledger_repo_root`, `run_id`, `attempt`,
+`owner`, `action_id`, and normalized `worktree`. Validate and adopt them
+unchanged. A partial envelope fails loudly; this route does not perform
+any other acquisition.
 
 ### Direct autonomous acquisition
 
@@ -248,7 +251,12 @@ your identity: the expired attempt is now a resumable suspension, so follow the
 suspension procedure — print the canonical re-entry line and stop, and never
 write a terminal `workflow-state finish` for it (the helper rejects a finish on
 a non-active attempt). Persistence precedes notification: the reaper's
-suspension is already durable before you print.
+suspension is already durable before you print. Expiry is wall-clock only:
+the reaper compares the current instant against the attempt's `deadline_at`
+and never consults `last_progress_at`, so an attempt that is actively
+working — blocked on a CI watch, say — expires exactly like one whose owner
+is gone. A deadline bounds how long an owner may hold the issue; it says
+nothing about whether that owner is still running.
 
 Without lifecycle identity, apply the same action order locally with the
 120-turn/150000-token ceilings and default interactive handoff behavior.
@@ -415,7 +423,7 @@ degradation decision reads them.
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow; a fresh ~10k subagent returns one summary instead of ~100 turns over a 200–300k prefix.
 
-Read `ship-handoff.md` for the exact subagent prompt — it carries the lifecycle envelope (`ledger_repo_root`, run, attempt, owner), branch, worktree, artifact paths, `review_state`, and the fixed report schema. When `ship-issue` is absent, the same file's inline fallback applies.
+Read `ship-handoff.md` for the exact subagent prompt — it carries the lifecycle envelope (`ledger_repo_root`, run, attempt, owner, `action_id`), branch, worktree, artifact paths, `review_state`, and the fixed report schema. When `ship-issue` is absent, the same file's inline fallback applies.
 
 After receiving the ship report, from-issue owns the terminal durable write.
 Pipe its received bytes through `artifact-budget validate-report --boundary
@@ -423,9 +431,15 @@ ship-summary --input -`, decode only canonical stdout, consume a durable
 `report_path` before advancing, and never inline either durable or retained
 detail; never inline the report. For `unpublished`, independently re-read the retained candidate through
 `validate-detail-input`, require non-empty findings, keep the worktree, and accept
-only `stopped`/`failed`. Then call `workflow-state finish` and send the exact JSON
-printed on stdout unchanged. A fresh ship agent never writes the owner's final
-ledger result. Apply the same procedure to any Phase-6 execution
+only `stopped`/`failed`. Before that terminal write, run
+`~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
+with this owner's own `action_id`: the ship owner and this parent share one
+launch identity, so a ship report from a superseded launch means this launch is
+superseded too. On `current: false` or any helper failure, write nothing, print
+the canonical re-entry line `/from-issue <num> --auto` on its own line, and
+stop. Then call `workflow-state finish` and send the exact JSON printed on
+stdout unchanged. A fresh ship agent never writes the owner's final ledger
+result. Apply the same procedure to any Phase-6 execution
 failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating so the two sequences stay distinguishable.
 
 ## Notes

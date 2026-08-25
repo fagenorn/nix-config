@@ -19,12 +19,17 @@ You are running ship-issue for issue #<num> in <autonomous|interactive> mode. Us
 Handoff from from-issue is the canonical stdout from
 `artifact-budget validate-report --boundary ship-handoff` over a candidate with
 exactly these fields:
-{"state":"complete","ledger_repo_root":"<immutable ledger root or null>","run_id":"<run or null>","attempt":<integer or null>,"owner":"<owner or null>","owner_worktree":"<owner worktree or null>","issue_number":<num>,"branch":"<branch-name>","worktree_path":"<absolute-worktree-path>","spec_artifact":{"kind":"design-spec","path":"<root>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"plan_artifact":{"kind":"implementation-plan","path":"<root>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"head_sha":"<full sha>","review_state":"clean|residuals","auto":true,"report_path":null,"notes":"<bounded notes>"}
+{"state":"complete","ledger_repo_root":"<immutable ledger root or null>","run_id":"<run or null>","attempt":<integer or null>,"owner":"<owner or null>","owner_worktree":"<owner worktree or null>","action_id":"<action id or null>","issue_number":<num>,"branch":"<branch-name>","worktree_path":"<absolute-worktree-path>","spec_artifact":{"kind":"design-spec","path":"<root>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"plan_artifact":{"kind":"implementation-plan","path":"<root>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"head_sha":"<full sha>","review_state":"clean|residuals","auto":true,"report_path":null,"notes":"<bounded notes>"}
 
 Use `state: failed` only according to the ship-handoff validator's before/after
 matrix. `notes` is bounded by `phase_reports.notes_max_characters`; it names a
 non-null `report_path`. Build a candidate file, validate it, and dispatch only
 the validated stdout bytes. A residual SDD report requires the durable path.
+
+`action_id` is the `issue:attempt:launch` string the acquisition envelope
+issued; it joins the all-or-nothing lifecycle group and is passed through
+verbatim — never recomputed, never derived from `attempt` — so ship-issue's
+launch guard can re-validate it before each forge write.
 
 Your task:
   1. Invoke the `ship-issue` skill via the Skill tool. Read its SKILL.md and follow

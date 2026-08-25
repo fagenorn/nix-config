@@ -45,6 +45,13 @@ RESULT_FIELDS = (
 )
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# Each ordinal is bounded at 18 digits. No real lifecycle identity is remotely
+# that large, and an unbounded digit run would hand `int()` a value past
+# CPython's integer-string conversion limit -- an uncaught ValueError instead of
+# the controlled `invalid action_id` refusal every other malformed id gets.
+ACTION_ID_PATTERN = re.compile(
+    r"^([1-9][0-9]{0,17}):([1-9][0-9]{0,17}):([1-9][0-9]{0,17})$"
+)
 MERGE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 DIRECT_RUN_ID_PATTERN = re.compile(r"^direct-([1-9][0-9]*)-([0-9]{6})$")
 PHASE_ACTIONS = frozenset({"continue", "fresh_start", "handoff", "delegate"})
@@ -1515,6 +1522,23 @@ def load_direct_owner_request(path_value: str) -> dict[str, Any]:
     )
 
 
+def render_action_id(attempt: dict[str, Any]) -> str:
+    """Render an attempt's current launch identity as ``issue:attempt:launch``."""
+    return f"{attempt['issue']}:{attempt['attempt']}:{len(attempt['launches'])}"
+
+
+def parse_action_id(value: str) -> tuple[int, int, int]:
+    """Split an ``issue:attempt:launch`` identity into its three ordinals.
+
+    The grammar has one home: this module renders every action id and is the only
+    thing that parses one back (per D6).
+    """
+    matched = ACTION_ID_PATTERN.fullmatch(value)
+    if matched is None:
+        raise WorkflowError("invalid action_id")
+    return int(matched[1]), int(matched[2]), int(matched[3])
+
+
 def bootstrap_response(state: dict[str, Any]) -> dict[str, Any]:
     requirements = []
     for issue_key in sorted(state["issues"], key=int):
@@ -1522,13 +1546,12 @@ def bootstrap_response(state: dict[str, Any]) -> dict[str, Any]:
         if not issue_state["attempts"]:
             continue
         attempt = issue_state["attempts"][-1]
-        launch = len(attempt["launches"])
         requirements.append(
             {
                 "issue": attempt["issue"],
                 "attempt": attempt["attempt"],
                 "owner": attempt["owner"],
-                "action_id": f"{attempt['issue']}:{attempt['attempt']}:{launch}",
+                "action_id": render_action_id(attempt),
                 "recorded_worktree": attempt["worktree"],
             }
         )
@@ -2234,7 +2257,7 @@ def command_control(args: argparse.Namespace) -> int:
                 "kind": delta_kind, "state": "active",
             })
             actions.append({
-                "id": f"{issue}:{attempt['attempt']}:{len(attempt['launches'])}",
+                "id": render_action_id(attempt),
                 "kind": operation,
                 "issue": issue,
                 "attempt": attempt["attempt"],
@@ -2358,9 +2381,7 @@ def direct_owner_response(
         "issue": attempt["issue"],
         "attempt": attempt["attempt"],
         "owner": attempt["owner"],
-        "action_id": (
-            f"{attempt['issue']}:{attempt['attempt']}:{len(attempt['launches'])}"
-        ),
+        "action_id": render_action_id(attempt),
         "launch_kind": launch_kind,
         "worktree": attempt["worktree"],
         "handoff_path": attempt["handoff_path"],
@@ -2846,6 +2867,69 @@ def command_finish(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_check_launch(args: argparse.Namespace) -> int:
+    """Answer whether one launch identity is an issue's current launch.
+
+    Read-only by construction: no clock, no lock, and neither ``transact`` nor
+    ``workflow_paths`` — between them those create ``.superpowers/``, the run
+    directory, the workflows ``.gitignore`` and ``state.lock``, and ``transact``
+    persists whenever a mutation reports ``changed`` (per D4).
+
+    A positive answer requires evidence. Every absence the ledger can express is
+    a well-formed negative at exit 0; only an unreadable ledger or an argument
+    that is not a well-formed question is an error (per D3).
+    """
+    repo_root = resolve_repo_root(args.repo_root)
+    if not RUN_ID_PATTERN.fullmatch(args.run_id):
+        raise WorkflowError("invalid run_id")
+    issue, attempt_ordinal, launch_ordinal = parse_action_id(args.action_id)
+    state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
+    if not require_regular_path(state_path, "workflow state", allow_missing=True):
+        print_json({
+            "action_id": args.action_id,
+            "current": False,
+            "current_action_id": None,
+            "reason": "unknown_run",
+        })
+        return 0
+    # No lock: `atomic_write_state` publishes by `os.replace`, so an unlocked
+    # reader sees either the whole prior file or the whole new one, never a torn
+    # one — and taking the lock would mean creating `state.lock`, which is a write.
+    state = read_locked_state(state_path, args.run_id)
+
+    issue_state = state["issues"].get(str(issue))
+    if issue_state is None or not issue_state["attempts"]:
+        current_action_id, reason = None, "unknown_issue"
+    else:
+        attempts = issue_state["attempts"]
+        latest = attempts[-1]
+        # Only an `active` latest attempt has a live launch; every other member
+        # of ATTEMPT_STATES (handed_off, suspended, stopped, failed, merged)
+        # entitles nobody, and `validate_state` has already closed that set, so
+        # there is no default fall-through here (per D5).
+        current_action_id = (
+            render_action_id(latest) if latest["state"] == "active" else None
+        )
+        if attempt_ordinal > len(attempts):
+            reason = "unknown_attempt"
+        elif attempt_ordinal < len(attempts):
+            reason = "superseded_attempt"
+        elif current_action_id is None:
+            reason = "inactive_attempt"
+        elif launch_ordinal != len(latest["launches"]):
+            reason = "superseded_launch"
+        else:
+            reason = "current"
+
+    print_json({
+        "action_id": args.action_id,
+        "current": reason == "current",
+        "current_action_id": current_action_id,
+        "reason": reason,
+    })
+    return 0
+
+
 def print_json(value: Any) -> None:
     json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
@@ -2909,6 +2993,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     progress.add_argument("--handoff-path")
     progress.set_defaults(handler=command_progress)
+
+    check_launch = subparsers.add_parser("check-launch")
+    check_launch.add_argument("--repo-root", required=True)
+    check_launch.add_argument("--run-id", required=True)
+    check_launch.add_argument("--action-id", required=True)
+    check_launch.set_defaults(handler=command_check_launch)
 
     return parser
 
