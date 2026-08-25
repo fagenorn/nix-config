@@ -503,6 +503,32 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             ok=ok,
         )
 
+    def check_launch_raw(self, *, action_id, repo_root=None, run_id=None, ok=True):
+        return self.run_cli(
+            "check-launch",
+            "--repo-root", self.root if repo_root is None else repo_root,
+            "--run-id", self.run_id if run_id is None else run_id,
+            "--action-id", action_id,
+            ok=ok,
+        )
+
+    def check_launch(self, **kwargs):
+        """Query one launch identity and pin the redundancy invariant on the way."""
+        completed = self.check_launch_raw(**kwargs)
+        answer = json.loads(completed.stdout)
+        self.assertEqual(
+            set(answer), {"action_id", "current", "current_action_id", "reason"}
+        )
+        self.assertEqual(answer["action_id"], kwargs["action_id"])
+        # The boolean is deliberately redundant with the two identity fields
+        # (per D1); if they ever disagree the discriminator is lying.
+        self.assertEqual(
+            answer["current"],
+            answer["current_action_id"] is not None
+            and answer["action_id"] == answer["current_action_id"],
+        )
+        return answer
+
     def legacy_expiry_record(self, *, issue, now, prior_schema=False):
         """Stamp the terminal reaper record written before the suspension model.
 
@@ -5094,6 +5120,150 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 )
                 self.assertEqual(self.state_path.read_bytes(), before)
 
+    def test_check_launch_supersedes_a_predecessor_attempt_after_a_failed_owner(self):
+        # The successor attempt is opened by an owner-reported failure, never by
+        # expiry: issue #133 changes expiry accounting and touches this same
+        # helper, and an expiry-driven fixture would be invalidated by it. Do
+        # not "simplify" this back to `expire`/`legacy_expiry_record`.
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-14")
+        spawned = self.spawn(issue=14, worktree=worktree)
+        self.assertEqual(spawned["id"], "14:1:1")
+        live = self.state_path.read_bytes()
+        self.assertEqual(self.check_launch(action_id="14:1:1"), {
+            "action_id": "14:1:1", "current": True,
+            "current_action_id": "14:1:1", "reason": "current",
+        })
+        self.assertEqual(self.state_path.read_bytes(), live)
+
+        self.fail_owner(issue=14, attempt=1, now="2026-08-13T20:05:00Z")
+        self.assertEqual(self.check_launch(action_id="14:1:1"), {
+            "action_id": "14:1:1", "current": False,
+            "current_action_id": None, "reason": "inactive_attempt",
+        })
+
+        # The retry reuses the predecessor's worktree, which is the shared-checkout
+        # reality this guard exists for.
+        retried = self.retry(issue=14, worktree=worktree, now="2026-08-13T20:10:00Z")
+        self.assertEqual(retried["id"], "14:2:1")
+        after = self.state_path.read_bytes()
+        self.assertEqual(self.check_launch(action_id="14:1:1"), {
+            "action_id": "14:1:1", "current": False,
+            "current_action_id": "14:2:1", "reason": "superseded_attempt",
+        })
+        self.assertEqual(self.check_launch(action_id="14:2:1"), {
+            "action_id": "14:2:1", "current": True,
+            "current_action_id": "14:2:1", "reason": "current",
+        })
+        self.assertEqual(self.state_path.read_bytes(), after)
+
+    def test_check_launch_supersedes_a_predecessor_launch_after_a_resume(self):
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-14")
+        self.assertEqual(self.spawn(issue=14, worktree=worktree)["id"], "14:1:1")
+        self.suspend(
+            issue=14, attempt=1, blocked_on="transport", now="2026-08-13T20:05:00Z",
+        )
+        self.assertEqual(self.check_launch(action_id="14:1:1"), {
+            "action_id": "14:1:1", "current": False,
+            "current_action_id": None, "reason": "inactive_attempt",
+        })
+
+        resumed = self.resume(issue=14, worktree=worktree, now="2026-08-13T20:06:00Z")
+        self.assertEqual(resumed["id"], "14:1:2")
+        after = self.state_path.read_bytes()
+        self.assertEqual(self.check_launch(action_id="14:1:1"), {
+            "action_id": "14:1:1", "current": False,
+            "current_action_id": "14:1:2", "reason": "superseded_launch",
+        })
+        self.assertEqual(self.check_launch(action_id="14:1:2"), {
+            "action_id": "14:1:2", "current": True,
+            "current_action_id": "14:1:2", "reason": "current",
+        })
+        self.assertEqual(self.state_path.read_bytes(), after)
+
+    def test_check_launch_creates_nothing_for_a_run_that_does_not_exist(self):
+        # `transact`/`workflow_paths` would create `.superpowers/`, the run dir,
+        # the workflows `.gitignore` and `state.lock` (per D4). The whole-tree
+        # assertion is what proves this verb uses neither.
+        first = self.check_launch_raw(action_id="14:1:1")
+        self.assertEqual(json.loads(first.stdout), {
+            "action_id": "14:1:1", "current": False,
+            "current_action_id": None, "reason": "unknown_run",
+        })
+        self.assertFalse((self.root / ".superpowers").exists())
+        self.assertFalse(self.workflows_dir.exists())
+        second = self.check_launch_raw(action_id="14:1:1")
+        self.assertEqual(second.stdout, first.stdout)
+        self.assertFalse((self.root / ".superpowers").exists())
+
+    def test_check_launch_separates_well_formed_negatives_from_errors(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=str(Path(self.root) / "wt-14"))
+        before = self.state_path.read_bytes()
+        # Assert the WHOLE answer, not just `reason`. The helper's redundancy
+        # invariant only cross-checks `current` against `current_action_id`, so
+        # an implementation that echoed the queried id back as
+        # `current_action_id` and answered `current: true` would satisfy it and
+        # still let a superseded launch merge — exactly the bug under test.
+        live = "14:1:1"
+        answers = (
+            ("absent run", {"action_id": live, "run_id": "issue-99-absent"},
+             {"action_id": live, "current": False,
+              "current_action_id": None, "reason": "unknown_run"}),
+            ("issue not in the ledger", {"action_id": "99:1:1"},
+             {"action_id": "99:1:1", "current": False,
+              "current_action_id": None, "reason": "unknown_issue"}),
+            ("attempt beyond the count", {"action_id": "14:9:1"},
+             {"action_id": "14:9:1", "current": False,
+              "current_action_id": live, "reason": "unknown_attempt"}),
+            ("launch beyond the latest", {"action_id": "14:1:9"},
+             {"action_id": "14:1:9", "current": False,
+              "current_action_id": live, "reason": "superseded_launch"}),
+        )
+        for label, kwargs, expected in answers:
+            with self.subTest(row=label):
+                completed = self.check_launch_raw(**kwargs)
+                self.assertEqual(json.loads(completed.stdout), expected)
+                # Canonical stdout: sorted keys, compact separators, one
+                # trailing newline, exactly as `print_json` emits it.
+                self.assertEqual(
+                    completed.stdout,
+                    json.dumps(expected, sort_keys=True,
+                               separators=(",", ":")) + "\n",
+                )
+                # Re-run through the helper so the redundancy invariant is
+                # checked on this row too.
+                self.check_launch(**kwargs)
+                self.assertEqual(self.state_path.read_bytes(), before)
+        errors = (
+            ("repository root does not exist",
+             {"action_id": "14:1:1", "repo_root": str(self.root / "absent")}),
+            ("run id outside the grammar",
+             {"action_id": "14:1:1", "run_id": "bad/run"}),
+            ("action id with two components", {"action_id": "14:1"}),
+            ("action id with a zero ordinal", {"action_id": "14:0:1"}),
+        )
+        for label, kwargs in errors:
+            with self.subTest(row=label):
+                completed = self.check_launch_raw(ok=False, **kwargs)
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stdout, "")
+                self.assertNotIn("Traceback", completed.stderr)
+                self.assertEqual(self.state_path.read_bytes(), before)
+
+        # A ledger that cannot be read is a fault, not a refusal (per D3). Both
+        # rows destroy the fixture, so they run last.
+        self.state_path.write_text("{not json", encoding="utf-8")
+        corrupt = self.check_launch_raw(action_id="14:1:1", ok=False)
+        self.assertEqual((corrupt.returncode, corrupt.stdout), (2, ""))
+        self.assertNotIn("Traceback", corrupt.stderr)
+
+        self.state_path.unlink()
+        self.state_path.symlink_to(self.root / "elsewhere.json")
+        linked = self.check_launch_raw(action_id="14:1:1", ok=False)
+        self.assertEqual((linked.returncode, linked.stdout), (2, ""))
+        self.assertNotIn("Traceback", linked.stderr)
 
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
     """Cover the installed layout, where the policy is a home-manager symlink."""
