@@ -153,17 +153,40 @@ Add these four tests at the **end of `WorkflowStateLifecycleTest`** — after
         self.init_run()
         self.spawn(issue=14, worktree=str(Path(self.root) / "wt-14"))
         before = self.state_path.read_bytes()
+        # Assert the WHOLE answer, not just `reason`. The helper's redundancy
+        # invariant only cross-checks `current` against `current_action_id`, so
+        # an implementation that echoed the queried id back as
+        # `current_action_id` and answered `current: true` would satisfy it and
+        # still let a superseded launch merge — exactly the bug under test.
+        live = "14:1:1"
         answers = (
-            ("absent run", {"action_id": "14:1:1", "run_id": "issue-99-absent"},
-             "unknown_run"),
-            ("issue not in the ledger", {"action_id": "99:1:1"}, "unknown_issue"),
-            ("attempt beyond the count", {"action_id": "14:9:1"}, "unknown_attempt"),
+            ("absent run", {"action_id": live, "run_id": "issue-99-absent"},
+             {"action_id": live, "current": False,
+              "current_action_id": None, "reason": "unknown_run"}),
+            ("issue not in the ledger", {"action_id": "99:1:1"},
+             {"action_id": "99:1:1", "current": False,
+              "current_action_id": None, "reason": "unknown_issue"}),
+            ("attempt beyond the count", {"action_id": "14:9:1"},
+             {"action_id": "14:9:1", "current": False,
+              "current_action_id": live, "reason": "unknown_attempt"}),
             ("launch beyond the latest", {"action_id": "14:1:9"},
-             "superseded_launch"),
+             {"action_id": "14:1:9", "current": False,
+              "current_action_id": live, "reason": "superseded_launch"}),
         )
-        for label, kwargs, reason in answers:
+        for label, kwargs, expected in answers:
             with self.subTest(row=label):
-                self.assertEqual(self.check_launch(**kwargs)["reason"], reason)
+                completed = self.check_launch_raw(**kwargs)
+                self.assertEqual(json.loads(completed.stdout), expected)
+                # Canonical stdout: sorted keys, compact separators, one
+                # trailing newline, exactly as `print_json` emits it.
+                self.assertEqual(
+                    completed.stdout,
+                    json.dumps(expected, sort_keys=True,
+                               separators=(",", ":")) + "\n",
+                )
+                # Re-run through the helper so the redundancy invariant is
+                # checked on this row too.
+                self.check_launch(**kwargs)
                 self.assertEqual(self.state_path.read_bytes(), before)
         errors = (
             ("repository root does not exist",

@@ -100,13 +100,19 @@ today — ship-issue now invokes the helper.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
+`unittest`'s `-k` takes one name pattern per flag and ORs repeated flags; it
+does **not** parse `a or b` inside a single pattern, so pass each name its own
+flag or the selector silently matches nothing and the red phase proves nothing.
+
 ```sh
 python3 home/common/agent-skills/tests/test_workflow_skill_contracts.py -v \
-  -k "guards_every_pre_merge or never_writes_it or helper_binaries"
+  -k guards_every_pre_merge -k never_writes_it -k helper_binaries
 ```
-Expected: 3 failures — `test_ship_issue_guards_every_pre_merge_forge_write`
-raises `ValueError: substring not found` from `section(...)` because
-`## Launch guard` does not exist; the other two fail on missing anchors.
+Expected: `Ran 3 tests`, 3 failures — a `Ran 0 tests` header means the selector
+matched nothing and the red phase is void.
+`test_ship_issue_guards_every_pre_merge_forge_write` raises `ValueError:
+substring not found` from `section(...)` because `## Launch guard` does not
+exist; the other two fail on missing anchors.
 
 - [ ] **Step 3: Add the `## Launch guard` section**
 

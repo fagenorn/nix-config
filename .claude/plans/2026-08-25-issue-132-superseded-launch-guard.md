@@ -81,12 +81,15 @@ Task 2 — Launch identity in the ship handoff — `home/common/agent-skills/scr
 Task 3 — The launch guard before every pre-merge forge write — `home/common/agent-skills/skills/ship-issue/SKILL.md`, `home/common/agent-skills/skills/ship-issue/REVIEW.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-3.md](2026-08-25-issue-132-superseded-launch-guard.tasks/task-3.md)
 Task 4 — Phase-6 tip check against the reviewed `HEAD_SHA` — `home/common/agent-skills/skills/ship-issue/SKILL.md`, `home/common/agent-skills/skills/ship-issue/REVIEW.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-4.md](2026-08-25-issue-132-superseded-launch-guard.tasks/task-4.md)
 Task 5 — from-issue's pre-`finish` guard — `home/common/agent-skills/skills/from-issue/SKILL.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-5.md](2026-08-25-issue-132-superseded-launch-guard.tasks/task-5.md)
-Task 6 — Shared-bucket and wall-clock-expiry documentation, then the whole-change gate — `CLAUDE.md`, `home/common/agent-skills/skills/from-issue/SKILL.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — low-risk — [task-6.md](2026-08-25-issue-132-superseded-launch-guard.tasks/task-6.md)
+Task 6 — Shared-bucket and wall-clock-expiry documentation, then the whole-change gate — `CLAUDE.md`, `home/common/agent-skills/skills/from-issue/SKILL.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-6.md](2026-08-25-issue-132-superseded-launch-guard.tasks/task-6.md)
 
-Lane notes: Tasks 1–5 are `full` — every one of them is lifecycle, concurrency
-or public-contract work. Task 6 is `low-risk`: two documentation sentences with
-no behavioral, configuration, interface or generated-output effect. Nothing here
-is `mechanical`; even the action-id extraction in Task 1 ships a new public verb
+Lane notes: every task is `full`. Tasks 1–5 are lifecycle, concurrency or
+public-contract work outright. Task 6 is `full` too, despite being two
+documentation sentences: the `low-risk` lane excludes anything touching
+lifecycle or public contracts, and Task 6 rewrites from-issue's expiry
+instructions — semantic documentation about the lifecycle, pinned by a contract
+test. A change being small is not what qualifies a lane. Nothing here is
+`mechanical`; even the action-id extraction in Task 1 ships a new public verb
 alongside it.
 
 ## Acceptance-criteria coverage
@@ -114,6 +117,31 @@ appended three rows to the **spec's** ledger:
   (Tasks 3, 4).
 - **D18** — falsifiable anchoring: no new `CLAUDE.md` seam, and every new
   contract assertion anchors where it is false at base (Tasks 2, 6).
+
+The Phase-5 standards review appended three more:
+
+- **D19** — Task 4 also realigns `ship-issue/evals/evals.json` with the new
+  tip-check prose, pinned by a contract test (Task 4).
+- **D20** — the pre-`finish` guard is installed in both terminal routes, the
+  direct-autonomous bookkeeper included (Task 5).
+- **D21** — red-phase selectors, whole-answer assertions, and Task 6's lane
+  (Tasks 1, 2, 3, 6).
+
+## Standards review provenance
+
+- **Reviewer:** Codex (isolated, read-only runtime; fresh `CODEX_HOME`, approval
+  policy `never`, sandbox `read-only`), job `reviewer-mt8fxhh2-30ltjp`.
+- **Base SHA:** `ec31bcd47cc02a631b564786b620857cd5a92aab`; plan reviewed at
+  `362e547af6bed2b68830d2758f2965da5d7f6ffc`.
+- **Focus:** none configured (`codex.planReview.focus` unset).
+- **Fallback:** none — the Codex route completed; no native fallback was used.
+- **Dispositions:** 5 accepted, 0 rejected, 0 deferred. Both Blocking findings
+  (B-132-01 eval realignment, B-132-02 the direct-autonomous bookkeeper) and all
+  three Should-fix findings (S-132-01 red-phase selectors, S-132-02 Task 6's
+  lane, S-132-03 whole-answer assertions) were verified against the live
+  worktree and applied. The single Discussion item endorsed spec row D8's
+  no-suspension departure after checking it against `command_suspend` and
+  `resume_attempt`; D8 is retained unchanged.
 
 ## Verification
 

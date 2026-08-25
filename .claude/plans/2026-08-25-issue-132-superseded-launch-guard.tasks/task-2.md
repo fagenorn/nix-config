@@ -109,15 +109,20 @@ In `home/common/agent-skills/tests/test_workflow_skill_contracts.py`:
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
+`unittest`'s `-k` takes one name pattern per flag and ORs repeated flags; it
+does **not** parse `a or b` inside a single pattern, so pass each name its own
+flag or the selector silently matches nothing and the red phase proves nothing.
+
 ```sh
 python3 home/common/agent-skills/tests/test_artifact_budget.py -v -k ship_handoff
 python3 home/common/agent-skills/tests/test_workflow_skill_contracts.py -v \
-  -k "root_plus_metrics or owner_lifecycle_is_optional"
+  -k root_plus_metrics -k owner_lifecycle_is_optional
 ```
 Expected: the artifact-budget suite fails because every payload now carries an
 unknown 17th key (`invalid ship handoff`, exit 2 where 0 was expected), and the
 contract suite fails on the missing `"action_id"` / `all six dispatcher fields`
-anchors.
+anchors. Check each `Ran N tests` header is non-zero before reading the
+failures; a `Ran 0 tests` line means the selector matched nothing.
 
 - [ ] **Step 3: Open the boundary to the launch identity**
 
