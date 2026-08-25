@@ -247,16 +247,29 @@ attempt budget's deadline has passed — either
 `progress requires an active attempt` when the lazy reaper demoted the attempt
 to `suspended(unknown)` first — that is an environmental interruption, not a
 semantic verdict, not a harness fault, and not a reason to retry it or to doubt
-your identity: the expired attempt is now a resumable suspension, so follow the
-suspension procedure — print the canonical re-entry line and stop, and never
-write a terminal `workflow-state finish` for it (the helper rejects a finish on
-a non-active attempt). Persistence precedes notification: the reaper's
+your identity: the expired attempt is usually now a resumable suspension, so
+follow the suspension procedure — print the canonical re-entry line and stop,
+and never write a terminal `workflow-state finish` for it (the helper rejects a
+finish on a non-active attempt). That rejection carries one outcome more than
+the suspension it usually means. At the anti-zombie bound — an attempt parked
+at the same recorded phase too many times in a row — the reaper ends the work
+instead of parking it: the attempt becomes a `stopped(stalled)` terminal and
+the run is over, not paused. The rejection reads the same either way, so print
+the re-entry line and stop without asserting which one you got; the reaper has
+already recorded it, and the re-entry either resumes the attempt or replays
+that terminal. Persistence precedes notification: the reaper's
 suspension is already durable before you print. Expiry is wall-clock only:
 the reaper compares the current instant against the attempt's `deadline_at`
 and never consults `last_progress_at`, so an attempt that is actively
 working — blocked on a CI watch, say — expires exactly like one whose owner
 is gone. A deadline bounds how long an owner may hold the issue; it says
-nothing about whether that owner is still running.
+nothing about whether that owner is still running. The reaper's suspension
+consumes no attempt: re-entry resumes the same attempt in place, on the same
+worktree, with a fresh full `attempt_budget_minutes` window and one more
+launch recorded against it. A deadline therefore never opens a second
+attempt, and the one fresh retry stays reserved for an attempt that reported
+a terminal — an owner-reported `failed`, or a legacy expiry-sourced `stopped`
+from before the suspension model.
 
 Without lifecycle identity, apply the same action order locally with the
 120-turn/150000-token ceilings and default interactive handoff behavior.
