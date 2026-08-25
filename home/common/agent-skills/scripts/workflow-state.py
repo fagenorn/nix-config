@@ -1832,7 +1832,10 @@ def _apply_one_issue_policy(
             return decision(
                 "idle", desired="resume", changed=expired, expired=expired,
             )
-        if handed_off:
+        if latest["handoff_path"] is not None:
+            # Verify the document exactly when the response is about to publish
+            # it. `handoff_path` survives `resume_attempt` and is never cleared,
+            # so a state-keyed guard checks only the first resume (per D5).
             validate_handoff_path(run_dir, latest["handoff_path"])
         unobserved_forge = forge_requirement()
         if unobserved_forge is not None:

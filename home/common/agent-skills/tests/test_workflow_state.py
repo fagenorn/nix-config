@@ -5529,6 +5529,56 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(replayed.stdout, escalated.stdout)
 
+    def test_expired_handoff_resumes_the_same_attempt_and_revalidates_its_document(self):
+        # Before this change an expired handoff entered the retry lane and got
+        # an attempt 2 whose `handoff_path` was null — the document was silently
+        # abandoned (per D5).
+        self.init_run()
+        worktree = self.root / "wt-a"
+        self.spawn(issue=14, worktree=worktree)
+        handoff_path = self.write_handoff(14)
+        self.progress(turn_count=118, context_tokens=20000,
+                      handoff_path=handoff_path)
+        observed = [self.worktree_fact(14, recorded={
+            "path": os.path.abspath(worktree), "state": "matching_issue_branch"})]
+
+        response = self.control(
+            now="2026-08-13T20:31:00Z", issues=[14], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(14)], worktrees=observed,
+        )
+        self.assertEqual([delta["kind"] for delta in response["deltas"]],
+                         ["expired", "resumed"])
+        action = self.dispatch_action(response, "resume")
+        self.assertEqual(
+            (action["id"], action["attempt"], action["worktree"],
+             action["handoff_path"], action["deadline_at"]),
+            ("14:1:2", 1, os.path.abspath(worktree), str(handoff_path),
+             "2026-08-13T21:01:00Z"),
+        )
+        attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(
+            (attempts[0]["state"], attempts[0]["handoff_path"]),
+            ("active", str(handoff_path)),
+        )
+        self.assertTrue(handoff_path.is_file())
+
+        # The second resume of one handoff is where the state-keyed guard used
+        # to hand out an unvalidated path: the attempt is `suspended`, not
+        # `handed_off`, yet the response is about to publish `handoff_path`.
+        handoff_path.unlink()
+        before = self.state_path.read_bytes()
+        rejected = self.control_raw(
+            now="2026-08-13T21:01:00Z", issues=[14], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(14)], worktrees=observed,
+            ok=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertNotIn("Traceback", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
     """Cover the installed layout, where the policy is a home-manager symlink."""
 
