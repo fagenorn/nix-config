@@ -1034,6 +1034,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn("this owner's own `action_id`", collapsed)
         self.assertIn("write nothing", collapsed)
+        # Name the line: inside this document the bare phrase "the canonical
+        # re-entry line" binds to the suspension procedure, whose banner needs
+        # the very write D8 forbids. ship-issue spells it out; so does this
+        # (per D24).
+        self.assertIn(
+            "the canonical re-entry line `/from-issue <num> --auto` on its own "
+            "line",
+            collapsed,
+        )
         # The refusal is a stop, never a suspension: in the resume shape a
         # suspend would park the successor's live attempt (per D8).
         self.assertNotIn("workflow-state suspend", phase_seven)
@@ -1042,7 +1051,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # The delegated ledger-only remainder is how a --auto run reaches its
         # terminal write, so the guard has to live inside the bookkeeper's own
         # command sequence, not in the parent that dispatches it (per D9).
-        collapsed = normalized(self.auto)
+        # Scoped to the delegated-owner section: AUTO.md names
+        # `workflow-state finish` again outside it, so a whole-file ordering
+        # assertion would bind that anchor and stop pinning check-before-write.
+        delegated = self.section(
+            self.auto,
+            "#### Fresh delegated owner",
+            "#### Earlier controller stop",
+        )
+        collapsed = normalized(delegated)
         self.assert_ordered(
             collapsed,
             "ledger-only bookkeeper route",
@@ -1053,7 +1070,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertNotIn("It executes only that command", collapsed)
         self.assertIn("only after a `current: true` answer", collapsed)
         self.assertIn("write nothing", collapsed)
-        self.assertNotIn("workflow-state suspend", self.auto)
+        # The bookkeeper is the most exposed reader of the phrase — a cheap
+        # agent told to run an exact sequence and nothing else (per D24).
+        self.assertIn(
+            "the canonical re-entry line `/from-issue <num> --auto` on its own "
+            "line",
+            collapsed,
+        )
+        self.assertNotIn("workflow-state suspend", delegated)
 
     def test_lifecycle_phase_one_paths_are_acquisition_mode_specific(self):
         phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")

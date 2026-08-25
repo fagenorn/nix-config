@@ -431,9 +431,10 @@ only `stopped`/`failed`. Before that terminal write, run
 with this owner's own `action_id`: the ship owner and this parent share one
 launch identity, so a ship report from a superseded launch means this launch is
 superseded too. On `current: false` or any helper failure, write nothing, print
-the canonical re-entry line, and stop. Then call `workflow-state finish` and
-send the exact JSON printed on stdout unchanged. A fresh ship agent never writes the owner's final
-ledger result. Apply the same procedure to any Phase-6 execution
+the canonical re-entry line `/from-issue <num> --auto` on its own line, and
+stop. Then call `workflow-state finish` and send the exact JSON printed on
+stdout unchanged. A fresh ship agent never writes the owner's final ledger
+result. Apply the same procedure to any Phase-6 execution
 failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating so the two sequences stay distinguishable.
 
 ## Notes

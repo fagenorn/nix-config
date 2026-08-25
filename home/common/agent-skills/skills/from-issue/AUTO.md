@@ -306,8 +306,9 @@ It executes exactly that sequence and relays the `finish` stdout; it decides
 nothing and edits nothing. It runs `finish` only after a `current: true` answer
 from a well-formed `check-launch` on exit 0. On `current: false`, a non-zero
 exit, or output it cannot parse, it must write nothing, print the canonical
-re-entry line as its whole result, and stop — a superseded launch's ship report
-is not this run's terminal result to record. The fresh implementation owner
+re-entry line `/from-issue <num> --auto` on its own line as its whole result,
+and stop — a superseded launch's ship report is not this run's terminal result
+to record. The fresh implementation owner
 must return only the exact canonical JSON printed by that durable finish.
 
 For mechanical-only direct autonomous work, the fresh owner invokes the
