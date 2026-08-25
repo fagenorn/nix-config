@@ -1283,15 +1283,15 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         decision = self.control_raw(request=decision_request)
         decided = json.loads(decision.stdout)
         self.assertEqual([d["kind"] for d in decided["deltas"]],
-                         ["expired", "retried", "spawned"])
+                         ["expired", "resumed", "spawned"])
         self.assertEqual([a["id"] for a in decided["actions"]],
-                         ["51:2:1", "53:1:1", "wait:2026-08-19T13:01:00Z"])
+                         ["51:1:2", "53:1:1", "wait:2026-08-19T13:01:00Z"])
         self.assertEqual(decided["actions"][0]["worktree"], paths[51])
         post_action_state = self.state_path.read_bytes()
 
         # 4. The retried owner and unrelated active owner finish concurrently.
         finished = self.concurrent_finish(
-            {51: (2, self.merged_result(51)), 53: (1, self.merged_result(53))},
+            {51: (1, self.merged_result(51)), 53: (1, self.merged_result(53))},
             now="2026-08-19T12:40:00Z",
         )
         self.assertTrue(all(process.returncode == 0 for process in finished))
@@ -1377,7 +1377,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(summary["result"], result)
         self.assertNotIn(47, [d["issue"] for d in response["deltas"] if d["kind"] == "expired"])
 
-    def test_control_demo_3_expires_retries_and_fills_unrelated_capacity(self):
+    def test_control_demo_3_expires_resumes_and_fills_unrelated_capacity(self):
         self.init_run(now="2026-08-19T12:00:00Z")
         paths = {i: str(self.root / f"wt-{i}") for i in (47, 51, 53)}
         self.control(
@@ -1399,12 +1399,12 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             ],
         )
         self.assertEqual([a["kind"] for a in response["actions"]],
-                         ["retry", "spawn", "wait"])
-        retry, spawn = response["actions"][:2]
-        self.assertEqual((retry["id"], retry["worktree"]), ("51:2:1", paths[51]))
+                         ["resume", "spawn", "wait"])
+        resume, spawn = response["actions"][:2]
+        self.assertEqual((resume["id"], resume["worktree"]), ("51:1:2", paths[51]))
         self.assertEqual((spawn["id"], spawn["issue"]), ("53:1:1", 53))
         self.assertEqual([d["kind"] for d in response["deltas"]],
-                         ["expired", "retried", "spawned"])
+                         ["expired", "resumed", "spawned"])
 
     def test_control_expiry_deltas_follow_reversed_request_order(self):
         self.init_run(now="2026-08-19T12:00:00Z")
@@ -1424,9 +1424,10 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             worktrees=[],
         )
         self.assertEqual([item["issue"] for item in response["summaries"]], [51, 47])
-        self.assertEqual([item["issue"] for item in response["deltas"]], [51, 47])
-        self.assertEqual([item["kind"] for item in response["deltas"]],
-                         ["expired", "expired"])
+        self.assertEqual(response["deltas"], [
+            {"issue": 51, "attempt": 1, "kind": "expired", "state": "suspended"},
+            {"issue": 47, "attempt": 1, "kind": "expired", "state": "suspended"},
+        ])
 
     def test_control_subset_does_not_expire_or_report_unrequested_issue(self):
         self.init_run(now="2026-08-19T12:00:00Z")
@@ -1635,7 +1636,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(persisted["attempts"][-1]["result_source"], "refused")
         self.assertEqual(persisted["outcome"], summary["result"])
 
-    def test_control_attempt_two_deadline_emits_only_retry_refused(self):
+    def test_control_attempt_two_deadline_suspends_instead_of_refusing(self):
         self.init_run(now="2026-08-19T12:00:00Z")
         path = str(self.root / "wt-47")
         self.control(
@@ -1661,15 +1662,20 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(retried["actions"][0]["id"], "47:2:1")
 
-        refused = self.control(
+        expired = self.control(
             now="2026-08-19T12:32:00Z", issues=[47],
             tracker=[self.tracker_fact(47)], worktrees=[],
         )
-        self.assertEqual(refused["deltas"], [{
-            "issue": 47, "attempt": 2, "kind": "retry_refused", "state": "failed",
+        self.assertEqual(expired["deltas"], [{
+            "issue": 47, "attempt": 2, "kind": "expired", "state": "suspended",
         }])
         persisted = self.read_state()["issues"]["47"]["attempts"][-1]
-        self.assertEqual(persisted["result_source"], "refused")
+        self.assertEqual(
+            (persisted["state"], persisted["blocked_on"],
+             persisted["result_source"]),
+            ("suspended", "unknown", None),
+        )
+        self.assertEqual(len(self.read_state()["issues"]["47"]["attempts"]), 2)
 
     def test_control_tracker_blockers_and_fog_suppress_only_new_work(self):
         self.init_run(now="2026-08-19T12:00:00Z")
@@ -4609,47 +4615,6 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             [{"kind": "candidate_worktree"}],
         )
 
-    def test_direct_expiry_retries_on_absent_candidate_then_refuses_attempt_two(self):
-        owner = self.acquire_direct(attempt_budget_minutes=30)
-        tracker = self.tracker_fact(73)
-        replacement = os.path.abspath(self.root / "replacement-worktree-73")
-        retry = self.direct_owner(
-            now="2026-08-20T10:30:00Z", attempt_budget_minutes=30,
-            tracker=tracker,
-            worktree=self.worktree_fact(
-                73,
-                recorded={"path": owner["worktree"], "state": "absent"},
-                candidate={"path": replacement, "state": "absent"},
-            ),
-        )
-        self.assertEqual(
-            (retry["attempt"], retry["launch_kind"], retry["worktree"],
-             retry["deadline_at"]),
-            (2, "retry", replacement, "2026-08-20T11:00:00Z"),
-        )
-        refused = self.direct_owner(
-            now="2026-08-20T11:00:00Z", attempt_budget_minutes=30,
-            tracker=tracker,
-            worktree=self.worktree_fact(73, recorded={
-                "path": replacement, "state": "matching_issue_branch",
-            }),
-        )
-        self.assertEqual(
-            refused,
-            {
-                "interface_version": 1, "kind": "terminal", "issue": 73,
-                "run_id": owner["run_id"], "source": "lifecycle",
-                "reason": "failed", "blockers": [],
-                "result": json.loads(
-                    self.direct_state_path(owner["run_id"]).read_text()
-                )["issues"]["73"]["outcome"],
-                "reentry": "/from-issue 73 --auto",
-            },
-        )
-        state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
-        self.assertEqual(len(state["issues"]["73"]["attempts"]), 2)
-        self.assertEqual(state["issues"]["73"]["attempts"][-1]["result_source"],
-                         "refused")
 
     def test_direct_terminal_replay_is_canonical_for_merged_and_owner_stopped(self):
         merged_owner = self.acquire_direct(issue=73)
@@ -5269,6 +5234,216 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         linked = self.check_launch_raw(action_id="14:1:1", ok=False)
         self.assertEqual((linked.returncode, linked.stdout), (2, ""))
         self.assertNotIn("Traceback", linked.stderr)
+
+    def test_control_expiry_resumes_in_place_when_a_slot_is_free(self):
+        # The demo in issue #133: a free slot must not turn an interruption into
+        # a consumed attempt (per D1).
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-51")
+        self.spawn(issue=51, worktree=path, now="2026-08-19T12:00:00Z",
+                   budget_minutes=30)
+        response = self.control(
+            now="2026-08-19T12:30:00Z", issues=[51], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(51, recorded={
+                "path": path, "state": "matching_issue_branch"})],
+        )
+        self.assertEqual(response["deltas"], [
+            {"issue": 51, "attempt": 1, "kind": "expired", "state": "active"},
+            {"issue": 51, "attempt": 1, "kind": "resumed", "state": "active"},
+        ])
+        action = self.dispatch_action(response, "resume")
+        self.assertEqual(
+            (action["id"], action["attempt"], action["worktree"],
+             action["deadline_at"]),
+            ("51:1:2", 1, path, "2026-08-19T13:00:00Z"),
+        )
+        attempts = self.read_state()["issues"]["51"]["attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(
+            (attempts[0]["state"], attempts[0]["launch_kind"],
+             len(attempts[0]["launches"]), attempts[0]["blocked_on"],
+             attempts[0]["stalled_resumes"], attempts[0]["suspend_phase"]),
+            ("active", "resume", 2, None, 0, 0),
+        )
+        self.assertIsNone(self.read_state()["issues"]["51"]["outcome"])
+
+    def test_control_expiry_parks_when_capacity_is_full_then_resumes_next_sweep(self):
+        # Same-sweep when the suspension lane can dispatch, next sweep otherwise
+        # — expiry inherits the lane's timing rule, it does not get one (per D2).
+        self.init_run(now="2026-08-19T12:00:00Z")
+        paths = {51: str(self.root / "wt-51"), 53: str(self.root / "wt-53")}
+        self.spawn(issue=51, worktree=paths[51], now="2026-08-19T12:00:00Z",
+                   budget_minutes=30)
+        self.spawn(issue=53, worktree=paths[53], now="2026-08-19T12:00:00Z",
+                   budget_minutes=180)
+        observed = self.worktree_fact(51, recorded={
+            "path": paths[51], "state": "matching_issue_branch"})
+
+        parked = self.control(
+            now="2026-08-19T12:30:00Z", issues=[51, 53], max_parallel=1,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(issue) for issue in (51, 53)],
+            worktrees=[observed],
+        )
+        self.assertEqual(parked["deltas"], [
+            {"issue": 51, "attempt": 1, "kind": "expired", "state": "suspended"},
+        ])
+        self.assertEqual([action["kind"] for action in parked["actions"]], ["wait"])
+        attempt = self.read_state()["issues"]["51"]["attempts"][-1]
+        self.assertEqual(
+            (attempt["state"], attempt["blocked_on"], len(attempt["launches"])),
+            ("suspended", "unknown", 1),
+        )
+        summary = next(item for item in parked["summaries"] if item["issue"] == 51)
+        self.assertEqual(
+            (summary["state"], summary["blocked_on"], summary["worktree"]),
+            ("suspended", "unknown", paths[51]),
+        )
+
+        self.finish(1, self.merged_result(53), issue=53,
+                    now="2026-08-19T12:40:00Z")
+        resumed = self.control(
+            now="2026-08-19T12:45:00Z", issues=[51, 53], max_parallel=1,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(issue) for issue in (51, 53)],
+            worktrees=[observed],
+        )
+        # The parked attempt is `suspended`, not `active`/`handed_off`, so this
+        # sweep sees no expiry at all — only the resume the pause already owed.
+        self.assertEqual(resumed["deltas"], [
+            {"issue": 51, "attempt": 1, "kind": "resumed", "state": "active"},
+        ])
+        action = self.dispatch_action(resumed, "resume")
+        self.assertEqual((action["id"], action["deadline_at"]),
+                         ("51:1:2", "2026-08-19T13:15:00Z"))
+        self.assertEqual(len(self.read_state()["issues"]["51"]["attempts"]), 1)
+
+    def test_control_expiry_parks_when_the_recorded_worktree_is_unobserved(self):
+        # The "round still owed" skip already covers a reaped attempt because it
+        # tests `state == "suspended"` (per D2); it costs one sweep, never an
+        # attempt.
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-51")
+        self.spawn(issue=51, worktree=path, now="2026-08-19T12:00:00Z",
+                   budget_minutes=30)
+        parked = self.control(
+            now="2026-08-19T12:30:00Z", issues=[51], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(51)], worktrees=[],
+        )
+        self.assertEqual(parked["deltas"], [
+            {"issue": 51, "attempt": 1, "kind": "expired", "state": "suspended"},
+        ])
+        # No active or handed-off attempt is left, so no deadline is armed.
+        self.assertEqual(parked["actions"], [{"id": "finalize", "kind": "finalize"}])
+        self.assertIsNone(parked["next_deadline"])
+
+        resumed = self.control(
+            now="2026-08-19T12:31:00Z", issues=[51], max_parallel=2,
+            attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(51)],
+            worktrees=[self.worktree_fact(51, recorded={
+                "path": path, "state": "matching_issue_branch"})],
+        )
+        action = self.dispatch_action(resumed, "resume")
+        self.assertEqual((action["id"], action["deadline_at"]),
+                         ("51:1:2", "2026-08-19T13:01:00Z"))
+        self.assertEqual(len(self.read_state()["issues"]["51"]["attempts"]), 1)
+
+    def test_control_double_expiry_resumes_twice_and_spends_no_retry(self):
+        # Issue #133 AC2. Two expiries, two resume launches, one attempt.
+        self.init_run(now="2026-08-19T12:00:00Z")
+        path = str(self.root / "wt-51")
+        self.spawn(issue=51, worktree=path, now="2026-08-19T12:00:00Z",
+                   budget_minutes=30)
+        observed = [self.worktree_fact(51, recorded={
+            "path": path, "state": "matching_issue_branch"})]
+        kinds = []
+        for moment, launch, deadline in (
+            ("2026-08-19T12:30:00Z", "51:1:2", "2026-08-19T13:00:00Z"),
+            ("2026-08-19T13:00:00Z", "51:1:3", "2026-08-19T13:30:00Z"),
+        ):
+            response = self.control(
+                now=moment, issues=[51], max_parallel=2,
+                attempt_budget_minutes=30,
+                tracker=[self.tracker_fact(51)], worktrees=observed,
+            )
+            kinds.extend(delta["kind"] for delta in response["deltas"])
+            action = self.dispatch_action(response, "resume")
+            self.assertEqual(
+                (action["id"], action["attempt"], action["deadline_at"]),
+                (launch, 1, deadline),
+            )
+        self.assertEqual(kinds, ["expired", "resumed", "expired", "resumed"])
+        self.assertNotIn("retried", kinds)
+        self.assertNotIn("retry_refused", kinds)
+        attempts = self.read_state()["issues"]["51"]["attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(
+            (attempts[0]["attempt"], attempts[0]["stalled_resumes"],
+             attempts[0]["suspend_phase"], len(attempts[0]["launches"])),
+            (1, 1, 0, 3),
+        )
+
+    def test_direct_expiry_resumes_in_place_and_ignores_the_candidate(self):
+        # Replaces the retry-then-refuse fixture: a direct re-entry after a
+        # crash resumes attempt 1, it does not spend the fresh retry (per D2).
+        # The reaped attempt is at phase 0, so an `absent` recorded worktree is
+        # the reservation intact, not a mismatch (per D13).
+        owner = self.acquire_direct(attempt_budget_minutes=30)
+        tracker = self.tracker_fact(73)
+        replacement = os.path.abspath(self.root / "replacement-worktree-73")
+        first = self.direct_owner(
+            now="2026-08-20T10:30:00Z", attempt_budget_minutes=30,
+            tracker=tracker,
+            worktree=self.worktree_fact(
+                73,
+                recorded={"path": owner["worktree"], "state": "absent"},
+                candidate={"path": replacement, "state": "absent"},
+            ),
+        )
+        self.assertEqual(
+            (first["kind"], first["attempt"], first["action_id"],
+             first["launch_kind"], first["worktree"], first["deadline_at"]),
+            ("owner", 1, "73:1:2", "resume", owner["worktree"],
+             "2026-08-20T11:00:00Z"),
+        )
+
+        second = self.direct_owner(
+            now="2026-08-20T11:00:00Z", attempt_budget_minutes=30,
+            tracker=tracker,
+            worktree=self.worktree_fact(73, recorded={
+                "path": owner["worktree"], "state": "absent"}),
+        )
+        self.assertEqual(
+            (second["attempt"], second["action_id"], second["launch_kind"],
+             second["deadline_at"]),
+            (1, "73:1:3", "resume", "2026-08-20T11:30:00Z"),
+        )
+
+        # Inherited, not introduced: a recorded worktree the caller cannot
+        # vouch for is re-asked for, exactly as any other suspension in that
+        # position. Filed as a follow-up, not fixed here (spec, Out of scope).
+        stranded = self.direct_owner(
+            now="2026-08-20T11:30:00Z", attempt_budget_minutes=30,
+            tracker=tracker,
+            worktree=self.worktree_fact(73, recorded={
+                "path": owner["worktree"], "state": "mismatch"}),
+        )
+        self.assertEqual(stranded, {
+            "interface_version": 1, "kind": "observe", "issue": 73,
+            "run_id": owner["run_id"],
+            "requirements": [
+                {"kind": "recorded_worktree", "path": owner["worktree"]},
+            ],
+        })
+        state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
+        attempts = state["issues"]["73"]["attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertIsNone(attempts[-1]["result_source"])
+        self.assertIsNone(state["issues"]["73"]["outcome"])
 
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
     """Cover the installed layout, where the policy is a home-manager symlink."""

@@ -1764,28 +1764,6 @@ def _apply_one_issue_policy(
     active_unexpired = bool(
         latest is not None and latest["state"] == "active" and not expired
     )
-    handed_off = bool(
-        latest is not None and latest["state"] == "handed_off" and not expired
-    )
-    suspended = bool(
-        latest is not None
-        and latest["state"] == "suspended"
-        and (human_directed or latest["blocked_on"] in AUTO_RESUMABLE_BLOCKED_ON)
-    )
-    retryable = bool(
-        latest is not None
-        and (
-            expired
-            or (
-                latest["state"] == "failed"
-                and latest["result_source"] == "owner"
-            )
-            or (
-                latest["state"] == "stopped"
-                and latest["result_source"] == "expiry"
-            )
-        )
-    )
 
     def forge_requirement() -> list[dict[str, Any]] | None:
         """The observation the caller still owes before it may take the issue."""
@@ -1796,17 +1774,40 @@ def _apply_one_issue_policy(
     if current_owner_unavailable and not active_unexpired:
         raise WorkflowError("owner_unavailable is not applicable")
 
-    if latest is not None and not (
-        active_unexpired or handed_off or suspended or retryable
-    ):
-        return decision("terminal", expired=False)
-
     if forge is not None and forge["state"] == "merged" and latest is not None:
         # Reconciliation precedes ownership: whatever this request would have
         # earned, a merged pull request has already ended the work (per D3).
         assert ledger_issue is not None
         reconcile_merged_attempt(ledger_issue, latest, forge=forge, now=now)
         return decision("reconcile", changed=True, expired=False)
+
+    if expired:
+        # One reaper, one call site, running before any lane predicate is
+        # derived: everything below sees an ordinary suspension, or the stall
+        # escalation's terminal (per D1). Reconciliation is deliberately above
+        # this line — an escalation would otherwise return a terminal before a
+        # merged pull request was ever considered (per D3).
+        assert latest is not None and ledger_issue is not None
+        demote_expired_attempt(ledger_issue, latest, now=now)
+
+    handed_off = bool(latest is not None and latest["state"] == "handed_off")
+    suspended = bool(
+        latest is not None
+        and latest["state"] == "suspended"
+        and (human_directed or latest["blocked_on"] in AUTO_RESUMABLE_BLOCKED_ON)
+    )
+    retryable = bool(
+        latest is not None
+        and (
+            (latest["state"] == "failed" and latest["result_source"] == "owner")
+            or (latest["state"] == "stopped" and latest["result_source"] == "expiry")
+        )
+    )
+
+    if latest is not None and not (
+        active_unexpired or handed_off or suspended or retryable
+    ):
+        return decision("terminal", changed=expired, expired=expired)
 
     if active_unexpired and not current_owner_unavailable:
         return decision("idle", expired=False)
@@ -1821,21 +1822,23 @@ def _apply_one_issue_policy(
         halted = tracker_halt_reason(tracker)
         if halted is not None:
             return decision(
-                "terminal", expired=False, tracker_reason=halted,
-                blockers=control_blockers(tracker),
+                "terminal", changed=expired, expired=expired,
+                tracker_reason=halted, blockers=control_blockers(tracker),
             )
 
     if active_unexpired or handed_off or suspended:
         assert latest is not None
         if not dispatch_permitted:
-            return decision("idle", desired="resume", expired=False)
+            return decision(
+                "idle", desired="resume", changed=expired, expired=expired,
+            )
         if handed_off:
             validate_handoff_path(run_dir, latest["handoff_path"])
         unobserved_forge = forge_requirement()
         if unobserved_forge is not None:
             return decision(
                 "observe", desired="resume", requirements=unobserved_forge,
-                expired=False,
+                expired=expired,
             )
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
@@ -1860,32 +1863,34 @@ def _apply_one_issue_policy(
                 "observe", desired="resume", requirements=[
                     {"kind": "recorded_worktree", "path": latest["worktree"]}
                 ],
-                expired=False,
+                expired=expired,
             )
         resume_attempt(
             latest, now=now,
             attempt_budget_minutes=attempt_budget_minutes if suspended else None,
         )
-        return decision("resume", changed=True, expired=False)
+        return decision("resume", changed=True, expired=expired)
+
+    # Below this line an expired attempt is impossible: the reaper made it
+    # `suspended` (auto-resumable, so the lane above always claims it) or
+    # `stopped(stalled)` (claimed by the terminal check). A future edit that
+    # reopens the path fails here rather than silently emitting an `expired`
+    # delta from the wrong lane (per D6).
+    assert not expired
 
     needs_new_work = latest is None or retryable
     if needs_new_work and tracker is None:
         return decision(
             "observe", requirements=[{"kind": "tracker"}],
-            desired="retry" if retryable else "spawn", expired=expired,
+            desired="retry" if retryable else "spawn", expired=False,
         )
 
     assert tracker is not None
     blockers = control_blockers(tracker)
     halt_reason = tracker_halt_reason(tracker)
     if halt_reason is not None:
-        changed = False
-        if expired:
-            assert latest is not None and ledger_issue is not None
-            demote_expired_attempt(ledger_issue, latest, now=now)
-            changed = True
         return decision(
-            "terminal", changed=changed, expired=expired,
+            "terminal", expired=False,
             tracker_reason=halt_reason, blockers=blockers,
         )
 
@@ -1893,16 +1898,13 @@ def _apply_one_issue_policy(
     if unobserved_forge is not None:
         return decision(
             "observe", requirements=unobserved_forge,
-            desired="retry" if retryable else "spawn", expired=expired,
+            desired="retry" if retryable else "spawn", expired=False,
         )
 
     if retryable and latest is not None and latest["attempt"] >= 2:
         validate_recorded_worktree()
         if not dispatch_permitted:
-            return decision("idle", desired="refuse", expired=expired)
-        if expired:
-            assert ledger_issue is not None
-            demote_expired_attempt(ledger_issue, latest, now=now)
+            return decision("idle", desired="refuse", expired=False)
         worktrees = ", ".join(
             attempt["worktree"] for attempt in ledger_issue["attempts"][:2]
         )
@@ -1916,16 +1918,9 @@ def _apply_one_issue_policy(
         latest["finished_at"] = finish_time(latest, now)
         latest["result_source"] = "refused"
         ledger_issue["outcome"] = copy.deepcopy(result)
-        return decision("refuse", changed=True, expired=expired)
+        return decision("refuse", changed=True, expired=False)
 
     if not dispatch_permitted:
-        if expired:
-            assert latest is not None and ledger_issue is not None
-            demote_expired_attempt(ledger_issue, latest, now=now)
-            return decision(
-                "idle", changed=True, desired="retry" if retryable else "spawn",
-                expired=True,
-            )
         return decision(
             "idle", desired="retry" if retryable else "spawn", expired=False,
         )
@@ -1971,7 +1966,7 @@ def _apply_one_issue_policy(
                 "observe", desired="retry", requirements=[
                     {"kind": "recorded_worktree", "path": latest["worktree"]}
                 ],
-                expired=expired,
+                expired=False,
             )
         if recorded is not None and recorded["state"] == "matching_issue_branch":
             selected_path = latest["worktree"]
@@ -1981,13 +1976,10 @@ def _apply_one_issue_policy(
         else:
             return decision(
                 "observe", desired="retry",
-                requirements=[{"kind": "candidate_worktree"}], expired=expired,
+                requirements=[{"kind": "candidate_worktree"}], expired=False,
             )
 
     desired = "retry" if retryable else "spawn"
-    if expired and latest is not None:
-        assert ledger_issue is not None
-        demote_expired_attempt(ledger_issue, latest, now=now)
     attempt_number = 2 if retryable else 1
     attempt = new_control_attempt(
         issue=issue, attempt_number=attempt_number, worktree=selected_path,
@@ -2002,7 +1994,7 @@ def _apply_one_issue_policy(
         ledger_issue["attempts"].append(attempt)
     return decision(
         desired, changed=True, attempt=attempt, uses_candidate=uses_candidate,
-        path=selected_path, expired=expired,
+        path=selected_path, expired=False,
     )
 
 
@@ -2141,9 +2133,12 @@ def command_control(args: argparse.Namespace) -> int:
                         )
                     proposal_order.append(issue)
                     capacity -= 1
-                elif analysis[issue]["expired"]:
-                    apply_policy(issue, False)
-            elif analysis[issue]["expired"]:
+            elif analysis[issue]["expired"] and issue not in planned:
+                # The resume pass may already have dispatched this reap.
+                # Re-planning it with dispatch withheld would replace that
+                # resume with a suspension while the issue stayed in
+                # `proposal_order`, and the {spawn, resume, retry} delta map
+                # would then KeyError on "idle" (per D7).
                 apply_policy(issue, False)
 
         for issue in request["issues"]:
