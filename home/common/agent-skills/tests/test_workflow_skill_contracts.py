@@ -404,6 +404,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "consumes no attempt",
             "`resumed` on the same attempt",
             "a later eligible sweep resumes",
+            "`stopped(stalled)`",
         )
         self.assertIn("never `retried` and never `retry_refused`", collapsed)
 
