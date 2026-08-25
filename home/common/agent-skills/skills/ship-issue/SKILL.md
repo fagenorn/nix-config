@@ -57,6 +57,61 @@ Standing authorization exists exactly where the lifecycle guard grants it: pushi
 
 In a qualifying repository this skill IS that chain: `git push`, `gh pr create`, `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered mergeSubjectTemplate>"] --delete-branch`, branch delete, and worktree remove need no re-prompt; pause only where a phase says to.
 
+## Launch guard
+
+The lifecycle ledger reserves one worktree per issue and hands a retry the
+predecessor's worktree and branch on purpose, so a superseded attempt can still
+push, open a PR and merge. Before **every write to the forge or to `origin` this
+skill makes up to and including the merge**, re-validate that the handoff's
+launch identity is still the launch the ledger entitles:
+
+```
+~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>
+```
+
+`<issue:attempt:launch>` is the `action_id` the handoff carried, passed through
+verbatim — never recomputed, never derived from `attempt`; the launch ordinal is
+exactly the part this owner cannot know. The verb is read-only: it takes no
+clock, holds no lock and creates nothing.
+
+Proceed only on `current: true`. Refuse the write on `current: false`, a
+non-zero exit, a missing helper, or output that does not parse into the exact
+four keys `action_id`, `current`, `current_action_id` and `reason`. **This one
+call does not follow this skill's degrade-gracefully rule for absent optional
+helpers** — that rule is written for optional bindings, not for a safety check,
+and following it here would turn the guard into a no-op precisely when the
+environment is broken.
+
+Guarded: the Phase-4 push, the Phase-4 PR create, every push in REVIEW.md's
+five-step apply/push flow, and the Phase-7 merge. Everything **after the merge is
+verified** is deliberately unguarded — the remote branch delete, and Phase 8's
+issue close, `git branch -d` and `git worktree remove`. A refusal there could
+only refuse cleanup for a merge that already landed, stranding a worktree and a
+branch; deleting an already-merged branch is idempotent and harmless. Phase 1's
+merge from the integration branch and Phase 3's local commits are not forge
+writes and are not guarded.
+
+**A refusal is a stop that writes nothing anywhere.** Do not execute the write.
+Make no further forge write, **no ledger write**, and run no cleanup: leave the
+worktree, the branch and any PR exactly as they are, because the successor is
+working in that same worktree on that same branch. Print the canonical re-entry
+line `/from-issue <num> --auto` on its own line, then return a truthful
+`stopped` ship summary whose notes name the refusal, the reported `reason`, this
+`action_id` and the reported `current_action_id`. Its fields are `merge_sha:
+null`, `issue_closed: false`, `discussion_items: []`, `pr_url` the PR when one
+was already opened and null otherwise, and `detail_state: "none"` with
+`report_path: null` — or the failure-only `unpublished` shape when Phase 5
+retained readable Minor/Discussion findings, naming that retained source in
+notes and keeping the worktree. Phase 8 does not run and no delivery detail is
+published: the successor owns that worktree and will produce its own.
+
+Without lifecycle identity — a standalone `/ship-issue <num>`, or a handoff
+whose lifecycle group is all-null — skip the guard silently: a ledger-free
+invocation has no attempts and no supersession mechanism, and the handoff
+validator's all-or-nothing group means it is never partially present. That is
+the only skip, and it is a statement about the invocation, not about the
+environment.
+
 ## Doc-grounded escalations
 
 Before forming *any* user-facing question this skill raises mid-flow, invoke the `doc-grounded-questions` skill (if unavailable, read whichever declared `docPaths` exist). Lead with what the relevant doc says; ask only the genuinely open part.
@@ -116,8 +171,16 @@ Test failures: separate *environmental* (container connectivity, missing network
 
 Skip entirely when `issueTracker.kind=none` (push the branch and stop, or merge locally per the user's request).
 
+Run `check-launch` (see `## Launch guard`); on anything but `current: true`,
+stop without pushing. Then:
+
 ```
 git push -u origin <branch>
+```
+
+Run `check-launch` again, then:
+
+```
 gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
 ## Summary
 <2-4 bullets of what shipped>
@@ -197,6 +260,10 @@ timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30
 
 (When `issueTracker.kind=none`, merge the branch into the integration branch locally per the user's instruction instead.)
 
+Run `check-launch` (see `## Launch guard`) immediately before the merge, and
+run it regardless of how Phase 6's tip check came out. On anything but
+`current: true`, refuse the merge and take the no-write stop.
+
 Use the `repoSlug` binding resolved in Phase 0. Build the subject from `mergeSubjectTemplate` (substituting `<feature>`/`<desc>`/`<num>`/`<integrationBranch>`). Emit the subject form only when the rendered result is nonempty and representable by D18's quoted-subject grammar: it contains none of double quote, dollar, backtick, backslash, NUL, LF, or CR; otherwise omit `--subject` and its value and let the forge default stand. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
 
 ```
@@ -260,7 +327,9 @@ to remove the worktree.
 
 The final validated ship-summary contains only `issue`, `state`, `pr_url`, full
 `merge_sha`, `issue_closed`, `discussion_items: []`, `detail_state`,
-`report_path`, and notes. A fresh ship owner never writes workflow-state itself.
+`report_path`, and notes. A fresh ship owner never writes workflow-state
+itself; the read-only `check-launch` query of `## Launch guard` is the one
+ledger call it makes.
 
 ## Notes
 

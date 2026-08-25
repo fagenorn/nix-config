@@ -1876,6 +1876,57 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn(guard_and_fallback, phase_lines)
 
+    def test_ship_issue_guards_every_pre_merge_forge_write(self):
+        guard = self.section(self.ship_issue, "## Launch guard",
+                             "## Doc-grounded escalations")
+        collapsed = normalized(guard)
+        self.assertIn(
+            "~/.agents/bin/workflow-state check-launch --repo-root "
+            "<ledger_repo_root> --run-id <run-id> --action-id "
+            "<issue:attempt:launch>",
+            collapsed,
+        )
+        self.assertIn("Proceed only on `current: true`", collapsed)
+        # Every refusal trigger, so a guard that degraded to "on a false answer"
+        # would fail here rather than pass with a hole.
+        for trigger in ("`current: false`", "a non-zero exit", "a missing helper",
+                        "output that does not parse"):
+            with self.subTest(trigger=trigger):
+                self.assertIn(trigger, collapsed)
+        # The refusal is a no-write stop, not a suspension (per D8).
+        self.assertIn("no ledger write", collapsed)
+        self.assertIn("/from-issue <num> --auto", collapsed)
+        self.assertIn("`stopped` ship summary", collapsed)
+        self.assertNotIn("workflow-state suspend", guard)
+        # The post-merge exemption and the ledger-free skip.
+        self.assertIn("after the merge is verified", collapsed)
+        self.assertIn("skip the guard silently", collapsed)
+
+        # Phase 4: the query immediately precedes each of its two forge writes.
+        phase_four = self.section(self.ship_issue, "## Phase 4 — Open PR",
+                                  "## Summary")
+        self.assert_ordered(phase_four, "check-launch",
+                            "git push -u origin <branch>",
+                            "check-launch", "gh pr create")
+        # Phase 5's fix push is an instance of the same rule, not an exception.
+        self.assert_ordered(normalized(self.ship_review), "check-launch",
+                            "`git push`")
+        # Phase 7: the query precedes the merge. Anchor on --delete-branch: the
+        # literal `gh pr merge` is pinned line-by-line elsewhere in this file.
+        phase_seven = self.section(self.ship_issue, "## Phase 7 — Merge",
+                                   "## Phase 8 — Cleanup")
+        self.assert_ordered(phase_seven, "check-launch", "--delete-branch")
+
+    def test_ship_owner_reads_the_ledger_but_never_writes_it(self):
+        # AC3's invariant, previously unpinned. The read-only exception is named
+        # so a reader cannot take the sentence as a ban on consulting the ledger.
+        self.assertIn(
+            "A fresh ship owner never writes workflow-state itself; the "
+            "read-only `check-launch` query of `## Launch guard` is the one "
+            "ledger call it makes.",
+            normalized(self.ship_issue),
+        )
+
     def test_phase0_size_note_delegates_counting_to_diff_scope(self):
         # Issues #21-#22 made diff-scope the accounting authority and retired the
         # hand-counted numstat arithmetic; this note is the only restatement of
@@ -1915,7 +1966,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             REPO_ROOT / "home/common/agent-skills/default.nix"
         ).read_text(encoding="utf-8")
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
-        for name, text in (("from-issue", self.from_issue), ("orchestrate", self.orchestrate)):
+        for name, text in (("from-issue", self.from_issue), ("orchestrate", self.orchestrate),
+                           ("ship-issue", self.ship_issue)):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/workflow-state", text)
         for name, text in (("research", self.research), ("certification", self.certification)):

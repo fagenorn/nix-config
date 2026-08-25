@@ -64,7 +64,9 @@ Phase 6 polling CI on the stale tip." Follow this order:
 2. Re-run `verify.lint` + `verify.test` against the modified surface.
 3. `git add` the changed files; commit `fix(issue-<num>): address PR review —
    <short blocker>` (follow `commit.coAuthoredBy`).
-4. `git push`.
+4. Run `check-launch` (SKILL.md's `## Launch guard`); on anything but
+   `current: true`, stop without pushing and take the no-write stop. Then
+   `git push`.
 5. Verify the push landed: `gh pr view <pr-num> --json headRefOid` must equal
    `git rev-parse HEAD`. Diverged → the push didn't take; retry before Phase 6.
 
