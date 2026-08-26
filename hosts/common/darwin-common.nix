@@ -136,6 +136,10 @@ in
       # "plexamp"            # Headless Plex music player
       "plex" # Media server and player
       "spotify" # Music streaming service client
+      {
+        name = "stremio"; # Stable Stremio 5 desktop app
+        greedy = true; # Keep Homebrew's auto-updating cask on the latest stable release
+      }
       # Rogue Amoeba Audio Tools (Specialized Audio Routing/Recording)
       # "audio-hijack"       # Record audio from any application
       # "farrago"            # Soundboard application
