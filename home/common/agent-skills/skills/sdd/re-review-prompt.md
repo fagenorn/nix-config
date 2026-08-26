@@ -46,10 +46,15 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
     `root_bytes`, `total_bytes`, `file_count`, and
     `largest_member_bytes`. Read the strict manifest first, validate complete
     coverage and declared bytes against the checker metrics, then read every
-    shard exactly once in manifest order. Explicitly report an unreadable or
-    mismatched shard as unreadable review evidence; do not fetch a fallback diff
-    or approve the fix. The shards contain the fix commits, stat, and complete
-    fix diff with surrounding context. Do not re-run git commands.
+    shard exactly once in manifest order. A version-2 manifest may replace only
+    an individually oversized auto-generated EF migration designer with its
+    bounded `generated_evidence`; verify that entry against the companion
+    migration/snapshot diff and the report's no-pending-model-change,
+    generated-SQL, and provider-backed migration evidence. Explicitly report an
+    unreadable, mismatched, or uncorroborated item as unreadable review evidence;
+    do not fetch a fallback diff or approve the fix. The shards contain the fix
+    commits, stat, and byte-complete handwritten fix diff with surrounding
+    context. Do not re-run git commands.
 
     Your review is read-only on this checkout. Do not mutate the working
     tree, the index, HEAD, or branch state in any way.

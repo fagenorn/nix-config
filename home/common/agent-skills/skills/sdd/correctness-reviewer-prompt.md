@@ -39,7 +39,12 @@ Subagent (reviewer, Opus/high for the native path selected above):
     coverage and declared bytes against those checker metrics. For an unscoped
     review, read every shard exactly once in manifest order. Explicitly report
     an unreadable or mismatched shard as unreadable review evidence; do not
-    fetch a fallback diff or report a clean axis. When the packet states the
+    fetch a fallback diff or report a clean axis. A version-2 manifest may carry
+    bounded evidence for an oversized auto-generated EF migration designer;
+    inspect its identities and model-shape counts with the companion
+    migration/snapshot diff and require the report's no-pending-model-change,
+    generated-SQL, and provider-backed migration evidence. It is not a waiver.
+    When the packet states the
     review is scoped and lists the paths under review, retain the manifest root
     and metrics only as range-coverage evidence: do not read its shards.
     Instead, those listed paths are the whole of the range to fetch, so run

@@ -46,7 +46,12 @@ Subagent (reviewer, Sonnet/high as selected above):
     coverage and declared bytes against those checker metrics, then read every
     shard exactly once in manifest order. Explicitly report an unreadable or
     mismatched shard as unreadable review evidence; do not fetch a fallback diff
-    or report a clean axis. A non-SDD dispatcher that supplies no manifest may
+    or report a clean axis. For a version-2 manifest, also inspect each bounded
+    auto-generated EF designer evidence entry against the companion migration
+    and snapshot diff and require the reported no-pending-model-change,
+    generated-SQL, and provider-backed migration evidence promised by the plan;
+    the generated entry is not a review waiver. A non-SDD dispatcher that
+    supplies no manifest may
     fetch the range itself:
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
     `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`.

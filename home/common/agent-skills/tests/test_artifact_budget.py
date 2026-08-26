@@ -481,6 +481,60 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual(over.returncode, 3)
             self.assertIn("member_bytes", json.loads(over.stdout)["violations"])
 
+    def test_generated_evidence_manifest_is_strict_and_within_budget(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root, _, manifest = self.review_manifest(Path(raw), size=256)
+            manifest["interface_version"] = 2
+            manifest["source_diff_bytes"] = 70_000
+            manifest["total_review_bytes"] = manifest.pop("total_diff_bytes")
+            side = {
+                "blob_sha": "c" * 40,
+                "bytes": 68_000,
+                "content_sha256": "d" * 64,
+                "migration_id": "20260826010101_AddWidgets",
+                "product_version": "10.0.10",
+                "entity_types": 12,
+                "properties": 70,
+                "indexes": 5,
+                "foreign_keys": 3,
+                "tables": 12,
+            }
+            manifest["generated_evidence"] = [{
+                "path": "src/App/Migrations/20260826010101_AddWidgets.Designer.cs",
+                "kind": "ef-core-migration-designer",
+                "source_diff_bytes": 70_000,
+                "base": None,
+                "head": side,
+            }]
+            manifest["coverage"] = {
+                "complete": True,
+                "file_diff_count": 1,
+                "byte_complete_file_count": 0,
+                "generated_evidence_file_count": 1,
+            }
+            root.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(self.run_check("review-package", root).returncode, 0)
+
+            mutations = {
+                "unknown evidence kind": lambda m: m["generated_evidence"][0].__setitem__(
+                    "kind", "generated"),
+                "traversal path": lambda m: m["generated_evidence"][0].__setitem__(
+                    "path", "../escape.Designer.cs"),
+                "boolean metric": lambda m: m["generated_evidence"][0]["head"].__setitem__(
+                    "entity_types", True),
+                "bad digest": lambda m: m["generated_evidence"][0]["head"].__setitem__(
+                    "content_sha256", "not-a-digest"),
+                "coverage mismatch": lambda m: m["coverage"].__setitem__(
+                    "generated_evidence_file_count", 0),
+            }
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    invalid = deepcopy(manifest)
+                    mutate(invalid)
+                    root.write_text(json.dumps(invalid), encoding="utf-8")
+                    result = self.run_check("review-package", root)
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+
     def test_delivery_detail_manifest_uses_the_same_review_limits(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)

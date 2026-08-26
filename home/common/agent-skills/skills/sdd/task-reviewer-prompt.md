@@ -43,9 +43,18 @@ Subagent (reviewer, Opus/high as selected above):
     `root_bytes`, `total_bytes`, `file_count`, and
     `largest_member_bytes`. Read the strict manifest JSON first. Validate its
     declared complete coverage and shard byte totals against those checker
-    metrics, then read every shard exactly once in manifest order. Together the
-    shards are the byte-for-byte full diff with surrounding context and are
-    your view of the change. Explicitly report an unreadable or mismatched shard
+    metrics, then read every shard exactly once in manifest order. A version-1
+    manifest's shards are the byte-for-byte full diff with surrounding context.
+    A version-2 manifest keeps every handwritten file byte-complete but replaces
+    an individually oversized auto-generated EF migration designer with the
+    manifest's bounded `generated_evidence` entry. For each such entry, inspect
+    its blob/content identities, migration/product identities, and model-shape
+    counts together with the companion migration and snapshot diff; require the
+    implementer report to show no-pending-model-change, generated-SQL, and
+    provider-backed migration evidence. Missing or inconsistent corroboration is
+    a finding, and generated evidence is never a waiver to approve blindly. The
+    shards plus any declared generated evidence are your view of the change.
+    Explicitly report an unreadable or mismatched shard
     as unreadable review evidence; do not fetch a fallback diff or report
     approval. The diff's context lines ARE the changed files: do not Read a
     changed file separately unless a hunk you must judge is cut off
