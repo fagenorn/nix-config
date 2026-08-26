@@ -535,6 +535,44 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                     result = self.run_check("review-package", root)
                     self.assertEqual((result.returncode, result.stdout), (2, ""))
 
+    def test_adaptive_context_manifest_is_strict_and_within_budget(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root, _, manifest = self.review_manifest(Path(raw), size=256)
+            manifest["interface_version"] = 3
+            manifest["source_diff_bytes"] = 256
+            manifest["total_review_bytes"] = manifest.pop("total_diff_bytes")
+            manifest["generated_evidence"] = []
+            manifest["packaging"] = {
+                "context_lines": 7,
+                "shard_strategy": "stable-first-fit-whole-file",
+            }
+            manifest["coverage"] = {
+                "complete": True,
+                "file_diff_count": 1,
+                "byte_complete_file_count": 1,
+                "generated_evidence_file_count": 0,
+            }
+            root.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(self.run_check("review-package", root).returncode, 0)
+
+            mutations = {
+                "unknown context": lambda m: m["packaging"].__setitem__(
+                    "context_lines", 6),
+                "boolean context": lambda m: m["packaging"].__setitem__(
+                    "context_lines", True),
+                "unknown strategy": lambda m: m["packaging"].__setitem__(
+                    "shard_strategy", "first-fit"),
+                "coverage mismatch": lambda m: m["coverage"].__setitem__(
+                    "byte_complete_file_count", 0),
+            }
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    invalid = deepcopy(manifest)
+                    mutate(invalid)
+                    root.write_text(json.dumps(invalid), encoding="utf-8")
+                    result = self.run_check("review-package", root)
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+
     def test_delivery_detail_manifest_uses_the_same_review_limits(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)

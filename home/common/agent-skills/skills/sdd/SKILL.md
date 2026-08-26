@@ -114,6 +114,17 @@ not meet the exact generated-designer contract remains over budget and exits 3;
 never classify by suffix alone, truncate a diff, or treat generated evidence as
 a review waiver.
 
+Interface version 3 is the producer's bounded remediation only when the complete
+version-1/2 `-U10` package fails solely on `member_count` and/or
+`aggregate_bytes`. It retries the closed context sequence 7, 5, 3, 1, 0 and
+selects the first checker-valid package, packing complete file-diff records with
+`stable-first-fit-whole-file`. It never splits a file diff or omits a changed
+line. Reviewers read every shard, honor the declared `packaging.context_lines`,
+and inspect the live file when that bounded unchanged context is insufficient.
+Version 3 may also contain the same strictly identified generated evidence as
+version 2. `member_bytes` and `root_bytes` never take this remediation: an
+individually oversized handwritten diff or manifest still exits 3.
+
 Record the exact `base_sha and head_sha` before invoking any `review-package`
 producer. Parse every producer report only after the producer-boundary validator,
 then independently run `artifact-budget check --kind review-package` on its root

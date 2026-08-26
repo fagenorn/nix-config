@@ -401,6 +401,14 @@ def _validate_manifest(root: Path, root_raw: bytes) -> list[CapturedArtifact]:
         }
         suffix = "diff"
         total_key = "total_review_bytes"
+    elif purpose == "diff-review" and version == 3:
+        expected_keys = {
+            "interface_version", "kind", "purpose", "range", "commits", "stat",
+            "shards", "source_diff_bytes", "total_review_bytes", "generated_evidence",
+            "packaging", "coverage",
+        }
+        suffix = "diff"
+        total_key = "total_review_bytes"
     elif purpose == "delivery-detail":
         expected_keys = {"interface_version", "kind", "purpose", "context", "shards",
                          "total_detail_bytes", "coverage"}
@@ -436,6 +444,14 @@ def _validate_manifest(root: Path, root_raw: bytes) -> list[CapturedArtifact]:
                     or not _integer(coverage["file_diff_count"])):  # type: ignore[index]
                 raise ArtifactBudgetError("invalid diff coverage")
         else:
+            if version == 3:
+                packaging = manifest["packaging"]
+                if (not _exact_keys(packaging, {"context_lines", "shard_strategy"})
+                        or packaging["context_lines"] not in {0, 1, 3, 5, 7}  # type: ignore[index]
+                        or type(packaging["context_lines"]) is not int  # type: ignore[index]
+                        or packaging["shard_strategy"]  # type: ignore[index]
+                        != "stable-first-fit-whole-file"):
+                    raise ArtifactBudgetError("invalid adaptive packaging")
             coverage_keys = {
                 "complete", "file_diff_count", "byte_complete_file_count",
                 "generated_evidence_file_count",
@@ -445,7 +461,8 @@ def _validate_manifest(root: Path, root_raw: bytes) -> list[CapturedArtifact]:
                     or any(not _integer(coverage[key]) for key in coverage_keys - {"complete"})):  # type: ignore[index]
                 raise ArtifactBudgetError("invalid diff coverage")
             generated = manifest["generated_evidence"]
-            if not isinstance(generated, list) or not generated:
+            if (not isinstance(generated, list)
+                    or (version == 2 and not generated)):
                 raise ArtifactBudgetError("missing generated evidence")
             for item in generated:
                 _validate_generated_evidence(item)
@@ -521,7 +538,7 @@ def _validate_manifest(root: Path, root_raw: bytes) -> list[CapturedArtifact]:
                 raise ArtifactBudgetError("empty detail shard")
     if not _integer(manifest[total_key]) or manifest[total_key] != sum(sizes):
         raise ArtifactBudgetError("invalid declared total")
-    if (purpose == "diff-review" and version == 2
+    if (purpose == "diff-review" and version in {2, 3}
             and manifest["source_diff_bytes"] < manifest["total_review_bytes"]):
         raise ArtifactBudgetError("invalid review byte reduction")
     if suffix == "jsonl":

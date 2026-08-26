@@ -184,6 +184,59 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual([item["path"] for item in manifest["shards"]],
                              ["review.shards/shard-001.diff", "review.shards/shard-002.diff"])
 
+    def test_fragmented_complete_diffs_use_bounded_adaptive_context_package(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env = self.setup_repo(repo)
+            target_sizes = [
+                25_203, 10_617, 59_012, 8_037, 50_410, 18_999,
+                22_184, 54_145, 42_155, 44_332, 19_559, 12_004,
+                25_696, 15_635, 23_066, 34_082, 5_682, 6_805,
+            ]
+            paths = []
+            for number in range(len(target_sizes)):
+                path = repo / f"f-{number:02d}.txt"
+                path.write_text("small\n", encoding="utf-8")
+                paths.append(path)
+            base = self.commit(repo, "base", env)
+            for number, (path, size) in enumerate(zip(paths, target_sizes)):
+                path.write_text(chr(65 + number) * size + "\n", encoding="utf-8")
+            head = self.commit(repo, "fragmented complete diffs", env)
+            out = repo / "review.json"
+
+            result = self.invoke(repo, plan, base, head, out, env)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["state"], "complete")
+            manifest = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["interface_version"], 3)
+            self.assertEqual(manifest["packaging"], {
+                "context_lines": 7,
+                "shard_strategy": "stable-first-fit-whole-file",
+            })
+            self.assertEqual(manifest["generated_evidence"], [])
+            self.assertEqual(manifest["coverage"], {
+                "complete": True,
+                "file_diff_count": len(paths),
+                "byte_complete_file_count": len(paths),
+                "generated_evidence_file_count": 0,
+            })
+            self.assertLessEqual(len(manifest["shards"]), 8)
+            self.assertTrue(all(item["bytes"] <= 65_536
+                                for item in manifest["shards"]))
+            expected = subprocess.run(
+                ["git", "-C", str(repo), "diff", "--no-ext-diff", "--binary", "-U7",
+                 f"{base}..{head}"], check=True, capture_output=True,
+            ).stdout
+            self.assertEqual(manifest["source_diff_bytes"], len(expected))
+            packaged = b"".join((out.parent / item["path"]).read_bytes()
+                                 for item in manifest["shards"])
+            self.assertEqual(manifest["total_review_bytes"], len(packaged))
+            for path in paths:
+                header = f"diff --git a/{path.name} b/{path.name}\n".encode()
+                self.assertEqual(packaged.count(header), 1)
+
     def test_multiple_commits_are_ordered_with_exact_full_identity(self):
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)

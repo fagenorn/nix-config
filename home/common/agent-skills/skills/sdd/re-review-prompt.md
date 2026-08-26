@@ -53,8 +53,11 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
     generated-SQL, and provider-backed migration evidence. Explicitly report an
     unreadable, mismatched, or uncorroborated item as unreadable review evidence;
     do not fetch a fallback diff or approve the fix. The shards contain the fix
-    commits, stat, and byte-complete handwritten fix diff with surrounding
-    context. Do not re-run git commands.
+    commits and stat. A version-3 manifest preserves every whole handwritten
+    file diff and every changed line with the declared adaptive unchanged
+    context and `stable-first-fit-whole-file` packing; validate those fields and
+    read the live file when that bounded context is insufficient. Version 3 may
+    also carry version 2's generated evidence. Do not re-run git commands.
 
     Your review is read-only on this checkout. Do not mutate the working
     tree, the index, HEAD, or branch state in any way.

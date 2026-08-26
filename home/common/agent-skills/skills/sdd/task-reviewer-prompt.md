@@ -53,7 +53,15 @@ Subagent (reviewer, Opus/high as selected above):
     implementer report to show no-pending-model-change, generated-SQL, and
     provider-backed migration evidence. Missing or inconsistent corroboration is
     a finding, and generated evidence is never a waiver to approve blindly. The
-    shards plus any declared generated evidence are your view of the change.
+    version-3 manifest is the producer's bounded aggregate remediation: it keeps
+    every changed file diff whole, includes every changed line, declares the
+    unchanged `packaging.context_lines`, and packs those whole records with
+    `stable-first-fit-whole-file`. Validate those exact fields; file order across
+    shards is packaging order, not Git path order. If the declared unchanged
+    context is insufficient to judge a hunk, read that live file and name the
+    focused context check in your report. Version 3 may also carry the same
+    generated evidence contract as version 2. The shards plus any declared
+    generated evidence are your view of the change.
     Explicitly report an unreadable or mismatched shard
     as unreadable review evidence; do not fetch a fallback diff or report
     approval. The diff's context lines ARE the changed files: do not Read a
