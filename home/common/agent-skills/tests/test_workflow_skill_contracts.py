@@ -1677,8 +1677,32 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(reader=reader):
                 self.assertNotIn(reader, output_format)
                 self.assertNotIn(reader, diff_under_review)
+
+    def test_sdd_review_contracts_preserve_adaptive_whole_file_coverage(self):
+        for name, path in (
+            ("task", SDD_DIR / "task-reviewer-prompt.md"),
+            ("re-review", SDD_DIR / "re-review-prompt.md"),
+            ("conformance", SDD_DIR / "conformance-reviewer-prompt.md"),
+            ("correctness", SDD_DIR / "correctness-reviewer-prompt.md"),
+        ):
+            text = " ".join(path.read_text(encoding="utf-8").split())
+            with self.subTest(document=name):
+                self.assertIn("version-3", text)
+                self.assertIn("stable-first-fit-whole-file", text)
+                self.assertIn("changed line", text)
+                self.assertIn("live file", text)
+        final_review = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
+        for text in (self.sdd, final_review):
+            compact = " ".join(text.split()).lower()
+            self.assertIn("interface version 3", compact)
+            self.assertIn("stable-first-fit-whole-file", compact)
+        self.assertIn("member_count", self.sdd)
+        self.assertIn("aggregate_bytes", self.sdd)
         # The Placeholders paragraph tells a packet builder that the manifest
         # remains coverage evidence while selected paths are the only diff reads.
+        rubric = (SDD_DIR / "correctness-reviewer-prompt.md").read_text(
+            encoding="utf-8"
+        )
         placeholders = " ".join(rubric[rubric.index("**Placeholders:**") :].split())
         for fragment in (
             "manifest root path and all four metrics",

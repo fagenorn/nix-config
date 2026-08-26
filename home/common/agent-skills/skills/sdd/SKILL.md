@@ -102,6 +102,29 @@ and report/checker agreement permits dispatch. Generator exit 3 must validate as
 Generator exit 2, validator exit 2, malformed or unknown output, or any
 report/checker disagreement is `failed`; record and return it before dispatch.
 
+A diff-review manifest may use interface version 2 only when an individually
+oversized file is a positively identified auto-generated EF Core migration
+designer. In that form every handwritten file remains byte-complete and the
+designer is replaced by bounded, deterministic evidence: its Git blob and
+content identities, migration/product identities, source-diff bytes, and model
+shape counts. The reviewer must inspect that evidence together with the
+companion migration/snapshot diff and the implementer's no-pending-model-change,
+generated-SQL, and provider-backed migration evidence. A large file that does
+not meet the exact generated-designer contract remains over budget and exits 3;
+never classify by suffix alone, truncate a diff, or treat generated evidence as
+a review waiver.
+
+Interface version 3 is the producer's bounded remediation only when the complete
+version-1/2 `-U10` package fails solely on `member_count` and/or
+`aggregate_bytes`. It retries the closed context sequence 7, 5, 3, 1, 0 and
+selects the first checker-valid package, packing complete file-diff records with
+`stable-first-fit-whole-file`. It never splits a file diff or omits a changed
+line. Reviewers read every shard, honor the declared `packaging.context_lines`,
+and inspect the live file when that bounded unchanged context is insufficient.
+Version 3 may also contain the same strictly identified generated evidence as
+version 2. `member_bytes` and `root_bytes` never take this remediation: an
+individually oversized handwritten diff or manifest still exits 3.
+
 Record the exact `base_sha and head_sha` before invoking any `review-package`
 producer. Parse every producer report only after the producer-boundary validator,
 then independently run `artifact-budget check --kind review-package` on its root

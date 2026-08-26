@@ -15,7 +15,14 @@ Pass both axes the manifest root path and all four metrics (`root_bytes`,
 `total_bytes`, `file_count`, `largest_member_bytes`), never shard lists or
 diff contents. Every unscoped reviewer validates the strict manifest and
 coverage, reads every shard once in manifest order, and explicitly reports an
-unreadable or mismatched shard. Then review the branch on two axes **in
+unreadable or mismatched shard. For interface version 3, it verifies the
+declared adaptive context and `stable-first-fit-whole-file` packing, treats
+every changed line as covered, and opens the live file when the bounded
+unchanged context is insufficient. For interface version 2, or version 3 with non-empty generated
+evidence, it also inspects each bounded auto-generated EF designer evidence entry with the companion
+migration/snapshot diff and requires the implementer's no-pending-model-change,
+generated-SQL, and provider-backed migration evidence; this is evidence
+decomposition, never a waiver. Then review the branch on two axes **in
 parallel, as isolated subagents** over that same package:
 
 - **Conformance axis** — did the diff deliver what issue + spec + plan promised, honoring the project's ADRs, context docs, and standards. Native `reviewer` on the Sonnet/high tier selected in [conformance-reviewer-prompt.md](conformance-reviewer-prompt.md) — delivered-vs-promised grading is checklist-shaped work against written promises; the top tier stays on correctness.
