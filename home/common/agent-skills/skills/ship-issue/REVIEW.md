@@ -107,11 +107,12 @@ stdout, compare it with the submitted candidate, and require non-empty findings
 before setting `detail_state: "unpublished"`. That `report_path` is the retained
 candidate's **worktree-relative** path — the same
 `.superpowers/ship-review/<issue>/retained-detail.json` written above, resolved
-against the feature worktree and never against the primary checkout. The two
-detail states are rooted differently on purpose, and `workflow-state finish`
-enforces exactly that split: it resolves a `present` path against `--repo-root`
-and an `unpublished` one against the attempt's recorded worktree. Name the root
-in notes so a reader never has to guess which one a bare relative path means.
+against the feature worktree — the one recorded on the attempt — and never
+against the primary checkout. The two detail states are rooted differently on
+purpose, and `workflow-state finish` enforces exactly that split: it resolves a
+`present` path against `--repo-root` and an `unpublished` one against the
+attempt's recorded worktree. Name the root in notes so a reader never has to
+guess which one a bare relative path means.
 Then keep the worktree and do not remove it; return only `stopped` or
 `failed`. Missing, unreadable, malformed,
 wrong-schema, or empty findings cannot support unpublished detail. With no
