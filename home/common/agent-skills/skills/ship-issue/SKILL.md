@@ -103,8 +103,10 @@ line `/from-issue <num> --auto` on its own line, then return a truthful
 null`, `issue_closed: false`, `discussion_items: []`, `pr_url` the PR when one
 was already opened and null otherwise, and `detail_state: "none"` with
 `report_path: null` — or the failure-only `unpublished` shape when Phase 5
-retained readable Minor/Discussion findings, naming that retained source in
-notes and keeping the worktree. Phase 8 does not run and no delivery detail is
+retained readable Minor/Discussion findings, naming that retained source and its
+root in notes and keeping the worktree. An `unpublished` `report_path` is
+worktree-relative, not main-root-relative (REVIEW.md §"Durable
+Minor/Discussion detail"). Phase 8 does not run and no delivery detail is
 published: the successor owns that worktree and will produce its own.
 
 Without lifecycle identity — a standalone `/ship-issue <num>`, or a handoff
@@ -343,8 +345,11 @@ to remove the worktree.
 
 The final validated ship-summary contains only `issue`, `state`, `pr_url`, full
 `merge_sha`, `issue_closed`, `discussion_items: []`, `detail_state`,
-`report_path`, and notes. A fresh ship owner never writes workflow-state
-itself; the read-only `check-launch` query of `## Launch guard` is the one
+`report_path`, and notes. `report_path` is relative, and which root it is
+relative to follows `detail_state`: a `present` path resolves against the
+primary checkout, an `unpublished` one against the feature worktree. Notes say
+which, because the path alone does not. A fresh ship owner never writes
+workflow-state itself; the read-only `check-launch` query of `## Launch guard` is the one
 ledger call it makes.
 
 ## Notes

@@ -52,7 +52,9 @@ over a candidate with these exact keys: `issue`, `state`, `pr_url`,
 and `notes`. `discussion_items: []` because non-empty details are moved to the
 single report. `detail_state` is `none`, `present`, or failure-only `unpublished`
 per the validator matrix. With `unpublished`, name the readable retained source
-in notes, keep the worktree, and do not claim merge success. Never inline detail.
+and the root it resolves against in notes — a retained path is
+worktree-relative, unlike a `present` one — keep the worktree, and do not claim
+merge success. Never inline detail.
 ```
 
 ## Inline fallback (no ship-issue skill)

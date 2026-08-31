@@ -104,7 +104,15 @@ On success, independently check the returned review-package root, set
 `report_path` and notes, and return no inline items. On publication failure,
 re-read the retained source with `validate-detail-input`, consume canonical
 stdout, compare it with the submitted candidate, and require non-empty findings
-before setting `detail_state: "unpublished"`. Then keep the worktree and do not remove
-it; return only `stopped` or `failed`. Missing, unreadable, malformed,
+before setting `detail_state: "unpublished"`. That `report_path` is the retained
+candidate's **worktree-relative** path — the same
+`.superpowers/ship-review/<issue>/retained-detail.json` written above, resolved
+against the feature worktree and never against the primary checkout. The two
+detail states are rooted differently on purpose, and `workflow-state finish`
+enforces exactly that split: it resolves a `present` path against `--repo-root`
+and an `unpublished` one against the attempt's recorded worktree. Name the root
+in notes so a reader never has to guess which one a bare relative path means.
+Then keep the worktree and do not remove it; return only `stopped` or
+`failed`. Missing, unreadable, malformed,
 wrong-schema, or empty findings cannot support unpublished detail. With no
 Minor/Discussion items, use `detail_state: "none"` and a null path.

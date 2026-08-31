@@ -444,7 +444,10 @@ ship-summary --input -`, decode only canonical stdout, consume a durable
 `report_path` before advancing, and never inline either durable or retained
 detail; never inline the report. For `unpublished`, independently re-read the retained candidate through
 `validate-detail-input`, require non-empty findings, keep the worktree, and accept
-only `stopped`/`failed`. Before that terminal write, run
+only `stopped`/`failed`. Resolve that `report_path` against the owner worktree,
+not `ledger_repo_root` — only a `present` path is primary-checkout-relative, and
+`workflow-state finish` resolves the two the same way.
+Before that terminal write, run
 `~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
 with this owner's own `action_id`: the ship owner and this parent share one
 launch identity, so a ship report from a superseded launch means this launch is
