@@ -202,6 +202,11 @@ evidence is never inlined.
 If publication fails, run `artifact-budget validate-detail-input` against the
 no-follow retained file and consume canonical stdout, requiring non-empty findings
 and comparison with the candidate before setting `detail_state: "unpublished"`.
+That `report_path` is the `<workspace>/retained-detail.json` written above, and
+is **main-root-relative** like the durable path: the workspace lives beneath
+the primary checkout, never the process cwd, so both sdd detail states share
+one root — unlike ship-issue, which roots its retained candidate in the feature
+worktree instead. Name the root in notes.
 Then validate the failed candidate through `artifact-budget
 validate-report --boundary sdd`, keep the workspace and keep the worktree, and
 do not remove either. Missing, unreadable, empty, malformed, wrong-schema, or
