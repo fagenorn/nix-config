@@ -143,8 +143,8 @@ unit-test suite for documentation in this repository and this work edits no
 - **V4 — prototype reference immutability.** `git cat-file -e <sha>^{commit}`
   and `git ls-remote origin` for both prototype shas (AC3).
 
-Implementers verify at these four seams and nowhere else. A task that appears to
-need a fifth seam is a plan bug, not an implementer's call.
+Implementers verify at these five seams and nowhere else. A task that appears to
+need a sixth seam is a plan bug, not an implementer's call.
 
 ## Task index
 
@@ -174,8 +174,9 @@ state systems), each of which is independently `full` by the exclusion list.
 
 ## Decisions
 
-The spec owns the single issue-level ledger (D1–D18). Cite rows by ID; never
-restate them. Planning appended three rows to the **spec's** ledger:
+The spec owns the single issue-level ledger (D1–D21). Cite rows by ID; never
+restate them. Planning appended D16–D18 and the Phase-5 standards review
+appended D19–D21 to the **spec's** ledger:
 
 - **D16** — in-branch gates observe `git show HEAD:<path>`; the `main` form of V1
   is a ship-time consequence of merging, not a task gate.
@@ -185,6 +186,13 @@ restate them. Planning appended three rows to the **spec's** ledger:
 - **D18** — C62.2's parenthetical drift observation is itself planning-time
   unverified and is superseded by the execute-phase re-observation, whatever
   that finds — including "no drift".
+- **D19** — the claim-ID gates prove traceability, not truth; V5's source-backed
+  semantic audit is the only seam that discharges AC1, and the #80 gate checks
+  substantive seam values and associated prototype triples.
+- **D20** — the guard inventory covers both authorized owners and the `dev`
+  integration base, and the durable-state sources name the two sdd scripts.
+- **D21** — fleet citations record the checked-out snapshot and its distance
+  behind `origin`; no task refreshes a checkout.
 
 ## Standards review provenance
 
