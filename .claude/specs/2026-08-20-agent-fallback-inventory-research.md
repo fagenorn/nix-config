@@ -993,8 +993,8 @@ Per-cluster repeated execution cost:
   already counted in the 40 ms, and the `kind: none` branches are prose read by
   the model, not executed.
 - **Doc discovery:** no subprocess at all. The repeated cost is model turns spent
-  on filesystem probes — 13 for nix-config, 4 for Argus, 1 for Nodo, as measured
-  above. The per-turn cost of a probe has **no answer in the sources read**;
+  on filesystem probes — 12 for nix-config, 4 for Argus, 1 for Nodo, the counts
+  the ladder walk in `The three live adapters` publishes cell by cell. The per-turn cost of a probe has **no answer in the sources read**;
   this evidence base contains no harness instrumentation, and none was
   fabricated.
 
