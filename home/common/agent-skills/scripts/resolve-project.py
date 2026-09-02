@@ -3,11 +3,13 @@
 
 `.agents/project.json` is the only input. `resolve` loads it, validates its
 whole shape in one pass, normalizes every authored repository-relative path
-against the discovered project root, and prints the snapshot as compact sorted
-JSON on stdout. Nothing is defaulted, inferred, or sniffed from the
+against the discovered project root, computes each capability's readiness
+from the filesystem and `PATH`, and prints the snapshot as compact sorted JSON
+on stdout. No project policy is defaulted, inferred, or sniffed from the
 environment (D5); a missing, unexpected or malformed member is a refusal, never
-an implied value. The subcommand is strictly read-only: it opens no file for
-writing, creates no directory, and spawns no subprocess.
+an implied value. Readiness observes the machine but never executes anything:
+the subcommand opens no file for writing, creates no directory, and starts no
+child process.
 
 A structural refusal prints exactly one JSON object carrying an `error` member
 on stdout and exits 2 (D12). An argparse usage error also exits 2 but prints no
@@ -19,8 +21,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import sys
 
 
@@ -89,6 +93,41 @@ COMMAND_MEMBERS = ("argv", "cwd", "env")
 WORKFLOW_MEMBERS = ("verification", "orchestration", "review", "release")
 DEPLOY_MEMBERS = ("adapter", "command", "config")
 PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
+
+# D6: what each capability demands of the bindings when it is declared
+# `supported`. A row is the binding member's path under `/bindings` and the
+# predicate the authored value must satisfy; failing one is `invalid_contract`,
+# never `blocked`. Only a declared `supported` capability is walked, so an
+# `unsupported` one imposes none of its rows on the bindings.
+CAPABILITY_BINDING_REQUIREMENTS = {
+    "tracker": (
+        (("tracker", "kind"), lambda value: value != "none"),
+        (("tracker", "cli"), lambda value: isinstance(value, str) and value != ""),
+    ),
+    "worktrees": ((("vcs", "kind"), lambda value: value == "git"),),
+    "knowledge.context": ((("paths", "context"), bool),),
+    "knowledge.standards": ((("paths", "standards"), bool),),
+    "knowledge.architecture": ((("paths", "architecture"), bool),),
+    "knowledge.hints": ((("paths", "hints"), bool),),
+    "verification": ((("workflow", "verification"), bool),),
+    "review.plan": (
+        (("workflow", "review", "plan"), lambda value: value is not None),),
+    "review.code": (
+        (("workflow", "review", "code"), lambda value: value is not None),),
+    "release": ((("workflow", "release"), lambda value: value is not None),),
+    "deploy": (
+        (("deploy", "adapter"), lambda value: value != "none"),
+        (("deploy", "command"), lambda value: value is not None),
+    ),
+}
+
+# The `paths` list each `knowledge.*` capability reads its prerequisite from.
+KNOWLEDGE_PATH_MEMBERS = {
+    "knowledge.context": "context",
+    "knowledge.standards": "standards",
+    "knowledge.architecture": "architecture",
+    "knowledge.hints": "hints",
+}
 
 # `env` carries variable names only, never values (D13); an entry holding an
 # `=` or any other non-name character is a violation rather than a value the
@@ -553,6 +592,44 @@ def validate_capabilities(source: dict, violations: list[dict]) -> None:
                 "contract.capabilities.invalid_support"))
 
 
+def find_binding(bindings: dict, path: tuple[str, ...]) -> tuple[bool, object]:
+    """The value at `path`, and whether the walk reached it through objects."""
+    value: object = bindings
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return False, None
+        value = value[key]
+    return True, value
+
+
+def validate_capability_bindings(source: dict) -> list[dict]:
+    """D6 contradictions: a `supported` capability whose binding is incomplete.
+
+    Only declared support is read, so an `unsupported` capability imposes no
+    requirement at all, and only a member the walk actually reaches is judged:
+    a namespace already reported malformed contributes no second violation.
+    """
+    violations: list[dict] = []
+    capabilities = source.get("capabilities")
+    bindings = source.get("bindings")
+    if not isinstance(capabilities, dict) or not isinstance(bindings, dict):
+        return violations
+    for name in CAPABILITY_NAMES:
+        declaration = capabilities.get(name)
+        if (not isinstance(declaration, dict)
+                or declaration.get("support") != "supported"):
+            continue
+        for path, is_complete in CAPABILITY_BINDING_REQUIREMENTS[name]:
+            found, value = find_binding(bindings, path)
+            if found and not is_complete(value):
+                violations.append(violation(
+                    "/bindings/" + "/".join(path),
+                    f"must be complete: capability '{name}' is declared supported",
+                    f"contract.capabilities.{name}.binding_incomplete",
+                ))
+    return violations
+
+
 def validate_projections(source: dict, violations: list[dict]) -> None:
     projections = source.get("projections")
     if not check_list(projections, "/projections", "projections", violations):
@@ -614,6 +691,7 @@ def validate_contract(source: dict) -> list[dict]:
         validate_capabilities(source, violations)
     if "projections" in source:
         validate_projections(source, violations)
+    violations.extend(validate_capability_bindings(source))
     return violations
 
 
@@ -640,25 +718,95 @@ def normalize_bindings(source_bindings: dict, root: Path) -> dict:
     return bindings
 
 
-def resolve_capabilities(declarations: dict) -> dict:
-    """Capability states from the authored declaration alone.
+def resolves_on_path(argv0: str, cwd: Path) -> bool:
+    """True when argv0 names a runnable binary, without executing it.
 
-    Task 2 replaces the `supported` branch with prerequisite evaluation.
+    `cwd` is the base for a relative argv0 and is already absolute.
     """
+    if "/" not in argv0:
+        return shutil.which(argv0) is not None
+    candidate = Path(cwd) / argv0
+    return candidate.is_file() and os.access(candidate, os.X_OK)
+
+
+def commands_resolve(bindings: dict, command_ids: list[str]) -> bool:
+    """Every named command's argv[0] resolves, each against its own `cwd` (D22)."""
+    for command_id in command_ids:
+        entry = bindings["commands"][command_id]
+        if not resolves_on_path(entry["argv"][0], Path(entry["cwd"])):
+            return False
+    return True
+
+
+def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | None:
+    """The first failing prerequisite's reason code, or None when all pass.
+
+    Only the declared `supported` capabilities reach here, and D6 has already
+    refused an incomplete binding, so every member read below is present.
+    """
+    if name == "tracker":
+        # The tracker CLI is not a `commands` entry, so its base is the root.
+        if not resolves_on_path(bindings["tracker"]["cli"], root):
+            return "tracker_cli_missing"
+        return None
+    if name == "worktrees":
+        if not resolves_on_path("git", root):
+            return "vcs_worktree_unsupported"
+        # `vcs.worktree.root` names the directory every created worktree is
+        # placed under, so it is that parent which must exist and accept a
+        # new entry.
+        parent = root / bindings["vcs"]["worktree"]["root"]
+        if not (parent.is_dir() and os.access(parent, os.W_OK)):
+            return "vcs_worktree_unsupported"
+        return None
+    if name in KNOWLEDGE_PATH_MEMBERS:
+        entries = bindings["paths"][KNOWLEDGE_PATH_MEMBERS[name]]
+        if not entries or not all((root / entry).exists() for entry in entries):
+            return "knowledge_path_missing"
+        return None
+    if name == "verification":
+        ids = bindings["workflow"]["verification"]
+    elif name == "review.plan":
+        ids = [bindings["workflow"]["review"]["plan"]]
+    elif name == "review.code":
+        ids = [bindings["workflow"]["review"]["code"]]
+    elif name == "release":
+        ids = [bindings["workflow"]["release"]]
+    elif name == "deploy":
+        ids = [bindings["deploy"]["command"]]
+    else:
+        raise ValueError(f"unknown capability name: {name!r}")
+    return None if commands_resolve(bindings, ids) else "command_missing"
+
+
+def compute_capabilities(bindings: dict, root: Path, declarations: dict) -> dict:
+    """Contract: eleven entries, each {"state", "reason_code", "repair_id"}."""
     resolved = {}
     for name in CAPABILITY_NAMES:
         support = declarations[name]["support"]
         if support == "unsupported":
-            state = "unsupported"
-        elif support == "supported":
-            state = "available"
-        else:
+            resolved[name] = {
+                "state": "unsupported", "reason_code": None, "repair_id": None}
+            continue
+        if support != "supported":
             raise ValueError(f"unknown authored support value: {support!r}")
-        resolved[name] = {"state": state, "reason_code": None, "repair_id": None}
+        reason_code = first_unmet_prerequisite(name, bindings, root)
+        if reason_code is None:
+            resolved[name] = {
+                "state": "available", "reason_code": None, "repair_id": None}
+        else:
+            resolved[name] = {
+                "state": "blocked",
+                "reason_code": reason_code,
+                "repair_id": f"capability.{name}.{reason_code}",
+            }
     return resolved
 
 
 def build_snapshot(root: Path, source: dict) -> dict:
+    # Readiness reads the normalized bindings, so each command's `cwd` is
+    # already the absolute base a relative argv[0] resolves against (D22).
+    bindings = normalize_bindings(source["bindings"], root)
     return {
         "schema_version": SCHEMA_VERSION,
         "project": {
@@ -666,9 +814,48 @@ def build_snapshot(root: Path, source: dict) -> dict:
             "id": source["project"]["id"],
             "name": source["project"]["name"],
         },
-        "bindings": normalize_bindings(source["bindings"], root),
-        "capabilities": resolve_capabilities(source["capabilities"]),
+        "bindings": bindings,
+        "capabilities": compute_capabilities(
+            bindings, root, source["capabilities"]),
     }
+
+
+def unavailable_reason(entry: dict) -> str:
+    """The repair-id suffix a non-available capability contributes."""
+    return entry["reason_code"] if entry["state"] == "blocked" else "unsupported"
+
+
+def raise_for_unavailable(required: list[str] | None, capabilities: dict) -> None:
+    """Refuse `capability_unavailable` when a `--require` name is not available.
+
+    Names are visited in sorted order, which is pointer order because every
+    pointer shares the `/capabilities/` prefix; the published repair id names
+    the first offender in that order.
+    """
+    offending = [
+        (name, capabilities[name])
+        for name in sorted(set(required or ()))
+        if capabilities[name]["state"] != "available"
+    ]
+    if not offending:
+        return
+    violations = [
+        {
+            "pointer": f"/capabilities/{name}",
+            "message": (
+                f"required capability is blocked: {entry['reason_code']}"
+                if entry["state"] == "blocked"
+                else "required capability is unsupported by this project"
+            ),
+        }
+        for name, entry in offending
+    ]
+    first_name, first_entry = offending[0]
+    raise ContractError(
+        "capability_unavailable",
+        f"capability.{first_name}.{unavailable_reason(first_entry)}",
+        violations,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -698,7 +885,9 @@ def command_resolve(args: argparse.Namespace) -> int:
     root = discover_root(args.repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source))
-    return emit_json(build_snapshot(root, source))
+    snapshot = build_snapshot(root, source)
+    raise_for_unavailable(args.require, snapshot["capabilities"])
+    return emit_json(snapshot)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -713,6 +902,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--repo-root",
         help="the project root; without it the nearest ancestor holding "
              f"{CONTRACT_FILENAME} is used",
+    )
+    # A closed `choices` set, so an unknown name is argparse's own usage error
+    # rather than a JSON refusal (D16).
+    resolve.add_argument(
+        "--require",
+        action="append",
+        dest="require",
+        default=None,
+        choices=list(CAPABILITY_NAMES),
+        metavar="CAPABILITY",
+        help="refuse unless the named capability is available; repeatable",
     )
     return parser
 

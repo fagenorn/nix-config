@@ -12,6 +12,8 @@ import copy
 import io
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -504,6 +506,303 @@ class CommittedContractTest(ResolverTestCase):
                          legacy["orchestration"]["maxParallel"])
         self.assertEqual(orchestration["attempt_budget_minutes"],
                          legacy["orchestration"]["agentBudgetMinutes"])
+
+
+def run_with_path(path_value: str, *args: str) -> tuple[int, str, str]:
+    """Run the resolver with `PATH` replaced by exactly `path_value`.
+
+    The interpreter is `sys.executable`, an absolute path, because `PATH` here
+    holds only the stub directory and no Python (B-002).
+    """
+    env = dict(os.environ, PATH=path_value)
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def make_stub_bin(names: tuple[str, ...]) -> Path:
+    """A directory holding executable no-op stubs for the named binaries."""
+    stub = Path(tempfile.mkdtemp())
+    for name in names:
+        target = stub / name
+        target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    return stub
+
+
+class CapabilityStateTest(ResolverTestCase):
+    def resolve_with_path(self, root: Path, stub: Path, *extra: str):
+        code, out, err = run_with_path(
+            str(stub), "resolve", "--repo-root", str(root), *extra)
+        try:
+            payload: object = json.loads(out)
+        except json.JSONDecodeError:
+            payload = None
+        return code, payload, out, err
+
+    def test_available_when_every_prerequisite_is_present(self):
+        root = self.make_root()
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        for name in ("tracker", "worktrees", "knowledge.standards",
+                     "knowledge.architecture", "verification",
+                     "review.plan", "review.code"):
+            with self.subTest(capability=name):
+                entry = snap["capabilities"][name]
+                self.assertEqual(entry["state"], "available")
+                self.assertIsNone(entry["reason_code"])
+                self.assertIsNone(entry["repair_id"])
+
+    def test_tracker_is_blocked_when_its_cli_is_absent(self):
+        root = self.make_root()
+        stub = make_stub_bin(("git", "just", "codex"))
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        entry = snap["capabilities"]["tracker"]
+        self.assertEqual(entry["state"], "blocked")
+        self.assertEqual(entry["reason_code"], "tracker_cli_missing")
+        self.assertEqual(entry["repair_id"], "capability.tracker.tracker_cli_missing")
+
+    def test_worktrees_is_blocked_when_git_is_absent(self):
+        root = self.make_root()
+        stub = make_stub_bin(("gh", "just", "codex"))
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        entry = snap["capabilities"]["worktrees"]
+        self.assertEqual(entry["state"], "blocked")
+        self.assertEqual(entry["reason_code"], "vcs_worktree_unsupported")
+        self.assertEqual(entry["repair_id"],
+                         "capability.worktrees.vcs_worktree_unsupported")
+
+    def test_verification_is_blocked_when_a_command_binary_is_absent(self):
+        root = self.make_root()
+        stub = make_stub_bin(("gh", "git", "codex"))
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        entry = snap["capabilities"]["verification"]
+        self.assertEqual(entry["state"], "blocked")
+        self.assertEqual(entry["reason_code"], "command_missing")
+        self.assertEqual(entry["repair_id"], "capability.verification.command_missing")
+
+    def test_knowledge_is_blocked_when_a_declared_path_is_absent(self):
+        root = self.make_root()
+        (root / "CLAUDE.md").unlink()
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        entry = snap["capabilities"]["knowledge.architecture"]
+        self.assertEqual(entry["state"], "blocked")
+        self.assertEqual(entry["reason_code"], "knowledge_path_missing")
+        self.assertEqual(entry["repair_id"],
+                         "capability.knowledge.architecture.knowledge_path_missing")
+
+    def test_every_blocked_reason_code_is_from_the_closed_set(self):
+        root = self.make_root()
+        code, snap, _, err = self.resolve_with_path(root, make_stub_bin(()))
+        self.assertEqual(code, 0, err)
+        for name, entry in snap["capabilities"].items():
+            with self.subTest(capability=name):
+                if entry["state"] == "blocked":
+                    self.assertIn(entry["reason_code"],
+                                  ("tracker_cli_missing", "vcs_worktree_unsupported",
+                                   "knowledge_path_missing", "command_missing"))
+                    self.assertEqual(entry["repair_id"],
+                                     f"capability.{name}.{entry['reason_code']}")
+                else:
+                    self.assertIsNone(entry["reason_code"])
+                    self.assertIsNone(entry["repair_id"])
+
+    def test_unsupported_capabilities_never_evaluate_prerequisites(self):
+        root = self.make_root()
+        code, snap, _, err = self.resolve_with_path(root, make_stub_bin(()))
+        self.assertEqual(code, 0, err)
+        for name in ("release", "deploy", "knowledge.context", "knowledge.hints"):
+            with self.subTest(capability=name):
+                self.assertEqual(snap["capabilities"][name]["state"], "unsupported")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "mode bits do not bind root")
+    def test_worktrees_is_blocked_when_the_worktree_parent_is_unwritable(self):
+        root = self.make_root()
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        parent = root / ".worktrees"
+        original = parent.stat().st_mode
+        parent.chmod(0o500)
+        try:
+            code, snap, _, err = self.resolve_with_path(root, stub)
+        finally:
+            parent.chmod(original)
+        self.assertEqual(code, 0, err)
+        entry = snap["capabilities"]["worktrees"]
+        self.assertEqual(entry["state"], "blocked")
+        self.assertEqual(entry["reason_code"], "vcs_worktree_unsupported")
+
+    def test_worktrees_is_blocked_when_the_worktree_parent_is_absent(self):
+        root = self.make_root()
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        shutil.rmtree(root / ".worktrees")
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            snap["capabilities"]["worktrees"]["reason_code"],
+            "vcs_worktree_unsupported")
+
+    def test_a_relative_executable_resolves_against_its_command_cwd(self):
+        """DISC-001: the base is the entry's `cwd`, not `project.root`."""
+        source = source_contract()
+        source["bindings"]["commands"]["local-check"] = {
+            "argv": ["./check"], "cwd": "tools", "env": []}
+        source["bindings"]["workflow"]["verification"] = ["local-check"]
+        root = self.make_root(source)
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+
+        (root / "tools").mkdir()
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["capabilities"]["verification"]["state"], "blocked")
+
+        target = root / "tools" / "check"
+        target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["capabilities"]["verification"]["state"], "available")
+
+    def test_a_relative_executable_at_the_root_does_not_satisfy_a_cwd_entry(self):
+        source = source_contract()
+        source["bindings"]["commands"]["local-check"] = {
+            "argv": ["./check"], "cwd": "tools", "env": []}
+        source["bindings"]["workflow"]["verification"] = ["local-check"]
+        root = self.make_root(source)
+        (root / "tools").mkdir()
+        decoy = root / "check"
+        decoy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        decoy.chmod(decoy.stat().st_mode | stat.S_IXUSR)
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["capabilities"]["verification"]["state"], "blocked")
+
+
+class ContradictionTest(ResolverTestCase):
+    def refuse(self, contract: dict) -> dict:
+        code, payload, _ = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "invalid_contract")
+        return payload["error"]
+
+    def test_supported_tracker_with_kind_none_is_a_contract_error(self):
+        contract = source_contract()
+        contract["bindings"]["tracker"]["kind"] = "none"
+        self.assertIn("/bindings/tracker/kind",
+                      [v["pointer"] for v in self.refuse(contract)["violations"]])
+
+    def test_supported_tracker_with_an_empty_cli_is_a_contract_error(self):
+        contract = source_contract()
+        contract["bindings"]["tracker"]["cli"] = ""
+        self.refuse(contract)
+
+    def test_supported_worktrees_with_a_non_git_vcs_is_a_contract_error(self):
+        contract = source_contract()
+        contract["bindings"]["vcs"]["kind"] = "hg"
+        self.refuse(contract)
+
+    def test_supported_knowledge_with_an_empty_path_list_is_a_contract_error(self):
+        contract = source_contract()
+        contract["bindings"]["paths"]["standards"] = []
+        self.assertIn("/bindings/paths/standards",
+                      [v["pointer"] for v in self.refuse(contract)["violations"]])
+
+    def test_supported_verification_with_no_ids_is_a_contract_error(self):
+        contract = source_contract()
+        contract["bindings"]["workflow"]["verification"] = []
+        self.refuse(contract)
+
+    def test_supported_review_with_a_null_id_is_a_contract_error(self):
+        contract = source_contract()
+        contract["bindings"]["workflow"]["review"]["plan"] = None
+        self.refuse(contract)
+
+    def test_unsupported_capabilities_impose_no_binding_requirement(self):
+        contract = source_contract()
+        self.assertEqual(contract["capabilities"]["release"]["support"], "unsupported")
+        self.assertIsNone(contract["bindings"]["workflow"]["release"])
+        self.assertEqual(contract["bindings"]["deploy"]["adapter"], "none")
+        code, _, err = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 0, err)
+
+    def test_a_supported_deploy_needs_an_adapter_and_a_command(self):
+        contract = source_contract()
+        contract["capabilities"]["deploy"]["support"] = "supported"
+        self.refuse(contract)
+
+
+class RequireTest(ResolverTestCase):
+    def test_requiring_an_unsupported_capability_refuses(self):
+        root = self.make_root()
+        code, out, _ = run_with_path(
+            str(make_stub_bin(("gh", "git", "just", "codex"))),
+            "resolve", "--repo-root", str(root), "--require", "release")
+        payload = json.loads(out)
+        self.assertEqual(code, 2)
+        error = payload["error"]
+        self.assertEqual(error["code"], "capability_unavailable")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/capabilities/release"])
+        self.assertEqual(error["repair_id"], "capability.release.unsupported")
+        self.assertNotIn("schema_version", payload)
+
+    def test_requiring_a_blocked_capability_names_its_reason_code(self):
+        root = self.make_root()
+        code, out, _ = run_with_path(
+            str(make_stub_bin(("git", "just", "codex"))),
+            "resolve", "--repo-root", str(root), "--require", "tracker")
+        error = json.loads(out)["error"]
+        self.assertEqual(code, 2)
+        self.assertEqual(error["code"], "capability_unavailable")
+        self.assertEqual(error["repair_id"], "capability.tracker.tracker_cli_missing")
+
+    def test_several_offending_requirements_are_reported_in_pointer_order(self):
+        root = self.make_root()
+        code, out, _ = run_with_path(
+            str(make_stub_bin(("gh", "git", "just", "codex"))),
+            "resolve", "--repo-root", str(root),
+            "--require", "release", "--require", "deploy")
+        error = json.loads(out)["error"]
+        self.assertEqual(code, 2)
+        pointers = [v["pointer"] for v in error["violations"]]
+        self.assertEqual(pointers, ["/capabilities/deploy", "/capabilities/release"])
+        self.assertEqual(error["repair_id"], "capability.deploy.unsupported")
+
+    def test_requiring_an_available_capability_returns_the_snapshot(self):
+        root = self.make_root()
+        code, out, err = run_with_path(
+            str(make_stub_bin(("gh", "git", "just", "codex"))),
+            "resolve", "--repo-root", str(root), "--require", "tracker")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["schema_version"], 1)
+
+    def test_an_unknown_require_name_is_an_argparse_usage_error(self):
+        root = self.make_root()
+        code, out, err = run("resolve", "--repo-root", str(root),
+                             "--require", "orchestration")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("orchestration", err)
+
+
+class NoSubprocessTest(ResolverTestCase):
+    def test_readiness_runs_no_child_process(self):
+        """An empty PATH must still produce a snapshot, not an execution error."""
+        root = self.make_root()
+        code, out, err = run_with_path(
+            str(make_stub_bin(())), "resolve", "--repo-root", str(root))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        self.assertEqual(json.loads(out)["schema_version"], 1)
 
 
 if __name__ == "__main__":
