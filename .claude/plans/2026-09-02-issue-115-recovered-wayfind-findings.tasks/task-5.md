@@ -1,0 +1,319 @@
+# Task 5: #80 — added seams, prototype references, the #86 correction, package sweep
+
+**Files:**
+- Modify: `.claude/specs/2026-08-20-release-lifecycle-seams-research.md`
+- Test: none — this repository has no test suite for documentation. The task's
+  gates are the two shell blocks in Step 2/Step 5, run from the worktree root.
+
+**Interfaces:**
+
+- Consumes: the spec
+  `.claude/specs/2026-09-02-issue-115-recovered-wayfind-findings-design.md` —
+  the **added claims** half of its
+  `### .claude/specs/2026-08-20-release-lifecycle-seams-research.md (#80)`
+  table (`A80.1`–`A80.4`), its `## Seam taxonomy`, its
+  `**Terminology guards for #80**`, and rows D1–D3, D5, D7, D8, D10, D11, D12,
+  D14, D16, D17. From Task 4, in the same file: the `## Seam roster` section
+  holding one three-column table `| Seam | Class | Detail |` whose `Class`
+  column carries exactly one of `release-unit seam`, `enforcement seam`,
+  `durable-state seam` and whose `Detail` column carries the verbatim text of a
+  `##`/`###` heading in the same document; its `### Field definitions`
+  subsection declaring **locator**, **identity**, **evidence**, **rollback**
+  and the four label lines `Locator:`, `Identity:`, `Evidence:`, `Rollback:`;
+  and five filled `release-unit seam` rows.
+- Produces: the completed eleven-row roster and the finished package. Nothing
+  after this task consumes it.
+
+**Invariants:**
+
+- Task 4's five `release-unit seam` rows and their detail subsections are
+  **extended, never rewritten or reordered**. This task adds six rows and their
+  detail sections; the release-unit half of the roster is unchanged.
+- The roster ends with exactly eleven rows: five `release-unit seam`, one
+  `enforcement seam`, five `durable-state seam` (per D11).
+- Each of the six added seams has its own detail section carrying all four
+  label lines `Locator:`, `Identity:`, `Evidence:`, `Rollback:`, with the
+  meanings Task 4's `### Field definitions` declares. `Locator:` names its root
+  explicitly — caller-supplied repository root, primary checkout, feature
+  worktree, `$TMPDIR`, or the tracker itself. `Identity:` says which sense of
+  *identity* it uses (per D10). `Rollback:` states the reversibility limit
+  where nothing undoes the record.
+- **`A80.1`'s "only machine enforcement" claim is bounded** (per D14): the
+  guard is the only enforcement **inside the agent's own execution path**,
+  adjudicating before the action runs; live branch protection and the required
+  `Nix Eval` status context on `main` are forge-side enforcement the guard
+  *consults*, not enforcement it replaces. An unbounded restatement would
+  contradict this repository's own CI configuration and is a defect.
+- **`A80.3`'s shas are exact, full 40-character shas**, each with the `origin`
+  branch that reaches it, the directory it contains, and the command a reader
+  runs to retrieve it. Verify each with `git cat-file -e <sha>^{commit}` and
+  `git ls-remote origin` before writing it (per D3, V4).
+- **`A80.4` corrects #86 in this document only.** No tracker comment is edited,
+  including #86's (per D7). The correction names #86's statement, states that it
+  is false, and gives the `git ls-remote origin` evidence with the branch and
+  sha.
+- The `.superpowers/` name is stated to be historical: the document uses the
+  literal paths and records that no Superpowers input, patch, marketplace or
+  plugin exists in this repository (per D10, `CLAUDE.md`).
+- The six added seams are never implied to be release units. The *state* and
+  *identity* disambiguations from Task 4 apply here too and are the reason each
+  added row says which sense it uses.
+- Length is governed by the-bar's *Token economy*; `artifact-budget` is never
+  run against any of the four documents (per D8).
+
+- [ ] **Step 1: Write both gates first, before editing the document**
+
+Save this to `"${TMPDIR:-/tmp}/gate-80b.sh"` — the #80 completion gate.
+
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+DOC=".claude/specs/2026-08-20-release-lifecycle-seams-research.md"
+fail=0
+say() { echo "FAIL: $*"; fail=1; }
+test -f "$DOC" || { echo "FAIL: $DOC does not exist"; exit 1; }
+
+heads=$(grep -E '^#{2,4} ' "$DOC" | sed -E 's/^#{2,4} //')
+cov=$(awk '/^## Coverage of the resolution summary$/{f=1;next} /^## /{f=0} f' "$DOC")
+roster=$(awk '/^## Seam roster$/{f=1;next} /^## /{f=0} f' "$DOC")
+
+# Roster class counts: 5 / 1 / 5 = eleven rows (D11).
+for pair in "release-unit seam:5" "enforcement seam:1" "durable-state seam:5"; do
+  cls="${pair%:*}"; want="${pair##*:}"
+  got=$(printf '%s\n' "$roster" | grep -cF "$cls" || true)
+  [ "$got" -eq "$want" ] || say "roster has $got '$cls' rows, expected $want"
+done
+
+# Every roster Detail column names a real heading.
+printf '%s\n' "$roster" | grep -F ' seam ' | while IFS= read -r row; do
+  det=$(printf '%s\n' "$row" | awk -F'|' '{print $4}' | sed -E 's/^ +| +$//g')
+  [ -n "$det" ] || { echo "FAIL: a roster row names no Detail section"; continue; }
+  printf '%s\n' "$heads" | grep -qxF -- "$det" \
+    || echo "FAIL: roster Detail '$det' is not a heading in $DOC"
+done | tee "${TMPDIR:-/tmp}/roster-detail.log"
+[ ! -s "${TMPDIR:-/tmp}/roster-detail.log" ] || fail=1
+
+# Each added seam's detail section carries the four label lines.
+printf '%s\n' "$roster" | grep -F ' seam ' \
+  | grep -vF 'release-unit seam' | while IFS= read -r row; do
+  det=$(printf '%s\n' "$row" | awk -F'|' '{print $4}' | sed -E 's/^ +| +$//g')
+  sec=$(awk -v h="$det" '
+    $0 ~ /^#{2,4} / { if (index($0, h)) {f=1; next} else if (f) {f=0} }
+    f' "$DOC")
+  for lbl in "Locator:" "Identity:" "Evidence:" "Rollback:"; do
+    printf '%s\n' "$sec" | grep -qF -- "$lbl" \
+      || echo "FAIL: added seam section '$det' is missing the '$lbl' line"
+  done
+done | tee "${TMPDIR:-/tmp}/added-fields.log"
+[ ! -s "${TMPDIR:-/tmp}/added-fields.log" ] || fail=1
+
+# A80.1 - A80.4 appear in the coverage table with a real discharging heading.
+for id in A80.1 A80.2 A80.3 A80.4; do
+  row=$(printf '%s\n' "$cov" | grep -F -- "$id " | head -1)
+  [ -n "$row" ] || { say "claim $id absent from the coverage table"; continue; }
+  sec=$(printf '%s\n' "$row" | awk -F'|' '{print $5}' | sed -E 's/^ +| +$//g')
+  printf '%s\n' "$heads" | grep -qxF -- "$sec" \
+    || say "$id names discharging section '$sec', which is not a heading in $DOC"
+done
+
+# A80.1 specifics: the four adjudicated verbs, the boundary, the fail-closed classes.
+while IFS= read -r lit; do
+  grep -qF -- "$lit" "$DOC" || say "A80.1 missing literal: $lit"
+done <<'LITS'
+PreToolUse
+git push
+gh pr create
+git branch -d
+gh pr merge
+fagenorn
+elevenyellow/nodocom
+enforce_admins
+Nix Eval
+GITHUB_TOKEN
+no defer path
+LITS
+grep -qiF -- "forge-side" "$DOC" || say "A80.1's D14 boundary (forge-side enforcement) is not stated"
+
+# A80.3 / V4: both full shas, their branches, and immutability proof.
+for sha in dc98ba9b6bafaf7b5373cc7595ef79a5526846d1 \
+           b49c8771cbaf87eefc5f0d385100e205060538d9; do
+  grep -qF -- "$sha" "$DOC" || say "prototype sha $sha is not recorded"
+  git cat-file -e "${sha}^{commit}" 2>/dev/null || say "V4: $sha is not a reachable commit object"
+  git ls-remote origin | grep -qF -- "$sha" || say "V4: $sha is not on any origin branch"
+done
+for b in worktree-prototype-release-transactions \
+         worktree-prototype-nix-config-adoption-dry-run \
+         prototype-release-transactions prototype-agent-adoption-dry-run; do
+  grep -qF -- "$b" "$DOC" || say "A80.3 does not name '$b'"
+done
+
+# A80.4: the #86 correction is present, and no tracker comment was edited.
+grep -qE '^#{2,4} .*[Cc]orrection' "$DOC" || say "A80.4 has no named correction subsection"
+grep -qF -- '#86' "$DOC" || say "A80.4 does not name issue #86"
+grep -qF -- 'git ls-remote origin' "$DOC" || say "A80.4 does not give the ls-remote evidence"
+
+# .superpowers/ is declared historical.
+grep -qF -- '.superpowers/' "$DOC" || say "the durable-state locators do not use the literal .superpowers/ paths"
+grep -qiF -- 'Superpowers' "$DOC" || say "the historical-name note is absent"
+
+if grep -qE '\b(TODO|TBD|FIXME)\b' "$DOC"; then say "placeholder marker in $DOC"; fi
+
+git show "HEAD:$DOC" >/dev/null 2>&1 || say "V1: $DOC is not committed at HEAD"
+
+[ "$fail" -eq 0 ] && echo "PASS gate-80b"
+exit "$fail"
+```
+
+Save this to `"${TMPDIR:-/tmp}/gate-package.sh"` — the whole-package sweep.
+
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+fail=0
+say() { echo "FAIL: $*"; fail=1; }
+S=".claude/specs"
+
+# V1 for all four, at HEAD.
+for d in 2026-08-20-cross-agent-project-surfaces-research \
+         2026-08-20-agent-fallback-inventory-research \
+         2026-08-20-project-knowledge-inventory-research \
+         2026-08-20-release-lifecycle-seams-research; do
+  git show "HEAD:$S/$d.md" >/dev/null 2>&1 || say "V1: $S/$d.md is not committed at HEAD"
+done
+
+# V2 across the package: every claim ID of the spec appears in the right document.
+check() {
+  doc="$S/$1.md"; shift
+  cov=$(awk '/^## Coverage of the resolution summary$/{f=1;next} /^## /{f=0} f' "$doc")
+  for id in "$@"; do
+    printf '%s\n' "$cov" | grep -qF -- "$id " || say "$doc does not cover $id"
+  done
+}
+check 2026-08-20-cross-agent-project-surfaces-research C60.1 C60.2 C60.3 C60.4 C60.5
+check 2026-08-20-agent-fallback-inventory-research C61.1 C61.2 C61.3 C61.4 C61.5
+check 2026-08-20-project-knowledge-inventory-research C62.1 C62.2 C62.3 C62.4 C62.5 C62.6
+check 2026-08-20-release-lifecycle-seams-research \
+  C80.1 C80.2 C80.3 C80.4 C80.5 C80.6 A80.1 A80.2 A80.3 A80.4
+
+# Shared contract literals in all four.
+for d in 2026-08-20-cross-agent-project-surfaces-research \
+         2026-08-20-agent-fallback-inventory-research \
+         2026-08-20-project-knowledge-inventory-research \
+         2026-08-20-release-lifecycle-seams-research; do
+  doc="$S/$d.md"
+  for lit in '**Durability: committed**' '## Provenance' '## Research question' \
+             '## Coverage of the resolution summary' '## Unverified inheritance' \
+             '## What this document does not decide' \
+             'Schema-version-1 `research-observations` / `agent-evidence` gate: not invoked'; do
+    grep -qF -- "$lit" "$doc" || say "$doc is missing the shared literal: $lit"
+  done
+  if grep -qE '\b(TODO|TBD|FIXME)\b' "$doc"; then say "placeholder marker in $doc"; fi
+done
+
+# Scope: this branch touches only .claude/specs and .claude/plans.
+BASE=$(git merge-base HEAD origin/main)
+if git diff --name-only "$BASE..HEAD" | grep -vE '^\.claude/(specs|plans)/'; then
+  say "the branch touches files outside .claude/specs and .claude/plans"
+fi
+
+[ "$fail" -eq 0 ] && echo "PASS gate-package"
+exit "$fail"
+```
+
+- [ ] **Step 2: Run both gates and watch them fail**
+
+Run: `bash "${TMPDIR:-/tmp}/gate-80b.sh"; bash "${TMPDIR:-/tmp}/gate-package.sh"`
+Expected at this task's base commit (Task 4's commit): `gate-80b.sh` **FAILS**
+with at least
+`FAIL: roster has 0 'enforcement seam' rows, expected 1` and
+`FAIL: roster has 0 'durable-state seam' rows, expected 5`, plus the four
+`claim A80.n absent from the coverage table` lines — Task 4 wrote the
+release-unit half only, so those rows provably do not exist yet.
+`gate-package.sh` fails its `does not cover A80.1` checks for the same reason.
+Both exit non-zero.
+
+- [ ] **Step 3: Gather the primary sources for the six added seams**
+
+**The enforcement seam (`A80.1`)** — read the `PreToolUse` hook block in
+`home/common/claude-code/default.nix` (the hook definition begins near the
+`hooks.PreToolUse` attribute) together with `tests/test_claude_permission_guard.py`
+and `CLAUDE.md`'s Claude Code section. Derive from the source, not from
+`CLAUDE.md`'s summary: the four adjudicated lifecycle verbs and the exact
+validated form of each; the authorized-owner set and where it is declared; the
+per-repository integration-base map including `dev` for `elevenyellow/nodocom`
+and its deliberate exemption from the protection demand; the live checks against
+a default-branch base (an open PR on that base, at least one required status
+context, `enforce_admins` enabled); the scrubbing of `GITHUB_TOKEN`/`GH_TOKEN`
+from the lookups' environment so they authenticate through the gh keyring
+credential; the fail-closed classes (unparseable command, shell handed to an
+evaluator, a guarded verb outside a command position, unresolvable repo or
+default branch, child timeout, non-zero or unparseable output); and the absence
+of a defer path. Cross-check the forge side in `.github/branch-protection.json`
+and `.github/workflows/ci.yaml` for the D14 boundary.
+
+**The five durable-state seams (`A80.2`)** — read each system's own source and
+record its literal path template:
+
+1. the attempt-lifecycle ledger — `home/common/agent-skills/scripts/workflow-state.py`
+   and `home/common/agent-skills/skills/from-issue/SKILL.md`;
+2. the sdd plan ledger — `home/common/agent-skills/skills/sdd/SKILL.md`
+   (the per-plan artifacts under the primary checkout's per-checkout bucket);
+3. the review-package store — `home/common/agent-skills/skills/sdd/SKILL.md`
+   and `home/common/agent-skills/skills/ship-issue/SKILL.md`;
+4. ship-release's own state file —
+   `home/common/agent-skills/skills/ship-release/SKILL.md`;
+5. the tracker-native wayfind state —
+   `home/common/agent-skills/skills/wayfind/SKILL.md`.
+
+`CLAUDE.md`'s paragraph on the `.superpowers/` paths names which root each is
+rooted at; confirm each against the skill source before writing it.
+
+**The prototype references (`A80.3`, `A80.4`)** — run, and paste the real
+output into the document's evidence:
+
+```bash
+git cat-file -e dc98ba9b6bafaf7b5373cc7595ef79a5526846d1^{commit} && echo reachable
+git cat-file -e b49c8771cbaf87eefc5f0d385100e205060538d9^{commit} && echo reachable
+git ls-remote origin | grep prototype
+git ls-tree --name-only dc98ba9b6bafaf7b5373cc7595ef79a5526846d1 | grep prototype
+git ls-tree --name-only b49c8771cbaf87eefc5f0d385100e205060538d9 | grep prototype
+unset GITHUB_TOKEN GH_TOKEN && gh issue view 86 --repo fagenorn/nix-config --comments
+```
+
+- [ ] **Step 4: Extend the document**
+
+Append to `.claude/specs/2026-08-20-release-lifecycle-seams-research.md`,
+leaving Task 4's release-unit content untouched:
+
+- six new roster rows — one `enforcement seam`, five `durable-state seam` —
+  each naming its detail heading in the `Detail` column;
+- a detail section per added seam, each with the four label lines `Locator:`,
+  `Identity:`, `Evidence:`, `Rollback:`;
+- the bounded "only machine enforcement" statement and the forge-side contrast
+  (`A80.1`, per D14);
+- the two prototype references with full shas, `origin` branches, directories,
+  retrievability commands and the real command output (`A80.3`);
+- a named correction subsection for #86 (`A80.4`, per D7);
+- the `.superpowers/`-is-historical note;
+- four new coverage rows for `A80.1`–`A80.4`, each naming a real heading.
+
+Run: `bash "${TMPDIR:-/tmp}/gate-80b.sh"`
+Expected: `PASS gate-80b`, exit 0. (V1 still fails until Step 5's commit.)
+
+- [ ] **Step 5: Commit, then run the whole-package sweep**
+
+```bash
+git add .claude/specs/2026-08-20-release-lifecycle-seams-research.md
+git commit -m "$(cat <<'MSG'
+docs(specs): add the #80 enforcement and durable-state seams and the #86 correction
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+MSG
+)"
+bash "${TMPDIR:-/tmp}/gate-80b.sh"
+bash "${TMPDIR:-/tmp}/gate-package.sh"
+```
+
+Expected: the commit is SSH-signed and succeeds; both gates print their `PASS`
+line and exit 0. AC4's `git show main:<path>` form of V1 becomes true when this
+branch merges (per D16); nothing further in this plan can assert it.
