@@ -389,6 +389,84 @@ def owner_issue(result):
     return issue if issue == match.group(1) else None
 
 
+def scan_codex_file(path):
+    """Parse one Codex rollout. Returns per-file usage and identity, or None.
+
+    Contract: tokens are the sum of ``info.last_token_usage`` over the file's
+    ``token_count`` events (D3); ``cached_input_tokens`` and
+    ``reasoning_output_tokens`` are subsets of their parents and are never
+    added on top.
+    """
+    meta = None
+    input_total = cache_create = cache_read = output = reasoning = 0
+    peak_ctx = 0
+    turns = 0
+    models = Counter()
+    efforts = Counter()
+
+    try:
+        fh = open(path, "r", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            # Cheap prefilter, matching scan_file's style: only these three
+            # record kinds carry identity, usage or the model/effort mix.
+            if ("session_meta" not in line and "token_count" not in line
+                    and "turn_context" not in line):
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            kind = rec.get("type")
+            payload = rec.get("payload") or {}
+            if kind == "session_meta":
+                if meta is None:  # a later session_meta is ignored
+                    session_id = payload.get("session_id") or payload.get("id")
+                    meta = {
+                        "session_id": session_id,
+                        "rollout_id": payload.get("id") or session_id,
+                        "is_root": payload.get("thread_source") == "user",
+                        "cwd": payload.get("cwd") or "",
+                    }
+            elif kind == "event_msg" and payload.get("type") == "token_count":
+                last = (payload.get("info") or {}).get("last_token_usage")
+                if isinstance(last, dict):
+                    seen_input = last.get("input_tokens") or 0
+                    input_total += seen_input
+                    cache_read += last.get("cached_input_tokens") or 0
+                    cache_create += last.get("cache_write_input_tokens") or 0
+                    output += last.get("output_tokens") or 0
+                    reasoning += last.get("reasoning_output_tokens") or 0
+                    peak_ctx = max(peak_ctx, seen_input)
+                    turns += 1
+            elif kind == "turn_context":
+                if payload.get("model"):
+                    models[payload["model"]] += 1
+                if payload.get("effort"):
+                    efforts[payload["effort"]] += 1
+
+    if meta is None:
+        return None
+    return {
+        "session_id": meta["session_id"],
+        "rollout_id": meta["rollout_id"],
+        "is_root": meta["is_root"],
+        "cwd": meta["cwd"],
+        "fresh": input_total - cache_read - cache_create,
+        "cache_create": cache_create,
+        "cache_read": cache_read,
+        "output": output,
+        "reasoning": reasoning,
+        "input_total": input_total,
+        "peak_ctx": peak_ctx,
+        "turns": turns,
+        "models": dict(models),
+        "efforts": dict(efforts),
+    }
+
+
 def scan_paths(paths, executor_factory=ProcessPoolExecutor):
     """Scan in order, falling back all-or-nothing when a process pool fails."""
     paths = list(paths)

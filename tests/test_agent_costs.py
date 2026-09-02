@@ -617,5 +617,133 @@ class EndToEndTest(unittest.TestCase):
             )
 
 
+def codex_meta(session_id, rollout_id=None, cwd="/Users/me/repo",
+               thread_source="user", parent=None):
+    payload = {
+        "session_id": session_id,
+        "id": rollout_id or session_id,
+        "cwd": cwd,
+        "thread_source": thread_source,
+        "originator": "codex-tui",
+    }
+    if thread_source == "subagent":
+        payload["parent_thread_id"] = parent or session_id
+        payload["source"] = {"subagent": {"thread_spawn": {
+            "parent_thread_id": parent or session_id,
+            "depth": 1, "agent_nickname": "Nash", "agent_role": None}}}
+    return record({"timestamp": "2026-08-04T14:08:50.499Z",
+                   "type": "session_meta", "payload": payload})
+
+
+def codex_usage(inp, cached=0, write=0, out=0, reasoning=0, total=None):
+    """One token_count event. `total` is the (untrustworthy) running counter."""
+    last = {"input_tokens": inp, "cached_input_tokens": cached,
+            "cache_write_input_tokens": write, "output_tokens": out,
+            "reasoning_output_tokens": reasoning,
+            "total_tokens": inp + out}
+    running = dict(last) if total is None else dict(last, input_tokens=total)
+    return record({"timestamp": "2026-08-04T14:08:55.871Z", "type": "event_msg",
+                   "payload": {"type": "token_count",
+                               "info": {"total_token_usage": running,
+                                        "last_token_usage": last,
+                                        "model_context_window": 258400}}})
+
+
+def codex_turn_context(model="gpt-5.6-sol", effort="xhigh"):
+    return record({"timestamp": "2026-08-04T14:08:50.873Z", "type": "turn_context",
+                   "payload": {"turn_id": "t1", "cwd": "/Users/me/repo",
+                               "model": model, "effort": effort, "summary": "auto"}})
+
+
+def codex_compacted():
+    return record({"timestamp": "2026-08-04T14:20:00.000Z", "type": "event_msg",
+                   "payload": {"type": "compacted"}})
+
+
+class ScanCodexFileTest(unittest.TestCase):
+    def write_rollout(self, *lines):
+        tmp = Path(tempfile.mkdtemp())
+        path = tmp / "rollout-2026-08-04T16-08-42-abc.jsonl"
+        path.write_text("".join(lines), encoding="utf-8")
+        return path
+
+    def test_sums_last_token_usage_and_ignores_the_rebased_running_total(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            codex_turn_context(),
+            codex_usage(1000, cached=600, write=0, out=50, reasoning=20, total=1000),
+            codex_compacted(),
+            # After compaction the running counter rebases; summing it would
+            # lose the pre-compaction turn, and reading the last one alone
+            # would report 400 input tokens instead of 1400.
+            codex_usage(400, cached=100, write=0, out=10, reasoning=5, total=400),
+        )
+        got = agent_costs.scan_codex_file(path)
+        self.assertEqual(got["input_total"], 1400)
+        self.assertEqual(got["cache_read"], 700)
+        self.assertEqual(got["cache_create"], 0)
+        self.assertEqual(got["fresh"], 700)
+        self.assertEqual(got["output"], 60)
+        self.assertEqual(got["reasoning"], 25)
+        self.assertEqual(got["turns"], 2)
+
+    def test_cached_and_reasoning_are_subsets_not_addends(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            codex_usage(1000, cached=900, write=100, out=80, reasoning=70),
+        )
+        got = agent_costs.scan_codex_file(path)
+        self.assertEqual(got["input_total"], 1000)      # not 1900
+        self.assertEqual(got["fresh"], 0)               # 1000 - 900 - 100
+        self.assertEqual(got["output"], 80)             # not 150
+        self.assertEqual(got["reasoning"], 70)
+
+    def test_peak_ctx_is_the_largest_single_turn_input(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            codex_usage(500), codex_usage(9000), codex_usage(700),
+        )
+        self.assertEqual(agent_costs.scan_codex_file(path)["peak_ctx"], 9000)
+
+    def test_root_and_subagent_classification_and_identity(self):
+        root = self.write_rollout(codex_meta("s1"), codex_usage(10))
+        sub = self.write_rollout(
+            codex_meta("s1", rollout_id="r2", thread_source="subagent",
+                       cwd="/Users/me/repo/.claude/worktrees/issue-120-x"),
+            codex_usage(20))
+        got_root = agent_costs.scan_codex_file(root)
+        got_sub = agent_costs.scan_codex_file(sub)
+        self.assertTrue(got_root["is_root"])
+        self.assertEqual(got_root["rollout_id"], "s1")
+        self.assertFalse(got_sub["is_root"])
+        self.assertEqual(got_sub["session_id"], "s1")
+        self.assertEqual(got_sub["rollout_id"], "r2")
+        self.assertEqual(got_sub["cwd"],
+                         "/Users/me/repo/.claude/worktrees/issue-120-x")
+
+    def test_models_and_efforts_come_from_turn_context(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            codex_turn_context("gpt-5.6-sol", "xhigh"),
+            codex_turn_context("gpt-5.6-sol", "xhigh"),
+            codex_turn_context("gpt-5.6", "medium"),
+            codex_usage(10),
+        )
+        got = agent_costs.scan_codex_file(path)
+        self.assertEqual(got["models"], {"gpt-5.6-sol": 2, "gpt-5.6": 1})
+        self.assertEqual(got["efforts"], {"xhigh": 2, "medium": 1})
+
+    def test_no_session_meta_and_unreadable_file_return_none(self):
+        headless = self.write_rollout(codex_usage(10))
+        self.assertIsNone(agent_costs.scan_codex_file(headless))
+        missing = Path(tempfile.mkdtemp()) / "absent.jsonl"
+        self.assertIsNone(agent_costs.scan_codex_file(missing))
+
+    def test_malformed_line_is_skipped_not_raised(self):
+        path = self.write_rollout(
+            codex_meta("s1"), "{not json\n", codex_usage(10))
+        self.assertEqual(agent_costs.scan_codex_file(path)["input_total"], 10)
+
+
 if __name__ == "__main__":
     unittest.main()
