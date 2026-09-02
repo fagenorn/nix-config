@@ -14,7 +14,11 @@ because the resolver normalizes every path against `project.root`. That value is
 `planDir` for the rest of this skill. Resolve once; never read
 `.agents/project.json` yourself and never persist the snapshot. On the single
 error code `not_onboarded` — the repository has not adopted the project contract
-yet — use the literal `.claude/plans` and say so in one line. Every other error
+yet — fall back to the `planDir` your caller handed you, and only to the
+literal `.claude/plans` when it handed you none; say which in one line. A
+caller that resolved `planDir` from another source is still the authority on
+where its plan goes, so an unonboarded repository must not silently relocate
+the plan. Every other error
 code is fatal: stop, report the code, and change nothing.
 
 **Save the package root to** `<planDir>/YYYY-MM-DD-<feature-name>.md` and its

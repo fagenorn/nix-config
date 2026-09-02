@@ -460,6 +460,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("not_onboarded", text)
         self.assertIn("`.claude/plans`", text)
         self.assertIn("Every other error code is fatal", text)
+        # An unonboarded repository is not licence to relocate the plan: the
+        # caller's own `planDir` outranks the literal default, which is reached
+        # only when the caller supplied none.
+        self.assert_ordered(
+            text, "not_onboarded", "`planDir` your caller handed you",
+            "only to the literal `.claude/plans` when it handed you none")
         for code in ("invalid_contract", "unsupported_schema",
                      "invalid_projection", "capability_unavailable",
                      "resolver_failure"):
