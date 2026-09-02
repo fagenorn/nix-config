@@ -445,6 +445,49 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                             "report candidate outside every working tree",
                             "validate-report", "validated stdout bytes")
 
+    def test_writing_plans_resolves_its_plan_dir_through_the_resolver(self):
+        text = normalized(self.writing_plans)
+        self.assertIn("resolve-project resolve", text)
+        self.assertIn("bindings.paths.artifacts.plans", text)
+        self.assertIn("planDir", self.writing_plans)
+
+    def test_writing_plans_no_longer_calls_the_fail_soft_helper(self):
+        self.assertNotIn("resolve-bindings", self.writing_plans)
+        self.assertNotIn("skills.config.json", self.writing_plans)
+
+    def test_writing_plans_treats_only_not_onboarded_as_non_fatal(self):
+        text = normalized(self.writing_plans)
+        self.assertIn("not_onboarded", text)
+        self.assertIn("`.claude/plans`", text)
+        self.assertIn("Every other error code is fatal", text)
+        # An unonboarded repository is not licence to relocate the plan: the
+        # caller's own `planDir` outranks the literal default, which is reached
+        # only when the caller supplied none.
+        self.assert_ordered(
+            text, "not_onboarded", "`planDir` your caller handed you",
+            "only to the literal `.claude/plans` when it handed you none")
+        for code in ("invalid_contract", "unsupported_schema",
+                     "invalid_projection", "capability_unavailable",
+                     "resolver_failure"):
+            with self.subTest(code=code):
+                self.assertNotIn(f"{code} → ", text)
+
+    def test_only_writing_plans_migrated_off_resolve_bindings(self):
+        still_calling = (
+            "research", "doc-grounded-questions", "design",
+            "ship-issue", "to-issues",
+        )
+        for name in still_calling:
+            path = (REPO_ROOT / "home/common/agent-skills/skills"
+                    / name / "SKILL.md")
+            with self.subTest(skill=name):
+                self.assertIn("resolve-bindings", path.read_text(encoding="utf-8"))
+        orchestrate = (REPO_ROOT / "home/common/claude-code/skills"
+                       / "orchestrate-issues" / "SKILL.md")
+        self.assertIn("resolve-bindings", orchestrate.read_text(encoding="utf-8"))
+        self.assertTrue(
+            (REPO_ROOT / "home/common/agent-skills/scripts/resolve-bindings").is_file())
+
     def test_design_and_grill_measure_after_last_write_and_stop_truthfully(self):
         for producer in (self.design, self.grill):
             self.assert_ordered(producer, "final mutation", "artifact-budget check",
