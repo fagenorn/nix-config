@@ -13,7 +13,8 @@
 - The section's **first** sentence is byte-unchanged. `test_authorization_truth_is_single_and_shared` requires it verbatim in both `ship-issue/SKILL.md` and `from-issue/SKILL.md`; this task edits only `ship-issue/SKILL.md` and must not touch that sentence.
 - The merge spelling inside the first host row is byte-identical to today's: `` `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered mergeSubjectTemplate>"] --delete-branch` ``.
 - After the edit, exactly three lines in `SKILL.md` contain the substring `gh pr merge`, in the same order as today — the flow line, the standing-authorization first row, and Phase 7's rendered form (per D6, D10). The second host row and both new phase pointers must contain none.
-- The predicate is the enforcement model, never a host-name or environment test. No detection instruction is added (per D3).
+- The predicate is the enforcement model, never a host-name or environment test. No detection instruction is added (per D3). This is pinned by an equality over the whole normalized `## Standing authorization` section, not by a single spelling-specific `assertNotIn` (per D15).
+- On the review-adjudicated path the order in `## Phase 7 — Merge` is **Gate 2 → `check-launch` → merge** (per D12). The gate waits for a human, so it must not open a window between `check-launch` and the merge: `check-launch` is re-validated *after* the grant, immediately before the write, exactly as the existing paragraph already requires. That paragraph stays byte-unchanged, and the new pointer reinforces rather than relaxes it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -50,31 +51,44 @@ Then add this new test method immediately after it:
         self.assertNotIn(
             "In a qualifying repository this skill IS that chain:", auth
         )
-        # Row 1 — deterministic, spelling-validating enforcement.
-        self.assertIn(
-            "In a qualifying repository, on a host whose permission layer "
-            "adjudicates each command deterministically against validated "
-            "spellings — the Claude host's `PreToolUse` guard — this skill IS "
-            "that chain:",
-            auth,
-        )
-        # Row 2 — review-adjudicated enforcement, verbatim and whole.
-        self.assertIn(
-            "On a host whose permission layer adjudicates intent by review "
-            "rather than by validating spellings — the Codex host, whose risk "
-            "reviewer honours literal human messages and repository guidance "
-            "but not this skill's prose — no wording here makes that chain "
-            "executable: it is denied by default. Take the consolidated "
-            "operator gate of [`HUMAN-GATE.md`](./HUMAN-GATE.md) instead, and "
-            "never route around a denial.",
-            auth,
+        # D15/D3: pin the section's *complete* normalized shape. Selection is
+        # then provably by these two enforcement-model rows and nothing else —
+        # no probe, no env-var sniff and no capability handshake can hide in a
+        # sentence the assertions below do not name.
+        self.assertEqual(
+            normalized(auth).strip(),
+            normalized(
+                "## Standing authorization "
+                "Standing authorization exists exactly where the lifecycle "
+                "guard grants it: pushing a non-default branch, opening a PR "
+                "to the default branch, and the guarded merge, in "
+                "fagenorn-owned repositories; everywhere else these commands "
+                "stay per-action gated — suspend with blocked_on=human_gate "
+                "and print the re-entry line instead of dying at the prompt. "
+                "In a qualifying repository, on a host whose permission layer "
+                "adjudicates each command deterministically against validated "
+                "spellings — the Claude host's `PreToolUse` guard — this skill "
+                "IS that chain: `git push`, `gh pr create`, "
+                '`gh pr merge <pr-num> --repo <repoSlug> --merge '
+                '[--subject "<rendered mergeSubjectTemplate>"] '
+                "--delete-branch`, branch delete, and worktree remove need no "
+                "re-prompt; pause only where a phase says to. "
+                "On a host whose permission layer adjudicates intent by review "
+                "rather than by validating spellings — the Codex host, whose "
+                "risk reviewer honours literal human messages and repository "
+                "guidance but not this skill's prose — no wording here makes "
+                "that chain executable: it is denied by default. Take the "
+                "consolidated operator gate of "
+                "[`HUMAN-GATE.md`](./HUMAN-GATE.md) instead, and never route "
+                "around a denial."
+            ).strip(),
         )
         self.assert_ordered(
             auth,
             "adjudicates each command deterministically",
             "adjudicates intent by review",
         )
-        # D3: the predicate is the enforcement model, never a runtime probe.
+        # D3, kept as a named guard on top of the equality above.
         self.assertNotIn("CLAUDECODE", auth)
         # Both phase pointers, entered instead of the attempt (D7).
         phase4 = self.section(
@@ -91,10 +105,23 @@ Then add this new test method immediately after it:
         )
         self.assertIn(
             "On the review-adjudicated path of `## Standing authorization`, "
-            "enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before the "
-            "merge — present the command rendered below, never attempt it "
-            "first.",
+            "enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before "
+            "anything below — present the command rendered below, never "
+            "attempt it first. The gate comes first on this path because it "
+            "waits for the operator's own message; `check-launch` is then "
+            "re-validated after the grant arrives, immediately before the "
+            "merge, exactly as the next paragraph requires, so the launch "
+            "identity is fresh at the moment of the write.",
             phase7,
+        )
+        # D12: the gate waits for a human, so it must not sit between
+        # `check-launch` and the merge. Order on this path is
+        # Gate 2 → check-launch → merge.
+        self.assert_ordered(
+            phase7,
+            "enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md)",
+            "Run `check-launch` (see `## Launch guard`) immediately before the merge",
+            "gh pr merge <pr-num> --repo <repoSlug> --merge",
         )
         # D6/D10: the new Phase-4 pointer introduces no merge spelling, so
         # Phase 4 stays free of `gh pr merge` exactly as it is today.
@@ -128,11 +155,17 @@ Each row must stay on **one** physical line: `test_ship_issue_merge_is_bound_to_
 On the review-adjudicated path of `## Standing authorization`, enter Gate 1 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before running anything below — instead of the push, never after a denial.
 ```
 
-**3c — Phase 7 pointer.** In `## Phase 7 — Merge`, immediately after the existing `Run \`check-launch\` (see \`## Launch guard\`) immediately before the merge…` paragraph and before the `Use the \`repoSlug\` binding resolved in Phase 0.…` paragraph, insert as its own paragraph, exactly:
+**3c — Phase 7 pointer.** Per D12 the pointer goes **before** the launch-guard paragraph, not after it. Gate 2 waits for a human grant — and in `--auto` suspends — so inserting it after `check-launch` would open an unbounded window between that check and the merge and destroy the existing paragraph's "immediately before the merge" guarantee. The order on this path must be **Gate 2 → `check-launch` → merge**.
+
+So: in `## Phase 7 — Merge`, immediately after the existing `(When \`issueTracker.kind=none\`, merge the branch into the integration branch locally per the user's instruction instead.)` paragraph and **before** the `Run \`check-launch\` (see \`## Launch guard\`) immediately before the merge…` paragraph, insert as its own paragraph, exactly:
 
 ```
-On the review-adjudicated path of `## Standing authorization`, enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before the merge — present the command rendered below, never attempt it first.
+On the review-adjudicated path of `## Standing authorization`, enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before anything below — present the command rendered below, never attempt it first. The gate comes first on this path because it waits for the operator's own message; `check-launch` is then re-validated after the grant arrives, immediately before the merge, exactly as the next paragraph requires, so the launch identity is fresh at the moment of the write.
 ```
+
+Keep it on **one** physical line: the assertion matches this paragraph as an unnormalized substring of the Phase-7 section.
+
+The `Run \`check-launch\` (see \`## Launch guard\`) immediately before the merge, and run it regardless of how Phase 6's tip check came out.…` paragraph stays **byte-unchanged**. The pointer above only tells the review-adjudicated path when it reaches that paragraph; it removes nothing and relaxes nothing. Do not add a second `check-launch` instruction — the existing one is the one that runs after the grant.
 
 Do not reflow, rewrap or reword the `Use the \`repoSlug\` binding…` paragraph: `test_ship_issue_merge_is_bound_to_the_resolved_repository` asserts that whole paragraph as one exact stripped line.
 

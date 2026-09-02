@@ -5,7 +5,7 @@
 
 **Goal:** Scope `ship-issue`'s no-re-prompt claim to the host enforcement model and route the review-adjudicated host through one consolidated operator gate that resumes to issue closure.
 
-**Architecture:** Three prose surfaces inside the machine-global skills tree change, in dependency order. A new `ship-issue` sidecar `HUMAN-GATE.md` owns the gate (per D4), so it lands first and nothing ever links to a missing file. `ship-issue/SKILL.md` then splits its `## Standing authorization` second sentence into two host-enforcement-model rows and adds two one-line phase pointers. `from-issue/AUTO.md`'s final paragraph gains one case in its enumeration so the gate reuses the existing `blocked_on: human_gate` suspension rather than defining a second pause. Every change is contract prose pinned by the existing Python contract suite; no Nix, no scripts, no host detection.
+**Architecture:** Three prose surfaces inside the machine-global skills tree change, in dependency order. A new `ship-issue` sidecar `HUMAN-GATE.md` owns the gate (per D4), so it lands first and nothing ever links to a missing file. `ship-issue/SKILL.md` then splits its `## Standing authorization` second sentence into two host-enforcement-model rows and adds two one-line phase pointers. `from-issue/AUTO.md` takes two amendments: its final paragraph gains one case in its enumeration so the gate reuses the existing `blocked_on: human_gate` suspension rather than defining a second pause, and its general self-answer sentence gains an exemption for irreversible-authorization gates, which `--auto` must never answer on the operator's behalf (per D13). Every change is contract prose pinned by the existing Python contract suite; no Nix, no scripts, no host detection.
 
 **Tech stack:** Markdown skill contracts under `home/common/agent-skills/skills/`; Python `unittest` prose assertions in `home/common/agent-skills/tests/test_workflow_skill_contracts.py`; Nix home-manager materialization via `home/common/agent-skills/default.nix`.
 
@@ -42,7 +42,15 @@ Task 3 — Extend the `--auto` gate enumeration and verify the accommodation rec
 
 The single issue-level ledger lives in `.claude/specs/2026-09-02-codex-ship-handoff-design.md` under `## Decision ledger`. This plan cites it by ID and never restates a row.
 
-- Task 1 rests on D2 (two gates, forced by the unknown `<pr-num>` at Phase 4), D4 (sidecar, not inline), D5 (the term is *operator gate* / *human gate*), D6 (the merge is never re-spelled outside Phase 7), D7 (enter the gate instead of attempting the verb), D8 (the grant is additional to every existing check).
-- Task 2 rests on D3 (enforcement model as prose rows, no host detection) and D6 (the pinned exact-ordered `gh pr merge` list stays at three entries, one changed), plus D10.
-- Task 3 rests on D1 (the README record is the accommodation store and is not test-pinned), D9 (`ship-release` deliberately unamended) and D11.
-- Planning appended **D10** and **D11** to the spec's ledger.
+- Task 1 rests on D2 (two gates, forced by the unknown `<pr-num>` at Phase 4), D4 (sidecar, not inline), D5 (the term is *operator gate* / *human gate*), D6 (the merge is never re-spelled outside Phase 7), D7 (enter the gate instead of attempting the verb), D8 (the grant is additional to every existing check), D14 (the no-bypass list is pinned section-scoped), D15 (the command payloads are pinned, not left to the implementer) and D16 (two *planned* gate locations, not a hard entry count).
+- Task 2 rests on D3 (enforcement model as prose rows, no host detection) and D6 (the pinned exact-ordered `gh pr merge` list stays at three entries, one changed), plus D10, D12 (Phase-7 order is Gate 2 → `check-launch` → merge) and D15 (the whole `## Standing authorization` section is pinned by equality).
+- Task 3 rests on D1 (the README record is the accommodation store and is not test-pinned), D9 (`ship-release` deliberately unamended), D11, D13 (`AUTO.md`'s self-answer exemption) and D14 (AC3 is a section-scoped Python assertion, not a line-local `grep`).
+- Planning appended **D10** and **D11** to the spec's ledger; the Phase-5 standards review appended **D12**–**D16**.
+
+## Standards review provenance
+
+- Reviewer: `Codex`, isolated read-only mode. No fallback reviewer was used.
+- Base SHA: `25d9989fd12c8a701a63cf2ac669f6d48e72b539`; HEAD reviewed: `0c5c655fc9d2a809fb9b1bd323e23c2c5e1299aa`.
+- Focus: none configured.
+- Dispositions: 3 blocking accepted, 2 should-fix accepted, 1 discussion accepted; 0 rejected, 0 deferred.
+- Applied as plan edits in this commit; the reasoning is carried by ledger rows **D12**–**D16** in `.claude/specs/2026-09-02-codex-ship-handoff-design.md`. The raw reviewer transcript is deliberately not stored — this summary is the whole record.
