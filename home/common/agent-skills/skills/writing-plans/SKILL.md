@@ -7,12 +7,20 @@ description: Turn a spec into a task-by-task implementation plan before touching
 
 Write the plan for an engineer who is skilled but has zero context for this codebase, this toolset, and this domain, and who will read exactly one task without the others. Every task names the files it touches, the exact interfaces and invariants it must satisfy, how to test it, and how to verify it. DRY. YAGNI. Test-first. Frequent commits.
 
-**Save the package root to** `<planDir>/YYYY-MM-DD-<feature-name>.md`
-(`planDir` from `~/.agents/bin/resolve-bindings`; helper missing →
-`.claude/skills.config.json`, default `.claude/plans`) and its task members to
-the sibling `<planDir>/<stem>.tasks/` directory, committed in the worktree you
-were called in. For example, the first member is `<stem>.tasks/task-1.md`.
-The root path remains the public plan path (D3, D6).
+**Resolve `planDir` once at entry.** Run `~/.agents/bin/resolve-project resolve
+--repo-root <the checkout you were called in>` and read
+`bindings.paths.artifacts.plans` from the snapshot it prints — an absolute path,
+because the resolver normalizes every path against `project.root`. That value is
+`planDir` for the rest of this skill. Resolve once; never read
+`.agents/project.json` yourself and never persist the snapshot. On the single
+error code `not_onboarded` — the repository has not adopted the project contract
+yet — use the literal `.claude/plans` and say so in one line. Every other error
+code is fatal: stop, report the code, and change nothing.
+
+**Save the package root to** `<planDir>/YYYY-MM-DD-<feature-name>.md` and its
+task members to the sibling `<planDir>/<stem>.tasks/` directory, committed in
+the worktree you were called in. For example, the first member is
+`<stem>.tasks/task-1.md`. The root path remains the public plan path (D3, D6).
 
 ## Payload discipline
 
