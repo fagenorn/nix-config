@@ -809,9 +809,16 @@ def canonical_digest(body):
 
 
 def sum_or_none(values):
-    """Total the values, or None as soon as one of them is an absent measurement."""
+    """Total the values, or None when nothing was measured.
+
+    Nothing was measured when a value is itself an absent measurement, and
+    equally when there is no value at all: `sum([])` is 0, and a stratum that
+    matched no runs has not measured zero tokens, it has measured nothing.
+    """
     values = list(values)
-    return None if any(value is None for value in values) else sum(values)
+    if not values or any(value is None for value in values):
+        return None
+    return sum(values)
 
 
 def merge_families(family_maps):

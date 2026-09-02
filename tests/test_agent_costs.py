@@ -870,6 +870,17 @@ class BuildRecordTest(unittest.TestCase):
             rec["record_id"],
             agent_costs.build_record(mutated, self.window())["record_id"])
 
+    def test_a_stratum_with_no_runs_totals_null_not_zero(self):
+        strata = self.strata()
+        strata["codex"]["groups"] = {}
+        rec = agent_costs.build_record(strata, self.window())
+        totals = rec["strata"]["codex"]["totals"]
+        self.assertEqual(totals["runs"], 0)
+        for field in ("input_total", "fresh", "cache_create", "cache_read",
+                      "output", "reasoning", "cost_usd"):
+            self.assertIsNone(totals[field], field)
+        self.assertEqual(totals["cost_by_family"], {})  # a mapping stays {}
+
     def test_runs_are_sorted_by_run_id(self):
         strata = self.strata()
         groups = strata["claude"]["groups"]
