@@ -11,10 +11,10 @@ extracted by `run_id` (D10).
 Two failure classes stay apart (D31). A manifest *document* fault — unreadable
 file, invalid JSON, a duplicate or unknown key, a wrong type or a value outside
 its enum — raises `ManifestError`: the tool never understood its input and emits
-no bundle. An *evidence* fault — missing strata, unpaired or miscounted trials,
-an unstable evaluator, a mismatched identity, an unreadable, tampered or
-wrong-shaped record — is returned as a diagnostic and resolves the bundle to
-`unmeasured`.
+no bundle. An *evidence* fault — missing strata, unpaired, miscounted or
+repeated trials, an unstable evaluator, a mismatched identity, an unreadable,
+tampered or wrong-shaped record — is returned as a diagnostic and resolves the
+bundle to `unmeasured`.
 """
 
 import argparse
@@ -543,6 +543,20 @@ def _resolve_stratum(block, stratum, path, allowed, loader, diagnostics):
     elif count not in allowed:
         _add(diagnostics, "TRIALS_CARDINALITY", path,
              f"{count} paired trials; allowed here: {sorted(allowed)}")
+
+    # A trial is identified by its cited (record_id, run_id): the same
+    # measurement cited twice is one measurement, and a median over copies of it
+    # buys the approval the exact cardinality of D36 exists to deny. Checked per
+    # side only — a run cited on both sides yields delta 0 and buys nothing.
+    # `repr` keys the pair without assuming the cited values are hashable.
+    for side in SIDES:
+        identities = [repr((entry.get("record_id"), entry.get("run_id")))
+                      for entry in cited[side] if isinstance(entry, dict)]
+        distinct = len(set(identities))
+        if distinct != len(identities):
+            _add(diagnostics, "TRIALS_DUPLICATE", f"{path}.{side}",
+                 f"{len(identities)} cited trials, "
+                 f"{distinct} distinct (record_id, run_id)")
 
     trials = {}
     for side in SIDES:

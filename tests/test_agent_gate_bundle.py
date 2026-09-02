@@ -325,6 +325,34 @@ class ResolveTrialsTest(unittest.TestCase):
         self.assertIsNone(evidence)
         self.assertIn("TRIALS_UNPAIRED", codes)
 
+    def test_repeated_citations_on_a_side_are_not_distinct_trials(self):
+        manifest = make_manifest(self.tmp, full_cases(self.tmp))
+        claude = manifest["cases"][0]["strata"]["claude"]
+        claude["base"] = [claude["base"][0]] * 3       # one run, cited three times
+        evidence, diagnostics = gate.resolve_trials(manifest)
+        self.assertIsNone(evidence)
+        rendered = gate.render(diagnostics)
+        self.assertIn("TRIALS_DUPLICATE $.cases[0].strata.claude.base: "
+                      "3 cited trials, 1 distinct (record_id, run_id)", rendered)
+
+    def test_a_partial_duplicate_is_caught_too(self):
+        manifest = make_manifest(self.tmp, full_cases(self.tmp))
+        codex = manifest["cases"][0]["strata"]["codex"]
+        codex["candidate"][1] = codex["candidate"][0]  # two of three distinct
+        evidence, diagnostics = gate.resolve_trials(manifest)
+        self.assertIsNone(evidence)
+        self.assertIn("TRIALS_DUPLICATE $.cases[0].strata.codex.candidate: "
+                      "3 cited trials, 2 distinct (record_id, run_id)",
+                      gate.render(diagnostics))
+
+    def test_the_same_run_cited_across_sides_is_not_a_duplicate(self):
+        manifest = make_manifest(self.tmp, full_cases(self.tmp))
+        claude = manifest["cases"][0]["strata"]["claude"]
+        claude["candidate"] = list(claude["base"])     # delta 0 buys no approval
+        evidence, codes = self.codes(manifest)
+        self.assertNotIn("TRIALS_DUPLICATE", codes)
+        self.assertIsNotNone(evidence)
+
     def test_absent_stratum_is_diagnosed(self):
         cases = full_cases(self.tmp)
         del cases[0]["strata"]["codex"]
@@ -572,6 +600,22 @@ class BundleCliTest(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(bundle["state"], "rejected")
         self.assertEqual(bundle["diagnostics"], [])
+
+    def test_a_run_cited_three_times_cannot_reach_approved(self):
+        pristine = self.saving_manifest()
+        code, bundle = run_cli("--trials", self.manifest_file(pristine, "clean.json"))
+        self.assertEqual((code, bundle["state"]), (0, "approved"))   # regression guard
+
+        repeated = self.saving_manifest()
+        for stratum in gate.STRATA:
+            block = repeated["cases"][0]["strata"][stratum]
+            for side in gate.SIDES:
+                block[side] = [block[side][0]] * 3
+        code, bundle = run_cli("--trials", self.manifest_file(repeated, "dup.json"))
+        self.assertEqual(code, 3)
+        self.assertEqual(bundle["state"], "unmeasured")
+        self.assertTrue(any(line.startswith("TRIALS_DUPLICATE ")
+                            for line in bundle["diagnostics"]), bundle["diagnostics"])
 
     def test_bundle_id_is_stable_and_covers_the_state(self):
         path = self.manifest_file(self.saving_manifest())
