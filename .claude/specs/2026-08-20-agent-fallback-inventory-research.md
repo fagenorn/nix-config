@@ -153,13 +153,19 @@ contrasting cases, named as such.
 
 | Checkout | Observed `HEAD` | Branch | Divergence from its own `origin` integration ref |
 |---|---|---|---|
-| `/Users/anis/Projects/nodocom` (Nodo) | `7a3dab7e541f44f5b021fe13a1e20894de2ef0b8` | `dev` | 111 commits behind `origin/dev`, 0 ahead (`git rev-list --count HEAD..origin/dev` → `111`) |
-| `/Users/anis/Projects/argus` (Argus) | `20d6655223e9497c2668f67dd016e1111b3a78cb` | `main` | level with `origin/main` — 0 behind, 0 ahead |
+| `/Users/anis/Projects/nodocom` (Nodo) | `7a3dab7e541f44f5b021fe13a1e20894de2ef0b8` | `dev` | 111 commits behind `origin/dev` as measured on 2026-09-02, 0 ahead (`git rev-list --count HEAD..origin/dev` → `111` **on that date**) |
+| `/Users/anis/Projects/argus` (Argus) | `20d6655223e9497c2668f67dd016e1111b3a78cb` | `main` | level with `origin/main` on 2026-09-02 — 0 behind, 0 ahead |
 
-The checked-out snapshot is the cited evidence. Neither checkout was refreshed,
-so these are the adapters as they stood on 2026-09-02, not either repository's
-current integration tip. **The third repository is nix-config itself**, read in
-the worktree named above.
+**These two rows are a dated observation, not a re-runnable command.** They pin
+the snapshot every Nodo and Argus claim below was read from. A reader running
+`git rev-parse HEAD` in either checkout today will very likely get a different
+sha, and `git rev-list --count 7a3dab7e..origin/dev` a larger number than 111,
+because both checkouts and both remotes move and this work deliberately
+refreshes neither: the cited shas stay reachable, and the distance figure is the
+distance *as it stood on the observation date*, against the `origin/dev` of that
+date. Re-running either command and finding a different answer confirms the
+snapshot has aged; it does not contradict anything here. **The third repository
+is nix-config itself**, read in the worktree named above.
 
 **How the sites were enumerated, so the count is auditable.** Every regular file
 in `home/common/agent-skills/skills/` and `home/common/claude-code/skills/`
@@ -199,7 +205,14 @@ seven. The nearest thing to a degrade among them is `workflow-state.py:315-325`,
 a source-module → sibling → `~/.agents/bin/artifact-budget` path ladder; it is
 not one, because `artifact_budget_validate` at `:328-346` raises
 `WorkflowError` on any non-zero exit or empty stdout, so no lesser result ever
-reaches a caller.
+reaches a caller. One branch in the same helper does substitute silently:
+`:323-325` passes `--policy` only when `trusted_policy` resolves the installed
+path, and that helper returns `None` on `OSError` (`:311-312`), so an
+unresolvable policy symlink drops the `--policy` argument at `:342-343` and lets
+`artifact-budget` resolve its own default. It is not a row because the argument
+exists only to work around `artifact-budget`'s `O_NOFOLLOW` policy read
+(docstring, `:302-308`) and the default it falls back to resolves to the same
+policy content — the operation continues with the same input, not a lesser one.
 
 **What counts as a row.** A hit becomes a row when an **absence or a failure
 makes the same operation continue with a lesser input, output or mechanism**. A
@@ -214,21 +227,26 @@ distinct `file:line` hits**. Every one is accounted for:
 
 | Disposition | Hits | A named example |
 |---|---|---|
-| Became (part of) one of the 63 rows | 76 | `ship-issue/SKILL.md:13` → A6 and B1 |
+| Became (part of) one of the 64 rows | 79 | `ship-issue/SKILL.md:13` → A6 and B1 |
 | Closed-set state vocabulary, not a branch | 38 | `workflow-state.py:129`, the literal `"owner_unavailable"` ledger field |
 | Fail-closed refusal | 36 | `diff-scope.py:430`, "a missing answer is a hard error, never a fallback" |
-| Cross-reference to a branch rowed elsewhere | 24 | `DIFF-REVIEW.md:16`, pointing at `SKILL.md`'s `command -v` check (E13) |
+| Cross-reference to a branch rowed elsewhere | 22 | `DIFF-REVIEW.md:16`, pointing at `SKILL.md`'s `command -v` check (E13) |
 | Vocabulary outside the subject | 13 | `improve-codebase-architecture/LICENSE:23`, a change-note; `REVIEW-CONTRACT.md:88`, a rubric about the *reviewed product's* fallbacks |
 | Default selection with nothing absent | 11 | `wayfind/SKILL.md:83`, "the user's named ticket, else the first frontier ticket" |
-| Budget-driven degrade, not absence-driven | 11 | `ship-issue/SKILL.md:218`, "Degrade to the merge-delta check when ALL of these hold" — the full review is skipped because the diff is small, not because anything is missing |
+| Budget-driven degrade, not absence-driven | 10 | `ship-issue/SKILL.md:218`, "Degrade to the merge-delta check when ALL of these hold" — the full review is skipped because the diff is small, not because anything is missing |
 | **Unaccounted** | **0** | — |
 
-76 exceeds 63 because a row may span several hit lines and two rows may share
-one. A reader who re-runs the two commands gets those hit counts and can check
-every hit against a row or a class; disagreeing with a *classification* is now
-possible, which it was not while the outcome was merely asserted.
+79 exceeds 64 because a row may span several hit lines and two rows may share
+one. **The per-hit map is published in full** as
+`### The adjudication, hit by hit`, one line per hit in file-then-line order, so
+every total above is re-derivable by counting the map, a reader can diff it
+against their own re-run, and a misclassification is visible on the page. Five
+of the 64 rows have **no** hit line at all — C3, C5, C6, C9 and D4 — because
+neither pass's vocabulary appears on those lines; each was found by reading the
+surrounding file while adjudicating a different hit in it, and they are listed at
+the end of the map so the two sides reconcile exactly.
 
-The 63 rows are what survived that adjudication. It remains a keyword sweep over
+The 64 rows are what survived that adjudication. It remains a keyword sweep over
 prose plus one script read, so a fallback phrased entirely outside that
 vocabulary, or buried in a script read only for its branches, would still be
 missed. The count is a floor — but the floor is now checkable.
@@ -241,7 +259,7 @@ unreadable or unparseable one prints one line to stderr and still returns `{}`
 exit status 0 (`positive_int_str`, lines 91-107, whose docstring states the
 reason: "one bad optional orchestration key must not break binding resolution
 for every skill"). The `Diagnostic at the fallback` column of `Per-site
-inventory` carries this verdict for all 63 sites, so #61's "or silently fall
+inventory` carries this verdict for all 64 sites, so #61's "or silently fall
 back" is answered per site rather than only for the helper.
 
 ## The removable cluster
@@ -313,14 +331,14 @@ logs (`REFERENCE.md:36-38`) try each area's `adr/`, then `docPaths.adrDir`, then
 `grill-with-docs/SKILL.md:38-41` carries its own three-tier layout detection, and
 `to-issues/SKILL.md:28` closes with "If those docs are absent, skip this
 grounding step silently." That context-map ladder, or its no-map branch, is
-restated in five further places — `from-issue/REVIEW-CONTRACT.md:39` and
-`sdd/conformance-reviewer-prompt.md:23` carry the ladder,
-`codex-collaboration/PLAN-REVIEW.md:36-47` and
-`grill-with-docs/CONTEXT-FORMAT.md:29` carry both, and
-`grill-with-docs/CONTEXT-FORMAT.md:133` carries the no-map branch alone. Three
+restated in five further places — `from-issue/REVIEW-CONTRACT.md:39`,
+`sdd/conformance-reviewer-prompt.md:23` and `grill-with-docs/CONTEXT-FORMAT.md:29`
+carry the ladder, `codex-collaboration/PLAN-REVIEW.md:36-47` carries both, and
+`grill-with-docs/CONTEXT-FORMAT.md:133` carries the no-map branch alone. Four
 more sites sit in the family without touching that ladder:
-`ship-release/CHANGELOG.md:65` (ADR links), `ship-issue/CONSOLIDATE.md:28,38`
-(destination doc and format references), and
+`ship-release/CHANGELOG.md:65` (ADR links), `ship-issue/CONSOLIDATE.md:28`
+(a learning whose destination doc is absent), `ship-issue/CONSOLIDATE.md:38`
+(the grilling skill's format references), and
 `doc-grounded-questions/SKILL.md:18`, the rule governing the whole pass. That is
 why doc discovery is the largest of the four families, at 18 of the 44
 in-cluster sites.
@@ -388,16 +406,16 @@ Two contrasting cases fix the boundary of this inventory from the other side.
 
 ## Per-site inventory
 
-63 sites, found by the sweep described in `## Method and evidence base`. **35**
+64 sites, found by the sweep described in `## Method and evidence base`. **35**
 are classified `removable-after-validated-onboarding-contract` — the branch's
-input is a repository property a contract could guarantee. **28** are classified
+input is a repository property a contract could guarantee. **29** are classified
 `unavoidable-portability` — the branch's input is a property of the machine, the
 harness, or the forge, which no repository onboarding contract reaches. Every
 site is a fallback in the sense fixed above; fail-closed refusals and declared
 runtime alternatives are excluded.
 
 The fourth column answers the other half of #61's question — which branches
-*silently* fall back. **53** of the 63 emit nothing at all; **8** are announced,
+*silently* fall back. **54** of the 64 emit nothing at all; **8** are announced,
 because the source requires the fallback to be recorded, reported or disclosed
 (B3, C3, C5, E3, E6, E13, E14, E16); and **2** write one line to stderr and continue
 at exit status 0 (A5 always, A3 only for an unreadable or unparseable config
@@ -470,13 +488,15 @@ file). Silence is the default in this tree, not the exception.
 | E17 | `skills/sdd/fix-loop.md:18` — rescue round: "Codex unavailable → the same tier", reframed for a fresh-context implementer | Codex CLI installed on the machine | silent | unavoidable-portability |
 | E18 | `skills/ship-issue/REVIEW.md:31-37` — "sdd templates unavailable → still use the two isolated native dispatches in SKILL.md", with the two rubrics pasted inline | sibling skill installed on the machine | silent by design — `REVIEW.md:43-44`, "ship-issue records no reviewer identity" | unavoidable-portability |
 | E19 | `skills/from-issue/ship-handoff.md:60-62` — "## Inline fallback (no ship-issue skill)": push, open the PR and run the same full-review tier inline | sibling skill installed on the machine | silent | unavoidable-portability |
+| E20 | `skills/sdd/correctness-reviewer-prompt.md:115-116` and `skills/sdd/conformance-reviewer-prompt.md:111-112` — "a dispatcher without the sdd scripts … omits them and the reviewer uses the body's fallback": the axis runs without a validated manifest root or its four metrics, and the reviewer fetches the range itself (`skills/ship-issue/REVIEW.md:28` is the dispatcher side) | sdd scripts installed on the machine | silent | unavoidable-portability |
 
 Paths in the table are relative to `home/common/agent-skills/`, except
 `skills/codex-collaboration/`, which lives under `home/common/claude-code/`
 (one of the two Claude-only skills).
 
-**Why the helper-, sibling- and runtime-presence sites (A6, B2, B3, D8, E2-E6,
-E8-E19) are portability and not contract.** `~/.agents/bin/` is user scope — an absolute path outside every
+**Why the helper-, sibling- and runtime-presence sites — A6, B2, B3, D8, D14,
+E2-E6 and E8-E20, called *the presence set* below — are portability and not
+contract.** `~/.agents/bin/` is user scope — an absolute path outside every
 repository, populated by `home/common/agent-skills/default.nix:52-102` as nine
 home-manager symlinks into the Nix store, with `home.sessionPath` adding it to
 PATH (line 161). Read on 2026-09-02, it holds `agent-evidence`,
@@ -520,36 +540,47 @@ Three consequences follow, each observed rather than inferred.
    exhausts all four, and Nodo exhausts none.** A **probe** here is one
    filesystem existence check of one candidate path, counted only for rungs the
    adapter's config does not already resolve; a ladder is **exhausted** when
-   every one of its candidates misses. The four ladders and their candidates,
-   from the rows above: **context map** = `docPaths.contextMap`,
-   `docs/CONTEXT-MAP.md`, root `CONTEXT-MAP.md` (D1); **legacy glossary**,
-   entered only when no map resolved = `docPaths.context`, `CONTEXT.md`,
-   `GLOSSARY.md`, `DOMAIN.md` (D2); **decision log** = `docs/areas/` first, else
-   `docPaths.adrDir`, `docs/adr/`, `docs/adrs/`, `docs/decisions/`, `adr/` (D3);
-   **architecture** = `docPaths.architecture`, `ARCHITECTURE.md`,
-   `docs/architecture.md` (D5). Walked on 2026-09-02:
+   every one of its filesystem candidates misses. Each ladder's candidates, from
+   the rows that own them:
+
+   - **context map** (D1) — `docPaths.contextMap`, `docs/CONTEXT-MAP.md`, root
+     `CONTEXT-MAP.md`: **2** probes unconfigured.
+   - **legacy glossary** (D2), entered only when no map resolved —
+     `docPaths.context`, `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md`, or a
+     top-of-`README` domain section: **3** probes unconfigured. The README rung
+     is a judgement about a file's *contents*, not an existence check, so it is
+     excluded from the count and from the exhaustion verdict; a README that
+     might carry such a section exists in nix-config and Argus and not in Nodo.
+   - **decision log** (D3) — `docs/areas/` first, else `docPaths.adrDir`,
+     `docs/adr/`, `docs/adrs/`, `docs/decisions/`, `adr/`: **1** probe when
+     `docs/areas/` hits, **5** when it does not.
+   - **architecture** (D5) — `docPaths.architecture`, `ARCHITECTURE.md`,
+     `docs/architecture.md`, or a README section: **2** probes unconfigured, the
+     README rung excluded on the same ground as above.
+
+   Walked on 2026-09-02, each cell `probes/hits`:
 
    | Adapter | Context map | Legacy glossary | Decision log | Architecture | Probes | Hits | Exhausted |
    |---|---|---|---|---|---|---|---|
-   | nix-config | 2 probes, 0 hits | 4 probes, 0 hits | 5 probes, 0 hits | 2 probes, 0 hits | **13** | **0** | all four |
-   | Argus | 1 probe, 1 hit | not entered | 1 probe, 1 hit | 2 probes, 0 hits | **4** | **2** | architecture only |
-   | Nodo | config rung, 0 probes | not entered | 1 probe, 1 hit | config rung, 0 probes | **1** | **1** | none |
+   | nix-config | 2/0 | 3/0 | 5/0 | 2/0 | **12** | **0** | all four |
+   | Argus | 1/1 | not entered | 1/1 | 2/0 | **4** | **2** | architecture only |
+   | Nodo | config rung, 0 probes | not entered | 1/1 | config rung, 0 probes | **1** | **1** | none |
 
    nix-config declares no `docPaths` and has no `docs/` directory at all, so
-   every candidate misses. Argus declares nothing either, but `docs/CONTEXT-MAP.md`
-   and `docs/areas/` (which holds 12 area `adr/` directories) exist, so its
-   glossary ladder is never entered — a map resolved — and only the architecture
-   ladder runs out. Nodo's config declares `docPaths.contextMap` and
-   `docPaths.architecture`, so those two resolve without probing, the glossary
-   ladder is never entered, and its one decision-log look hits. **Nodo exhausts
-   no ladder at all.** All seven of Nodo's declared `docPaths` resolve to
-   existing paths.
+   every candidate misses. Argus declares nothing either, but
+   `docs/CONTEXT-MAP.md` and `docs/areas/` (which holds 12 area `adr/`
+   directories) exist, so its glossary ladder is never entered — a map resolved —
+   and only the architecture ladder runs out. Nodo's config declares
+   `docPaths.contextMap` and `docPaths.architecture`, so those two resolve
+   without probing, the glossary ladder is never entered, and its one
+   decision-log look hits. **Nodo exhausts no ladder at all.** All seven of
+   Nodo's declared `docPaths` resolve to existing paths.
 
 3. **Argus's project standards are unreachable through the grounding pass.**
    `docs/standards/README.md` exists in Argus, but D4 above has no unconfigured
    discovery rung — project deltas are read only from `docPaths.standards`, and
    Argus declares no config. This is a gap, recorded here as observed; it is not
-   a fallback site and is not counted among the 63.
+   a fallback site and is not counted among the 64.
 
 **Drift against the resolution summary, per the drift rule.**
 
@@ -557,7 +588,7 @@ Three consequences follow, each observed rather than inferred.
   cluster is project binding, command, tracker, and doc discovery."
 - *As observed (2026-09-02, by reading each cited line and running
   `resolve-bindings` against all three checkouts):* the four families hold 44 of
-  the 63 sites, but only **35** of those 44 are removable by a repository
+  the 64 sites, but only **35** of those 44 are removable by a repository
   onboarding contract. Nine sites inside the named cluster — A2, A6, B2, B3, C2,
   C8, C11, D8, D14 — branch on the machine, the harness or the forge, not on the
   repository.
@@ -590,10 +621,10 @@ bytes, for the reason given below the table.
 | Tracker | 12 | 3,173 | 1.1% |
 | Doc discovery | 18 | 6,778 | 2.4% |
 | **Four families, subtotal** | **44** | **15,591** | **5.6%** |
-| Agent capability (outside the four) | 19 | 7,962 | 2.8% |
-| **All 63 sites** | **63** | **23,553** | **8.4%** |
+| Agent capability (outside the four) | 20 | 8,322 | 3.0% |
+| **All 64 sites** | **64** | **23,913** | **8.5%** |
 
-**Seven of the 63 sites contribute zero prompt bytes** and so contribute nothing
+**Seven of the 64 sites contribute zero prompt bytes** and so contribute nothing
 to the cells above. A1-A5, C1 and C2 live in
 `home/common/agent-skills/scripts/resolve-bindings`, which the model executes
 rather than reads: 5,517 bytes of Python in total, of which lines 24-107 (the
@@ -602,12 +633,12 @@ rather than reads: 5,517 bytes of Python in total, of which lines 24-107 (the
 below, not prompt.
 
 A token figure is **an estimate**: at roughly 4 bytes per token for English
-Markdown, 23,553 bytes is on the order of **5,900 tokens** — labelled an estimate
+Markdown, 23,913 bytes is on the order of **6,000 tokens** — labelled an estimate
 because no tokeniser was run against these files. The byte figures are
 measurements.
 
-Not all of these bytes are resident at once. **14,613** of the 23,553 sit in
-`SKILL.md` files, which load when the skill is invoked; **8,940** sit in sixteen
+Not all of these bytes are resident at once. **14,613** of the 23,913 sit in
+`SKILL.md` files, which load when the skill is invoked; **9,300** sit in sixteen
 auxiliary files (`from-issue/{bindings,REVIEW-CONTRACT,standards-review,ship-handoff}.md`,
 `doc-grounded-questions/REFERENCE.md`, `grill-with-docs/CONTEXT-FORMAT.md`,
 `sdd/{conformance-reviewer-prompt,correctness-reviewer-prompt,final-review,fix-loop}.md`,
@@ -667,11 +698,12 @@ sed -n '36,47p'               home/common/claude-code/skills/codex-collaboration
 sed -n '28p;33p;38p'          home/common/agent-skills/skills/ship-issue/CONSOLIDATE.md            ->  835
 ```
 
-**Agent capability — 7,962 bytes**
+**Agent capability — 8,322 bytes**
 
 ```
 sed -n '37p'                    home/common/agent-skills/skills/worktrees/SKILL.md                     ->  720
 sed -n '121p;237,241p;359p'     home/common/agent-skills/skills/ship-issue/SKILL.md                    ->  727
+sed -n '28p;31,37p'             home/common/agent-skills/skills/ship-issue/REVIEW.md                   ->  551
 sed -n '18,20p;31p'             home/common/agent-skills/skills/from-issue/standards-review.md         -> 1204
 sed -n '180p'                   home/common/agent-skills/skills/from-issue/SKILL.md                    ->  298
 sed -n '60,62p'                 home/common/agent-skills/skills/from-issue/ship-handoff.md             ->  167
@@ -679,13 +711,252 @@ sed -n '32p'                    home/common/agent-skills/skills/improve-codebase
 sed -n '39p;59p'                home/common/agent-skills/skills/doc-grounded-questions/SKILL.md        ->  476
 sed -n '38p'                    home/common/agent-skills/skills/from-issue/REVIEW-CONTRACT.md          ->   94
 sed -n '51p'                    home/common/agent-skills/skills/sdd/SKILL.md                           ->  263
-sed -n '4p'                     home/common/agent-skills/skills/sdd/correctness-reviewer-prompt.md     ->   86
+sed -n '4p;115,116p'            home/common/agent-skills/skills/sdd/correctness-reviewer-prompt.md     ->  203
+sed -n '111,112p'               home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md     ->  161
 sed -n '29p;31p'                home/common/agent-skills/skills/sdd/final-review.md                    -> 1315
 sed -n '18p'                    home/common/agent-skills/skills/sdd/fix-loop.md                        ->  157
-sed -n '31,37p'                 home/common/agent-skills/skills/ship-issue/REVIEW.md                   ->  469
 sed -n '38,40p;65,68p;119,141p' home/common/claude-code/skills/codex-collaboration/SKILL.md            -> 1738
 ```
 
+
+### The adjudication, hit by hit
+
+All 209 distinct `file:line` hits of the two published passes, in file-then-line
+order, each with its disposition: a row ID where it became part of a row,
+otherwise the exclusion class, abbreviated `fail-closed`, `state-vocabulary`,
+`cross-reference`, `off-subject`, `default-selection` and `budget-degrade` for
+the six classes of the disposition table above, in that table's order. Paths are
+relative to `home/common/`. Counting this list reproduces every total in that
+table.
+
+```
+agent-skills/scripts/diff-scope.py:30 fail-closed
+agent-skills/scripts/diff-scope.py:394 fail-closed
+agent-skills/scripts/diff-scope.py:430 fail-closed
+agent-skills/scripts/resolve-bindings:5 A1,A2,A3,A4,A5,C1,C2
+agent-skills/scripts/resolve-bindings:6 A1,A2,A3,A4,A5,C1,C2
+agent-skills/scripts/resolve-bindings:92 A1,A2,A3,A4,A5,C1,C2
+agent-skills/scripts/resolve-bindings:94 A1,A2,A3,A4,A5,C1,C2
+agent-skills/scripts/workflow-state.py:129 state-vocabulary
+agent-skills/scripts/workflow-state.py:145 state-vocabulary
+agent-skills/scripts/workflow-state.py:149 state-vocabulary
+agent-skills/scripts/workflow-state.py:152 state-vocabulary
+agent-skills/scripts/workflow-state.py:321 fail-closed
+agent-skills/scripts/workflow-state.py:398 state-vocabulary
+agent-skills/scripts/workflow-state.py:965 fail-closed
+agent-skills/scripts/workflow-state.py:1252 state-vocabulary
+agent-skills/scripts/workflow-state.py:1369 fail-closed
+agent-skills/scripts/workflow-state.py:1517 state-vocabulary
+agent-skills/scripts/workflow-state.py:1520 state-vocabulary
+agent-skills/scripts/workflow-state.py:1521 fail-closed
+agent-skills/scripts/workflow-state.py:1704 state-vocabulary
+agent-skills/scripts/workflow-state.py:1800 state-vocabulary
+agent-skills/scripts/workflow-state.py:1801 fail-closed
+agent-skills/scripts/workflow-state.py:1838 state-vocabulary
+agent-skills/scripts/workflow-state.py:1875 state-vocabulary
+agent-skills/scripts/workflow-state.py:1878 state-vocabulary
+agent-skills/scripts/workflow-state.py:1882 state-vocabulary
+agent-skills/scripts/workflow-state.py:1888 state-vocabulary
+agent-skills/scripts/workflow-state.py:2044 state-vocabulary
+agent-skills/scripts/workflow-state.py:2058 state-vocabulary
+agent-skills/scripts/workflow-state.py:2063 state-vocabulary
+agent-skills/scripts/workflow-state.py:2068 state-vocabulary
+agent-skills/scripts/workflow-state.py:2089 state-vocabulary
+agent-skills/scripts/workflow-state.py:2104 state-vocabulary
+agent-skills/scripts/workflow-state.py:2120 state-vocabulary
+agent-skills/scripts/workflow-state.py:2141 state-vocabulary
+agent-skills/scripts/workflow-state.py:2179 fail-closed
+agent-skills/scripts/workflow-state.py:2231 state-vocabulary
+agent-skills/scripts/workflow-state.py:2515 state-vocabulary
+agent-skills/scripts/workflow-state.py:2518 fail-closed
+agent-skills/scripts/workflow-state.py:2564 state-vocabulary
+agent-skills/scripts/workflow-state.py:2579 state-vocabulary
+agent-skills/scripts/workflow-state.py:2842 state-vocabulary
+agent-skills/skills/design/SKILL.md:49 A6
+agent-skills/skills/design/SKILL.md:129 cross-reference
+agent-skills/skills/doc-grounded-questions/REFERENCE.md:3 cross-reference
+agent-skills/skills/doc-grounded-questions/REFERENCE.md:27 D2
+agent-skills/skills/doc-grounded-questions/REFERENCE.md:36 D3
+agent-skills/skills/doc-grounded-questions/REFERENCE.md:37 D3
+agent-skills/skills/doc-grounded-questions/SKILL.md:8 cross-reference
+agent-skills/skills/doc-grounded-questions/SKILL.md:12 A6
+agent-skills/skills/doc-grounded-questions/SKILL.md:14 cross-reference
+agent-skills/skills/doc-grounded-questions/SKILL.md:18 D17
+agent-skills/skills/doc-grounded-questions/SKILL.md:20 D1
+agent-skills/skills/doc-grounded-questions/SKILL.md:22 cross-reference
+agent-skills/skills/doc-grounded-questions/SKILL.md:26 D5
+agent-skills/skills/doc-grounded-questions/SKILL.md:39 E7
+agent-skills/skills/doc-grounded-questions/SKILL.md:59 E15
+agent-skills/skills/from-issue/AUTO.md:11 state-vocabulary
+agent-skills/skills/from-issue/AUTO.md:13 state-vocabulary
+agent-skills/skills/from-issue/AUTO.md:17 state-vocabulary
+agent-skills/skills/from-issue/AUTO.md:113 cross-reference
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:17 fail-closed
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:19 fail-closed
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:36 fail-closed
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:38 E9
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:39 D9
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:41 cross-reference
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:59 cross-reference
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:88 off-subject
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:108 off-subject
+agent-skills/skills/from-issue/REVIEW-CONTRACT.md:115 off-subject
+agent-skills/skills/from-issue/SKILL.md:62 state-vocabulary
+agent-skills/skills/from-issue/SKILL.md:79 state-vocabulary
+agent-skills/skills/from-issue/SKILL.md:98 default-selection
+agent-skills/skills/from-issue/SKILL.md:119 default-selection
+agent-skills/skills/from-issue/SKILL.md:155 cross-reference
+agent-skills/skills/from-issue/SKILL.md:180 E4
+agent-skills/skills/from-issue/SKILL.md:207 default-selection
+agent-skills/skills/from-issue/SKILL.md:271 default-selection
+agent-skills/skills/from-issue/SKILL.md:356 default-selection
+agent-skills/skills/from-issue/SKILL.md:439 default-selection
+agent-skills/skills/from-issue/SKILL.md:465 C12
+agent-skills/skills/from-issue/bindings.md:6 A9,B4
+agent-skills/skills/from-issue/bindings.md:8 A9
+agent-skills/skills/from-issue/bindings.md:10 cross-reference
+agent-skills/skills/from-issue/ship-handoff.md:1 cross-reference
+agent-skills/skills/from-issue/ship-handoff.md:60 E19
+agent-skills/skills/from-issue/standards-review.md:19 E3
+agent-skills/skills/from-issue/standards-review.md:20 E3
+agent-skills/skills/from-issue/standards-review.md:31 E3
+agent-skills/skills/grill-with-docs/ADR-FORMAT.md:5 default-selection
+agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md:29 D15
+agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md:133 D12
+agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md:147 default-selection
+agent-skills/skills/grill-with-docs/SKILL.md:40 D6
+agent-skills/skills/grill-with-docs/SKILL.md:41 D6
+agent-skills/skills/grill-with-docs/SKILL.md:47 default-selection
+agent-skills/skills/grill-with-docs/SKILL.md:156 cross-reference
+agent-skills/skills/handoff/SKILL.md:51 fail-closed
+agent-skills/skills/handoff/SKILL.md:86 fail-closed
+agent-skills/skills/improve-codebase-architecture/LICENSE:23 off-subject
+agent-skills/skills/improve-codebase-architecture/LICENSE:26 off-subject
+agent-skills/skills/improve-codebase-architecture/SKILL.md:32 E6
+agent-skills/skills/research/SKILL.md:16 A6
+agent-skills/skills/sdd/SKILL.md:36 fail-closed
+agent-skills/skills/sdd/SKILL.md:51 E10
+agent-skills/skills/sdd/conformance-reviewer-prompt.md:23 D10
+agent-skills/skills/sdd/conformance-reviewer-prompt.md:48 fail-closed
+agent-skills/skills/sdd/conformance-reviewer-prompt.md:112 E20
+agent-skills/skills/sdd/correctness-reviewer-prompt.md:4 E11
+agent-skills/skills/sdd/correctness-reviewer-prompt.md:8 cross-reference
+agent-skills/skills/sdd/correctness-reviewer-prompt.md:42 fail-closed
+agent-skills/skills/sdd/correctness-reviewer-prompt.md:77 off-subject
+agent-skills/skills/sdd/correctness-reviewer-prompt.md:116 E20
+agent-skills/skills/sdd/final-review.md:29 E16
+agent-skills/skills/sdd/final-review.md:31 E16
+agent-skills/skills/sdd/fix-loop.md:18 E17
+agent-skills/skills/sdd/fix-loop.md:20 off-subject
+agent-skills/skills/sdd/fix-loop.md:21 off-subject
+agent-skills/skills/sdd/re-review-prompt.md:55 fail-closed
+agent-skills/skills/sdd/scripts/review-package:1081 fail-closed
+agent-skills/skills/sdd/scripts/task-brief:25 fail-closed
+agent-skills/skills/sdd/scripts/task-brief:26 fail-closed
+agent-skills/skills/sdd/scripts/task-brief:40 fail-closed
+agent-skills/skills/sdd/task-reviewer-prompt.md:66 fail-closed
+agent-skills/skills/ship-issue/CONSOLIDATE.md:28 D18
+agent-skills/skills/ship-issue/CONSOLIDATE.md:33 D13
+agent-skills/skills/ship-issue/CONSOLIDATE.md:38 D14
+agent-skills/skills/ship-issue/REVIEW.md:7 budget-degrade
+agent-skills/skills/ship-issue/REVIEW.md:18 budget-degrade
+agent-skills/skills/ship-issue/REVIEW.md:26 budget-degrade
+agent-skills/skills/ship-issue/REVIEW.md:28 E20
+agent-skills/skills/ship-issue/REVIEW.md:31 E18
+agent-skills/skills/ship-issue/REVIEW.md:42 budget-degrade
+agent-skills/skills/ship-issue/SKILL.md:13 A6,B1
+agent-skills/skills/ship-issue/SKILL.md:15 A8,C4
+agent-skills/skills/ship-issue/SKILL.md:17 A10
+agent-skills/skills/ship-issue/SKILL.md:80 fail-closed
+agent-skills/skills/ship-issue/SKILL.md:82 fail-closed
+agent-skills/skills/ship-issue/SKILL.md:121 E8
+agent-skills/skills/ship-issue/SKILL.md:155 default-selection
+agent-skills/skills/ship-issue/SKILL.md:207 C10
+agent-skills/skills/ship-issue/SKILL.md:218 budget-degrade
+agent-skills/skills/ship-issue/SKILL.md:220 budget-degrade
+agent-skills/skills/ship-issue/SKILL.md:222 B2
+agent-skills/skills/ship-issue/SKILL.md:225 budget-degrade
+agent-skills/skills/ship-issue/SKILL.md:232 budget-degrade
+agent-skills/skills/ship-issue/SKILL.md:237 E2
+agent-skills/skills/ship-issue/SKILL.md:239 E2
+agent-skills/skills/ship-issue/SKILL.md:240 E2
+agent-skills/skills/ship-issue/SKILL.md:359 E5
+agent-skills/skills/ship-release/CHANGELOG.md:65 D16
+agent-skills/skills/ship-release/SKILL.md:24 A7
+agent-skills/skills/ship-release/SKILL.md:71 D8
+agent-skills/skills/ship-release/SKILL.md:75 C7
+agent-skills/skills/to-issues/SKILL.md:12 A6
+agent-skills/skills/to-issues/SKILL.md:14 cross-reference
+agent-skills/skills/to-issues/SKILL.md:28 D7
+agent-skills/skills/to-issues/SKILL.md:87 C8
+agent-skills/skills/to-issues/SKILL.md:89 C8
+agent-skills/skills/wayfind/DISCIPLINE.md:49 C11
+agent-skills/skills/wayfind/SKILL.md:83 default-selection
+agent-skills/skills/worktrees/SKILL.md:37 E1
+agent-skills/skills/writing-plans/SKILL.md:11 A6
+agent-skills/skills/writing-plans/SKILL.md:185 fail-closed
+agent-skills/skills/writing-plans/SKILL.md:244 fail-closed
+agent-skills/skills/writing-plans/SKILL.md:255 cross-reference
+claude-code/skills/codex-collaboration/CERTIFICATION.md:5 cross-reference
+claude-code/skills/codex-collaboration/CERTIFICATION.md:18 fail-closed
+claude-code/skills/codex-collaboration/CERTIFICATION.md:43 fail-closed
+claude-code/skills/codex-collaboration/CERTIFICATION.md:44 fail-closed
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:9 fail-closed
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:10 fail-closed
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:16 cross-reference
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:19 cross-reference
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:20 cross-reference
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:59 B3
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:61 B3
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:68 budget-degrade
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:69 budget-degrade
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:200 off-subject
+claude-code/skills/codex-collaboration/DIFF-REVIEW.md:201 off-subject
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:4 cross-reference
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:12 fail-closed
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:14 fail-closed
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:37 D11
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:38 D11
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:46 D11
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:65 fail-closed
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:83 off-subject
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:94 off-subject
+claude-code/skills/codex-collaboration/PLAN-REVIEW.md:95 off-subject
+claude-code/skills/codex-collaboration/SKILL.md:22 cross-reference
+claude-code/skills/codex-collaboration/SKILL.md:38 E12
+claude-code/skills/codex-collaboration/SKILL.md:39 E12
+claude-code/skills/codex-collaboration/SKILL.md:65 E13
+claude-code/skills/codex-collaboration/SKILL.md:66 E13
+claude-code/skills/codex-collaboration/SKILL.md:112 cross-reference
+claude-code/skills/codex-collaboration/SKILL.md:119 E14
+claude-code/skills/codex-collaboration/SKILL.md:126 E14
+claude-code/skills/codex-collaboration/SKILL.md:135 E14
+claude-code/skills/codex-collaboration/SKILL.md:136 E14
+claude-code/skills/codex-collaboration/SKILL.md:139 E14
+claude-code/skills/codex-collaboration/SKILL.md:141 E14
+claude-code/skills/orchestrate-issues/SKILL.md:53 state-vocabulary
+claude-code/skills/orchestrate-issues/SKILL.md:55 state-vocabulary
+claude-code/skills/orchestrate-issues/SKILL.md:56 state-vocabulary
+claude-code/skills/orchestrate-issues/SKILL.md:60 state-vocabulary
+claude-code/skills/orchestrate-issues/SKILL.md:63 state-vocabulary
+```
+
+Five rows are absent from that list because neither pass's vocabulary appears on
+their lines; each was found by reading the surrounding file while adjudicating a
+different hit in the same file:
+
+```
+C3  skills/to-issues/SKILL.md:18
+C5  skills/ship-release/SKILL.md:30
+C6  skills/ship-release/SKILL.md:28
+C9  skills/from-issue/bindings.md:12,14
+D4  skills/doc-grounded-questions/SKILL.md:24 + REFERENCE.md:41-44
+```
+
+Continuation lines of a multi-line row range are likewise absent from the map
+where only the range's anchor line matched — `E14`'s 23-line block matched on
+lines 119, 126, 135, 136, 139 and 141, for instance. The map lists hits, not
+row lines; the two are reconciled by the row ranges published above.
 ### Repeated execution cost
 
 Unit: wall-clock milliseconds per invocation, median of a 20-run sample.
@@ -746,15 +1017,15 @@ document decides nothing. Specifically it does **not** decide:
   conformance engine, closed purposes, one repair route per reason code — and
   this document neither restates nor evaluates it; it is why every removable
   verdict here is conditional (`## Unverified inheritance`, item 2);
-- whether any of the 28 `unavoidable-portability` sites should become a
+- whether any of the 29 `unavoidable-portability` sites should become a
   **fail-closed refusal** with a repair route, or a **declared runtime
   alternative**. #69's "no fallback is permitted for ... missing tool/trust/
-  credential" bears on several of them, but mapping this inventory's 28 sites
+  credential" bears on several of them, but mapping this inventory's 29 sites
   onto that rule is an act of policy application and is not performed here;
-- whether the helper-, sibling- and runtime-presence sites (A6, B2, B3, D8,
-  D14, E2-E6, E8-E19) should be addressed by a machine bootstrap contract rather than
-  a repository one, though the evidence above shows a repository contract cannot
-  reach them;
+- whether *the presence set* — enumerated once, in `Per-site inventory`, so the
+  two mentions cannot drift apart — should be addressed by a machine bootstrap
+  contract rather than a repository one, though the evidence above shows a
+  repository contract cannot reach them;
 - what Argus should declare, or whether it should declare anything at all. Its
   unreachable `docs/standards/README.md` is recorded as an observation, not as a
   defect to fix here.
