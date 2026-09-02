@@ -2,7 +2,9 @@
 
 Runs the resolver as a subprocess against temporary repository roots and parses
 its stdout, the seam established by test_resolve_bindings.py and
-test_workflow_state.py. The resolver is never imported.
+test_workflow_state.py. The resolver is imported only by the two cases whose
+seam no subprocess run can reach — the generic failure wrapper and the
+emit-side non-finite guard — through the shared `load_module` below.
 """
 
 from __future__ import annotations
@@ -283,6 +285,34 @@ class ErrorOutputTest(ResolverTestCase):
         error = self.assert_refusal(code, payload, "invalid_contract")
         self.assertEqual(error["repair_id"], "contract.parse")
 
+    def test_a_non_finite_number_is_invalid_contract(self):
+        """COR-001: Python's decoder accepts bare `NaN`; the contract does not.
+
+        `bindings.deploy.config` is an unconstrained dict, so no later shape
+        rule would have stopped the token: it would reach the snapshot and be
+        re-emitted as JSON no standards parser can read. The refusal is the
+        closed `invalid_contract`, not `resolver_failure`.
+        """
+        expected = (".agents/project.json holds NaN, Infinity or -Infinity, "
+                    "which JSON has no value for")
+        for token, value in (("NaN", float("nan")),
+                             ("Infinity", float("inf")),
+                             ("-Infinity", float("-inf"))):
+            with self.subTest(token=token):
+                contract = source_contract()
+                contract["bindings"]["deploy"]["config"] = {"threshold": value}
+                root = self.make_root(contract)
+                # The fixture writes the contract with `json.dumps`, which
+                # emits the bare token: assert the input really carries it.
+                self.assertIn(
+                    f": {token}}}",
+                    (root / ".agents" / "project.json").read_text("utf-8"))
+                code, payload, _ = self.resolve(root)
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertEqual(error["repair_id"], "contract.parse")
+                self.assertEqual(
+                    [v["message"] for v in error["violations"]], [expected])
+
     def test_non_object_contract_is_invalid_contract(self):
         root = self.make_root(contract=[1, 2, 3])
         error = self.assert_refusal(*self.resolve(root)[:2], "invalid_contract")
@@ -402,6 +432,52 @@ class MalformedValueTest(ResolverTestCase):
                 self.assertNotIn("schema_version", payload)
 
 
+class CommandArgvTest(ResolverTestCase):
+    """COR-002: every `argv` word is a non-empty string, at its own pointer.
+
+    An empty `argv` list is already refused, and an empty word is the same
+    break one level down: `[""]` names no executable, and an empty later word
+    is an argument the callee cannot have meant.
+    """
+
+    CASES = (
+        ("an empty executable", ["", "build"], 0),
+        ("an empty later argument", ["just", ""], 1),
+    )
+
+    def test_an_empty_argv_word_is_an_invalid_contract_violation(self):
+        for label, argv, index in self.CASES:
+            with self.subTest(case=label):
+                contract = source_contract()
+                contract["bindings"]["commands"]["nix-build"]["argv"] = argv
+                code, payload, _ = self.resolve(self.make_root(contract))
+                self.assertEqual(code, 2)
+                self.assertEqual(payload["error"]["code"], "invalid_contract")
+                self.assertIn(
+                    f"/bindings/commands/nix-build/argv/{index}",
+                    [v["pointer"] for v in payload["error"]["violations"]])
+
+    def test_an_unreferenced_commands_entry_is_validated_too(self):
+        """Validation walks every entry, not only the ids workflow names."""
+        contract = source_contract()
+        contract["bindings"]["commands"]["orphan"] = {
+            "argv": [""], "cwd": ".", "env": []}
+        code, payload, _ = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "invalid_contract")
+        self.assertIn("/bindings/commands/orphan/argv/0",
+                      [v["pointer"] for v in payload["error"]["violations"]])
+
+    def test_a_non_string_argv_word_is_still_refused(self):
+        contract = source_contract()
+        contract["bindings"]["commands"]["nix-build"]["argv"] = ["just", 7]
+        code, payload, _ = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "invalid_contract")
+        self.assertIn("/bindings/commands/nix-build/argv/1",
+                      [v["pointer"] for v in payload["error"]["violations"]])
+
+
 class OnePassCollectionTest(ResolverTestCase):
     """B-004: `invalid_contract` reports every violation, `schema_version` included."""
 
@@ -478,24 +554,29 @@ class UsageErrorTest(ResolverTestCase):
                 self.assertNotEqual(err, "")
 
 
+def load_module():
+    """The resolver as an imported module, loaded by path (its name is hyphenated).
+
+    Reserved for the seams no subprocess run can reach: the generic failure
+    wrapper, and the emit-side guard that the parse-side guard keeps unreachable
+    from any authored contract.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("resolve_project", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class ResolverFailureTest(unittest.TestCase):
     """SF-002: the generic handler maps an unexpected exception to the closed code.
 
     No external input reaches this branch deterministically — every I/O and
     shape failure is already classified — so the seam is the wrapper itself.
-    The module is loaded by path because its filename carries a hyphen.
     """
 
-    @staticmethod
-    def load_module():
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("resolve_project", SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
     def test_an_unexpected_exception_becomes_resolver_failure(self):
-        module = self.load_module()
+        module = load_module()
         original = module.load_contract
         # A sentinel no fixed refusal sentence can contain: the prescribed
         # message is "the resolver failed unexpectedly", so a shorter probe
@@ -515,6 +596,34 @@ class ResolverFailureTest(unittest.TestCase):
         self.assertNotIn("schema_version", payload)
         self.assertNotIn("sentinel-exception-detail", json.dumps(payload),
                          "the internal message must not leak the exception text")
+
+
+class EmitGuardTest(unittest.TestCase):
+    """COR-001: the writing side refuses a non-finite float on its own.
+
+    The parse-side guard keeps this unreachable from any authored contract,
+    which is the point — it is the second half of the check, not a duplicate
+    of the first: `emit_json` never prints a token another JSON parser would
+    reject, whatever put the value in front of it.
+    """
+
+    def test_emitting_a_non_finite_float_raises(self):
+        module = load_module()
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=repr(value)):
+                buffer = io.StringIO()
+                with self.assertRaises(ValueError):
+                    with contextlib.redirect_stdout(buffer):
+                        module.emit_json({"deploy": {"config": value}})
+                self.assertNotIn("NaN", buffer.getvalue())
+                self.assertNotIn("Infinity", buffer.getvalue())
+
+    def test_emitting_finite_values_is_unchanged(self):
+        module = load_module()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            module.emit_json({"b": 1, "a": [2.5, "x"]})
+        self.assertEqual(buffer.getvalue(), '{"a":[2.5,"x"],"b":1}\n')
 
 
 class CommittedContractTest(ResolverTestCase):
@@ -948,14 +1057,19 @@ class WriteProjectionsTest(ResolverTestCase):
     def test_a_write_preserves_the_targets_permission_bits(self):
         """The atomic replace must not narrow the mode tempfile creates at."""
         root = self.make_root(projections=False)
-        os.chmod(root / "CLAUDE.md", 0o644)
+        # 0750, a mode no other actor here produces: under the umask below a
+        # created file lands on 0644 and `tempfile` creates at 0600, so an
+        # implementation that ignored the existing target's bits — whichever
+        # of those two it fell back to — fails this assertion instead of
+        # matching it by coincidence (COR-004).
+        os.chmod(root / "CLAUDE.md", 0o750)
         # The child inherits this umask, so the created target's mode is a
         # fixed expectation rather than whatever the machine happens to set.
         previous = os.umask(0o022)
         self.addCleanup(os.umask, previous)
         self.assertEqual(self.write(root)[0], 0)
         kept = (root / "CLAUDE.md").stat().st_mode & 0o777
-        self.assertEqual(oct(kept), oct(0o644))
+        self.assertEqual(oct(kept), oct(0o750))
         created = (root / "AGENTS.md").stat().st_mode & 0o777
         self.assertEqual(oct(created), oct(0o644))
         self.assertTrue(created & stat.S_IRGRP and created & stat.S_IROTH,

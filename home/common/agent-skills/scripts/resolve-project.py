@@ -318,6 +318,23 @@ def discover_root(repo_root: str | None) -> Path:
     raise not_onboarded()
 
 
+class NonFiniteNumber(Exception):
+    """A bare `NaN`, `Infinity` or `-Infinity` token in the authored JSON."""
+
+
+def reject_non_finite(token: str) -> object:
+    """`parse_constant` for `json.loads`: the three bare tokens are refused.
+
+    Python's decoder accepts them as an extension, and `deploy.config` is an
+    unconstrained dict, so an accepted token would travel through validation
+    untouched and land in a snapshot that no standards JSON parser can read —
+    from a tool whose whole contract is that its output can be trusted. The
+    emit side carries the matching `allow_nan=False` guard instead of relying
+    on this one: the boundary is checked from both directions.
+    """
+    raise NonFiniteNumber(token)
+
+
 def load_contract(root: Path) -> dict:
     """Read and parse the authored contract, or refuse with `contract.parse`."""
     def refuse(message: str) -> ContractError:
@@ -334,7 +351,12 @@ def load_contract(root: Path) -> dict:
     except UnicodeDecodeError:
         raise refuse(".agents/project.json is not valid UTF-8") from None
     try:
-        source = json.loads(text)
+        source = json.loads(text, parse_constant=reject_non_finite)
+    except NonFiniteNumber:
+        raise refuse(
+            ".agents/project.json holds NaN, Infinity or -Infinity, which "
+            "JSON has no value for"
+        ) from None
     except json.JSONDecodeError:
         raise refuse(".agents/project.json is not valid JSON") from None
     if not isinstance(source, dict):
@@ -488,11 +510,13 @@ def validate_commands(commands: dict, violations: list[dict]) -> None:
                 violations.append(violation(
                     f"{pointer}/argv", "must name at least one executable",
                     "contract.commands.empty_argv"))
+            # Every word is a non-empty string, at its own pointer: an empty
+            # `argv[0]` names no executable and an empty later word is an
+            # argument the callee cannot have meant, so both are as broken as
+            # the empty `argv` list above.
             for index, word in enumerate(entry["argv"]):
-                if not isinstance(word, str):
-                    violations.append(violation(
-                        f"{pointer}/argv/{index}", "must be a string",
-                        "contract.commands.not_string"))
+                check_string(
+                    word, f"{pointer}/argv/{index}", "commands", violations)
         if "cwd" in entry:
             check_safe_path(entry["cwd"], f"{pointer}/cwd", "commands", violations)
         if "env" in entry and check_list(
@@ -849,8 +873,29 @@ def build_snapshot(root: Path, source: dict) -> dict:
 
 
 def unavailable_reason(entry: dict) -> str:
-    """The repair-id suffix a non-available capability contributes."""
-    return entry["reason_code"] if entry["state"] == "blocked" else "unsupported"
+    """The repair-id suffix a non-available capability contributes.
+
+    Each of the three states is named. `available` never reaches here — only
+    an offending entry is asked for a reason — and a state outside the closed
+    set is a bug in this module, so both raise rather than defaulting to a
+    plausible-looking `unsupported`.
+    """
+    state = entry["state"]
+    if state == "blocked":
+        return entry["reason_code"]
+    if state == "unsupported":
+        return "unsupported"
+    raise ValueError(f"unknown capability state: {state!r}")
+
+
+def unavailable_message(entry: dict) -> str:
+    """The violation message a non-available capability contributes."""
+    state = entry["state"]
+    if state == "blocked":
+        return f"required capability is blocked: {entry['reason_code']}"
+    if state == "unsupported":
+        return "required capability is unsupported by this project"
+    raise ValueError(f"unknown capability state: {state!r}")
 
 
 def raise_for_unavailable(required: list[str] | None, capabilities: dict) -> None:
@@ -870,11 +915,7 @@ def raise_for_unavailable(required: list[str] | None, capabilities: dict) -> Non
     violations = [
         {
             "pointer": f"/capabilities/{name}",
-            "message": (
-                f"required capability is blocked: {entry['reason_code']}"
-                if entry["state"] == "blocked"
-                else "required capability is unsupported by this project"
-            ),
+            "message": unavailable_message(entry),
         }
         for name, entry in offending
     ]
@@ -1107,7 +1148,11 @@ def raise_for_projection_violations(violations: list[dict]) -> None:
 
 
 def emit_json(value: object) -> int:
-    json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
+    # `allow_nan=False`: the parse side already refuses the three non-finite
+    # tokens, and this is the second half of that check — nothing this tool
+    # prints is JSON another parser would reject.
+    json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"),
+              allow_nan=False)
     sys.stdout.write("\n")
     return 0
 
