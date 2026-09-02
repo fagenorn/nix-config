@@ -628,3 +628,163 @@ def resolve_trials(manifest, loader=load_record):
     if diagnostics:
         return None, sorted(diagnostics)
     return {"cases": _assemble(resolved)}, []
+
+
+# --- The #70 gate (D13, D21) -------------------------------------------------
+
+CONTEXT_SAVE_PCT = 10.0        # a drop of at least this many percent saves
+CONTEXT_SAVE_TOKENS = 500      # ... or a drop of at least this many tokens
+CONTEXT_RISE_PCT = 2.0         # a rise must exceed both of these to breach
+CONTEXT_RISE_TOKENS = 128
+QUALITY_DROP_POINTS = 5.0      # a drop of more than this vetoes (one-sided, D13)
+CHECKS_OPS_DROP_PCT = 20.0
+MAINTENANCE_DROP_PCT = 50.0
+
+
+def _rise_exceeds(delta_tokens, delta_pct, limit_pct):
+    """The one place a zero base median is judged: any rise from nothing exceeds."""
+    if delta_pct is None:
+        return delta_tokens > 0
+    return delta_pct > limit_pct
+
+
+def _dropped_at_least(base, candidate, limit_pct):
+    """A drop from `base` to `candidate` of at least `limit_pct` percent."""
+    return base > 0 and 100 * (base - candidate) / base >= limit_pct
+
+
+def context_saves(delta_tokens, delta_pct):
+    """Contract: a three-trial median drop of >=500 tokens OR >=10 percent."""
+    return (delta_tokens <= -CONTEXT_SAVE_TOKENS
+            or (delta_pct is not None and delta_pct <= -CONTEXT_SAVE_PCT))
+
+
+def context_breaches(delta_tokens, delta_pct):
+    """Contract: the no-regression bound is conjunctive — >128 tokens AND >2 percent."""
+    return (delta_tokens > CONTEXT_RISE_TOKENS
+            and _rise_exceeds(delta_tokens, delta_pct, CONTEXT_RISE_PCT))
+
+
+def quality_fails(quality):
+    """Contract: the hard veto — every critical criterion, and a one-sided bound (D13).
+
+    `evaluator_stability` is deliberately unread; instability resolves upstream (D37).
+    """
+    if not quality:
+        return True
+    if quality.get("critical_all_pass") is not True:
+        return True
+    median = quality["noncritical_median"]
+    return median["base"] - median["candidate"] > QUALITY_DROP_POINTS
+
+
+def checks_save(checks):
+    """Contract: no static fallback check survives, and preflight ops drop >=20%.
+
+    An absent declaration means the gate cannot fire, never that it passes (D11).
+    """
+    if not checks:
+        return False
+    static = checks["static_fallback_checks"]
+    ops = checks["discovery_preflight_ops"]
+    return (static["candidate"] == 0 and static["base"] > 0
+            and _dropped_at_least(ops["base"], ops["candidate"], CHECKS_OPS_DROP_PCT))
+
+
+def maintenance_saves(maintenance):
+    """Contract: manual update sites drop >=50% and >=1, with no new hand-authored
+    projection. An absent declaration means the gate cannot fire (D11).
+    """
+    if not maintenance:
+        return False
+    if maintenance["new_hand_authored_projections"] != 0:
+        return False
+    sites = maintenance["manual_update_sites"]
+    return (sites["base"] - sites["candidate"] >= 1
+            and _dropped_at_least(sites["base"], sites["candidate"],
+                                  MAINTENANCE_DROP_PCT))
+
+
+def _pairs(context):
+    """(delta_tokens, delta_pct) per index-aligned trial pair (D30)."""
+    trials = context["trials"]
+    pairs = []
+    for base, candidate in zip(trials["base"], trials["candidate"]):
+        delta = candidate["input_total"] - base["input_total"]
+        pairs.append((delta, 100 * delta / base["input_total"]
+                      if base["input_total"] else None))
+    return pairs
+
+
+def straddling_cases(evidence):
+    """Contract: sorted (case_index, case_id, stratum) for every case whose pairs
+    cross both sides of the context gate — at three pairs and at ten alike (D21).
+    """
+    straddling = []
+    for index, case in enumerate(evidence["cases"]):
+        for stratum, block in case["strata"].items():
+            pairs = _pairs(block["context"])
+            if (any(context_saves(*pair) for pair in pairs)
+                    and any(context_breaches(*pair) for pair in pairs)):
+                straddling.append((index, case["case_id"], stratum))
+    return sorted(straddling)
+
+
+def _declared_axis(blocks, key, saves):
+    """One optional-declaration axis over a stratum's cases: which fire, and whether."""
+    firing = [case_id for case_id, block in blocks if saves(block[key])]
+    return {"fired": bool(firing), "cases": firing}
+
+
+def gate_results(evidence):
+    """Contract: the bundle's `gates` block — every axis reported per stratum."""
+    cases = evidence["cases"]
+    failing = sorted(f"{case['case_id']}/{stratum}"
+                     for case in cases
+                     for stratum, block in case["strata"].items()
+                     if quality_fails(block["quality"]))
+
+    context, checks, maintenance = {}, {}, {}
+    for stratum in STRATA:
+        blocks = [(case["case_id"], case["strata"][stratum]) for case in cases
+                  if stratum in case["strata"]]
+        saving = [case_id for case_id, block in blocks
+                  if context_saves(block["context"]["delta_tokens"],
+                                   block["context"]["delta_pct"])]
+        breaching = [case_id for case_id, block in blocks
+                     if context_breaches(block["context"]["delta_tokens"],
+                                         block["context"]["delta_pct"])]
+        context[stratum] = {"fired": bool(saving) and not breaching,
+                            "saving_cases": saving, "breaching_cases": breaching}
+        checks[stratum] = _declared_axis(blocks, "checks", checks_save)
+        maintenance[stratum] = _declared_axis(blocks, "maintenance",
+                                              maintenance_saves)
+
+    cross = {}
+    for stratum in STRATA:
+        other = any(context[name]["breaching_cases"]
+                    for name in STRATA if name != stratum)
+        cross[stratum] = {"qualifies": not other, "other_breaches": other}
+
+    return {"quality": {"passed": not failing, "failing": failing},
+            "context": context, "checks": checks, "maintenance": maintenance,
+            "cross_stratum": cross}
+
+
+def decide(evidence):
+    """Contract: the sole verdict authority. Takes the resolved evidence and
+    nothing else — no authorization block, no manifest, no clock (D14)."""
+    if not evidence or not evidence.get("cases"):
+        return "unmeasured"
+    if straddling_cases(evidence):
+        return "unmeasured"
+    gates = gate_results(evidence)
+    if not gates["quality"]["passed"]:
+        return "rejected"
+    for stratum in STRATA:
+        if not gates["cross_stratum"][stratum]["qualifies"]:
+            continue
+        if any(gates[axis][stratum]["fired"]
+               for axis in ("context", "checks", "maintenance")):
+            return "approved"
+    return "rejected"

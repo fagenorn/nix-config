@@ -375,5 +375,157 @@ class ResolveTrialsTest(unittest.TestCase):
         self.assertIn("RUN_NOT_FOUND", codes)
 
 
+def context(base, candidate, base_trials=None, candidate_trials=None):
+    delta = candidate - base
+    return {"base_median": base, "candidate_median": candidate,
+            "delta_tokens": delta,
+            "delta_pct": (100 * delta / base) if base else None,
+            "trials": {
+                "base": [{"run_id": f"b{i}", "record_id": "sha256:x",
+                          "generated_at": "2026-09-02T00:00:00Z", "outcome": "completed",
+                          "input_total": total, "peak_ctx": total}
+                         for i, total in enumerate(base_trials or [base] * 3)],
+                "candidate": [{"run_id": f"c{i}", "record_id": "sha256:x",
+                               "generated_at": "2026-09-02T00:00:00Z", "outcome": "completed",
+                               "input_total": total, "peak_ctx": total}
+                              for i, total in enumerate(candidate_trials or [candidate] * 3)]}}
+
+
+def quality(base=87.0, candidate=87.0, critical=True, stability="stable"):
+    return {"critical_all_pass": critical, "evaluator_stability": stability,
+            "noncritical_median": {"base": base, "candidate": candidate}}
+
+
+def stratum(ctx, qual=None, checks=None, maintenance=None):
+    return {"context": ctx, "quality": qual or quality(),
+            "checks": checks, "maintenance": maintenance}
+
+
+def evidence(*case_specs):
+    """Each spec is (case_id, case_class, {stratum: stratum_dict})."""
+    return {"cases": [{"case_id": cid, "case_class": klass, "strata": strata}
+                      for cid, klass, strata in case_specs]}
+
+
+def flat(claude, codex=None):
+    """One case, both strata; `codex` defaults to a flat no-change stratum."""
+    return evidence(("c1", "cold-resolution",
+                     {"claude": claude, "codex": codex or stratum(context(1000, 1000))}))
+
+
+class GatePrimitiveTest(unittest.TestCase):
+    def test_context_saving_boundaries(self):
+        self.assertTrue(gate.context_saves(-500, -1.0))       # exactly 500 tokens
+        self.assertTrue(gate.context_saves(-100, -10.0))      # exactly 10 percent
+        self.assertFalse(gate.context_saves(-499, -9.99))
+        self.assertFalse(gate.context_saves(0, 0.0))
+        self.assertFalse(gate.context_saves(-400, None))      # zero base median
+
+    def test_context_regression_bound_is_conjunctive(self):
+        self.assertFalse(gate.context_breaches(129, 2.0))     # exactly 2 percent
+        self.assertFalse(gate.context_breaches(128, 2.1))     # exactly 128 tokens
+        self.assertTrue(gate.context_breaches(129, 2.1))
+        self.assertTrue(gate.context_breaches(400, None))     # zero base median, rose
+
+    def test_quality_fails_ignores_the_stability_declaration(self):
+        # instability is Task 3's EVALUATOR_UNSTABLE, not a quality veto (D37)
+        self.assertFalse(gate.quality_fails(quality(stability="unstable")))
+
+    def test_quality_bound_is_one_sided(self):
+        self.assertFalse(gate.quality_fails(quality(87.0, 82.0)))   # exactly 5 points
+        self.assertTrue(gate.quality_fails(quality(87.0, 81.9)))
+        self.assertFalse(gate.quality_fails(quality(80.0, 95.0)))   # candidate is better
+        self.assertTrue(gate.quality_fails(quality(87.0, 87.0, critical=False)))
+
+    def test_checks_gate_boundaries(self):
+        fires = {"static_fallback_checks": {"base": 3, "candidate": 0},
+                 "discovery_preflight_ops": {"base": 100, "candidate": 80}}
+        self.assertTrue(gate.checks_save(fires))                     # exactly 20 percent
+        self.assertFalse(gate.checks_save(None))
+        self.assertFalse(gate.checks_save(dict(fires, discovery_preflight_ops={
+            "base": 100, "candidate": 81})))
+        self.assertFalse(gate.checks_save(dict(fires, static_fallback_checks={
+            "base": 0, "candidate": 0})))                            # nothing disappeared
+        self.assertFalse(gate.checks_save(dict(fires, static_fallback_checks={
+            "base": 3, "candidate": 1})))                            # not every invocation
+
+    def test_maintenance_gate_boundaries(self):
+        fires = {"manual_update_sites": {"base": 8, "candidate": 4},
+                 "new_hand_authored_projections": 0}
+        self.assertTrue(gate.maintenance_saves(fires))               # exactly 50 percent
+        self.assertFalse(gate.maintenance_saves(None))
+        self.assertFalse(gate.maintenance_saves(dict(fires, manual_update_sites={
+            "base": 8, "candidate": 5})))
+        self.assertFalse(gate.maintenance_saves(dict(fires, manual_update_sites={
+            "base": 1, "candidate": 1})))                            # no site removed
+        self.assertFalse(gate.maintenance_saves(dict(
+            fires, new_hand_authored_projections=1)))
+
+
+class DecideTest(unittest.TestCase):
+    def test_context_saving_with_a_clean_other_stratum_is_approved(self):
+        self.assertEqual(gate.decide(flat(stratum(context(1000, 800)))), "approved")
+
+    def test_no_gate_fires_is_rejected(self):
+        self.assertEqual(gate.decide(flat(stratum(context(1000, 999)))), "rejected")
+
+    def test_quality_veto_beats_a_firing_gate(self):
+        vetoed = stratum(context(1000, 800), quality(87.0, 70.0))
+        self.assertEqual(gate.decide(flat(vetoed)), "rejected")
+
+    def test_a_regression_elsewhere_in_the_same_stratum_blocks_the_saving(self):
+        both = evidence(
+            ("c1", "cold-resolution", {"claude": stratum(context(1000, 800)),
+                                       "codex": stratum(context(1000, 1000))}),
+            ("c2", "routine-issue", {"claude": stratum(context(1000, 1200)),
+                                     "codex": stratum(context(1000, 1000))}))
+        self.assertEqual(gate.decide(both), "rejected")
+
+    def test_a_regression_in_the_other_stratum_blocks_the_saving(self):
+        blocked = flat(stratum(context(1000, 800)),
+                       codex=stratum(context(1000, 1200)))
+        self.assertEqual(gate.decide(blocked), "rejected")
+
+    def test_checks_and_maintenance_gates_can_carry_an_approval_alone(self):
+        checks = stratum(context(1000, 1000), checks={
+            "static_fallback_checks": {"base": 3, "candidate": 0},
+            "discovery_preflight_ops": {"base": 40, "candidate": 25}})
+        self.assertEqual(gate.decide(flat(checks)), "approved")
+        upkeep = stratum(context(1000, 1000), maintenance={
+            "manual_update_sites": {"base": 8, "candidate": 3},
+            "new_hand_authored_projections": 0})
+        self.assertEqual(gate.decide(flat(upkeep)), "approved")
+
+    def test_straddling_pairs_are_unmeasured_and_dominate_the_quality_veto(self):
+        straddle = stratum(context(1000, 1000,
+                                   base_trials=[1000, 1000, 1000],
+                                   candidate_trials=[400, 1400, 1200]),
+                           quality(87.0, 60.0))
+        self.assertEqual(gate.straddling_cases(flat(straddle)),
+                         [(0, "c1", "claude")])
+        self.assertEqual(gate.decide(flat(straddle)), "unmeasured")
+
+    def test_ten_pairs_straddle_exactly_as_three_do(self):
+        base = [1000] * 10
+        candidate = [400] + [1400] * 9
+        straddle = stratum(context(1000, 1400, base, candidate))
+        self.assertEqual(gate.decide(flat(straddle)), "unmeasured")
+
+    def test_empty_or_absent_evidence_is_unmeasured(self):
+        self.assertEqual(gate.decide({"cases": []}), "unmeasured")
+        self.assertEqual(gate.decide(None), "unmeasured")
+
+    def test_gate_results_report_every_axis(self):
+        gates = gate.gate_results(flat(stratum(context(1000, 800))))
+        self.assertEqual(set(gates),
+                         {"quality", "context", "checks", "maintenance", "cross_stratum"})
+        self.assertTrue(gates["quality"]["passed"])
+        self.assertTrue(gates["context"]["claude"]["fired"])
+        self.assertFalse(gates["context"]["codex"]["fired"])
+        self.assertEqual(gates["context"]["claude"]["saving_cases"], ["c1"])
+        self.assertEqual(gates["context"]["claude"]["breaching_cases"], [])
+        self.assertTrue(gates["cross_stratum"]["claude"]["qualifies"])
+
+
 if __name__ == "__main__":
     unittest.main()
