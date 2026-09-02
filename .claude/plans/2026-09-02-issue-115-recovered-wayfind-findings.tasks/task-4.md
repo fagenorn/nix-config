@@ -296,11 +296,59 @@ and Steps 4-5 re-run.
 
 ---
 
-**Amendment (2026-09-02, D22).** This task ran and is committed. Two of its
-rules above were written under the superseded one-file-per-ticket architecture
-and are now read through D22: a coverage row's fourth column and a
-`## Seam roster` `Detail` cell name a heading in the same document **package**,
-which is the root when the heading stayed there and
-`<member repo-relative path> § <heading text>` when Task 5's decomposition moved
-it. Nothing this task produced is withdrawn; only where a reader looks for it
-can change. See the plan root's `## Amendment log`.
+**Amendment (2026-09-02, D22). This task is reopened; it is not complete.**
+
+Steps 1–6 above ran and their document is committed at `7edbe6b`, but this
+task's mandatory review was never dispatched, because `review-package` refuses
+an individually oversized handwritten file diff and this document's whole-file
+diff is 74,501 bytes against a 65,536-byte cap. The remaining work below is the
+decomposition that makes the same content reviewable. Two rules above are now
+read through D22: a coverage row's fourth column and a `## Seam roster`
+`Detail` cell name a heading in the same document **package** — the root when
+the heading stayed there, and `<member repo-relative path> § <heading text>`
+when Step 7 moves it. Nothing Steps 1–6 produced is withdrawn; only where a
+reader looks for it can change. The spec's `## Amendment log` records the
+back-up from Phase 6 to planning that produced D22.
+
+**Read Task 5 before starting Step 7.** It decomposes the #61 document under
+the same D22 conventions, and its Steps 1–6 are the procedure — pinned
+`MOVE_BASE`, recorded baseline line ranges, byte-identical extraction from the
+baseline rather than the working tree, and the G1–G5 gate block including the
+`cmp` proof and the `--output` form of V6. Follow that procedure exactly here,
+substituting this document. Everything Task 5 states as an invariant — only
+bulk evidence moves, no synthesis or conclusion leaves the root, the root keeps
+its exact linked path and canonical section order, every member is reachable and
+self-describing, coverage rows are rewritten to the `§` form — binds this task
+identically.
+
+- [ ] **Step 7: decompose this document into a root plus evidence members.**
+      `DOC=.claude/specs/2026-08-20-release-lifecycle-seams-research.md`. The
+      per-release-unit mechanics under
+      `## Release-unit mechanics, project by project` are the natural cut: they
+      are field-by-field recording sections, which D22 admits as bulk evidence
+      whether tabular or prose, and they are the bulk of the file. Confirm that
+      against the live headings rather than assuming, and leave in the root
+      every synthesis and conclusion those sections feed — including
+      `## Identity and evidence, per release unit` and `## The rollback
+      spectrum`, which are argument, not enumeration.
+
+      **This root carries a tighter target than V6's cap: at most 35,000 bytes
+      when this task ends.** Task 6 appends four more sections to it — the
+      enforcement seam, the five durable-state seams, the prototype references
+      and the #86 correction — and that target is what leaves them room. It is a
+      target this task measures directly with `wc -c`, because V6 checks only
+      the 65,536-byte cap and would pass a root too full for Task 6.
+
+      Rewrite every `## Seam roster` `Detail` cell whose section moved into the
+      `<member path> § <heading>` form, alongside the coverage rows.
+
+- [ ] **Step 8: run Task 5's G1–G5 gate block against this document,** plus
+      `wc -c "$DOC"` against the 35,000-byte target. Then commit.
+
+- [ ] **Step 9: report** exactly what Task 5's Step 6 requires, plus the root's
+      final byte count.
+
+**Verification for the reopened work:** G1–G5 pass for this document, the root
+is at or under 35,000 bytes, and G2's `cmp` output appears in the report. The
+review that follows this task covers Steps 1–6's document content as well as the
+decomposition; it is the independent review Steps 1–6 never received.

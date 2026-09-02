@@ -1,134 +1,145 @@
-# Task 5: decompose the #61 and #80 documents into root-plus-evidence-member packages
+# Task 5: decompose the #61 document into a root-plus-evidence-member package
 
 **Files:**
-- Modify: `.claude/specs/2026-08-20-agent-fallback-inventory-research.md` (#61 root)
-- Modify: `.claude/specs/2026-08-20-release-lifecycle-seams-research.md` (#80 root)
+- Modify: `.claude/specs/2026-08-20-agent-fallback-inventory-research.md` (the #61 root)
 - Create: one or more members under
   `.claude/specs/2026-08-20-agent-fallback-inventory-research.evidence/`
-- Create: one or more members under
-  `.claude/specs/2026-08-20-release-lifecycle-seams-research.evidence/`
 - Test: none — this repository has no test suite for documentation. The task's
-  gates are the shell blocks in Step 4, run from the worktree root.
+  gates are the shell blocks in Step 5, run from the worktree root.
 
-**Why this task exists.** Read the plan root's `## Amendment log` before
-starting. This is not a content task. Tasks 1–4 produced correct, reviewed
-documents that the mandatory final two-axis review cannot package, because
-`review-package` refuses an individually oversized handwritten file diff and has
-no remediation for that violation. Your job is to change the *delivery shape*
-so the same content becomes reviewable, and to change nothing else.
+**Why this task exists.** Read the spec's `## Amendment log` and D22 before
+starting. This is not a content task. Task 2 produced a correct, reviewed
+document that the mandatory final two-axis review cannot package, because
+`review-package` shards a diff into whole files and refuses an individually
+oversized handwritten file diff with no remediation available. Measured over
+the merge base at `7edbe6b`, this document's whole-file diff is 80,800 bytes
+against a 65,536-byte per-member cap. Your job is to change the *delivery shape*
+so the same bytes become reviewable, and to change nothing else. Task 4 does the
+same for the #80 document; this task and that one share the D22 conventions and
+must produce the same shapes.
 
 **Interfaces:**
 
-- Consumes: the plan root's `## Global Constraints` (especially
-  **Coverage-table shape** and **Review-package bound**), its `## Test seams`
-  V1, V2 and V6, and spec rows D3, D12, D19 and D22.
-- Produces, for Task 6 to extend: a #80 root small enough to receive Task 6's
-  four sections and stay under the 55,000-byte bound, and an evidence-member
-  convention Task 6 follows for its own bulk evidence.
+- Consumes: the spec's D3, D12, D19 and D22; the plan root's `## Global
+  Constraints` (especially **Coverage-table shape** and **Review-package
+  bound**) and its `## Test seams` V1, V2 and V6.
+- Produces: a #61 package whose root and every member pass V6, and the pointer,
+  member-header and coverage-reference conventions Task 4 and Task 6 reuse.
 
 **Invariants:**
 
-- **No sentence changes meaning.** Every block you relocate moves
-  byte-identical, apart from heading-level normalisation where a `###` becomes
-  the member's own `##`. You are not rewriting, summarising, correcting or
-  extending any finding. If you believe a sentence is wrong, do not fix it —
-  record it in your report and leave it. Five fix rounds settled this prose and
-  a silent edit here would be indistinguishable from the failure this issue
-  exists to repair.
-- **No published number moves.** Every count, byte figure, percentage and total
-  keeps its value. After the move, re-grep each root for the figures it still
-  cites and confirm each still resolves to content the reader can reach.
-- **The roots keep their paths and their conclusions.** The two roots stay at
-  the exact paths #61's and #80's resolution comments link. A root always keeps,
-  in the canonical order, `## Provenance`, `## Research question`,
+- **No sentence changes meaning.** Every relocated block moves byte-identical,
+  apart from the heading-level normalisation Step 3 permits. You are not
+  rewriting, summarising, correcting or extending any finding. If you believe a
+  sentence is wrong, do not fix it — record it in your report and leave it. Five
+  fix rounds settled this prose; a silent edit here would be indistinguishable
+  from the failure this issue exists to repair. Step 5's `cmp` gate is what
+  proves this, not your reading.
+- **Only bulk evidence moves** (per D22): a per-hit adjudication map, a
+  per-invocation appendix, or a comparable block whose value is enumeration
+  rather than argument. A member never carries a synthesis, a conclusion, or a
+  sentence the document reasons from.
+- **The root keeps its path and its argument.** It stays at
+  `.claude/specs/2026-08-20-agent-fallback-inventory-research.md`, the exact
+  path #61's resolution comment links, and keeps in canonical order
+  `## Provenance`, `## Research question`,
   `## Coverage of the resolution summary`, `## Unverified inheritance`, every
-  synthesis and conclusion sentence, and `## What this document does not decide`
-  last. Only bulk evidence — per-hit maps, per-invocation appendices, per-unit
-  recording tables — is eligible to move.
-- **Every member is reachable and self-describing.** At the point a block leaves
-  a root, the root keeps a heading and a pointer line naming the member's
-  repo-relative path and what it contains, so no reader hits a gap. Each member
-  opens with a one-paragraph header naming its root, stating that it is an
-  evidence member of that document and carries no conclusion of its own, and
-  declaring the same `2026-09-02` re-derivation provenance the root declares
-  (per D1 — a member found on its own must not read as an independent finding).
+  synthesis and conclusion, and `## What this document does not decide` last.
+- **Every member is reachable and self-describing.** Where a block leaves the
+  root, the root keeps a heading plus a pointer line naming the member's
+  repo-relative path and what it holds, so no reader hits a gap. Each member
+  opens with a one-paragraph header naming its root, stating it is an evidence
+  member carrying no conclusion of its own, and declaring the same 2026-09-02
+  re-derivation provenance the root declares (per D1) — a member found alone
+  must not read as an independent finding.
 - **Coverage rows point at what discharges them.** Where a discharging heading
-  moves into a member, that coverage row's fourth column becomes
+  moves into a member, that row's fourth column becomes
   `<member repo-relative path> § <verbatim heading text>` (per D22). Where the
-  heading stays in the root, the row is untouched. The same rule applies to the
-  #80 `## Seam roster` table's `Detail` column, which Task 4 built under the
-  superseded in-the-same-document rule.
-- **Byte bounds.** After this task, every file this branch adds has a
-  whole-file diff over the merge base of at most **55,000 bytes**. The #80 root
-  is additionally held to at most **35,000 bytes**, because Task 6 still has
-  four sections to append to it.
+  heading stays in the root, the row is untouched.
+- **Byte bounds.** V6 is the arbiter and the only bound this task asserts: after
+  this task every file the branch adds must satisfy it. Aim to land the root and
+  each member near 45,000–55,000 bytes rather than just under the 65,536-byte
+  cap: shards hold whole files, so slack is what keeps the package inside its
+  eight-shard limit once Task 6 adds its content.
 - Commits are SSH-signed and carry the
   `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` trailer. Never pass
   `--no-gpg-sign`.
 
 **Steps:**
 
-- [ ] **Step 1 — measure before touching anything.** From the worktree root,
-      record the merge base and each file's current whole-file diff size:
+- [ ] **Step 1 — pin the baseline.** Before editing anything:
 
+      MOVE_BASE=$(git rev-parse HEAD)
       MB=$(git merge-base origin/main HEAD)
-      for f in $(git diff --name-only "$MB"..HEAD); do
-        printf '%s %s\n' "$(git diff --no-ext-diff --binary -U10 "$MB"..HEAD -- "$f" | wc -c)" "$f"
-      done | sort -rn
+      DOC=.claude/specs/2026-08-20-agent-fallback-inventory-research.md
+      git diff --no-ext-diff --binary -U10 "$MB"..HEAD -- "$DOC" | wc -c
 
-      Two files exceed 65,536. Those two are your only subjects. Write the
-      starting numbers into your report.
+      Record `MOVE_BASE`, `MB` and that byte count in your report. `MOVE_BASE`
+      is the immutable copy every later comparison reads; never compare against
+      the working tree.
 
-- [ ] **Step 2 — choose the cuts.** For each of the two roots, list its
-      `##`/`###` headings with their byte extents, then choose the smallest set
-      of bulk-evidence blocks whose removal brings the root under its bound.
-      Prefer few, large, self-contained blocks over many small ones: each member
-      is a whole file to the shard packer, and the whole-branch package must
-      still fit eight shards. For #80, the per-release-unit mechanics detail is
-      the natural member and is what makes the 35,000-byte root bound
-      reachable. For #61, the per-hit adjudication map and the measured-range
-      appendix are the natural members. Do not cut a block that contains a
-      synthesis or conclusion sentence; if a candidate block mixes evidence and
-      conclusion, leave the conclusion in the root and move only the table.
-      Record the chosen cuts and their sizes in your report before editing.
+- [ ] **Step 2 — choose the cuts.** List the document's `##`/`###` headings with
+      their exact line ranges, then choose the smallest set of bulk-evidence
+      blocks whose removal brings the root inside the bound. Prefer few large
+      self-contained blocks: each member is a whole file to the shard packer.
+      The per-hit adjudication map and the measured-range appendix under
+      `## Attributable prompt size and repeated execution cost` are the obvious
+      candidates; confirm that against the live headings rather than assuming.
+      Do not cut a block containing a synthesis or conclusion — if a candidate
+      mixes evidence and conclusion, leave the conclusion in the root and move
+      only the enumeration. Record each cut as an exact `start,end` line range
+      **in `MOVE_BASE`** before you edit, and put the ranges in your report.
 
-- [ ] **Step 3 — perform the moves.** For each cut: create the member, write its
-      header paragraph, append the block byte-identical, and replace the block
-      in the root with its retained heading plus the pointer line. Then update
-      every coverage row and every `## Seam roster` `Detail` cell whose heading
-      moved, and every in-document cross-reference that named a moved heading.
-      Commit each document's decomposition separately, so a reviewer can read
-      one at a time.
+- [ ] **Step 3 — perform the moves.** For each cut, in order: create the member,
+      write its header paragraph, then append the block extracted from
+      `MOVE_BASE` — not from the working tree. The only edit permitted inside a
+      moved block is demoting or promoting its own heading markers so the
+      member's top heading is `##`; every other byte is carried across
+      unchanged. Replace the block in the root with its retained heading plus
+      the pointer line.
 
-- [ ] **Step 4 — verify.** All four blocks must pass before you report DONE.
+- [ ] **Step 4 — update the references.** Rewrite every coverage row whose
+      discharging heading moved, into the `<member path> § <heading>` form, and
+      every in-document cross-reference that named a moved heading. Commit.
 
-      # V1 — the four linked roots still resolve at this commit
-      for p in .claude/specs/2026-08-20-cross-agent-project-surfaces-research.md \
-               .claude/specs/2026-08-20-agent-fallback-inventory-research.md \
-               .claude/specs/2026-08-20-project-knowledge-inventory-research.md \
-               .claude/specs/2026-08-20-release-lifecycle-seams-research.md; do
-        git show "HEAD:$p" > /dev/null || echo "MISSING $p"
-      done
+- [ ] **Step 5 — verify.** All four gates must pass before you report DONE.
 
-      # V2 — every coverage row's fourth column resolves to a real heading,
-      # in the root when named bare and in the member when named `path § heading`
-      # (write this check as a script in your report; it must open the named
-      # file and match the heading text character-for-character)
+      # G1 (V1) — the linked root still resolves at this commit
+      git show "HEAD:$DOC" > /dev/null || echo "FAIL: root missing"
 
-      # V6 — the decisive gate
+      # G2 (B-06) — every moved block is byte-identical to its baseline.
+      # For each recorded range START,END and its member MEMBER:
+      #   git show "$MOVE_BASE:$DOC" | sed -n "START,ENDp" > /tmp/base.block
+      #   sed -n '/^## <first heading of the moved block>$/,$p' "$MEMBER" > /tmp/moved.block
+      # Normalise ONLY the heading markers you changed in Step 3, then:
+      #   cmp /tmp/base.block /tmp/moved.block || echo "FAIL: block drifted"
+      # Write the exact commands you ran, and their output, into your report.
+
+      # G3 — the retained root is the baseline minus exactly the moved ranges.
+      # Reconstruct it: take git show "$MOVE_BASE:$DOC", delete the recorded
+      # ranges, and diff that against the committed root. Every difference must
+      # be a pointer line or a rewritten coverage/cross-reference cell, and you
+      # must list them all. Any other difference is a failure.
+
+      # G4 (V2) — every coverage row's fourth column resolves.
+      # For each row: a bare value must match a heading in the root
+      # character-for-character; a `<path> § <heading>` value must split on the
+      # first ' § ', and the heading must match a heading in that member file
+      # character-for-character. Report the row count checked and any failure.
+
+      # G5 (V6) — packageability, after the commit
+      OUT=$(mktemp -d)
       review-package .claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.md \
-        "$(git merge-base origin/main HEAD)" HEAD
+        "$(git merge-base origin/main HEAD)" HEAD --output "$OUT/v6.json"
+      # require exit 0 and budget_status within_budget, then: rm -rf "$OUT"
+      # Always pass --output: the default destination is the range the final
+      # review publishes to, and review-package publishes exclusively.
 
-      V6 must exit 0 with `budget_status` `within_budget`. Exit 3 means a file
-      is still over; exit 2 with `review package generation failed` is a stale
-      package directory from an earlier run against this same range, not a
-      budget verdict — re-run against the current `HEAD`.
+- [ ] **Step 6 — report.** Report `MOVE_BASE`, the before/after byte figures,
+      each cut with its exact baseline range and resulting member, the G2 `cmp`
+      commands and their output, the G3 difference list, the G4 row count, the
+      G5 result, and anything you noticed but deliberately did not fix.
 
-- [ ] **Step 5 — report.** Report the before and after byte table, the cuts you
-      chose and why, the coverage rows you rewrote, the V6 result, and anything
-      you noticed but deliberately did not fix.
-
-**Verification:** V1 passes for all four roots; V2 passes for every coverage row
-in both decomposed packages; V6 exits 0 with `within_budget`; `git diff` shows
-no changed sentence outside pointer lines, member headers, coverage-row fourth
-columns and roster `Detail` cells.
+**Verification:** G1–G5 all pass. G2 proves byte-identity by comparison against
+`MOVE_BASE`, not by reading; a task reporting DONE without G2's commands and
+their output in the report has not met this gate.

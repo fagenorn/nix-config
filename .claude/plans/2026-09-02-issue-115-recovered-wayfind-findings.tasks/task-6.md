@@ -14,7 +14,7 @@
   table (`A80.1`–`A80.4`), its `## Seam taxonomy`, its
   `**Terminology guards for #80**`, and rows D1–D3, D5, D7, D8, D10, D11, D12,
   D14, D16, D17, D22. From Task 4, in the same document package (its root, or
-  an evidence member if Task 5's decomposition moved it): the `## Seam roster` section
+  an evidence member if Task 4's Step 7 moved it): the `## Seam roster` section
   holding one three-column table `| Seam | Class | Detail |` whose `Class`
   column carries exactly one of `release-unit seam`, `enforcement seam`,
   `durable-state seam` and whose `Detail` column carries the verbatim text of a
@@ -78,31 +78,65 @@ test -f "$DOC" || { echo "FAIL: $DOC does not exist"; exit 1; }
 
 heads=$(grep -E '^#{2,4} ' "$DOC" | sed -E 's/^#{2,4} //')
 cov=$(awk '/^## Coverage of the resolution summary$/{f=1;next} /^## /{f=0} f' "$DOC")
-roster=$(awk '/^## Seam roster$/{f=1;next} /^## /{f=0} f' "$DOC")
+# The roster's TABLE ROWS only. Stop at the next heading of any level, so
+# `### Field definitions` — which names every class literal in its prose — is
+# outside the block, and keep only pipe-delimited rows that are not the header
+# or the separator. Grepping the whole section counts those prose mentions and
+# silently inflates every class count.
+roster=$(awk '/^## Seam roster$/{f=1;next} /^#{2,4} /{f=0} f' "$DOC" \
+  | grep '^|' | grep -v '^| *Seam *|' | grep -vE '^\|[ :|-]+\|$')
 
-# Roster class counts: 5 / 1 / 5 = eleven rows (D11).
+# Roster class counts, read from the Class column (field 3) of those rows:
+# 5 / 1 / 5 = eleven rows (D11).
 for pair in "release-unit seam:5" "enforcement seam:1" "durable-state seam:5"; do
   cls="${pair%:*}"; want="${pair##*:}"
-  got=$(printf '%s\n' "$roster" | grep -cF "$cls" || true)
+  got=$(printf '%s\n' "$roster" \
+    | awk -F'|' -v c="$cls" '{gsub(/^ +| +$/,"",$3)} $3==c' | wc -l | tr -d ' ')
   [ "$got" -eq "$want" ] || say "roster has $got '$cls' rows, expected $want"
 done
 
-# Every roster Detail column names a real heading.
-printf '%s\n' "$roster" | grep -F ' seam ' | while IFS= read -r row; do
+# One deterministic resolver for every heading reference in this package, used
+# for roster Detail cells and coverage rows alike (per D22). A bare value names
+# a heading in the root; a `<member repo-relative path> § <heading>` value
+# splits on the FIRST ' § ' and names a heading in that member file. Either way
+# the heading must match character-for-character.
+resolve() {  # $1 = reference; echoes nothing on success, a reason on failure
+  ref="$1"
+  case "$ref" in
+    *' § '*)
+      f="${ref%% § *}"; h="${ref#* § }"
+      [ -f "$f" ] || { echo "member '$f' does not exist"; return; }
+      grep -E '^#{2,4} ' "$f" | sed -E 's/^#{2,4} //' | grep -qxF -- "$h" \
+        || echo "'$h' is not a heading in $f"
+      ;;
+    *)
+      printf '%s\n' "$heads" | grep -qxF -- "$ref" \
+        || echo "'$ref' is not a heading in $DOC"
+      ;;
+  esac
+}
+
+# Every roster Detail column resolves.
+printf '%s\n' "$roster" | while IFS= read -r row; do
   det=$(printf '%s\n' "$row" | awk -F'|' '{print $4}' | sed -E 's/^ +| +$//g')
   [ -n "$det" ] || { echo "FAIL: a roster row names no Detail section"; continue; }
-  printf '%s\n' "$heads" | grep -qxF -- "$det" \
-    || echo "FAIL: roster Detail '$det' is not a heading in $DOC"
+  why=$(resolve "$det"); [ -z "$why" ] || echo "FAIL: roster Detail $why"
 done | tee "${TMPDIR:-/tmp}/roster-detail.log"
 [ ! -s "${TMPDIR:-/tmp}/roster-detail.log" ] || fail=1
 
 # Each added seam's detail section carries the four label lines.
-printf '%s\n' "$roster" | grep -F ' seam ' \
-  | grep -vF 'release-unit seam' | while IFS= read -r row; do
+printf '%s\n' "$roster" \
+  | awk -F'|' '{gsub(/^ +| +$/,"",$3)} $3=="enforcement seam" || $3=="durable-state seam"' \
+  | while IFS= read -r row; do
   det=$(printf '%s\n' "$row" | awk -F'|' '{print $4}' | sed -E 's/^ +| +$//g')
-  sec=$(awk -v h="$det" '
+  # Read the detail section out of whichever file the reference names.
+  case "$det" in
+    *' § '*) f="${det%% § *}"; h="${det#* § }" ;;
+    *)       f="$DOC";         h="$det"        ;;
+  esac
+  sec=$(awk -v h="$h" '
     $0 ~ /^#{2,4} / { if (index($0, h)) {f=1; next} else if (f) {f=0} }
-    f' "$DOC")
+    f' "$f")
   for lbl in "Locator:" "Identity:" "Evidence:" "Rollback:"; do
     line=$(printf '%s\n' "$sec" | grep -F -- "$lbl" | head -1)
     if [ -z "$line" ]; then
@@ -230,12 +264,29 @@ for d in 2026-08-20-cross-agent-project-surfaces-research \
   git show "HEAD:$S/$d.md" >/dev/null 2>&1 || say "V1: $S/$d.md is not committed at HEAD"
 done
 
-# V2 across the package: every claim ID of the spec appears in the right document.
+# V2 across the package: every claim ID appears in the right root AND its
+# fourth column resolves to a real heading — in that root when named bare, and
+# in the named evidence member when written `<member path> § <heading>` (D22).
+# Presence alone was never the seam; a row pointing at nothing covers nothing.
 check() {
   doc="$S/$1.md"; shift
-  cov=$(awk '/^## Coverage of the resolution summary$/{f=1;next} /^## /{f=0} f' "$doc")
+  cov=$(awk '/^## Coverage of the resolution summary$/{f=1;next} /^#{2,4} /{f=0} f' "$doc" \
+    | grep '^|' | grep -v '^| *ID' | grep -vE '^\|[ :|-]+\|$')
+  dheads=$(grep -E '^#{2,4} ' "$doc" | sed -E 's/^#{2,4} //')
   for id in "$@"; do
-    printf '%s\n' "$cov" | grep -qF -- "$id " || say "$doc does not cover $id"
+    row=$(printf '%s\n' "$cov" | grep -F -- "| $id " | head -1)
+    [ -n "$row" ] || { say "$doc does not cover $id"; continue; }
+    ref=$(printf '%s\n' "$row" | awk -F'|' '{print $5}' | sed -E 's/^ +| +$//g')
+    case "$ref" in
+      *' § '*)
+        f="${ref%% § *}"; h="${ref#* § }"
+        [ -f "$f" ] || { say "$doc row $id names missing member '$f'"; continue; }
+        grep -E '^#{2,4} ' "$f" | sed -E 's/^#{2,4} //' | grep -qxF -- "$h" \
+          || say "$doc row $id: '$h' is not a heading in $f" ;;
+      *)
+        printf '%s\n' "$dheads" | grep -qxF -- "$ref" \
+          || say "$doc row $id: '$ref' is not a heading in $doc" ;;
+    esac
   done
 }
 check 2026-08-20-cross-agent-project-surfaces-research C60.1 C60.2 C60.3 C60.4 C60.5
@@ -360,8 +411,14 @@ committing.
 
 - [ ] **Step 5: Commit, then run the whole-package sweep**
 
+Stage the whole #80 package, not just the root: if this task put any evidence
+into a new member, an untracked member leaves every reference to it dangling
+after the commit and the branch ships a broken package.
+
 ```bash
-git add .claude/specs/2026-08-20-release-lifecycle-seams-research.md
+git add .claude/specs/2026-08-20-release-lifecycle-seams-research.md \
+        .claude/specs/2026-08-20-release-lifecycle-seams-research.evidence/
+git status --porcelain -- .claude/specs   # must show nothing untracked
 git commit -m "$(cat <<'MSG'
 docs(specs): add the #80 enforcement and durable-state seams and the #86 correction
 
@@ -370,10 +427,24 @@ MSG
 )"
 bash "${TMPDIR:-/tmp}/gate-80b.sh"
 bash "${TMPDIR:-/tmp}/gate-package.sh"
+
+# V6 — packageability, after the commit. Always pass --output: the default
+# destination is the very range the mandatory final review publishes to, and
+# review-package publishes exclusively, so a default-path run here makes the
+# final review's own generation fail and re-running does not clear it.
+OUT=$(mktemp -d)
+review-package .claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.md \
+  "$(git merge-base origin/main HEAD)" HEAD --output "$OUT/v6.json"
+# require exit 0 and budget_status within_budget, then:
+rm -rf "$OUT"
 ```
 
-Expected: the commit is SSH-signed and succeeds; both gates print their `PASS`
-line and exit 0. AC4's `git show main:<path>` form of V1 becomes true when this
+Expected: nothing untracked under `.claude/specs`; the commit is SSH-signed and
+succeeds; both gates print their `PASS` line and exit 0; V6 exits 0 with
+`within_budget`. If V6 exits 3, this task's additions pushed a file or the
+package over — move the bulkiest new evidence into a member under
+`.claude/specs/2026-08-20-release-lifecycle-seams-research.evidence/` following
+Task 5's conventions, keeping the conclusions in the root, and re-run. AC4's `git show main:<path>` form of V1 becomes true when this
 branch merges (per D16); nothing further in this plan can assert it.
 
 - [ ] **Step 6: V5 — source-backed semantic audit (per D19)**
@@ -398,11 +469,15 @@ and Steps 4-5 re-run.
 
 ---
 
-**Amendment (2026-09-02, D22).** Task 5 decomposes the #80 document into a root
-plus evidence members before this task runs. Append your four sections to the
-**root**, keeping it within the plan's 55,000-byte review-package bound; if a
-section's evidence is bulky enough to threaten that bound, put the evidence in a
-new member under
-`.claude/specs/2026-08-20-release-lifecycle-seams-research.evidence/` following
-Task 5's convention, and keep the section's conclusions in the root. Run V6 as
-the last gate of this task, not only V1–V4.
+**Amendment (2026-09-02, D22).** Task 4's reopened Step 7 decomposes the #80
+document into a root plus evidence members before this task runs, and leaves
+that root at or under 35,000 bytes so your four sections have room. Append them
+to the **root**. If a section's evidence is bulky enough to push any file past
+V6's 65,536-byte cap, move that evidence into a new member under
+`.claude/specs/2026-08-20-release-lifecycle-seams-research.evidence/`, following
+the conventions Task 5 sets out, and keep the section's conclusions in the root.
+Every heading reference you write obeys D22's two forms — bare for a root
+heading, `<member repo-relative path> § <heading text>` for a member one — and
+Step 1's `resolve` helper is what checks them. Run V6 as the last gate of this
+task, not only V1–V4. The spec's `## Amendment log` records the back-up from
+Phase 6 to planning that produced D22.
