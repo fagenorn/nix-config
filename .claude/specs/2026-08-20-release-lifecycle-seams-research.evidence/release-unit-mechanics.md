@@ -727,9 +727,15 @@ signature an artifact previously carried, so a retired signature leaves no trace
 ad-hoc `-` with a stderr warning when no Apple Development identity is found — the
 warning itself states the consequence, that "keychain Always-Allow will NOT survive
 rebuilds; Argus.app notifications will not display" — so a machine with no identity
-produces a successfully-signed-looking release that is degraded. Separately, every
-`devenv.nix` `enterShell` build block ends in `|| true`, so a failed compile *or* a
-failed signature leaves the shell green and silent. The explicit builders are
+produces a successfully-signed-looking release that is degraded. Separately, each of
+the four `devenv.nix` `enterShell` build blocks ends in `|| true` (`devenv.nix:139-160`),
+which masks the exit *status*, not the output: every block echoes a progress line
+naming what it is building before it runs, and neither the compiler's nor `sign.sh`'s
+stderr is redirected, so a failed compile or a failed signature does print its
+diagnostic into the terminal. What `|| true` costs is detectability — the shell still
+opens green, so the only thing that reacts to a failure is the `compile && sign` chain
+inside the three blocks that have one (a failed compile skips its signature), and no
+exit status carries either failure onward. The explicit builders are
 stricter: `wa-build`, `build-wkfetch.sh` and `notifyd/build.sh` all `set -euo
 pipefail`, though `notifyd/build.sh` still degrades gracefully to `.icns`-only with
 a warning when `actool` is absent.

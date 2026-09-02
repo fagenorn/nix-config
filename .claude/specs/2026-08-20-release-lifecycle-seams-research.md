@@ -658,9 +658,11 @@ Its root is the **primary checkout, never a feature worktree**: Phase 1 requires
 `git rev-parse --git-common-dir` to be `.git` or to end in `.git`, and otherwise
 switches to the main checkout or surfaces, because a release is repo-wide (`:84`).
 Live: `ls .superpowers/workflows/ship-release/` fails with `No such file or
-directory`. By the skill's own rule that is not an absence of information — a
-present file always means an unfinished release (`:34`, `:340`) — so its absence
-means none is in flight.
+directory`. But the rule runs one way only — a present file means an unfinished
+release (`:34`, `:340`) — and Phase 0 writes it only at its end, "when neither
+resume path applies" (`:80`), so a release inside Phase 0, or one that died
+before it, leaves none. The absence rules out an unfinished release past that
+write, not one in flight.
 
 **Identity:** the *record* sense, and the record is a **singleton**: one constant
 path per repository, no run id and no release id in the name. What distinguishes one
