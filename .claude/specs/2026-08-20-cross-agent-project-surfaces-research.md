@@ -88,12 +88,15 @@ is not permitted, so each is named.
    `Method and evidence base`). Any nodo conclusion could turn on those 111
    commits. Argus's checkout is level with `origin/main` and carries no such
    caveat.
-5. **Absence verdicts are observed absence, not proof of non-existence.** Where
-   this document records a Codex project-scope mechanism as *absent*, the
-   evidence is that no such surface exists in any of the three checkouts and
-   that this repository's own Codex module routes the mechanism through user
-   scope. That is strong for these three repositories and is not a claim about
-   what Codex supports in general.
+5. **Absence verdicts are observed absence, not proof of non-existence** — and
+   this applies at **both** scopes. For a Codex *project*-scope mechanism, the
+   evidence is that no such surface exists in any of the three checkouts. For a
+   Codex *user*-scope mechanism, the evidence is a direct read of
+   `~/.codex/config.toml` on 2026-09-02 — not the silence of
+   `home/common/codex/default.nix`, which owns exactly one key of that
+   runtime-managed file and so could never witness the absence of anything else
+   in it. Both are strong for this machine and these three repositories, and
+   neither is a claim about what Codex supports in general.
 
 ## Method and evidence base
 
@@ -116,6 +119,10 @@ direct observation.
   + the checkout's observed `HEAD` + the observation date. All fleet
   observations are dated **2026-09-02** and were read without writing to,
   checking out, fetching or stashing in either checkout.
+- *Files in the user's home directory* — `~/.codex/config.toml` is the only one
+  cited here — are given by absolute path with the observation date and are
+  always labelled `user scope`. They sit outside every repository, which is
+  precisely the fact several conclusions below turn on.
 - *Settled decisions* are cited by issue number.
 
 **The two fleet checkouts, as observed on 2026-09-02:**
@@ -143,8 +150,8 @@ not counted toward a project-scope verdict.
 |---|---|---|
 | Instructions | **Present** — repo-root `CLAUDE.md` in all three repositories: `CLAUDE.md`; nodo `CLAUDE.md` (`git ls-files -s` → mode `100644`) @`7a3dab7e54`, 2026-09-02; argus `CLAUDE.md` (mode `100644`) @`20d6655223`, 2026-09-02 | **Present** — repo-root `AGENTS.md`: nodo `AGENTS.md`, tracked at mode `120000`, a symlink to `CLAUDE.md` @`7a3dab7e54`; argus `AGENTS.md`, mode `100644` @`20d6655223`. Absent in nix-config, which has no `AGENTS.md` |
 | Skills | **Present** — `.claude/skills/<name>/SKILL.md`: argus tracks three (`git ls-files .claude/skills` → one `SKILL.md` each under `adding-a-capability/`, `writing-pi-extensions/`, `writing-pi-skills/`) @`20d6655223`; nodo carries 34 untracked vendored skill directories @`7a3dab7e54`. Absent in nix-config, which has no `.claude/skills/` | **Absent** — no project-scoped Codex skill surface in any of the three checkouts; no `.codex/` directory exists in any of them. `home/common/codex/default.nix` states that "Skills reach Codex through the whole-directory links at ~/.agents/skills" — user scope |
-| Configuration | **Present** — `.claude/settings.json` and `.claude/settings.local.json`: both observed in nodo @`7a3dab7e54`. Plus the agent-neutral `.claude/skills.config.json` in nix-config and in nodo | **Absent** — no project-scoped Codex configuration file in any checkout. The only Codex configuration observed is `~/.codex/config.toml` (user scope), written by `home/common/codex/default.nix` |
-| Hooks | **Present** — a `hooks` key inside project settings: nodo `.claude/settings.json` resolves to `{"hooks": {}}` @`7a3dab7e54` — the surface exists and is empty | **Absent** — no hook surface observed at project scope, and none at user scope either: `home/common/codex/default.nix` declares only the Codex package and one `config.toml` key |
+| Configuration | **Present** — `.claude/settings.json` and `.claude/settings.local.json`: both observed in nodo @`7a3dab7e54`. Plus the agent-neutral `.claude/skills.config.json` in nix-config and in nodo | **Absent as a repository file** — no Codex configuration file exists in any of the three checkouts. The *mechanism*, however, is not absent: user-scope `~/.codex/config.toml` (read 2026-09-02) carries a **per-project configuration namespace**, 63 `[projects."<absolute path>"]` sections, and all three checkouts are registered in it. It is keyed by absolute path and lives outside every repository, so it is per-project configuration that cannot be a repository source — see the Discovery path and Gaps rows below |
+| Hooks | **Present** — a `hooks` key inside project settings: nodo `.claude/settings.json` resolves to `{"hooks": {}}` @`7a3dab7e54` — the surface exists and is empty | **Absent** — no hook surface at either scope. At project scope no Codex config file exists in any checkout. At **user scope** this is a direct read, not an inference from module silence: `~/.codex/config.toml` (281 lines, read 2026-09-02) contains no `hooks` key and no occurrence of the string `hook` at all (`grep -i hook` → no match) |
 | Plugins | **Present** — an `enabledPlugins` key inside project settings: nodo `.claude/settings.local.json` carries `"enabledPlugins": {}` @`7a3dab7e54` — the surface exists and is empty | **Absent** at project scope. At user scope Codex has plugins, but `CLAUDE.md` records that "Codex has no Nix-declared marketplace: its marketplaces and plugins are runtime-managed inside `~/.codex/config.toml`, which Nix does not own" |
 
 **Reading of this matrix.** Claude Code exposes all five mechanisms at project
@@ -175,7 +182,7 @@ base cannot settle an axis — it is not a placeholder for a conclusion omitted.
 | Axis | Claude Code | Codex |
 |---|---|---|
 | Discovery path | `.claude/skills/<name>/SKILL.md`. argus tracks three `SKILL.md` files @`20d6655223`; nodo holds 34 skill directories under `.claude/skills/` @`7a3dab7e54`, none of them tracked (`git ls-files .claude/skills` → 0; `git check-ignore -v` names `.gitignore:46:.claude/*`) | *None observed at project scope.* No `.codex/` exists in any of the three checkouts. At **user scope** the path is `~/.agents/skills/<name>/` as whole-directory links (`home/common/agent-skills/default.nix`), plus `~/.codex/skills/`, which `CLAUDE.md` records as "Codex's own runtime state" that Nix "neither populates nor prunes" |
-| Precedence | Project and user scope share **one flat name space keyed by bare skill name**. nodo `.claude/settings.local.json` @`7a3dab7e54` sets `skillOverrides` to `"off"` for names that are project-vendored (`analyzing-dotnet-performance`, present under nodo `.claude/skills/`) *and* for names present in neither nodo's `.claude/skills/` nor this repository's `home/common/agent-skills/skills/` (`design-md`, `enhance-prompt`, `weekly-review`) — so the override key is the bare name and reaches across sources. Which scope wins a name collision: *no answer in the sources read* | Not applicable at project scope (no surface). At user scope `CLAUDE.md` records a real collision hazard in the same flat name space: "a skill hand-copied there duplicates the managed `~/.agents/skills/` link of the same name and has to be removed by hand" |
+| Precedence | **Directly observed:** the `skillOverrides` keys in nodo `.claude/settings.local.json` @`7a3dab7e54` are **bare skill names**, not paths or scope-qualified identifiers, and one of them (`analyzing-dotnet-performance`) resolves to a project-scope directory under nodo `.claude/skills/` while three (`design-md`, `enhance-prompt`, `weekly-review`) resolve to nothing in nodo's `.claude/skills/` or in this repository's `home/common/agent-skills/skills/`. **Inferred, evidence level low:** that the name space is therefore *flat across scopes*, so a project skill and a user skill could collide on a name. The three unresolved names are equally consistent with stale override entries for skills that no longer exist anywhere, and nothing observed discriminates between the two explanations. Which scope wins a name collision: *no answer in the sources read* | Not applicable at project scope (no surface). At user scope `CLAUDE.md` records a real collision hazard in the same flat name space: "a skill hand-copied there duplicates the managed `~/.agents/skills/` link of the same name and has to be removed by hand" |
 | Refresh or restart | At project scope, **vendored copies do not refresh**: nodo `.claude/resync-dotnet-skills.sh` @`7a3dab7e54` states in its own header that the skills "were vendored (copied), not installed via the plugin marketplace, so they do NOT auto-update. Run this script to pull the latest upstream copies", and pins provenance as `github.com/dotnet/skills` commit `a7a744ce18951bf30a73769217abbd7165203be9`. Whether a *running* session re-reads a changed `SKILL.md`: *no answer in the sources read* | *No answer in the sources read* at project scope. At user scope, content advances only on a Home Manager activation, since every skill path is a store link (`home/common/agent-skills/default.nix`) |
 | Symlink support | **Per-file store symlinks are accepted**, at user scope: `home/common/agent-skills/default.nix` comments that "Claude accepts Home Manager's recursive file links, so its generated multi-file skill can continue to use that layout", and `.claude/skills/ui-ux-pro-max` is declared with `recursive = true`; `programs.claude-code.skillsDir` feeds the same authored tree. At **project scope**, zero symlinks exist under `.claude/skills` in either fleet checkout (`find .claude/skills -maxdepth 2 -type l` → 0 in nodo; none in argus), so project-scope symlink support is **unobserved**, not confirmed | **A symlinked `SKILL.md` is ignored; a symlinked skill *directory* is not.** `home/common/agent-skills/default.nix`: "Codex ignores a skill when SKILL.md itself is a symlink, but supports a symlink to the whole skill directory" — user scope, and it is the reason `~/.agents/skills/<name>` is a whole-directory link rather than Home Manager's default recursive per-file layout. This is a *mechanism* fact and the strongest single symlink observation in the evidence base |
 | Failure semantics | *No answer in the sources read* for a malformed or unreadable project skill | Codex's symlinked-`SKILL.md` case fails as a **silent ignore**, not an error — the skill simply does not appear (`home/common/agent-skills/default.nix`). By contrast the *installer* around it fails loudly: `home.activation.migrateCodexSkillLinks` refuses with `errorEcho ... "Refusing to replace $target because it contains content not owned by the previous Home Manager skill layout"` and `return 1`, aborting activation rather than deleting user-authored content — user scope |
@@ -185,18 +192,18 @@ base cannot settle an axis — it is not a placeholder for a conclusion omitted.
 
 | Axis | Claude Code | Codex |
 |---|---|---|
-| Discovery path | `.claude/settings.json` and `.claude/settings.local.json`, both observed in nodo @`7a3dab7e54`. Separately, an **agent-neutral** project config exists at `.claude/skills.config.json` — present in nix-config (`{"orchestration": {"agentBudgetMinutes": 180, "maxParallel": 2}}`) and in nodo — read not by either agent but by `home/common/agent-skills/scripts/resolve-bindings`, which finds it by "walking up from the current directory" (`CONFIG_RELPATH = Path(".claude/skills.config.json")`) | *None observed at project scope.* The only Codex configuration is user-scope `~/.codex/config.toml` |
-| Precedence | Two project-scope files are observed carrying disjoint keys: nodo's `settings.json` holds only `hooks`, while `settings.local.json` holds `permissions`, `enabledMcpjsonServers`, `disabledMcpjsonServers`, `skillOverrides`, `worktree` and `enabledPlugins` @`7a3dab7e54`. A user-scope `~/.claude/settings.json` exists in parallel, generated from the `settings` attrset in `home/common/claude-code/default.nix`. The merge order across the three is *no answer in the sources read*. One intra-file conflict is directly observable and its resolution is likewise unknown: nodo's `settings.local.json` lists `shadcn` in **both** `enabledMcpjsonServers` and `disabledMcpjsonServers` | `home/common/codex/default.nix` implements a precedence of its own by rewriting: an `awk` pass prepends `model_reasoning_effort = "xhigh"` and drops any pre-existing **top-level** assignment of that key, leaving section-scoped keys untouched (`/^[[:space:]]*\[/ { in_top_level = 0 }`). Nix owns exactly that one key; the rest of the file stays runtime-managed — user scope |
+| Discovery path | `.claude/settings.json` and `.claude/settings.local.json`, both observed in nodo @`7a3dab7e54`. Separately, an **agent-neutral** project config exists at `.claude/skills.config.json` — present in nix-config (`{"orchestration": {"agentBudgetMinutes": 180, "maxParallel": 2}}`) and in nodo — read not by either agent but by `home/common/agent-skills/scripts/resolve-bindings`, which finds it by "walking up from the current directory" (`CONFIG_RELPATH = Path(".claude/skills.config.json")`) | *No file inside any repository.* The surface is user-scope `~/.codex/config.toml` (281 lines, read 2026-09-02), and it does carry per-project configuration: **63 `[projects."<absolute path>"]` sections**, each holding exactly one key on this machine, and all 63 identical: `trust_level = "trusted"` (63 sections, 63 `trust_level` lines, one distinct value; `[projects."/Users/anis/tmp/nix-config"]` is one of them). All three checkouts of this study are registered. Top-level keys observed alongside them: `model_reasoning_effort`, `model`, `approvals_reviewer`, `notify`, `service_tier`. The namespace is keyed by **absolute path**, so an entry cannot be committed, does not travel with a clone, and does not survive the same repository being checked out at a different path |
+| Precedence | Two project-scope files are observed carrying disjoint keys: nodo's `settings.json` holds only `hooks`, while `settings.local.json` holds `permissions`, `enabledMcpjsonServers`, `disabledMcpjsonServers`, `skillOverrides`, `worktree` and `enabledPlugins` @`7a3dab7e54`. A user-scope `~/.claude/settings.json` exists in parallel, generated from the `settings` attrset in `home/common/claude-code/default.nix`. The merge order across the three is *no answer in the sources read*. One intra-file conflict is directly observable and its resolution is likewise unknown: nodo's `settings.local.json` lists `shadcn` in **both** `enabledMcpjsonServers` and `disabledMcpjsonServers` | `home/common/codex/default.nix` implements a precedence of its own by rewriting: an `awk` pass prepends `model_reasoning_effort = "xhigh"` and drops any pre-existing **top-level** assignment of that key, leaving section-scoped keys untouched (`/^[[:space:]]*\[/ { in_top_level = 0 }`). Nix owns exactly that one key; the rest of the file stays runtime-managed — user scope. The 63 `[projects."<path>"]` sections are a directly observed consequence of that rule: being section-scoped, they survive every activation untouched, which is why a per-project namespace can accumulate in a file Nix rewrites on each switch |
 | Refresh or restart | At user scope, the file is re-asserted on **every activation**: `home.activation.claudeCodeSettings` runs `cp -f` then `chmod u+w`, and the module states "Claude Code can still rewrite it at runtime — your live edits persist until the next switch, which resets it to the declared content". Project scope: *no answer in the sources read* | Same shape at user scope — `home.activation.codexConfig` rewrites `~/.codex/config.toml` through a temp file and `mv -f` on every activation. Project scope: not applicable |
 | Symlink support | **A symlink is accepted for reading and breaks writing.** At project scope, nodo `.claude/settings.json` @`7a3dab7e54` *is* a symlink into `/nix/store/...` and resolves to `{"hooks": {}}` — evidence level **moderate** for read support (the link is directly observed; that Claude resolves it is inferred). At user scope the same shape is explicitly rejected for a *writable* file: `home/common/claude-code/default.nix` records that the module's own option "writes ~/.claude/settings.json as a READ-ONLY store symlink, which breaks Claude Code's in-app /config flow and the sandbox (both rewrite the file)", which is why the file is materialised as a writable copy instead | Not applicable at project scope. At user scope the same constraint holds by construction: `home.activation.codexConfig` keeps `config.toml` a real writable file because "plugins and marketplaces also use it" |
 | Failure semantics | For the agent-neutral file, **degrade rather than fail**: `resolve-bindings` catches `OSError`/`json.JSONDecodeError`, prints `resolve-bindings: cannot read {path}: {error}` to stderr, returns `{}`, and falls through to its `DEFAULTS` table. For the native settings files: *no answer in the sources read* | *No answer in the sources read* |
-| Gaps | A shared project-scope setting has **no Codex-side file to be shared with**, so the only observed cross-agent project configuration is the agent-neutral `.claude/skills.config.json` — which neither agent reads natively. And the read-only-symlink finding constrains any projection: the projected file must stay **writable**, because the agent writes to it | Same gap from the Codex side, plus: project-scope reasoning-effort or model settings have no observed home, so the one key Nix does control is settable only machine-wide |
+| Gaps | A shared project-scope setting has **no Codex-side file inside the repository** to be shared with. Codex does have per-project configuration, but it is path-keyed and user-scope-resident (see the Codex column), so a canonical *repository* source cannot reach it by any in-repo projection — only by something that writes into the user's `~/.codex/config.toml` on that machine. The only observed cross-agent project configuration therefore remains the agent-neutral `.claude/skills.config.json`, which neither agent reads natively. And the read-only-symlink finding constrains any projection: the projected file must stay **writable**, because the agent writes to it | The per-project namespace's key *is* its gap: keyed by absolute path, it cannot be committed, does not follow a clone, and silently supplies nothing when the same repository is checked out elsewhere. That is not hypothetical: on 2026-09-02 `[projects."/Users/anis/tmp/nix-config"]` is registered and trusted, while this study's own worktree of that same repository, `/Users/anis/tmp/nix-config/.worktrees/worktree-issue-115-recover-wayfind-research-findings`, has no entry at all — and none of the 63 registered paths is a worktree path. Beyond `trust_level`, no per-project key was observed: project-scope reasoning-effort or model settings have no home, so the one key Nix does control is settable only machine-wide |
 
 ### Hooks
 
 | Axis | Claude Code | Codex |
 |---|---|---|
-| Discovery path | A `hooks` key **inside** the settings file, not a separate path. Project scope: nodo `.claude/settings.json` → `{"hooks": {}}` @`7a3dab7e54`. User scope: `settings.hooks.PreToolUse` in `home/common/claude-code/default.nix`, one entry with `matcher = "Bash"` and a `type = "command"` hook whose `command` is the `claude-bash-lifecycle-guard` store path, `timeout = 30` | *None observed*, at either scope. `home/common/codex/default.nix` declares only the Codex package and the single `config.toml` key |
+| Discovery path | A `hooks` key **inside** the settings file, not a separate path. Project scope: nodo `.claude/settings.json` → `{"hooks": {}}` @`7a3dab7e54`. User scope: `settings.hooks.PreToolUse` in `home/common/claude-code/default.nix`, one entry with `matcher = "Bash"` and a `type = "command"` hook whose `command` is the `claude-bash-lifecycle-guard` store path, `timeout = 30` | *None at either scope*, observed directly rather than inferred from the Nix module's silence: `~/.codex/config.toml` (281 lines, user scope, read 2026-09-02) contains no `hooks` key and no occurrence of `hook` in any form. Its section namespaces are `[projects."<path>"]`, `[plugins."<name>@<marketplace>"]`, `[marketplaces.<name>]`, `[mcp_servers.<name>]`, `[features]`, `[desktop]`, `[tui.*]`, `[shell_environment_policy.set]` and `[notice]` — no hook namespace among them |
 | Precedence | The only non-empty hook set observed is user scope; nodo's project-scope `hooks` object is empty, so **no merge or override case was observed** and the ordering is *no answer in the sources read* | Not applicable |
 | Refresh or restart | The hook `command` is a Nix store path frozen into `~/.claude/settings.json` at generation time, so a hook change reaches the agent only when that file is rewritten — i.e. on the next activation (`home.activation.claudeCodeSettings`). Whether a *running* session re-reads it: *no answer in the sources read*. Project scope: *no answer in the sources read* | Not applicable |
 | Symlink support | Indirect, and it is the settings file's property, not the hook's: nodo's project `settings.json` — the file that *carries* the hooks key — is itself a store symlink @`7a3dab7e54`. The hook's own `command` is a plain store path, not a symlink | Not applicable |
@@ -207,7 +214,7 @@ base cannot settle an axis — it is not a placeholder for a conclusion omitted.
 
 | Axis | Claude Code | Codex |
 |---|---|---|
-| Discovery path | An `enabledPlugins` key plus `extraKnownMarketplaces` inside the settings file. Project scope: nodo `.claude/settings.local.json` → `"enabledPlugins": {}` @`7a3dab7e54` — key present, empty. User scope: `home/common/claude-code/default.nix` enables `skill-creator@claude-plugins-official` and `codex@nix-codex` | *None observed at project scope.* At user scope, per `CLAUDE.md`: "Codex has no Nix-declared marketplace: its marketplaces and plugins are runtime-managed inside `~/.codex/config.toml`, which Nix does not own" |
+| Discovery path | An `enabledPlugins` key plus `extraKnownMarketplaces` inside the settings file. Project scope: nodo `.claude/settings.local.json` → `"enabledPlugins": {}` @`7a3dab7e54` — key present, empty. User scope: `home/common/claude-code/default.nix` enables `skill-creator@claude-plugins-official` and `codex@nix-codex` | *None inside any repository.* At user scope the surface was read directly in `~/.codex/config.toml`, 2026-09-02, and mirrors Claude's shape: 10 `[plugins."<name>@<marketplace>"]` sections each carrying one `enabled` boolean, over 2 `[marketplaces.<name>]` sections (`openai-bundled`, `openai-primary-runtime`) each declaring `source_type = "local"` plus a `source` path. This is the runtime-managed state `CLAUDE.md` describes: "Codex has no Nix-declared marketplace: its marketplaces and plugins are runtime-managed inside `~/.codex/config.toml`, which Nix does not own". No plugin entry is keyed by project |
 | Precedence | Enablement is a per-`plugin@marketplace` boolean, and **two marketplace source types are accepted simultaneously**: `claude-plugins-official.source = { source = "github"; repo = "anthropics/claude-plugins-official"; }` and `nix-codex.source = { source = "directory"; path = "${agentPlugins.codex}"; }` — a store path built by `lib/agent-plugins.nix`. Project-vs-user merge: *no answer in the sources read*, and nodo's project value is empty so no case was observable | Not applicable at project scope |
 | Refresh or restart | **The declared marketplace and the install record drift, and drift is not self-correcting.** `home.activation.repairCodexPluginInstall` exists precisely for this: "After a rebuild the recorded codex installPath can dangle (old store path GC'd, cache copy wiped) or point at a stale patch revision — spawned sessions then resolve stale or broken agent definitions (observed: p1 record while the marketplace served p2, exit-127 bridge behavior in the nodo evidence run)". The mutable record is `~/.claude/plugins/installed_plugins.json`; the repair is idempotent and "rewrites only when installPath differs from the current store plugin" — user scope | Not applicable |
 | Symlink support | Not used and not observed. The marketplace is referenced by **absolute store path**, and `home/common/claude-code/default.nix` records that "Claude's install/cache state under ~/.claude/plugins stays mutable (never Nix-owned)" — so the projection here is a copy under a mutable root, not a link | Not applicable |
@@ -237,10 +244,20 @@ through `programs.claude-code.memory` and `~/.codex/AGENTS.md` through
 by link too, shaped to the consumer's tolerance and guarded by a refusing
 migration. Configuration, hooks and plugins cannot: they are re-asserted, by
 `cp -f` for `~/.claude/settings.json`, an `awk` splice for Codex's TOML, and an
-idempotent `jq` rewrite for the plugin install record. At **project** scope the
-only link observed anywhere in the fleet is nodo's committed `AGENTS.md`
-symlink, and it is the only projection in the evidence base that git itself
-validates.
+idempotent `jq` rewrite for the plugin install record. At **project** scope two links were
+observed in the fleet, both in nodo, and only one of them is git-validated: its
+committed `AGENTS.md` symlink, tracked at mode `120000`, so git stores the link
+itself and a divergence would be a tracked change; and its
+`.claude/settings.json` store symlink, which is **untracked** — `git
+check-ignore -v` names `.gitignore:46:.claude/*` — so git neither records nor
+validates it, and a fresh clone does not get it at all. An unbounded-depth
+`find` over the three checkouts' `.claude` trees and root instruction files,
+2026-09-02, located no other project-scope symlink outside the
+`.claude/worktrees/` scratch trees in nodo and argus, whose links are all build
+and dependency artifacts (`.devenv/`, `node_modules/.bin/`) inside checked-out
+worktrees. So the projection git itself validates is the tracked instruction
+symlink alone, and the property that makes it validatable is being **tracked**,
+not being a link.
 
 ## Remaining gaps, under both readings of "prototype"
 
@@ -254,10 +271,16 @@ chosen.
 Gaps a trial of the contained-source-with-thin-projections shape would still
 face, given the 2026-09-02 evidence:
 
-1. **Four of five mechanisms have no Codex project-scope target.** Only
-   instructions can be projected to both agents at project scope. Skills,
-   configuration, hooks and plugins have a Claude-side path and, in these three
-   repositories, no Codex-side path at all.
+1. **Four of five mechanisms have no in-repository Codex target.** Only
+   instructions can be projected to both agents by a file inside the
+   repository. Skills, hooks and plugins have a Claude-side path and, in these
+   three repositories, no Codex-side path at all. Configuration is the one that
+   needs stating precisely: Codex *does* have per-project configuration, but it
+   lives in the user-scope `~/.codex/config.toml` and is keyed by absolute
+   path, so a repository cannot contain it, commit it, or carry it to another
+   clone — a projection would have to write into the user's home directory
+   rather than into the tree, which is a different operation with a different
+   blast radius.
 2. **Precedence between project and user scope is undetermined for every
    mechanism.** Nothing in the evidence base establishes whether a projected
    project-scope file wins, loses, or merges against the user-scope file of the
@@ -376,8 +399,10 @@ document decides nothing. Specifically it does **not** decide:
   the complete agent-development system");
 - the migration order or the acceptance evidence for adopting any of this —
   that is #71's question;
-- whether the four mechanisms with no Codex project-scope target should be
-  projected to Codex some other way, left Claude-only, or moved to shared
-  tooling in the manner of `.claude/skills.config.json`;
+- whether the four mechanisms with no in-repository Codex target should be
+  projected to Codex some other way — including whether a projection may write
+  into user scope, as Codex's path-keyed `[projects."<path>"]` namespace would
+  require — or be left Claude-only, or moved to shared tooling in the manner of
+  `.claude/skills.config.json`;
 - which of the two readings of "prototype" #60's original artifact meant. That
   is unrecoverable, and both are covered above rather than resolved.
