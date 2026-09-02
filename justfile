@@ -71,6 +71,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_costs.py \
+    tests/test_agent_gate_bundle.py \
     tests/test_branch_protection.py
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
