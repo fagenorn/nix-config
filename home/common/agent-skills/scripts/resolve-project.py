@@ -11,6 +11,11 @@ an implied value. Readiness observes the machine but never executes anything:
 the subcommand opens no file for writing, creates no directory, and starts no
 child process.
 
+`check-projections` judges each declared target against its source and
+refuses on drift; `resolve` runs the same check before it builds anything, so
+a hand-edited target is a structural refusal rather than a stale snapshot
+(D10).
+
 `write-projections` is the tool's only writer. It renders each declared
 projection from the single instruction source and brings its native entry
 target into sync: a wholly generated file for one agent, one managed import
@@ -648,7 +653,12 @@ def validate_capability_bindings(source: dict) -> list[dict]:
     return violations
 
 
-def validate_projections(source: dict, violations: list[dict]) -> None:
+def validate_projection_entries(source: dict, violations: list[dict]) -> None:
+    """Every shape violation of the declared projection entries.
+
+    Named for the entries rather than the member because `validate_projections`
+    below judges the same projections against the filesystem.
+    """
     projections = source.get("projections")
     if not check_list(projections, "/projections", "projections", violations):
         return
@@ -708,7 +718,7 @@ def validate_contract(source: dict) -> list[dict]:
     if "capabilities" in source:
         validate_capabilities(source, violations)
     if "projections" in source:
-        validate_projections(source, violations)
+        validate_projection_entries(source, violations)
     violations.extend(validate_capability_bindings(source))
     return violations
 
@@ -956,6 +966,46 @@ def projection_status(root: Path, entry: dict) -> str:
     raise ValueError(f"unknown projection kind: {kind!r}")
 
 
+def validate_projections(root: Path, contract: dict) -> None:
+    """Contract: returns None when every declared projection is in sync;
+    otherwise raises ContractError("invalid_projection", …) with one violation
+    per drifted projection, sorted by pointer.
+
+    `projection_status` reads each entry's source before it judges any target,
+    so a source that is gone refuses as `invalid_contract` and propagates from
+    here before drift is ever considered.
+    """
+    drifted: list[tuple[str, dict]] = []
+    for entry in contract["projections"]:
+        # Each of the three statuses is named: a value outside the closed set
+        # is a bug in this module, and reclassifying it as drift would hide
+        # that behind a plausible refusal.
+        status = projection_status(root, entry)
+        if status == "in_sync":
+            continue
+        if status == "missing":
+            message = ("the projection target is absent; regenerate it with "
+                       "`resolve-project write-projections`")
+        elif status == "stale":
+            message = ("the projection target no longer matches its source; "
+                       "regenerate it with `resolve-project write-projections`")
+        else:
+            raise ValueError(f"unknown projection status: {status!r}")
+        drifted.append((status, {
+            "pointer": f"/projections/{entry['id']}",
+            "message": message,
+        }))
+    if not drifted:
+        return
+    drifted.sort(key=lambda item: item[1]["pointer"])
+    first_status, first = drifted[0]
+    raise ContractError(
+        "invalid_projection",
+        f"projection.{first['pointer'].rsplit('/', 1)[-1]}.{first_status}",
+        [item for _, item in drifted],
+    )
+
+
 def destination_mode(target: Path) -> int:
     """The permission bits the replaced target must end up holding.
 
@@ -1078,6 +1128,9 @@ def command_resolve(args: argparse.Namespace) -> int:
     root = discover_root(args.repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source))
+    # Drift is a structural refusal, not a capability state, and it refuses
+    # before a single snapshot member exists (D10).
+    validate_projections(root, source)
     snapshot = build_snapshot(root, source)
     raise_for_unavailable(args.require, snapshot["capabilities"])
     return emit_json(snapshot)
@@ -1103,6 +1156,23 @@ def command_write_projections(args: argparse.Namespace) -> int:
             applied.append({"id": entry["id"], "action": action})
     raise_for_projection_violations(violations)
     return emit_json({"projections": applied})
+
+
+def command_check_projections(args: argparse.Namespace) -> int:
+    """Report every declared projection as in sync, or refuse on drift.
+
+    A broken contract still refuses first, so drift is only ever reported
+    against a source the validator accepts. Like `resolve`, this reads: it
+    opens no file for writing and creates no directory.
+    """
+    root = discover_root(args.repo_root)
+    source = load_contract(root)
+    raise_for_violations(validate_contract(source))
+    validate_projections(root, source)
+    return emit_json({"projections": [
+        {"id": entry["id"], "action": "unchanged"}
+        for entry in source["projections"]
+    ]})
 
 
 def add_repo_root(subparser: argparse.ArgumentParser) -> None:
@@ -1133,6 +1203,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="CAPABILITY",
         help="refuse unless the named capability is available; repeatable",
     )
+    check_projections = subparsers.add_parser(
+        "check-projections",
+        help="refuse unless every declared projection target is in sync")
+    add_repo_root(check_projections)
     write_projections = subparsers.add_parser(
         "write-projections",
         help="write every declared projection target that is missing or stale")
@@ -1143,6 +1217,8 @@ def build_parser() -> argparse.ArgumentParser:
 def dispatch(args: argparse.Namespace) -> int:
     if args.command == "resolve":
         return command_resolve(args)
+    if args.command == "check-projections":
+        return command_check_projections(args)
     if args.command == "write-projections":
         return command_write_projections(args)
     raise ValueError(f"unknown subcommand: {args.command!r}")
