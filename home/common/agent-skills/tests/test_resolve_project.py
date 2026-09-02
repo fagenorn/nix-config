@@ -628,7 +628,9 @@ class CapabilityStateTest(ResolverTestCase):
     def test_worktrees_is_blocked_when_the_worktree_parent_is_unwritable(self):
         root = self.make_root()
         stub = make_stub_bin(("gh", "git", "just", "codex"))
-        parent = root / ".worktrees"
+        # The parent of `.worktrees` is the checkout itself: a read-only
+        # checkout is the failure this prerequisite exists to catch.
+        parent = root
         original = parent.stat().st_mode
         parent.chmod(0o500)
         try:
@@ -640,15 +642,21 @@ class CapabilityStateTest(ResolverTestCase):
         self.assertEqual(entry["state"], "blocked")
         self.assertEqual(entry["reason_code"], "vcs_worktree_unsupported")
 
-    def test_worktrees_is_blocked_when_the_worktree_parent_is_absent(self):
+    def test_worktrees_is_available_when_the_worktree_root_is_absent(self):
+        """The worktree root is created on first use, so its absence is normal.
+
+        `.worktrees` is ignored by git and therefore missing from every fresh
+        clone; blocking on it would report a working capability as broken.
+        """
         root = self.make_root()
         stub = make_stub_bin(("gh", "git", "just", "codex"))
         shutil.rmtree(root / ".worktrees")
         code, snap, _, err = self.resolve_with_path(root, stub)
         self.assertEqual(code, 0, err)
-        self.assertEqual(
-            snap["capabilities"]["worktrees"]["reason_code"],
-            "vcs_worktree_unsupported")
+        entry = snap["capabilities"]["worktrees"]
+        self.assertEqual(entry["state"], "available")
+        self.assertIsNone(entry["reason_code"])
+        self.assertIsNone(entry["repair_id"])
 
     def test_a_relative_executable_resolves_against_its_command_cwd(self):
         """DISC-001: the base is the entry's `cwd`, not `project.root`."""

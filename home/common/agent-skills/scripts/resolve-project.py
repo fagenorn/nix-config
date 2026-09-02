@@ -752,10 +752,10 @@ def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | Non
     if name == "worktrees":
         if not resolves_on_path("git", root):
             return "vcs_worktree_unsupported"
-        # `vcs.worktree.root` names the directory every created worktree is
-        # placed under, so it is that parent which must exist and accept a
-        # new entry.
-        parent = root / bindings["vcs"]["worktree"]["root"]
+        # The parent of the worktree root, not the root itself: the root is
+        # created lazily on first use, so demanding it exist would report a
+        # working capability as blocked in every fresh checkout.
+        parent = (root / bindings["vcs"]["worktree"]["root"]).parent
         if not (parent.is_dir() and os.access(parent, os.W_OK)):
             return "vcs_worktree_unsupported"
         return None
