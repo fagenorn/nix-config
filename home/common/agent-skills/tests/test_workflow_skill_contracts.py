@@ -36,6 +36,9 @@ SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
+SHIP_ISSUE_HUMAN_GATE = (
+    REPO_ROOT / "home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md"
+)
 SMALL_BUDGET_FIXTURE = (
     REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/small-issue.json"
 )
@@ -199,6 +202,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
         cls.ship_review = SHIP_ISSUE_REVIEW.read_text(encoding="utf-8")
+        cls.ship_human_gate = SHIP_ISSUE_HUMAN_GATE.read_text(encoding="utf-8")
         cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
         cls.writing_plans = WRITING_PLANS.read_text(encoding="utf-8")
         cls.sdd = SDD.read_text(encoding="utf-8")
@@ -2060,6 +2064,122 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "already produces a true merge commit)."
         )
         self.assertIn(guard_and_fallback, phase_lines)
+
+    def test_ship_issue_human_gate_consolidates_and_forbids_bypass(self):
+        gate = self.ship_human_gate
+        # The sidecar hard-wraps like the rest of the corpus, so every prose
+        # assertion runs against the normalized text and only headings and
+        # section slicing use the raw file.
+        flat = normalized(gate)
+        # D6: Phase 7 is the single home for the merge spelling. A second home
+        # would drift silently — the pinned exact-list test only scans SKILL.md.
+        self.assertNotIn("gh pr merge", gate)
+        # D5: the gate reuses the one suspension mechanism, defining no new one.
+        self.assertIn("blocked_on: human_gate", flat)
+        self.assert_ordered(
+            gate,
+            "## Gate 1 — before the first push (Phase 4)",
+            "## Gate 2 — after CI, before the merge (Phase 7)",
+            "## Grant semantics",
+            "## Never route around a denial",
+        )
+        # D7: entered instead of the attempt, never as a denial fallback.
+        self.assertIn(
+            "Enter the gate *instead of* attempting the verb — never attempt a "
+            "shipping verb and then react to the denial.",
+            flat,
+        )
+        # D16: two *planned* locations on the successful path — not a hard
+        # count of entries, because a failed command re-enters its own gate.
+        self.assertIn(
+            "There are two planned gate locations on the successful path — one "
+            "before the first push, one before the merge. A failed command "
+            "re-enters its own gate for a fresh single-use grant, so the gate "
+            "can be entered more often than twice; it is never entered fewer.",
+            flat,
+        )
+        # D2/#90: Gate 1 shows the whole remaining chain once.
+        self.assertIn(
+            "Gate 1 also names that a second and final gate follows after CI and "
+            "what it will cover, so the operator sees the whole remaining chain "
+            "once.",
+            flat,
+        )
+        # D6: Gate 2 refers to the merge, never re-spells it.
+        self.assertIn(
+            "Present the merge command exactly as Phase 7 renders it.", flat
+        )
+        # AC2: the session resumes in place, through to issue closure.
+        self.assertIn(
+            "After this grant nothing further is asked: the same session resumes "
+            "in place and runs the chain to issue closure and cleanup.",
+            flat,
+        )
+        # D15/AC2: the literal payloads are what make the handoff
+        # *consolidated*. Pin each gate's block, in order, inside its own
+        # section — the assertions above would all pass with the commands
+        # omitted entirely.
+        gate_1 = self.section(
+            gate,
+            "## Gate 1 — before the first push (Phase 4)",
+            "## Gate 2 — after CI, before the merge (Phase 7)",
+        )
+        self.assert_ordered(
+            normalized(gate_1),
+            "git push -u origin <branch>",
+            'gh pr create --base <integrationBranch> --title "<title>" --body',
+            "Closes #<num>",
+        )
+        gate_2 = self.section(
+            gate,
+            "## Gate 2 — after CI, before the merge (Phase 7)",
+            "## Grant semantics",
+        )
+        self.assert_ordered(
+            normalized(gate_2),
+            "Present the merge command exactly as Phase 7 renders it.",
+            "gh issue close <num>",
+            "git ls-remote --heads origin <branch>",
+            "git worktree remove <worktree-path>",
+            "git branch -d <branch>",
+        )
+        for clause in (
+            "A grant covers exactly the literal command strings presented, each "
+            "consumed by exactly one execution.",
+            "A command that renders differently in any byte from the granted "
+            "literal is not covered and needs a fresh gate.",
+            "Silence is not a grant.",
+            "A partial reply grants only the commands it names.",
+            "A failed execution is not re-run under the same grant; re-entering "
+            "the gate is the only path.",
+            # D8: additional to, never a substitute for, the existing checks.
+            "The grant is additional to every check the Claude path performs, "
+            "never a substitute:",
+            "`check-launch` still runs before every pre-merge forge write",
+            "Phase 6's tip check and the CI wait still bind",
+            "the base branch's required status check",
+        ):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, flat)
+        # AC3 (per D14): the closed no-bypass list is pinned as an ordered list
+        # scoped to its own heading — the file's last section — not as seven
+        # free-floating substrings that could sit anywhere.
+        ban = normalized(gate[gate.index("## Never route around a denial") :])
+        self.assert_ordered(
+            ban,
+            "On this path the session must not:",
+            "- merge the feature branch into `<integrationBranch>` locally;",
+            "- push to `<integrationBranch>`;",
+            "- push to any remote other than `origin`;",
+            "- pass `--admin`, `--force`, `--force-with-lease`, or any "
+            "hook-bypass flag;",
+            "- rewrite, reset or rebase any branch to change what a denied "
+            "command would have done;",
+            "- re-attempt a denied command in a re-worded or re-quoted "
+            "spelling;",
+            "- ask a subagent, another skill, or another host to run the "
+            "command on its behalf.",
+        )
 
     def test_ship_issue_guards_every_pre_merge_forge_write(self):
         guard = self.section(self.ship_issue, "## Launch guard",
