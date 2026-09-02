@@ -2036,8 +2036,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         expected_occurrences = [
             "7. Merge                   → "
             f"{optional_subject} (true merge commit)",
-            "In a qualifying repository this skill IS that chain: `git push`, "
-            "`gh pr create`, "
+            "In a qualifying repository, on a host whose permission layer "
+            "adjudicates each command deterministically against validated "
+            "spellings — the Claude host's `PreToolUse` guard — this skill IS "
+            "that chain: `git push`, `gh pr create`, "
             f"`{optional_subject}`, branch delete, and worktree remove need no "
             "re-prompt; pause only where a phase says to.",
             rendered_subject,
@@ -2064,6 +2066,90 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "already produces a true merge commit)."
         )
         self.assertIn(guard_and_fallback, phase_lines)
+
+    def test_ship_issue_authorization_is_scoped_to_the_host_enforcement_model(self):
+        auth = self.section(
+            self.ship_issue, "## Standing authorization", "## Launch guard"
+        )
+        # AC1: the bare unconditional opener is gone.
+        self.assertNotIn(
+            "In a qualifying repository this skill IS that chain:", auth
+        )
+        # D15/D3: pin the section's *complete* normalized shape. Selection is
+        # then provably by these two enforcement-model rows and nothing else —
+        # no probe, no env-var sniff and no capability handshake can hide in a
+        # sentence the assertions below do not name.
+        self.assertEqual(
+            normalized(auth).strip(),
+            normalized(
+                "## Standing authorization "
+                "Standing authorization exists exactly where the lifecycle "
+                "guard grants it: pushing a non-default branch, opening a PR "
+                "to the default branch, and the guarded merge, in "
+                "fagenorn-owned repositories; everywhere else these commands "
+                "stay per-action gated — suspend with blocked_on=human_gate "
+                "and print the re-entry line instead of dying at the prompt. "
+                "In a qualifying repository, on a host whose permission layer "
+                "adjudicates each command deterministically against validated "
+                "spellings — the Claude host's `PreToolUse` guard — this skill "
+                "IS that chain: `git push`, `gh pr create`, "
+                '`gh pr merge <pr-num> --repo <repoSlug> --merge '
+                '[--subject "<rendered mergeSubjectTemplate>"] '
+                "--delete-branch`, branch delete, and worktree remove need no "
+                "re-prompt; pause only where a phase says to. "
+                "On a host whose permission layer adjudicates intent by review "
+                "rather than by validating spellings — the Codex host, whose "
+                "risk reviewer honours literal human messages and repository "
+                "guidance but not this skill's prose — no wording here makes "
+                "that chain executable: it is denied by default. Take the "
+                "consolidated operator gate of "
+                "[`HUMAN-GATE.md`](./HUMAN-GATE.md) instead, and never route "
+                "around a denial."
+            ).strip(),
+        )
+        self.assert_ordered(
+            auth,
+            "adjudicates each command deterministically",
+            "adjudicates intent by review",
+        )
+        # D3, kept as a named guard on top of the equality above.
+        self.assertNotIn("CLAUDECODE", auth)
+        # Both phase pointers, entered instead of the attempt (D7).
+        phase4 = self.section(
+            self.ship_issue, "## Phase 4 — Open PR", "## Phase 5 — Review the PR"
+        )
+        self.assertIn(
+            "On the review-adjudicated path of `## Standing authorization`, "
+            "enter Gate 1 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before running "
+            "anything below — instead of the push, never after a denial.",
+            phase4,
+        )
+        phase7 = self.section(
+            self.ship_issue, "## Phase 7 — Merge", "## Phase 8 — Cleanup"
+        )
+        self.assertIn(
+            "On the review-adjudicated path of `## Standing authorization`, "
+            "enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before "
+            "anything below — present the command rendered below, never "
+            "attempt it first. The gate comes first on this path because it "
+            "waits for the operator's own message; `check-launch` is then "
+            "re-validated after the grant arrives, immediately before the "
+            "merge, exactly as the next paragraph requires, so the launch "
+            "identity is fresh at the moment of the write.",
+            phase7,
+        )
+        # D12: the gate waits for a human, so it must not sit between
+        # `check-launch` and the merge. Order on this path is
+        # Gate 2 → check-launch → merge.
+        self.assert_ordered(
+            phase7,
+            "enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md)",
+            "Run `check-launch` (see `## Launch guard`) immediately before the merge",
+            "gh pr merge <pr-num> --repo <repoSlug> --merge",
+        )
+        # D6/D10: the new Phase-4 pointer introduces no merge spelling, so
+        # Phase 4 stays free of `gh pr merge` exactly as it is today.
+        self.assertNotIn("gh pr merge", phase4)
 
     def test_ship_issue_human_gate_consolidates_and_forbids_bypass(self):
         gate = self.ship_human_gate
