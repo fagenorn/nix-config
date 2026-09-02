@@ -59,6 +59,11 @@ in
       executable = true;
     };
 
+    ".agents/bin/resolve-project" = {
+      source = ./scripts/resolve-project.py;
+      executable = true;
+    };
+
     ".agents/bin/agent-model-matrix" = {
       source = ./scripts/agent-model-matrix.py;
       executable = true;
