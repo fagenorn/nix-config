@@ -126,7 +126,7 @@ install IP:
     sh install-nix.sh\"'"
 
 
-# Report agent token spend per issue from the local Claude Code transcripts
+# Report agent token spend per issue from the local Claude Code and Codex sessions
 agent-costs *args:
   python3 scripts/agent-costs.py {{args}}
 
