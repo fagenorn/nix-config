@@ -55,7 +55,9 @@ review prompt.
 
 Standing authorization exists exactly where the lifecycle guard grants it: pushing a non-default branch, opening a PR to the default branch, and the guarded merge, in fagenorn-owned repositories; everywhere else these commands stay per-action gated — suspend with blocked_on=human_gate and print the re-entry line instead of dying at the prompt.
 
-In a qualifying repository this skill IS that chain: `git push`, `gh pr create`, `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered mergeSubjectTemplate>"] --delete-branch`, branch delete, and worktree remove need no re-prompt; pause only where a phase says to.
+In a qualifying repository, on a host whose permission layer adjudicates each command deterministically against validated spellings — the Claude host's `PreToolUse` guard — this skill IS that chain: `git push`, `gh pr create`, `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered mergeSubjectTemplate>"] --delete-branch`, branch delete, and worktree remove need no re-prompt; pause only where a phase says to.
+
+On a host whose permission layer adjudicates intent by review rather than by validating spellings — the Codex host, whose risk reviewer honours literal human messages and repository guidance but not this skill's prose — no wording here makes that chain executable: it is denied by default. Take the consolidated operator gate of [`HUMAN-GATE.md`](./HUMAN-GATE.md) instead, and never route around a denial.
 
 ## Launch guard
 
@@ -175,6 +177,8 @@ Test failures: separate *environmental* (container connectivity, missing network
 
 Skip entirely when `issueTracker.kind=none` (push the branch and stop, or merge locally per the user's request).
 
+On the review-adjudicated path of `## Standing authorization`, enter Gate 1 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before running anything below — instead of the push, never after a denial.
+
 Run `check-launch` (see `## Launch guard`); on anything but `current: true`,
 stop without pushing. Then:
 
@@ -277,6 +281,8 @@ timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30
 ## Phase 7 — Merge
 
 (When `issueTracker.kind=none`, merge the branch into the integration branch locally per the user's instruction instead.)
+
+On the review-adjudicated path of `## Standing authorization`, enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before anything below — present the command rendered below, never attempt it first. The gate comes first on this path because it waits for the operator's own message; `check-launch` is then re-validated after the grant arrives, immediately before the merge, exactly as the next paragraph requires, so the launch identity is fresh at the moment of the write.
 
 Run `check-launch` (see `## Launch guard`) immediately before the merge, and
 run it regardless of how Phase 6's tip check came out. On anything but

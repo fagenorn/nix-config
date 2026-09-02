@@ -34,6 +34,46 @@ orchestrator context.
 4. Everything else is machine-global via nix (`home/common/agent-skills/`): the skills, the
    standards layers 0–1, and the linter arrive with the home-manager generation.
 
+## Host adapter accommodations
+
+The skills are agent-agnostic by
+[#64](https://github.com/fagenorn/nix-config/issues/64): a native adapter translates host
+mechanics only, and anything that adds a capability one host has and another does not is a
+native extension needing irreducibility evidence. Where two hosts enforce the same semantics
+differently, the accommodation is recorded here — one entry per divergence, with the evidence
+that forced it and the argument for why it is adapter-tier.
+
+### Shipping authorization — `ship-issue`
+
+*Recorded 2026-09-02,
+[#119](https://github.com/fagenorn/nix-config/issues/119).*
+
+The semantics are one sentence and hold on every host: **shipping needs authorization for
+irreversible egress.** Only the translation differs.
+
+- **Claude** runs a deterministic `PreToolUse` permission guard that validates the exact
+  spellings of `git push`, `gh pr create` and `gh pr merge` against the live repository and
+  allows them. The chain runs unattended.
+- **Codex** has no such layer. Its built-in risk reviewer adjudicates intent, and the only
+  inputs it honours are literal human messages and repository guidance — never skill prose. No
+  wording in `ship-issue` can make it allow those verbs.
+
+**Evidence.** Over two weeks the Codex host denied these verbs 129 times, peaking at 57 in a
+single day. Every affected ship completed only because a human pushed or merged by hand. In
+between, sessions retried the denied command, fell back to read-only checks, and stalled —
+because the contract asserted the chain needed no re-prompt and the host disagreed.
+
+**Accommodation.** `ship-issue`'s `## Standing authorization` states the no-re-prompt claim per
+enforcement model rather than unconditionally, and the review-adjudicated path takes the
+consolidated operator gate in `skills/ship-issue/HUMAN-GATE.md`: present the literal commands,
+wait for the human's own message, resume in place. It reuses the existing
+`blocked_on=human_gate` suspension rather than defining a new pause.
+
+**Why this is adapter-tier and not a native extension.** The semantics are unchanged and
+host-neutral; no capability, verb, artifact or behaviour is added that only one host has, and a
+Claude session can express the operator gate too — it simply never needs to. #64's
+irreducibility evidence is therefore not required.
+
 ## Vendored skills
 
 A directory under `skills/` may be a **vendored adaptation** of an upstream skill rather than an

@@ -36,6 +36,9 @@ SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
+SHIP_ISSUE_HUMAN_GATE = (
+    REPO_ROOT / "home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md"
+)
 SMALL_BUDGET_FIXTURE = (
     REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/small-issue.json"
 )
@@ -199,6 +202,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
         cls.ship_review = SHIP_ISSUE_REVIEW.read_text(encoding="utf-8")
+        cls.ship_human_gate = SHIP_ISSUE_HUMAN_GATE.read_text(encoding="utf-8")
         cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
         cls.writing_plans = WRITING_PLANS.read_text(encoding="utf-8")
         cls.sdd = SDD.read_text(encoding="utf-8")
@@ -1022,6 +1026,77 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("all other acquisition modes", phase_gate)
         self.assertIn("post-rollover Phase-6 and Phase-7 gates", phase_gate)
         self.assertIn("unchanged", phase_gate)
+
+    def test_auto_gate_enumeration_covers_an_unguarded_host(self):
+        # AUTO.md's final paragraph is the one suspension route for shipping
+        # gates. It gains the review-adjudicated host as a third qualifying
+        # case, so the operator gate reuses the mechanism that already exists.
+        self.assertIn(
+            "At any Phase-6 or Phase-7 push, PR-open, or merge gate the "
+            "lifecycle guard does not stand — a repository the guard does not "
+            "cover, a merge it fails closed on, or a host that has no such "
+            "guard at all and adjudicates intent by review instead — do not die "
+            "at the prompt: follow `SKILL.md`'s suspension procedure, "
+            "suspending `blocked_on: human_gate` and printing the canonical "
+            "re-entry line, so a later human approval resumes the same attempt "
+            "without penalty.",
+            normalized(self.auto),
+        )
+        # No second pause shape is introduced: after Step 3b the file names
+        # `blocked_on: human_gate` twice — the shipping-gate route here and
+        # the self-answer exemption — and `human_gate` is still the only
+        # `blocked_on` value in the file.
+        self.assertEqual(self.auto.count("blocked_on: human_gate"), 2)
+        self.assertEqual(
+            sorted(set(re.findall(r"blocked_on[:=] ?(\w+)", normalized(self.auto)))),
+            ["human_gate"],
+        )
+
+    def test_auto_never_self_answers_an_irreversible_authorization_gate(self):
+        # D13: the general self-answer instruction cannot stand unqualified
+        # once a gate exists that `--auto` must NOT answer for the operator.
+        # Grounded in D2's #84 (a fresh, single-use confirmation, never
+        # inherited) and #90 (one operator touchpoint; silence is never yes).
+        self.assertIn(
+            "One class of gate is exempt: a gate that asks a human to "
+            "authorize an irreversible action is never self-answered. Its "
+            "confirmation must be fresh and single-use, and silence never "
+            "means yes — so present the gate's block and follow `SKILL.md`'s "
+            "suspension procedure, suspending `blocked_on: human_gate` and "
+            "printing the canonical re-entry line, rather than answering on "
+            "the operator's behalf.",
+            normalized(self.auto),
+        )
+        # The general rule itself is unchanged and still stands first.
+        self.assert_ordered(
+            normalized(self.auto),
+            "when one tells you to ask or wait, run the self-answer pattern "
+            "instead.",
+            "One class of gate is exempt:",
+        )
+
+    def test_human_gate_carries_no_affirmative_bypass_instruction(self):
+        # AC3 (per D14). The closed negative list under
+        # `## Never route around a denial` is the file's ONLY home for these
+        # spellings; anywhere else they would read as an instruction. A
+        # line-local grep cannot see this, because the list's "must not:"
+        # lead-in sits on the introduction line and each banned verb on its
+        # own bullet.
+        gate = self.ship_human_gate
+        split = gate.index("## Never route around a denial")
+        outside, ban = gate[:split], normalized(gate[split:])
+        self.assertIn("On this path the session must not:", ban)
+        for bypass in (
+            "--admin",
+            "--force",
+            "--force-with-lease",
+            "git merge",
+            "git push origin <integrationBranch>",
+            "git reset",
+            "git rebase",
+        ):
+            with self.subTest(bypass=bypass):
+                self.assertNotIn(bypass, outside)
 
     def test_owner_has_executable_phase_gate_and_action_semantics(self):
         self.assertIn("workflow-state progress", self.from_issue)
@@ -2032,8 +2107,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         expected_occurrences = [
             "7. Merge                   → "
             f"{optional_subject} (true merge commit)",
-            "In a qualifying repository this skill IS that chain: `git push`, "
-            "`gh pr create`, "
+            "In a qualifying repository, on a host whose permission layer "
+            "adjudicates each command deterministically against validated "
+            "spellings — the Claude host's `PreToolUse` guard — this skill IS "
+            "that chain: `git push`, `gh pr create`, "
             f"`{optional_subject}`, branch delete, and worktree remove need no "
             "re-prompt; pause only where a phase says to.",
             rendered_subject,
@@ -2060,6 +2137,237 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "already produces a true merge commit)."
         )
         self.assertIn(guard_and_fallback, phase_lines)
+
+    def test_ship_issue_authorization_is_scoped_to_the_host_enforcement_model(self):
+        auth = self.section(
+            self.ship_issue, "## Standing authorization", "## Launch guard"
+        )
+        # AC1: the bare unconditional opener is gone.
+        self.assertNotIn(
+            "In a qualifying repository this skill IS that chain:", auth
+        )
+        # D15/D3: pin the section's *complete* normalized shape. Selection is
+        # then provably by these two enforcement-model rows and nothing else —
+        # no probe, no env-var sniff and no capability handshake can hide in a
+        # sentence the assertions below do not name.
+        self.assertEqual(
+            normalized(auth).strip(),
+            normalized(
+                "## Standing authorization "
+                "Standing authorization exists exactly where the lifecycle "
+                "guard grants it: pushing a non-default branch, opening a PR "
+                "to the default branch, and the guarded merge, in "
+                "fagenorn-owned repositories; everywhere else these commands "
+                "stay per-action gated — suspend with blocked_on=human_gate "
+                "and print the re-entry line instead of dying at the prompt. "
+                "In a qualifying repository, on a host whose permission layer "
+                "adjudicates each command deterministically against validated "
+                "spellings — the Claude host's `PreToolUse` guard — this skill "
+                "IS that chain: `git push`, `gh pr create`, "
+                '`gh pr merge <pr-num> --repo <repoSlug> --merge '
+                '[--subject "<rendered mergeSubjectTemplate>"] '
+                "--delete-branch`, branch delete, and worktree remove need no "
+                "re-prompt; pause only where a phase says to. "
+                "On a host whose permission layer adjudicates intent by review "
+                "rather than by validating spellings — the Codex host, whose "
+                "risk reviewer honours literal human messages and repository "
+                "guidance but not this skill's prose — no wording here makes "
+                "that chain executable: it is denied by default. Take the "
+                "consolidated operator gate of "
+                "[`HUMAN-GATE.md`](./HUMAN-GATE.md) instead, and never route "
+                "around a denial."
+            ).strip(),
+        )
+        self.assert_ordered(
+            auth,
+            "adjudicates each command deterministically",
+            "adjudicates intent by review",
+        )
+        # D3, kept as a named guard on top of the equality above.
+        self.assertNotIn("CLAUDECODE", auth)
+        # Both phase pointers, entered instead of the attempt (D7).
+        phase4 = self.section(
+            self.ship_issue, "## Phase 4 — Open PR", "## Phase 5 — Review the PR"
+        )
+        self.assertIn(
+            "On the review-adjudicated path of `## Standing authorization`, "
+            "enter Gate 1 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before running "
+            "anything below — instead of the push, never after a denial.",
+            phase4,
+        )
+        phase7 = self.section(
+            self.ship_issue, "## Phase 7 — Merge", "## Phase 8 — Cleanup"
+        )
+        self.assertIn(
+            "On the review-adjudicated path of `## Standing authorization`, "
+            "enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before "
+            "anything below — present the command rendered below, never "
+            "attempt it first. The gate comes first on this path because it "
+            "waits for the operator's own message; `check-launch` is then "
+            "re-validated after the grant arrives, immediately before the "
+            "merge, exactly as the next paragraph requires, so the launch "
+            "identity is fresh at the moment of the write.",
+            phase7,
+        )
+        # D12: the gate waits for a human, so it must not sit between
+        # `check-launch` and the merge. Order on this path is
+        # Gate 2 → check-launch → merge.
+        self.assert_ordered(
+            phase7,
+            "enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md)",
+            "Run `check-launch` (see `## Launch guard`) immediately before the merge",
+            "gh pr merge <pr-num> --repo <repoSlug> --merge",
+        )
+        # D6/D10: the new Phase-4 pointer introduces no merge spelling, so
+        # Phase 4 stays free of `gh pr merge` exactly as it is today.
+        self.assertNotIn("gh pr merge", phase4)
+
+    def test_ship_issue_human_gate_consolidates_and_forbids_bypass(self):
+        gate = self.ship_human_gate
+        # The sidecar hard-wraps like the rest of the corpus, so every prose
+        # assertion runs against the normalized text and only headings and
+        # section slicing use the raw file.
+        flat = normalized(gate)
+        # D6: Phase 7 is the single home for the merge spelling. A second home
+        # would drift silently — the pinned exact-list test only scans SKILL.md.
+        self.assertNotIn("gh pr merge", gate)
+        # D5: the gate reuses the one suspension mechanism, defining no new one.
+        self.assertIn("blocked_on: human_gate", flat)
+        # D17: the `--auto` pause routes through whoever owns the ledger. A
+        # fresh ship owner cannot suspend — `ship-issue/SKILL.md`'s launch
+        # guard forbids it any workflow-state write, and `ship-handoff.md`
+        # requires it to return a validated ship summary — so it returns a
+        # truthful `stopped` row and its parent suspends. Pinned as an ordered
+        # split so a future edit cannot collapse the two cases back into one
+        # instruction addressed to whoever happens to be running.
+        self.assert_ordered(
+            flat,
+            "A fresh ship owner launched per `from-issue/ship-handoff.md` "
+            "writes no workflow state",
+            "returns the truthful `stopped` ship summary naming the human gate",
+            "`artifact-budget validate-report --boundary ship-summary`",
+            "keeping the worktree and claiming no merge success",
+            "its parent, the `from-issue` owner, is what suspends "
+            "`blocked_on: human_gate` and prints the canonical re-entry line",
+            "A `from-issue` owner running this path itself, with no fresh ship "
+            "owner in between, follows `from-issue/SKILL.md`'s existing "
+            "suspension procedure directly",
+            "This file defines no new suspension shape and no new "
+            "`blocked_on` value.",
+        )
+        self.assert_ordered(
+            gate,
+            "## Gate 1 — before the first push (Phase 4)",
+            "## Gate 2 — after CI, before the merge (Phase 7)",
+            "## Grant semantics",
+            "## Never route around a denial",
+        )
+        # D7: entered instead of the attempt, never as a denial fallback.
+        self.assertIn(
+            "Enter the gate *instead of* attempting the verb — never attempt a "
+            "shipping verb and then react to the denial.",
+            flat,
+        )
+        # D16: two *planned* locations on the successful path — not a hard
+        # count of entries, because a failed command re-enters its own gate.
+        self.assertIn(
+            "There are two planned gate locations on the successful path — one "
+            "before the first push, one before the merge. A failed command "
+            "re-enters its own gate for a fresh single-use grant, so the gate "
+            "can be entered more often than twice; it is never entered fewer.",
+            flat,
+        )
+        # D2/#90: Gate 1 shows the whole remaining chain once.
+        self.assertIn(
+            "Gate 1 also names that a second and final gate follows after CI and "
+            "what it will cover, so the operator sees the whole remaining chain "
+            "once.",
+            flat,
+        )
+        # D6: Gate 2 refers to the merge, never re-spells it.
+        self.assertIn(
+            "Present the merge command exactly as Phase 7 renders it.", flat
+        )
+        # AC2, qualified per D18 the way D16 qualified the gate count: the
+        # session resumes in place through to issue closure on the *successful*
+        # path. Unqualified, this contradicted the grant semantics below, which
+        # send a failed execution back through its own gate.
+        self.assertIn(
+            "After this grant nothing further is asked on the successful path: "
+            "the same session resumes in place and runs the chain to issue "
+            "closure and cleanup. A failed execution is the exception the grant "
+            "semantics name: it re-enters its own gate for a fresh grant.",
+            flat,
+        )
+        # D15/AC2: the literal payloads are what make the handoff
+        # *consolidated*. Pin each gate's block, in order, inside its own
+        # section — the assertions above would all pass with the commands
+        # omitted entirely.
+        gate_1 = self.section(
+            gate,
+            "## Gate 1 — before the first push (Phase 4)",
+            "## Gate 2 — after CI, before the merge (Phase 7)",
+        )
+        self.assert_ordered(
+            normalized(gate_1),
+            "git push -u origin <branch>",
+            'gh pr create --base <integrationBranch> --title "<title>" --body',
+            "Closes #<num>",
+        )
+        gate_2 = self.section(
+            gate,
+            "## Gate 2 — after CI, before the merge (Phase 7)",
+            "## Grant semantics",
+        )
+        self.assert_ordered(
+            normalized(gate_2),
+            "Present the merge command exactly as Phase 7 renders it.",
+            "gh issue close <num>",
+            # The delete is the action and the ls-remote its condition, so the
+            # bullet spells them in that order. Without this anchor the block
+            # could lose the delete entirely and still pass.
+            "git push origin --delete <branch>",
+            "git ls-remote --heads origin <branch>",
+            "git worktree remove <worktree-path>",
+            "git branch -d <branch>",
+        )
+        for clause in (
+            "A grant covers exactly the literal command strings presented, each "
+            "consumed by exactly one execution.",
+            "A command that renders differently in any byte from the granted "
+            "literal is not covered and needs a fresh gate.",
+            "Silence is not a grant.",
+            "A partial reply grants only the commands it names.",
+            "A failed execution is not re-run under the same grant; re-entering "
+            "the gate is the only path.",
+            # D8: additional to, never a substitute for, the existing checks.
+            "The grant is additional to every check the Claude path performs, "
+            "never a substitute:",
+            "`check-launch` still runs before every pre-merge forge write",
+            "Phase 6's tip check and the CI wait still bind",
+            "the base branch's required status check",
+        ):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, flat)
+        # AC3 (per D14): the closed no-bypass list is pinned as an ordered list
+        # scoped to its own heading — the file's last section — not as seven
+        # free-floating substrings that could sit anywhere.
+        ban = normalized(gate[gate.index("## Never route around a denial") :])
+        self.assert_ordered(
+            ban,
+            "On this path the session must not:",
+            "- merge the feature branch into `<integrationBranch>` locally;",
+            "- push to `<integrationBranch>`;",
+            "- push to any remote other than `origin`;",
+            "- pass `--admin`, `--force`, `--force-with-lease`, or any "
+            "hook-bypass flag;",
+            "- rewrite, reset or rebase any branch to change what a denied "
+            "command would have done;",
+            "- re-attempt a denied command in a re-worded or re-quoted "
+            "spelling;",
+            "- ask a subagent, another skill, or another host to run the "
+            "command on its behalf.",
+        )
 
     def test_ship_issue_guards_every_pre_merge_forge_write(self):
         guard = self.section(self.ship_issue, "## Launch guard",
