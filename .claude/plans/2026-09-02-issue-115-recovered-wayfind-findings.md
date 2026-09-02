@@ -154,15 +154,17 @@ unit-test suite for documentation in this repository and this work edits no
 
 - **V6 — review packageability** (per D22). After committing, run
   `review-package <this plan file> "$(git merge-base origin/main HEAD)" HEAD
-  --output "$(mktemp -d)/v6.json"`, require exit 0 with `within_budget`, then
-  delete that directory. **Always pass `--output`:** the default destination is
-  keyed to the range, `MERGE_BASE..HEAD` is exactly what the mandatory final
-  review publishes to, and `review-package` publishes exclusively — a V6 run
-  left at the default makes the final review's own generation fail, and
-  re-running at the same `HEAD` does not clear it. Exit 2 is a generation
-  failure of any kind, never assumed stale. V6 is the only gate here measuring
-  *delivery shape*, and the one the single-file architecture failed; run it at
-  the end of every task from task 4 onward.
+  "$OUT/v6.json"` with `OUT=$(mktemp -d)`, require exit 0 with `within_budget`,
+  then delete `$OUT`. **Always give that fourth positional destination** (in
+  diff mode `--output` is rejected as an invalid invocation; the flag belongs to
+  detail mode): the default destination is keyed to the range,
+  `MERGE_BASE..HEAD` is exactly what the mandatory final review publishes to,
+  and `review-package` publishes exclusively — a V6 run left at the default
+  makes the final review's own generation fail, and re-running at the same
+  `HEAD` does not clear it. Exit 2 is a generation failure of any kind, never
+  assumed stale. V6 is the only gate here measuring *delivery shape*, and the
+  one the single-file architecture failed; run it at the end of every task from
+  task 4 onward.
 
 Implementers verify at these six seams and nowhere else. A task that appears to
 need a seventh seam is a plan bug, not an implementer's call.

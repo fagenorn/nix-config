@@ -434,8 +434,9 @@ bash "${TMPDIR:-/tmp}/gate-package.sh"
 # final review's own generation fail and re-running does not clear it.
 OUT=$(mktemp -d)
 review-package .claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.md \
-  "$(git merge-base origin/main HEAD)" HEAD --output "$OUT/v6.json"
-# require exit 0 and budget_status within_budget, then:
+  "$(git merge-base origin/main HEAD)" HEAD "$OUT/v6.json"
+# The destination is the fourth positional argument; in diff mode --output is
+# rejected as an invalid invocation. Require exit 0 and within_budget, then:
 rm -rf "$OUT"
 ```
 
@@ -476,6 +477,14 @@ to the **root**. If a section's evidence is bulky enough to push any file past
 V6's 65,536-byte cap, move that evidence into a new member under
 `.claude/specs/2026-08-20-release-lifecycle-seams-research.evidence/`, following
 the conventions Task 5 sets out, and keep the section's conclusions in the root.
+**Watch the shard budget.** The branch already fills 8 of `review-package`'s 8
+shards, and shards hold whole files, so your additions can fail V6 on
+`member_count` rather than on any file being too big. Task 5's `Shard budget`
+invariant explains the packing and is worth reading before you decide whether
+your evidence goes in the root or a member. If V6 exits 3 on `member_count`,
+resize or relocate your additions and redo; if nothing passes, report `BLOCKED`
+with what you tried.
+
 Every heading reference you write obeys D22's two forms — bare for a root
 heading, `<member repo-relative path> § <heading text>` for a member one — and
 Step 1's `resolve` helper is what checks them. Run V6 as the last gate of this

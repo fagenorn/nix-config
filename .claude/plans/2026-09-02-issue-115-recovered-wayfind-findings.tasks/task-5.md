@@ -61,6 +61,31 @@ must produce the same shapes.
   each member near 45,000–55,000 bytes rather than just under the 65,536-byte
   cap: shards hold whole files, so slack is what keeps the package inside its
   eight-shard limit once Task 6 adds its content.
+- **Shard budget — read this before choosing your split sizes.** V6 has two
+  ways to fail and the second one is now the live risk. After Task 4's
+  decomposition the branch already fills **8 of `review-package`'s 8 shards**,
+  with 404,249 of 524,288 aggregate bytes. Shards hold whole files and the
+  version-1 packer merely groups *adjacent* files in path order, so a large
+  file that will not fit beside its neighbour opens a shard and wastes the
+  remainder. Splitting one file into two therefore adds a file to a packing
+  problem that is already at its limit, and a careless split pushes the count to
+  9 and fails on `member_count`.
+
+  Two things work in your favour. The producer retries a `member_count`-only
+  failure as interface version 3, which repacks with *first fit* rather than
+  adjacency and is markedly better. And your two output sizes are yours to
+  choose: your member sorts immediately before your root, both land between
+  `task-6.md` and the #60 document, and a member near **22,000 bytes** packs
+  into the shard those task members leave part-empty, while a root up to about
+  **60,000** then takes a shard of its own. Sizes near the middle — two files of
+  roughly 40,000 — are the worst case, because neither pairs with anything.
+
+  This is engineering against a measured limit, not a rule of thumb. Compute the
+  packing before you commit, and treat V6 as the arbiter: if it exits 3 on
+  `member_count`, change the split sizes and redo the move rather than accepting
+  it. If no split you can find passes, stop and report `BLOCKED` with the sizes
+  you tried and the packing each produced — that is a real finding about the
+  branch, not a failure of yours.
 - Commits are SSH-signed and carry the
   `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` trailer. Never pass
   `--no-gpg-sign`.
@@ -130,9 +155,11 @@ must produce the same shapes.
       # G5 (V6) — packageability, after the commit
       OUT=$(mktemp -d)
       review-package .claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.md \
-        "$(git merge-base origin/main HEAD)" HEAD --output "$OUT/v6.json"
+        "$(git merge-base origin/main HEAD)" HEAD "$OUT/v6.json"
       # require exit 0 and budget_status within_budget, then: rm -rf "$OUT"
-      # Always pass --output: the default destination is the range the final
+      # The destination is the FOURTH POSITIONAL argument. In diff mode
+      # --output is rejected as an invalid invocation; that flag is detail
+      # mode's. Always give it: the default destination is the range the final
       # review publishes to, and review-package publishes exclusively.
 
 - [ ] **Step 6 — report.** Report `MOVE_BASE`, the before/after byte figures,
