@@ -882,10 +882,15 @@ def build_record(groups_by_stratum, window):
         totals["cost_by_family"] = merge_families(run["cost_by_family"] for run in runs)
         strata[name] = {"cost_basis": stratum["cost_basis"], "totals": totals, "runs": runs}
 
+    # The fleet folds the strata that measured something. An idle stratum
+    # contributes nothing rather than nulling the roll-up, so `None` here means
+    # no selected stratum had a run — while a measuring stratum's own absent
+    # field (Claude's `reasoning`) still propagates through sum_or_none.
+    measuring = [s["totals"] for s in strata.values() if s["totals"]["runs"]]
     fleet = {
         "informative": True,
         "totals": {
-            field: sum_or_none(s["totals"][field] for s in strata.values())
+            field: sum_or_none(totals[field] for totals in measuring)
             for field in RECORD_TOKEN_FIELDS
         },
     }

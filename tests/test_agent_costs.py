@@ -870,6 +870,24 @@ class BuildRecordTest(unittest.TestCase):
             rec["record_id"],
             agent_costs.build_record(mutated, self.window())["record_id"])
 
+    def test_fleet_folds_only_the_strata_that_measured_something(self):
+        strata = self.strata()
+        strata["codex"]["groups"] = {}          # one idle, one measuring
+        fleet = agent_costs.build_record(strata, self.window())["fleet"]["totals"]
+        self.assertEqual(fleet["input_total"], 3300)
+        self.assertEqual(fleet["fresh"], 100)
+        self.assertEqual(fleet["cache_create"], 200)
+        self.assertEqual(fleet["cache_read"], 3000)
+        self.assertEqual(fleet["output"], 40)
+        # a measuring stratum's genuinely absent field still propagates as null
+        self.assertIsNone(fleet["reasoning"])
+        idle = {name: dict(stratum, groups={})
+                for name, stratum in strata.items()}
+        blank = agent_costs.build_record(idle, self.window())["fleet"]["totals"]
+        for field in ("input_total", "fresh", "cache_create", "cache_read",
+                      "output", "reasoning"):
+            self.assertIsNone(blank[field], field)
+
     def test_a_stratum_with_no_runs_totals_null_not_zero(self):
         strata = self.strata()
         strata["codex"]["groups"] = {}
