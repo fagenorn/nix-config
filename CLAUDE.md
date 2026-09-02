@@ -64,3 +64,4 @@ Two repo-specific helpers in `lib/helpers.nix` drive almost everything — under
   - The `palmier-pro` MCP server (HTTP on `127.0.0.1:19789`) is merged into `~/.claude.json` by an idempotent jq activation script — not the module's mcpServers option (which broke subcommands). New MCP servers should follow that same jq-merge pattern, never overwriting `~/.claude.json` wholesale.
 
 **Other notable bits:** Ghostty on darwin is stubbed to `pkgs.hello` (the package is broken on darwin); Linux uses the real one. The dock app list is split into `hosts/common/darwin-common-dock.nix` so it can be swapped per-host (`mkDarwin` picks `hosts/darwin/<hostname>/` if present, else the dock variant). Catppuccin (macchiato) is enabled globally. Git commits are SSH-signed by default with `~/.ssh/id_ed25519`.
+@.agents/instructions/bootstrap.md
