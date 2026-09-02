@@ -22,13 +22,13 @@
   heading in the same document; and the front-matter literals
   `**Durability: committed**` and
   ``Schema-version-1 `research-observations` / `agent-evidence` gate: not invoked``.
-- Produces, for Task 5 to extend in the same file:
+- Produces, for Task 6 to extend in the same file:
   - a `## Seam roster` section holding **one** table with exactly three
     columns, `| Seam | Class | Detail |`: `Class` carries exactly one of the
     three literals `release-unit seam`, `enforcement seam`,
     `durable-state seam`; `Detail` carries the verbatim text of a `##`/`###`
     heading **in the same document** that holds that seam's fields. All five
-    `release-unit seam` rows are filled in by this task; Task 5 appends the one
+    `release-unit seam` rows are filled in by this task; Task 6 appends the one
     `enforcement seam` row and the five `durable-state seam` rows to this same
     table.
   - a `### Field definitions` subsection under `## Seam roster` defining
@@ -293,3 +293,14 @@ document against its cited sources and confirm each claim ID it owes is
 
 Expected: every claim ID answered from a cited source, or the document revised
 and Steps 4-5 re-run.
+
+---
+
+**Amendment (2026-09-02, D22).** This task ran and is committed. Two of its
+rules above were written under the superseded one-file-per-ticket architecture
+and are now read through D22: a coverage row's fourth column and a
+`## Seam roster` `Detail` cell name a heading in the same document **package**,
+which is the root when the heading stayed there and
+`<member repo-relative path> § <heading text>` when Task 5's decomposition moved
+it. Nothing this task produced is withdrawn; only where a reader looks for it
+can change. See the plan root's `## Amendment log`.

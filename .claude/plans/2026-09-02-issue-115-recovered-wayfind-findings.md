@@ -8,8 +8,12 @@
 holds a committed, re-derived research document that provably discharges its
 ticket's enumerated claim contract.
 
-**Architecture:** Four Markdown documents, one per ticket, written at the exact
-paths their resolution comments link. Each obeys one shared front-matter and
+**Architecture:** Four Markdown *document packages*, one per ticket, each with a
+root at the exact path its resolution comment links. A root over the
+`review-package` per-member cap also carries evidence members under
+`<root-stem>.evidence/` (per D22). A root always holds provenance, research
+question, coverage table, unverified inheritance, syntheses and conclusions; a
+member holds bulk evidence tables only. Each obeys one shared front-matter and
 citation contract (spec, `## Document contract`) and carries a
 `## Coverage of the resolution summary` table keyed by the spec's literal claim
 IDs. That table is the *traceability* seam: a `grep` proves every claim ID is
@@ -40,15 +44,19 @@ Python, no new dependency, no new file outside the two directories above.
 
 Every task's requirements implicitly include this section.
 
-- **Scope.** This work is four Markdown files plus the spec and this plan
-  package. Do not create a checker script, a glossary, a context map or an ADR
+- **Scope.** Four Markdown document packages plus the spec and this plan
+  package. The only files it may create outside the four linked roots are
+  evidence members at `<root-stem>.evidence/<name>.md` (per D22) and this plan's
+  own task members. Do not create a checker script, a glossary, a context map or an ADR
   (per D15, D17). Do not touch `home/`, `hosts/`, `lib/`, `flake.nix`,
   `justfile`, `tests/` or any `.nix` file. Should a task nevertheless touch a
   `.nix` file, `CLAUDE.md`'s standing rule reactivates and `just build` becomes
   a gate for that task.
 - **Paths are exact and non-negotiable.** The four filenames and their
   `2026-08-20` prefix are the *decision date* of each ticket, not the authorship
-  date. Nothing renames these files.
+  date. Nothing renames these files or moves a root out of `.claude/specs/`: the
+  four permalinks must resolve to the roots themselves. A member's directory is
+  the root's stem plus `.evidence`.
 - **Every substantive sentence in the four documents is authored during
   execution from primary sources.** This plan dictates the claim contract, the
   required structure and the falsifiable gates; it deliberately dictates no
@@ -82,13 +90,20 @@ Every task's requirements implicitly include this section.
 - **Coverage-table shape.** Four columns: the spec's literal claim ID with its
   source tag in the form `C60.1 (summary)`; a one-line restatement of the claim;
   the claim's source; and the exact text of a `##`/`###` heading **in the same
-  document** that discharges it. The heading text in column four must match a
-  real heading character-for-character — that is what makes coverage checkable
-  rather than promised.
+  document package** that discharges it. The heading text in column four must
+  match a real heading character-for-character — that is what makes coverage
+  checkable rather than promised. A root heading is named alone; a member
+  heading is named `<member path> § <heading text>`, so coverage still resolves
+  to exactly one file per row (per D22).
 - **Proportionality** (per D8): `artifact-budget` declares no `research` kind, so
   never run it against the four documents. Length is governed by the-bar's
   *Token economy* — as long as the coverage obligation and the citations
   require, and no longer.
+- **Review-package bound** (per D22) — a different bound from D8, enforced by a
+  different tool: no file this branch adds may have a whole-file diff over the
+  merge base larger than **55,000 bytes**, and the branch package must fit
+  `review-package`'s eight shards. The tool's cap is 65,536 bytes per shard and
+  a shard holds whole files, so 55,000 is margin. Measured by V6.
 - **Fleet checkouts are read-only.** `/Users/anis/Projects/nodocom` and
   `/Users/anis/Projects/argus` may be read and may have their `HEAD` observed.
   Never write, `checkout`, `fetch`, `stash` or otherwise mutate them.
@@ -143,8 +158,16 @@ unit-test suite for documentation in this repository and this work edits no
 - **V4 — prototype reference immutability.** `git cat-file -e <sha>^{commit}`
   and `git ls-remote origin` for both prototype shas (AC3).
 
-Implementers verify at these five seams and nowhere else. A task that appears to
-need a sixth seam is a plan bug, not an implementer's call.
+- **V6 — review packageability** (per D22). Run
+  `review-package <this plan file> "$(git merge-base origin/main HEAD)" HEAD`
+  and require exit 0 with `budget_status` `within_budget`. The only gate here
+  that measures *delivery shape* rather than content, and the one the
+  single-file architecture failed. Re-run it at the end of every task from Task
+  5 onward. Exit 2 (`review package generation failed`) is a stale package
+  directory colliding, not a budget verdict; re-run against current `HEAD`.
+
+Implementers verify at these six seams and nowhere else. A task that appears to
+need a seventh seam is a plan bug, not an implementer's call.
 
 ## Task index
 
@@ -152,47 +175,57 @@ Task 1 — #60 cross-agent project surfaces — `.claude/specs/2026-08-20-cross-
 Task 2 — #61 agent fallback inventory — `.claude/specs/2026-08-20-agent-fallback-inventory-research.md` — full — [task-2.md](2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-2.md)
 Task 3 — #62 project knowledge inventory — `.claude/specs/2026-08-20-project-knowledge-inventory-research.md` — full — [task-3.md](2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-3.md)
 Task 4 — #80 release-unit seams and inherited claims — `.claude/specs/2026-08-20-release-lifecycle-seams-research.md` — full — [task-4.md](2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-4.md)
-Task 5 — #80 added seams, prototype references, correction, package sweep — `.claude/specs/2026-08-20-release-lifecycle-seams-research.md` — full — [task-5.md](2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-5.md)
+Task 5 — decompose the #61 and #80 documents into root-plus-evidence-member packages — `.claude/specs/2026-08-20-agent-fallback-inventory-research.md` and its evidence members — full — [task-5.md](2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-5.md)
+Task 6 — #80 added seams, prototype references, correction, package sweep — `.claude/specs/2026-08-20-release-lifecycle-seams-research.md` — full — [task-6.md](2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-6.md)
+
+**Task 5 is new (D22) and took the number 5**; the added-seams task that held it
+is now Task 6. The index runs in ascending order and the decomposition must
+precede the added-seams work, whose per-task review cannot be packaged until the
+#80 root is under the cap. Tasks 1–4 are unaffected.
 
 Lane notes: every task is `full`. Each produces a document that is cited as
 evidence by settled decisions (#71 Stage 0, #79, #84, #88) — a public contract,
 which the `low-risk` lane excludes outright. `mechanical` is unavailable to all
-five: none of them is a deletion or rename, and every one has semantic
+six: none of them is a deletion or rename, and every one has semantic
 documentation effect, which is that lane's stated exclusion. Being Markdown, or
-being short, does not qualify a lane. Task 5 additionally carries release,
+being short, does not qualify a lane. Task 6 additionally carries release,
 security and lifecycle subject matter (the permission guard, the five durable
-state systems), each of which is independently `full` by the exclusion list.
+state systems), each of which is independently `full` by the exclusion list. The
+decomposition in Task 5 is `full`, not `mechanical`: relocating a claim's
+evidence changes where a reader must go to check it, which is the semantic
+documentation effect that lane excludes.
 
 ## Acceptance-criteria coverage
 
 | AC | Discharged by |
 |----|---------------|
-| AC1 — each document's conclusions cover every claim in its ticket's resolution summary | Tasks 1–4 (V2 per document), Task 5 (whole-package V2 sweep) |
-| AC2 — #80 adds the permission guard and the five durable state systems as seams with identity, evidence and rollback | Task 5 (V3) |
-| AC3 — #80 records immutable references for both prototype artifacts and corrects #86 | Task 5 (V4) |
-| AC4 — the four linked paths resolve | Tasks 1–5 (V1 in-branch), completed on merge to `main` |
+| AC1 — each document's conclusions cover every claim in its ticket's resolution summary | Tasks 1–4 (V2 per document), Task 5 (V2 re-run across both decomposed packages), Task 6 (whole-package V2 sweep) |
+| AC2 — #80 adds the permission guard and the five durable state systems as seams with identity, evidence and rollback | Task 6 (V3) |
+| AC3 — #80 records immutable references for both prototype artifacts and corrects #86 | Task 6 (V4) |
+| AC4 — the four linked paths resolve | Tasks 1–4 and 6 (V1 in-branch), Task 5 (V1 re-run after decomposition), completed on merge to `main` |
 
 ## Decisions
 
-The spec owns the single issue-level ledger (D1–D21). Cite rows by ID; never
-restate them. Planning appended D16–D18 and the Phase-5 standards review
-appended D19–D21 to the **spec's** ledger:
+The spec owns the single issue-level ledger (D1–D22). Cite rows by ID; never
+restate them. Planning appended D16–D18, the Phase-5 standards review appended
+D19–D21, and the Phase-6 back-up to planning appended D22 — all to the **spec's**
+ledger:
 
-- **D16** — in-branch gates observe `git show HEAD:<path>`; the `main` form of V1
-  is a ship-time consequence of merging, not a task gate.
-- **D17** — the plan dictates claim contracts, required structure and falsifiable
-  gates, and dictates no finding prose; it also creates no verification script,
-  keeping the deliverable at four Markdown files.
-- **D18** — C62.2's parenthetical drift observation is itself planning-time
-  unverified and is superseded by the execute-phase re-observation, whatever
-  that finds — including "no drift".
-- **D19** — the claim-ID gates prove traceability, not truth; V5's source-backed
-  semantic audit is the only seam that discharges AC1, and the #80 gate checks
-  substantive seam values and associated prototype triples.
+- **D16** — in-branch gates observe `git show HEAD:<path>`.
+- **D17** — the plan dictates contracts, structure and gates, never finding prose,
+  and creates no verification script.
+- **D18** — C62.2's parenthetical drift observation is superseded by the
+  execute-phase re-observation, whatever it finds.
+- **D19** — the claim-ID gates prove traceability, not truth; V5 is the only seam
+  that discharges AC1.
 - **D20** — the guard inventory covers both authorized owners and the `dev`
-  integration base, and the durable-state sources name the two sdd scripts.
+  integration base.
 - **D21** — fleet citations record the checked-out snapshot and its distance
-  behind `origin`; no task refreshes a checkout.
+  behind `origin`.
+- **D22** — a document whose whole-file diff exceeds the `review-package`
+  per-member cap becomes a root-plus-evidence-member package. Added during
+  execution, when the gate refused the branch; the spec's `## Amendment log`
+  records that back-up from Phase 6 to planning.
 
 ## Standards review provenance
 
@@ -206,12 +239,8 @@ appended D19–D21 to the **spec's** ledger:
 - **Dispositions.** Every finding was re-verified against the live plan members
   before being applied. B-01 (each task's Step 4 expected `PASS` while its own
   gate runs V1, which cannot pass before Step 5's commit) is corrected in all
-  five members. B-02 and B-03 are recorded together as D19; SF-01 and SF-02 as
-  D20; the Discussion item D-01 as D21. Two of B-02/B-03's sub-claims were
-  partly stale and were narrowed rather than applied as written: task 4's gate
-  did already check twelve `C80.4` fields (the other eleven are now added), and
-  task 5's guard literals did already include `elevenyellow/nodocom` (only bare
-  `elevenyellow` and `dev` were missing).
+  five members. B-02 and B-03 are recorded as D19, SF-01 and SF-02 as D20, and
+  the Discussion item D-01 as D21. Two sub-claims of B-02/B-03 were partly stale
+  and were narrowed rather than applied as written.
 - No reviewer transcript is stored in this repository, the issue, the PR, or any
   commit message.
-
