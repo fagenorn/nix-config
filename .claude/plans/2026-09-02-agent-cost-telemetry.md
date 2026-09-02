@@ -35,6 +35,13 @@ Both documents are content-addressed over canonical JSON and written to stdout o
 - `generated_at` is RFC3339 UTC, `datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")`.
 - An absent measurement is emitted as `null` (or `{}` / `[]` for a mapping or list), never `0` (D6).
 - `input_total = fresh + cache_create + cache_read`, and the three categories stay as sibling keys.
+- Every run and stratum total carries `cost_by_family` beside `cost_usd`; both are `null` for the
+  Codex stratum, and `fleet` carries neither (D32, D7, D8).
+- Nothing in a cited record is read before it is type-checked, and each resolved trial carries the
+  record's `generated_at` and the run's `outcome` (D34, D35, D39).
+- Quality evidence carries a declared `evaluator_stability`; `"unstable"` is `unmeasured` (D37).
+- Every field inside a document digest is deterministic from declared inputs — the override's
+  `authorized_at` is `--override-at`, never a clock sample (D38).
 - Text mode's stdout bytes are byte-identical to today's for every invocation that passes no new
   flag, and `--strata` with any value other than `claude` in text mode is a usage error, exit 2 (D15).
 - Gate thresholds, transcribed from #70 and frozen behind `gate_version: 1`: context saving
@@ -42,7 +49,8 @@ Both documents are content-addressed over canonical JSON and written to stdout o
   quality veto `base − candidate > 5` one-sided (D13); checks saving
   `static_fallback_checks.candidate == 0` with `base > 0` **and** `discovery_preflight_ops` down
   `≥20%`; maintenance saving `manual_update_sites` down `≥50%` **and** `≥1` site with
-  `new_hand_authored_projections == 0`; minimum `3` paired trials per side.
+  `new_hand_authored_projections == 0`; paired-trial cardinality is **exact** — 3 per side, or 3
+  or 10 when `expansion.expanded` is `true` with a non-empty `checkpoint_ref` (D36).
 - `case_class` is the closed enum `cold-resolution`, `routine-issue`, `fuzzy-design`,
   `review-ship`, `repo-specific`. The first four must each appear at least once; the fifth is
   optional. There is no per-case `required` flag (D20).
@@ -112,5 +120,27 @@ Task 5 — Bundle assembly, `--override`, exit codes, and the no-upgrade table �
 - D30 fixes the `trials` object shape the evidence carries, used by Tasks 3–5.
 - D31 fixes the document-fault/evidence-fault split behind exit 2 versus `unmeasured`, used by
   Tasks 3 and 5.
+- D32 fixes per-model-family cost on every run and stratum total, used by Task 2.
+- D33 fixes the pre-change golden stdout oracle for #97's byte-identity clause, used by Task 2.
+- D34 fixes strict pre-extraction record and numeric validation, used by Tasks 3–5.
+- D35 fixes the evidence timestamp carried into every resolved trial, used by Tasks 3 and 5.
+- D36 fixes exact paired-trial cardinality and expansion consistency, used by Tasks 3–5.
+- D37 fixes the declared `evaluator_stability` and its `unmeasured` path, used by Tasks 3–5.
+- D38 fixes the override's declared `authorized_at`, used by Task 5.
+- D39 fixes "completed run" as a trusted precondition with `outcome` bound but ungated, used by
+  Tasks 3 and 4.
+- D40 fixes the operator-facing docstring and recipe-comment updates, used by Task 2.
+- D41 fixes `scan_paths(..., scanner=None)` so the existing patch-based fallback tests still
+  bind, used by Task 2.
+
+## Standards review provenance
+
+A standards review of this plan at `8db514c` was run by **Codex** in an isolated, read-only
+runtime against base SHA `5a7aa7cfc83d356f8c3b910c4560cafd27840b1c`, with **no focus configured**
+and **no fallback used**. Eleven findings were raised — eight blocking, two should-fix, one
+discussion — and every one was verified against the live worktree before disposition:
+**11 accepted** (the discussion item resolved by autonomous default), **0 rejected**,
+**0 deferred**. The resulting decisions are ledger rows **D32–D41** in the design spec; the raw reviewer transcript is not
+stored anywhere in this repository.
 
 ---

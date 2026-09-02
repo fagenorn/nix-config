@@ -10,7 +10,9 @@
   `{"cases": [{"case_id", "case_class", "strata": {<s>: {"context": {"base_median",
   "candidate_median", "delta_tokens", "delta_pct", "trials": {"base": [...],
   "candidate": [...]}}, "quality", "checks", "maintenance"}}}]}`, where each resolved trial is
-  `{"run_id", "record_id", "input_total", "peak_ctx"}`.
+  `{"run_id", "record_id", "generated_at", "outcome", "input_total", "peak_ctx"}` (per D35,
+  D39). `decide` reads only `input_total`; the other four are bound into the bundle digest and
+  gate nothing.
 - Produces, for Task 5:
   - `quality_fails(quality) -> bool`
   - `context_saves(delta_tokens, delta_pct) -> bool` and
@@ -41,7 +43,16 @@
   no-regression bound; with a single-element `STRATA` the condition would be vacuous, which is
   why both strata are required evidence.
 - A case whose index-aligned pairs straddle a gate is `unmeasured` at three pairs and at ten
-  alike; nothing in this task reads `expansion` (D21).
+  alike; nothing in this task reads `expansion` (D21). That remains true *because* Task 3 now
+  validates cardinality and expansion consistency before `decide` ever sees the evidence (per
+  D36) — `decide` can assume exactly 3 or exactly 10 index-aligned pairs.
+- Evaluator instability is likewise resolved upstream: `quality_fails` never inspects
+  `evaluator_stability`, because an `"unstable"` declaration produces `EVALUATOR_UNSTABLE` in
+  Task 3 and the evidence never reaches `decide` (per D37). Ordering it this way keeps
+  `unmeasured` dominant without a second precedence rule inside `decide`.
+- `quality_fails` reads only `critical_all_pass` and the two medians. Task 3 has already
+  guaranteed those are a strict `bool` and two finite numbers in `[0, 100]`, so the arithmetic
+  here needs no defensive typing (per D34).
 
 ## Steps
 
@@ -57,15 +68,17 @@ def context(base, candidate, base_trials=None, candidate_trials=None):
             "delta_pct": (100 * delta / base) if base else None,
             "trials": {
                 "base": [{"run_id": f"b{i}", "record_id": "sha256:x",
+                          "generated_at": "2026-09-02T00:00:00Z", "outcome": "completed",
                           "input_total": total, "peak_ctx": total}
                          for i, total in enumerate(base_trials or [base] * 3)],
                 "candidate": [{"run_id": f"c{i}", "record_id": "sha256:x",
+                               "generated_at": "2026-09-02T00:00:00Z", "outcome": "completed",
                                "input_total": total, "peak_ctx": total}
                               for i, total in enumerate(candidate_trials or [candidate] * 3)]}}
 
 
-def quality(base=87.0, candidate=87.0, critical=True):
-    return {"critical_all_pass": critical,
+def quality(base=87.0, candidate=87.0, critical=True, stability="stable"):
+    return {"critical_all_pass": critical, "evaluator_stability": stability,
             "noncritical_median": {"base": base, "candidate": candidate}}
 
 
@@ -99,6 +112,10 @@ class GatePrimitiveTest(unittest.TestCase):
         self.assertFalse(gate.context_breaches(128, 2.1))     # exactly 128 tokens
         self.assertTrue(gate.context_breaches(129, 2.1))
         self.assertTrue(gate.context_breaches(400, None))     # zero base median, rose
+
+    def test_quality_fails_ignores_the_stability_declaration(self):
+        # instability is Task 3's EVALUATOR_UNSTABLE, not a quality veto (D37)
+        self.assertFalse(gate.quality_fails(quality(stability="unstable")))
 
     def test_quality_bound_is_one_sided(self):
         self.assertFalse(gate.quality_fails(quality(87.0, 82.0)))   # exactly 5 points

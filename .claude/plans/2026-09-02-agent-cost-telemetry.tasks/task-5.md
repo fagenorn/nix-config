@@ -14,7 +14,8 @@
 - Produces (the tool's final surface):
   - `class BundleIntegrityError(Exception)` — the emitter's refusal to write.
   - `assemble_bundle(manifest, evidence, diagnostics, override, state) -> dict`
-  - `build_override(reason, authorized_by) -> dict | None`
+  - `build_override(reason, authorized_by, authorized_at) -> dict | None` — every field a
+    declared input; it reads no clock (per D38)
   - `main(argv=None) -> int`, wired as `raise SystemExit(main())`.
   - `justfile` recipe `agent-gate-bundle *args`.
 
@@ -26,6 +27,10 @@
 - `override` is a closed four-key object, `{"reason", "authorized_by", "authorized_at",
   "scope"}`, with `scope` the literal `"further-experimentation"`. It is `null` when the flags
   are absent, and it changes neither `state` nor the exit code.
+- Every hashed field is deterministic from declared inputs. `authorized_at` is therefore
+  `--override-at`, a *required* companion of `--override` (like `--override-by`), validated as
+  RFC3339 UTC ending in `Z` — never a clock sample. `generated_at` is the one clock read, and it
+  sits outside the digest. An override-bearing bundle reproduces byte-for-byte (per D38).
 - `bundle_id = canonical_digest(body)` over the bundle minus `bundle_id` and `generated_at`;
   `state`, `gates`, `evidence`, `identity`, `expansion`, `override` and `diagnostics` are all
   inside the digest, so a differing verdict is a differing bundle (D9).
@@ -99,6 +104,22 @@ class BundleCliTest(unittest.TestCase):
         other = run_cli("--trials", self.manifest_file(self.flat_manifest(), "b.json"))[1]
         self.assertNotEqual(first["bundle_id"], other["bundle_id"])
 
+    def test_an_override_bearing_bundle_id_is_reproducible(self):
+        path = self.manifest_file(self.flat_manifest(), "ovr.json")
+        argv = ("--trials", path, "--override", "further experimentation approved",
+                "--override-by", "anis", "--override-at", "2026-09-02T12:00:00Z")
+        first, second = run_cli(*argv)[1], run_cli(*argv)[1]
+        self.assertEqual(first["bundle_id"], second["bundle_id"])
+        self.assertEqual(first["override"]["authorized_at"], "2026-09-02T12:00:00Z")
+        later = run_cli(*argv[:-1], "2026-09-03T12:00:00Z")[1]
+        self.assertNotEqual(first["bundle_id"], later["bundle_id"])
+
+    def test_override_without_a_timestamp_is_a_usage_error(self):
+        path = self.manifest_file(self.flat_manifest(), "novrat.json")
+        with self.assertRaises(SystemExit) as caught:
+            run_cli("--trials", path, "--override", "why", "--override-by", "anis")
+        self.assertEqual(caught.exception.code, 2)
+
     def test_unreadable_manifest_is_exit_two_with_no_document(self):
         code, bundle = run_cli("--trials", str(self.tmp / "absent.json"))
         self.assertEqual(code, 2)
@@ -148,6 +169,38 @@ class NoUpgradeTableTest(unittest.TestCase):
         exempted = make_manifest(self.tmp, full_cases(self.tmp, flat))
         exempted["cases"][0]["required"] = False
 
+        # per D36: a retained-subset count, and ten pairs with no recorded checkpoint
+        retained = make_manifest(self.tmp, full_cases(self.tmp, {
+            s: ([1000] * 5, [800] * 5) for s in gate.STRATA}))
+
+        unchecked_ten = make_manifest(self.tmp, full_cases(self.tmp, {
+            s: ([1000] * 10, [800] * 10) for s in gate.STRATA}))
+
+        checkpoint_without_expansion = make_manifest(self.tmp, full_cases(self.tmp))
+        checkpoint_without_expansion["expansion"] = {
+            "expanded": False, "checkpoint_ref": "ck-1"}
+
+        # per D37
+        unstable = make_manifest(self.tmp, full_cases(self.tmp))
+        unstable["cases"][0]["strata"]["claude"]["quality"][
+            "evaluator_stability"] = "unstable"
+
+        # per D34: a wrong-kind record, re-digested so it is self-consistent
+        wrong_kind = make_manifest(self.tmp, full_cases(self.tmp))
+        entry = wrong_kind["cases"][0]["strata"]["claude"]["base"][0]
+        cited = Path(entry["record"])
+        document = dict(json.loads(cited.read_text(encoding="utf-8")),
+                        kind="agent-gate-bundle")
+        body = {k: v for k, v in document.items()
+                if k not in ("record_id", "generated_at")}
+        document["record_id"] = entry["record_id"] = gate.canonical_digest(body)
+        cited.write_text(json.dumps(document), encoding="utf-8")
+
+        # per D34: a rubric value outside [0, 100] is a document fault
+        impossible_score = make_manifest(self.tmp, full_cases(self.tmp))
+        impossible_score["cases"][0]["strata"]["claude"]["quality"][
+            "noncritical_median"]["candidate"] = 1000.0
+
         return [
             ("manifest-declared state", declared_state, 2),
             ("manifest-declared bundle_id", declared_id, 2),
@@ -157,6 +210,12 @@ class NoUpgradeTableTest(unittest.TestCase):
             ("missing core case class", missing_class, 3),
             ("straddling case", straddle, 3),
             ("mismatched pinned identity", mismatched, 3),
+            ("selectively retained 5 pairs", retained, 3),
+            ("ten pairs, no recorded checkpoint", unchecked_ten, 3),
+            ("checkpoint without a declared expansion", checkpoint_without_expansion, 3),
+            ("declared-unstable evaluator", unstable, 3),
+            ("self-consistent wrong-kind record", wrong_kind, 3),
+            ("rubric value outside [0, 100]", impossible_score, 2),
         ]
 
     def test_no_row_yields_an_approval(self):
@@ -190,7 +249,8 @@ class NoUpgradeTableTest(unittest.TestCase):
         manifest = make_manifest(self.tmp, full_cases(self.tmp, flat))
         code, bundle = run_cli("--trials", self.write(manifest, "override.json"),
                                "--override", "further experimentation approved",
-                               "--override-by", "anis")
+                               "--override-by", "anis",
+                               "--override-at", "2026-09-02T12:00:00Z")
         self.assertEqual(code, 3)
         self.assertEqual(bundle["state"], "rejected")
         self.assertEqual(set(bundle["override"]),
@@ -210,16 +270,18 @@ test in both classes.
 Add `import argparse` and `import sys` to `scripts/agent-gate-bundle.py`, plus
 `from datetime import datetime, timezone`, and append:
 
-**3a. `build_override(reason, authorized_by)`** — `None` when `reason` is `None`; otherwise
-exactly
+**3a. `build_override(reason, authorized_by, authorized_at)`** — `None` when `reason` is
+`None`; otherwise exactly
 
 ```python
 {"reason": reason, "authorized_by": authorized_by,
- "authorized_at": <RFC3339 UTC now>, "scope": "further-experimentation"}
+ "authorized_at": authorized_at, "scope": "further-experimentation"}
 ```
 
-with the timestamp built as
-`datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")`. No other key
+`authorized_at` is the caller's declared `--override-at`, **not** a clock read: the override
+block is inside `bundle_id`, so a sampled timestamp would give identical inputs different bundle
+ids and contradict the reproducibility criterion (per D38). `main` validates it with
+`datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")` and calls `ap.error` on failure. No other key
 exists, and none of these four is read anywhere else in the module (D14).
 
 **3b. `assemble_bundle(manifest, evidence, diagnostics, override, state)`**:
@@ -249,9 +311,13 @@ ap.add_argument("--override", metavar="REASON",
                 help="record an authorization for further experimentation; "
                      "never changes the state or the exit code")
 ap.add_argument("--override-by", metavar="WHO", help="who authorized --override")
+ap.add_argument("--override-at", metavar="RFC3339",
+                help="when --override was authorized, e.g. 2026-09-02T12:00:00Z; "
+                     "declared, not sampled, so the bundle id stays reproducible")
 args = ap.parse_args(argv)
-if bool(args.override) != bool(args.override_by):
-    ap.error("--override and --override-by must be given together")
+given = (bool(args.override), bool(args.override_by), bool(args.override_at))
+if len(set(given)) != 1:
+    ap.error("--override, --override-by and --override-at must be given together")
 ```
 
 Then: `load_manifest(Path(args.trials))` inside a `try`, catching `ManifestError` — print

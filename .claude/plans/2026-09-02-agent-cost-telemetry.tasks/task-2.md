@@ -2,6 +2,8 @@
 
 **Files:**
 - Modify: `scripts/agent-costs.py`
+- Modify: `justfile` (recipe comment only, per D40)
+- Create: `tests/fixtures/agent_costs_text_golden.txt` (per D33)
 - Test: `tests/test_agent_costs.py`
 
 **Interfaces:**
@@ -19,7 +21,11 @@
 - New module surface: `SCHEMA_VERSION = 1`, `RECORD_KIND = "agent-cost-record"`,
   `DISCLAIMER` (str), `canonical_digest(body) -> str`,
   `build_record(groups_by_stratum, window) -> dict`, and `scan_paths(paths, executor_factory,
-  scanner=scan_file)`.
+  scanner=None)` — `None`, **not** `scan_file`: a captured default binds once at `def` time and
+  would silently bypass the existing `mock.patch.object(agent_costs, "scan_file", ...)` fallback
+  tests (per D41).
+- `scan_file` gains one key, `cost_by_family`, and `COUNTER_FIELDS` gains the same name, so the
+  per-family cost rides the one existing deduplicated derivation (per D32).
 
 **Invariants:**
 - Text mode's stdout bytes are byte-identical to the pre-task bytes for every invocation that
@@ -41,7 +47,14 @@
   `dict`, so `record_id` does not depend on filesystem iteration order (D28).
 - `record_id` equals `canonical_digest(body)` where `body` is the document minus `record_id` and
   `generated_at`; every other field is inside the digest (D9).
-- `fleet` carries `informative: true` and token fields only — no cost, under any `--strata` (D8).
+- `fleet` carries `informative: true` and token fields only — no cost of either shape, under any
+  `--strata` (D8).
+- Every run and stratum total carries `cost_by_family`; for the Claude stratum
+  `sum(run["cost_by_family"].values())` equals `run["cost_usd"]` to float rounding, because both
+  come from the same accumulator loop. It is `null` for Codex (per D32, D7).
+- Byte-identity is asserted against `tests/fixtures/agent_costs_text_golden.txt`, captured from
+  the script **as it stands at this task's base commit** — the only oracle that predates the
+  change (per D33).
 
 ## Steps
 
@@ -100,6 +113,7 @@ class BuildRecordTest(unittest.TestCase):
         claude.update(fresh=100, cache_create=200, cache_read=3000, output=40,
                       cost=1.5, turns=2, sessions=1, peak_ctx=3300)
         claude["models"].update({"claude-opus-5": 2})
+        claude["cost_by_family"].update({"opus": 1.2, "sonnet": 0.3})
         claude["outcomes"].append("completed")
         claude["agent_prompt_bytes"].extend([10, 20, 30])
         codex = {"fresh": 300, "cache_create": 0, "cache_read": 700, "output": 60,
@@ -127,10 +141,21 @@ class BuildRecordTest(unittest.TestCase):
         self.assertEqual(run["agent_prompt_bytes"],
                          {"n": 3, "p50": 20, "p90": 30, "max": 30})
 
+    def test_cost_is_carried_per_model_family(self):
+        rec = agent_costs.build_record(self.strata(), self.window())
+        run = rec["strata"]["claude"]["runs"][0]
+        self.assertEqual(run["cost_by_family"], {"opus": 1.2, "sonnet": 0.3})
+        self.assertAlmostEqual(sum(run["cost_by_family"].values()), run["cost_usd"])
+        self.assertEqual(rec["strata"]["claude"]["totals"]["cost_by_family"],
+                         {"opus": 1.2, "sonnet": 0.3})
+        self.assertIsNone(rec["strata"]["codex"]["runs"][0]["cost_by_family"])
+        self.assertIsNone(rec["strata"]["codex"]["totals"]["cost_by_family"])
+        self.assertNotIn("cost_by_family", rec["fleet"]["totals"])
+
     def test_absent_measurements_are_null_not_zero(self):
         rec = agent_costs.build_record(self.strata(), self.window())
         run = rec["strata"]["codex"]["runs"][0]
-        for field in ("outcome", "cost_usd", "phase_turns", "attr_turns",
+        for field in ("outcome", "cost_usd", "cost_by_family", "phase_turns", "attr_turns",
                       "stop_reasons", "agents_by_type", "agent_statuses",
                       "skill_loads", "repeats", "agents_killed", "interventions",
                       "agent_prompt_bytes", "agent_result_bytes"):
@@ -175,7 +200,17 @@ class BuildRecordTest(unittest.TestCase):
         self.assertIn("claude:repo:multi", ids)
 
 
+GOLDEN = Path(__file__).resolve().parent / "fixtures" / "agent_costs_text_golden.txt"
+
+
 class TextByteIdentityTest(unittest.TestCase):
+    def test_default_stdout_is_byte_for_byte_the_pre_change_golden(self):
+        tmp = Path(tempfile.mkdtemp())
+        claude_tree(tmp)
+        bare, code = run_main("--projects-dir", str(tmp), "--days", "0")
+        self.assertIsNone(code)
+        self.assertEqual(bare, GOLDEN.read_text(encoding="utf-8"))
+
     def test_explicit_defaults_reproduce_the_no_flag_bytes(self):
         tmp = Path(tempfile.mkdtemp())
         claude_tree(tmp)
@@ -187,15 +222,33 @@ class TextByteIdentityTest(unittest.TestCase):
         self.assertEqual(bare, explicit)
         self.assertIn("NOTE: cache reads measure logical context re-processing", bare)
 
-    def test_json_totals_agree_with_the_printed_total_line(self):
+    def test_json_reports_the_same_numbers_the_table_prints(self):
         tmp = Path(tempfile.mkdtemp())
         claude_tree(tmp)
         text, _ = run_main("--projects-dir", str(tmp), "--days", "0")
         raw, _ = run_main("--projects-dir", str(tmp), "--days", "0",
                           "--format", "json")
-        totals = json.loads(raw)["strata"]["claude"]["totals"]
+        record = json.loads(raw)
+        totals = record["strata"]["claude"]["totals"]
+        run = record["strata"]["claude"]["runs"][0]
         printed = agent_costs.human(totals["input_total"] + totals["output"])
         self.assertIn(f"TOTAL  {printed} tokens", text)
+        # every shared group/total quantity, not one substring
+        self.assertEqual(totals["fresh"], run["tokens"]["fresh"])
+        self.assertEqual(totals["cache_create"], run["tokens"]["cache_create"])
+        self.assertEqual(totals["cache_read"], run["tokens"]["cache_read"])
+        self.assertEqual(totals["output"], run["tokens"]["output"])
+        self.assertEqual(totals["input_total"], run["tokens"]["input_total"])
+        self.assertEqual(totals["cost_usd"], run["cost_usd"])
+        self.assertEqual(totals["cost_by_family"], run["cost_by_family"])
+        self.assertAlmostEqual(sum(run["cost_by_family"].values()), run["cost_usd"])
+        for value in (agent_costs.human(run["tokens"]["fresh"]),
+                      agent_costs.human(run["tokens"]["cache_create"]),
+                      agent_costs.human(run["tokens"]["cache_read"]),
+                      agent_costs.human(run["tokens"]["output"]),
+                      agent_costs.human(run["peak_ctx"]),
+                      f"{run['cost_usd']:,.2f}"):
+            self.assertIn(value, text)
 
 
 class StrataCliTest(unittest.TestCase):
@@ -272,6 +325,14 @@ Replace the final `print(...)` of `main` with `print(f"\nNOTE: {DISCLAIMER}")`. 
 bytes must be identical; `TextByteIdentityTest` and the untouched existing `EndToEndTest` are
 what prove it.
 
+**3a-bis. Per-family cost (per D32).** In `scan_file`, initialise
+`cost_by_family = Counter()` beside `cost` and, in the same pricing block that already computes a
+message's cost, add that cost to `cost_by_family[model_family(model)]`. Return it as
+`"cost_by_family": dict(cost_by_family)`. Add `"cost_by_family"` to `COUNTER_FIELDS`, so
+`new_group` seeds it and `build_groups` merges it beside the other counters — no new loop and no
+second derivation (D2). `SUM_FIELDS` is untouched, so `fold_scan_totals` and every text-path
+statement are unchanged.
+
 **3b. `canonical_digest`.**
 
 ```python
@@ -292,7 +353,8 @@ def canonical_digest(body):
    - `tokens = {"input_total": fresh + cache_create + cache_read, "fresh": …,
      "cache_create": …, "cache_read": …, "output": …, "reasoning": g.get("reasoning")}`,
      each of the four categories read with `g.get(field)`.
-   - `cost_usd = g.get("cost")`; `peak_ctx`, `turns`, `sessions`, `subagents`, `skill_loads`,
+   - `cost_usd = g.get("cost")`; `cost_by_family = dict(g["cost_by_family"])` when the key is
+     present, else `None` (D6, D32); `peak_ctx`, `turns`, `sessions`, `subagents`, `skill_loads`,
      `repeats`, `agents_killed`, `interventions` each `g.get(field)`.
    - each of `models`, `efforts`, `stop_reasons`, `phase_turns`, `attr_turns`,
      `agents_by_type`, `agent_statuses`: `dict(g[field])` when the key is present, else `None`.
@@ -303,7 +365,8 @@ def canonical_digest(body):
 3. `totals` for the stratum: `{"runs": len(runs)}` plus, for each of `input_total`, `fresh`,
    `cache_create`, `cache_read`, `output`, `reasoning`, `cost_usd`, the sum of that field over
    the runs — or `None` when **any** run's value is `None` (D6). Token fields come from
-   `run["tokens"]`, `cost_usd` from the run's top level.
+   `run["tokens"]`, `cost_usd` from the run's top level. `cost_by_family` totals as a
+   family-keyed sum across the runs, `None` when any run's is `None`.
 4. `strata[name] = {"cost_basis": …, "totals": totals, "runs": runs}`.
 5. `fleet = {"informative": True, "totals": {field: sum over strata totals, or None when any
    stratum's is None}}` for the six token fields only — no `cost_usd` key at all (D8).
@@ -314,9 +377,12 @@ def canonical_digest(body):
    (`from datetime import datetime, timezone` in the header).
 
 **3d. `scan_paths` gains a scanner.** Change the signature to
-`scan_paths(paths, executor_factory=ProcessPoolExecutor, scanner=scan_file)` and use `scanner`
-in both the `pool.map` call and the sequential fallback. Existing positional callers and the
-existing fallback tests are unaffected.
+`scan_paths(paths, executor_factory=ProcessPoolExecutor, scanner=None)` and, as the **first**
+statement of the body, `if scanner is None: scanner = scan_file`. Then use `scanner` in both the
+`pool.map` call and the sequential fallback. Writing `scanner=scan_file` in the signature would
+capture the function object at `def` time and bypass
+`mock.patch.object(agent_costs, "scan_file", ...)`, silently breaking the two existing fallback
+tests in `ScanPathsTest` — which stay as the regression gate for this (per D41).
 
 **3e. Codex collection.** Add, next to `scan_codex_file`:
 
@@ -342,6 +408,16 @@ existing fallback tests are unaffected.
 7. Accumulate into the group: sum `fresh`/`cache_create`/`cache_read`/`output`/`reasoning`/
    `turns`; `peak_ctx = max(...)`; `models`/`efforts` merged as `Counter`s and stored as `dict`s;
    `sessions += 1` per root rollout and `subagents += 1` per non-root rollout (D27).
+
+**3e-bis. Operator-facing prose (per D40).** Two descriptions go false the moment this task
+lands; both are edited here, and neither touches stdout:
+
+- `scripts/agent-costs.py`'s module docstring — its first line becomes
+  `Per-issue agent-cost telemetry for Claude Code and Codex sessions.`, and its body gains one
+  sentence naming `~/.codex/sessions` as the Codex source and `--format json` as the
+  `agent-cost-record` projection. The disclaimer literal is not duplicated here (D18).
+- the `justfile` `agent-costs` recipe comment becomes
+  `# Report agent token spend per issue from the local Claude Code and Codex sessions`.
 
 **3f. `main` wiring.** Add three arguments after `--artifacts`:
 
@@ -388,6 +464,24 @@ Then, keeping today's statements in today's order on the text path:
 
 - [ ] **Step 4: Verify**
 
+First capture the pre-change oracle, **before** editing `scripts/agent-costs.py` (per D33):
+
+```sh
+mkdir -p tests/fixtures
+git show HEAD:scripts/agent-costs.py > /tmp/agent-costs-base.py
+python3 - <<'PY' > tests/fixtures/agent_costs_text_golden.txt
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("base", "/tmp/agent-costs-base.py")
+base = importlib.util.module_from_spec(spec); spec.loader.exec_module(base)
+# build the same claude_tree() fixture the test builds, then call
+#   base.main(["--projects-dir", str(tmp), "--days", "0"],
+#             executor_factory=DeterministicExecutor)
+PY
+```
+
+The fixture passes no `--artifacts`, and that is the only path on which the tool prints an
+absolute path, so the captured bytes are location-independent and commit cleanly. Then:
+
 ```sh
 python3 -m unittest -v tests/test_agent_costs.py
 just agent-costs --days 1 --format json --strata claude | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["kind"], d["record_id"][:14], len(d["strata"]["claude"]["runs"]))'
@@ -401,7 +495,8 @@ was left in the footer.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/agent-costs.py tests/test_agent_costs.py
+git add scripts/agent-costs.py tests/test_agent_costs.py \
+        tests/fixtures/agent_costs_text_golden.txt justfile
 git commit -m "feat(agent-costs): emit an agent-cost-record with a Codex stratum
 
 --format json projects the same groups the tables print (D2); --strata
