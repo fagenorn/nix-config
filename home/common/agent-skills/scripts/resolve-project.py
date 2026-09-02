@@ -687,6 +687,8 @@ def validate_projection_entries(source: dict, violations: list[dict]) -> None:
     if not check_list(projections, "/projections", "projections", violations):
         return
     seen: set[str] = set()
+    targets: dict[str, int] = {}
+    sources: set[str] = set()
     for index, entry in enumerate(projections):
         pointer = f"/projections/{index}"
         if not check_object(entry, pointer, "projections", violations):
@@ -709,9 +711,29 @@ def validate_projection_entries(source: dict, violations: list[dict]) -> None:
                 f"{pointer}/kind", "must name a known projection kind",
                 "contract.projections.invalid_kind"))
         for name in ("target", "source"):
-            if name in entry:
-                check_safe_path(
-                    entry[name], f"{pointer}/{name}", "projections", violations)
+            if name in entry and check_safe_path(
+                    entry[name], f"{pointer}/{name}", "projections", violations):
+                if name == "source":
+                    sources.add(entry[name])
+                elif entry[name] in targets:
+                    # The writer visits entries in order and never re-reads what
+                    # it wrote, so a second entry on one target silently leaves
+                    # the first projection stale behind a successful exit.
+                    violations.append(violation(
+                        f"{pointer}/target",
+                        "projection target is declared more than once",
+                        "contract.projections.duplicate_target"))
+                else:
+                    targets[entry[name]] = index
+    # A target that is also somebody's source is the same collision one step
+    # removed: writing the target would overwrite an authored instruction file.
+    for target, index in sorted(targets.items(), key=lambda item: item[1]):
+        if target in sources:
+            violations.append(violation(
+                f"/projections/{index}/target",
+                "must not name a projection source: writing the target would "
+                "overwrite the authored source it is rendered from",
+                "contract.projections.target_is_source"))
 
 
 def validate_contract(source: dict) -> list[dict]:
@@ -1073,8 +1095,14 @@ def write_atomically(target: Path, data: bytes) -> None:
     The temporary file is named distinctively so an orphan left by a crashed
     process is recognizable and is caught by the repository's `.gitignore`
     rather than offered as an untracked file.
+
+    A nested target is a safe path the validator accepts, so its parent may not
+    exist yet; it is created here, because the temporary file is opened inside
+    that directory and a missing one would surface as `resolver_failure`
+    instead of a written projection.
     """
     mode = destination_mode(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
     pending: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(

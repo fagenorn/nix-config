@@ -1094,6 +1094,63 @@ class WriteProjectionsTest(ResolverTestCase):
         self.assertEqual(sorted(path.name for path in root.iterdir()), before)
 
 
+class ProjectionCollisionTest(ResolverTestCase):
+    """The writer visits entries in order and never re-reads what it wrote, so
+    a collision between two declared entries has to be refused by the validator
+    or it exits 0 having left one projection stale.
+    """
+
+    def contract_with(self, mutate) -> dict:
+        contract = copy.deepcopy(source_contract())
+        mutate(contract["projections"])
+        return contract
+
+    def refusal(self, contract: dict) -> dict:
+        root = self.make_root(contract, projections=False)
+        before = tree_snapshot(root)
+        code, out, err = run("write-projections", "--repo-root", str(root))
+        self.assertEqual(code, 2, err)
+        # The refusal precedes every write: nothing under the root moved.
+        self.assertEqual(tree_snapshot(root), before)
+        return json.loads(out)["error"]
+
+    def test_two_entries_on_one_target_are_refused(self):
+        error = self.refusal(self.contract_with(
+            lambda entries: entries[1].__setitem__("target", entries[0]["target"])))
+        self.assertEqual(error["code"], "invalid_contract")
+        self.assertEqual(error["repair_id"],
+                         "contract.projections.duplicate_target")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/projections/1/target"])
+
+    def test_a_target_that_is_also_a_source_is_refused(self):
+        error = self.refusal(self.contract_with(
+            lambda entries: entries[0].__setitem__(
+                "target", entries[0]["source"])))
+        self.assertEqual(error["code"], "invalid_contract")
+        self.assertEqual(error["repair_id"],
+                         "contract.projections.target_is_source")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/projections/0/target"])
+
+    def test_a_nested_target_is_written_rather_than_failing_on_its_parent(self):
+        """`generated/AGENTS.md` is a safe path the validator accepts; the
+        writer must create the directory it names instead of surfacing the
+        missing parent as `resolver_failure`.
+        """
+        contract = self.contract_with(
+            lambda entries: entries[0].__setitem__("target", "generated/AGENTS.md"))
+        root = self.make_root(contract, projections=False)
+        code, out, err = run("write-projections", "--repo-root", str(root))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            {p["id"]: p["action"] for p in json.loads(out)["projections"]},
+            {"codex.entry": "written", "claude.entry": "written"})
+        source = (root / ".agents" / "instructions" / "bootstrap.md").read_bytes()
+        self.assertEqual((root / "generated" / "AGENTS.md").read_bytes(),
+                         CODEX_HEADER.encode() + b"\n\n" + source)
+
+
 class CommittedProjectionTest(ResolverTestCase):
     def test_the_repository_projections_are_present_and_current(self):
         agents = (REPO_ROOT / "AGENTS.md").read_bytes()

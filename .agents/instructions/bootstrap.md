@@ -9,7 +9,10 @@ on its own; those projections are generated and must never be hand-edited.
   `resolve-project resolve` and trust the returned `ResolvedProject`.
 - No project policy is defaulted. When `resolve-project` refuses, fix the
   contract; never guess a value it declined to give you.
-- Every path in the snapshot is absolute and rooted at `project.root`.
+- Every `paths` member, every `paths.artifacts` member and every command
+  `cwd` in the snapshot is absolute and rooted at `project.root`. No other
+  binding is rewritten: a path-shaped value elsewhere is returned exactly as
+  authored, so resolve it yourself before using it.
 - Every executable invocation is a `commands` entry addressed by its id; the
   contract carries no environment variable values and no shell text.
 - `AGENTS.md` and the `@.agents/instructions/bootstrap.md` import line in
