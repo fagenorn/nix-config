@@ -23,14 +23,19 @@
 Append to `home/common/agent-skills/tests/test_resolve_project.py`, above the `if __name__ == "__main__":` guard. It adds a PATH-stubbing subprocess helper, because readiness is decided from `PATH` alone:
 
 ```python
-import os
 import stat
 
 
 def run_with_path(path_value: str, *args: str) -> tuple[int, str, str]:
+    """Run the resolver with `PATH` replaced by exactly `path_value`.
+
+    The interpreter is `sys.executable`, an absolute path, because `PATH` here
+    holds only the stub directory and no Python (B-002). `os`, `sys` and
+    `subprocess` are already imported by Task 1's module header.
+    """
     env = dict(os.environ, PATH=path_value)
     proc = subprocess.run(
-        ["python3", str(SCRIPT), *args],
+        [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, timeout=60, env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr
@@ -287,27 +292,99 @@ Add:
 
 ```python
 def resolves_on_path(argv0: str) -> bool:
-    """True when argv0 names a runnable binary, without executing it."""
+    """True when argv0 names a runnable binary, without executing it.
+
+    `cwd` is the base for a relative argv0 and is already absolute.
+    """
 
 
 def compute_capabilities(bindings: dict, root: Path, declarations: dict) -> dict:
     """Contract: eleven entries, each {"state", "reason_code", "repair_id"}."""
 ```
 
-`resolves_on_path(argv0)`: when `argv0` contains no path separator, return `shutil.which(argv0) is not None`; otherwise resolve it against `root` when relative and return `path.is_file() and os.access(path, os.X_OK)`. It never runs the binary.
+`resolves_on_path(argv0, cwd)`: when `argv0` contains no path separator, return `shutil.which(argv0) is not None`; otherwise resolve a relative `argv0` against `cwd` — the command entry's own already-normalized absolute working directory, not `project.root` — and return `path.is_file() and os.access(path, os.X_OK)`. Resolving against `cwd` is what actually happens when the command runs, so `{"cwd": "tools", "argv": ["./check"]}` is checked at `<root>/tools/check` (DISC-001). Every `command_missing` prerequisite passes the entry's `cwd`. It never runs the binary.
 
 `compute_capabilities` walks `CAPABILITY_NAMES` in order. A declaration of `unsupported` yields `{"state": "unsupported", "reason_code": None, "repair_id": None}` immediately. A declaration of `supported` evaluates that capability's prerequisites in the fixed order of the spec's Capability computation table, returning `{"state": "available", "reason_code": None, "repair_id": None}` when all pass, and otherwise `{"state": "blocked", "reason_code": <first failure's code>, "repair_id": f"capability.{name}.{reason_code}"}`:
 
-- `tracker` — `resolves_on_path(bindings["tracker"]["cli"])`, else `tracker_cli_missing`.
-- `worktrees` — `resolves_on_path("git")`, then the **parent directory** of `root / bindings["vcs"]["worktree"]["root"]` exists and `os.access(parent, os.W_OK)`; either failure gives `vcs_worktree_unsupported`.
+- `tracker` — `resolves_on_path(bindings["tracker"]["cli"], root)`, else `tracker_cli_missing`. The tracker CLI has no command entry, so its base is `root`.
+- `worktrees` — `resolves_on_path("git", root)`, then the **parent directory** of `root / bindings["vcs"]["worktree"]["root"]` exists and `os.access(parent, os.W_OK)`; either failure gives `vcs_worktree_unsupported`.
 - `knowledge.context` / `knowledge.standards` / `knowledge.architecture` / `knowledge.hints` — the matching `bindings["paths"][…]` list is non-empty and every entry, resolved under `root`, exists; else `knowledge_path_missing`.
-- `verification` — for every id in `bindings["workflow"]["verification"]`, `resolves_on_path(bindings["commands"][id]["argv"][0])`; else `command_missing`.
+- `verification` — for every id in `bindings["workflow"]["verification"]`, `resolves_on_path(entry["argv"][0], entry["cwd"])` where `entry = bindings["commands"][id]`; else `command_missing`.
 - `review.plan`, `review.code`, `release` — the same single check over `bindings["workflow"]["review"]["plan"]`, `…["code"]`, and `bindings["workflow"]["release"]`; else `command_missing`.
 - `deploy` — the same single check over `bindings["deploy"]["command"]`; else `command_missing`.
 
 The dispatch over `CAPABILITY_NAMES` raises on its default branch rather than returning a fallback state.
 
 Replace Task 1's declaration-only branch in `resolve` with this function and remove any comment or docstring that described the interim behavior.
+
+**SF-002 — the readiness branches these rules create each need a falsifiable test.** Add to `CapabilityStateTest`:
+
+```python
+    def test_worktrees_is_blocked_when_the_worktree_parent_is_unwritable(self):
+        root = self.make_root()
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        parent = root / ".worktrees"
+        original = parent.stat().st_mode
+        parent.chmod(0o500)
+        try:
+            code, snap, _, err = self.resolve_with_path(root, stub)
+        finally:
+            parent.chmod(original)
+        self.assertEqual(code, 0, err)
+        entry = snap["capabilities"]["worktrees"]
+        self.assertEqual(entry["state"], "blocked")
+        self.assertEqual(entry["reason_code"], "vcs_worktree_unsupported")
+
+    def test_worktrees_is_blocked_when_the_worktree_parent_is_absent(self):
+        root = self.make_root()
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        shutil.rmtree(root / ".worktrees")
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            snap["capabilities"]["worktrees"]["reason_code"],
+            "vcs_worktree_unsupported")
+
+    def test_a_relative_executable_resolves_against_its_command_cwd(self):
+        """DISC-001: the base is the entry's `cwd`, not `project.root`."""
+        source = source_contract()
+        source["bindings"]["commands"]["local-check"] = {
+            "argv": ["./check"], "cwd": "tools", "env": []}
+        source["bindings"]["workflow"]["verification"] = ["local-check"]
+        root = self.make_root(source)
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+
+        (root / "tools").mkdir()
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["capabilities"]["verification"]["state"], "blocked")
+
+        target = root / "tools" / "check"
+        target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["capabilities"]["verification"]["state"], "available")
+
+    def test_a_relative_executable_at_the_root_does_not_satisfy_a_cwd_entry(self):
+        source = source_contract()
+        source["bindings"]["commands"]["local-check"] = {
+            "argv": ["./check"], "cwd": "tools", "env": []}
+        source["bindings"]["workflow"]["verification"] = ["local-check"]
+        root = self.make_root(source)
+        (root / "tools").mkdir()
+        decoy = root / "check"
+        decoy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        decoy.chmod(decoy.stat().st_mode | stat.S_IXUSR)
+        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        code, snap, _, err = self.resolve_with_path(root, stub)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["capabilities"]["verification"]["state"], "blocked")
+```
+
+`shutil` joins the module imports. The unwritable-parent case is skipped under a
+`root` euid, where mode bits do not deny access:
+`@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "mode bits do not bind root")`.
 
 - [ ] **Step 5: Implement `--require`**
 

@@ -7,7 +7,7 @@
 - Modify (generated line appended): `CLAUDE.md` (repository root)
 
 **Interfaces:**
-- Consumes, from Tasks 1–2: `SCHEMA_VERSION = 1`; `PROJECTION_KINDS = ("generated_file", "managed_import")`; `AGENT_IDS`; `class ContractError(Exception)` with `code`, `repair_id`, `violations`; `discover_root(repo_root) -> Path`; `load_contract(root) -> dict`; `validate_contract(source) -> list[dict]`; `emit_json(value) -> int`; `emit_error(code, repair_id, violations) -> int`; `main(argv=None) -> int`, whose `write-projections` subparser currently returns a `resolver_failure` placeholder that this task replaces. A projection entry is exactly `{"id", "agent", "kind", "target", "source"}` with repository-relative `target` and `source`.
+- Consumes, from Tasks 1–2: `SCHEMA_VERSION = 1`; `PROJECTION_KINDS = ("generated_file", "managed_import")`; `AGENT_IDS`; `class ContractError(Exception)` with `code`, `repair_id`, `violations`; `discover_root(repo_root) -> Path`; `load_contract(root) -> dict`; `validate_contract(source) -> list[dict]`; `emit_json(value) -> int`; `emit_error(code, repair_id, violations) -> int`; `main(argv=None) -> int`, which carries the `resolve` subparser only; **this task registers the `write-projections` subparser for the first time** (B-001). A projection entry is exactly `{"id", "agent", "kind", "target", "source"}` with repository-relative `target` and `source`.
 - Produces, for Task 4: `render_projection(entry: dict, source_bytes: bytes) -> bytes` returning the exact bytes a `generated_file` target must hold, or the exact single managed line (with its trailing newline) a `managed_import` target must contain; `read_projection_source(root: Path, entry: dict) -> bytes` raising `ContractError("invalid_contract", "contract.projections.source_missing", …)` when the source file is absent; and `projection_status(root: Path, entry: dict) -> str` returning one of `"in_sync"`, `"missing"`, `"stale"`.
 
 **Invariants:**
@@ -157,7 +157,7 @@ class CommittedProjectionTest(ResolverTestCase):
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `python3 -m unittest -v home/common/agent-skills/tests/test_resolve_project.py 2>&1 | tail -20`
-Expected: FAIL — every `WriteProjectionsTest` case exits 2 with the Task 1 `resolver_failure` placeholder, and `CommittedProjectionTest` fails because `AGENTS.md` does not exist in the repository.
+Expected: FAIL — every `WriteProjectionsTest` case exits 2 as an argparse usage error with empty stdout, because `write-projections` is not a registered subcommand yet, and `CommittedProjectionTest` fails because `AGENTS.md` does not exist in the repository.
 
 - [ ] **Step 3: Implement rendering**
 
@@ -190,11 +190,11 @@ Neither branch consults the clock, the environment, or anything outside `entry` 
 
 - [ ] **Step 4: Implement comparison and `write-projections`**
 
-Add `projection_status(root, entry) -> str` returning `"in_sync"`, `"missing"`, or `"stale"`:
+Add `projection_status(root, entry) -> str` returning exactly one of the closed set `"in_sync"`, `"missing"`, `"stale"`. Every call site dispatches explicitly over all three and raises on any other value rather than branching on "not `in_sync`" (SF-003):
 - `generated_file` — target absent → `"missing"`; target bytes equal to the rendered bytes → `"in_sync"`; otherwise `"stale"`.
 - `managed_import` — target absent → `"missing"`; the managed line appears exactly once among the target's lines → `"in_sync"`; zero occurrences → `"stale"`; more than one occurrence → `"stale"`.
 
-Replace the `write-projections` placeholder body. It resolves the root, loads and validates the contract (Task 1's path, so a broken contract still refuses first), then, for each entry in `contract["projections"]` in source order:
+Register the `write-projections` subparser, accepting `--repo-root`, and implement its body. It resolves the root, loads and validates the contract (Task 1's path, so a broken contract still refuses first), then, for each entry in `contract["projections"]` in source order:
 
 - `in_sync` → record `{"id": entry["id"], "action": "unchanged"}` and touch nothing.
 - `generated_file` that is `missing` or `stale` → write the rendered bytes atomically and record `"written"`.

@@ -5,7 +5,7 @@
 - Test: `home/common/agent-skills/tests/test_resolve_project.py`
 
 **Interfaces:**
-- Consumes, from Tasks 1–3: `class ContractError(Exception)` with `code`, `repair_id`, `violations`; `discover_root(repo_root) -> Path`; `load_contract(root) -> dict`; `validate_contract(source) -> list[dict]`; `normalize_bindings(source_bindings, root) -> dict`; `compute_capabilities(bindings, root, declarations) -> dict`; `read_projection_source(root, entry) -> bytes`; `render_projection(entry, source_bytes) -> bytes`; `projection_status(root, entry) -> str` returning `"in_sync"`, `"missing"` or `"stale"`; `emit_json(value) -> int`; `emit_error(code, repair_id, violations) -> int`; `main(argv=None) -> int`, whose `check-projections` subparser currently returns a `resolver_failure` placeholder that this task replaces.
+- Consumes, from Tasks 1–3: `class ContractError(Exception)` with `code`, `repair_id`, `violations`; `discover_root(repo_root) -> Path`; `load_contract(root) -> dict`; `validate_contract(source) -> list[dict]`; `normalize_bindings(source_bindings, root) -> dict`; `compute_capabilities(bindings, root, declarations) -> dict`; `read_projection_source(root, entry) -> bytes`; `render_projection(entry, source_bytes) -> bytes`; `projection_status(root, entry) -> str` returning `"in_sync"`, `"missing"` or `"stale"`; `emit_json(value) -> int`; `emit_error(code, repair_id, violations) -> int`; `main(argv=None) -> int`, carrying the `resolve` and `write-projections` subparsers; **this task registers the `check-projections` subparser for the first time** (B-001).
 - Produces, for Task 5: `validate_projections(root: Path, contract: dict) -> None`, raising `ContractError("invalid_projection", f"projection.{first_id}.{first_kind}", violations)` when any declared projection is `missing` or `stale`; a `resolve` that refuses on drift; and the guarantee that `resolve` still writes nothing.
 
 **Invariants:**
@@ -130,13 +130,20 @@ class CheckProjectionsTest(ResolverTestCase):
         self.assertEqual(payload["error"]["code"], "invalid_contract")
 
     def test_check_projections_writes_nothing(self):
+        """SF-001: the same three witnesses Task 1's `ReadOnlyTest` uses."""
+        assert_read_only(self, self.make_root(), 0, "check-projections")
+
+    def test_a_refusing_check_projections_writes_nothing(self):
         root = self.make_root()
-        before = sorted((str(p.relative_to(root)), p.stat().st_mtime_ns)
-                        for p in root.rglob("*") if p.is_file())
-        self.assertEqual(self.check(root)[0], 0)
-        after = sorted((str(p.relative_to(root)), p.stat().st_mtime_ns)
-                       for p in root.rglob("*") if p.is_file())
-        self.assertEqual(before, after)
+        with (root / "AGENTS.md").open("a", encoding="utf-8") as handle:
+            handle.write("x\n")
+        assert_read_only(self, root, 2, "check-projections")
+
+    def test_a_refusing_resolve_on_drift_writes_nothing(self):
+        root = self.make_root()
+        with (root / "AGENTS.md").open("a", encoding="utf-8") as handle:
+            handle.write("x\n")
+        assert_read_only(self, root, 2, "resolve")
 
 
 class ResolveFreshnessTest(ResolverTestCase):
@@ -190,7 +197,7 @@ class DriftGateTest(ResolverTestCase):
 - [ ] **Step 3: Run the tests and watch them fail**
 
 Run: `python3 -m unittest -v home/common/agent-skills/tests/test_resolve_project.py 2>&1 | tail -20`
-Expected: FAIL — every `CheckProjectionsTest` case exits 2 with the Task 1 `resolver_failure` placeholder rather than a projection result, and both `ResolveFreshnessTest` drift cases exit 0 with a snapshot because `resolve` does not yet validate freshness.
+Expected: FAIL — every `CheckProjectionsTest` case exits 2 as an argparse usage error with empty stdout, because `check-projections` is not a registered subcommand yet, and both `ResolveFreshnessTest` drift cases exit 0 with a snapshot because `resolve` does not yet validate freshness.
 
 - [ ] **Step 4: Implement validation and the two call sites**
 
@@ -203,9 +210,9 @@ def validate_projections(root: Path, contract: dict) -> None:
     per drifted projection, sorted by pointer."""
 ```
 
-It walks `contract["projections"]` in source order, calling `read_projection_source` first — so an absent source is `invalid_contract` and propagates before any drift is considered — then `projection_status`. Every status other than `"in_sync"` contributes `{"pointer": f"/projections/{entry['id']}", "message": …}` and, alongside it, the status word for the repair id. Sort the violations byte-wise ascending by `pointer`; when the list is non-empty raise `ContractError("invalid_projection", f"projection.{first_id}.{first_status}", violations)`, where `first_id` and `first_status` belong to the first violation in that order and `first_status` is `missing` or `stale`.
+It walks `contract["projections"]` in source order, calling `read_projection_source` first — so an absent source is `invalid_contract` and propagates before any drift is considered — then `projection_status`. **Dispatch explicitly over all three statuses rather than treating "not `in_sync`" as drift (SF-003):** `"in_sync"` contributes nothing; `"missing"` and `"stale"` each contribute `{"pointer": f"/projections/{entry['id']}", "message": …}` and, alongside it, their own status word for the repair id; any other value raises, because a status outside the closed set is a bug in this module and must fail loud rather than be silently reclassified as drift (the plan's Global Constraints, the bar's *Fail loud*). The same explicit three-way dispatch applies at `write-projections`' call site in Task 3. Sort the violations byte-wise ascending by `pointer`; when the list is non-empty raise `ContractError("invalid_projection", f"projection.{first_id}.{first_status}", violations)`, where `first_id` and `first_status` belong to the first violation in that order and `first_status` is `missing` or `stale`.
 
-Replace the `check-projections` placeholder body: resolve the root, load and validate the contract (so a broken contract still refuses first), call `validate_projections`, and on success emit `{"projections": [{"id": entry["id"], "action": "unchanged"} for entry in contract["projections"]]}` in source order, returning 0. It performs no write of any kind.
+Register the `check-projections` subparser, accepting `--repo-root`, and implement its body: resolve the root, load and validate the contract (so a broken contract still refuses first), call `validate_projections`, and on success emit `{"projections": [{"id": entry["id"], "action": "unchanged"} for entry in contract["projections"]]}` in source order, returning 0. It performs no write of any kind.
 
 In the `resolve` body, call `validate_projections(root, contract)` after contract validation and before building the snapshot, so drift refuses with no snapshot and no partial member (D10).
 
@@ -239,7 +246,7 @@ cp /tmp/agents-md-backup AGENTS.md
 git diff --quiet -- AGENTS.md
 ```
 
-Expected: the script reaches its last line and `git diff --quiet -- AGENTS.md` succeeds — proving the drift gate refuses at all three levels (D15) and that the edit was reverted. At Task 3's commit the first `check-projections` would have exited 2 already for the placeholder reason rather than for drift, and `just agent-workflow-tests` would have passed despite the edit.
+Expected: the script reaches its last line and `git diff --quiet -- AGENTS.md` succeeds — proving the drift gate refuses at all three levels (D15) and that the edit was reverted. At Task 3's commit the first `check-projections` would have exited 2 already as an unknown-subcommand usage error rather than for drift, and `just agent-workflow-tests` would have passed despite the edit.
 
 - [ ] **Step 6: Commit**
 

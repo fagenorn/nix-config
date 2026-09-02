@@ -10,7 +10,7 @@
 - Modify: `.gitignore`
 
 **Interfaces:**
-- Produces, for Tasks 2–4: the module-level constants `SCHEMA_VERSION = 1`, `CAPABILITY_NAMES` (tuple, the eleven names in the Global Constraints order), `BINDING_NAMESPACES` (tuple of six), `ERROR_CODES`, `REASON_CODES`, `PROJECTION_KINDS`, `AGENT_IDS`; the exception `class ContractError(Exception)` carrying `code: str`, `repair_id: str`, `violations: list[dict]`; `discover_root(repo_root: str | None) -> pathlib.Path`; `load_contract(root: pathlib.Path) -> dict`; `validate_contract(source: dict) -> list[dict]` returning violations; `normalize_bindings(source_bindings: dict, root: pathlib.Path) -> dict`; `emit_error(code: str, repair_id: str, violations: list[dict]) -> int`; `emit_json(value: object) -> int`; and an argparse `main(argv: list[str] | None = None) -> int` with the subparsers `resolve`, `check-projections`, `write-projections`.
+- Produces, for Tasks 2–4: the module-level constants `SCHEMA_VERSION = 1`, `CAPABILITY_NAMES` (tuple, the eleven names in the Global Constraints order), `BINDING_NAMESPACES` (tuple of six), `ERROR_CODES`, `REASON_CODES`, `PROJECTION_KINDS`, `AGENT_IDS`; the exception `class ContractError(Exception)` carrying `code: str`, `repair_id: str`, `violations: list[dict]`; `discover_root(repo_root: str | None) -> pathlib.Path`; `load_contract(root: pathlib.Path) -> dict`; `validate_contract(source: dict) -> list[dict]` returning violations; `normalize_bindings(source_bindings: dict, root: pathlib.Path) -> dict`; `emit_error(code: str, repair_id: str, violations: list[dict]) -> int`; `emit_json(value: object) -> int`; and an argparse `main(argv: list[str] | None = None) -> int` carrying the `resolve` subparser only. Tasks 3 and 4 each register their own subparser in the task that implements it (B-001).
 - Produces, for Task 5: the installed executable `~/.agents/bin/resolve-project` and the invocation `resolve-project resolve --repo-root <path>`.
 - Consumes: nothing from earlier tasks.
 
@@ -50,7 +50,7 @@ on its own; those projections are generated and must never be hand-edited.
   `resolve-project write-projections`. Edit this file, then regenerate.
 ```
 
-Append `.agents/runtime/` to `.gitignore`, under the existing ephemeral-scratch block, with a one-line comment saying it is the lazily created runtime bucket of the `.agents/` taxonomy and is never tracked.
+Append `.agents/runtime/` to `.gitignore` as its own block, **below** the existing ephemeral-scratch block and not inside it: that block's comment states its patterns are only a backstop and that the real homes are `.superpowers/` and `$TMPDIR`, which is not true of `.agents/runtime/`. The new block's comment reads that `.agents/runtime/` is the lazily created runtime bucket of the `.agents/` taxonomy, is its own real home, and is never tracked (SF-004).
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -66,9 +66,13 @@ test_workflow_state.py. The resolver is never imported.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,10 +91,63 @@ CAPABILITY_STATES = ("available", "unsupported", "blocked")
 
 def run(*args: str) -> tuple[int, str, str]:
     proc = subprocess.run(
-        ["python3", str(SCRIPT), *args],
+        [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, timeout=60,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def git(root: Path, *args: str) -> str:
+    """Run git in `root` with a hermetic identity and return its stdout."""
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True, text=True, timeout=60, check=True,
+        env=dict(
+            os.environ,
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_CONFIG_SYSTEM=os.devnull,
+            GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid",
+        ),
+    )
+    return proc.stdout
+
+
+def tree_snapshot(root: Path) -> list[tuple[str, str, int | None]]:
+    """Every path under `root` outside `.git`, with its type and file mtime.
+
+    Directories are included so that creating an empty one is caught; `.git`
+    is excluded because git's own bookkeeping is not the resolver's writing.
+    """
+    out = []
+    for path in sorted(root.rglob("*")):
+        if ".git" in path.relative_to(root).parts:
+            continue
+        kind = "d" if path.is_dir() else "f"
+        out.append((
+            str(path.relative_to(root)), kind,
+            None if kind == "d" else path.stat().st_mtime_ns,
+        ))
+    return out
+
+
+def assert_read_only(case: unittest.TestCase, root: Path,
+                     expected_code: int, *args: str) -> None:
+    """Assert the resolver invocation `args` writes nothing under `root`.
+
+    Three independent witnesses, because each misses what the others catch:
+    `git status --porcelain` bytes catch a tracked-content or index change, the
+    recursive path/type set catches a created empty directory, and the file
+    mtimes catch a rewrite with identical bytes (SF-001, AC-5).
+    """
+    git(root, "add", "-A")
+    git(root, "commit", "--quiet", "-m", "fixture")
+    before_status = git(root, "status", "--porcelain")
+    before_tree = tree_snapshot(root)
+    code, _, err = run(*args, "--repo-root", str(root))
+    case.assertEqual(code, expected_code, err)
+    case.assertEqual(git(root, "status", "--porcelain"), before_status)
+    case.assertEqual(tree_snapshot(root), before_tree)
 
 
 def source_contract() -> dict:
@@ -105,7 +162,7 @@ class ResolverTestCase(unittest.TestCase):
         once `resolve` gates on projection freshness.
         """
         root = Path(tempfile.mkdtemp())
-        (root / ".git").mkdir()
+        git(root, "init", "--quiet")
         (root / "home" / "common" / "agent-skills" / "standards").mkdir(parents=True)
         (root / ".out-of-scope").mkdir()
         (root / ".worktrees").mkdir()
@@ -214,16 +271,15 @@ class NormalizationTest(ResolverTestCase):
 
 
 class ReadOnlyTest(ResolverTestCase):
+    """AC-5: running the resolver leaves the working tree unchanged (SF-001)."""
+
     def test_resolve_leaves_the_tree_untouched(self):
+        assert_read_only(self, self.make_root(), 0, "resolve")
+
+    def test_a_refusing_resolve_leaves_the_tree_untouched(self):
         root = self.make_root()
-        before = sorted(
-            (str(p.relative_to(root)), p.stat().st_mtime_ns)
-            for p in root.rglob("*") if p.is_file())
-        self.assertEqual(self.resolve(root)[0], 0)
-        after = sorted(
-            (str(p.relative_to(root)), p.stat().st_mtime_ns)
-            for p in root.rglob("*") if p.is_file())
-        self.assertEqual(before, after)
+        (root / ".agents" / "project.json").write_text("{", encoding="utf-8")
+        assert_read_only(self, root, 2, "resolve")
 
 
 class ErrorOutputTest(ResolverTestCase):
@@ -351,6 +407,140 @@ class NoDefaultingTest(ResolverTestCase):
             self.assertNotIn(f'"{member}"', out)
 
 
+class MalformedValueTest(ResolverTestCase):
+    """B-003: a wrongly typed or empty leaf is a violation, never a snapshot."""
+
+    CASES = (
+        ("/bindings/vcs/default_branch", ("bindings", "vcs", "default_branch"), None),
+        ("/bindings/vcs/branch_pattern", ("bindings", "vcs", "branch_pattern"), ""),
+        ("/bindings/vcs/kind", ("bindings", "vcs", "kind"), 1),
+        ("/bindings/vcs/commit/signed", ("bindings", "vcs", "commit", "signed"), 1),
+        ("/bindings/tracker/repo_slug", ("bindings", "tracker", "repo_slug"), []),
+        ("/bindings/tracker/cli", ("bindings", "tracker", "cli"), ""),
+        ("/bindings/deploy/adapter", ("bindings", "deploy", "adapter"), None),
+    )
+
+    def test_each_malformed_leaf_is_an_invalid_contract_violation(self):
+        for pointer, path, bad in self.CASES:
+            with self.subTest(pointer=pointer):
+                source = source_contract()
+                target = source
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = bad
+                root = self.make_root(source)
+                code, payload, _ = self.resolve(root)
+                self.assertEqual(code, 2)
+                self.assertEqual(payload["error"]["code"], "invalid_contract")
+                self.assertIn(pointer,
+                              [v["pointer"] for v in payload["error"]["violations"]])
+                self.assertNotIn("schema_version", payload)
+
+
+class OnePassCollectionTest(ResolverTestCase):
+    """B-004: `invalid_contract` reports every violation, `schema_version` included."""
+
+    def test_an_invalid_schema_version_is_collected_with_the_others(self):
+        source = source_contract()
+        source["schema_version"] = "1"
+        del source["bindings"]["deploy"]
+        root = self.make_root(source)
+        code, payload, _ = self.resolve(root)
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "invalid_contract")
+        pointers = [v["pointer"] for v in payload["error"]["violations"]]
+        self.assertIn("/schema_version", pointers)
+        self.assertIn("/bindings/deploy", pointers)
+        self.assertEqual(pointers, sorted(pointers))
+
+    def test_an_unsupported_integer_version_short_circuits(self):
+        source = source_contract()
+        source["schema_version"] = 2
+        del source["bindings"]["deploy"]
+        root = self.make_root(source)
+        code, payload, _ = self.resolve(root)
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "unsupported_schema")
+        self.assertEqual(
+            [v["pointer"] for v in payload["error"]["violations"]],
+            ["/schema_version"])
+
+
+class DiscoveryTest(ResolverTestCase):
+    """SF-002: the nearest-ancestor walk taken without `--repo-root`."""
+
+    def resolve_from(self, cwd: Path) -> tuple[int, object, str]:
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "resolve"],
+            capture_output=True, text=True, timeout=60, cwd=str(cwd))
+        try:
+            payload: object = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            payload = None
+        return proc.returncode, payload, proc.stderr
+
+    def test_a_nested_directory_finds_the_nearest_ancestor(self):
+        root = self.make_root()
+        nested = root / "home" / "common" / "agent-skills" / "standards"
+        code, snap, err = self.resolve_from(nested)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["project"]["root"], str(root))
+
+    def test_no_contract_above_the_start_directory_is_not_onboarded(self):
+        bare = Path(tempfile.mkdtemp())
+        code, payload, _ = self.resolve_from(bare)
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "not_onboarded")
+
+
+class UsageErrorTest(ResolverTestCase):
+    """SF-002: an unknown or missing subcommand is argparse's error, not JSON."""
+
+    def test_an_unregistered_subcommand_exits_two_without_json(self):
+        for args in (("check-projections",), ("write-projections",), ()):
+            with self.subTest(args=args):
+                code, out, err = run(*args)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertNotEqual(err, "")
+
+
+class ResolverFailureTest(unittest.TestCase):
+    """SF-002: the generic handler maps an unexpected exception to the closed code.
+
+    No external input reaches this branch deterministically — every I/O and
+    shape failure is already classified — so the seam is the wrapper itself.
+    The module is loaded by path because its filename carries a hyphen.
+    """
+
+    @staticmethod
+    def load_module():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("resolve_project", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_an_unexpected_exception_becomes_resolver_failure(self):
+        module = self.load_module()
+        original = module.load_contract
+        module.load_contract = lambda root: (_ for _ in ()).throw(
+            RuntimeError("unexpected"))
+        buffer = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buffer):
+                code = module.main(["resolve", "--repo-root", str(REPO_ROOT)])
+        finally:
+            module.load_contract = original
+        self.assertEqual(code, 2)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["error"]["code"], "resolver_failure")
+        self.assertEqual(payload["error"]["repair_id"], "resolver.internal")
+        self.assertNotIn("schema_version", payload)
+        self.assertNotIn("unexpected", json.dumps(payload),
+                         "the internal message must not leak the exception text")
+
+
 class CommittedContractTest(ResolverTestCase):
     def test_the_repositorys_own_contract_is_structurally_valid(self):
         contract = source_contract()
@@ -407,17 +597,19 @@ Implement:
 
 - `discover_root(repo_root)` — with `--repo-root`, `Path(repo_root).resolve()` **is** the root and no walk-up occurs; that directory either holds `.agents/project.json` or the run raises `ContractError("not_onboarded", "onboarding.contract.missing", [{"pointer": "", "message": ".agents/project.json was not found at or above the start directory"}])`. Without the flag, walk `Path.cwd().resolve()` and its ancestors, stopping at the first directory holding the file, and raise the same error when none does. The violation message never embeds a path, so refusal bytes stay identical between runs.
 - `load_contract(root)` — read the file as UTF-8 and `json.loads` it. An `OSError`, a `UnicodeDecodeError`, a `json.JSONDecodeError`, or a parsed value that is not a `dict` raises `ContractError("invalid_contract", "contract.parse", [{"pointer": "", "message": "..."}])`.
-- `validate_contract(source)` — return the full list of violations, in one pass, never aborting early. Each violation is exactly `{"pointer": <JSON Pointer string>, "message": <one sentence>}`. Before the general pass, handle `schema_version` on its own: absent, or not an `int`, or a `bool` (booleans are not integers here) raises `ContractError("invalid_contract", "contract.schema_version.invalid", ...)`; an `int` other than `SCHEMA_VERSION` raises `ContractError("unsupported_schema", "contract.schema_version.unsupported", ...)`. The general pass then checks, collecting everything:
+- `validate_contract(source)` — return the full list of violations, in one pass, never aborting early. Each violation is exactly `{"pointer": <JSON Pointer string>, "message": <one sentence>}`. Handle `schema_version` first, but only `unsupported_schema` may short-circuit: an `int` other than `SCHEMA_VERSION` raises `ContractError("unsupported_schema", "contract.schema_version.unsupported", [{"pointer": "/schema_version", "message": ...}])` immediately, because the schema-1 shape rules do not apply to another schema. A `schema_version` that is absent, not an `int`, or a `bool` (booleans are not integers here) is an `invalid_contract` case, so it contributes the violation `{"pointer": "/schema_version", ...}` to the same one-pass list as every other shape violation rather than aborting before it — the spec requires `invalid_contract` to report every violation in one pass (B-004). Its published `repair_id` follows the same rule as every other `invalid_contract` failure: the first violation in byte-wise pointer order wins, and `/schema_version` claims it only when it sorts first. The general pass then checks, collecting everything:
   - top level: exactly `schema_version`, `project`, `bindings`, `capabilities`, `projections`; a missing member and an unexpected member are both violations.
   - `/project`: exactly `id` and `name`, each a non-empty `str`.
   - `/bindings`: exactly `BINDING_NAMESPACES`, each a `dict`.
-  - `/bindings/vcs`: exactly `kind`, `default_branch`, `integration_branch`, `branch_pattern`, `worktree`, `commit`, `merge`. `worktree` is exactly `{root, prefix}` (strings, `root` a safe relative path); `commit` is exactly `{co_authored_by, signed}` (`bool`); `merge` is exactly `{strategy, delete_branch}` (`str`, `bool`).
-  - `/bindings/tracker`: exactly `kind`, `cli`, `repo_slug`, `credential_env`; `credential_env` is exactly `{unset_before_invocation}`, a list of `str`.
+  - `/bindings/vcs`: exactly `kind`, `default_branch`, `integration_branch`, `branch_pattern`, `worktree`, `commit`, `merge`. `kind`, `default_branch`, `integration_branch` and `branch_pattern` are each a non-empty `str`. `worktree` is exactly `{root, prefix}` — `root` a non-empty safe relative path string, `prefix` a non-empty `str`; `commit` is exactly `{co_authored_by, signed}`, each a real `bool`; `merge` is exactly `{strategy, delete_branch}` — `strategy` a non-empty `str`, `delete_branch` a real `bool`.
+  - `/bindings/tracker`: exactly `kind`, `cli`, `repo_slug`, `credential_env`. `kind`, `cli` and `repo_slug` are each a non-empty `str`; `credential_env` is exactly `{unset_before_invocation}`, whose value is a list (possibly empty) of non-empty `str`.
   - `/bindings/paths`: exactly `artifacts`, `context`, `standards`, `architecture`, `operations`, `hints`, `rejections`. `artifacts` is exactly `{specs, plans}`, each a safe relative path string; the six others are lists of safe relative path strings, possibly empty.
   - `/bindings/commands`: a `dict` whose every value is exactly `{argv, cwd, env}` — `argv` a non-empty list of `str`, `cwd` a safe relative path string, `env` a list of `str` naming variables only (D13).
   - `/bindings/workflow`: exactly `verification`, `orchestration`, `review`, `release`. `verification` is a list of command ids; `orchestration` is exactly `{max_parallel, attempt_budget_minutes}`, each a positive `int` that is not a `bool`; `review` is exactly `{plan, code}`, each a command id or `null`; `release` is a command id or `null`.
-  - `/bindings/deploy`: exactly `adapter`, `command`, `config`; `command` is a command id or `null`; `config` is a `dict`.
+  - `/bindings/deploy`: exactly `adapter`, `command`, `config`. `adapter` is a non-empty `str`; `command` is a non-empty `str` command id or `null`; `config` is a `dict`.
   - referential integrity: every non-null command id under `/bindings/workflow` and `/bindings/deploy` is a key of `/bindings/commands`, reported at the referencing pointer.
+
+  **Leaf-value rule (B-003).** Every leaf the list above types as a `str` must be a `str` and must be non-empty after no stripping; a `None`, a number, a list, a dict, or `""` is a violation at that leaf's own pointer, not a value that survives into a snapshot. Every leaf typed `bool` must be a real `bool`, never a truthy int. `isinstance(x, bool)` is checked *before* `isinstance(x, int)` everywhere an integer is required. The spec closes no vocabulary for `vcs.kind`, `vcs.default_branch`, `vcs.integration_branch`, `vcs.branch_pattern`, `vcs.worktree.prefix`, `vcs.merge.strategy`, `tracker.kind`, `tracker.cli`, `tracker.repo_slug` or `deploy.adapter`, so do **not** invent an enum for any of them; type and non-emptiness are the whole check.
   - `/capabilities`: exactly `CAPABILITY_NAMES`, each value exactly `{"support": <one of AUTHORED_SUPPORT>}`.
   - `/projections`: a list; each entry exactly `{id, agent, kind, target, source}` with `agent` in `AGENT_IDS`, `kind` in `PROJECTION_KINDS`, `id` a non-empty unique `str`, and `target`/`source` safe relative path strings.
   - A "safe relative path" is a non-empty `str` that is not absolute, does not start with `/`, and has no `..` segment.
@@ -426,9 +618,9 @@ Implement:
 - `normalize_bindings(source_bindings, root)` — deep-copy the source bindings and replace, with `str(root / value)`, exactly: `paths.artifacts.specs`, `paths.artifacts.plans`, every entry of the six `paths` lists, and every `commands.<id>.cwd`. Change nothing else.
 - `emit_json(value)` — `json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))`, then a `"\n"`, then return `0`.
 - `emit_error(code, repair_id, violations)` — emit `{"error": {"code": code, "repair_id": repair_id, "violations": violations}}` through the same serializer and return `2`.
-- `main(argv=None)` — an `argparse.ArgumentParser` with the three subcommands of D1. Each accepts `--repo-root`. Wrap the whole dispatch: a `ContractError` becomes `emit_error(...)`; any other unexpected exception becomes `emit_error("resolver_failure", "resolver.internal", [{"pointer": "", "message": "..."}])`. Dispatch over the subcommand name raises on its default branch rather than falling through.
+- `main(argv=None)` — an `argparse.ArgumentParser` with the `resolve` subcommand of D1; Tasks 3 and 4 add the other two. Each accepts `--repo-root`. Wrap the whole dispatch: a `ContractError` becomes `emit_error(...)`; any other unexpected exception becomes `emit_error("resolver_failure", "resolver.internal", [{"pointer": "", "message": "the resolver failed unexpectedly"}])` — one fixed sentence that never interpolates the exception text, so refusal bytes stay deterministic and no internal detail leaks. Dispatch over the subcommand name raises on its default branch rather than falling through.
 - `resolve` in this task builds the snapshot `{"schema_version": SCHEMA_VERSION, "project": {"root": str(root), "id": ..., "name": ...}, "bindings": normalize_bindings(...), "capabilities": ...}` and emits it. Capability states here come from the authored declaration alone: `unsupported` → `{"state": "unsupported", "reason_code": None, "repair_id": None}`; `supported` → `{"state": "available", "reason_code": None, "repair_id": None}`. **Task 2 replaces that second branch with prerequisite evaluation; write no comment claiming prerequisites are already evaluated.**
-- `check-projections` and `write-projections` are registered here but not yet implemented: each returns `emit_error("resolver_failure", "resolver.internal", [{"pointer": "/projections", "message": "TODO: implemented in a later task"}])`. Tasks 3 and 4 replace both bodies and the TODO.
+- **Register `resolve` and nothing else.** `write-projections` and `check-projections` are added by Tasks 3 and 4 respectively, each in the task that implements it. No commit produced by this plan ever carries a registered-but-unimplemented subcommand, a placeholder body, or a `TODO` in source (the bar, *Production-grade by default*). Invoking an unregistered subcommand is an argparse usage error: exit 2, no JSON on stdout (D12, D16).
 
 Then wire publication:
 - In `home/common/agent-skills/default.nix`, add a `".agents/bin/resolve-project" = { source = ./scripts/resolve-project.py; executable = true; };` entry alongside `".agents/bin/workflow-state"`.
@@ -455,7 +647,7 @@ if ! grep -q "resolve-project" justfile; then exit 1; fi
 if ! grep -q '".agents/bin/resolve-project"' home/common/agent-skills/default.nix; then exit 1; fi
 ```
 
-(The `resolve-project` TODO in the two unimplemented subcommands is expected at this task and removed by Tasks 3 and 4; do not gate on its absence here.)
+Also assert the absence of a placeholder: `grep -n 'TODO\|FIXME' home/common/agent-skills/scripts/resolve-project.py` must print nothing, and `python3 home/common/agent-skills/scripts/resolve-project.py check-projections --repo-root . ; test $? -eq 2` must exit 2 as an argparse usage error with empty stdout, because the subcommand is not registered yet (B-001).
 
 - [ ] **Step 6: Commit**
 
