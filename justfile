@@ -131,6 +131,10 @@ install IP:
 agent-costs *args:
   python3 scripts/agent-costs.py {{args}}
 
+# Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
+agent-gate-bundle *args:
+  python3 scripts/agent-gate-bundle.py {{args}}
+
 # Garbage collect old OS generations and remove stale packages from the nix store
 gc generations="5":
   nix-env --delete-generations {{generations}}

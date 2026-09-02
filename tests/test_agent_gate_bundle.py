@@ -3,8 +3,12 @@
 Run: python3 -m unittest -v tests/test_agent_gate_bundle.py
 """
 
+import contextlib
 import importlib.util
+import inspect
+import io
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -525,6 +529,261 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(gates["context"]["claude"]["saving_cases"], ["c1"])
         self.assertEqual(gates["context"]["claude"]["breaching_cases"], [])
         self.assertTrue(gates["cross_stratum"]["claude"]["qualifies"])
+
+def run_cli(*argv):
+    """main() with stdout captured; returns (exit code, parsed bundle or None)."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = gate.main(list(argv))
+    text = out.getvalue()
+    return code, (json.loads(text) if text.strip() else None)
+
+
+class BundleCliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def manifest_file(self, manifest, name="trials.json"):
+        path = self.tmp / name
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return str(path)
+
+    def saving_manifest(self):
+        return make_manifest(self.tmp, full_cases(self.tmp))
+
+    def flat_manifest(self):
+        totals = {s: ([1000, 1000, 1000], [999, 999, 999]) for s in gate.STRATA}
+        return make_manifest(self.tmp, full_cases(self.tmp, totals))
+
+    def test_approved_bundle_exits_zero_with_no_diagnostics(self):
+        code, bundle = run_cli("--trials", self.manifest_file(self.saving_manifest()))
+        self.assertEqual(code, 0)
+        self.assertEqual(bundle["state"], "approved")
+        self.assertEqual(bundle["kind"], "agent-gate-bundle")
+        self.assertEqual(bundle["gate_contract"], "issue-70")
+        self.assertEqual(bundle["gate_version"], 1)
+        self.assertEqual(bundle["diagnostics"], [])
+        self.assertIsNone(bundle["override"])
+        self.assertEqual(bundle["identity"]["pinned"]["rubric_version"]["base"], "r1")
+
+    def test_rejected_bundle_exits_three(self):
+        code, bundle = run_cli("--trials", self.manifest_file(self.flat_manifest()))
+        self.assertEqual(code, 3)
+        self.assertEqual(bundle["state"], "rejected")
+        self.assertEqual(bundle["diagnostics"], [])
+
+    def test_bundle_id_is_stable_and_covers_the_state(self):
+        path = self.manifest_file(self.saving_manifest())
+        first = run_cli("--trials", path)[1]
+        second = run_cli("--trials", path)[1]
+        self.assertEqual(first["bundle_id"], second["bundle_id"])
+        body = {k: v for k, v in first.items()
+                if k not in ("bundle_id", "generated_at")}
+        self.assertEqual(first["bundle_id"], gate.canonical_digest(body))
+        other = run_cli("--trials", self.manifest_file(self.flat_manifest(), "b.json"))[1]
+        self.assertNotEqual(first["bundle_id"], other["bundle_id"])
+
+    def test_an_override_bearing_bundle_id_is_reproducible(self):
+        path = self.manifest_file(self.flat_manifest(), "ovr.json")
+        argv = ("--trials", path, "--override", "further experimentation approved",
+                "--override-by", "anis", "--override-at", "2026-09-02T12:00:00Z")
+        first, second = run_cli(*argv)[1], run_cli(*argv)[1]
+        self.assertEqual(first["bundle_id"], second["bundle_id"])
+        self.assertEqual(first["override"]["authorized_at"], "2026-09-02T12:00:00Z")
+        later = run_cli(*argv[:-1], "2026-09-03T12:00:00Z")[1]
+        self.assertNotEqual(first["bundle_id"], later["bundle_id"])
+
+    def test_override_without_a_timestamp_is_a_usage_error(self):
+        path = self.manifest_file(self.flat_manifest(), "novrat.json")
+        with self.assertRaises(SystemExit) as caught:
+            run_cli("--trials", path, "--override", "why", "--override-by", "anis")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_a_malformed_override_timestamp_is_a_usage_error(self):
+        path = self.manifest_file(self.flat_manifest(), "badat.json")
+        with self.assertRaises(SystemExit) as caught:
+            run_cli("--trials", path, "--override", "why", "--override-by", "anis",
+                    "--override-at", "2026-09-02 12:00:00")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_unreadable_manifest_is_exit_two_with_no_document(self):
+        code, bundle = run_cli("--trials", str(self.tmp / "absent.json"))
+        self.assertEqual(code, 2)
+        self.assertIsNone(bundle)
+
+    def test_emitter_refuses_a_state_the_evidence_does_not_earn(self):
+        manifest = self.flat_manifest()
+        evidence, diagnostics = gate.resolve_trials(manifest)
+        self.assertEqual(diagnostics, [])
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.assemble_bundle(manifest, evidence, [], None, "approved")
+
+
+class NoUpgradeTableTest(unittest.TestCase):
+    """One row per manifest surface that might try to buy an approval."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def write(self, manifest, name):
+        path = self.tmp / name
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return str(path)
+
+    def area(self, name):
+        """A private record directory per row. Rows reuse the same case ids, so
+        one row's records would otherwise overwrite a neighbour's on disk and
+        make it fail for a citation fault instead of the fault it is named for.
+        """
+        path = self.tmp / name
+        path.mkdir()
+        return path
+
+    def rows(self):
+        flat = {s: ([1000, 1000, 1000], [999, 999, 999]) for s in gate.STRATA}
+
+        area = self.area("declared_state")
+        declared_state = make_manifest(area, full_cases(area))
+        declared_state["state"] = "approved"
+
+        area = self.area("declared_id")
+        declared_id = make_manifest(area, full_cases(area))
+        declared_id["bundle_id"] = "sha256:" + "0" * 64
+
+        empty_cases = make_manifest(self.area("empty_cases"), [])
+
+        area = self.area("absent_stratum")
+        absent_stratum = make_manifest(area, full_cases(area))
+        del absent_stratum["cases"][0]["strata"]["codex"]
+
+        area = self.area("missing_class")
+        missing_class = make_manifest(area, full_cases(area)[:3])
+
+        area = self.area("straddle")
+        straddle = make_manifest(area, full_cases(area, dict(
+            flat, claude=([1000, 1000, 1000], [300, 1500, 1400]))))
+
+        area = self.area("mismatched")
+        mismatched = make_manifest(area, full_cases(area))
+        mismatched["identity"]["pinned"]["environment_fingerprint"]["candidate"] = "f2"
+
+        area = self.area("exempted")
+        exempted = make_manifest(area, full_cases(area, flat))
+        exempted["cases"][0]["required"] = False
+
+        # per D36: a retained-subset count, and ten pairs with no recorded checkpoint
+        area = self.area("retained")
+        retained = make_manifest(area, full_cases(area, {
+            s: ([1000] * 5, [800] * 5) for s in gate.STRATA}))
+
+        area = self.area("unchecked_ten")
+        unchecked_ten = make_manifest(area, full_cases(area, {
+            s: ([1000] * 10, [800] * 10) for s in gate.STRATA}))
+
+        area = self.area("checkpoint_without_expansion")
+        checkpoint_without_expansion = make_manifest(area, full_cases(area))
+        checkpoint_without_expansion["expansion"] = {
+            "expanded": False, "checkpoint_ref": "ck-1"}
+
+        # per D37
+        area = self.area("unstable")
+        unstable = make_manifest(area, full_cases(area))
+        unstable["cases"][0]["strata"]["claude"]["quality"][
+            "evaluator_stability"] = "unstable"
+
+        # per D34: a wrong-kind record, re-digested so it is self-consistent
+        area = self.area("wrong_kind")
+        wrong_kind = make_manifest(area, full_cases(area))
+        entry = wrong_kind["cases"][0]["strata"]["claude"]["base"][0]
+        cited = Path(entry["record"])
+        document = dict(json.loads(cited.read_text(encoding="utf-8")),
+                        kind="agent-gate-bundle")
+        body = {k: v for k, v in document.items()
+                if k not in ("record_id", "generated_at")}
+        document["record_id"] = entry["record_id"] = gate.canonical_digest(body)
+        cited.write_text(json.dumps(document), encoding="utf-8")
+
+        # per D34: a rubric value outside [0, 100] is a document fault
+        area = self.area("impossible_score")
+        impossible_score = make_manifest(area, full_cases(area))
+        impossible_score["cases"][0]["strata"]["claude"]["quality"][
+            "noncritical_median"]["candidate"] = 1000.0
+
+        return [
+            ("manifest-declared state", declared_state, 2),
+            ("manifest-declared bundle_id", declared_id, 2),
+            ("per-case required opt-out", exempted, 2),
+            ("empty cases", empty_cases, 3),
+            ("absent stratum", absent_stratum, 3),
+            ("missing core case class", missing_class, 3),
+            ("straddling case", straddle, 3),
+            ("mismatched pinned identity", mismatched, 3),
+            ("selectively retained 5 pairs", retained, 3),
+            ("ten pairs, no recorded checkpoint", unchecked_ten, 3),
+            ("checkpoint without a declared expansion", checkpoint_without_expansion, 3),
+            ("declared-unstable evaluator", unstable, 3),
+            ("self-consistent wrong-kind record", wrong_kind, 3),
+            ("rubric value outside [0, 100]", impossible_score, 2),
+        ]
+
+    def test_no_row_yields_an_approval(self):
+        for index, (label, manifest, expected_code) in enumerate(self.rows()):
+            with self.subTest(row=label):
+                code, bundle = run_cli("--trials", self.write(manifest, f"m{index}.json"))
+                self.assertEqual(code, expected_code)
+                self.assertNotEqual(code, 0)
+                if bundle is not None:
+                    self.assertEqual(bundle["state"], "unmeasured")
+                    self.assertTrue(bundle["diagnostics"])
+
+    def test_a_straddling_bundle_says_why(self):
+        straddle = dict(self.rows()[6][1])
+        _code, bundle = run_cli("--trials", self.write(straddle, "straddle.json"))
+        self.assertTrue(any(line.startswith("CASE_STRADDLES_GATE")
+                            for line in bundle["diagnostics"]), bundle["diagnostics"])
+
+    def test_a_tampered_record_cannot_certify(self):
+        manifest = make_manifest(self.tmp, full_cases(self.tmp))
+        cited = Path(manifest["cases"][0]["strata"]["claude"]["base"][0]["record"])
+        document = json.loads(cited.read_text(encoding="utf-8"))
+        document["strata"]["claude"]["runs"][0]["tokens"]["input_total"] = 10
+        cited.write_text(json.dumps(document), encoding="utf-8")
+        code, bundle = run_cli("--trials", self.write(manifest, "tampered.json"))
+        self.assertEqual(code, 3)
+        self.assertEqual(bundle["state"], "unmeasured")
+
+    def test_override_records_authority_without_changing_the_verdict(self):
+        flat = {s: ([1000, 1000, 1000], [999, 999, 999]) for s in gate.STRATA}
+        manifest = make_manifest(self.tmp, full_cases(self.tmp, flat))
+        code, bundle = run_cli("--trials", self.write(manifest, "override.json"),
+                               "--override", "further experimentation approved",
+                               "--override-by", "anis",
+                               "--override-at", "2026-09-02T12:00:00Z")
+        self.assertEqual(code, 3)
+        self.assertEqual(bundle["state"], "rejected")
+        self.assertEqual(set(bundle["override"]),
+                         {"reason", "authorized_by", "authorized_at", "scope"})
+        self.assertEqual(bundle["override"]["scope"], "further-experimentation")
+        self.assertEqual(bundle["override"]["authorized_by"], "anis")
+
+
+class NoUpgradeStructureTest(unittest.TestCase):
+    """D14's two layers, checked structurally rather than only behaviourally."""
+
+    def test_the_verdict_authority_sees_only_the_evidence(self):
+        self.assertEqual(list(inspect.signature(gate.decide).parameters),
+                         ["evidence"])
+
+    def test_no_authorization_name_reaches_the_verdict_authority(self):
+        # Literal, and prose counts: a docstring naming the flag is one rename
+        # away from a parameter that honours it. Scoped to `decide` alone --
+        # every other function in the module is free to spell it (D14).
+        self.assertNotIn("override", inspect.getsource(gate.decide))
+
+    def test_the_emitter_re_decides_before_it_writes(self):
+        self.assertIn("decide(", inspect.getsource(gate.assemble_bundle))
 
 
 if __name__ == "__main__":

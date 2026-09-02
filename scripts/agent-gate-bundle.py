@@ -17,12 +17,15 @@ wrong-shaped record — is returned as a diagnostic and resolves the bundle to
 `unmeasured`.
 """
 
+import argparse
 import copy
 import hashlib
 import json
 import math
 import statistics
+import sys
 from collections import namedtuple
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -788,3 +791,121 @@ def decide(evidence):
                for axis in ("context", "checks", "maintenance")):
             return "approved"
     return "rejected"
+
+
+# --- The bundle document (D9, D14, D16, D22) ---------------------------------
+
+
+class BundleIntegrityError(Exception):
+    """The emitter's refusal to write: the assembled body does not earn the
+    state it was handed (D14). No document reaches stdout on this path."""
+
+
+def build_override(reason, authorized_by, authorized_at):
+    """Contract: the closed four-key authorization block, or None when unasked.
+
+    Every field is a declared input. `authorized_at` is the caller's
+    `--override-at` and never a clock read: the block sits inside `bundle_id`,
+    so a sampled time would give identical inputs different bundle ids (D38).
+    """
+    if reason is None:
+        return None
+    return {"reason": reason, "authorized_by": authorized_by,
+            "authorized_at": authorized_at, "scope": "further-experimentation"}
+
+
+def _generated_at():
+    """The one clock read in the document, and the one field outside the digest."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z")
+
+
+def assemble_bundle(manifest, evidence, diagnostics, override, state):
+    """Contract: the bundle document, or BundleIntegrityError and no document.
+
+    `state` is `decide`'s and only `decide`'s; the body is re-decided against
+    its own evidence before it is returned, so a state the evidence does not
+    earn is refused rather than written (D14).
+    """
+    resolved = evidence if evidence else {"cases": []}
+
+    reasons = list(diagnostics)
+    if state == "unmeasured" and evidence:
+        for index, case_id, stratum in straddling_cases(evidence):
+            _add(reasons, "CASE_STRADDLES_GATE",
+                 f"$.cases[{index}].strata.{stratum}",
+                 f"case {case_id!r} has index-aligned pairs on both sides "
+                 "of a gate")
+    lines = render(reasons) if state == "unmeasured" else []
+
+    body = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": BUNDLE_KIND,
+        "gate_contract": GATE_CONTRACT,
+        "gate_version": GATE_VERSION,
+        "state": state,
+        "identity": manifest["identity"],
+        "expansion": manifest["expansion"],
+        "evidence": resolved,
+        "gates": gate_results(resolved),
+        "override": override,
+        "diagnostics": lines,
+    }
+    earned = decide(body["evidence"])
+    if earned != body["state"]:
+        raise BundleIntegrityError(
+            f"the bundle's own evidence earns {earned!r}, not {body['state']!r}")
+    return dict(body, bundle_id=canonical_digest(body),
+                generated_at=_generated_at())
+
+
+def main(argv=None):
+    """Contract: one bundle to stdout and an exit code — 0 approved, 3 rejected
+    or unmeasured, 2 tool failure. A non-zero exit is never an approval (D16).
+    """
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--trials", required=True, metavar="FILE",
+                    help="agent-gate-trials manifest citing emitted cost records")
+    ap.add_argument("--override", metavar="REASON",
+                    help="record an authorization for further experimentation; "
+                         "never changes the state or the exit code")
+    ap.add_argument("--override-by", metavar="WHO", help="who authorized --override")
+    ap.add_argument("--override-at", metavar="RFC3339",
+                    help="when --override was authorized, e.g. 2026-09-02T12:00:00Z; "
+                         "declared, not sampled, so the bundle id stays reproducible")
+    args = ap.parse_args(argv)
+
+    given = (bool(args.override), bool(args.override_by), bool(args.override_at))
+    if len(set(given)) != 1:
+        ap.error("--override, --override-by and --override-at must be given together")
+    if args.override_at is not None:
+        try:
+            datetime.strptime(args.override_at, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            ap.error("--override-at must be RFC3339 UTC, e.g. 2026-09-02T12:00:00Z")
+
+    try:
+        manifest = load_manifest(Path(args.trials))
+    except ManifestError as error:
+        for line in render(error.diagnostics):
+            print(line, file=sys.stderr)
+        return 2
+
+    evidence, diagnostics = resolve_trials(manifest)
+    state = decide(evidence)
+    try:
+        bundle = assemble_bundle(
+            manifest, evidence, diagnostics,
+            build_override(args.override, args.override_by, args.override_at),
+            state)
+    except BundleIntegrityError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    json.dump(bundle, sys.stdout, sort_keys=True, separators=(",", ":"))
+    sys.stdout.write("\n")
+    return 0 if state == "approved" else 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
