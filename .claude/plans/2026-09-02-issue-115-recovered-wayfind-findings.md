@@ -12,8 +12,10 @@ ticket's enumerated claim contract.
 paths their resolution comments link. Each obeys one shared front-matter and
 citation contract (spec, `## Document contract`) and carries a
 `## Coverage of the resolution summary` table keyed by the spec's literal claim
-IDs — that table is the verification seam, so coverage is a `grep` rather than a
-reading. Three documents (#60, #61, #62) are re-derived from their in-ticket
+IDs. That table is the *traceability* seam: a `grep` proves every claim ID is
+present and names a real discharging section, which is a necessary floor and not
+a sufficient one. Whether the discharged prose is true of the live tree is
+settled only by the per-task semantic audit (V5), never by a gate. Three documents (#60, #61, #62) are re-derived from their in-ticket
 conclusions plus the live tree; the fourth (#80) is re-derived from primary
 sources across all three fleet repositories and is built in two passes along the
 spec's own inherited/added claim boundary. No `.nix` file, and no file outside
@@ -28,8 +30,10 @@ restates them. Its `## Out of scope` is binding.
 
 **Issue:** https://github.com/fagenorn/nix-config/issues/115
 
-**Tech stack:** Markdown only. Verification is POSIX shell (`git`, `grep`,
-`sed`, `awk`) plus `gh` for reading tracker comments. No Nix evaluation, no
+**Tech stack:** Markdown only. Verification is Bash plus standard command-line
+tools (`git`, `grep`, `sed`, `awk`, `diff`) — the gates use Bash-only
+constructs such as `$'…'` and process substitution — plus `gh` for reading
+tracker comments. No Nix evaluation, no
 Python, no new dependency, no new file outside the two directories above.
 
 ## Global Constraints
@@ -88,6 +92,16 @@ Every task's requirements implicitly include this section.
 - **Fleet checkouts are read-only.** `/Users/anis/Projects/nodocom` and
   `/Users/anis/Projects/argus` may be read and may have their `HEAD` observed.
   Never write, `checkout`, `fetch`, `stash` or otherwise mutate them.
+- **The checked-out fleet snapshot is the cited evidence, and its divergence is
+  stated, not hidden** (per D21). These documents record what was observable on
+  2026-09-02, not the current integration tip of another repository, and no task
+  may refresh a checkout to close the gap. Every fleet citation therefore names
+  the checkout's observed `HEAD` and, where the checkout is behind its own
+  `origin` integration ref, says by how many commits and names that ref. At the
+  time of planning `/Users/anis/Projects/nodocom` was at `7a3dab7`, 111 commits
+  behind its local `origin/dev`; re-observe both numbers at execute time rather
+  than copying these. A conclusion whose truth could turn on that gap is marked
+  as snapshot-bound in `## Unverified inheritance`.
 - **Tracker access.** The ambient `GITHUB_TOKEN` lacks access to this repo.
   Prefix every `gh` call with `unset GITHUB_TOKEN GH_TOKEN &&` and pass
   `--repo fagenorn/nix-config`. Never edit a tracker comment, including #86's
@@ -110,7 +124,19 @@ unit-test suite for documentation in this repository and this work edits no
 - **V2 — claim-ID coverage.** `grep`/`awk` over the
   `## Coverage of the resolution summary` section of each document for that
   document's claim IDs, exactly as the spec enumerates them. This is the AC1
-  floor, made mechanical (per D12).
+  *traceability* floor, made mechanical (per D12). It proves a claim is
+  addressed somewhere; it proves nothing about whether the address is correct.
+- **V5 — source-backed semantic audit.** A reading, not a gate, and the only
+  seam that can discharge AC1. For each claim ID in a document's coverage
+  table, the task's reviewer opens the named discharging section and the live
+  sources it cites, then confirms every enumerated field, matrix cell and list
+  item that claim owes is actually answered from those sources. A conclusion
+  with no cited source, a citation that does not support the sentence it
+  anchors, and an enumerated field left unanswered without an explicit
+  no-answer statement are each a rejection. These documents are recovered
+  historical findings whose entire value is being true of the live tree, so an
+  unsupported-but-plausible sentence at one of these four paths is a worse
+  outcome than a missing one (per D19).
 - **V3 — the #80 roster.** Inspection of the `## Seam roster` table for eleven
   rows across the three declared classes, each carrying its required fields
   (AC2).
@@ -159,3 +185,25 @@ restate them. Planning appended three rows to the **spec's** ledger:
 - **D18** — C62.2's parenthetical drift observation is itself planning-time
   unverified and is superseded by the execute-phase re-observation, whatever
   that finds — including "no drift".
+
+## Standards review provenance
+
+- **Reviewer:** Codex, isolated read-only runtime (fresh `CODEX_HOME`, approval
+  policy `never`, sandbox `read-only`). No native fallback was used.
+- **Base SHA:** `9206f3ea92e2dde06b998b1a9e402fc2b1ad1e6d`, branch
+  `worktree-issue-115-recover-wayfind-research-findings`.
+- **Focus:** none configured; the standard bar was applied.
+- **Counts:** 6 findings, 6 accepted, 0 rejected, 0 deferred — 3 Blocking, 2
+  Should fix, 1 Discussion.
+- **Dispositions.** Every finding was re-verified against the live plan members
+  before being applied. B-01 (each task's Step 4 expected `PASS` while its own
+  gate runs V1, which cannot pass before Step 5's commit) is corrected in all
+  five members. B-02 and B-03 are recorded together as D19; SF-01 and SF-02 as
+  D20; the Discussion item D-01 as D21. Two of B-02/B-03's sub-claims were
+  partly stale and were narrowed rather than applied as written: task 4's gate
+  did already check twelve `C80.4` fields (the other eleven are now added), and
+  task 5's guard literals did already include `elevenyellow/nodocom` (only bare
+  `elevenyellow` and `dev` were missing).
+- No reviewer transcript is stored in this repository, the issue, the PR, or any
+  commit message.
+

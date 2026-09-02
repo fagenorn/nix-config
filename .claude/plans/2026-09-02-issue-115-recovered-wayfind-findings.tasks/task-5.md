@@ -101,11 +101,34 @@ printf '%s\n' "$roster" | grep -F ' seam ' \
     $0 ~ /^#{2,4} / { if (index($0, h)) {f=1; next} else if (f) {f=0} }
     f' "$DOC")
   for lbl in "Locator:" "Identity:" "Evidence:" "Rollback:"; do
-    printf '%s\n' "$sec" | grep -qF -- "$lbl" \
-      || echo "FAIL: added seam section '$det' is missing the '$lbl' line"
+    line=$(printf '%s\n' "$sec" | grep -F -- "$lbl" | head -1)
+    if [ -z "$line" ]; then
+      echo "FAIL: added seam section '$det' is missing the '$lbl' line"
+      continue
+    fi
+    # The value after the label must be substantive, not an empty or stub field.
+    val=$(printf '%s\n' "$line" | sed -E "s/^.*${lbl%:}: *//" | sed -E 's/[`*_]//g; s/^ +| +$//g')
+    [ "${#val}" -ge 20 ] \
+      || echo "FAIL: added seam '$det' has an empty or stub '$lbl' value: '$val'"
+    printf '%s\n' "$val" | grep -qiE '^(n/a|none|tbd|todo|unknown)\.?$' \
+      && echo "FAIL: added seam '$det' declares '$lbl' unanswered without justification"
   done
 done | tee "${TMPDIR:-/tmp}/added-fields.log"
 [ ! -s "${TMPDIR:-/tmp}/added-fields.log" ] || fail=1
+
+# The six added seams are each named by a roster row (per D19). Missing one is
+# not a soft warning: AC2 names them individually.
+while IFS= read -r seam; do
+  printf '%s\n' "$roster" | grep -qiF -- "$seam" \
+    || say "added seam '$seam' has no roster row"
+done <<'SEAMS'
+permission guard
+attempt-lifecycle ledger
+sdd plan ledger
+review-package store
+ship-release state
+wayfind state
+SEAMS
 
 # A80.1 - A80.4 appear in the coverage table with a real discharging heading.
 for id in A80.1 A80.2 A80.3 A80.4; do
@@ -126,7 +149,9 @@ gh pr create
 git branch -d
 gh pr merge
 fagenorn
+elevenyellow
 elevenyellow/nodocom
+dev
 enforce_admins
 Nix Eval
 GITHUB_TOKEN
@@ -135,17 +160,38 @@ LITS
 grep -qiF -- "forge-side" "$DOC" || say "A80.1's D14 boundary (forge-side enforcement) is not stated"
 
 # A80.3 / V4: both full shas, their branches, and immutability proof.
-for sha in dc98ba9b6bafaf7b5373cc7595ef79a5526846d1 \
-           b49c8771cbaf87eefc5f0d385100e205060538d9; do
+# Each prototype is verified as a whole triple - sha, its exact remote branch,
+# and the directory in that commit's tree - and the document must associate all
+# three in one place. Checking them independently would pass a swapped pairing
+# (per D19).
+while IFS='|' read -r sha branch dir; do
   grep -qF -- "$sha" "$DOC" || say "prototype sha $sha is not recorded"
-  git cat-file -e "${sha}^{commit}" 2>/dev/null || say "V4: $sha is not a reachable commit object"
-  git ls-remote origin | grep -qF -- "$sha" || say "V4: $sha is not on any origin branch"
-done
-for b in worktree-prototype-release-transactions \
-         worktree-prototype-nix-config-adoption-dry-run \
-         prototype-release-transactions prototype-agent-adoption-dry-run; do
-  grep -qF -- "$b" "$DOC" || say "A80.3 does not name '$b'"
-done
+  grep -qF -- "$branch" "$DOC" || say "A80.3 does not name branch '$branch'"
+  grep -qF -- "$dir" "$DOC" || say "A80.3 does not name directory '$dir'"
+  git cat-file -e "${sha}^{commit}" 2>/dev/null \
+    || say "V4: $sha is not a reachable commit object"
+  # The sha must be the tip of that exact remote branch, not merely on some ref.
+  actual=$(git ls-remote origin "refs/heads/$branch" | awk '{print $1}')
+  [ "$actual" = "$sha" ] \
+    || say "V4: origin/$branch is at '${actual:-<absent>}', not $sha"
+  # The named directory must exist in that commit's tree.
+  git ls-tree --name-only "$sha" -- "$dir" | grep -qx -- "$dir" \
+    || say "V4: '$dir' is not in the tree of $sha"
+  # The document must state the three together, within one block, not scattered.
+  awk -v s="$sha" -v b="$branch" -v d="$dir" '
+    { buf[NR]=$0 }
+    END {
+      for (i=1; i<=NR; i++) {
+        w=""
+        for (j=i; j<=NR && j<i+12; j++) w = w "\n" buf[j]
+        if (index(w,s) && index(w,b) && index(w,d)) { print "OK"; exit }
+      }
+    }' "$DOC" | grep -qx OK \
+    || say "A80.3 does not associate $sha with '$branch' and '$dir' in one place"
+done <<'PROTOS'
+dc98ba9b6bafaf7b5373cc7595ef79a5526846d1|worktree-prototype-release-transactions|prototype-release-transactions
+b49c8771cbaf87eefc5f0d385100e205060538d9|worktree-prototype-nix-config-adoption-dry-run|prototype-agent-adoption-dry-run
+PROTOS
 
 # A80.4: the #86 correction is present, and no tracker comment was edited.
 grep -qE '^#{2,4} .*[Cc]orrection' "$DOC" || say "A80.4 has no named correction subsection"
@@ -256,10 +302,15 @@ record its literal path template:
 
 1. the attempt-lifecycle ledger — `home/common/agent-skills/scripts/workflow-state.py`
    and `home/common/agent-skills/skills/from-issue/SKILL.md`;
-2. the sdd plan ledger — `home/common/agent-skills/skills/sdd/SKILL.md`
-   (the per-plan artifacts under the primary checkout's per-checkout bucket);
-3. the review-package store — `home/common/agent-skills/skills/sdd/SKILL.md`
-   and `home/common/agent-skills/skills/ship-issue/SKILL.md`;
+2. the sdd plan ledger — `home/common/agent-skills/skills/sdd/scripts/sdd-workspace`
+   for the actual bucket and path derivation, with
+   `home/common/agent-skills/skills/sdd/SKILL.md` for its contract;
+3. the review-package store — `home/common/agent-skills/skills/sdd/scripts/review-package`
+   is the primary source: it derives the durable locator and identity from the
+   primary checkout, the issue, the run/branch identity, the producer and the
+   head SHA. Read it before the skill prose in
+   `home/common/agent-skills/skills/sdd/SKILL.md` and
+   `home/common/agent-skills/skills/ship-issue/SKILL.md`;
 4. ship-release's own state file —
    `home/common/agent-skills/skills/ship-release/SKILL.md`;
 5. the tracker-native wayfind state —
@@ -298,7 +349,11 @@ leaving Task 4's release-unit content untouched:
 - four new coverage rows for `A80.1`–`A80.4`, each naming a real heading.
 
 Run: `bash "${TMPDIR:-/tmp}/gate-80b.sh"`
-Expected: `PASS gate-80b`, exit 0. (V1 still fails until Step 5's commit.)
+Expected: `gate-80b` exits 1 with exactly one `FAIL:` line, the V1 line
+`FAIL: V1: <doc> is not committed at HEAD`. Every content check passes here;
+V1 cannot pass before Step 5's commit, so `PASS` is unreachable at this step.
+If any other `FAIL:` line appears, fix the document and re-run before
+committing.
 
 - [ ] **Step 5: Commit, then run the whole-package sweep**
 
@@ -317,3 +372,23 @@ bash "${TMPDIR:-/tmp}/gate-package.sh"
 Expected: the commit is SSH-signed and succeeds; both gates print their `PASS`
 line and exit 0. AC4's `git show main:<path>` form of V1 becomes true when this
 branch merges (per D16); nothing further in this plan can assert it.
+
+- [ ] **Step 6: V5 — source-backed semantic audit (per D19)**
+
+The gate has proven traceability only. Before this task is done, read the
+document against its cited sources and confirm each claim ID it owes is
+*answered*, not merely *addressed*:
+
+- Open every `##`/`###` section the coverage table names, and every live source
+  that section cites. A citation that does not support the sentence it anchors
+  is a rejection.
+- Confirm each enumerated obligation this task's invariants list — every matrix
+  cell, every mandated axis, every required field — is answered in the place the
+  coverage table points at. The gate's document-wide `grep` cannot see whether an
+  axis is answered in *each* cell; only this reading can.
+- A field with no answer in the live tree must say so explicitly. Silence and
+  plausible-but-uncited prose are both rejections.
+- Reject any conclusion not traceable to a source read during Step 3.
+
+Expected: every claim ID answered from a cited source, or the document revised
+and Steps 4-5 re-run.

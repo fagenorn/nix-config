@@ -161,17 +161,28 @@ while IFS= read -r field; do
   n=$(count "$field")
   [ "$n" -ge 5 ] || say "C80.4 field '$field' appears $n times; expected >= 5 (one per release unit)"
 done <<'FIELDS'
+candidate identity
 release identity
 publication target
+trigger
+ordering
 immutability
 activation mode
 authority boundary
+restart
+convergence
+deployment success
+running identity
 liveness
 readiness
 migration
+product smoke
+data at risk
 rollback anchor
+rollback action
 reversibility limit
 retirement evidence
+partial failure
 re-entry
 FIELDS
 
@@ -241,8 +252,11 @@ projects, separate from project-specific mechanics (`C80.5`); and a closing
 chosen and no universal adapter is invented (`C80.6`).
 
 Run: `bash "${TMPDIR:-/tmp}/gate-80a.sh"`
-Expected: `PASS`, exit 0. (V1 still fails until Step 5's commit; re-run after
-committing.)
+Expected: exit 1 with exactly one `FAIL:` line, the V1 line
+`FAIL: V1: <doc> is not committed at HEAD`. Every content check passes here;
+V1 cannot pass before Step 5's commit, so `PASS` is unreachable at this step.
+If any other `FAIL:` line appears, fix the document and re-run before
+committing.
 
 - [ ] **Step 5: Commit, then confirm V1**
 
@@ -259,3 +273,23 @@ bash "${TMPDIR:-/tmp}/gate-80a.sh"
 
 Expected: the commit is SSH-signed and succeeds; the gate prints `PASS` with
 exit 0, V1 included.
+
+- [ ] **Step 6: V5 — source-backed semantic audit (per D19)**
+
+The gate has proven traceability only. Before this task is done, read the
+document against its cited sources and confirm each claim ID it owes is
+*answered*, not merely *addressed*:
+
+- Open every `##`/`###` section the coverage table names, and every live source
+  that section cites. A citation that does not support the sentence it anchors
+  is a rejection.
+- Confirm each enumerated obligation this task's invariants list — every matrix
+  cell, every mandated axis, every required field — is answered in the place the
+  coverage table points at. The gate's document-wide `grep` cannot see whether an
+  axis is answered in *each* cell; only this reading can.
+- A field with no answer in the live tree must say so explicitly. Silence and
+  plausible-but-uncited prose are both rejections.
+- Reject any conclusion not traceable to a source read during Step 3.
+
+Expected: every claim ID answered from a cited source, or the document revised
+and Steps 4-5 re-run.
