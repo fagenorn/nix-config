@@ -875,10 +875,19 @@ def main(argv=None):
                          "declared, not sampled, so the bundle id stays reproducible")
     args = ap.parse_args(argv)
 
-    given = (bool(args.override), bool(args.override_by), bool(args.override_at))
+    # Presence is `is not None`: absence is what waives the companions, and an
+    # unexpanded shell variable is a present flag with no value, not an absent
+    # one. Every field here is hashed into `bundle_id` as the record of who
+    # authorized what, so a blank one is a usage error, not an empty record (D38).
+    given = tuple(value is not None for value in
+                  (args.override, args.override_by, args.override_at))
     if len(set(given)) != 1:
         ap.error("--override, --override-by and --override-at must be given together")
-    if args.override_at is not None:
+    if given[0]:
+        for flag, value in (("--override", args.override),
+                            ("--override-by", args.override_by)):
+            if not value.strip():
+                ap.error(f"{flag} must carry a value")
         try:
             datetime.strptime(args.override_at, "%Y-%m-%dT%H:%M:%SZ")
         except ValueError:

@@ -600,6 +600,23 @@ class BundleCliTest(unittest.TestCase):
             run_cli("--trials", path, "--override", "why", "--override-by", "anis")
         self.assertEqual(caught.exception.code, 2)
 
+    def test_an_empty_override_reason_is_a_usage_error(self):
+        # An unexpanded shell variable: the flag is present, its value is not.
+        # Absence is what waives the companions, and "" is not absence.
+        path = self.manifest_file(self.flat_manifest(), "emptyreason.json")
+        with self.assertRaises(SystemExit) as caught:
+            run_cli("--trials", path, "--override", "")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_a_blank_override_companion_is_a_usage_error(self):
+        # Every field of the block is hashed into bundle_id as the record of
+        # who authorized what; a blank one records nothing (D38).
+        path = self.manifest_file(self.flat_manifest(), "blankby.json")
+        with self.assertRaises(SystemExit) as caught:
+            run_cli("--trials", path, "--override", "why", "--override-by", "  ",
+                    "--override-at", "2026-09-02T12:00:00Z")
+        self.assertEqual(caught.exception.code, 2)
+
     def test_a_malformed_override_timestamp_is_a_usage_error(self):
         path = self.manifest_file(self.flat_manifest(), "badat.json")
         with self.assertRaises(SystemExit) as caught:
