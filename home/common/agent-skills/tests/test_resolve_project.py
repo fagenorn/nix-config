@@ -928,12 +928,41 @@ class WriteProjectionsTest(ResolverTestCase):
         self.assertEqual(self.write(root)[0], 0)
         self.assertEqual((root / "AGENTS.md").read_bytes(), first)
 
+    def test_a_write_preserves_the_targets_permission_bits(self):
+        """The atomic replace must not narrow the mode tempfile creates at."""
+        root = self.make_root()
+        (root / "AGENTS.md").unlink(missing_ok=True)
+        os.chmod(root / "CLAUDE.md", 0o644)
+        # The child inherits this umask, so the created target's mode is a
+        # fixed expectation rather than whatever the machine happens to set.
+        previous = os.umask(0o022)
+        self.addCleanup(os.umask, previous)
+        self.assertEqual(self.write(root)[0], 0)
+        kept = (root / "CLAUDE.md").stat().st_mode & 0o777
+        self.assertEqual(oct(kept), oct(0o644))
+        created = (root / "AGENTS.md").stat().st_mode & 0o777
+        self.assertEqual(oct(created), oct(0o644))
+        self.assertTrue(created & stat.S_IRGRP and created & stat.S_IROTH,
+                        oct(created))
+
     def test_no_stray_temporary_file_survives_a_write(self):
         root = self.make_root()
+        (root / "AGENTS.md").unlink(missing_ok=True)
+        before = sorted(path.name for path in root.iterdir())
         self.assertEqual(self.write(root)[0], 0)
-        strays = [p.name for p in root.iterdir()
-                  if p.name.startswith(".") and "tmp" in p.name.lower()]
-        self.assertEqual(strays, [])
+        self.assertEqual(sorted(path.name for path in root.iterdir()),
+                         sorted([*before, "AGENTS.md"]))
+
+    def test_a_failed_replace_leaves_no_temporary_file_behind(self):
+        """A non-empty directory cannot be replaced by a file, so the write
+        fails with the temporary file already on disk."""
+        root = self.make_root()
+        (root / "AGENTS.md").mkdir()
+        (root / "AGENTS.md" / "occupant").write_text("x", encoding="utf-8")
+        before = sorted(path.name for path in root.iterdir())
+        code, _, _ = self.write(root)
+        self.assertEqual(code, 2)
+        self.assertEqual(sorted(path.name for path in root.iterdir()), before)
 
 
 class CommittedProjectionTest(ResolverTestCase):

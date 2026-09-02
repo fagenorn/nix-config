@@ -956,15 +956,45 @@ def projection_status(root: Path, entry: dict) -> str:
     raise ValueError(f"unknown projection kind: {kind!r}")
 
 
+def destination_mode(target: Path) -> int:
+    """The permission bits the replaced target must end up holding.
+
+    `tempfile` creates at 0600 and `os.replace` carries the temporary file's
+    mode onto the destination, so an unadjusted atomic write silently narrows
+    a file other uids have to read — invisibly, since git records no bit but
+    the executable one. An existing target therefore keeps exactly the bits it
+    already had, and a new one gets what a plain `open()` would have given it:
+    0666 with the process umask applied. Reading the umask means briefly
+    setting it, which is safe here because the resolver is single-threaded and
+    forks nothing.
+    """
+    try:
+        return os.stat(target).st_mode & 0o7777
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
 def write_atomically(target: Path, data: bytes) -> None:
-    """Replace `target` with `data` in one step, never a partial file."""
+    """Replace `target` with `data` in one step, never a partial file.
+
+    The temporary file is named distinctively so an orphan left by a crashed
+    process is recognizable and is caught by the repository's `.gitignore`
+    rather than offered as an untracked file.
+    """
+    mode = destination_mode(target)
     pending: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-                dir=str(target.parent), delete=False) as handle:
+                dir=str(target.parent),
+                prefix=".resolve-project.",
+                suffix=".tmp",
+                delete=False) as handle:
             pending = Path(handle.name)
             handle.write(data)
             handle.flush()
+        os.chmod(pending, mode)
         os.replace(pending, target)
         pending = None
     finally:
