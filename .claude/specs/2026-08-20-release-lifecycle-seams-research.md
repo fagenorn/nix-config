@@ -517,8 +517,8 @@ all — absolute temporaries beneath `${TMPDIR:-/tmp}` (`from-issue/SKILL.md:50`
 `:103`, `:281-283`), the result file removed under an unconditional cleanup on every
 outcome. Live: `ls -1 .superpowers/workflows/` lists **18** run directories (`ls -A1`
 lists **22** — those plus a `.gitignore` holding `*` and three `.direct-<n>.lock`
-files), and `ls -1 .superpowers/workflows/run-20260902-115-130/` returns exactly
-`state.json` and `state.lock`.
+files), and `ls -1 .superpowers/workflows/run-20260902-115-130/` returns
+`handoffs`, `state.json` and `state.lock`.
 
 **Identity:** the *record* sense, at two levels. A run is named by `run_id`, a
 caller-chosen string matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` (`:47`) that is
