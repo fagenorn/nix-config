@@ -2233,6 +2233,28 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertNotIn("gh pr merge", gate)
         # D5: the gate reuses the one suspension mechanism, defining no new one.
         self.assertIn("blocked_on: human_gate", flat)
+        # D17: the `--auto` pause routes through whoever owns the ledger. A
+        # fresh ship owner cannot suspend — `ship-issue/SKILL.md`'s launch
+        # guard forbids it any workflow-state write, and `ship-handoff.md`
+        # requires it to return a validated ship summary — so it returns a
+        # truthful `stopped` row and its parent suspends. Pinned as an ordered
+        # split so a future edit cannot collapse the two cases back into one
+        # instruction addressed to whoever happens to be running.
+        self.assert_ordered(
+            flat,
+            "A fresh ship owner launched per `from-issue/ship-handoff.md` "
+            "writes no workflow state",
+            "returns the truthful `stopped` ship summary naming the human gate",
+            "`artifact-budget validate-report --boundary ship-summary`",
+            "keeping the worktree and claiming no merge success",
+            "its parent, the `from-issue` owner, is what suspends "
+            "`blocked_on: human_gate` and prints the canonical re-entry line",
+            "A `from-issue` owner running this path itself, with no fresh ship "
+            "owner in between, follows `from-issue/SKILL.md`'s existing "
+            "suspension procedure directly",
+            "This file defines no new suspension shape and no new "
+            "`blocked_on` value.",
+        )
         self.assert_ordered(
             gate,
             "## Gate 1 — before the first push (Phase 4)",
@@ -2266,10 +2288,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn(
             "Present the merge command exactly as Phase 7 renders it.", flat
         )
-        # AC2: the session resumes in place, through to issue closure.
+        # AC2, qualified per D18 the way D16 qualified the gate count: the
+        # session resumes in place through to issue closure on the *successful*
+        # path. Unqualified, this contradicted the grant semantics below, which
+        # send a failed execution back through its own gate.
         self.assertIn(
-            "After this grant nothing further is asked: the same session resumes "
-            "in place and runs the chain to issue closure and cleanup.",
+            "After this grant nothing further is asked on the successful path: "
+            "the same session resumes in place and runs the chain to issue "
+            "closure and cleanup. A failed execution is the exception the grant "
+            "semantics name: it re-enters its own gate for a fresh grant.",
             flat,
         )
         # D15/AC2: the literal payloads are what make the handoff
@@ -2296,6 +2323,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             normalized(gate_2),
             "Present the merge command exactly as Phase 7 renders it.",
             "gh issue close <num>",
+            # The delete is the action and the ls-remote its condition, so the
+            # bullet spells them in that order. Without this anchor the block
+            # could lose the delete entirely and still pass.
+            "git push origin --delete <branch>",
             "git ls-remote --heads origin <branch>",
             "git worktree remove <worktree-path>",
             "git branch -d <branch>",

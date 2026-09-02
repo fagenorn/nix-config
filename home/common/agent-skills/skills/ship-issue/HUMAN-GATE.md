@@ -15,10 +15,19 @@ first push, one before the merge. A failed command re-enters its own gate for a
 fresh single-use grant, so the gate can be entered more often than twice; it is
 never entered fewer.
 
-In `--auto`, present the gate's block and then follow `from-issue/SKILL.md`'s
-existing suspension procedure: suspend with `blocked_on: human_gate` and print
-the canonical re-entry line. This file defines no new suspension shape and no
-new `blocked_on` value.
+In `--auto`, present the gate's block and then pause through whoever owns the
+ledger. A fresh ship owner launched per `from-issue/ship-handoff.md` writes no
+workflow state — the read-only `check-launch` query is its one ledger call — so
+it presents the block and returns the truthful `stopped` ship summary naming the
+human gate, validated through
+`artifact-budget validate-report --boundary ship-summary` like every other ship
+return, keeping the worktree and claiming no merge success; its parent, the
+`from-issue` owner, is what suspends `blocked_on: human_gate` and prints the
+canonical re-entry line. A `from-issue` owner running this path itself, with no
+fresh ship owner in between, follows `from-issue/SKILL.md`'s existing suspension
+procedure directly — suspending `blocked_on: human_gate` and printing that same
+line — exactly as `from-issue/AUTO.md`'s final paragraph already says. This file
+defines no new suspension shape and no new `blocked_on` value.
 
 ## Gate 1 — before the first push (Phase 4)
 
@@ -68,8 +77,10 @@ The same grant covers the rest of the chain, in this order:
 Phase 6's CI wait has already bound before this gate is entered, and the grant
 does not re-litigate it.
 
-After this grant nothing further is asked: the same session resumes in place and
-runs the chain to issue closure and cleanup.
+After this grant nothing further is asked on the successful path: the same
+session resumes in place and runs the chain to issue closure and cleanup. A
+failed execution is the exception the grant semantics name: it re-enters its own
+gate for a fresh grant.
 
 ## Grant semantics
 
