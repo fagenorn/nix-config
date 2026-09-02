@@ -166,23 +166,42 @@ in `home/common/agent-skills/skills/` and `home/common/claude-code/skills/`
 (excluding each skill's `evals/`) and every script in
 `home/common/agent-skills/scripts/` was swept — **65 files**: 58 under the two
 skill trees, which already contain `sdd/scripts/`, plus 7 under `scripts/`,
-enumerated with `find … -type f -not -path '*/evals/*'` on 2026-09-02. Two
-passes ran over them. The first was a broad `grep -rniE` for
-`fallback|falls? back|degrade|absent|unavailable|not (available|installed|present)|command -v|legacy|helper missing|no native|cannot dispatch`,
-which produced the candidate files; the second narrowed to the branch shapes the
-skills actually spell out:
+enumerated with `find … -type f -not -path '*/evals/*'` on 2026-09-02. Three
+inputs produced the rows.
+
+**Pass 1, broad**, over all 65 files, to find the candidates:
+
+```
+grep -rniE 'fallback|falls? back|degrade|absent|unavailable|not (available|installed|present)|command -v|legacy|helper missing|no native|cannot dispatch' \
+  home/common/agent-skills/skills home/common/claude-code/skills home/common/agent-skills/scripts \
+  | grep -v '/evals/'
+```
+
+**Pass 2, narrowed** to the branch shapes the skills actually spell out, to
+separate branches from prose that merely uses the words:
 
 ```
 grep -rniE 'if unavailable|is unavailable|not installed|command -v|helper missing|no measurement|else the manifest|fall back to|falls back to|degrade[sd]? (to|gracefully)|no native|cannot dispatch|absent (sibling|helper|skill)|missing (sibling|helper)|legacy (fallback|root|ADR|conventions|repos|single-doc)|else `|, else |otherwise `' \
-  home/common/agent-skills/skills home/common/claude-code/skills --include='*.md'
+  home/common/agent-skills/skills home/common/claude-code/skills home/common/agent-skills/scripts \
+  | grep -v '/evals/'
 ```
 
-Every hit was then read in place, because these patterns also match prose that
-is not a branch; a hit became a row only where the source describes a
-lesser-but-continuing behaviour. The 51 rows are what survived that reading. It
-is a keyword sweep, not a proof of exhaustiveness: a fallback phrased entirely
-outside that vocabulary would not have been found, and the count should be read
-as a floor.
+**A full read of `home/common/agent-skills/scripts/resolve-bindings`** (168
+lines), because rows A1-A5, C1 and C2 are Python branches whose *branch lines*
+carry none of the vocabulary above — pass 1 reaches the file only through its
+docstrings (lines 5, 6, 94). No keyword sweep would have produced those seven
+rows; reading the file did. The other six scripts were read the same way and
+yielded no fallback rows: `diff-scope.py`, `artifact_budget.py`,
+`agent-evidence.py` and `sdd/scripts/task-brief` raise or exit instead of
+degrading, which is why they appear only as contrasting cases.
+
+Every hit of both passes was then read in place, because the patterns also match
+prose that is not a branch; a hit became a row only where the source describes a
+lesser-but-continuing behaviour. The 53 rows are what survived reading the two
+passes' hits plus that script read. This is a keyword sweep over prose plus a
+targeted read of one script, not a proof of exhaustiveness: a fallback phrased
+entirely outside that vocabulary, or buried in a script nobody read line by
+line, would not have been found. The count is a floor.
 
 **What "silently" means in the verdicts below.** A branch is called silent when
 it takes the lesser path without writing a diagnostic. `resolve-bindings` is
@@ -192,7 +211,7 @@ unreadable or unparseable one prints one line to stderr and still returns `{}`
 exit status 0 (`positive_int_str`, lines 91-107, whose docstring states the
 reason: "one bad optional orchestration key must not break binding resolution
 for every skill"). The `Diagnostic at the fallback` column of `Per-site
-inventory` carries this verdict for all 51 sites, so #61's "or silently fall
+inventory` carries this verdict for all 53 sites, so #61's "or silently fall
 back" is answered per site rather than only for the helper.
 
 ## The removable cluster
@@ -211,7 +230,7 @@ rung at all and go straight from absent-config to a hardcoded default
 (`specDir`, `planDir`, `integrationBranch`, `defaultBranch`, `branchPattern`,
 `worktreePrefix`, `coAuthoredBy`, `unsetGithubToken`, `agentBudgetMinutes`,
 `maxParallel`); three have one (`repoSlug`, `trackerKind`, `trackerCli`), and
-`repoRoot` is derived. Seven skills carry prose duplicating that ladder:
+`repoRoot` is derived. Seven `SKILL.md` files carry prose duplicating that ladder:
 `ship-issue/SKILL.md:13`, `doc-grounded-questions/SKILL.md:12`,
 `to-issues/SKILL.md:12`, `writing-plans/SKILL.md:11-13`, `research/SKILL.md:16`,
 `design/SKILL.md:49`, and `ship-release/SKILL.md:24` — which does not call the
@@ -231,9 +250,13 @@ else the manifest (`package.json` scripts, `*.slnx`/`*.sln` → `dotnet test`,
 ("npm scripts, dotnet, cargo, go, make"). Helper-binary resolution is the other —
 `ship-issue/SKILL.md:222` and `codex-collaboration/DIFF-REVIEW.md:23-25` both
 instruct the reader to use the full `~/.agents/bin/diff-scope` path "if the bare
-name does not resolve", and both define a no-measurement outcome. The tree holds
-exactly one branch that literally probes for a command:
-`codex-collaboration/SKILL.md:65-68`'s `command -v codex-companion` pre-flight.
+name does not resolve", and both define a no-measurement outcome. Two branches
+in the swept set literally probe for a command with `command -v`, and only one of
+them falls back: `codex-collaboration/SKILL.md:65-68`'s
+`command -v codex-companion` pre-flight degrades to the native reviewer flow,
+while `sdd/scripts/task-brief:25-28`'s `command -v artifact-budget` prints to
+stderr and exits 2. The second is a fail-closed refusal, so it is a contrasting
+case rather than an inventory site.
 
 **Tracker.** `resolve-bindings` `detect_tracker` (lines 77-82) maps an origin URL
 to `github`/`gh`, `gitlab`/`glab`, or `none`/`""`, and `origin_url` (lines 59-69)
@@ -264,7 +287,7 @@ restated in four further places — `from-issue/REVIEW-CONTRACT.md:39` and
 `sdd/conformance-reviewer-prompt.md:23` carry the ladder,
 `codex-collaboration/PLAN-REVIEW.md:36-47` carries both, and
 `grill-with-docs/CONTEXT-FORMAT.md:133` carries the no-map branch alone — which
-is why doc discovery is the largest of the four families, at 13 of the 37
+is why doc discovery is the largest of the four families, at 13 of the 38
 in-cluster sites.
 
 ## Why runtime preflights are not interchangeable
@@ -318,8 +341,11 @@ Two contrasting cases fix the boundary of this inventory from the other side.
   but it never degrades, and it is therefore enforcement, not an inventory site.
 - **Helpers that raise instead of degrading.** `diff-scope.py:428-431` refuses to
   treat a missing object as recoverable with the comment "a missing answer is a
-  hard error, never a fallback (issue #21's D7)"; `artifact_budget.py:112,123,233,241,250`
-  raises on every unopenable, unreadable or concurrently-modified artifact;
+  hard error, never a fallback (issue #21's D7)"; `artifact_budget.py:112,123,233,241,250` raises on every unopenable, unreadable
+  or concurrently-modified artifact;
+  `sdd/scripts/task-brief:25-28` probes `command -v artifact-budget` and, on a
+  miss, writes "artifact-budget is not available" to stderr and exits 2 rather
+  than proceeding without a budget check;
   `handoff/SKILL.md:51-52` requires "stop failed rather than copy unmeasured
   bytes" and `handoff/SKILL.md:85-86` forbids a "prose fallback". These are
   fail-closed refusals inside the same helper set and are excluded for the same
@@ -327,16 +353,16 @@ Two contrasting cases fix the boundary of this inventory from the other side.
 
 ## Per-site inventory
 
-51 sites, found by the sweep described in `## Method and evidence base`. **29**
+53 sites, found by the sweep described in `## Method and evidence base`. **30**
 are classified `removable-after-validated-onboarding-contract` — the branch's
-input is a repository property a contract could guarantee. **22** are classified
+input is a repository property a contract could guarantee. **23** are classified
 `unavoidable-portability` — the branch's input is a property of the machine, the
 harness, or the forge, which no repository onboarding contract reaches. Every
 site is a fallback in the sense fixed above; fail-closed refusals and declared
 runtime alternatives are excluded.
 
 The fourth column answers the other half of #61's question — which branches
-*silently* fall back. **42** of the 51 emit nothing at all; **7** are announced,
+*silently* fall back. **44** of the 53 emit nothing at all; **7** are announced,
 because the source requires the fallback to be recorded, reported or disclosed
 (B3, C3, C5, E3, E6, E13, E14); and **2** write one line to stderr and continue
 at exit status 0 (A5 always, A3 only for an unreadable or unparseable config
@@ -351,7 +377,7 @@ file). Silence is the default in this tree, not the exception.
 | A3 | `scripts/resolve-bindings:47-56` — `load_config` returns `{}` on a missing file, on `OSError`/`JSONDecodeError`, or on a non-dict top level | config file presence and validity | silent, except one stderr line on an unreadable or unparseable file | removable-after-validated-onboarding-contract |
 | A4 | `scripts/resolve-bindings:85-88` — `as_bool_str` substitutes the default for any non-bool | config value type | silent | removable-after-validated-onboarding-contract |
 | A5 | `scripts/resolve-bindings:91-107` — `positive_int_str` substitutes the default for a non-positive or non-int; exit status stays 0 | config value type | one stderr line | removable-after-validated-onboarding-contract |
-| A6 | `skills/{ship-issue:13, doc-grounded-questions:12, to-issues:12, writing-plans:11, research:16, design:49}/SKILL.md` — "helper missing → read the config and apply the same defaults" | presence of `~/.agents/bin/resolve-bindings` on the machine | silent | unavoidable-portability |
+| A6 | `skills/{ship-issue:13, doc-grounded-questions:12, to-issues:12, writing-plans:11, research:16, design:49}/SKILL.md` — a helper-missing branch in six files, worded three ways: `doc-grounded-questions:12` and `to-issues:12` say "helper missing → read the config and apply the same defaults"; `ship-issue:13` says "Helper missing → read the config and apply the defaults it documents."; `writing-plans:11`, `research:16` and `design:49` say "helper missing → `.claude/skills.config.json`, default `.claude/specs`" (`.claude/plans` in `writing-plans`) | presence of `~/.agents/bin/resolve-bindings` on the machine | silent | unavoidable-portability |
 | A7 | `skills/ship-release/SKILL.md:24` — reads the config directly and restates the whole default set in prose, calling no helper | absent config key | silent | removable-after-validated-onboarding-contract |
 | A8 | `skills/{ship-issue:15, doc-grounded-questions:12, to-issues:12}/SKILL.md`, `skills/ship-release/SKILL.md:24` — "never hard-fail on a missing optional binding"; "skip any configured-but-absent doc path silently" | declared-but-absent path | silent, and says so | removable-after-validated-onboarding-contract |
 | A9 | `skills/from-issue/bindings.md:5-8` — the whole ladder duplicated in an auxiliary file: config, auto-detection, eight named defaults, degrade-gracefully | absent config key | silent, and says so (line 8) | removable-after-validated-onboarding-contract |
@@ -369,6 +395,7 @@ file). Silence is the default in this tree, not the exception.
 | C8 | `skills/to-issues/SKILL.md:87-89` — GitLab native blocking links are Premium/Ultimate; on the free tier the body's "Blocked by" section is the record | forge subscription tier | silent | unavoidable-portability |
 | C9 | `skills/from-issue/bindings.md:6,12,14` — tracker auto-detection, the `kind=none` skip, and the `unsetGithubToken` prefix, all restated in the auxiliary file | absent tracker binding | silent | removable-after-validated-onboarding-contract |
 | C10 | `skills/ship-issue/SKILL.md:207` — `repoSlug` from config, else the origin URL, for every issue URL it writes | absent config key | silent | removable-after-validated-onboarding-contract |
+| C12 | `skills/from-issue/SKILL.md:465` — "derive the slug from `repoSlug` if configured, else `git remote get-url origin`" for every URL the lifecycle writes | absent config key | silent | removable-after-validated-onboarding-contract |
 | C11 | `skills/wayfind/DISCIPLINE.md:49` — a tracker without native blocking falls back to a body convention | forge feature set | silent | unavoidable-portability |
 | D1 | `skills/doc-grounded-questions/SKILL.md:20` — context map: `docPaths.contextMap` → `docs/CONTEXT-MAP.md` → legacy root `CONTEXT-MAP.md` → no map | absent config key and absent file | silent | removable-after-validated-onboarding-contract |
 | D2 | `skills/doc-grounded-questions/REFERENCE.md:26-29` — no map → `docPaths.context`, `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md`, or a README domain section | absent config key and absent file | silent | removable-after-validated-onboarding-contract |
@@ -395,15 +422,16 @@ file). Silence is the default in this tree, not the exception.
 | E10 | `skills/sdd/SKILL.md:51` — correctness axis via `codex-collaboration` when available, else `reviewer` on Opus/high | Codex CLI installed on the machine | silent | unavoidable-portability |
 | E11 | `skills/sdd/correctness-reviewer-prompt.md:4` — a whole prompt file that exists only for when `codex-collaboration` is unavailable | Codex CLI installed on the machine | silent | unavoidable-portability |
 | E12 | `skills/codex-collaboration/SKILL.md:38-40` — the capability-fallback declaration: this skill or the `codex:codex-reviewer` plugin agent unavailable → the native reviewer flow | skill and plugin agent installed on the machine | silent | unavoidable-portability |
-| E13 | `skills/codex-collaboration/SKILL.md:65-68` — `command -v codex-companion` pre-flight; missing → the native reviewer flow. The only literal command-detection branch in either skill tree | runtime binary on PATH | announced — "record it as such" | unavoidable-portability |
+| E13 | `skills/codex-collaboration/SKILL.md:65-68` — `command -v codex-companion` pre-flight; missing → the native reviewer flow. The only `command -v` probe in the swept set that falls back rather than refusing (`sdd/scripts/task-brief:25-28` is the other, and it exits 2) | runtime binary on PATH | announced — "record it as such" | unavoidable-portability |
 | E14 | `skills/codex-collaboration/SKILL.md:119-141` — one-time native standards-review fallback on a real Codex failure (executable missing, authentication unavailable, `CODEX_REVIEW_FAILURE:`, or an empty/malformed result); explicitly never on concurrency | Codex runtime health | announced — "Record the concrete failure class and that Claude fallback was used" | unavoidable-portability |
+| E15 | `skills/doc-grounded-questions/SKILL.md:59` — "Sibling skills are referenced opportunistically — where one is not installed, apply the same pass to whatever flow you are in" | sibling skill installed on the machine | silent | unavoidable-portability |
 
 Paths in the table are relative to `home/common/agent-skills/`, except
 `skills/codex-collaboration/`, which lives under `home/common/claude-code/`
 (one of the two Claude-only skills).
 
 **Why the helper-, sibling- and runtime-presence sites (A6, B2, B3, D8, E2-E6,
-E8-E14) are portability and not contract.** `~/.agents/bin/` is user scope — an absolute path outside every
+E8-E15) are portability and not contract.** `~/.agents/bin/` is user scope — an absolute path outside every
 repository, populated by `home/common/agent-skills/default.nix:52-102` as nine
 home-manager symlinks into the Nix store, with `home.sessionPath` adding it to
 PATH (line 161). Read on 2026-09-02, it holds `agent-evidence`,
@@ -443,33 +471,36 @@ Three consequences follow, each observed rather than inferred.
    other nine defaulted values match Argus's intent has **no answer in the
    sources read**: Argus states no intent about them anywhere this evidence base
    reaches, which is precisely the condition an onboarding contract would end.
-2. **Every adapter exhausts at least one doc-discovery ladder; only nix-config
-   exhausts all four.** Walking the
-   four ladders (context map, legacy glossary, decision log, architecture) as
+2. **Two of the three exhaust at least one doc-discovery ladder; only nix-config
+   exhausts all four, and Nodo exhausts none.** Walking the four ladders (context map, legacy glossary, decision log, architecture) as
    filesystem probes on 2026-09-02, skipping any rung the adapter's config
    already resolves: nix-config makes **13 probes and gets 0 hits** — it declares
    no `docPaths` and has no `docs/` directory at all; Argus makes **4 probes and
    gets 2 hits** (`docs/CONTEXT-MAP.md`, and `docs/areas/`, which holds 12 area
    `adr/` directories) but **exhausts the architecture ladder** — neither
    `ARCHITECTURE.md` nor `docs/architecture.md` exists there — because it
-   declares nothing either; Nodo makes **1 probe and gets 1 hit** — its config declares
-   `docPaths.contextMap` and `docPaths.architecture`, so those two ladders
-   resolve at the config rung and never probe, leaving only the
-   area-versus-legacy look at `docs/areas/`, which is present. All seven of
-   Nodo's declared `docPaths` resolve to existing paths.
+   declares nothing either. That is one exhausted ladder for Argus: the
+   legacy-glossary ladder is entered only when there is no map, and Argus has
+   one, so it is never walked. Nodo makes **1 probe and gets 1 hit** — its
+   config declares `docPaths.contextMap` and `docPaths.architecture`, so those
+   two ladders
+   resolve at the config rung and never probe; the legacy-glossary ladder is
+   never entered, because the map resolved; and the one decision-log look at
+   `docs/areas/` hits. **Nodo exhausts no ladder at all.** All seven of Nodo's
+   declared `docPaths` resolve to existing paths.
 3. **Argus's project standards are unreachable through the grounding pass.**
    `docs/standards/README.md` exists in Argus, but D4 above has no unconfigured
    discovery rung — project deltas are read only from `docPaths.standards`, and
    Argus declares no config. This is a gap, recorded here as observed; it is not
-   a fallback site and is not counted among the 51.
+   a fallback site and is not counted among the 53.
 
 **Drift against the resolution summary, per the drift rule.**
 
 - *As-of-decision claim:* #61's resolution comment says "The clearest removable
   cluster is project binding, command, tracker, and doc discovery."
 - *As observed (2026-09-02, by reading each cited line and running
-  `resolve-bindings` against all three checkouts):* the four families hold 37 of
-  the 51 sites, but only **29** of those 37 are removable by a repository
+  `resolve-bindings` against all three checkouts):* the four families hold 38 of
+  the 53 sites, but only **30** of those 38 are removable by a repository
   onboarding contract. Eight sites inside the named cluster — A2, A6, B2, B3, C2,
   C8, C11, D8 — branch on the machine, the harness or the forge, not on the
   repository.
@@ -491,19 +522,21 @@ second family is understated: `ship-issue/SKILL.md:13` carries A6 and B1 and
 `from-issue/bindings.md:6` carries A9, B4 and C9, counted under project binding.
 Whole lines are the smallest unit, which overstates wherever a fallback is one
 clause of a longer line (see `## Unverified inheritance`, item 3). Denominator:
-the 24 files that carry these sites, `wc -c` -> **246,808 bytes**.
+the 24 files that carry these sites' prose, `wc -c` -> **246,808 bytes**.
+`resolve-bindings` is not among them: it carries seven sites and zero prompt
+bytes, for the reason given below the table.
 
 | Cluster | Sites | Bytes | Share of the 24 files |
 |---|---|---|---|
 | Project binding | 9 | 3,839 | 1.6% |
 | Command | 4 | 1,636 | 0.7% |
-| Tracker | 11 | 3,014 | 1.2% |
+| Tracker | 12 | 3,173 | 1.3% |
 | Doc discovery | 13 | 5,459 | 2.2% |
-| **Four families, subtotal** | **37** | **13,948** | **5.7%** |
-| Agent capability (outside the four) | 14 | 5,725 | 2.3% |
-| **All 51 sites** | **51** | **19,673** | **8.0%** |
+| **Four families, subtotal** | **38** | **14,107** | **5.7%** |
+| Agent capability (outside the four) | 15 | 5,854 | 2.4% |
+| **All 53 sites** | **53** | **19,961** | **8.1%** |
 
-**Seven of the 51 sites contribute zero prompt bytes** and so contribute nothing
+**Seven of the 53 sites contribute zero prompt bytes** and so contribute nothing
 to the cells above. A1-A5, C1 and C2 live in
 `home/common/agent-skills/scripts/resolve-bindings`, which the model executes
 rather than reads: 5,517 bytes of Python in total, of which lines 24-107 (the
@@ -512,11 +545,11 @@ rather than reads: 5,517 bytes of Python in total, of which lines 24-107 (the
 below, not prompt.
 
 A token figure is **an estimate**: at roughly 4 bytes per token for English
-Markdown, 19,673 bytes is on the order of **4,900 tokens** — labelled an estimate
+Markdown, 19,961 bytes is on the order of **5,000 tokens** — labelled an estimate
 because no tokeniser was run against these files. The byte figures are
 measurements.
 
-Not all of these bytes are resident at once. **13,977** of the 19,673 sit in
+Not all of these bytes are resident at once. **14,265** of the 19,961 sit in
 `SKILL.md` files, which load when the skill is invoked; **5,696** sit in eleven
 auxiliary files (`from-issue/bindings.md`, `from-issue/REVIEW-CONTRACT.md`,
 `from-issue/standards-review.md`, `doc-grounded-questions/REFERENCE.md`,
@@ -550,14 +583,15 @@ sed -n '222p'          home/common/agent-skills/skills/ship-issue/SKILL.md      
 sed -n '23,25p;59,63p' home/common/claude-code/skills/codex-collaboration/DIFF-REVIEW.md    ->  631
 ```
 
-**Tracker — 3,014 bytes**
+**Tracker — 3,173 bytes**
 
 ```
-sed -n '18p;87,89p' home/common/agent-skills/skills/to-issues/SKILL.md      -> 919
-sed -n '28p;30p;75p' home/common/agent-skills/skills/ship-release/SKILL.md  -> 1145
-sed -n '12p;14p'    home/common/agent-skills/skills/from-issue/bindings.md  -> 525
-sed -n '207p'       home/common/agent-skills/skills/ship-issue/SKILL.md     -> 345
-sed -n '49p'        home/common/agent-skills/skills/wayfind/DISCIPLINE.md   ->  80
+sed -n '18p;87,89p'  home/common/agent-skills/skills/to-issues/SKILL.md      ->  919
+sed -n '28p;30p;75p' home/common/agent-skills/skills/ship-release/SKILL.md   -> 1145
+sed -n '12p;14p'     home/common/agent-skills/skills/from-issue/bindings.md  ->  525
+sed -n '207p'        home/common/agent-skills/skills/ship-issue/SKILL.md     ->  345
+sed -n '465p'        home/common/agent-skills/skills/from-issue/SKILL.md     ->  159
+sed -n '49p'         home/common/agent-skills/skills/wayfind/DISCIPLINE.md   ->   80
 ```
 
 **Doc discovery — 5,459 bytes**
@@ -575,7 +609,7 @@ sed -n '36,47p'                 home/common/claude-code/skills/codex-collaborati
 sed -n '33p'                    home/common/agent-skills/skills/ship-issue/CONSOLIDATE.md            ->  295
 ```
 
-**Agent capability — 5,725 bytes**
+**Agent capability — 5,854 bytes**
 
 ```
 sed -n '37p'                        home/common/agent-skills/skills/worktrees/SKILL.md                   ->  720
@@ -583,7 +617,7 @@ sed -n '121p;237,241p;359p'         home/common/agent-skills/skills/ship-issue/S
 sed -n '18,20p;31p'                 home/common/agent-skills/skills/from-issue/standards-review.md       -> 1204
 sed -n '180p'                       home/common/agent-skills/skills/from-issue/SKILL.md                  ->  298
 sed -n '32p'                        home/common/agent-skills/skills/improve-codebase-architecture/SKILL.md -> 248
-sed -n '39p'                        home/common/agent-skills/skills/doc-grounded-questions/SKILL.md      ->  347
+sed -n '39p;59p'                    home/common/agent-skills/skills/doc-grounded-questions/SKILL.md      ->  476
 sed -n '38p'                        home/common/agent-skills/skills/from-issue/REVIEW-CONTRACT.md        ->   94
 sed -n '51p'                        home/common/agent-skills/skills/sdd/SKILL.md                         ->  263
 sed -n '4p'                         home/common/agent-skills/skills/sdd/correctness-reviewer-prompt.md   ->   86
@@ -636,7 +670,7 @@ Per-cluster repeated execution cost:
 Per #61's own instruction — "Do not decide removal policy" — and C61.5, this
 document decides nothing. Specifically it does **not** decide:
 
-- whether any of the 29 `removable-after-validated-onboarding-contract` sites
+- whether any of the 30 `removable-after-validated-onboarding-contract` sites
   should actually be removed, nor in what order, nor behind what evidence. Note
   that this is not an open question in the tracker: #71's resolution (closed)
   settles a strict cutover that will "delete static binding, command, tracker,
@@ -650,13 +684,13 @@ document decides nothing. Specifically it does **not** decide:
   conformance engine, closed purposes, one repair route per reason code — and
   this document neither restates nor evaluates it; it is why every removable
   verdict here is conditional (`## Unverified inheritance`, item 2);
-- whether any of the 22 `unavoidable-portability` sites should become a
+- whether any of the 23 `unavoidable-portability` sites should become a
   **fail-closed refusal** with a repair route, or a **declared runtime
   alternative**. #69's "no fallback is permitted for ... missing tool/trust/
-  credential" bears on several of them, but mapping this inventory's 22 sites
+  credential" bears on several of them, but mapping this inventory's 23 sites
   onto that rule is an act of policy application and is not performed here;
 - whether the helper-, sibling- and runtime-presence sites (A6, B2, B3, D8,
-  E2-E6, E8-E14) should be addressed by a machine bootstrap contract rather than
+  E2-E6, E8-E15) should be addressed by a machine bootstrap contract rather than
   a repository one, though the evidence above shows a repository contract cannot
   reach them;
 - what Argus should declare, or whether it should declare anything at all. Its
