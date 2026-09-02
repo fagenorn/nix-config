@@ -90,8 +90,8 @@ observed claims whose truth is bounded. Silence is not permitted, so each is nam
 5. **The load class of a Claude-side project skill is an inference, not a primary
    observation.** For pi this document cites Argus's own kernel note that skills
    are lazy-loaded with only name/description/path in the system prompt. For
-   Claude Code nothing in the row-class corpus swept below (the 19 Nodo, 20 Argus
-   and 2 nix-config files listed in sweep A) states the equivalent; the
+   Claude Code nothing in the row-class corpus swept below (the 103 Nodo, 19 Argus
+   and 2 nix-config files sweep A enumerates) states the equivalent; the
    nearest primary source is `home/common/agent-guidance/AGENTS.md`, which
    instructs an agent to "check the available-skills listing for a match" and then
    "invoke it via the Skill tool" — establishing that a listing exists separately
@@ -349,14 +349,31 @@ taken on trust.
 
 ### Sweep A — the-bar's section titles across each repository's corpus
 
-Corpus per repository: the row-class files defined above.
+Corpus per repository: **every** member of the row class declared in
+`## What counts as an inventoried item`, enumerated by that definition rather than
+by hand. Skills contribute every file under a skills root, not only `SKILL.md`, so
+the sweep cannot miss auxiliary skill content. The excluded kinds are the ones the
+row class excludes — glossaries (Argus's `CONTEXT.md`, both `docs/CONTEXT-MAP.md`),
+repository-root `README.md`, runbooks under `docs/guides/` and `docs/operations/`,
+and point-in-time records under `.claude/plans/`, `.claude/specs/`,
+`.claude/handoffs/`, `.claude/notes/` and every `adr/`.
 
 ```console
 $ grep '^### ' home/common/agent-skills/standards/the-bar.md | sed 's/^### //' > /tmp/_bar_titles.txt   # 15 titles
-$ ls CLAUDE.md docs/standards/*.md .claude/hints/*.md > /tmp/_nodo_corpus.txt                            # 19 files
-$ ls AGENTS.md CLAUDE.md CONTEXT.md home/AGENTS.md home/SYSTEM.md docs/standards/*.md \
-     .claude/skills/*/SKILL.md home/skills/*/SKILL.md > /tmp/_argus_corpus.txt                           # 20 files
-$ ls CLAUDE.md README.md > /tmp/_nc_corpus.txt                                                           #  2 files
+
+# nix-config — guidance + agent config (no skills, standards or hints exist here)
+$ ls CLAUDE.md .claude/skills.config.json > /tmp/_nc_corpus.txt                                       #   2 files
+
+# Nodo — guidance (2) + agent config (1) + standards (14) + hints (4) + skills (82)
+$ { printf '%s\n' CLAUDE.md AGENTS.md .claude/skills.config.json
+    /bin/ls -1 docs/standards/*.md .claude/hints/*.md
+    find .claude/skills -type f; } | sort > /tmp/_nodo_corpus.txt                                     # 103 files
+
+# Argus — guidance (4) + standards (6) + skills (3 dev + 6 runtime)
+$ { printf '%s\n' CLAUDE.md AGENTS.md home/AGENTS.md home/SYSTEM.md
+    /bin/ls -1 docs/standards/*.md
+    find .claude/skills home/skills -type f; } | sort > /tmp/_argus_corpus.txt                        #  19 files
+
 $ norm() { tr '\n' ' ' < "$1" | tr -s ' '; }   # so a wrapped phrase still matches
 $ while IFS= read -r t; do
     hits=""; while IFS= read -r f; do norm "$f" | grep -qiF -- "$t" && hits="$hits $f"; done < <corpus>
@@ -364,7 +381,27 @@ $ while IFS= read -r t; do
   done < /tmp/_bar_titles.txt
 ```
 
-Full result — every title with a hit, in all three repositories:
+Raw output, unedited:
+
+```console
+== Nodo (103 files) ==
+  Production-grade by default        | AGENTS.md CLAUDE.md
+  Root causes                        | .claude/skills/build-perf-diagnostics/SKILL.md AGENTS.md CLAUDE.md
+  Framework-first                    | .claude/hints/review.md AGENTS.md CLAUDE.md
+  Verify before claiming done        | AGENTS.md CLAUDE.md
+== Argus (19 files) ==
+  Root causes                        | AGENTS.md
+  Token economy                      | AGENTS.md
+  Verify before claiming done        | AGENTS.md
+== nix-config (2 files) ==
+  (no output — zero hits)
+```
+
+Nodo's `AGENTS.md` is a tracked symlink to `CLAUDE.md` (mode `120000`), so it is one
+file reported under two names and every `CLAUDE.md` hit is paired; the table below
+lists each such hit once.
+
+Full result — every hit above, adjudicated:
 
 | Repository | the-bar section | Site | Restated or linked? | Disposition |
 |---|---|---|---|---|
@@ -373,15 +410,38 @@ Full result — every title with a hit, in all three repositories:
 | Nodo | Verify before claiming done | `CLAUDE.md:25` "**Verify before claiming done.** Run the build. Run the tests. …" | restated, global home not cited | duplicate-of-global |
 | Nodo | Framework-first | `CLAUDE.md:61` `## Framework-first` — "The principle is `~/.agents/standards/the-bar.md` "Framework-first"" | linked, then adds project-specific pointers | pointer, not a duplicate |
 | Nodo | Framework-first | `.claude/hints/review.md:9` "**Framework-first.**" — cites `~/.agents/standards/stacks/dotnet.md` | linked to Layer 1 | pointer, not a duplicate |
+| Nodo | Root causes | `.claude/skills/build-perf-diagnostics/SKILL.md:46, :75, :82` — "**Root causes**: too many assembly references…", a field label in a symptoms/root-causes/fixes diagnostic table | neither: an incidental label inside vendored upstream content | not a restatement; no total moves |
 | Argus | Root causes | `AGENTS.md` bullet "**Fix root causes, not symptoms.** No try/catch to mute errors, no sleeps to hide races." | restated, global home not cited | duplicate-of-global |
 | Argus | Verify before claiming done | `AGENTS.md` bullet "**Verify before claiming done.** Run it; read the output. Evidence before assertions." | restated, global home not cited | duplicate-of-global |
-| Argus | Token economy | `AGENTS.md` bullet "**Keep the agent-facing surface lean.** … See `~/.agents/standards/the-bar.md` "Token economy"." | restated **and** linked | pointer with restatement |
+| Argus | Token economy | `AGENTS.md` bullet "**Keep the agent-facing surface lean.** … See `~/.agents/standards/the-bar.md` "Token economy"." | restated, and cites its global home | pointer under the counting rule below |
 | nix-config | — | none of the 15 titles matched either corpus file | — | — |
 
-Eleven of the 15 bar sections are matched nowhere in the fleet corpus. nix-config's
-`CLAUDE.md` has no collaboration or principles section at all — its `##` headings
-are `Commands`, `Architecture` and `Key conventions & gotchas` — so it has nothing
-that could restate the bar.
+Five distinct bar titles are matched anywhere in the fleet — `Production-grade by
+default`, `Root causes`, `Framework-first`, `Verify before claiming done`,
+`Token economy` — so **ten** of the 15 are matched nowhere. Derived, not counted by
+eye:
+
+```console
+$ printf '%s\n' 'Production-grade by default' 'Root causes' 'Framework-first' \
+    'Verify before claiming done' 'Token economy' | sort > /tmp/_matched.txt
+$ comm -23 <(sort /tmp/_bar_titles.txt) /tmp/_matched.txt
+Defense in depth
+DRY — knowledge, not keystrokes
+Fail loud
+Maintainability over cleverness
+Moves keep their history
+Single responsibility
+Tests that can fail
+The log stream is the debugger
+Truthful terminal states
+YAGNI
+$ comm -23 <(sort /tmp/_bar_titles.txt) /tmp/_matched.txt | wc -l
+      10
+```
+
+nix-config's `CLAUDE.md` has no collaboration or principles section at all — its
+`##` headings are `Commands`, `Architecture` and `Key conventions & gotchas` — so it
+has nothing that could restate the bar, and its two-file corpus returns zero hits.
 
 ### Sweep B — every lead in the two `## How we collaborate` sections
 
@@ -403,7 +463,7 @@ $ awk '/^## How we collaborate$/{f=1;next} /^## /{f=0} f' <file> | grep -c '^\*\
 | 5 | Verify before claiming done. | the-bar § Verify before claiming done | duplicate-of-global |
 | 6 | Never `sed -i` for file edits — use the file-edit tool. | none; the trap is Argus's devenv putting GNU sed on PATH | project-specific — agent-exclusive |
 | 7 | Rebuild local binaries through the signed path, never a bare compile. | none; names `wa-build`, authd, wkfetch and ADR-system-012 | project-specific — agent-exclusive |
-| 8 | Keep the agent-facing surface lean. | the-bar § Token economy, cited inline | pointer with restatement |
+| 8 | Keep the agent-facing surface lean. | the-bar § Token economy, cited inline | pointer — restates, but cites its global home |
 | 9 | Be direct. | none | no global home — promotion candidate |
 
 | # | Nodo `CLAUDE.md` lead (8 of 8) | Global counterpart | Disposition |
@@ -433,43 +493,76 @@ README wraps its prose and a line-anchored grep misses a wrapped sentence.
 | Rule owned by `~/.agents/standards/README.md` | Nodo `docs/standards/README.md` | Argus `docs/standards/README.md` |
 |---|---|---|
 | The three-layer ladder and where each layer lives | restated, lines 3 and 11–15 (a `Layer \| Location` table) | restated, lines 3–6 |
-| The precedence order, ending "A recurring conflict between a layer and what the code actually does is a bug in one of them; fix it in the work that touches it, not as a separate refactor." | **verbatim**, line 9 (whole sentence identical to the global line 13) | **verbatim**, lines 10–12 (wrapped; identical after whitespace normalisation) |
+| The precedence order, ending "A recurring conflict between a layer and what the code actually does is a bug in one of them; fix it in the work that touches it, not as a separate refactor." | **verbatim**, line 9 — the whole sentence is identical to the global line 13 | **paraphrased**, lines 10–12 — same clause up to "in one of them", then "**, fixed in** the work that touches it **rather than** as a separate refactor." Different punctuation, different verb phrase. |
 | Deltas only — anything restating Layer 0 or 1 is deleted, not copied down | paraphrased, line 3 | paraphrased, lines 5–6 |
 | Index, never store | "Index, never store: rules live in the shards." line 35 | "Index, never store: the rules live in the shards." line 22 |
 
+The probe is the **whole** sentence, terminator included — a pattern truncated at
+"in one of them" matches all three and cannot distinguish a copy from a paraphrase,
+because that is exactly where Argus diverges:
+
 ```console
-$ P='A recurring conflict between a layer and what the code actually does is a bug in one of them'
-$ for f in <global> <nodo> <argus>; do printf '%s %s\n' "$f" "$(norm "$f" | grep -c "$P")"; done
+$ FULL='A recurring conflict between a layer and what the code actually does is a bug in one of them; fix it in the work that touches it, not as a separate refactor.'
+$ for f in <global> <nodo> <argus>; do printf '%-8s %s\n' "$f" "$(norm "$f" | grep -cF -- "$FULL")"; done
 <global> 1
 <nodo>   1
-<argus>  1
+<argus>  0
+
+$ for f in <global> <nodo> <argus>; do norm "$f" | grep -oE 'A recurring conflict[^.]*\.'; done
+A recurring conflict between a layer and what the code actually does is a bug in one of them; fix it in the work that touches it, not as a separate refactor.
+A recurring conflict between a layer and what the code actually does is a bug in one of them; fix it in the work that touches it, not as a separate refactor.
+A recurring conflict between a layer and what the code actually does is a bug in one of them, fixed in the work that touches it rather than as a separate refactor.
 ```
+
+Across sweep C's four rules in two files — eight cells — exactly one is a
+word-for-word copy: Nodo's precedence sentence. Argus restates all four rules and
+copies none of them.
 
 ### What the three sweeps total
 
-Counting a *site* as one file-and-section that restates global content, the three
-sweeps together find **six**, three per fleet repository:
+Counting a *site* as one file-and-section that **restates global content without
+citing its home**, the three sweeps together find **six**, three per fleet
+repository. Every hit in the three sweep tables is dispositioned by two questions in
+order: does it restate a global rule at all, and if so does it name the file that
+owns the rule? A restatement that cites `~/.agents/standards/…` alongside it is a
+pointer, not a site. Argus's Token-economy
+bullet restates *and* cites, so it sits on the pointer side of the line below and is
+not one of the six.
 
 | Repository | Site | Found by | What is restated |
 |---|---|---|---|
 | Nodo | `CLAUDE.md:15` | A, B | the-bar § Root causes |
 | Nodo | `CLAUDE.md:25` | A, B | the-bar § Verify before claiming done |
-| Nodo | `docs/standards/README.md` | C | four rules of `~/.agents/standards/README.md`, one verbatim |
+| Nodo | `docs/standards/README.md` | C | four rules of `~/.agents/standards/README.md`; the precedence sentence verbatim, the other three paraphrased |
 | Argus | `AGENTS.md` root-causes bullet | A, B | the-bar § Root causes |
 | Argus | `AGENTS.md` verify bullet | A, B | the-bar § Verify before claiming done |
-| Argus | `docs/standards/README.md` | C | the same four rules, one verbatim |
+| Argus | `docs/standards/README.md` | C | the same four rules, all four paraphrased — none copied word for word |
 
-References that cite their global home, and are therefore pointers rather than
-duplication: **four** — Nodo `CLAUDE.md:23`, `CLAUDE.md:61` and
-`.claude/hints/review.md:9`, and Argus's Token-economy bullet. nix-config has
-**zero** of either kind.
+References that cite their global home, and are therefore pointers under the same
+rule: **four** — Nodo `CLAUDE.md:23`, `CLAUDE.md:61` and `.claude/hints/review.md:9`,
+and Argus's Token-economy bullet, which restates the rule *and* names the file that
+owns it. nix-config has **zero** of either kind. The one remaining sweep-A hit,
+`Root causes` in Nodo's `.claude/skills/build-perf-diagnostics/SKILL.md`, is neither:
+it is a field label in a vendored diagnostic table, so it enters no total.
+
+Six restatement sites, four pointer sites, one incidental label — eleven adjudicated
+hits, which is what the three sweep tables list.
 
 So Argus duplication is real, and within the corpus and the three sweeps declared
-above it is exactly the three sites named — and Nodo's is the same shape and the
-same size. The bound is the corpus: a restatement living in a file outside the row
-class (an ADR, a guide, a runbook) would not have been reached. #62's summary singles
-out Argus; this document records that the pattern it names is symmetric across the
-two fleet repositories at the observed `HEAD`s, and does not re-rank them.
+above it is exactly the three sites named. Nodo has three as well, in the same two
+families — two collaboration leads plus the standards index — so the count and the
+shape match. They differ in one respect the tables record: Nodo's standards index
+copies the precedence sentence word for word while Argus's paraphrases all four
+rules, so Nodo carries the corpus's only verbatim copy.
+
+Both sides of that comparison were swept to the same definition — every member of
+each repository's row class, 103 files for Nodo against 19 for Argus, the difference
+being Nodo's 82 vendored skill files — so the equal totals are not an artefact of
+looking harder at one repository. The bound is the row class itself: a restatement
+living in a file outside it (an ADR, a guide, a runbook, a glossary) would not have
+been reached. #62's summary singles out Argus; this document records that the pattern
+it names is present in both fleet repositories at the observed `HEAD`s, and does not
+re-rank them.
 
 ## Argus's vendor-derived pi guidance
 
@@ -548,12 +641,29 @@ Repo-relative paths; observed in the worktree at `9610867`, 2026-09-02.
 | `CLAUDE.md` | Hand-authored in this repository; describes this flake's own mechanics (justfile recipes, `scanPaths`/`mergeFilesOrdered`, sops, homebrew taps, the Claude Code module, the permission guard). | Hand edit, under review with the change that makes it wrong; no generator. | 16,531 bytes, `always` | High and rising — it is the longest guidance file in the fleet and its accuracy is coupled to `home/common/claude-code/default.nix`, `lib/helpers.nix` and the patch workflow; no check enforces the coupling. | agent-exclusive |
 | `.claude/skills.config.json` | Hand-authored; content is `{"orchestration":{"agentBudgetMinutes":180,"maxParallel":2}}`. | Hand edit. | 81 bytes, `on-demand` | Negligible. | agent-exclusive |
 
-Absent by observation, not by inference: no `docs/standards/`, no `.claude/skills/`,
-no `.claude/hints/`, no `.claude/agents/`, no repository-root `AGENTS.md`
-(`ls -d .claude/skills .claude/agents .claude/hooks .agents` fails on all four;
-`git ls-files '*.md'` outside `.claude/` lists no root `AGENTS.md` and no
-`docs/` path). nix-config authors the machine-global tree but installs no
-project-scoped skill of its own.
+Absent by observation, not by inference — one command covering all five claimed
+paths, plus an anchored probe for the root `AGENTS.md`:
+
+```console
+$ ls -d docs/standards .claude/skills .claude/hints .claude/agents AGENTS.md
+ls: .claude/agents: No such file or directory
+ls: .claude/hints: No such file or directory
+ls: .claude/skills: No such file or directory
+ls: AGENTS.md: No such file or directory
+ls: docs/standards: No such file or directory
+# exit status: 1
+
+$ git ls-files | grep -c '^AGENTS\.md$'
+0
+```
+
+The probe is anchored to the repository root on purpose. An unanchored
+`git ls-files '*.md'` finds `home/common/agent-guidance/AGENTS.md` — the machine-global
+guidance source this repository *authors* at user scope — and seven `docs/` paths
+under `home/common/agent-skills/evals/fixture-repo/`, which is a test fixture, not this
+repository's own project knowledge. Neither is a repository-root path, and neither is
+in the row class. nix-config authors the machine-global tree but installs no
+project-scoped skill, standards shard or hint file of its own.
 
 ### Nodo — `/Users/anis/Projects/nodocom` at `cc98ed0e65d66a01895f53659e291303d8e475f3`, 2026-09-02
 
@@ -580,7 +690,7 @@ project-scoped skill of its own.
 | `.claude/skills/writing-pi-extensions/`, `.claude/skills/writing-pi-skills/` | Hand-authored, but their content is pi's tool contract and pi's skill-loading behaviour — the vendor owns the truth. Tracked. | Hand edit on re-verification. | 8,064 bytes (4,935 + 3,129), `listing-only` for pi (`AGENTS.md`: "only name/description/path enter the system prompt"); `listing-only` for Claude by inference | High — same exposure as the kernel-facts row, spread over two more files, with `writing-pi-skills` carrying its own dated measurement (2026-07-02). | vendor-derived |
 | `.claude/skills/adding-a-capability/` | Hand-authored routing skill: which of the three shapes a new capability is. Tracked. | Hand edit. | 4,472 bytes, `listing-only` | Moderate — depends on the kernel facts staying true. | agent-exclusive |
 | `home/skills/` — 6 runtime skills (`email-backlog-cleanup`, `email-triage`, `memory-ingest`, `slack-triage`, `web-research`, `whatsapp-triage`) | Hand-authored capabilities of the assistant itself, one `SKILL.md` each, tracked. | Hand edit. | 40,166 bytes across 6 files, `listing-only` (pi, cited above) | Moderate — six independent workflow documents tied to live external services. | agent-exclusive |
-| `docs/standards/README.md` | Hand-authored index; restates the same four global-README rules as Nodo's (sweep C), one verbatim, citing the global README nowhere. | Hand edit. | 2,158 bytes, `on-demand` | Moderate — identical exposure to Nodo's index. | duplicate-of-global |
+| `docs/standards/README.md` | Hand-authored index; restates the same four global-README rules as Nodo's (sweep C), all four paraphrased rather than copied, citing the global README nowhere. | Hand edit. | 2,158 bytes, `on-demand` | Moderate — identical exposure to Nodo's index. | duplicate-of-global |
 | `docs/standards/pi-extensions.md` | pi's tool contract as a Layer-2 shard. | Hand edit on re-verification. | 1,996 bytes, `on-demand` | High — third file restating the same vendor contract as the two pi skills. | vendor-derived |
 | `docs/standards/` — the 4 remaining shards (`commits`, `growth`, `layout`, `safety`) | Hand-authored Layer-2 deltas; sweep A found no bar-title restatement in any of them. | Hand edit, loaded by `governs:` glob intersection. | 7,724 bytes (11,878 for the directory, minus the README and `pi-extensions.md` rows) across 4 files, `on-demand` | Low — the directory is the smallest standards set in the fleet. | agent-exclusive |
 
