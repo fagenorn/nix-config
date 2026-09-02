@@ -225,20 +225,24 @@ than having to take the row on faith. Columns are the five units in roster order
 
 | Shared property | Nix generations | Railway services | GHCR engines | Argus daemon | Argus signing |
 |---|---|---|---|---|---|
-| **S1 — a person starts it.** Nothing releases on a timer. | `just switch`, run by hand | push to `main` matching `watchPatterns`, `scripts/deploy.sh`, or `railway up` | push to `main` (or `workflow_dispatch`) on the engine path | `daemon install` / `daemon restart` | a build command (`wa-build`, `build-wkfetch.sh`, `notifyd/build.sh`, or first devenv shell entry) |
+| **S1 — a person starts it.** Nothing releases on a timer: `grep -l 'schedule:' .github/workflows/*.yml` matches no file in Nodo and none in Argus, and nix-config's one scheduled trigger runs `Flake Checker` only, which neither builds nor deploys. | `just switch`, run by hand | push to `main` matching `watchPatterns`, `scripts/deploy.sh`, or `railway up` | push to `main` (or `workflow_dispatch`) on the engine path | `daemon install` / `daemon restart` | a build command (`wa-build`, `build-wkfetch.sh`, `notifyd/build.sh`, or first devenv shell entry) |
 | **S2 — build and activation are separate, with a nameable artifact between.** | `./result` → the realised store path | the image Railway builds from the Dockerfile | `ghcr.io/<owner>/<image>@sha256:…` | the generated plist plus the checkout it points at | the compiled file on disk, then its signature |
 | **S3 — no product smoke runs anywhere in the release path.** Each unit's *Product smoke evidence* field below says "none", and this row is that field's per-unit summary. | none; command exit status is the whole signal | none after the platform healthcheck, which the api's own runbook calls a pure liveness probe running no dependency checks | none for the engine release itself. The closest thing in the fleet sits inside this unit's on-device activation — a browser roll commits only after `/healthz` reports Chrome healthy at the candidate image's runtime version — and it proves a sibling component came up at the right version, not that a product flow works | none; CI is hermetic and never installs the daemon | none |
-| **S4 — rollback is a human decision.** | yes; the repository declares no rollback command at all | yes — `railway redeploy` an earlier deployment, or revert the merge | **the one exception**: the supervisor reverts automatically, one step deep, on crash-loop | yes — `daemon uninstall`, or move the checkout back and re-install | yes — rebuild and re-sign |
-| **S5 — no unit carries a version string or release number.** | store hash + generation number | Railway deployment id + `commitHash` | OCI digest (a `Version` field is sent, and it is a 12-character git sha) | a bare launchd label, `dev.argus.daemon` | a bare code-signing identifier, `dev.argus.*` |
+| **S4 — *choosing* which prior release to return to is a human act.** One unit also has an unattended revert, and that revert makes no choice. | a human, with no command declared to help | a human picks the deployment to `railway redeploy`, or reverts the merge | a human re-publishes an archived digest. The supervisor's crash-loop revert is unattended, but it selects nothing — it takes the single `fallback_digest` it recorded | a human runs `daemon uninstall`, or moves the checkout back and re-installs | a human rebuilds and re-signs |
+| **S5 — no unit carries a semantic version or a human-assigned release number.** Every identity is content-derived, machine- or provider-assigned, or a constant label. | content hash, plus a machine-assigned monotonic generation number | provider-assigned deployment id, plus `commitHash` | content-derived OCI digest; the `Version` field the publish call sends is a 12-character git sha, not a version | a constant launchd label, `dev.argus.daemon` | a constant code-signing identifier, `dev.argus.*` |
 
 Two properties that read like shared facts are **not** shared, and are recorded here
-so they are not mistaken for one. *Target cardinality*: four of the five release to
-exactly one place, while the GHCR unit releases to a fleet of devices that converge
-independently, so "the release landed" is a per-member question there and a single
-question everywhere else. *Publication remoteness*: only the GHCR unit publishes an
-artifact to a remote registry; the Nix unit publishes into the local
-`/nix/store`, Argus's two units publish onto the local filesystem, and Railway's
-build artifact is not addressable from the repository at all.
+so they are not mistaken for one. *Whether the target set is closed at release time*:
+four of the five release onto a set that is named and fixed before the release starts
+— one machine for the Nix unit, the two named services for Railway, this machine's
+plist and bundle for the Argus daemon, five named paths for Argus signing — while the
+GHCR unit publishes to a device fleet whose membership is not fixed at publish time
+and whose members converge on their own 30-second ticks. "The release landed" is
+therefore a per-member question in exactly one of the five and a single question in
+the other four. *Publication remoteness*: only the GHCR unit publishes an artifact to
+a remote registry; the Nix unit publishes into the local `/nix/store`, Argus's two
+units publish onto the local filesystem, and Railway's build artifact is not
+addressable from the repository at all.
 
 ## Release-unit mechanics, project by project
 
