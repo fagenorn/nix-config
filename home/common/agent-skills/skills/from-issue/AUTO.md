@@ -46,8 +46,14 @@ delegated-owner dispatch failure remains an ordinarily owned terminal result and
 must be persisted before notification.
 
 Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`,
-`ship-issue`) don't know about `--auto`. *You* carry the autonomous-mode context — when one tells you
-to ask or wait, run the self-answer pattern instead.
+`ship-issue`) don't know about `--auto`. *You* carry the autonomous-mode
+context — when one tells you to ask or wait, run the self-answer pattern
+instead. One class of gate is exempt: a gate that asks a human to authorize an
+irreversible action is never self-answered. Its confirmation must be fresh and
+single-use, and silence never means yes — so present the gate's block and
+follow `SKILL.md`'s suspension procedure, suspending `blocked_on: human_gate`
+and printing the canonical re-entry line, rather than answering on the
+operator's behalf.
 
 ## When *not* to auto-resolve
 
@@ -349,7 +355,8 @@ Reviewer, SDD, and shipping contracts remain unchanged for these routes, and
 the owning controller continues to verify and disposition findings.
 
 At any Phase-6 or Phase-7 push, PR-open, or merge gate the lifecycle guard does
-not stand — a repository the guard does not cover, or a merge it fails closed on
-— do not die at the prompt: follow `SKILL.md`'s suspension procedure, suspending
-`blocked_on: human_gate` and printing the canonical re-entry line, so a later
-human approval resumes the same attempt without penalty.
+not stand — a repository the guard does not cover, a merge it fails closed on,
+or a host that has no such guard at all and adjudicates intent by review
+instead — do not die at the prompt: follow `SKILL.md`'s suspension procedure,
+suspending `blocked_on: human_gate` and printing the canonical re-entry line, so
+a later human approval resumes the same attempt without penalty.

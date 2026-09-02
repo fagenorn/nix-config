@@ -1027,6 +1027,77 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("post-rollover Phase-6 and Phase-7 gates", phase_gate)
         self.assertIn("unchanged", phase_gate)
 
+    def test_auto_gate_enumeration_covers_an_unguarded_host(self):
+        # AUTO.md's final paragraph is the one suspension route for shipping
+        # gates. It gains the review-adjudicated host as a third qualifying
+        # case, so the operator gate reuses the mechanism that already exists.
+        self.assertIn(
+            "At any Phase-6 or Phase-7 push, PR-open, or merge gate the "
+            "lifecycle guard does not stand — a repository the guard does not "
+            "cover, a merge it fails closed on, or a host that has no such "
+            "guard at all and adjudicates intent by review instead — do not die "
+            "at the prompt: follow `SKILL.md`'s suspension procedure, "
+            "suspending `blocked_on: human_gate` and printing the canonical "
+            "re-entry line, so a later human approval resumes the same attempt "
+            "without penalty.",
+            normalized(self.auto),
+        )
+        # No second pause shape is introduced: after Step 3b the file names
+        # `blocked_on: human_gate` twice — the shipping-gate route here and
+        # the self-answer exemption — and `human_gate` is still the only
+        # `blocked_on` value in the file.
+        self.assertEqual(self.auto.count("blocked_on: human_gate"), 2)
+        self.assertEqual(
+            sorted(set(re.findall(r"blocked_on[:=] ?(\w+)", normalized(self.auto)))),
+            ["human_gate"],
+        )
+
+    def test_auto_never_self_answers_an_irreversible_authorization_gate(self):
+        # D13: the general self-answer instruction cannot stand unqualified
+        # once a gate exists that `--auto` must NOT answer for the operator.
+        # Grounded in D2's #84 (a fresh, single-use confirmation, never
+        # inherited) and #90 (one operator touchpoint; silence is never yes).
+        self.assertIn(
+            "One class of gate is exempt: a gate that asks a human to "
+            "authorize an irreversible action is never self-answered. Its "
+            "confirmation must be fresh and single-use, and silence never "
+            "means yes — so present the gate's block and follow `SKILL.md`'s "
+            "suspension procedure, suspending `blocked_on: human_gate` and "
+            "printing the canonical re-entry line, rather than answering on "
+            "the operator's behalf.",
+            normalized(self.auto),
+        )
+        # The general rule itself is unchanged and still stands first.
+        self.assert_ordered(
+            normalized(self.auto),
+            "when one tells you to ask or wait, run the self-answer pattern "
+            "instead.",
+            "One class of gate is exempt:",
+        )
+
+    def test_human_gate_carries_no_affirmative_bypass_instruction(self):
+        # AC3 (per D14). The closed negative list under
+        # `## Never route around a denial` is the file's ONLY home for these
+        # spellings; anywhere else they would read as an instruction. A
+        # line-local grep cannot see this, because the list's "must not:"
+        # lead-in sits on the introduction line and each banned verb on its
+        # own bullet.
+        gate = self.ship_human_gate
+        split = gate.index("## Never route around a denial")
+        outside, ban = gate[:split], normalized(gate[split:])
+        self.assertIn("On this path the session must not:", ban)
+        for bypass in (
+            "--admin",
+            "--force",
+            "--force-with-lease",
+            "git merge",
+            "git push origin <integrationBranch>",
+            "git reset",
+            "git rebase",
+        ):
+            with self.subTest(bypass=bypass):
+                self.assertNotIn(bypass, outside)
+
     def test_owner_has_executable_phase_gate_and_action_semantics(self):
         self.assertIn("workflow-state progress", self.from_issue)
         self.assertIn("continue | fresh_start | handoff | delegate", self.from_issue)
