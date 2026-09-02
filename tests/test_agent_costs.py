@@ -741,7 +741,9 @@ class ScanCodexFileTest(unittest.TestCase):
 
     def test_malformed_line_is_skipped_not_raised(self):
         path = self.write_rollout(
-            codex_meta("s1"), "{not json\n", codex_usage(10))
+            codex_meta("s1"),
+            '{"type":"event_msg","payload":{"type":"token_count"\n',
+            codex_usage(10))
         self.assertEqual(agent_costs.scan_codex_file(path)["input_total"], 10)
 
 
