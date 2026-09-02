@@ -294,7 +294,9 @@ a missing optional binding" (A8); `ship-issue/SKILL.md:17` makes an absent
 `review.criticalPaths` mean "the `risky` label is the only always-full trigger"
 (A10); and `ship-issue/REVIEW.md:16-18` drops the project-hints paragraph from
 the merge-delta reviewer's checklist when `projectHints` is absent (A11). With
-A1-A5 inside the helper, that is 11 sites in all.
+A1-A5 inside the helper, that is 5 (the helper rungs A1-A5) + 3 (the prose
+duplications A6, A7, A9) + 3 (the optional-binding sites A8, A10, A11) = 11
+sites in all.
 `orchestrate-issues/SKILL.md:26-31` calls the helper but carries no fallback: it
 forbids the adapter from copying either orchestration default, so it is not an
 inventory site.
@@ -473,7 +475,7 @@ file). Silence is the default in this tree, not the exception.
 | D1 | `skills/doc-grounded-questions/SKILL.md:20` — context map: `docPaths.contextMap` → `docs/CONTEXT-MAP.md` → legacy root `CONTEXT-MAP.md` → no map | absent config key and absent file | silent | removable-after-validated-onboarding-contract |
 | D2 | `skills/doc-grounded-questions/REFERENCE.md:26-29` — no map → `docPaths.context`, `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md`, or a README domain section | absent config key and absent file | silent | removable-after-validated-onboarding-contract |
 | D3 | `skills/doc-grounded-questions/REFERENCE.md:36-38` — decision log: area `adr/` dirs, else `docPaths.adrDir`, else `docs/adr/`, `docs/adrs/`, `docs/decisions/`, `adr/` | absent config key and absent file | silent | removable-after-validated-onboarding-contract |
-| D4 | `skills/doc-grounded-questions/SKILL.md:24` with `REFERENCE.md:41-45` — project standards deltas are read only from `docPaths.standards`; there is no unconfigured discovery rung. The configured path is "a `docs/standards/` directory with a README index … or a single `CONTRIBUTING.md` / `docs/coding-standards.md` in older repos" — a rung on the *shape* of a configured path, not on discovery; D19 is its restatement | absent config key | silent | removable-after-validated-onboarding-contract |
+| D4 | `skills/doc-grounded-questions/SKILL.md:24` with `REFERENCE.md:41-45` — project standards deltas are read only from `docPaths.standards`; there is no unconfigured discovery rung. The configured path is "a `docs/standards/` directory with a README index … or a single `CONTRIBUTING.md` / `docs/coding-standards.md` in older repos" — a rung on the *shape* of a configured path, not on discovery; D19 is its restatement | shape of the configured standards path (shards directory vs legacy single doc) | silent | removable-after-validated-onboarding-contract |
 | D5 | `skills/doc-grounded-questions/SKILL.md:26` — architecture: `docPaths.architecture`, else `ARCHITECTURE.md` / `docs/architecture.md` / a README section | absent config key and absent file | silent | removable-after-validated-onboarding-contract |
 | D6 | `skills/grill-with-docs/SKILL.md:38-41` — three-tier layout detection: standard tree, legacy conventions, then `docPaths` overrides | repository doc layout | silent | removable-after-validated-onboarding-contract |
 | D7 | `skills/to-issues/SKILL.md:28` — glossary and ADR grounding, "If those docs are absent, skip this grounding step silently" | absent file | silent, and says so | removable-after-validated-onboarding-contract |
@@ -490,21 +492,21 @@ file). Silence is the default in this tree, not the exception.
 | D18 | `skills/ship-issue/CONSOLIDATE.md:28` — a learning whose mapped destination doc is absent is dropped and consolidation continues without it | absent config key and absent file | silent | removable-after-validated-onboarding-contract |
 | D19 | `skills/from-issue/REVIEW-CONTRACT.md:59` — the plan reviewer checks test-fixture conventions against "the project's standards shards (or legacy coding-standards doc)": no shards → the older single-doc form that `REFERENCE.md:43-45` names, and the pass continues from the coarser source | absent file | silent | removable-after-validated-onboarding-contract |
 | E1 | `skills/worktrees/SKILL.md:37` — "No native worktree tool:" → `git worktree add` | harness tool surface | silent | unavoidable-portability |
-| E2 | `skills/ship-issue/SKILL.md:237-241` — `codex-collaboration`'s `diff-review` unavailable → native `reviewer` dispatch (`id=ship-issue-full-correctness-fallback`) | Codex CLI installed on the machine | silent by design — `REVIEW.md:43-44`, "ship-issue records no reviewer identity" | unavoidable-portability |
-| E3 | `skills/from-issue/standards-review.md:18-20` — plan review goes to `codex-collaboration` when available, else a native reviewer. `codex.planReview.enabled=false` is a declared configuration choice, not a fallback, and only the unavailable branch is inventoried | Codex CLI installed on the machine | announced — line 31 records "whether fallback was used" in the plan | unavoidable-portability |
+| E2 | `skills/ship-issue/SKILL.md:237-241` — `codex-collaboration`'s `diff-review` unavailable → native `reviewer` dispatch (`id=ship-issue-full-correctness-fallback`) | `codex-collaboration`'s `diff-review` capability on the machine | silent by design — `REVIEW.md:43-44`, "ship-issue records no reviewer identity" | unavoidable-portability |
+| E3 | `skills/from-issue/standards-review.md:18-20` — plan review goes to `codex-collaboration` when available, else a native reviewer. `codex.planReview.enabled=false` is a declared configuration choice, not a fallback, and only the unavailable branch is inventoried | `codex-collaboration` skill installed on the machine | announced — line 31 records "whether fallback was used" in the plan | unavoidable-portability |
 | E4 | `skills/from-issue/SKILL.md:180` — "Never hard-fail on a missing sibling" → run the phase inline | sibling skill installed on the machine | silent | unavoidable-portability |
 | E5 | `skills/ship-issue/SKILL.md:359` — absent sibling skills degrade to no-ops | sibling skill installed on the machine | silent | unavoidable-portability |
 | E6 | `skills/improve-codebase-architecture/SKILL.md:32` — host cannot dispatch a sub-agent → perform the scan inline | harness agent-dispatch capability | announced — "disclose that fallback" | unavoidable-portability |
 | E7 | `skills/doc-grounded-questions/SKILL.md:39` — grounding cache at `$(git rev-parse --git-dir)/GROUNDING.md`; outside a git repo, fall back to the platform temp dir | invocation directory | silent | unavoidable-portability |
 | E8 | `skills/ship-issue/SKILL.md:121` — `doc-grounded-questions` unavailable → read whichever declared `docPaths` exist | sibling skill installed on the machine | silent | unavoidable-portability |
 | E9 | `skills/from-issue/REVIEW-CONTRACT.md:38` — the same, in the plan-review grounding contract | sibling skill installed on the machine | silent | unavoidable-portability |
-| E10 | `skills/sdd/SKILL.md:51` — correctness axis via `codex-collaboration` when available, else `reviewer` on Opus/high | Codex CLI installed on the machine | silent | unavoidable-portability |
-| E11 | `skills/sdd/correctness-reviewer-prompt.md:4` — a whole prompt file that exists only for when `codex-collaboration` is unavailable | Codex CLI installed on the machine | silent | unavoidable-portability |
+| E10 | `skills/sdd/SKILL.md:51` — correctness axis via `codex-collaboration` when available, else `reviewer` on Opus/high | `codex-collaboration` skill installed on the machine | silent | unavoidable-portability |
+| E11 | `skills/sdd/correctness-reviewer-prompt.md:4` — a whole prompt file that exists only for when `codex-collaboration` is unavailable | `codex-collaboration` skill installed on the machine | silent | unavoidable-portability |
 | E12 | `skills/codex-collaboration/SKILL.md:38-40` — the capability-fallback declaration: this skill or the `codex:codex-reviewer` plugin agent unavailable → the native reviewer flow | skill and plugin agent installed on the machine | silent | unavoidable-portability |
 | E13 | `skills/codex-collaboration/SKILL.md:65-68` — `command -v codex-companion` pre-flight; missing → the native reviewer flow. The only `command -v` probe in the swept set that falls back rather than refusing (`skills/sdd/scripts/task-brief:25-28` is the other, and it exits 2) | runtime binary on PATH | announced — "record it as such" | unavoidable-portability |
 | E14 | `skills/codex-collaboration/SKILL.md:119-141` — one-time native standards-review fallback on a real Codex failure (executable missing, authentication unavailable, `CODEX_REVIEW_FAILURE:`, or an empty/malformed result); explicitly never on concurrency | Codex runtime health | announced — "Record the concrete failure class and that Claude fallback was used" | unavoidable-portability |
 | E15 | `skills/doc-grounded-questions/SKILL.md:59` — "Sibling skills are referenced opportunistically — where one is not installed, apply the same pass to whatever flow you are in" | sibling skill installed on the machine | silent | unavoidable-portability |
-| E16 | `skills/sdd/final-review.md:29` — correctness axis via `codex-collaboration` when available; "Unavailable → use the Opus/high native reviewer selected in correctness-reviewer-prompt.md. Either way the axis is never skipped" | Codex CLI installed on the machine | announced — line 31 records the reviewer identity (`Codex` / `native` / `fallback` + failure class) in the ledger | unavoidable-portability |
+| E16 | `skills/sdd/final-review.md:29` — correctness axis via `codex-collaboration` when available; "Unavailable → use the Opus/high native reviewer selected in correctness-reviewer-prompt.md. Either way the axis is never skipped" | `codex-collaboration` skill installed on the machine | announced — line 31 records the reviewer identity (`Codex` / `native` / `fallback` + failure class) in the ledger | unavoidable-portability |
 | E17 | `skills/sdd/fix-loop.md:18` — rescue round: "Codex unavailable → the same tier", reframed for a fresh-context implementer | Codex CLI installed on the machine | silent | unavoidable-portability |
 | E18 | `skills/ship-issue/REVIEW.md:31-37` — "sdd templates unavailable → still use the two isolated native dispatches in SKILL.md", with the two rubrics pasted inline | sibling skill installed on the machine | silent by design — `REVIEW.md:43-44`, "ship-issue records no reviewer identity" | unavoidable-portability |
 | E19 | `skills/from-issue/ship-handoff.md:60-62` — "## Inline fallback (no ship-issue skill)": push, open the PR and run the same full-review tier inline | sibling skill installed on the machine | silent | unavoidable-portability |
@@ -519,10 +521,24 @@ E2-E6 and E8-E20, called *the presence set* below — are portability and not
 contract.** `~/.agents/bin/` is user scope — an absolute path outside every
 repository, populated by `home/common/agent-skills/default.nix:52-102` as nine
 home-manager symlinks into the Nix store, with `home.sessionPath` adding it to
-PATH (line 161). Read on 2026-09-02, it holds `agent-evidence`,
+PATH (line 161). `ls ~/.agents/bin/`, run 2026-09-02, returns `agent-evidence`,
 `agent-model-matrix`, `artifact-budget`, `context-map-lint`, `diff-scope`,
-`resolve-bindings`, `review-package`, `sdd-workspace`, `workflow-state` — so on
-this machine none of these branches fires. That they are nonetheless live is
+`resolve-bindings`, `review-package`, `sdd-workspace`, `workflow-state` — so the
+three helper-binary branches, A6, B2 and B3, do not fire here. That listing
+settles nothing about the rest of the set, which turns on installed skills, on a
+plugin agent and on the Codex runtime, so three further reads were taken the same
+day. `ls ~/.claude/skills/` returns nineteen entries, among them every sibling
+this table names — `codex-collaboration`, `doc-grounded-questions`,
+`grill-with-docs`, `sdd`, `ship-issue` — and `ls ~/.claude/skills/sdd/scripts/`
+returns `review-package`, `sdd-workspace`, `task-brief`, so D8, D14, E2-E5,
+E8-E11 and E15-E20 do not fire either.
+`ls "$(jq -r '.extraKnownMarketplaces["nix-codex"].source.path' ~/.claude/settings.json)"/plugins/codex/agents/`
+returns `codex-rescue.md` and `codex-reviewer.md`, which with that skill listing
+covers E12's two conditions, and `command -v codex-companion` returns
+`/etc/profiles/per-user/anis/bin/codex-companion`, covering E13. Two rows lie
+outside what any presence read can settle, and nothing is claimed for them here:
+E6 branches on the harness's own sub-agent dispatch capability, and E14 on Codex
+runtime health at the moment of invocation. That these branches are nonetheless live is
 stated by the sources themselves: `DIFF-REVIEW.md:63-64` records that
 "`diff-scope` reaches `~/.agents/bin` only after a rebuild, so absence is a real
 state on a machine that has this skill", and

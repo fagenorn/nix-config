@@ -107,11 +107,13 @@ are docstring lines that announce behaviour implemented in branches carrying no
 pass vocabulary, so each is attributed to **all seven** rows that reading the
 file produced — A1-A5, C1 and C2 — rather than to the one row whose cited range
 happens to contain it (`:92` and `:94` fall inside A5's `91-107`; `:5` and `:6`
-fall inside no row's cited range at all). No other hit is attributed that way:
-the only three that carry several row IDs — `from-issue/bindings.md:6`
-(A9, B4, C9), `ship-issue/SKILL.md:13` (A6, B1) and `:15` (A8, C4) — each states
-every site named on it, which is also why the byte table counts each of those
-lines once, under project binding.
+fall inside no row's cited range at all). No other hit is attributed that way.
+Six hits carry several row IDs — `from-issue/bindings.md:6` (A9, B4, C9),
+`ship-issue/SKILL.md:13` (A6, B1) and `:15` (A8, C4),
+`doc-grounded-questions/SKILL.md:12` (A6, A8), `to-issues/SKILL.md:12` (A6, A8)
+and `ship-release/SKILL.md:24` (A7, A8) — and each of the six states every site
+named on it, which is also why the byte table counts each of those lines once,
+under project binding.
 
 ```
 agent-skills/scripts/diff-scope.py:30 fail-closed
@@ -163,7 +165,7 @@ agent-skills/skills/doc-grounded-questions/REFERENCE.md:27 D2
 agent-skills/skills/doc-grounded-questions/REFERENCE.md:36 D3
 agent-skills/skills/doc-grounded-questions/REFERENCE.md:37 D3
 agent-skills/skills/doc-grounded-questions/SKILL.md:8 cross-reference
-agent-skills/skills/doc-grounded-questions/SKILL.md:12 A6
+agent-skills/skills/doc-grounded-questions/SKILL.md:12 A6,A8
 agent-skills/skills/doc-grounded-questions/SKILL.md:14 cross-reference
 agent-skills/skills/doc-grounded-questions/SKILL.md:18 D17
 agent-skills/skills/doc-grounded-questions/SKILL.md:20 D1
@@ -266,10 +268,10 @@ agent-skills/skills/ship-issue/SKILL.md:239 E2
 agent-skills/skills/ship-issue/SKILL.md:240 E2
 agent-skills/skills/ship-issue/SKILL.md:359 E5
 agent-skills/skills/ship-release/CHANGELOG.md:65 D16
-agent-skills/skills/ship-release/SKILL.md:24 A7
+agent-skills/skills/ship-release/SKILL.md:24 A7,A8
 agent-skills/skills/ship-release/SKILL.md:71 D8
 agent-skills/skills/ship-release/SKILL.md:75 C7
-agent-skills/skills/to-issues/SKILL.md:12 A6
+agent-skills/skills/to-issues/SKILL.md:12 A6,A8
 agent-skills/skills/to-issues/SKILL.md:14 cross-reference
 agent-skills/skills/to-issues/SKILL.md:28 D7
 agent-skills/skills/to-issues/SKILL.md:87 C8
