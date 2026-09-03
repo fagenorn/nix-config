@@ -691,6 +691,19 @@ REPAIRS = {
     "host.tracker.authenticate": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
+    # No engine subcommand admits a path into a class, edits an ignore file or
+    # destructures a command, so all three operations are null (D25). Editing
+    # an ignore file changes the working tree, which is why only the middle one
+    # is `worktree`.
+    "lifecycle.path.classify": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "lifecycle.ignore.repair": {
+        "module": "conformance", "safety_class": "worktree",
+        "operation": None},
+    "contract.commands.destructure": {
+        "module": "resolve-project", "safety_class": "user_action",
+        "operation": None},
 }
 
 
@@ -974,6 +987,180 @@ def check_tracker_credential(context: "Context") -> "Outcome":
                    {"authenticated": False, "cli_invoked": True, "host": host})
 
 
+# --------------------------------------------------------------------------
+# Repository policy
+#
+# Three pure reads of the working tree and the authored contract: no process,
+# no write, no network. Every fact is a repository-relative path, an ignore
+# rule or a command id — never an absolute path, and never a command's argv.
+# --------------------------------------------------------------------------
+
+
+# The four lifecycle classes are closed (#72): a path matching none of them is
+# a finding, never a new implicit class. The four names unpack from the tuple,
+# so no class can exist outside it.
+LIFECYCLE_CLASSES = ("canonical_tracked", "tracked_projection",
+                     "ignored_runtime", "allowlisted_bookkeeping")
+(CANONICAL_TRACKED, TRACKED_PROJECTION,
+ IGNORED_RUNTIME, ALLOWLISTED_BOOKKEEPING) = LIFECYCLE_CLASSES
+
+AGENTS_DIR = ".agents"
+CANONICAL_AGENTS_PREFIXES = (
+    "project.json", "instructions/", "skills/", "adapters/",
+    "extensions/", "knowledge/", "artifacts/",
+)
+RUNTIME_PREFIX = "runtime/"
+ARTIFACTS_PREFIX = "artifacts/"
+# The buckets `artifacts/` admits; any other second segment is unclassified.
+ARTIFACTS_BUCKETS = ("specs", "plans", "evidence", "handoffs", "notes")
+# Closed and empty in v1: nothing outside .agents/ is admitted as
+# non-behavioral bookkeeping yet.
+BOOKKEEPING_ALLOWLIST: tuple[str, ...] = ()
+
+RUNTIME_IGNORE_PATTERNS = (".agents/runtime/", ".agents/runtime",
+                           "/.agents/runtime/", "/.agents/runtime")
+OVERBROAD_IGNORE_PATTERNS = (".agents/*", "/.agents/*", ".claude/*", "/.claude/*")
+RUNTIME_SENTINEL_BYTES = b"*\n"
+
+SHELL_ARGV0 = ("sh", "bash", "zsh", "dash", "ksh")
+SHELL_METACHARACTERS = (";", "|", "&&", "`", "$(")
+
+
+def classify_agents_relative(relative: str) -> str | None:
+    """The lifecycle class of a path relative to `<root>/.agents/`, or None."""
+    if relative.startswith(RUNTIME_PREFIX):
+        return IGNORED_RUNTIME
+    if relative.startswith(ARTIFACTS_PREFIX):
+        segments = relative.split("/")
+        if len(segments) > 1 and segments[1] in ARTIFACTS_BUCKETS:
+            return CANONICAL_TRACKED
+        return None
+    for prefix in CANONICAL_AGENTS_PREFIXES:
+        if relative == prefix or (prefix.endswith("/")
+                                  and relative.startswith(prefix)):
+            return CANONICAL_TRACKED
+    return None
+
+
+def classify_path(relative: str, targets: frozenset) -> str | None:
+    """Contract: `relative`'s lifecycle class, or None when it matches none of
+    the four. `relative` and every member of `targets` are repository-relative,
+    so a projection target that lives under `.agents/` classifies as the
+    projection it is rather than as an unadmitted file."""
+    if relative in targets:
+        return TRACKED_PROJECTION
+    if relative in BOOKKEEPING_ALLOWLIST:
+        return ALLOWLISTED_BOOKKEEPING
+    if relative.startswith(AGENTS_DIR + "/"):
+        return classify_agents_relative(relative[len(AGENTS_DIR) + 1:])
+    return None
+
+
+def agents_tree_paths(root: Path) -> set[str]:
+    """Every file under `<root>/.agents/`, repository-relative.
+
+    A path carrying a `.git` component is skipped: a nested repository's own
+    bookkeeping is not this repository's classification subject.
+    """
+    found = set()
+    for path in (root / AGENTS_DIR).rglob("*"):
+        relative = path.relative_to(root)
+        if ".git" not in relative.parts and path.is_file():
+            found.add(relative.as_posix())
+    return found
+
+
+def check_paths_classified(context: "Context") -> "Outcome":
+    """Contract: failed when a file under .agents/ or a declared projection
+    target matches none of the four closed lifecycle classes (#72)."""
+    targets = frozenset(projection["target"]
+                        for projection in context.contract["projections"])
+    subjects = agents_tree_paths(context.root) | targets
+    offending = [relative for relative in sorted(subjects)
+                 if classify_path(relative, targets) is None]
+    if not offending:
+        return Outcome("passed")
+    return Outcome("failed", "unclassified_path", "lifecycle.path.classify",
+                   {"paths": bound_facts(offending), "count": len(offending)})
+
+
+def ignore_rules(path: Path) -> list[str]:
+    """Every stripped, non-empty, non-comment line of `path`.
+
+    An unreadable or absent file yields an empty rule list rather than an
+    exception: a repository carrying no ignore file states no rule.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    stripped = (line.strip() for line in text.splitlines())
+    return [rule for rule in stripped if rule and not rule.startswith("#")]
+
+
+def holds_runtime_sentinel(path: Path) -> bool:
+    """Whether `path` is #72's committed sentinel: exactly the bytes `*\\n`."""
+    try:
+        return path.read_bytes() == RUNTIME_SENTINEL_BYTES
+    except OSError:
+        return False
+
+
+def check_ignore_runtime_sentinel(context: "Context") -> "Outcome":
+    """Contract: failed for a broad .agents/* or .claude/* ignore rule, or when
+    .agents/runtime/ is covered by neither a root rule nor the committed
+    sentinel; the overbroad finding outranks the missing one.
+
+    Only the tracked ignore files are read. `.git/info/exclude` is deliberately
+    not consulted: a machine-local rule cannot be the repository's own
+    classification of a path.
+    """
+    root_gitignore = context.root / ".gitignore"
+    rules = ignore_rules(root_gitignore)
+    offending = [rule for rule in rules if rule in OVERBROAD_IGNORE_PATTERNS]
+    if offending:
+        return Outcome("failed", "overbroad_ignore", "lifecycle.ignore.repair",
+                       {"rules": bound_facts(offending), "count": len(offending)})
+    # Either spelling covers the subtree, so a conformant repository that
+    # commits only one of the two is not failed for the other's absence.
+    sentinel = context.root / AGENTS_DIR / "runtime" / ".gitignore"
+    if (any(rule in RUNTIME_IGNORE_PATTERNS for rule in rules)
+            or holds_runtime_sentinel(sentinel)):
+        return Outcome("passed")
+    return Outcome("failed", "runtime_ignore_missing", "lifecycle.ignore.repair",
+                   {"root_gitignore": root_gitignore.exists(),
+                    "sentinel": sentinel.exists()})
+
+
+def reaches_through_a_shell(argv: list) -> bool:
+    """Whether `argv` reaches its command through a shell rather than naming it.
+
+    `argv` is non-empty and every word is a string: the resolver validated
+    command shape before `repository.contract.valid` passed, which this check
+    declares as its dependency, so the two never re-implement one another.
+    """
+    if Path(argv[0]).name in SHELL_ARGV0 and "-c" in argv[1:]:
+        return True
+    return any(meta in word for word in argv for meta in SHELL_METACHARACTERS)
+
+
+def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
+    """Contract: failed when a declared command's argv[0] is a shell invoked
+    with -c, or any argv element carries a shell metacharacter.
+
+    Read from the authored contract rather than `context.bindings`:
+    normalization rewrites `cwd` and leaves `argv` alone, so the authored form
+    keeps the reported ids and the authored text in one correspondence.
+    """
+    offending = [command_id for command_id, entry
+                 in sorted(context.contract["bindings"]["commands"].items())
+                 if reaches_through_a_shell(entry["argv"])]
+    if not offending:
+        return Outcome("passed")
+    return Outcome("failed", "shell_indirection", "contract.commands.destructure",
+                   {"commands": bound_facts(offending), "count": len(offending)})
+
+
 REGISTRY: tuple[Check, ...] = (
     Check(RESOLVABLE_CHECK_ID, "repository", "contract", "required", (),
           (("resolver_failure", "conformance.internal"),),
@@ -1012,6 +1199,19 @@ REGISTRY: tuple[Check, ...] = (
            ("unsupported_tracker_kind", "host.tracker.authenticate"),
            ("tracker_credential_missing", "host.tracker.authenticate")),
           "check_tracker_credential", network=True),
+    Check("repository.paths.classified", "repository", "path", "required",
+          ("repository.contract.valid",),
+          (("unclassified_path", "lifecycle.path.classify"),),
+          "check_paths_classified"),
+    Check("repository.ignore.runtime_sentinel", "repository", "path", "required",
+          ("repository.contract.valid",),
+          (("runtime_ignore_missing", "lifecycle.ignore.repair"),
+           ("overbroad_ignore", "lifecycle.ignore.repair")),
+          "check_ignore_runtime_sentinel"),
+    Check("verification.commands.no_shell_indirection", "verification", "command",
+          "required", ("repository.contract.valid",),
+          (("shell_indirection", "contract.commands.destructure"),),
+          "check_commands_no_shell_indirection"),
 )
 REGISTRY_BY_ID = {check.id: check for check in REGISTRY}
 

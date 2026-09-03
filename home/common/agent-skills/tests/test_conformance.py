@@ -87,8 +87,9 @@ def make_root(tmp: Path) -> Path:
     """A temporary project root a clean `doctor` run passes on.
 
     The committed contract, its instruction source and both projection targets
-    are copied byte-for-byte, and every directory a knowledge path names is
-    created, so a fixture refuses only for the mutation a case applies to it.
+    are copied byte-for-byte, every directory a knowledge path names is
+    created, and the root ignore file covers `.agents/runtime/`, so a fixture
+    refuses only for the mutation a case applies to it.
     """
     root = tmp / "project"
     (root / ".agents" / "instructions").mkdir(parents=True)
@@ -104,6 +105,7 @@ def make_root(tmp: Path) -> Path:
             target = root / entry
             if not target.exists():  # `architecture` names CLAUDE.md, already copied
                 target.mkdir(parents=True)
+    (root / ".gitignore").write_text(".agents/runtime/\n", encoding="utf-8")
     return root
 
 
@@ -992,6 +994,196 @@ class TrackerCredentialTest(ReportAssertions, unittest.TestCase):
             self.assertEqual(code, 0, err)
             self.assertNotIn(self.CHECK_ID,
                              [c["id"] for c in json.loads(out)["checks"]])
+
+
+def write_file(root: Path, relative: str, text: str = "x\n") -> Path:
+    """One file at `relative` under `root`, with every parent created."""
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    return target
+
+
+class PathClassificationTest(ReportAssertions, unittest.TestCase):
+    """#72: the four lifecycle classes are closed. A path matching none of them
+    is a finding, never a new implicit class, and every offender is named
+    repository-relative so a reader can open it."""
+
+    CHECK_ID = "repository.paths.classified"
+    REPAIR_ID = "lifecycle.path.classify"
+
+    def test_a_conformant_tree_passes_with_no_repair_and_no_facts(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["domain"], check["subject_kind"], check["status"],
+                 check["reason_code"], check["repair_id"], check["facts"]],
+                ["repository", "path", "passed", None, None, {}])
+            self.assert_validates(report)
+
+    def test_a_path_outside_every_class_is_a_finding(self):
+        """An unadmitted `artifacts/` bucket is unclassified for the same reason
+        a stray directory is: the class list, not the parent, admits a path."""
+        for relative in (".agents/scratchpad/notes.txt",
+                         ".agents/artifacts/scratch/x.md"):
+            with self.subTest(relative=relative), fixture() as tmp:
+                root = make_root(tmp)
+                write_file(root, relative)
+                report, by_id = doctor(self, root)
+                check = by_id[self.CHECK_ID]
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["repair_id"]],
+                    ["failed", "unclassified_path", self.REPAIR_ID])
+                self.assertEqual(check["facts"],
+                                 {"paths": [relative], "count": 1})
+                repair = {r["repair_id"]: r
+                          for r in report["repairs"]}[self.REPAIR_ID]
+                self.assertEqual(
+                    [repair["module"], repair["safety_class"], repair["operation"]],
+                    ["conformance", "user_action", None])
+                self.assert_validates(report)
+
+    def test_runtime_state_is_a_class_not_an_escape(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, ".agents/runtime/state/run-1/state.json", "{}\n")
+            report, by_id = doctor(self, root)
+            check = by_id[self.CHECK_ID]
+            self.assertEqual([check["status"], check["facts"]], ["passed", {}])
+            self.assert_validates(report)
+
+    def test_many_long_offending_paths_are_capped_and_bounded(self):
+        """D30: a repository-relative path has no length ceiling, so an
+        unbounded fact would fail the engine's own report validation and turn a
+        repository finding into `resolver_failure`."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            deep = "/".join([".agents/scratchpad"] + ["d" * 40] * 6)
+            for index in range(12):
+                write_file(root, f"{deep}/f{index:02d}.txt")
+            report, by_id = doctor(self, root)
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(check["status"], "failed")
+            self.assertEqual(len(check["facts"]["paths"]), 8)
+            self.assertEqual(check["facts"]["count"], 12)
+            self.assertEqual({len(path) for path in check["facts"]["paths"]},
+                             {200})
+            self.assert_validates(report)
+
+
+class IgnoreSentinelTest(ReportAssertions, unittest.TestCase):
+    """#72: `.agents/runtime/` is covered by a root rule or by the committed
+    sentinel — either spelling, because both are legitimate homes. Only the
+    tracked ignore files are read; `.git/info/exclude` is machine-local and a
+    machine-local rule cannot be the repository's classification."""
+
+    CHECK_ID = "repository.ignore.runtime_sentinel"
+    REPAIR_ID = "lifecycle.ignore.repair"
+
+    def build(self, tmp: Path, gitignore: str, sentinel: bool = False) -> Path:
+        root = make_root(tmp)
+        (root / ".gitignore").write_text(gitignore, encoding="utf-8")
+        if sentinel:
+            write_file(root, ".agents/runtime/.gitignore", "*\n")  # exactly b"*\n"
+        return root
+
+    def test_either_spelling_of_the_runtime_rule_passes(self):
+        for label, gitignore, sentinel in (
+                ("root rule", "# comment\n\n.agents/runtime/\n", False),
+                ("committed sentinel", "result\n", True)):
+            with self.subTest(coverage=label), fixture() as tmp:
+                report, by_id = doctor(self, self.build(tmp, gitignore, sentinel))
+                check = by_id[self.CHECK_ID]
+                self.assertEqual(
+                    [check["domain"], check["subject_kind"], check["status"],
+                     check["reason_code"], check["repair_id"], check["facts"]],
+                    ["repository", "path", "passed", None, None, {}])
+                self.assert_validates(report)
+
+    def test_neither_spelling_present_is_the_missing_finding(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, self.build(tmp, "result\n"))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"]],
+                ["failed", "runtime_ignore_missing", self.REPAIR_ID])
+            self.assertEqual(check["facts"],
+                             {"root_gitignore": True, "sentinel": False})
+            repair = {r["repair_id"]: r for r in report["repairs"]}[self.REPAIR_ID]
+            self.assertEqual(
+                [repair["module"], repair["safety_class"], repair["operation"]],
+                ["conformance", "worktree", None])
+            self.assert_validates(report)
+
+    def test_an_overbroad_rule_outranks_a_covered_runtime_subtree(self):
+        """The runtime rule is present and the check still fails: an overbroad
+        ignore conceals authored truth, so it is the finding that is reported."""
+        with fixture() as tmp:
+            report, by_id = doctor(
+                self, self.build(tmp, ".agents/runtime/\n.agents/*\n"))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"]],
+                ["failed", "overbroad_ignore", self.REPAIR_ID])
+            self.assertEqual(check["facts"],
+                             {"rules": [".agents/*"], "count": 1})
+            self.assert_validates(report)
+
+
+class ShellIndirectionTest(ReportAssertions, unittest.TestCase):
+    """The command *policy* check: the resolver already validated command shape,
+    and neither re-implements the other. Facts carry command ids, never argv."""
+
+    CHECK_ID = "verification.commands.no_shell_indirection"
+    REPAIR_ID = "contract.commands.destructure"
+
+    def with_argv(self, root: Path, command_id: str, argv: list) -> Path:
+        contract = root / ".agents/project.json"
+        authored = json.loads(contract.read_text(encoding="utf-8"))
+        authored["bindings"]["commands"][command_id]["argv"] = argv
+        contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+        return root
+
+    def test_plain_argv_passes_with_no_repair_and_no_facts(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["domain"], check["subject_kind"], check["status"],
+                 check["reason_code"], check["repair_id"], check["facts"]],
+                ["verification", "command", "passed", None, None, {}])
+            self.assert_validates(report)
+
+    def test_a_shell_or_a_metacharacter_names_the_offending_command_id(self):
+        for label, argv in (("shell -c", ["bash", "-c", "just build"]),
+                            ("metacharacter", ["just", "build && just switch"])):
+            with self.subTest(indirection=label), fixture() as tmp:
+                root = self.with_argv(make_root(tmp), "nix-build", argv)
+                report, by_id = doctor(self, root)
+                check = by_id[self.CHECK_ID]
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["repair_id"]],
+                    ["failed", "shell_indirection", self.REPAIR_ID])
+                self.assertEqual(check["facts"],
+                                 {"commands": ["nix-build"], "count": 1})
+                repair = {r["repair_id"]: r
+                          for r in report["repairs"]}[self.REPAIR_ID]
+                self.assertEqual(
+                    [repair["module"], repair["safety_class"], repair["operation"]],
+                    ["resolve-project", "user_action", None])
+                self.assert_validates(report)
+
+    def test_ci_selects_the_verification_check_and_fleet_does_not(self):
+        """The purpose table's own claim, proved rather than assumed."""
+        for purpose, expected in (("ci", True), ("fleet", False)):
+            with self.subTest(purpose=purpose), fixture() as tmp:
+                code, out, err = run("run", "--purpose", purpose, "--repo-root",
+                                     str(make_root(tmp)))
+                self.assertEqual(code, 0, err)
+                ids = [c["id"] for c in json.loads(out)["checks"]]
+                self.assertEqual(self.CHECK_ID in ids, expected)
+
 
 if __name__ == "__main__":
     unittest.main()
