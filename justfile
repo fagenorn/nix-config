@@ -81,6 +81,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_adopt_project.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
+    home/common/agent-skills/tests/test_adopt_verify.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_costs.py \
     tests/test_agent_model_drift_schema.py \

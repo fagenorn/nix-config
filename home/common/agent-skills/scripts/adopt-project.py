@@ -63,8 +63,10 @@ PLATFORM_LIBRARY_MEMBERS = (
     "load_manifest",
     "parse_semver",
     "read_registry",
+    "registry_transaction",
     "state_root",
     "write_atomically",
+    "write_registry",
 )
 PLATFORM_LIBRARY_REPAIR_ID = "platform.library.missing"
 
@@ -101,6 +103,7 @@ ADOPT_INSPECTION_MEMBERS = (
     "AdoptError",
     "COMMIT_GATES",
     "CONTRACT_FILENAME",
+    "EVIDENCE_RECORD_DIR",
     "Inventory",
     "METADATA_ONLY_IGNORED",
     "NOTES",
@@ -110,18 +113,24 @@ ADOPT_INSPECTION_MEMBERS = (
     "READY_GATES",
     "RUNTIME_SENTINEL",
     "TARGETED_IGNORED",
+    "VERIFY_RESULTS",
+    "blob_at_head",
     "canonical_json",
     "classify",
     "classify_inventory",
+    "commit_is_ancestor",
     "evidence_entry",
     "gate_entry",
     "git_or_fail",
     "head_revision",
+    "introducing_commit",
     "is_agent_path",
     "is_secret_path",
     "matches_group",
     "outcome_is_appliable",
     "overlap_targets",
+    "parses_as_evidence_record",
+    "parses_as_migration_map",
     "read_bytes_bounded",
     "refuse",
     "registered_worktrees",
@@ -129,8 +138,10 @@ ADOPT_INSPECTION_MEMBERS = (
     "run_git",
     "sha256_hash",
     "targeted_ignored",
+    "tracked_evidence_records",
     "tracked_inventory",
     "untracked_under",
+    "verify_check_entry",
 )
 
 ADOPT_PLANNING_MEMBERS = (
@@ -1181,6 +1192,287 @@ def dirty_overlap(root: Path, targets: list[str]) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# `verify`
+#
+# The conformance question, answered read-only against the *committed* state,
+# and — only with `--register` — the one write to the user-scope fleet
+# registry. Every one of the three answers is a report on exit 0 (R6.4): exit
+# 2 and the D12 error object are reserved for the closed `ADOPT_ERROR_CODES`,
+# so `not_conformant` reaches the operator as the answer they asked for rather
+# than as a refusal they have to parse.
+#
+# Nothing here stores a `ResolvedProject` snapshot or a capability verdict
+# (R6.3, D18): the report is printed and forgotten, and what registration
+# persists is exactly an identity and a location.
+# --------------------------------------------------------------------------
+
+VERIFY_SCHEMA_VERSION = 1
+
+
+def registration_allowed(result: str) -> bool:
+    """Whether `result` may register. Every member named, default raises."""
+    if result == "adopted":
+        return True
+    if result == "adopted_with_blockers":
+        return True
+    if result == "not_conformant":
+        return False
+    raise ValueError(f"unknown verify result: {result!r}")
+
+
+def verify_exit_code(result: str) -> int:
+    """The exit code each result publishes. Every member named, default raises.
+
+    All three are 0 on purpose and each is written out rather than folded into
+    one return, so a fourth result added to the closed set has to be given an
+    answer here instead of inheriting a plausible success.
+    """
+    if result == "adopted":
+        return 0
+    if result == "adopted_with_blockers":
+        return 0
+    if result == "not_conformant":
+        return 0
+    raise ValueError(f"unknown verify result: {result!r}")
+
+
+def resolved_project_id(payload: object) -> str | None:
+    project = payload.get("project") if isinstance(payload, dict) else None
+    identifier = project.get("id") if isinstance(project, dict) else None
+    return identifier if isinstance(identifier, str) and identifier else None
+
+
+def integration_branch(payload: object) -> str | None:
+    """The contract's declared integration branch, out of the resolver's view.
+
+    Read from the validated snapshot rather than from the contract file, for
+    the reason D26 exists: the resolver is the only reader of contract policy.
+    """
+    bindings = payload.get("bindings") if isinstance(payload, dict) else None
+    vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
+    branch = vcs.get("integration_branch") if isinstance(vcs, dict) else None
+    return branch if isinstance(branch, str) and branch else None
+
+
+def blocked_capabilities(payload: object) -> list[dict]:
+    """Every declared capability the host cannot deliver, and its repair id.
+
+    `unsupported` is a deliberate absence and never a blocker; only `blocked`
+    is a capability the contract claims and the machine withholds (R6.4).
+    """
+    capabilities = payload.get("capabilities") if isinstance(payload, dict) \
+        else None
+    if not isinstance(capabilities, dict):
+        return []
+    return [{"capability": name, "repair_id": entry.get("repair_id")}
+            for name, entry in sorted(capabilities.items())
+            if isinstance(entry, dict) and entry.get("state") == "blocked"]
+
+
+def projection_check(root: Path) -> tuple[str, str | None]:
+    """The `projections-in-sync` verdict and the reason it failed.
+
+    Drift is the resolver's `invalid_projection` refusal, whose violation
+    pointers name each drifted projection by id, so the reason published here
+    is the resolver's own answer rather than a second opinion about it.
+    """
+    exit_code, payload = run_resolver(root, "check-projections")
+    if exit_code == 0 and isinstance(payload, dict):
+        entries = payload.get("projections")
+        if isinstance(entries, list) and all(
+                isinstance(entry, dict) and entry.get("action") == "unchanged"
+                for entry in entries):
+            return "passed", None
+    pointers = resolver_violation_pointers(payload)
+    if pointers:
+        return "failed", ("the projection targets have drifted: "
+                          + ", ".join(pointers))
+    return "failed", ("the projections could not be checked: "
+                      f"{resolver_error_code(payload)}")
+
+
+class Verification:
+    """One repository's conformance verdict, and what registration needs.
+
+    `report` is exactly what is printed. `resolve_payload` is kept beside it
+    rather than folded in, because the integration branch registration checks
+    is contract policy the report has no business publishing.
+    """
+
+    def __init__(self, report: dict, resolve_payload: object) -> None:
+        self.report = report
+        self.resolve_payload = resolve_payload
+
+
+def verify_repository(root: Path) -> Verification:
+    """Run the ordered conformance checks and build the report.
+
+    Every check runs where its inputs exist and is recorded as `not_run` where
+    they do not, so a report always carries one row per declared check: an
+    absent evidence record is a named failure with two consequences, never two
+    silent omissions.
+    """
+    checks: list[dict] = []
+
+    def record(check_id: str, status: str, detail: str | None) -> None:
+        checks.append(adopt_inspection.verify_check_entry(
+            check_id, status, detail))
+
+    exit_code, payload = run_resolver(root, "resolve")
+    resolves = exit_code == 0 and isinstance(payload, dict)
+    record("contract-resolves", "passed" if resolves else "failed",
+           None if resolves else
+           f"the contract does not resolve: {resolver_error_code(payload)}")
+
+    # Asked even when `resolve` refused, because the commonest reason it
+    # refuses *is* projection drift: reporting the drift as "not run" would
+    # hide the one check that names which projection went stale.
+    record("projections-in-sync", *projection_check(root))
+
+    unclassified = sorted(
+        path for path, _ in adopt_inspection.tracked_inventory(root)
+        if adopt_inspection.classify(path) is None
+        and adopt_inspection.is_agent_path(path))
+    record("no-unclassified-agent-path",
+           "failed" if unclassified else "passed",
+           ("no lifecycle class covers: " + ", ".join(unclassified))
+           if unclassified else None)
+
+    record_path, map_path = None, None
+    candidates = adopt_inspection.tracked_evidence_records(root)
+    if not candidates:
+        record("adoption-evidence-record", "failed",
+               "no adoption evidence record is committed under "
+               f"{adopt_inspection.EVIDENCE_RECORD_DIR}/")
+    elif len(candidates) > 1:
+        record("adoption-evidence-record", "failed",
+               "more than one adoption evidence record is committed: "
+               + ", ".join(candidates))
+    else:
+        found = adopt_inspection.parses_as_evidence_record(
+            adopt_inspection.blob_at_head(root, candidates[0]))
+        if found is None:
+            record("adoption-evidence-record", "failed",
+                   "the committed file does not parse as an adoption "
+                   f"evidence record: {candidates[0]}")
+        else:
+            record_path = candidates[0]
+            map_path = found["path_migration_map"]
+            record("adoption-evidence-record", "passed", None)
+
+    commit = None
+    if record_path is None:
+        record("adoption-commit-derived", "not_run",
+               "no adoption evidence record was discovered")
+    else:
+        commit = adopt_inspection.introducing_commit(root, record_path)
+        record("adoption-commit-derived",
+               "failed" if commit is None else "passed",
+               None if commit is not None else
+               "git records no commit introducing the adoption evidence "
+               f"record: {record_path}")
+
+    if record_path is None:
+        record("path-migration-map", "not_run",
+               "no adoption evidence record was discovered")
+        map_path = None
+    elif not isinstance(map_path, str) or not map_path:
+        record("path-migration-map", "failed",
+               "the evidence record names no path migration map")
+        map_path = None
+    elif adopt_inspection.parses_as_migration_map(
+            adopt_inspection.blob_at_head(root, map_path)) is None:
+        record("path-migration-map", "failed",
+               f"the path migration map is absent or does not parse: "
+               f"{map_path}")
+    else:
+        record("path-migration-map", "passed", None)
+
+    blockers = blocked_capabilities(payload) if resolves else []
+    if any(entry["status"] != "passed" for entry in checks):
+        result = "not_conformant"
+    elif blockers:
+        result = "adopted_with_blockers"
+    else:
+        result = "adopted"
+    # Defence in depth behind the two exhaustive dispatches below: a result
+    # invented here crashes rather than reaching an operator.
+    if result not in adopt_inspection.VERIFY_RESULTS:
+        raise ValueError(f"unknown verify result: {result!r}")
+
+    return Verification({
+        "schema_version": VERIFY_SCHEMA_VERSION,
+        "result": result,
+        "project_id": resolved_project_id(payload),
+        "root": str(root),
+        "adoption_commit": commit,
+        "evidence_record": record_path,
+        "migration_map": map_path,
+        "checks": checks,
+        "blockers": blockers if result != "not_conformant" else [],
+        "registered": False,
+    }, payload)
+
+
+def register_project(root: Path, verification: Verification) -> None:
+    """Record `{project_id, root}` in the fleet, or refuse and change nothing.
+
+    The ancestry check comes first because it is the ordering #67 documents and
+    D19 makes checked: a commit that lives only on a feature branch names a
+    state the integration branch does not have. The duplicate check and the
+    replacement then happen inside one exclusive lock over a registry reread
+    underneath it, so two registrations racing under one `HOME` serialize
+    instead of one overwriting the other.
+    """
+    report = verification.report
+    branch = integration_branch(verification.resolve_payload)
+    project_id = report["project_id"]
+    commit = report["adoption_commit"]
+    if branch is None or project_id is None or commit is None:
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.registration.incomplete", "",
+            "registration needs a project id, an adoption commit and a "
+            "declared integration branch")
+    if not adopt_inspection.commit_is_ancestor(root, commit, branch):
+        raise adopt_inspection.refuse(
+            "not_integrated", "adopt.registration.not_integrated", "",
+            "the adoption commit is not reachable from the contract's "
+            "integration branch")
+    try:
+        with agent_platform.registry_transaction() as entries:
+            for entry in entries:
+                if entry["project_id"] != project_id:
+                    continue
+                if Path(entry["root"]).resolve() != root:
+                    raise adopt_inspection.refuse(
+                        "duplicate_project_id", "adopt.registry.duplicate",
+                        "/projects",
+                        "the fleet registry already holds this project id at "
+                        "another root")
+            agent_platform.write_registry(
+                [entry for entry in entries
+                 if entry["project_id"] != project_id]
+                + [{"project_id": project_id, "root": str(root)}])
+    except agent_platform.PlatformManifestError as error:
+        raise adopt_inspection.AdoptError(
+            "adopt_failure", "adopt.registry.invalid",
+            error.violations) from None
+    report["registered"] = True
+
+
+def command_verify(args: argparse.Namespace) -> int:
+    # Before the target is touched, so a broken platform installation surfaces
+    # as an adoption failure rather than as a non-conformant repository.
+    require_manifest()
+    root = adopt_inspection.require_repository(args.repo_root)
+    verification = verify_repository(root)
+    if args.register and registration_allowed(verification.report["result"]):
+        register_project(root, verification)
+    emit_json(verification.report)
+    return verify_exit_code(verification.report["result"])
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
@@ -1208,6 +1500,18 @@ def build_parser() -> argparse.ArgumentParser:
                                  "plan")
     apply_plan.add_argument("--acknowledge-deletions", action="store_true",
                             help="acknowledge that the plan deletes a file")
+    verify = subparsers.add_parser(
+        "verify", help="report a checkout's conformance, and optionally "
+                       "register it in the fleet")
+    verify.add_argument("--repo-root", required=True,
+                        help="the top level of the repository to verify")
+    # Registration is opt-in and is the only thing that writes the fleet
+    # registry: `apply` never does, and read-only `verify` never registers
+    # implicitly (R6.3).
+    verify.add_argument("--register", action="store_true",
+                        help="record the project in the user-scope fleet "
+                             "registry once its adoption commit is on the "
+                             "declared integration branch")
     return parser
 
 
@@ -1216,6 +1520,8 @@ def dispatch(args: argparse.Namespace) -> int:
         return command_plan(args)
     if args.command == "apply":
         return command_apply(args)
+    if args.command == "verify":
+        return command_verify(args)
     raise ValueError(f"unknown subcommand: {args.command!r}")
 
 

@@ -279,8 +279,42 @@ def reconcile_repo(home: Path, *,
     return root
 
 
-def adopted_repo(home: Path) -> Path:
-    """A conformant checkout: valid contract, sentinel present, nothing legacy."""
+EVIDENCE_RECORD_MEMBERS = ("schema_version", "plan_id", "outcome",
+                           "base_revision", "platform", "decisions_accepted",
+                           "sources", "checks", "path_migration_map")
+
+
+def write_adoption_records(root: Path, digest: str = "a1" * 32) -> str:
+    """The two records an adoption commits, as `apply` writes them.
+
+    Authored here rather than produced by a run, so a fixture that must
+    already *be* adopted needs no apply: `verify` discovers the record by
+    listing the tree at `HEAD` (D34) and never by being told its name.
+    """
+    migration_map = f".agents/knowledge/archive/path-migrations/{digest}.json"
+    write(root, migration_map, json.dumps({
+        "schema_version": 1, "migration_id": f"sha256:{digest}",
+        "moves": []}) + "\n")
+    write(root, f".agents/artifacts/evidence/{digest}.json", json.dumps({
+        "schema_version": 1, "plan_id": f"sha256:{digest}",
+        "outcome": "no_change", "base_revision": git(
+            root, "rev-parse", "HEAD").strip(),
+        "platform": {"platform_version": "1.0.0",
+                     "project_schema_versions": [1],
+                     "resolved_schema_version": 1},
+        "decisions_accepted": [], "sources": [], "checks": [],
+        "path_migration_map": migration_map}) + "\n")
+    return migration_map
+
+
+def adopted_repo(home: Path, *, records: bool = True) -> Path:
+    """A conformant checkout: valid contract, sentinel present, nothing legacy.
+
+    The two adoption records a real apply commits are present by default, in
+    a commit of their own: without them the checkout carries no adoption
+    commit for `verify` to find, so it cannot legitimately verify as adopted
+    (D34). `records=False` is the fixture the discovery negatives start from.
+    """
     root = init_repo()
     scaffold(root, fixture_contract(), home)
     write(root, ".agents/runtime/.gitignore", "*\n")
@@ -288,6 +322,9 @@ def adopted_repo(home: Path) -> Path:
     git(root, "remote", "add", "origin",
         "https://github.com/fixture/target.git")
     commit(root)
+    if records:
+        write_adoption_records(root)
+        commit(root, "adopt")
     return root
 
 
@@ -1077,12 +1114,11 @@ class RefusalTest(AdoptTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
 
-    def test_the_parser_exposes_plan_and_apply_and_nothing_else(self):
+    def test_the_parser_exposes_the_three_verbs_and_nothing_else(self):
         code, out, err = run("--help", home=self.home)
         self.assertEqual(code, 0, err)
-        self.assertIn("plan", out)
-        self.assertIn("apply", out)
-        self.assertNotIn("verify", out)
+        choices = re.search(r"usage: adopt-project \[-h\] \{([^}]*)\}", out)
+        self.assertEqual(choices.group(1), "plan,apply,verify")
 
 
 class AdoptFailureWrapperTest(unittest.TestCase):

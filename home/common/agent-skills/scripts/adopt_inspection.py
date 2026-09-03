@@ -69,6 +69,32 @@ PROVENANCES = (
     "untracked-explicit-paths",
 )
 GATE_STATUSES = ("passed", "failed", "not_run")
+
+# The closed set of answers `verify` publishes, and the ordered conformance
+# checks it publishes them over (R6.4). Every one of the three is a reported
+# state on exit 0: `not_conformant` is the answer the operator asked for, not
+# a refusal, and exit 2 belongs to `ADOPT_ERROR_CODES` alone.
+VERIFY_RESULTS = ("adopted", "adopted_with_blockers", "not_conformant")
+VERIFY_CHECKS = (
+    "contract-resolves",
+    "projections-in-sync",
+    "no-unclassified-agent-path",
+    "adoption-evidence-record",
+    "adoption-commit-derived",
+    "path-migration-map",
+)
+
+# The adoption evidence record's members, per the spec. A committed file under
+# the evidence directory is the adoption record only if it carries all of them
+# (D34): the record is discovered rather than named, so its shape is the only
+# thing that identifies it.
+EVIDENCE_RECORD_MEMBERS = ("schema_version", "plan_id", "outcome",
+                           "base_revision", "platform", "decisions_accepted",
+                           "sources", "checks", "path_migration_map")
+
+# The path-migration record's members, per #72 and D36. The record the
+# evidence names has to be one of these, not merely a file that parses.
+MIGRATION_MAP_MEMBERS = ("schema_version", "migration_id", "moves")
 LIFECYCLE_CLASSES = (
     "canonical-tracked",
     "durable-artifact",
@@ -279,6 +305,21 @@ def gate_entry(gate_id: str, status: str, repair_id: str | None) -> dict:
     if status not in GATE_STATUSES:
         raise ValueError(f"unknown gate status: {status!r}")
     return {"id": gate_id, "status": status, "repair_id": repair_id}
+
+
+def verify_check_entry(check_id: str, status: str,
+                       detail: str | None) -> dict:
+    """One conformance check's outcome, with the reason when it is not passed.
+
+    Both closed sets are asserted here rather than trusted, so a check id or a
+    status invented at a call site crashes instead of reaching the operator as
+    a plausible row.
+    """
+    if check_id not in VERIFY_CHECKS:
+        raise ValueError(f"unknown verify check: {check_id!r}")
+    if status not in GATE_STATUSES:
+        raise ValueError(f"unknown gate status: {status!r}")
+    return {"id": check_id, "status": status, "detail": detail}
 
 
 def question_impact(question_id: str) -> str:
@@ -512,6 +553,86 @@ def registered_worktrees(root: Path) -> list[str]:
             pass
         names.append(path.name)
     return sorted(names)
+
+
+def blob_at_head(root: Path, relative: str) -> bytes | None:
+    """The tracked bytes of `relative` at `HEAD`, or None when it is not there.
+
+    Read out of the commit rather than off disk, because every question
+    `verify` asks is about the committed state: an untracked working-tree file
+    must not be able to answer for a record the history does not carry (D34).
+    """
+    code, out = run_git(root, "show", f"HEAD:{relative}")
+    return out if code == 0 else None
+
+
+def tracked_evidence_records(root: Path) -> list[str]:
+    """Every `.agents/artifacts/evidence/*.json` path in the tree at `HEAD`.
+
+    Listed from the commit, not walked on disk, and one level deep exactly as
+    the glob reads: a nested file is not one of the candidates D34 counts.
+    """
+    out = git_or_fail(root, "ls-tree", "-r", "--name-only", "-z", "HEAD",
+                      "--", EVIDENCE_RECORD_DIR)
+    prefix = EVIDENCE_RECORD_DIR + "/"
+    return sorted(
+        path for path in split_nul(out)
+        if path.startswith(prefix) and path.endswith(".json")
+        and "/" not in path[len(prefix):])
+
+
+def parses_as_evidence_record(data: bytes | None) -> dict | None:
+    """The record `data` holds, or None when it is not one.
+
+    Membership is the whole test: an adoption record is identified by carrying
+    every member the spec fixes, because nothing else in the repository names
+    it.
+    """
+    if data is None:
+        return None
+    try:
+        source = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(source, dict) or any(
+            member not in source for member in EVIDENCE_RECORD_MEMBERS):
+        return None
+    return source
+
+
+def parses_as_migration_map(data: bytes | None) -> dict | None:
+    """The path-migration map `data` holds, or None when it is not one."""
+    if data is None:
+        return None
+    try:
+        source = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(source, dict) or any(
+            member not in source for member in MIGRATION_MAP_MEMBERS):
+        return None
+    return source
+
+
+def introducing_commit(root: Path, relative: str) -> str | None:
+    """The commit that added `relative`, or None when git names none.
+
+    The adoption record carries no commit identity and cannot — it is created
+    *by* the commit that would name it — so the introducing commit is the only
+    identity git already holds (D34).
+    """
+    code, out = run_git(root, "log", "--diff-filter=A", "--format=%H", "-1",
+                        "--", relative)
+    if code != 0:
+        return None
+    text = out.decode("utf-8", "surrogateescape").strip()
+    return text.splitlines()[0] if text else None
+
+
+def commit_is_ancestor(root: Path, commit: str, branch: str) -> bool:
+    """Whether `commit` is reachable from `branch` (D19)."""
+    code, _ = run_git(root, "merge-base", "--is-ancestor", commit, branch)
+    return code == 0
 
 
 def head_revision(root: Path) -> str:
