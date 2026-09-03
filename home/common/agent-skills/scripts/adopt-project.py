@@ -27,6 +27,15 @@ green run produces exactly one commit on one new branch and removes the
 worktree only after proving the ref carries it. It never pushes, never merges
 and never writes the fleet registry.
 
+`verify` answers the conformance question read-only against the committed
+state — the contract resolves, every projection is in sync, no agent path is
+unclassified, and exactly one adoption evidence record is discoverable at
+`HEAD` with the migration map it names (D34). All three answers are reports on
+exit 0. `--register` is the one write to the user-scope fleet registry, and
+only once the adoption commit derived from that record is an ancestor of the
+contract's declared integration branch (D19); what it stores is an identity
+and a location and nothing else (D18).
+
 The resolver is consumed **only** as a subprocess at the absolute path
 `$HOME/.agents/bin/resolve-project`, never imported (D26): contract validation
 has one home, and a stale generation earlier on `PATH` cannot answer. The
@@ -1409,7 +1418,7 @@ def verify_repository(root: Path) -> Verification:
         "evidence_record": record_path,
         "migration_map": map_path,
         "checks": checks,
-        "blockers": blockers if result != "not_conformant" else [],
+        "blockers": blockers,
         "registered": False,
     }, payload)
 
