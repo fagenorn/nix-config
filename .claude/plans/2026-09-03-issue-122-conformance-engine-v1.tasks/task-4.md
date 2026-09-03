@@ -14,13 +14,12 @@
   - Repairs `conformance.rerun_online` and `host.tracker.authenticate`.
 
 **Invariants:**
-- `--offline` is the **only** way the engine learns it is offline. Nothing probes the network to decide, and no evaluator may write `context.offline` (D7, the plan root's offline rule).
+- `--offline` is the **only** way the engine learns it is offline; no evaluator may write `context.offline` (D7, the root's offline rule).
 - When `context.offline` is true and the entry's `network` is true, the evaluator body **never runs**: the rule is applied in `evaluate`, before the `getattr` dispatch. That is what mechanically prevents a skipped probe from becoming a pass.
-- A required `not_run` drives `outcome.status` to `incomplete`; a `warning` never does (D8).
 - `workflow_entry` selects no network-flagged check, so `--offline` cannot change its outcome. Assert it; do not assume it.
 - The check records a boolean and a hostname. Never a token, a username, a raw CLI stdout line, or an environment variable value.
 - An unrecognised `tracker.kind` is `not_run` / `unsupported_tracker_kind`, never a pass (D20).
-- No test reaches a real tracker: every case runs through the hermetic runner with a stub CLI on `PATH` (D35).
+- No test reaches a real tracker: every case runs through the hermetic runner with a stub CLI on `PATH` (D35). The S3 in-process seam inherits the caller's environment instead, so every S3 case calling `main` passes `--offline`; the rule below is what keeps this check from spawning `gh` there. Never add an S3 case that runs this registry online.
 
 ## The offline rule in `evaluate`
 
@@ -44,7 +43,7 @@ Append after `host.executor.helper_on_path`:
 | `host.tracker.credential` | host | tracker | required | **yes** | `repository.contract.valid` | `offline_constraint` → `conformance.rerun_online`; `unsupported_tracker_kind` → `host.tracker.authenticate`; `tracker_credential_missing` → `host.tracker.authenticate` |
 
 Repairs added:
-- `conformance.rerun_online` → `{"module": "conformance", "safety_class": "read_only", "operation": {"subcommand": "run", "args": []}}`
+- `conformance.rerun_online` → `{"module": "conformance", "safety_class": "read_only", "operation": None}` — `null`: a rerun repeats the caller's own request without `--offline`, so no fixed argv performs it, and bare `run` is an argparse usage error (D25).
 - `host.tracker.authenticate` → `{"module": "conformance", "safety_class": "user_action", "operation": None}`
 
 ## `check_tracker_credential`
@@ -96,7 +95,7 @@ class OfflineRuleTest(ReportAssertions, unittest.TestCase):
             repair = {r["repair_id"]: r for r in report["repairs"]}[
                 "conformance.rerun_online"]
             self.assertEqual(repair["safety_class"], "read_only")
-            self.assertEqual(repair["operation"], {"subcommand": "run", "args": []})
+            self.assertIsNone(repair["operation"])
             self.assert_validates(report)
 
     def test_offline_never_yields_a_passing_network_check(self):

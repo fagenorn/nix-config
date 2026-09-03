@@ -17,17 +17,15 @@
   - `evaluate(purpose, context) -> list[dict]`, `build_report(purpose, context, checks) -> dict`, `select(purpose) -> tuple[Check, ...]`.
   - `bounded_run(argv, cwd, env=None)` — read-only child, `timeout=15`, `capture_output=True`, `text=True`; returns `None` on `OSError`/`subprocess.SubprocessError` (D19).
   - `ENGINE_FAILURE_MESSAGE = "the conformance engine failed unexpectedly"`.
-- Later tasks extend `REGISTRY` and `REPAIRS` and add evaluators; they do not edit `select`, `evaluate` or `build_report`.
+- Later tasks extend `REGISTRY` and `REPAIRS` and add evaluators; they do not edit `select` or `build_report`. **Task 4 alone extends `evaluate`**, with the offline rule D21 requires to arrive alongside the first network-flagged check rather than ahead of it.
 
 **Invariants:**
 - The ladder runs **at most once per process**, inside `repository.contract.resolvable`; every other structural check is a pure read of the cached stages (D17).
 - After `check_contract_resolvable` returns, **no stage is `None`** (D33). A dependent evaluator that still finds one raises: that is a control-flow bug, not a finding.
-- `run` writes nothing under the subject root.
 - `checks` is emitted sorted by `id`; evaluation order is `REGISTRY` order, which is topological (D24).
 - Every emitted report satisfies `validate_report` — asserted in `command_run` before printing.
 - `workflow_entry` emits exactly one check and at most one repair when the outcome is not `passed`, and exits 2. Every other purpose exits 0.
-- An evaluator returns an `Outcome` for every expected authored or environmental condition, and raises **only** where a closed-set dispatch inside it meets a value the set does not cover — an engine defect (D32).
-- Every contract- or filesystem-derived string reaches `facts` through `bound_fact`/`bound_facts` (D30). No evaluator argues its own subject is short enough.
+- The root's evaluator-return rule (D32) and its one fact-bounding helper pair (D30) hold for every evaluator here.
 
 ## The registry entries this task adds
 
@@ -81,7 +79,7 @@ PURPOSE_DOMAINS = {
 
 ## The resolver ladder evaluator (D2, D17, D28, D33)
 
-`RESOLVER_NAMES = ("resolve-project.py", "resolve_project.py", "resolve-project")`. `load_resolver()` takes the first sibling path that `is_file()`, builds `importlib.util.spec_from_loader("conformance_resolve_project", SourceFileLoader(name, str(path)))`, then `module_from_spec` + `exec_module`, and memoises the result; with none present it raises `RuntimeError` naming the directory searched. Its docstring says the names are tried in that order so an extensionless Nix-installed link loads identically to the repository file (D2), and that the resolver's `main()` is `__main__`-guarded so import defines functions and runs nothing.
+`RESOLVER_NAMES = ("resolve-project.py", "resolve_project.py", "resolve-project")`. `load_resolver()` takes the first sibling path that `is_file()`, builds `importlib.util.spec_from_loader("conformance_resolve_project", SourceFileLoader(name, str(path)))`, then `module_from_spec` + `exec_module`, and memoises the result; with none present it raises `RuntimeError` naming the directory searched. Its docstring says the names are tried in that order so an extensionless Nix-installed link loads identically to the repository file (D2), and that the resolver's `main()` is `__main__`-guarded.
 
 `check_contract_resolvable(context)` is the **only** place the ladder runs:
 
@@ -109,7 +107,7 @@ except Exception:
                    {"stage": <last stage attempted>})
 ```
 
-**`context.root_arg` is `args.repo_root` verbatim, `None` when the flag was omitted.** The live resolver walks ancestors only for `None` and treats any given path as the root, so resolving `"."` first and passing that would make every run from a project subdirectory report `not_onboarded` (D28). `context.root` starts at `Path(args.repo_root).resolve()` or `Path.cwd().resolve()` and is replaced by the discovered root as soon as `discover_root` returns, so `subject.root` names the project rather than the caller's directory.
+**`context.root_arg` is `args.repo_root` verbatim, `None` when the flag was omitted.** The live resolver walks ancestors only for `None` and treats any given path as the root (D28, and the root constraint it amends). `context.root` starts at `Path(args.repo_root).resolve()` or `Path.cwd().resolve()` and is replaced by the discovered root as soon as `discover_root` returns, so `subject.root` names the project rather than the caller's directory.
 
 **`settle(err)` is the complete stage state machine (D33).** The resolver raises codes from call sites the ladder order does not predict — `load_contract` raises `invalid_contract` before the schema stage has run at all, and `validate_projections` raises it for an unreadable projection source — so `settle` dispatches on `err.code`, never on which call raised:
 
@@ -124,7 +122,7 @@ except Exception:
 
 `settle` records the named stage as `Outcome("failed", err.code, <that stage's repair id>, {"violations": <count>, "first_pointer": bound_fact(err.violations[0]["pointer"])})`, **overwriting a `passed` recording when the code names an earlier stage**, and sets *every stage still `None`* — those before it in ladder order as well as those after — to `Outcome("suppressed", facts={"suppressed_by": <the failing stage's check id>})`.
 
-The "before it as well" clause is the whole fix for the parse hole: an unparseable contract raises `invalid_contract` from `load_contract`, so `valid` fails while `schema_supported` never ran. It becomes `suppressed` by `repository.contract.valid` instead of staying `None`, so `doctor` emits it honestly and `workflow_entry` — which does not stop on `suppressed` — walks on to the one true root cause.
+The "before it as well" clause is the whole fix for the parse hole: an unparseable contract fails `valid` while `schema_supported` never ran, so that stage becomes `suppressed` by `repository.contract.valid` instead of staying `None`, and `workflow_entry` — which does not stop on `suppressed` — walks on to the one true root cause.
 
 Each of the five dependent structural checks is then a one-line evaluator returning `context.stages[<stage>]`, raising `ValueError` on a `None` (the bar, *Fail loud*).
 
@@ -145,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
                           [{"pointer": "", "message": ENGINE_FAILURE_MESSAGE}])
 ```
 
-`build_parser` is inside it because `--require`'s `choices` come from `load_resolver().CAPABILITY_NAMES`, so a resolver that will not load refuses in the D15 shape rather than tracebacking. The message is the **fixed sentence**, never `str(err)`: exception text can name a path or a home directory, and the live resolver's own wrapper sets the precedent of one fixed sentence so refusal bytes stay deterministic. `command_run` therefore carries no `try/except Exception` of its own.
+`build_parser` is inside it because `--require`'s `choices` come from `load_resolver().CAPABILITY_NAMES`, so a resolver that will not load refuses in the D15 shape rather than tracebacking. The message is the **fixed sentence**, never `str(err)`, which can name a path (D29). `command_run` carries no `try/except Exception` of its own.
 
 The single declared exception is the ladder's catch inside `check_contract_resolvable` (D17): a failure *of the resolver* is a check finding carrying `resolver_failure`; a failure of anything else in the engine is the refusal. `EngineFailureTest` pins both halves.
 
@@ -280,7 +278,7 @@ class PurposeSelectionTest(unittest.TestCase):
             load_module().select("teleport")
 ```
 
-`RequiredCapabilityTest` covers the `--require` surface in three cases, all through the same helpers: requiring `release` on a clean fixture makes `workflow_entry` exit 2 with `host.capability.required` / `capability_unavailable` as its one check and `["release"]` in `request.required_capabilities`; `--require worktrees --require tracker --require worktrees` on `doctor` emits `["tracker", "worktrees"]`, deduplicated, sorted and a subset of `load_module().load_resolver().CAPABILITY_NAMES` (Task 1 keeps that membership out of the pure validator, so it is asserted here); and `--require teleport` exits 2 with `usage:` on stderr and empty stdout, the argparse channel rather than a JSON refusal.
+`RequiredCapabilityTest` covers the `--require` surface in three cases, all through the same helpers: requiring `release` on a clean fixture makes `workflow_entry` exit 2 with `host.capability.required` / `capability_unavailable` as its one check and `["release"]` in `request.required_capabilities`; `--require worktrees --require tracker --require worktrees` on `doctor` emits `["tracker", "worktrees"]`, deduplicated, sorted and a subset of `load_module().load_resolver().CAPABILITY_NAMES`; and `--require teleport` exits 2 with `usage:` on stderr and empty stdout, the argparse channel rather than a JSON refusal.
 
 `ReadOnlyTest` (SF-003) adopts the resolver suite's three-witness pattern. It builds a fixture root, initialises a throwaway git repository in it (`git init -q`, `git add -A`, `git -c commit.gpgsign=false commit -q -m fixture`), records `git status --porcelain`, a `snapshot(root)` of `sorted((relative path, is_dir, st_mtime_ns))` over `root.rglob("*")` excluding `.git`, and `root.stat().st_mtime_ns`; runs `doctor`; and asserts all three are byte-identical afterwards.
 
@@ -292,7 +290,12 @@ Also add the S3 cases, importing `contextlib` and `io`:
 
 ```python
 class EngineFailureTest(unittest.TestCase):
-    """S3: the boundary refuses; the ladder's declared catch does not (D17, D29)."""
+    """S3: the boundary refuses; the ladder's declared catch does not (D17, D29).
+
+    Both cases pass --offline, and every later S3 case calling main must: in
+    process there is no hermetic runner, so evaluate's offline rule is what
+    keeps Task 4's network check from spawning a child (D35).
+    """
 
     def rebind(self, owner, name, value):
         original = getattr(owner, name)
@@ -305,7 +308,7 @@ class EngineFailureTest(unittest.TestCase):
             RuntimeError("sentinel-exception-detail")))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            code = module.main(["run", "--purpose", "doctor",
+            code = module.main(["run", "--purpose", "doctor", "--offline",
                                 "--repo-root", str(REPO_ROOT)])
         self.assertEqual(code, 2)
         payload = json.loads(buf.getvalue())
@@ -321,7 +324,8 @@ class EngineFailureTest(unittest.TestCase):
                     lambda _arg: (_ for _ in ()).throw(RuntimeError("boom")))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            code = module.main(["run", "--purpose", "doctor", "--repo-root", "/"])
+            code = module.main(["run", "--purpose", "doctor", "--offline",
+                                "--repo-root", "/"])
         self.assertEqual(code, 0)
         check = {c["id"]: c for c in json.loads(buf.getvalue())["checks"]}[
             "repository.contract.resolvable"]
@@ -329,7 +333,7 @@ class EngineFailureTest(unittest.TestCase):
                          ["failed", "resolver_failure"])
 ```
 
-Add `load_module()`. **It must register the module in `sys.modules` before `exec_module` (D36).** The engine uses `from __future__ import annotations`, so every dataclass field annotation is a string and `dataclasses._process_class` resolves those through `sys.modules[cls.__module__].__dict__` while checking for `KW_ONLY`; an unregistered module makes that lookup return `None` and the import dies with `AttributeError: 'NoneType' object has no attribute '__dict__'` before any test reaches its seam. Use **one** stable fullname for the `SourceFileLoader`, the spec and the registration; `exec_module` inside a `try` whose `except BaseException` pops the name again and re-raises, so a failed load leaves `sys.modules` clean:
+Add `load_module()`. **It must register the module in `sys.modules` before `exec_module` (D36).** The engine uses postponed annotations, so dataclass construction resolves every field annotation through `sys.modules[cls.__module__].__dict__`; unregistered, that lookup returns `None` and the import dies with `AttributeError` before any test reaches its seam. Use **one** stable fullname for the `SourceFileLoader`, the spec and the registration; `exec_module` inside a `try` whose `except BaseException` pops the name again and re-raises, so a failed load leaves `sys.modules` clean:
 
 ```python
 def load_module():

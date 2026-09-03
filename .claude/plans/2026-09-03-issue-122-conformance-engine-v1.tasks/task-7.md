@@ -13,7 +13,7 @@
 - Neither `not_run` reason can read as a pass, and neither can drive `incomplete`, because the checks are optional (D6).
 - Nothing in this task compiles, parses or validates a release profile: this slice ships no compiler, and judging a profile it cannot read would be a fabricated finding (D27).
 - After this task the registry is closed at **17** entries and every acceptance criterion in the issue has a test that fails at the base commit.
-- The acceptance gate against this repository's committed root is offline and hermetic (D35): it judges the registry and the report's shape, never the machine's ambient credentials.
+- The committed-root acceptance gate runs `--offline` (D35); the paragraph under the suite states what it then judges.
 
 ## The subject locator (D27)
 
@@ -244,18 +244,16 @@ Add `find_release_profile`, the three evaluators (`check_release_profile_rolled_
 python3 -m unittest -v home/common/agent-skills/tests/test_conformance.py
 just agent-workflow-tests
 just build
-python3 home/common/agent-skills/scripts/conformance.py run --purpose doctor --repo-root . \
+python3 home/common/agent-skills/scripts/conformance.py run --purpose doctor --repo-root . --offline \
   > /tmp/conformance-demo.json
 python3 -c 'import json; r=json.load(open("/tmp/conformance-demo.json")); print(len(r["checks"]), r["outcome"]["status"]); print([c["id"] for c in r["checks"] if c["subject_kind"]=="release_profile"])'
 python3 home/common/agent-skills/scripts/conformance.py validate-report --input /tmp/conformance-demo.json
-git diff --stat HEAD~7..HEAD -- home/common/agent-skills/scripts/conformance.py \
-    home/common/agent-skills/tests/test_conformance.py \
-    home/common/agent-skills/default.nix justfile
+git diff --stat HEAD~6
 ```
 
-Expected: unittest OK; `just agent-workflow-tests` and `just build` pass; the fourth command prints `17` and an outcome of `passed` or `incomplete` (this one runs online against the developer's own machine, so either is legitimate), then the three `repository.release_profile.*` ids; `validate-report` prints `{"valid":true}` and exits 0; the scoped diff shows exactly those four files changed across the plan's seven commits.
+Expected: unittest OK; `just agent-workflow-tests` and `just build` pass; the `python3 -c` line prints `17 incomplete` — `--offline` makes the required `host.tracker.credential` `not_run`, so the outcome never depends on this machine's credentials (D35) — then the three `repository.release_profile.*` ids; `validate-report` prints `{"valid":true}` and exits 0; the last command carries **no pathspec**, the only way a fifth file can show, and spans the plan's base commit to the working tree — the six landed task commits plus this task's change, which Step 5 commits — listing exactly the plan's four files and nothing else. (`HEAD~6` assumes one commit per landed task.)
 
-Falsifiability at the base commit: the fourth command prints `14` and an empty list.
+Falsifiability at the base commit: the `python3 -c` line prints `14` and an empty list.
 
 - [ ] **Step 5: Commit**
 

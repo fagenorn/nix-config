@@ -11,7 +11,7 @@
 
 ## Global Constraints
 
-- The authoritative design is `.claude/specs/2026-09-03-issue-122-conformance-engine-v1-design.md`. Cite D1–D27 by ID; never restate their rationale in code, tests, or commits.
+- The authoritative design is `.claude/specs/2026-09-03-issue-122-conformance-engine-v1-design.md`. Cite D1–D37 by ID; never restate their rationale in code, tests, or commits.
 - Four files change across the whole plan and no others: `home/common/agent-skills/scripts/conformance.py` (new), `home/common/agent-skills/tests/test_conformance.py` (new), `home/common/agent-skills/default.nix`, `justfile`. `.agents/project.json`, `.agents/instructions/bootstrap.md`, `AGENTS.md` and `CLAUDE.md` are untouched (D12, D13).
 - Python standard library only. No third-party import, no network in any code path, no `sleep`, no timestamp anywhere in the report or the source.
 - **Closed vocabularies, exhaustively.** `domain` ∈ `repository | compatibility | host | verification`. `requirement` ∈ `required | optional`. `status` ∈ `passed | warning | failed | not_run | suppressed`. `outcome.status` ∈ `passed | failed | incomplete`. `safety_class` ∈ `read_only | worktree | user_action | destructive`. `purpose` ∈ `workflow_entry | adoption | local | ci | fleet | doctor`. `subject_kind` ∈ `contract | projection | path | capability | host_tool | tracker | release_profile | residue | command` (D25). Every dispatch over one of these raises on its default branch rather than falling through (the bar, *Fail loud*).

@@ -227,7 +227,7 @@ if __name__ == "__main__":
 | nested object fact | `facts = {"k": {"a": 1}}` | `/checks/0/facts/k` |
 | timestamp-named fact key | `facts = {"created_at": 1}` | `/checks/0/facts/created_at` |
 | unsorted required capabilities | `["worktrees", "tracker"]` | `/request/required_capabilities` |
-| repairs out of order | append a second check naming `contract.invalid`, insert that repair **first** | `/repairs` |
+| repairs out of order | append a second `failed` check `repository.projection.fresh` / `invalid_projection` naming `projection.regenerate` (`resolve-project`, `worktree`) and insert that repair **first** — it sorts *after* `onboarding.contract.missing`, so the list is descending | `/repairs` |
 | failed check under a passed outcome | outcome → `passed` / `None` | `/outcome/status` |
 | required `not_run` under a passed outcome | check → `not_run` / `offline_constraint`, outcome → `passed` | `/outcome/status` |
 | `primary_check_id` naming a passing check | append a passing second check and name it | `/outcome/primary_check_id` |
