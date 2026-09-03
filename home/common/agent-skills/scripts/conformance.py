@@ -557,12 +557,14 @@ def bounded_run(argv: list[str], cwd, env: dict | None = None):
 # --------------------------------------------------------------------------
 
 
+RESOLVABLE_CHECK_ID = "repository.contract.resolvable"
+REQUIRED_CAPABILITY_CHECK_ID = "host.capability.required"
 STAGE_CHECKS = {
     "present": "repository.contract.present",
     "schema_supported": "compatibility.contract.schema_supported",
     "valid": "repository.contract.valid",
     "projection_fresh": "repository.projection.fresh",
-    "capability_required": "host.capability.required",
+    "capability_required": REQUIRED_CAPABILITY_CHECK_ID,
 }
 STAGE_ORDER = tuple(STAGE_CHECKS)
 # Which stage a resolver refusal names. The raising call site does not decide
@@ -575,7 +577,6 @@ CODE_STAGES = {
     "invalid_projection": "projection_fresh",
     "capability_unavailable": "capability_required",
 }
-RESOLVABLE_CHECK_ID = "repository.contract.resolvable"
 
 
 # --------------------------------------------------------------------------
@@ -828,7 +829,7 @@ REGISTRY: tuple[Check, ...] = (
           ("repository.contract.valid",),
           (("invalid_projection", "projection.regenerate"),),
           "check_projection_fresh"),
-    Check("host.capability.required", "host", "capability", "required",
+    Check(REQUIRED_CAPABILITY_CHECK_ID, "host", "capability", "required",
           ("repository.contract.valid",),
           (("capability_unavailable", "capability.required.unavailable"),),
           "check_capability_required"),
@@ -854,12 +855,17 @@ PURPOSE_DOMAINS = {
 }
 
 
-def select(purpose: str) -> tuple[Check, ...]:
+def select(purpose: str, required: tuple[str, ...] = ()) -> tuple[Check, ...]:
     """Contract: the checks `purpose` runs, in REGISTRY (dependency) order.
 
     Every purpose but `workflow_entry` selects by domain rather than by a
     hand-maintained id list, so registering a check is enough for it to be
     picked up (D21). `local` is the entry ladder plus every host check.
+
+    A non-empty `required` adds the capability check whatever the purpose's
+    domains are (D38): `adoption`, `ci` and `fleet` carry no `host` domain, and
+    without this union they would answer `passed` while a caller-declared
+    required capability is unsupported or blocked.
     """
     if purpose == "workflow_entry":
         chosen = set(WORKFLOW_ENTRY_LADDER)
@@ -871,6 +877,8 @@ def select(purpose: str) -> tuple[Check, ...]:
                   if check.domain in PURPOSE_DOMAINS[purpose]}
     else:
         raise ValueError(f"unknown purpose: {purpose!r}")
+    if required:
+        chosen.add(REQUIRED_CAPABILITY_CHECK_ID)
     return tuple(check for check in REGISTRY if check.id in chosen)
 
 
@@ -880,8 +888,14 @@ def select(purpose: str) -> tuple[Check, ...]:
 
 
 def evaluator(name: str):
-    """The evaluator a check declares, resolved through this module."""
-    return getattr(sys.modules[__name__], name)
+    """The evaluator a check declares, resolved through this module's globals.
+
+    `globals()` rather than `sys.modules[__name__]`: the S3 loader builds a
+    fresh module instance per call under one shared name, so resolving through
+    `sys.modules` would fetch the newest instance's function and silently
+    bypass a rebind made on the instance under test.
+    """
+    return globals()[name]
 
 
 def failed_ancestor(check: Check, results: dict, selected: set) -> str | None:
@@ -940,7 +954,7 @@ def evaluate(purpose: str, context: Context) -> list[dict]:
     `suppressed` never stops it, because it names a step the ladder skipped
     rather than the cause (D3, D33).
     """
-    checks = select(purpose)
+    checks = select(purpose, context.required)
     selected = {check.id for check in checks}
     results: dict = {}
     emitted: list[dict] = []

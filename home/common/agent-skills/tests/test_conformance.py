@@ -579,23 +579,62 @@ class ReadOnlyTest(unittest.TestCase):
 
 
 class PurposeSelectionTest(unittest.TestCase):
-    """SF-002: structural rules for all six purposes; Task 7 pins the exact ids."""
+    """SF-002: structural rules for all six purposes; Task 7 pins the exact ids.
+
+    The invariants are asserted with and without a required capability, because
+    --require widens the selection for every purpose (D38) and must not cost it
+    duplicate-freedom, REGISTRY order or dependency closure.
+    """
 
     def test_every_purpose_is_duplicate_free_and_dependency_closed(self):
         module = load_module()
         for purpose in module.PURPOSES:
+            for required in ((), ("release",)):
+                with self.subTest(purpose=purpose, required=required):
+                    selected = module.select(purpose, required)
+                    ids = [check.id for check in selected]
+                    self.assertEqual(len(ids), len(set(ids)))
+                    self.assertEqual(
+                        ids, [c.id for c in module.REGISTRY if c.id in set(ids)])
+                    for check in selected:
+                        for dependency in check.depends_on:
+                            self.assertIn(dependency, ids, f"{purpose}: {check.id}")
+
+    def test_a_required_capability_selects_its_check_for_every_purpose(self):
+        module = load_module()
+        for purpose in module.PURPOSES:
             with self.subTest(purpose=purpose):
-                ids = [check.id for check in module.select(purpose)]
-                self.assertEqual(len(ids), len(set(ids)))
-                self.assertEqual(
-                    ids, [c.id for c in module.REGISTRY if c.id in set(ids)])
-                for check in module.select(purpose):
-                    for dependency in check.depends_on:
-                        self.assertIn(dependency, ids, f"{purpose}: {check.id}")
+                ids = [c.id for c in module.select(purpose, ("release",))]
+                self.assertIn("host.capability.required", ids)
 
     def test_an_unknown_purpose_raises(self):
         with self.assertRaises(ValueError):
             load_module().select("teleport")
+
+
+class RequiredCapabilitySelectionTest(unittest.TestCase):
+    """D38: no purpose reports `passed` while a required capability is missing.
+
+    `adoption`, `ci` and `fleet` carry no `host` domain, so a purely
+    domain-derived selection drops the one check that judges `--require` and
+    the report answers `passed` with the unmet name still in `request`.
+    """
+
+    def test_no_purpose_passes_while_a_required_capability_is_unavailable(self):
+        for purpose in ("adoption", "ci", "fleet"):
+            with self.subTest(purpose=purpose):
+                with fixture() as tmp:
+                    code, out, err = run("run", "--purpose", purpose,
+                                         "--repo-root", str(make_root(tmp)),
+                                         "--require", "release")
+                    self.assertEqual(code, 0, err)
+                    report = json.loads(out)
+                    self.assertEqual(report["outcome"], {
+                        "status": "failed",
+                        "primary_check_id": "host.capability.required"})
+                    check = {c["id"]: c for c in report["checks"]}[
+                        "host.capability.required"]
+                    self.assertEqual(check["reason_code"], "capability_unavailable")
 
 
 class FactBoundingTest(unittest.TestCase):
@@ -622,18 +661,48 @@ class FactBoundingTest(unittest.TestCase):
             module.bound_facts([f"{index}" + "w" * 300 for index in range(12)])))
 
 
-class EngineFailureTest(unittest.TestCase):
+class Rebinding:
+    """Restore every module attribute a case replaces, so none leaks forward."""
+
+    def rebind(self, owner, name, value):
+        original = getattr(owner, name)
+        self.addCleanup(setattr, owner, name, original)
+        setattr(owner, name, value)
+
+
+class EvaluatorResolutionTest(Rebinding, unittest.TestCase):
+    """S3: an evaluator is resolved through the module that declared it.
+
+    `load_module` builds a fresh instance per call under one shared
+    `sys.modules` key, so resolving an evaluator through that key would fetch
+    the newest instance's function and silently bypass a rebind made on the
+    instance under test — the very thing S3 is reserved for.
+    """
+
+    def test_a_rebound_evaluator_is_the_one_evaluate_calls(self):
+        module = load_module()
+        load_module()  # a second instance now owns the shared sys.modules name
+        self.rebind(module, "check_contract_present", lambda _context: module.Outcome(
+            "failed", "not_onboarded", "onboarding.contract.missing"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = module.main(["run", "--purpose", "doctor", "--offline",
+                                "--repo-root", str(REPO_ROOT)])
+        self.assertEqual(code, 0)
+        by_id = {c["id"]: c for c in json.loads(buf.getvalue())["checks"]}
+        self.assertEqual(
+            [by_id["repository.contract.present"]["status"],
+             by_id["repository.contract.present"]["reason_code"]],
+            ["failed", "not_onboarded"])
+
+
+class EngineFailureTest(Rebinding, unittest.TestCase):
     """S3: the boundary refuses; the ladder's declared catch does not (D17, D29).
 
     Both cases pass --offline, and every later S3 case calling main must: in
     process there is no hermetic runner, so evaluate's offline rule is what
     keeps Task 4's network check from spawning a child (D35).
     """
-
-    def rebind(self, owner, name, value):
-        original = getattr(owner, name)
-        self.addCleanup(setattr, owner, name, original)
-        setattr(owner, name, value)
 
     def test_an_unexpected_engine_exception_becomes_the_refusal(self):
         module = load_module()
