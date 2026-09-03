@@ -1435,8 +1435,21 @@ class ManifestGateTest(ResolverTestCase):
         for violations in self.refusals(manifest, self.make_root()):
             self.assertEqual([v["pointer"] for v in violations], expected)
 
+    def assert_repair_id(self, manifest: object, expected: str) -> None:
+        """The three whole-file failures share the empty pointer, so only the
+        repair id tells a caller which one it hit."""
+        self.set_manifest(manifest)
+        root = self.make_root()
+        for subcommand in SUBCOMMANDS:
+            with self.subTest(subcommand=subcommand):
+                code, out, _ = run(subcommand, "--repo-root", str(root),
+                                   home=self.home)
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(out)["error"]["repair_id"], expected)
+
     def test_a_missing_manifest_refuses(self):
         self.assert_pointers(None, [""])
+        self.assert_repair_id(None, "platform.manifest.missing")
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
                      "root reads a 0000 file, so the case cannot be staged")
@@ -1454,12 +1467,16 @@ class ManifestGateTest(ResolverTestCase):
                 error = json.loads(out)["error"]
                 self.assertEqual(error["code"], "resolver_failure")
                 self.assertEqual([v["pointer"] for v in error["violations"]], [""])
+                self.assertEqual(error["repair_id"],
+                                 "platform.manifest.unreadable")
 
     def test_a_manifest_that_is_not_valid_json_refuses(self):
         self.assert_pointers("{", [""])
+        self.assert_repair_id("{", "platform.manifest.parse")
 
     def test_a_manifest_that_is_not_an_object_refuses(self):
         self.assert_pointers([], [""])
+        self.assert_repair_id([], "platform.manifest.not_object")
 
     def test_an_unexpected_member_refuses(self):
         self.assert_pointers(mutated_manifest(surprise=1), ["/surprise"])
