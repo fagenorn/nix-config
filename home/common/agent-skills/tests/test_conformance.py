@@ -811,6 +811,27 @@ class TrackerCredentialTest(ReportAssertions, unittest.TestCase):
                 "host": "github.com"})
             self.assert_validates(report)
 
+    def test_the_probe_is_scoped_to_the_host_whose_credential_it_reports(self):
+        """`gh auth status` unscoped exits 0 when *any* configured host holds a
+        credential. Reporting `github.com` on that basis passes a machine
+        authenticated only against another forge, so the hostname the facts
+        name and the hostname the argv asks about must be the same one."""
+        with fixture() as tmp:
+            log = tmp / "gh-argv.txt"
+            stub_bin = tmp / "argvbin"
+            make_stub_bin(stub_bin)
+            gh = stub_bin / "gh"
+            gh.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {log}\nexit 0\n',
+                          encoding="utf-8")
+            gh.chmod(0o755)
+            report, by_id = doctor(self, make_root(tmp),
+                                   env=dict(HERMETIC_ENV, PATH=str(stub_bin)))
+            self.assertEqual(by_id[self.CHECK_ID]["status"], "passed")
+            argv = log.read_text(encoding="utf-8").split("\n")[:-1]
+            self.assertEqual(argv, ["auth", "status", "--hostname", "github.com"])
+            self.assertEqual(by_id[self.CHECK_ID]["facts"]["host"], argv[-1])
+            self.assert_validates(report)
+
     def test_an_unauthenticated_cli_fails_and_names_a_user_action_repair(self):
         with fixture() as tmp:
             report, by_id = doctor(self, make_root(tmp), env=gh_env(tmp, 1))

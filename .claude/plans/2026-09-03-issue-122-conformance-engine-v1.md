@@ -5,14 +5,14 @@
 
 **Goal:** Ship one `conformance` engine over Resolver v1 — a closed check registry across four truth domains, six closed purposes the engine (not the caller) resolves into a check ladder, and one closed `ConformanceReport` whose `workflow_entry` form carries exactly one root cause and exits non-zero while `doctor` carries every independent finding and exits zero.
 
-**Architecture:** A single standard-library Python script, `home/common/agent-skills/scripts/conformance.py`, installed as `~/.agents/bin/conformance`. It imports `resolve-project.py` in process through an explicit `SourceFileLoader` on its sibling file (D2) and calls the five ladder functions individually rather than calling `resolve` and catching whatever surfaces first. A static registry of check declarations — id, domain, subject kind, requirement, dependencies, reason codes, repair — drives evaluation; a static purpose table selects from it. Two subcommands: `run` produces a report, `validate-report` is the schema validator that every test and every consumer checks a report against.
+**Architecture:** Three standard-library modules in `home/common/agent-skills/scripts/` (D40, superseding this plan's single-file architecture): `conformance.py` — CLI, report and validator, installed as `~/.agents/bin/conformance` — importing siblings `conformance-checks.py` (evaluators) and `conformance-registry.py` (declarations and purpose table). It imports `resolve-project.py` in process through an explicit `SourceFileLoader` on its sibling file (D2) and calls the five ladder functions individually rather than calling `resolve` and catching whatever surfaces first. A static registry of check declarations — id, domain, subject kind, requirement, dependencies, reason codes, repair — drives evaluation; a static purpose table selects from it. Two subcommands: `run` produces a report, `validate-report` is the schema validator that every test and every consumer checks a report against.
 
 **Tech stack:** Python 3 standard library only (`argparse`, `json`, `pathlib`, `os`, `shutil`, `fcntl`, `subprocess`, `platform`, `importlib`), `unittest` driven by subprocess against temporary roots, Home Manager / Nix (`home/common/agent-skills/default.nix`), Just.
 
 ## Global Constraints
 
-- The authoritative design is `.claude/specs/2026-09-03-issue-122-conformance-engine-v1-design.md`. Cite D1–D37 by ID; never restate their rationale in code, tests, or commits.
-- Four files change across the whole plan and no others: `home/common/agent-skills/scripts/conformance.py` (new), `home/common/agent-skills/tests/test_conformance.py` (new), `home/common/agent-skills/default.nix`, `justfile`. `.agents/project.json`, `.agents/instructions/bootstrap.md`, `AGENTS.md` and `CLAUDE.md` are untouched (D12, D13).
+- The authoritative design is `.claude/specs/2026-09-03-issue-122-conformance-engine-v1-design.md`. Cite D1–D41 by ID; never restate their rationale in code, tests, or commits.
+- Nine files change across the whole plan and no others, all under `home/common/agent-skills/` but the last: `scripts/conformance.py`, `scripts/conformance-checks.py`, `scripts/conformance-registry.py`, `tests/test_conformance.py`, `tests/test_conformance_checks.py`, `tests/test_conformance_registry.py`, `tests/conformance_test_support.py` (all new), `default.nix`, and the root `justfile`. D40 superseded the original four-file constraint; the set is still closed and a tenth file is a plan bug. `.agents/project.json`, `.agents/instructions/bootstrap.md`, `AGENTS.md` and `CLAUDE.md` are untouched (D12, D13).
 - Python standard library only. No third-party import, no network in any code path, no `sleep`, no timestamp anywhere in the report or the source.
 - **Closed vocabularies, exhaustively.** `domain` ∈ `repository | compatibility | host | verification`. `requirement` ∈ `required | optional`. `status` ∈ `passed | warning | failed | not_run | suppressed`. `outcome.status` ∈ `passed | failed | incomplete`. `safety_class` ∈ `read_only | worktree | user_action | destructive`. `purpose` ∈ `workflow_entry | adoption | local | ci | fleet | doctor`. `subject_kind` ∈ `contract | projection | path | capability | host_tool | tracker | release_profile | residue | command` (D25). Every dispatch over one of these raises on its default branch rather than falling through (the bar, *Fail loud*).
 - **The report has exactly six top-level members**: `schema_version`, `subject`, `request`, `outcome`, `checks`, `repairs`. `schema_version` is the integer `1`. No seventh member, no member omitted, no timestamp.
@@ -41,23 +41,25 @@
 - **Fake CLI on `PATH`** — a temp directory holding an executable `gh` stub exiting 0 or 1, and an empty `PATH` — covers the tracker and helper checks without a packet. `shutil.which` honours both.
 - **Kernel-held `flock`** — the test process holds `fcntl.flock` on a fixture `state.lock` while the subprocess runs, proving the `live_owner` branch without a sleep.
 - **The repository's own committed root** is the acceptance gate for `doctor` (D22).
-- `home/common/agent-skills/tests/test_conformance.py` is the engine's whole suite, wired into `just agent-workflow-tests`. `just build` is the publication seam for `.agents/bin/conformance`. Add no other seam; a task needing one is a plan bug.
+- The four test modules above are the engine's whole suite, wired into `just agent-workflow-tests` (D40). `just build` is the publication seam for `.agents/bin/conformance`. Add no other seam; a task needing one is a plan bug.
 
 ## Task index
 
-Task 1 — Report schema, closed vocabularies and the `validate-report` subcommand, with Nix and `justfile` wiring — `home/common/agent-skills/scripts/conformance.py`, `home/common/agent-skills/tests/test_conformance.py`, `home/common/agent-skills/default.nix`, `justfile` — full — [task-1.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-1.md)
+D40 split the engine and its suite into modules after this index was written, so each row's file field names the closed set in Global Constraints; each task member states its own files.
 
-Task 2 — The engine core: resolver ladder, registry, purpose selection, precedence, suppression and the two `run` report shapes — `home/common/agent-skills/scripts/conformance.py`, `home/common/agent-skills/tests/test_conformance.py` — full — [task-2.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-2.md)
+Task 1 — Report schema, closed vocabularies and the `validate-report` subcommand, with Nix and `justfile` wiring — the closed nine-file set — full — [task-1.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-1.md)
 
-Task 3 — Host installation checks: store-symlinked policy path and helper missing from `PATH` — `home/common/agent-skills/scripts/conformance.py`, `home/common/agent-skills/tests/test_conformance.py` — full — [task-3.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-3.md)
+Task 2 — The engine core: resolver ladder, registry, purpose selection, precedence, suppression and the two `run` report shapes — the closed nine-file set — full — [task-2.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-2.md)
 
-Task 4 — The offline rule and the tracker credential check — `home/common/agent-skills/scripts/conformance.py`, `home/common/agent-skills/tests/test_conformance.py` — full — [task-4.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-4.md)
+Task 3 — Host installation checks: store-symlinked policy path and helper missing from `PATH` — the closed nine-file set — full — [task-3.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-3.md)
 
-Task 5 — Repository policy checks: path classification, runtime ignore sentinel, command shell indirection — `home/common/agent-skills/scripts/conformance.py`, `home/common/agent-skills/tests/test_conformance.py` — full — [task-5.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-5.md)
+Task 4 — The offline rule and the tracker credential check — the closed nine-file set — full — [task-4.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-4.md)
 
-Task 6 — Residue checks: nested ledgers proved by `flock`, and root scratch — `home/common/agent-skills/scripts/conformance.py`, `home/common/agent-skills/tests/test_conformance.py` — full — [task-6.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-6.md)
+Task 5 — Repository policy checks: path classification, runtime ignore sentinel, command shell indirection — the closed nine-file set — full — [task-5.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-5.md)
 
-Task 7 — The three release-profile lint checks and the end-to-end acceptance gate — `home/common/agent-skills/scripts/conformance.py`, `home/common/agent-skills/tests/test_conformance.py` — full — [task-7.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-7.md)
+Task 6 — Residue checks: nested ledgers proved by `flock`, and root scratch — the closed nine-file set — full — [task-6.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-6.md)
+
+Task 7 — The three release-profile lint checks and the end-to-end acceptance gate — the closed nine-file set — full — [task-7.md](2026-09-03-issue-122-conformance-engine-v1.tasks/task-7.md)
 
 ## Decisions
 

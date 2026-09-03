@@ -287,7 +287,11 @@ def check_executor_helper_on_path(context: "Context") -> "Outcome":
 
 
 TRACKERS: dict[str, dict] = {
-    "github": {"argv": ("auth", "status"), "host": "github.com"},
+    # `argv` is completed with `host` at the call site. An unscoped
+    # `gh auth status` exits 0 when *any* configured host holds a credential,
+    # which would report `github.com` authenticated on the strength of another
+    # forge's login — and fail it on an unrelated host's broken one.
+    "github": {"argv": ("auth", "status", "--hostname"), "host": "github.com"},
 }
 
 
@@ -306,7 +310,9 @@ def check_tracker_credential(context: "Context") -> "Outcome":
     env = dict(os.environ)
     for name in tracker["credential_env"]["unset_before_invocation"]:
         env.pop(name, None)   # the contract is the single home for the scrub
-    proc = bounded_run([cli, *TRACKERS[kind]["argv"]], cwd=context.root, env=env)
+    host = TRACKERS[kind]["host"]
+    proc = bounded_run([cli, *TRACKERS[kind]["argv"], host],
+                       cwd=context.root, env=env)
     if proc is None:
         # A tracker CLI that cannot be spawned is host.executor.helper_on_path's
         # finding, not this one's.
@@ -314,7 +320,6 @@ def check_tracker_credential(context: "Context") -> "Outcome":
                        "host.tracker.authenticate",
                        {"authenticated": False, "cli_invoked": False})
     # The table, never stdout: `gh auth status` prints the account name.
-    host = TRACKERS[kind]["host"]
     if proc.returncode == 0:
         return Outcome("passed", None, None,
                        {"authenticated": True, "cli_invoked": True,
@@ -394,15 +399,21 @@ def classify_path(relative: str, targets: frozenset) -> str | None:
 
 
 def agents_tree_paths(root: Path) -> set[str]:
-    """Every file under `<root>/.agents/`, repository-relative.
+    """Every file or symlink under `<root>/.agents/`, repository-relative.
 
     A path carrying a `.git` component is skipped: a nested repository's own
     bookkeeping is not this repository's classification subject.
+
+    A symlink is a subject in its own right, not merely when it resolves to a
+    file: `rglob` does not descend through a directory symlink, so a link that
+    `is_file()` rejects for pointing at a directory — or at nothing — would
+    otherwise contribute no subject at all and escape classification entirely.
     """
     found = set()
     for path in (root / AGENTS_DIR).rglob("*"):
         relative = path.relative_to(root)
-        if ".git" not in relative.parts and path.is_file():
+        if ".git" not in relative.parts and (path.is_symlink()
+                                             or path.is_file()):
             found.add(relative.as_posix())
     return found
 
@@ -469,6 +480,17 @@ def check_ignore_runtime_sentinel(context: "Context") -> "Outcome":
                     "sentinel": sentinel.exists()})
 
 
+def asks_a_shell_to_read_a_command(word: str) -> bool:
+    """Whether `word` is a short-option cluster carrying a shell's `-c`.
+
+    A shell accepts `-c` bundled with its other short options, so matching the
+    exact word `-c` lets `bash -lc '<script>'` through — and a script naming no
+    metacharacter then reaches a shell unnoticed.
+    """
+    return (word.startswith("-") and not word.startswith("--")
+            and "c" in word[1:])
+
+
 def reaches_through_a_shell(argv: list) -> bool:
     """Whether `argv` reaches its command through a shell rather than naming it.
 
@@ -476,14 +498,16 @@ def reaches_through_a_shell(argv: list) -> bool:
     command shape before `repository.contract.valid` passed, which this check
     declares as its dependency, so the two never re-implement one another.
     """
-    if Path(argv[0]).name in SHELL_ARGV0 and "-c" in argv[1:]:
+    if (Path(argv[0]).name in SHELL_ARGV0
+            and any(asks_a_shell_to_read_a_command(word)
+                    for word in argv[1:])):
         return True
     return any(meta in word for word in argv for meta in SHELL_METACHARACTERS)
 
 
 def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
-    """Contract: failed when a declared command's argv[0] is a shell invoked
-    with -c, or any argv element carries a shell metacharacter.
+    """Contract: failed when a declared command's argv[0] is a shell asked to
+    read a command, or any argv element carries a shell metacharacter.
 
     Read from the authored contract rather than `context.bindings`:
     normalization rewrites `cwd` and leaves `argv` alone, so the authored form

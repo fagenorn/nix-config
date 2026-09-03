@@ -70,6 +70,25 @@ class PathClassificationTest(ReportAssertions, unittest.TestCase):
                     ["conformance", "user_action", None])
                 self.assert_validates(report)
 
+    def test_an_unclassified_symlink_cannot_escape_by_pointing_at_a_directory(self):
+        """`rglob` does not descend through a directory symlink and `is_file()`
+        rejects the link itself, so a link judged only by what it resolves to
+        would contribute no subject at all — the one shape that turns an
+        unclassified path into silence rather than a finding."""
+        for label, target in (("directory", ".agents/artifacts/specs"),
+                              ("dangling", ".agents/nowhere")):
+            with self.subTest(target=label), fixture() as tmp:
+                root = make_root(tmp)
+                (root / ".agents/scratchpad").symlink_to(root / target)
+                report, by_id = doctor(self, root)
+                check = by_id[self.CHECK_ID]
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["repair_id"]],
+                    ["failed", "unclassified_path", self.REPAIR_ID])
+                self.assertEqual(check["facts"],
+                                 {"paths": [".agents/scratchpad"], "count": 1})
+                self.assert_validates(report)
+
     def test_runtime_state_is_a_class_not_an_escape(self):
         with fixture() as tmp:
             root = make_root(tmp)
@@ -193,6 +212,8 @@ class ShellIndirectionTest(ReportAssertions, unittest.TestCase):
 
     def test_a_shell_or_a_metacharacter_names_the_offending_command_id(self):
         for label, argv in (("shell -c", ["bash", "-c", "just build"]),
+                            ("bundled -lc", ["bash", "-lc", "just build"]),
+                            ("bundled -ec", ["sh", "-ec", "just build"]),
                             ("metacharacter", ["just", "build && just switch"])):
             with self.subTest(indirection=label), fixture() as tmp:
                 root = self.with_argv(make_root(tmp), "nix-build", argv)
