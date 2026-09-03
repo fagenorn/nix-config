@@ -11,6 +11,7 @@
   - Module constants `SCHEMA_VERSION = 1`, `DOMAINS`, `REQUIREMENTS`, `STATUSES`, `OUTCOME_STATUSES`, `SAFETY_CLASSES`, `PURPOSES`, `SUBJECT_KINDS`, `REPORT_MEMBERS`, `CHECK_MEMBERS`, `REPAIR_MEMBERS`, `REPAIR_MODULES` — each a `tuple[str, ...]` except `SCHEMA_VERSION`.
   - `class ReportError(Exception)` with `__init__(self, violations: list[dict]) -> None` and attribute `violations`, each entry `{"pointer": str, "message": str}`.
   - `def validate_report(report: object) -> None` — returns `None` for a schema-valid report, raises `ReportError` otherwise.
+  - `def bound_fact(value: str) -> str` and `def bound_facts(values, limit: int = MAX_FACT_LIST) -> list[str]` — the one fact-bounding helper pair every evaluator routes authored or filesystem-derived strings through (D30).
   - `def emit_json(value: object) -> int` and `def emit_error(code: str, repair_id: str, violations: list[dict]) -> int` — byte-identical in behaviour to the resolver's, exit codes 0 and 2.
   - `def build_parser() -> argparse.ArgumentParser`, `def dispatch(args) -> int`, `def main(argv: list[str] | None = None) -> int`, guarded by `if __name__ == "__main__":`.
 - Consumes: nothing from earlier tasks.
@@ -19,7 +20,8 @@
 - `validate_report` is a *pure* function of the parsed object: it opens no file, starts no process, and never mutates its argument.
 - A report is valid only when its member set is **exactly** `REPORT_MEMBERS` — a missing member and an extra member are each a violation.
 - `repairs` and the set of non-null `repair_id` values across `checks` are the same set: a check naming a repair absent from `repairs` is a violation, and a repair no check names is a violation.
-- No member anywhere in a valid report may be named `timestamp`, `created_at`, `generated_at`, or `time`.
+- No member anywhere in a valid report may be named `timestamp`, `created_at`, `generated_at`, or `time` — **including a `facts` key**, which `validate_facts` enforces itself rather than inheriting (D37).
+- The validator pins every invariant the plan root declares, not only field shapes (D37): outcome precedence against the emitted statuses; `primary_check_id` naming the first `failed` check in emitted order, else the first required `not_run`, else `null`; a `suppressed` check carrying exactly `{"suppressed_by": <str>}` and a null `repair_id`; and `passed` implying a null `reason_code` and a null `repair_id`. Membership of `request.required_capabilities` in the resolver's `CAPABILITY_NAMES` stays out of the validator — sourcing it would mean loading the resolver and break the purity invariant above; the closed argparse `choices` is its enforcement point, and Task 2's report test asserts the emitted set is a subset.
 - `ReportError.violations` is non-empty and sorted byte-wise ascending by `pointer`.
 - The module defines no `run` subcommand in this task: a committed placeholder subcommand is a defect (the bar, *Production-grade by default*).
 
@@ -61,11 +63,20 @@ Create `home/common/agent-skills/tests/test_conformance.py` with the module docs
 Runs the engine as a subprocess against temporary repository roots and parses
 its stdout, the seam test_resolve_project.py established (D16). The module is
 imported only for the seams no subprocess run can reach.
+
+Every run is environment-hermetic (D35): the child never inherits the caller's
+environment, so no test can reach the network, the caller's credentials or a
+tool the fixture did not place. HERMETIC_ENV points PATH at a stub bin holding
+one exit-0 script per tool the contract names; a case that needs a different
+tool outcome builds its own bin with make_stub_bin and overrides PATH.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -74,14 +85,61 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "conformance.py"
 REPO_ROOT = Path(__file__).resolve().parents[4]
+STUB_TOOLS = ("codex", "gh", "git", "just")
 
 
-def run(*args: str) -> tuple[int, str, str]:
+def make_stub_bin(directory: Path, exits: dict | None = None) -> str:
+    """A bin directory holding one executable stub per STUB_TOOLS.
+
+    Each stub prints nothing and exits 0 unless `exits` names a different code
+    for it, so a fixture decides every tool outcome the engine can observe.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for tool in STUB_TOOLS:
+        stub = directory / tool
+        stub.write_text(f"#!/bin/sh\nexit {(exits or {}).get(tool, 0)}\n",
+                        encoding="utf-8")
+        stub.chmod(0o755)
+    return str(directory)
+
+
+_HERMETIC_HOME = tempfile.mkdtemp(prefix="conformance-home-")
+HERMETIC_ENV = {
+    "PATH": make_stub_bin(Path(tempfile.mkdtemp(prefix="conformance-bin-"))),
+    "HOME": _HERMETIC_HOME,
+    "TMPDIR": _HERMETIC_HOME,
+    "LANG": "C",
+}
+
+
+def run(*args: str, env: dict | None = None,
+        cwd: str | Path | None = None) -> tuple[int, str, str]:
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, timeout=60,
+        env=HERMETIC_ENV if env is None else env, cwd=None if cwd is None else str(cwd),
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+@contextlib.contextmanager
+def fixture():
+    """A temporary directory, as a Path."""
+    with tempfile.TemporaryDirectory() as tmp:
+        yield Path(tmp)
+
+
+def doctor(case, root, *extra: str, env: dict | None = None) -> tuple[dict, dict]:
+    """One `doctor` run: asserts exit 0, returns (report, {check id: check}).
+
+    Tasks 2-7 read every check through this, so no case re-spells the run, the
+    exit assertion or the id index.
+    """
+    code, out, err = run("run", "--purpose", "doctor", "--repo-root", str(root),
+                         *extra, env=env)
+    case.assertEqual(code, 0, err)
+    report = json.loads(out)
+    return report, {c["id"]: c for c in report["checks"]}
 
 
 def valid_report() -> dict:
@@ -116,8 +174,8 @@ class ValidateReportTest(unittest.TestCase):
     """S2: the validator, as a subprocess."""
 
     def check(self, mutate, pointer: str) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = write_report(Path(tmp), mutate)
+        with fixture() as tmp:
+            path = write_report(tmp, mutate)
             code, out, _ = run("validate-report", "--input", str(path))
             self.assertEqual(code, 2)
             payload = json.loads(out)
@@ -125,64 +183,16 @@ class ValidateReportTest(unittest.TestCase):
             self.assertIn(pointer, [v["pointer"] for v in payload["error"]["violations"]])
 
     def test_valid_report_is_accepted(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = write_report(Path(tmp))
+        with fixture() as tmp:
+            path = write_report(tmp)
             code, out, _ = run("validate-report", "--input", str(path))
             self.assertEqual(code, 0, out)
             self.assertEqual(json.loads(out), {"valid": True})
 
-    def test_extra_top_level_member_is_refused(self):
-        self.check(lambda r: r.__setitem__("extra", 1), "/extra")
-
-    def test_missing_top_level_member_is_refused(self):
-        self.check(lambda r: r.pop("repairs"), "/repairs")
-
-    def test_timestamp_member_is_refused(self):
-        self.check(lambda r: r["subject"].__setitem__("timestamp", 0), "/subject/timestamp")
-
-    def test_unknown_status_is_refused(self):
-        self.check(lambda r: r["checks"][0].__setitem__("status", "skipped"),
-                   "/checks/0/status")
-
-    def test_unknown_safety_class_is_refused(self):
-        self.check(lambda r: r["repairs"][0].__setitem__("safety_class", "risky"),
-                   "/repairs/0/safety_class")
-
-    def test_unknown_subject_kind_is_refused(self):
-        self.check(lambda r: r["checks"][0].__setitem__("subject_kind", "widget"),
-                   "/checks/0/subject_kind")
-
-    def test_dangling_repair_id_is_refused(self):
-        self.check(lambda r: r["repairs"].clear(), "/repairs")
-
-    def test_unreferenced_repair_is_refused(self):
-        self.check(lambda r: r["checks"][0].__setitem__("repair_id", None),
-                   "/repairs")
-
-    def test_oversized_facts_object_is_refused(self):
-        self.check(
-            lambda r: r["checks"][0].__setitem__(
-                "facts", {f"k{i}": "v" for i in range(9)}),
-            "/checks/0/facts")
-
-    def test_overlong_fact_string_is_refused(self):
-        self.check(lambda r: r["checks"][0].__setitem__("facts", {"k": "x" * 201}),
-                   "/checks/0/facts/k")
-
-    def test_nested_object_fact_is_refused(self):
-        self.check(lambda r: r["checks"][0].__setitem__("facts", {"k": {"a": 1}}),
-                   "/checks/0/facts/k")
-
-    def test_repairs_out_of_order_is_refused(self):
-        def mutate(report):
-            report["checks"].append(dict(report["checks"][0],
-                                         id="repository.contract.valid",
-                                         repair_id="contract.invalid"))
-            report["repairs"].insert(0, {"repair_id": "contract.invalid",
-                                         "module": "resolve-project",
-                                         "safety_class": "user_action",
-                                         "operation": None})
-        self.check(mutate, "/repairs")
+    def test_each_schema_violation_is_refused_at_its_pointer(self):
+        for name, (mutate, pointer) in REFUSALS.items():
+            with self.subTest(case=name):
+                self.check(mutate, pointer)
 
     def test_unreadable_input_is_refused(self):
         code, out, _ = run("validate-report", "--input", "/nonexistent/report.json")
@@ -199,6 +209,33 @@ class ValidateReportTest(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 ```
+
+`REFUSALS` is a module-level `{case name: (mutate, pointer)}` table, each `mutate` a callable taking the valid report and making **exactly one** violation reachable. Where a mutation would otherwise cascade, it also repairs the collateral — clearing `repairs` and resetting `outcome` to `{"status": "passed", "primary_check_id": None}` — so each row isolates the invariant it names:
+
+| Case | Mutation | Pointer |
+|---|---|---|
+| extra top-level member | `report["extra"] = 1` | `/extra` |
+| missing top-level member | `report.pop("repairs")` | `/repairs` |
+| timestamp member | `report["subject"]["timestamp"] = 0` | `/subject/timestamp` |
+| unknown status | check `status` → `"skipped"` | `/checks/0/status` |
+| unknown safety class | repair `safety_class` → `"risky"` | `/repairs/0/safety_class` |
+| unknown subject kind | check `subject_kind` → `"widget"` | `/checks/0/subject_kind` |
+| dangling repair id | `report["repairs"].clear()` | `/repairs` |
+| unreferenced repair | check `repair_id` → `None` | `/repairs` |
+| oversized facts | nine keys in `facts` | `/checks/0/facts` |
+| overlong fact string | `facts = {"k": "x" * 201}` | `/checks/0/facts/k` |
+| nested object fact | `facts = {"k": {"a": 1}}` | `/checks/0/facts/k` |
+| timestamp-named fact key | `facts = {"created_at": 1}` | `/checks/0/facts/created_at` |
+| unsorted required capabilities | `["worktrees", "tracker"]` | `/request/required_capabilities` |
+| repairs out of order | append a second check naming `contract.invalid`, insert that repair **first** | `/repairs` |
+| failed check under a passed outcome | outcome → `passed` / `None` | `/outcome/status` |
+| required `not_run` under a passed outcome | check → `not_run` / `offline_constraint`, outcome → `passed` | `/outcome/status` |
+| `primary_check_id` naming a passing check | append a passing second check and name it | `/outcome/primary_check_id` |
+| suppressed check carrying a repair | check → `suppressed`, `facts = {"suppressed_by": "x"}`, repair kept | `/checks/0/repair_id` |
+| suppressed check without `suppressed_by` | check → `suppressed`, `facts = {}` | `/checks/0/facts` |
+| passed check carrying a reason code | check → `passed` with `reason_code` set | `/checks/0/reason_code` |
+
+The last six rows are the ones the field-shape validator alone would let through: they pin outcome precedence, primary-check selection, suppression's exact facts and null repair, and status/reason/repair consistency (D37).
 
 - [ ] **Step 2: Run the test and watch it fail**
 
@@ -227,11 +264,25 @@ Structure the validator as one collecting pass — it owes the caller every viol
 - Top level: `schema_version` must be the integer `1` (a `bool` is not an int here); `subject`, `request`, `outcome` are objects with exactly `SUBJECT_MEMBERS`, `REQUEST_MEMBERS`, `OUTCOME_MEMBERS`; `checks` and `repairs` are lists.
 - `subject.project_id` is a `str` or `None`; `subject.root` is a non-empty `str`; `subject.revision` is `None` or a 40-character lowercase hex `str`; `subject.platform` is an object with exactly `PLATFORM_MEMBERS`, both non-empty strings.
 - `request.purpose` ∈ `PURPOSES`; `request.offline` is a `bool`; `request.required_capabilities` is a list of strings, sorted and duplicate-free; `request.platform_target` is a non-empty `str`.
-- `outcome.status` ∈ `OUTCOME_STATUSES`; `outcome.primary_check_id` is `None` or a `str` that is the `id` of some emitted check.
+- `outcome.status` ∈ `OUTCOME_STATUSES` **and agrees with the emitted checks**: `failed` iff some check is `failed`, else `incomplete` iff some `required` check is `not_run`, else `passed`. `outcome.primary_check_id` is `None` when the outcome is `passed`, and otherwise names the first `failed` check in emitted order, or the first required `not_run` when the outcome is `incomplete`. Report a disagreement at `/outcome/status` or `/outcome/primary_check_id` (D37).
 - Each check: exactly `CHECK_MEMBERS`; `domain` ∈ `DOMAINS`; `subject_kind` ∈ `SUBJECT_KINDS`; `requirement` ∈ `REQUIREMENTS`; `status` ∈ `STATUSES`; `id` a non-empty `str`; `reason_code` `None` or a non-empty `str`; `repair_id` `None` or a non-empty `str`; `facts` an object validated by `validate_facts`. Check ids must be unique and the list sorted ascending by `id` (D24) — an unsorted list is a violation at `/checks`.
-- `validate_facts(facts, pointer, violations)`: at most `MAX_FACT_KEYS` keys; each value is a `bool`, an `int` that is not a `bool`, a `str` of at most `MAX_FACT_STRING` characters, or a `list` of at most `MAX_FACT_LIST` such strings. Anything else — a float, a nested object, a `None`, an over-long string — is a violation at `<pointer>/<key>`; too many keys is a violation at `<pointer>` (D9).
+- Status consistency, per check (D37): `passed` requires a null `reason_code` and a null `repair_id`; `suppressed` requires a null `reason_code`, a null `repair_id` and `facts` exactly `{"suppressed_by": <non-empty str>}`; `failed`, `warning` and `not_run` each require a non-null `reason_code`. Report at `<pointer>/reason_code`, `<pointer>/repair_id` or `<pointer>/facts`.
+- `validate_facts(facts, pointer, violations)`: at most `MAX_FACT_KEYS` keys; no key in `FORBIDDEN_MEMBER_NAMES`; each value is a `bool`, an `int` that is not a `bool`, a `str` of at most `MAX_FACT_STRING` characters, or a `list` of at most `MAX_FACT_LIST` such strings. Anything else — a float, a nested object, a `None`, an over-long string — is a violation at `<pointer>/<key>`; too many keys is a violation at `<pointer>` (D9).
 - Each repair: exactly `REPAIR_MEMBERS`; `safety_class` ∈ `SAFETY_CLASSES`; `module` ∈ `REPAIR_MODULES`; `operation` is `None` or an object with exactly `OPERATION_MEMBERS` whose `subcommand` is a non-empty `str` and whose `args` is a list of strings (D25). Repair ids must be unique and the list sorted ascending by `repair_id`; an unsorted or duplicated list is a violation at `/repairs`.
 - Referential closure, both directions, reported at `/repairs`: `{c["repair_id"] for c in checks if c["repair_id"] is not None}` must equal `{r["repair_id"] for r in repairs}`. Report the missing set and the unreferenced set as separate violations with distinct messages so a reader learns which direction failed.
+
+The fact-bounding helper pair (D30) — the single place any evaluator turns an authored or filesystem-derived value into a fact, so no evaluator ever reasons about whether its own subject can be long:
+
+```python
+def bound_fact(value: str) -> str:
+    """Contract: `value` truncated to MAX_FACT_STRING characters."""
+
+
+def bound_facts(values, limit: int = MAX_FACT_LIST) -> list[str]:
+    """Contract: the first `limit` of `sorted(values)`, each through bound_fact."""
+```
+
+Only an engine-authored literal — a registry id, a closed-set member, a repair id — may become a fact without passing through them.
 
 Emitters, copied in behaviour from the resolver so both tools print identical bytes for identical values:
 
@@ -279,7 +330,7 @@ if grep -Eq '"run"|add_parser\("run"' home/common/agent-skills/scripts/conforman
 fi
 ```
 
-Expected: the unittest run reports OK with 15 tests; `just agent-workflow-tests` passes with the new module included; `just build` succeeds; both greps succeed; the placeholder guard prints nothing and exits 0.
+Expected: the unittest run reports OK, with every REFUSALS subtest green; `just agent-workflow-tests` passes with the new module included; `just build` succeeds; both greps succeed; the placeholder guard prints nothing and exits 0.
 
 Falsifiability at the base commit: `python3 -m unittest home/common/agent-skills/tests/test_conformance.py` fails, because neither the test module nor the script exists.
 

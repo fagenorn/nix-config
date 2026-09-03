@@ -5,7 +5,7 @@
 - Modify: `home/common/agent-skills/tests/test_conformance.py`
 
 **Interfaces:**
-- Consumes from Task 2: `Check`, `Outcome`, `Context` (`context.root`, `context.contract`), `REGISTRY`, `REPAIRS`.
+- Consumes from Task 2: `Check`, `Outcome`, `Context` (`context.root`, `context.contract`), `REGISTRY`, `REPAIRS`, `bound_facts`.
 - Produces three evaluators — `check_paths_classified`, `check_ignore_runtime_sentinel`, `check_commands_no_shell_indirection` — plus `LIFECYCLE_CLASSES`, `CANONICAL_AGENTS_PREFIXES`, `OVERBROAD_IGNORE_PATTERNS`, `RUNTIME_IGNORE_PATTERNS`, `SHELL_ARGV0`, `SHELL_METACHARACTERS`, and three registry entries with three repairs.
 
 **Invariants:**
@@ -13,7 +13,7 @@
 - Path classification is a **closed** four-class rule (#72). A path matching none of the four is a finding, never a new implicit class.
 - The ignore check reads the tracked ignore files only. `.git/info/exclude` is machine-local and is deliberately not consulted — a machine-local rule cannot be the repository's classification.
 - `verification.commands.no_shell_indirection` validates command *policy*; the resolver already validated command *shape*. Neither re-implements the other.
-- Facts carry repository-relative paths and command ids, never absolute paths and never a command's full argv.
+- Facts carry repository-relative paths and command ids, never absolute paths and never a command's full argv. All of them go through `bound_facts` (D30): a path and an authored command id are both unbounded strings, and an unbounded one would make the report fail `validate_report`.
 
 ## The four closed lifecycle classes (#72)
 
@@ -31,7 +31,7 @@ BOOKKEEPING_ALLOWLIST = ()   # closed and empty in v1: nothing outside .agents/
 
 ## `repository.paths.classified`
 
-**Subject set.** Every *file* under `<root>/.agents/` (recursive, `rglob("*")` filtered to `is_file()`, with any path containing a `.git` component skipped), expressed relative to `<root>/.agents/`; plus every declared projection `target`, expressed relative to `<root>`.
+**Subject set.** Every *file* under `<root>/.agents/` (recursive `rglob("*")` filtered to `is_file()`, skipping any path with a `.git` component), expressed relative to `<root>/.agents/`; plus every declared projection `target`, expressed relative to `<root>`.
 
 **Classification.**
 - A `.agents/`-relative path is `canonical_tracked` when it equals `project.json` or starts with one of the remaining `CANONICAL_AGENTS_PREFIXES` directory prefixes. Under `artifacts/` require the second segment to be one of `specs`, `plans`, `evidence`, `handoffs`, `notes`; any other `artifacts/<x>/` segment is unclassified.
@@ -40,16 +40,7 @@ BOOKKEEPING_ALLOWLIST = ()   # closed and empty in v1: nothing outside .agents/
 - A path equal to a member of `BOOKKEEPING_ALLOWLIST` is `allowlisted_bookkeeping`.
 - Anything else is unclassified.
 
-**The finding.** No unclassified path → `Outcome("passed")`. Otherwise:
-
-```python
-Outcome("failed", "unclassified_path", "lifecycle.path.classify", {
-    "paths": <up to 8 offending repository-relative paths, sorted>,
-    "count": <total offending>,
-})
-```
-
-Offending paths are reported repository-relative (`.agents/<x>` for the first set) so a reader can open them.
+**The finding.** No unclassified path → `Outcome("passed")`. Otherwise `Outcome("failed", "unclassified_path", "lifecycle.path.classify", {"paths": bound_facts(offending), "count": len(offending)})`, with offending paths reported repository-relative (`.agents/<x>` for the first set) so a reader can open them.
 
 ## `repository.ignore.runtime_sentinel`
 
@@ -60,8 +51,7 @@ OVERBROAD_IGNORE_PATTERNS = (".agents/*", "/.agents/*", ".claude/*", "/.claude/*
 ```
 
 1. Read `<root>/.gitignore` as UTF-8 if it exists; strip each line, drop empties and lines starting with `#`. An unreadable or absent file yields an empty rule list, never an exception.
-2. **Overbroad first** — an overbroad ignore conceals authored truth, so it outranks a missing sentinel. If any rule is in `OVERBROAD_IGNORE_PATTERNS`:
-   `Outcome("failed", "overbroad_ignore", "lifecycle.ignore.repair", {"rules": <up to 8 offending rules, sorted>, "count": <total>})`.
+2. **Overbroad first** — an overbroad ignore conceals authored truth, so it outranks a missing sentinel. Any rule in `OVERBROAD_IGNORE_PATTERNS` → `Outcome("failed", "overbroad_ignore", "lifecycle.ignore.repair", {"rules": bound_facts(offending), "count": len(offending)})`.
 3. **Then coverage.** `.agents/runtime/` is covered when either some root rule is in `RUNTIME_IGNORE_PATTERNS`, or `<root>/.agents/runtime/.gitignore` exists and its bytes are exactly `b"*\n"` (#72's sentinel). Neither → `Outcome("failed", "runtime_ignore_missing", "lifecycle.ignore.repair", {"root_gitignore": <bool: the file exists>, "sentinel": <bool: the sentinel file exists>})`.
 4. Otherwise `Outcome("passed")`.
 
@@ -74,205 +64,58 @@ SHELL_ARGV0 = ("sh", "bash", "zsh", "dash", "ksh")
 SHELL_METACHARACTERS = (";", "|", "&&", "`", "$(")
 ```
 
-For each `command_id, entry` in `sorted(context.contract["bindings"]["commands"].items())`, the entry is offending when either:
-- `Path(entry["argv"][0]).name` is in `SHELL_ARGV0` **and** `"-c"` appears in `entry["argv"][1:]`; or
-- any element of `entry["argv"]` contains any member of `SHELL_METACHARACTERS`.
+For each `command_id, entry` in `sorted(context.contract["bindings"]["commands"].items())`, the entry is offending when either `Path(entry["argv"][0]).name` is in `SHELL_ARGV0` **and** `"-c"` appears in `entry["argv"][1:]`, or any element of `entry["argv"]` contains any member of `SHELL_METACHARACTERS`.
 
 Read the *authored* contract, not the normalized bindings: normalization rewrites `cwd` but leaves `argv` alone, and reading the authored form keeps the reported ids and the authored text in one correspondence.
 
-No offender → `Outcome("passed")`. Otherwise:
-
-```python
-Outcome("failed", "shell_indirection", "contract.commands.destructure", {
-    "commands": <up to 8 offending command ids, sorted>,
-    "count": <total offending>,
-})
-```
+No offender → `Outcome("passed")`. Otherwise `Outcome("failed", "shell_indirection", "contract.commands.destructure", {"commands": bound_facts(offending_ids), "count": len(offending_ids)})`.
 
 ## Registry entries this task adds
 
-Append after `repository.projection.fresh` — all three depend on `repository.contract.valid`, which precedes them in `REGISTRY`:
+Append after `repository.projection.fresh` — all three depend on `repository.contract.valid`, which precedes them in `REGISTRY`. All three are `required`, `network = False`.
 
-| Id | Domain | Subject kind | Req. | Depends on | Reason codes | Repair (module, class, operation) |
-|---|---|---|---|---|---|---|
-| `repository.paths.classified` | repository | path | required | `repository.contract.valid` | `unclassified_path` | `lifecycle.path.classify` (conformance, `user_action`, null) |
-| `repository.ignore.runtime_sentinel` | repository | path | required | `repository.contract.valid` | `runtime_ignore_missing`, `overbroad_ignore` | `lifecycle.ignore.repair` (conformance, `worktree`, null) |
-| `verification.commands.no_shell_indirection` | verification | command | required | `repository.contract.valid` | `shell_indirection` | `contract.commands.destructure` (resolve-project, `user_action`, null) |
+| Id | Domain | Subject kind | `findings`: reason code → repair id | Repair module, class, operation |
+|---|---|---|---|---|
+| `repository.paths.classified` | repository | path | `unclassified_path` → `lifecycle.path.classify` | conformance, `user_action`, null |
+| `repository.ignore.runtime_sentinel` | repository | path | `runtime_ignore_missing` → `lifecycle.ignore.repair`; `overbroad_ignore` → `lifecycle.ignore.repair` | conformance, `worktree`, null |
+| `verification.commands.no_shell_indirection` | verification | command | `shell_indirection` → `contract.commands.destructure` | resolve-project, `user_action`, null |
 
 `lifecycle.ignore.repair` is `worktree` — editing `.gitignore` changes the working tree — but carries `operation: None`, because no engine subcommand performs it (D25).
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `home/common/agent-skills/tests/test_conformance.py`.
+Append three classes to `home/common/agent-skills/tests/test_conformance.py`. Each inherits `ReportAssertions`, builds its root with `make_root(tmp)` inside `with fixture() as tmp:`, reads the report through Task 1's `doctor(self, root)` helper, and calls `assert_validates(report)` on every failing case. Homogeneous rows go in one method over `self.subTest`.
 
-```python
-class PathClassificationTest(ReportAssertions, unittest.TestCase):
-    def test_a_conformant_agents_tree_passes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            code, out, err = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            self.assertEqual(code, 0, err)
-            check = {c["id"]: c for c in json.loads(out)["checks"]}[
-                "repository.paths.classified"]
-            self.assertEqual(check["status"], "passed")
-            self.assertEqual(check["facts"], {})
+**`PathClassificationTest`** — the check is `repository.paths.classified`; on a finding assert `reason_code == "unclassified_path"` and `repair_id == "lifecycle.path.classify"`.
 
-    def test_an_unclassified_agents_path_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            (root / ".agents/scratchpad").mkdir()
-            (root / ".agents/scratchpad/notes.txt").write_text("x", encoding="utf-8")
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            report = json.loads(out)
-            check = {c["id"]: c for c in report["checks"]}["repository.paths.classified"]
-            self.assertEqual(check["status"], "failed")
-            self.assertEqual(check["reason_code"], "unclassified_path")
-            self.assertEqual(check["facts"]["paths"], [".agents/scratchpad/notes.txt"])
-            self.assertEqual(check["facts"]["count"], 1)
-            self.assertEqual(check["repair_id"], "lifecycle.path.classify")
-            self.assert_validates(report)
+| Case | Fixture mutation | Expected |
+|---|---|---|
+| conformant tree | none | `passed`, `facts == {}` |
+| unclassified path | write `.agents/scratchpad/notes.txt` | `failed`, `facts == {"paths": [".agents/scratchpad/notes.txt"], "count": 1}` |
+| runtime state | write `.agents/runtime/state/run-1/state.json` | `passed` — `runtime/` is a class, not an escape |
+| unadmitted artifacts dir | write `.agents/artifacts/scratch/x.md` | `failed`, `facts["paths"] == [".agents/artifacts/scratch/x.md"]` |
+| cap and bound (D30) | 12 files under `.agents/scratchpad/` + six path segments of 40 `d`s each | `len(facts["paths"]) == 8`, `facts["count"] == 12`, and every emitted path is exactly 200 characters |
 
-    def test_a_runtime_path_is_classified_and_does_not_fail(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            (root / ".agents/runtime/state/run-1").mkdir(parents=True)
-            (root / ".agents/runtime/state/run-1/state.json").write_text(
-                "{}", encoding="utf-8")
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            check = {c["id"]: c for c in json.loads(out)["checks"]}[
-                "repository.paths.classified"]
-            self.assertEqual(check["status"], "passed")
+The last row is the one that fails without the bounding helper: a repository-relative path has no length ceiling, so an unbounded fact makes the engine's own report fail `validate_report` and turn a repository finding into `resolver_failure`.
 
-    def test_an_unadmitted_artifacts_subdirectory_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            (root / ".agents/artifacts/scratch").mkdir(parents=True)
-            (root / ".agents/artifacts/scratch/x.md").write_text("x", encoding="utf-8")
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            check = {c["id"]: c for c in json.loads(out)["checks"]}[
-                "repository.paths.classified"]
-            self.assertEqual(check["status"], "failed")
-            self.assertEqual(check["facts"]["paths"],
-                             [".agents/artifacts/scratch/x.md"])
+**`IgnoreSentinelTest`** — the check is `repository.ignore.runtime_sentinel`. A shared `build(tmp, gitignore, sentinel=False)` helper writes `<root>/.gitignore` and, when asked, `<root>/.agents/runtime/.gitignore` holding exactly `b"*\n"`.
 
-    def test_offending_paths_are_capped_at_eight(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            (root / ".agents/scratchpad").mkdir()
-            for i in range(12):
-                (root / f".agents/scratchpad/n{i}.txt").write_text("x", encoding="utf-8")
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            report = json.loads(out)
-            check = {c["id"]: c for c in report["checks"]}["repository.paths.classified"]
-            self.assertEqual(len(check["facts"]["paths"]), 8)
-            self.assertEqual(check["facts"]["count"], 12)
-            self.assert_validates(report)
+| Case | `.gitignore` | Sentinel | Expected |
+|---|---|---|---|
+| root rule | `.agents/runtime/` | no | `passed` |
+| committed sentinel | `result` | yes | `passed` |
+| no coverage | `result` | no | `failed` / `runtime_ignore_missing` / `lifecycle.ignore.repair`, and that repair's `safety_class` is `worktree` |
+| overbroad outranks | `.agents/runtime/` then `.agents/*` | no | `failed` / `overbroad_ignore`, `facts["rules"] == [".agents/*"]` |
 
+**`ShellIndirectionTest`** — the check is `verification.commands.no_shell_indirection`. A `with_argv(root, command_id, argv)` helper rewrites one command's `argv` in `<root>/.agents/project.json`.
 
-class IgnoreSentinelTest(ReportAssertions, unittest.TestCase):
-    def test_root_gitignore_rule_satisfies_the_sentinel(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            (root / ".gitignore").write_text(".agents/runtime/\n", encoding="utf-8")
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            check = {c["id"]: c for c in json.loads(out)["checks"]}[
-                "repository.ignore.runtime_sentinel"]
-            self.assertEqual(check["status"], "passed")
+| Case | `nix-build` argv | Expected |
+|---|---|---|
+| plain argv | unchanged | `passed`, `domain == "verification"` |
+| shell `-c` | `["bash", "-c", "just build"]` | `failed` / `shell_indirection` / `contract.commands.destructure`, `facts["commands"] == ["nix-build"]` |
+| metacharacter | `["just", "build && just switch"]` | same finding |
 
-    def test_the_committed_runtime_sentinel_also_satisfies_it(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            (root / ".gitignore").write_text("result\n", encoding="utf-8")
-            (root / ".agents/runtime").mkdir(parents=True)
-            (root / ".agents/runtime/.gitignore").write_bytes(b"*\n")
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            check = {c["id"]: c for c in json.loads(out)["checks"]}[
-                "repository.ignore.runtime_sentinel"]
-            self.assertEqual(check["status"], "passed")
-
-    def test_missing_coverage_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            (root / ".gitignore").write_text("result\n", encoding="utf-8")
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            report = json.loads(out)
-            check = {c["id"]: c for c in report["checks"]}[
-                "repository.ignore.runtime_sentinel"]
-            self.assertEqual(check["status"], "failed")
-            self.assertEqual(check["reason_code"], "runtime_ignore_missing")
-            self.assertEqual(check["repair_id"], "lifecycle.ignore.repair")
-            self.assertEqual(
-                {r["repair_id"]: r for r in report["repairs"]}[
-                    "lifecycle.ignore.repair"]["safety_class"], "worktree")
-            self.assert_validates(report)
-
-    def test_an_overbroad_ignore_outranks_a_present_sentinel(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            (root / ".gitignore").write_text(
-                ".agents/runtime/\n.agents/*\n", encoding="utf-8")
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            check = {c["id"]: c for c in json.loads(out)["checks"]}[
-                "repository.ignore.runtime_sentinel"]
-            self.assertEqual(check["status"], "failed")
-            self.assertEqual(check["reason_code"], "overbroad_ignore")
-            self.assertEqual(check["facts"]["rules"], [".agents/*"])
-
-
-class ShellIndirectionTest(ReportAssertions, unittest.TestCase):
-    def mutate_commands(self, root: Path, command_id: str, argv: list) -> None:
-        path = root / ".agents/project.json"
-        contract = json.loads(path.read_text(encoding="utf-8"))
-        contract["bindings"]["commands"][command_id]["argv"] = argv
-        path.write_text(json.dumps(contract), encoding="utf-8")
-
-    def test_declared_commands_without_indirection_pass(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            check = {c["id"]: c for c in json.loads(out)["checks"]}[
-                "verification.commands.no_shell_indirection"]
-            self.assertEqual(check["status"], "passed")
-            self.assertEqual(check["domain"], "verification")
-
-    def test_a_shell_dash_c_command_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            self.mutate_commands(root, "nix-build", ["bash", "-c", "just build"])
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            report = json.loads(out)
-            check = {c["id"]: c for c in report["checks"]}[
-                "verification.commands.no_shell_indirection"]
-            self.assertEqual(check["status"], "failed")
-            self.assertEqual(check["reason_code"], "shell_indirection")
-            self.assertEqual(check["facts"]["commands"], ["nix-build"])
-            self.assertEqual(check["repair_id"], "contract.commands.destructure")
-            self.assert_validates(report)
-
-    def test_a_metacharacter_in_any_argv_element_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            self.mutate_commands(root, "nix-build", ["just", "build && just switch"])
-            code, out, _ = run("run", "--purpose", "doctor", "--repo-root", str(root))
-            check = {c["id"]: c for c in json.loads(out)["checks"]}[
-                "verification.commands.no_shell_indirection"]
-            self.assertEqual(check["status"], "failed")
-            self.assertEqual(check["facts"]["commands"], ["nix-build"])
-
-    def test_the_ci_purpose_includes_the_verification_domain(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            code, out, _ = run("run", "--purpose", "ci", "--repo-root", str(root))
-            self.assertIn("verification.commands.no_shell_indirection",
-                          [c["id"] for c in json.loads(out)["checks"]])
-
-    def test_the_fleet_purpose_excludes_it(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp))
-            code, out, _ = run("run", "--purpose", "fleet", "--repo-root", str(root))
-            self.assertNotIn("verification.commands.no_shell_indirection",
-                             [c["id"] for c in json.loads(out)["checks"]])
-```
+One further case runs `run("run", "--purpose", purpose, "--repo-root", str(root))` for `ci` and `fleet` and asserts the check id is present for the first and absent for the second — the purpose table's own claim, proved rather than assumed.
 
 `make_root` must write a `.gitignore` covering `.agents/runtime/` from this task on, so the clean-root cases in every earlier class keep passing.
 

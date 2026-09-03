@@ -17,13 +17,16 @@
 - **Closed vocabularies, exhaustively.** `domain` ∈ `repository | compatibility | host | verification`. `requirement` ∈ `required | optional`. `status` ∈ `passed | warning | failed | not_run | suppressed`. `outcome.status` ∈ `passed | failed | incomplete`. `safety_class` ∈ `read_only | worktree | user_action | destructive`. `purpose` ∈ `workflow_entry | adoption | local | ci | fleet | doctor`. `subject_kind` ∈ `contract | projection | path | capability | host_tool | tracker | release_profile | residue | command` (D25). Every dispatch over one of these raises on its default branch rather than falling through (the bar, *Fail loud*).
 - **The report has exactly six top-level members**: `schema_version`, `subject`, `request`, `outcome`, `checks`, `repairs`. `schema_version` is the integer `1`. No seventh member, no member omitted, no timestamp.
 - A check object has exactly `id`, `domain`, `subject_kind`, `requirement`, `status`, `reason_code`, `repair_id`, `facts`. A repair object has exactly `repair_id`, `module`, `safety_class`, `operation`, where `operation` is `null` or `{"subcommand": <str>, "args": [<str>...]}` (D25).
-- `facts` is bounded: at most eight keys; each value a bool, an int, a string of at most 200 characters, or a list of at most eight such strings. This bound is the whole no-secrets guarantee — there is no content heuristic (D9).
+- `facts` is bounded: at most eight keys; each value a bool, an int, a string of at most 200 characters, or a list of at most eight such strings. This bound is the whole no-secrets guarantee — there is no content heuristic (D9). Every authored or filesystem-derived string reaches `facts` through the one `bound_fact`/`bound_facts` helper pair (D30); no evaluator reasons about whether its own subject — a path, a command id, a run id, a JSON pointer — is short enough, because none of them has a length ceiling.
 - **Outcome precedence**: `failed` if any check is `failed`; else `incomplete` if any **required** check is `not_run`; else `passed`. A `warning` never changes the outcome (D8). `primary_check_id` is the first `failed` check in emitted order, or the first required `not_run` when the outcome is `incomplete`, or `null` when `passed`.
 - Checks are evaluated in dependency order and **emitted sorted by id**; `primary_check_id` is chosen over the emitted order (D24). `repairs` is deduplicated by `repair_id` and sorted by `repair_id`. A repair appears in `repairs` if and only if some emitted check names it.
 - **Cascade suppression**: for a diagnostic purpose, a check whose `depends_on` closure contains a `failed` check is `suppressed`, carries exactly `{"suppressed_by": "<ancestor id>"}` in `facts`, and contributes no repair. Every check outside that closure still runs.
 - Success output is `json.dump(..., sort_keys=True, separators=(",", ":"), allow_nan=False)` plus a trailing newline on stdout. `run` exits 0 for every diagnostic purpose whatever the outcome; it exits 2 for `workflow_entry` when the outcome is not `passed`.
-- An unexpected engine failure prints the resolver's exact refusal shape `{"error":{"code":"resolver_failure","repair_id":"conformance.internal","violations":[…]}}` on stdout, exits 2, and prints no report (D15). Argparse usage errors exit 2 and print no JSON.
+- An unexpected engine failure prints the resolver's exact refusal shape `{"error":{"code":"resolver_failure","repair_id":"conformance.internal","violations":[…]}}` on stdout, exits 2, and prints no report (D15). The violation message is one **fixed sentence**, never the exception text, which can name a path. There is exactly **one** boundary — resolver loading, parser construction and dispatch all inside it, with argparse's `SystemExit` re-raised — and exactly one declared exception to it: the ladder's own catch inside `repository.contract.resolvable`, where a failure *of the resolver* is a check finding rather than a refusal (D29, D17). Argparse usage errors exit 2 and print no JSON.
+- `--repo-root`, when **omitted**, means *discover the root*: the engine hands the resolver `None` so its ancestor walk runs from the process working directory, and adopts the discovered project root as `subject.root`. An explicit `--repo-root` is the root, with no walk-up. Resolving `"."` first and passing that would make every run from a project subdirectory report `not_onboarded` (D28).
+- An evaluator returns an `Outcome` for every expected authored or environmental condition, and raises only where a closed-set dispatch inside it meets a value the set does not cover — an engine defect, not a finding (D32).
 - `--purpose` and `--require` are closed argparse `choices`; `--require` reuses the resolver's `CAPABILITY_NAMES` rather than restating the eleven names.
+- **The suite is offline and environment-hermetic** (D35). The central subprocess runner injects an explicit environment — it never inherits the caller's — whose `PATH` is a fixture stub bin, so no test can reach the network, a real credential, or a tool the fixture did not place. The acceptance gate against this repository's own committed root runs `--offline` and judges the registry and the report's shape, never the machine's ambient credential state.
 - **Nothing in this slice writes, moves or deletes a file under the subject root.** `run` opens nothing for writing, creates no directory, and executes no repair. Every child process it starts is read-only, carries a bounded timeout, and on failure yields a `null` fact or a check finding — never an escaping exception (D19).
 - **No v1 repair carries `destructive`** (D10). Elapsed time is never consulted anywhere.
 - Offline is an input, never an inference: nothing probes the network to decide whether the network is available, and no check may flip `request.offline`.
@@ -81,5 +84,23 @@ Task 7 — The three release-profile lint checks and the end-to-end acceptance g
 - D25 fixes the exact member sets of check and repair objects, used by Task 1.
 - D26 fixes the two nested-ledger repair ids, used by Task 6.
 - D27 fixes the release-profile subject locator and its two `not_run` reasons, used by Task 7.
+- D28 fixes root discovery when `--repo-root` is omitted, used by Task 2.
+- D29 fixes the single exception boundary and its fixed refusal sentence, used by Task 2.
+- D30 fixes the one fact-bounding helper pair, used by Tasks 1, 3, 5 and 6.
+- D31 fixes `Check.findings` as the sole reason-code-to-repair declaration, used by Tasks 2–7.
+- D32 fixes when an evaluator returns and when it raises, used by Tasks 2 and 7.
+- D33 fixes the complete cached-stage state machine, used by Task 2.
+- D34 fixes the two proofs a removable nested ledger needs, used by Task 6.
+- D35 fixes the hermetic test environment and the offline acceptance gate, used by every task.
+- D36 fixes the `sys.modules` registration the S3 loader needs, used by Task 2.
+- D37 fixes the report invariants `validate-report` pins, used by Task 1.
+
+## Standards review provenance
+
+Reviewer `Codex`, isolated read-only mode, base SHA `8b69f8c182118063eeecafda81b9948100cf2eb1`, no configured focus, no fallback used. Every finding was re-verified against the live worktree before it was applied; none was rejected or deferred.
+
+**13 accepted / 0 rejected / 0 deferred.**
+
+Dispositions, each finding accepted and landed as the named ledger row: BLK-001 → D28, BLK-002 → D33, BLK-003 → D29, BLK-004 → D34, BLK-005 → D31, BLK-006 → D30, BLK-007 → D35, BLK-008 → D36, SF-001/SF-002/SF-003/SF-004 → D37, SF-005 → D32.
 
 Task members are the normative executable instructions. Read this root once for shared constraints and then only the selected linked member.
