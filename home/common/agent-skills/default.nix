@@ -64,6 +64,24 @@ in
       executable = true;
     };
 
+    ".agents/bin/conformance" = {
+      source = ./scripts/conformance.py;
+      executable = true;
+    };
+
+    # Loaded by path as siblings of the entry module (D40), never invoked: a
+    # library module on PATH is a command that cannot run. `load_sibling` only
+    # needs `is_file()`, so they stay beside `conformance` unexecutable.
+    ".agents/bin/conformance-registry" = {
+      source = ./scripts/conformance-registry.py;
+      executable = false;
+    };
+
+    ".agents/bin/conformance-checks" = {
+      source = ./scripts/conformance-checks.py;
+      executable = false;
+    };
+
     ".agents/bin/agent-model-matrix" = {
       source = ./scripts/agent-model-matrix.py;
       executable = true;
