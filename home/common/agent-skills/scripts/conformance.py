@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fcntl
+import fnmatch
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import json
@@ -704,6 +706,18 @@ REPAIRS = {
     "contract.commands.destructure": {
         "module": "resolve-project", "safety_class": "user_action",
         "operation": None},
+    # v1 reports residue and executes nothing, so all three operations are null
+    # and none is `destructive` (D10). Retaining is the reader's own call;
+    # removing touches only the worktree the run directory lives in (D26).
+    "lifecycle.residue.nested_ledger.retain": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "lifecycle.residue.nested_ledger.remove": {
+        "module": "conformance", "safety_class": "worktree",
+        "operation": None},
+    "lifecycle.residue.root_scratch": {
+        "module": "conformance", "safety_class": "worktree",
+        "operation": None},
 }
 
 
@@ -1161,6 +1175,166 @@ def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
                    {"commands": bound_facts(offending), "count": len(offending)})
 
 
+# --------------------------------------------------------------------------
+# Residue
+# --------------------------------------------------------------------------
+
+# The ledger's own terminal vocabulary. Only `merged` admits the removal
+# repair: a run that stopped or failed terminated without the outcome the
+# lifecycle was after, and a reader — not the engine — decides what it owes.
+TERMINAL_LEDGER_STATES = ("merged", "stopped", "failed")
+REMOVABLE_LEDGER_STATE = "merged"
+
+LEDGER_RUNS_RELATIVE = (".superpowers", "workflows")
+LEDGER_STATE_FILE = "state.json"
+LEDGER_LOCK_FILE = "state.lock"
+
+LIVE_OWNER = "live_owner"
+UNACKNOWLEDGED_RESIDUE = "unacknowledged_residue"
+TERMINAL_RESIDUE = "terminal_residue"
+# Declaration order is severity order, and this tuple is the check's own
+# `findings` (D31): the evaluator reads the first class it counted, so a report
+# naming a removable run while another is live never offers the removal repair.
+NESTED_LEDGER_FINDINGS = (
+    (LIVE_OWNER, "lifecycle.residue.nested_ledger.retain"),
+    (UNACKNOWLEDGED_RESIDUE, "lifecycle.residue.nested_ledger.retain"),
+    (TERMINAL_RESIDUE, "lifecycle.residue.nested_ledger.remove"),
+)
+# The fact key each class is counted under; the codes read as reason codes and
+# the keys read as a tally, so neither borrows the other's spelling.
+RESIDUE_FACT_KEYS = {LIVE_OWNER: "live_owner",
+                     UNACKNOWLEDGED_RESIDUE: "unacknowledged",
+                     TERMINAL_RESIDUE: "terminal"}
+
+ROOT_SCRATCH_PATTERNS = ("producer-report-*.json", "review-package-report-*.json",
+                         "*.tmp.??????", ".resolve-project.*.tmp")
+
+
+def nested_ledger_runs(context: "Context") -> list:
+    """Every ledger run directory living inside a worktree, sorted by path.
+
+    A run in the primary checkout is where the ledger belongs; only a copy
+    that a worktree carried away is residue.
+    """
+    worktree_root = (context.root
+                     / context.contract["bindings"]["vcs"]["worktree"]["root"])
+    if not worktree_root.is_dir():
+        return []
+    runs = []
+    for worktree in sorted(worktree_root.iterdir()):
+        if not worktree.is_dir():
+            continue
+        workflows = worktree.joinpath(*LEDGER_RUNS_RELATIVE)
+        if not workflows.is_dir():
+            continue
+        runs.extend(run for run in sorted(workflows.iterdir()) if run.is_dir())
+    return runs
+
+
+def ledger_attempts(run: Path) -> list | None:
+    """Every attempt the run's ledger records, or None when it records none.
+
+    An absent, unreadable, non-JSON or unexpectedly-shaped ledger is None
+    rather than an exception: a ledger nothing can read proves nothing, which
+    is exactly what an unacknowledged run means (D19).
+    """
+    try:
+        state = json.loads(
+            (run / LEDGER_STATE_FILE).read_text(encoding="utf-8"))
+        return [attempt for issue in state["issues"].values()
+                for attempt in issue["attempts"]]
+    except (OSError, UnicodeDecodeError, ValueError,
+            TypeError, AttributeError, KeyError):
+        return None
+
+
+def durably_merged(attempts) -> bool:
+    """Contract: whether every attempt is merged and says so twice (D34).
+
+    An attempt carrying no result, or a result whose state disagrees with the
+    attempt's, is a termination nobody wrote down — the ledger's own validator
+    refuses that shape, and D10 admits removal only against a record.
+    """
+    if not attempts:
+        return False
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            return False
+        result = attempt.get("result")
+        if (attempt.get("state") != REMOVABLE_LEDGER_STATE
+                or not isinstance(result, dict)
+                or result.get("state") != attempt.get("state")):
+            return False
+    return True
+
+
+def classify_residue_run(run: Path) -> str:
+    """Contract: `run`'s residue class, proved by a lock and then by a ledger.
+
+    The lock is opened read-only and never created: a run with no `state.lock`
+    proved nothing and is unacknowledged, because creating one to probe would
+    be a write under the subject root and reading its absence as freedom would
+    offer removal with no evidence at all behind it (D34). Elapsed time is
+    consulted nowhere.
+    """
+    lock = run / LEDGER_LOCK_FILE
+    if not lock.is_file():
+        return UNACKNOWLEDGED_RESIDUE
+    try:
+        fd = os.open(lock, os.O_RDONLY)
+    except OSError:  # a lock this process cannot even open proves nothing
+        return UNACKNOWLEDGED_RESIDUE
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:  # BlockingIOError included: someone else holds it
+            return LIVE_OWNER
+        return (TERMINAL_RESIDUE if durably_merged(ledger_attempts(run))
+                else UNACKNOWLEDGED_RESIDUE)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def check_residue_nested_ledger(context: "Context") -> "Outcome":
+    """Contract: warning when a ledger run directory lives inside a worktree.
+    A run is removable only when a non-blocking flock on its existing
+    state.lock succeeded and every attempt is merged with a matching durable
+    result; anything less is unacknowledged. Nothing is deleted, no lock is
+    created, and elapsed time is never consulted (D10, D34)."""
+    runs = nested_ledger_runs(context)
+    if not runs:
+        return Outcome("passed")
+    counts = {code: 0 for code, _ in NESTED_LEDGER_FINDINGS}
+    for run in runs:
+        counts[classify_residue_run(run)] += 1
+    reason_code, repair_id = next(
+        finding for finding in NESTED_LEDGER_FINDINGS if counts[finding[0]])
+    facts = {"runs": bound_facts(run.relative_to(context.root).as_posix()
+                                 for run in runs),
+             "count": len(runs)}
+    facts.update((RESIDUE_FACT_KEYS[code], counts[code]) for code in counts)
+    return Outcome("warning", reason_code, repair_id, facts)
+
+
+def check_residue_root_scratch(context: "Context") -> "Outcome":
+    """Contract: warning when an immediate child file of the project root
+    matches the closed scratch pattern set.
+
+    Never recursive: these are `mktemp` outputs that escaped `$TMPDIR` into the
+    repository root and nowhere else, and a deeper walk would sweep in the real
+    homes the same names legitimately have.
+    """
+    names = sorted(entry.name for entry in context.root.iterdir()
+                   if entry.is_file()
+                   and any(fnmatch.fnmatch(entry.name, pattern)
+                           for pattern in ROOT_SCRATCH_PATTERNS))
+    if not names:
+        return Outcome("passed")
+    return Outcome("warning", "root_scratch_present", "lifecycle.residue.root_scratch",
+                   {"files": bound_facts(names), "count": len(names)})
+
+
 REGISTRY: tuple[Check, ...] = (
     Check(RESOLVABLE_CHECK_ID, "repository", "contract", "required", (),
           (("resolver_failure", "conformance.internal"),),
@@ -1212,6 +1386,15 @@ REGISTRY: tuple[Check, ...] = (
           "required", ("repository.contract.valid",),
           (("shell_indirection", "contract.commands.destructure"),),
           "check_commands_no_shell_indirection"),
+    Check("repository.residue.nested_ledger", "repository", "residue", "optional",
+          ("repository.contract.valid",), NESTED_LEDGER_FINDINGS,
+          "check_residue_nested_ledger"),
+    # Its pattern set is a constant rather than contract-derived, so it still
+    # reports on a repository whose contract is invalid.
+    Check("repository.residue.root_scratch", "repository", "residue", "optional",
+          ("repository.contract.present",),
+          (("root_scratch_present", "lifecycle.residue.root_scratch"),),
+          "check_residue_root_scratch"),
 )
 REGISTRY_BY_ID = {check.id: check for check in REGISTRY}
 

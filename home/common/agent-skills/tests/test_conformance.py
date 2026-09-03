@@ -14,6 +14,7 @@ tool outcome builds its own bin with make_stub_bin and overrides PATH.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -1183,6 +1184,231 @@ class ShellIndirectionTest(ReportAssertions, unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 ids = [c["id"] for c in json.loads(out)["checks"]]
                 self.assertEqual(self.CHECK_ID in ids, expected)
+
+
+def make_run(root: Path, worktree: str, run_id: str, states: list, *,
+             lock: bool = True, results: bool = True,
+             ledger: str | None = None) -> Path:
+    """A nested ledger run directory, by default a removable one.
+
+    `lock` writes the canonical state.lock, `results` gives each terminal
+    attempt a matching durable result, and `ledger` replaces the state.json
+    bytes outright. A removable run needs all of them (D34).
+    """
+    run = root / ".worktrees" / worktree / ".superpowers" / "workflows" / run_id
+    run.mkdir(parents=True)
+    attempts = [{"state": s,
+                 "result": {"state": s} if results else None} for s in states]
+    run.joinpath("state.json").write_text(
+        ledger if ledger is not None
+        else json.dumps({"issues": {"1": {"attempts": attempts}}}),
+        encoding="utf-8")
+    if lock:
+        run.joinpath("state.lock").write_bytes(b"")
+    return run
+
+
+class NestedLedgerResidueTest(ReportAssertions, unittest.TestCase):
+    """AC5: orphaned ledgers are reported with non-destructive repairs unless a
+    lock proves no live owner."""
+
+    CHECK_ID = "repository.residue.nested_ledger"
+    RETAIN_ID = "lifecycle.residue.nested_ledger.retain"
+    REMOVE_ID = "lifecycle.residue.nested_ledger.remove"
+
+    def check(self, root):
+        return doctor(self, root)[1][self.CHECK_ID]
+
+    def test_a_locked_merged_run_with_results_is_removable(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            make_run(root, "worktree-a", "run-1", ["merged"])
+            report, by_id = doctor(self, root)
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"]],
+                ["warning", "terminal_residue", self.REMOVE_ID])
+            self.assertEqual(check["facts"]["runs"],
+                             [".worktrees/worktree-a/.superpowers/workflows/run-1"])
+            self.assertEqual([check["facts"]["terminal"],
+                              check["facts"]["live_owner"]], [1, 0])
+            self.assertEqual(
+                {r["repair_id"]: r for r in report["repairs"]}[
+                    self.REMOVE_ID]["safety_class"],
+                "worktree")
+            self.assert_validates(report)
+
+    def test_neither_proof_alone_makes_a_run_removable(self):
+        """D34: a missing lock, a missing result, a mismatched result, a
+        non-merged state and a malformed ledger are all unacknowledged."""
+        cases = {
+            "no_lock": dict(states=["merged"], lock=False),
+            "no_result": dict(states=["merged"], results=False),
+            "not_merged": dict(states=["merged", "failed"]),
+            "still_active": dict(states=["active"], results=False),
+            "malformed": dict(states=["merged"], ledger="{ broken"),
+            "mismatched": dict(states=["merged"],
+                               ledger=json.dumps({"issues": {"1": {"attempts": [
+                                   {"state": "merged",
+                                    "result": {"state": "stopped"}}]}}})),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(case=name), fixture() as tmp:
+                root = make_root(tmp)
+                make_run(root, "worktree-a", "run-1", **kwargs)
+                check = self.check(root)
+                self.assertEqual(
+                    [check["reason_code"], check["repair_id"],
+                     check["facts"]["terminal"]],
+                    ["unacknowledged_residue", self.RETAIN_ID, 0])
+
+    def test_a_held_lock_reports_live_owner_and_outranks_terminal_residue(self):
+        """The kernel, not a sleep, proves the live owner (D16)."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            make_run(root, "worktree-a", "run-1", ["merged"])
+            live = make_run(root, "worktree-b", "run-2", ["active"], results=False)
+            fd = os.open(live / "state.lock", os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                report, by_id = doctor(self, root)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"]],
+                ["warning", "live_owner", self.RETAIN_ID])
+            self.assertEqual([check["facts"]["live_owner"],
+                              check["facts"]["count"]], [1, 2])
+            self.assertEqual(
+                {r["repair_id"]: r for r in report["repairs"]}[
+                    self.RETAIN_ID]["safety_class"],
+                "user_action")
+            self.assert_validates(report)
+
+    def test_the_lock_is_released_and_never_created(self):
+        """The probe writes nothing: an unlocked run stays unlocked, and the
+        lock the engine did take is free again once the run has finished."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            unlocked = make_run(root, "worktree-a", "run-1", ["merged"],
+                                lock=False)
+            locked = make_run(root, "worktree-b", "run-2", ["merged"])
+            doctor(self, root)
+            self.assertFalse((unlocked / "state.lock").exists())
+            fd = os.open(locked / "state.lock", os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    def test_no_worktrees_passes(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["domain"], check["subject_kind"], check["requirement"],
+                 check["status"], check["reason_code"], check["repair_id"],
+                 check["facts"]],
+                ["repository", "residue", "optional", "passed", None, None, {}])
+            self.assert_validates(report)
+
+    def test_residue_never_drives_the_outcome_to_failed(self):
+        """D8: a warning is recorded with its repair and left out of the
+        outcome, so a machine holding residue is not a broken repository."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            make_run(root, "worktree-a", "run-1", ["failed"])
+            report, by_id = doctor(self, root)
+            self.assertEqual(by_id[self.CHECK_ID]["status"], "warning")
+            self.assertEqual(report["outcome"],
+                             {"status": "passed", "primary_check_id": None})
+            self.assert_validates(report)
+
+    def test_no_repair_in_the_report_is_destructive(self):
+        """D10: v1 satisfies the cleanup rule by never reaching for the
+        exemption — no repair it can emit carries `destructive`."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            make_run(root, "worktree-a", "run-1", ["merged"])
+            write_file(root, "producer-report-abc123.json", "{}\n")
+            report, _ = doctor(self, root)
+            self.assertTrue(report["repairs"])
+            self.assertNotIn("destructive",
+                             [r["safety_class"] for r in report["repairs"]])
+            self.assert_validates(report)
+
+
+class RootScratchResidueTest(ReportAssertions, unittest.TestCase):
+    """Scratch that escaped $TMPDIR into the repository root. The pattern set is
+    a constant, so the check still reports on an invalid contract."""
+
+    CHECK_ID = "repository.residue.root_scratch"
+    REPAIR_ID = "lifecycle.residue.root_scratch"
+
+    def test_root_scratch_is_named_with_its_worktree_repair(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "producer-report-abc123.json", "{}\n")
+            write_file(root, "brief.tmp.AbC123")
+            report, by_id = doctor(self, root)
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["domain"], check["subject_kind"], check["requirement"],
+                 check["status"], check["reason_code"], check["repair_id"]],
+                ["repository", "residue", "optional", "warning",
+                 "root_scratch_present", self.REPAIR_ID])
+            self.assertEqual(
+                check["facts"],
+                {"files": ["brief.tmp.AbC123", "producer-report-abc123.json"],
+                 "count": 2})
+            repair = {r["repair_id"]: r for r in report["repairs"]}[self.REPAIR_ID]
+            self.assertEqual(
+                [repair["module"], repair["safety_class"], repair["operation"]],
+                ["conformance", "worktree", None])
+            self.assert_validates(report)
+
+    def test_a_clean_root_passes(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual([check["status"], check["reason_code"],
+                              check["repair_id"], check["facts"]],
+                             ["passed", None, None, {}])
+            self.assert_validates(report)
+
+    def test_an_invalid_contract_does_not_suppress_it(self):
+        """It depends only on `repository.contract.present`, so it still reports
+        where a contract-derived sibling is suppressed."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            authored["bindings"]["extra"] = True
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            write_file(root, "producer-report-x.json", "{}\n")
+            report, by_id = doctor(self, root)
+            self.assertEqual(
+                [by_id["repository.contract.valid"]["status"],
+                 by_id["repository.paths.classified"]["status"],
+                 by_id[self.CHECK_ID]["status"],
+                 by_id[self.CHECK_ID]["reason_code"]],
+                ["failed", "suppressed", "warning", "root_scratch_present"])
+            self.assert_validates(report)
+
+
+class ScratchPatternConsistencyTest(unittest.TestCase):
+    """D11: the engine holds the scratch policy and the tracked .gitignore is
+    its backstop, so every pattern must appear in both."""
+
+    def test_every_scratch_pattern_is_backstopped_by_the_tracked_gitignore(self):
+        rules = {line.strip() for line
+                 in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()}
+        for pattern in load_module().ROOT_SCRATCH_PATTERNS:
+            with self.subTest(pattern=pattern):
+                self.assertIn(pattern, rules)
 
 
 if __name__ == "__main__":
