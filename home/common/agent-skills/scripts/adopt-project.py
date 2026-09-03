@@ -295,13 +295,21 @@ def command_plan(args: argparse.Namespace) -> int:
     projections_drift = (
         not contract_resolves
         and resolver_error_code(payload) == "invalid_projection")
-    # What the planned amendment can still put right. The `platform` member is
-    # the amendment's own reach; a drifted projection is separately repaired by
-    # the regeneration operations this plan already carries, so neither is a
-    # violation that keeps the plan out of `ready`.
+    # What the planned amendment can still put right, which is exactly what it
+    # writes. `amended_contract` *adds* `platform` when the member is absent
+    # and never rewrites an authored one, so only the absent case may forgive a
+    # `/platform` violation: an interval the project declared is its own policy
+    # and an out-of-range or malformed one is a repair, not something adoption
+    # silently overwrites. Forgiving it unconditionally would let a plan reach
+    # `ready` whose applied result the resolver still refuses. A drifted
+    # projection is separately repaired by the regeneration operations this
+    # plan already carries.
+    amendment_writes_platform = (contract_source is not None
+                                 and "platform" not in contract_source)
     unfixable = [] if projections_drift else [
         pointer for pointer in resolver_violation_pointers(payload)
-        if not pointer.startswith("/platform")]
+        if not (amendment_writes_platform
+                and pointer.startswith("/platform"))]
 
     contract_id = None
     if contract_resolves and isinstance(payload, dict):

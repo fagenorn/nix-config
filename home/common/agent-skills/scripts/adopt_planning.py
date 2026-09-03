@@ -351,9 +351,21 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
                 and isinstance(entry.get("target"), str)
                 and isinstance(entry.get("source"), str)]
         for entry in sorted(rows, key=lambda row: row["target"]):
-            current = read_bytes_bounded(root / entry["target"])
+            # The one variable path this module opens. It is authored in the
+            # contract, and this runs whether or not the resolver accepted that
+            # contract, so the boundary's two guards are applied here rather
+            # than borrowed from a validation that may never have happened: a
+            # secret-shaped target is never read and never hashed, and a target
+            # resolving outside the root is never followed. Either way the
+            # operation is still emitted, with the `before` a path that was not
+            # read truthfully has — null.
+            target = entry["target"]
+            resolved = (None if is_secret_path(target)
+                        else contained_path(root, target))
+            current = (None if resolved is None
+                       else read_bytes_bounded(resolved))
             tail.append(operation(
-                "regenerate-projection", [entry["source"]], [entry["target"]],
+                "regenerate-projection", [entry["source"]], [target],
                 None if current is None else sha256_hash(current),
                 # The rendered bytes are the resolver's to produce, so the
                 # plan states the source it regenerates from rather than
