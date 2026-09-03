@@ -333,7 +333,13 @@ class ErrorOutputTest(ResolverTestCase):
         self.assertEqual(sorted(payload), ["error"])
         self.assertNotIn("schema_version", payload)
         error = payload["error"]
-        self.assertEqual(sorted(error), ["code", "repair_id", "violations"])
+        # D7: `reason_code` is a member of the error object exactly when the
+        # code is `unsupported_schema`, and of no other refusal.
+        self.assertEqual(
+            sorted(error),
+            ["code", "reason_code", "repair_id", "violations"]
+            if expected == "unsupported_schema"
+            else ["code", "repair_id", "violations"])
         self.assertEqual(error["code"], expected)
         self.assertTrue(error["violations"])
         pointers = [v["pointer"] for v in error["violations"]]
@@ -1698,7 +1704,10 @@ class SemverBoundaryTest(ResolverTestCase):
                                  ["/platform_version"])
 
     def test_a_strict_version_is_accepted(self):
-        for value in ("0.0.0", "10.20.30"):
+        # Both spellings sit inside this repository's committed contract
+        # interval, so the range check (R2.3) cannot mask the shape question
+        # this case is about.
+        for value in ("1.0.0", "1.20.30"):
             with self.subTest(platform_version=value):
                 self.set_manifest(mutated_manifest(platform_version=value))
                 code, out, err = run("resolve", "--repo-root",
