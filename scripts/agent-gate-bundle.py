@@ -62,8 +62,15 @@ PINNED_FIELDS = PINNED_STRING_FIELDS + ("builds",)
 BUILD_FIELDS = ("agent", "model")
 EXPANSION_FIELDS = ("expanded", "checkpoint_ref")
 CASE_FIELDS = ("case_id", "case_class", "strata")
-STRATUM_REQUIRED_FIELDS = SIDES + ("quality",)
-STRATUM_FIELDS = STRATUM_REQUIRED_FIELDS + ("checks", "maintenance")
+# `quality` is deliberately allowed-but-not-required here: the verdict list makes
+# an absent `quality` block an *evidence* fault resolving to `unmeasured`
+# (QUALITY_MISSING, exit 3), not a document fault. Requiring it structurally
+# would raise ManifestError at exit 2 and leave QUALITY_MISSING unreachable.
+# D37's document-fault half is unaffected: QUALITY_FIELDS below is passed as both
+# the allowed and the required set, so a *present* block still owes all three
+# fields at exit 2.
+STRATUM_REQUIRED_FIELDS = SIDES
+STRATUM_FIELDS = STRATUM_REQUIRED_FIELDS + ("quality", "checks", "maintenance")
 TRIAL_FIELDS = ("record", "run_id", "record_id")
 QUALITY_FIELDS = ("critical_all_pass", "evaluator_stability", "noncritical_median")
 CHECKS_FIELDS = ("static_fallback_checks", "discovery_preflight_ops")
@@ -599,6 +606,46 @@ def _assemble(cases):
     return assembled
 
 
+def _check_case_reuse(cases, diagnostics):
+    """No cited measurement may stand as evidence for two different cases.
+
+    `_resolve_stratum` rejects a measurement cited twice *within* one side, but
+    the four core `case_class` values are checked only for presence. Without this
+    sweep one valid base/candidate trial set copied into all four core cases
+    satisfies CASE_CLASS_MISSING, TRIALS_CARDINALITY and TRIALS_DUPLICATE alike,
+    and a single measurement buys the whole gate — the cheapest form of the
+    approval-buying D36 exists to deny. A run belongs to one workload, so citing
+    it under two case classes is a category error rather than corroboration.
+    Reuse across the two sides *of one case* stays legal: it yields delta 0.
+    """
+    first_case = {}
+    for index, case in enumerate(cases):
+        case = case if isinstance(case, dict) else {}
+        declared_strata = case.get("strata")
+        declared_strata = declared_strata if isinstance(declared_strata, dict) else {}
+        seen = set()
+        for stratum in STRATA:
+            block = declared_strata.get(stratum)
+            if not isinstance(block, dict):
+                continue
+            for side in SIDES:
+                entries = block.get(side)
+                entries = entries if isinstance(entries, list) else []
+                for position, entry in enumerate(entries):
+                    if not isinstance(entry, dict):
+                        continue
+                    identity = repr((entry.get("record_id"), entry.get("run_id")))
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    owner = first_case.setdefault(identity, index)
+                    if owner != index:
+                        _add(diagnostics, "TRIALS_REUSED",
+                             f"$.cases[{index}].strata.{stratum}.{side}[{position}]",
+                             "this measurement is already cited by "
+                             f"$.cases[{owner}]")
+
+
 def resolve_trials(manifest, loader=load_record):
     """Resolve a manifest's cited records into the evidence `decide` consumes.
 
@@ -641,6 +688,8 @@ def resolve_trials(manifest, loader=load_record):
                 strata[stratum] = entry
         resolved.append({"case_id": case.get("case_id"),
                          "case_class": case.get("case_class"), "strata": strata})
+
+    _check_case_reuse(cases, diagnostics)
 
     if diagnostics:
         return None, sorted(diagnostics)

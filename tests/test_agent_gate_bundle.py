@@ -617,6 +617,62 @@ class BundleCliTest(unittest.TestCase):
         self.assertTrue(any(line.startswith("TRIALS_DUPLICATE ")
                             for line in bundle["diagnostics"]), bundle["diagnostics"])
 
+    def test_one_trial_set_copied_across_the_core_cases_cannot_approve(self):
+        """The cheapest approval to buy: cite one measured set as all four cases.
+
+        Per-side distinctness and CASE_CLASS_MISSING are both satisfied by four
+        cases carrying identical citations, so without the cross-case sweep a
+        single measurement decides the whole gate.
+        """
+        pristine = self.saving_manifest()
+        code, bundle = run_cli("--trials", self.manifest_file(pristine, "ok.json"))
+        self.assertEqual((code, bundle["state"]), (0, "approved"))   # regression guard
+
+        shared = self.saving_manifest()
+        first = shared["cases"][0]["strata"]
+        for case in shared["cases"][1:]:
+            for stratum in gate.STRATA:
+                for side in gate.SIDES:
+                    case["strata"][stratum][side] = [
+                        dict(entry) for entry in first[stratum][side]]
+        code, bundle = run_cli("--trials", self.manifest_file(shared, "reuse.json"))
+        self.assertEqual(code, 3)
+        self.assertEqual(bundle["state"], "unmeasured")
+        reused = [line for line in bundle["diagnostics"]
+                  if line.startswith("TRIALS_REUSED ")]
+        self.assertTrue(reused, bundle["diagnostics"])
+        self.assertIn("already cited by $.cases[0]", reused[0])
+
+    def test_a_run_cited_on_both_sides_of_one_case_is_not_reuse(self):
+        manifest = self.saving_manifest()
+        claude = manifest["cases"][0]["strata"]["claude"]
+        claude["candidate"] = [dict(entry) for entry in claude["base"]]
+        code, bundle = run_cli("--trials", self.manifest_file(manifest, "sides.json"))
+        self.assertEqual(bundle["diagnostics"], [])    # no TRIALS_REUSED
+        self.assertNotEqual(bundle["state"], "unmeasured")
+        self.assertEqual(code, 0)                      # the other cases still save
+
+    def test_absent_quality_is_unmeasured_evidence_not_a_document_fault(self):
+        """The verdict list makes an absent `quality` block exit 3, not exit 2.
+
+        Requiring it structurally would raise ManifestError before
+        `_resolve_stratum` ever ran, leaving QUALITY_MISSING unreachable.
+        """
+        manifest = self.saving_manifest()
+        del manifest["cases"][0]["strata"]["claude"]["quality"]
+        code, bundle = run_cli("--trials", self.manifest_file(manifest, "noq.json"))
+        self.assertEqual(code, 3)
+        self.assertEqual(bundle["state"], "unmeasured")
+        self.assertTrue(any(line.startswith("QUALITY_MISSING ")
+                            for line in bundle["diagnostics"]), bundle["diagnostics"])
+
+    def test_a_present_quality_block_still_owes_every_field_at_exit_two(self):
+        manifest = self.saving_manifest()
+        del manifest["cases"][0]["strata"]["claude"]["quality"]["evaluator_stability"]
+        code, bundle = run_cli("--trials", self.manifest_file(manifest, "partq.json"))
+        self.assertEqual(code, 2)                      # D37's document-fault half
+        self.assertIsNone(bundle)
+
     def test_bundle_id_is_stable_and_covers_the_state(self):
         path = self.manifest_file(self.saving_manifest())
         first = run_cli("--trials", path)[1]
