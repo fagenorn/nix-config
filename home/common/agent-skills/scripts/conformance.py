@@ -612,6 +612,7 @@ class Check:
     depends_on: tuple[str, ...]
     findings: tuple[tuple[str, str], ...]
     run: str
+    network: bool = False
 
     @property
     def reason_codes(self) -> tuple[str, ...]:
@@ -680,6 +681,14 @@ REPAIRS = {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
     "host.helper.install": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    # A rerun repeats the caller's own request without --offline, so no fixed
+    # argv performs it and bare `run` is an argparse usage error (D25).
+    "conformance.rerun_online": {
+        "module": "conformance", "safety_class": "read_only",
+        "operation": None},
+    "host.tracker.authenticate": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
 }
@@ -917,6 +926,54 @@ def check_executor_helper_on_path(context: "Context") -> "Outcome":
                     "reason_codes": bound_facts(codes)})
 
 
+# --------------------------------------------------------------------------
+# The tracker credential
+#
+# The one network-flagged check (D7): the only evaluator that starts a child
+# reaching beyond this machine. `TRACKERS` is the closed dispatch on
+# `tracker.kind`, so the kind, its subcommand and its hostname have a single
+# home and an unrecognised kind cannot fall back onto another tracker's.
+# --------------------------------------------------------------------------
+
+
+TRACKERS: dict[str, dict] = {
+    "github": {"argv": ("auth", "status"), "host": "github.com"},
+}
+
+
+def check_tracker_credential(context: "Context") -> "Outcome":
+    """Contract: passed when the declared tracker CLI reports an authenticated
+    credential; not_run for a tracker kind this engine cannot interrogate.
+    Records a boolean and a hostname from the closed table, never CLI output."""
+    tracker = context.contract["bindings"]["tracker"]
+    kind, cli = tracker["kind"], tracker["cli"]
+    if kind not in TRACKERS:
+        # Authored data the resolver accepts as a free string, so a finding
+        # rather than an engine bug — and never a pass (D20).
+        return Outcome("not_run", "unsupported_tracker_kind",
+                       "host.tracker.authenticate",
+                       {"kind": bound_fact(kind), "cli": bound_fact(cli)})
+    env = dict(os.environ)
+    for name in tracker["credential_env"]["unset_before_invocation"]:
+        env.pop(name, None)   # the contract is the single home for the scrub
+    proc = bounded_run([cli, *TRACKERS[kind]["argv"]], cwd=context.root, env=env)
+    if proc is None:
+        # A tracker CLI that cannot be spawned is host.executor.helper_on_path's
+        # finding, not this one's.
+        return Outcome("not_run", "tracker_credential_missing",
+                       "host.tracker.authenticate",
+                       {"authenticated": False, "cli_invoked": False})
+    # The table, never stdout: `gh auth status` prints the account name.
+    host = TRACKERS[kind]["host"]
+    if proc.returncode == 0:
+        return Outcome("passed", None, None,
+                       {"authenticated": True, "cli_invoked": True,
+                        "host": host})
+    return Outcome("failed", "tracker_credential_missing",
+                   "host.tracker.authenticate",
+                   {"authenticated": False, "cli_invoked": True, "host": host})
+
+
 REGISTRY: tuple[Check, ...] = (
     Check(RESOLVABLE_CHECK_ID, "repository", "contract", "required", (),
           (("resolver_failure", "conformance.internal"),),
@@ -949,6 +1006,12 @@ REGISTRY: tuple[Check, ...] = (
           ("repository.contract.valid",),
           (("helper_missing", "host.helper.install"),),
           "check_executor_helper_on_path"),
+    Check("host.tracker.credential", "host", "tracker", "required",
+          ("repository.contract.valid",),
+          (("offline_constraint", "conformance.rerun_online"),
+           ("unsupported_tracker_kind", "host.tracker.authenticate"),
+           ("tracker_credential_missing", "host.tracker.authenticate")),
+          "check_tracker_credential", network=True),
 )
 REGISTRY_BY_ID = {check.id: check for check in REGISTRY}
 
@@ -1068,7 +1131,8 @@ def evaluate(purpose: str, context: Context) -> list[dict]:
     has a result before its dependent asks for one (D24). `workflow_entry`
     stops at the first `failed` or `not_run` and carries that one root cause;
     `suppressed` never stops it, because it names a step the ladder skipped
-    rather than the cause (D3, D33).
+    rather than the cause (D3, D33). A network-flagged check is `not_run`
+    whenever `context.offline` holds, decided before the dispatch (D7).
     """
     checks = select(purpose, context.required)
     selected = {check.id for check in checks}
@@ -1078,6 +1142,10 @@ def evaluate(purpose: str, context: Context) -> list[dict]:
         blocker = failed_ancestor(check, results, selected)
         if blocker is not None:
             outcome = Outcome("suppressed", facts={"suppressed_by": blocker})
+        elif context.offline and check.network:
+            # Before the dispatch, so a skipped probe can never become a pass.
+            outcome = Outcome("not_run", "offline_constraint",
+                              "conformance.rerun_online")
         else:
             outcome = evaluator(check.run)(context)
         guard_finding(check, outcome)

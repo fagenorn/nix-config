@@ -873,5 +873,125 @@ class EngineFailureTest(Rebinding, unittest.TestCase):
                          ["failed", "resolver_failure"])
 
 
+def gh_env(tmp: Path, exit_code: int) -> dict:
+    """The hermetic environment with a `gh` stub exiting `exit_code`."""
+    return dict(HERMETIC_ENV,
+                PATH=make_stub_bin(tmp / "stubbin", {"gh": exit_code}))
+
+
+class OfflineRuleTest(ReportAssertions, unittest.TestCase):
+    """AC4: offline is an input; a network check reports not_run and the
+    outcome is incomplete, never a pass."""
+
+    def test_doctor_offline_marks_the_network_check_not_run_and_incomplete(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp), "--offline",
+                                   env=gh_env(tmp, 0))
+            self.assertTrue(report["request"]["offline"])
+            check = by_id["host.tracker.credential"]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"],
+                 check["facts"]],
+                ["not_run", "offline_constraint", "conformance.rerun_online", {}])
+            self.assertEqual(report["outcome"], {
+                "status": "incomplete",
+                "primary_check_id": "host.tracker.credential"})
+            repair = {r["repair_id"]: r for r in report["repairs"]}[
+                "conformance.rerun_online"]
+            self.assertEqual(repair["safety_class"], "read_only")
+            self.assertIsNone(repair["operation"])
+            self.assert_validates(report)
+
+    def test_offline_never_yields_a_passing_network_check(self):
+        """The body must not run: a stub that would pass online still not_run."""
+        with fixture() as tmp:
+            root, env = make_root(tmp), gh_env(tmp, 0)
+            online = doctor(self, root, env=env)[1]["host.tracker.credential"]
+            offline = doctor(self, root, "--offline",
+                             env=env)[1]["host.tracker.credential"]
+            self.assertEqual([online["status"], offline["status"]],
+                             ["passed", "not_run"])
+
+    def test_workflow_entry_selects_no_network_check(self):
+        """Asserted, not assumed: --offline cannot change the entry outcome."""
+        with fixture() as tmp:
+            root, env = make_root(tmp), gh_env(tmp, 1)
+            plain = run("run", "--purpose", "workflow_entry", "--repo-root",
+                        str(root), env=env)
+            offline = run("run", "--purpose", "workflow_entry", "--repo-root",
+                          str(root), "--offline", env=env)
+            self.assertEqual(plain[0], 0, plain[2])
+            self.assertEqual(offline[0], 0, offline[2])
+            self.assertEqual(json.loads(plain[1])["outcome"],
+                             json.loads(offline[1])["outcome"])
+            self.assertNotIn("host.tracker.credential",
+                             [c["id"] for c in json.loads(offline[1])["checks"]])
+
+
+class TrackerCredentialTest(ReportAssertions, unittest.TestCase):
+    """D7, D20: the one network-flagged check. It records whether a credential
+    exists and the hostname its closed table names — never a token, a username
+    or a line of CLI output, so `facts` is asserted whole in every branch."""
+
+    CHECK_ID = "host.tracker.credential"
+    REPAIR_ID = "host.tracker.authenticate"
+
+    def test_an_authenticated_cli_passes_with_a_boolean_and_a_hostname(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp), env=gh_env(tmp, 0))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["subject_kind"], check["reason_code"],
+                 check["repair_id"]],
+                ["passed", "tracker", None, None])
+            self.assertEqual(check["facts"], {
+                "authenticated": True, "cli_invoked": True,
+                "host": "github.com"})
+            self.assert_validates(report)
+
+    def test_an_unauthenticated_cli_fails_and_names_a_user_action_repair(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp), env=gh_env(tmp, 1))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"]],
+                ["failed", "tracker_credential_missing", self.REPAIR_ID])
+            self.assertEqual(check["facts"], {
+                "authenticated": False, "cli_invoked": True,
+                "host": "github.com"})
+            repair = {r["repair_id"]: r for r in report["repairs"]}[self.REPAIR_ID]
+            self.assertEqual([repair["safety_class"], repair["operation"]],
+                             ["user_action", None])
+            self.assert_validates(report)
+
+    def test_an_unrecognised_tracker_kind_is_not_run_never_a_pass(self):
+        """D20: the CLI would have succeeded, and the check still refuses to
+        pass a tracker this engine cannot interrogate."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            authored["bindings"]["tracker"]["kind"] = "forgejo"
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            report, by_id = doctor(self, root, env=gh_env(tmp, 0))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"]],
+                ["not_run", "unsupported_tracker_kind", self.REPAIR_ID])
+            self.assertEqual(check["facts"], {"kind": "forgejo", "cli": "gh"})
+            self.assertEqual(report["outcome"], {
+                "status": "incomplete", "primary_check_id": self.CHECK_ID})
+            self.assert_validates(report)
+
+    def test_ci_omits_the_tracker_check(self):
+        """The spec's "CI owns its own auth": `ci` selects repository,
+        compatibility and verification, never host."""
+        with fixture() as tmp:
+            code, out, err = run("run", "--purpose", "ci", "--repo-root",
+                                 str(make_root(tmp)), env=gh_env(tmp, 1))
+            self.assertEqual(code, 0, err)
+            self.assertNotIn(self.CHECK_ID,
+                             [c["id"] for c in json.loads(out)["checks"]])
+
 if __name__ == "__main__":
     unittest.main()
