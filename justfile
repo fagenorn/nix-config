@@ -71,6 +71,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_costs.py \
+    tests/test_agent_gate_bundle.py \
     tests/test_branch_protection.py
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
@@ -126,9 +127,13 @@ install IP:
     sh install-nix.sh\"'"
 
 
-# Report agent token spend per issue from the local Claude Code transcripts
+# Report agent token spend per issue from the local Claude Code and Codex sessions
 agent-costs *args:
   python3 scripts/agent-costs.py {{args}}
+
+# Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
+agent-gate-bundle *args:
+  python3 scripts/agent-gate-bundle.py {{args}}
 
 # Garbage collect old OS generations and remove stale packages from the nix store
 gc generations="5":

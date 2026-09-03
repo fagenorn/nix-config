@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Per-issue agent-cost telemetry for Claude Code transcripts.
+"""Per-issue agent-cost telemetry for Claude Code and Codex sessions.
 
 Scans ~/.claude/projects for root sessions (<project>/<session>.jsonl) plus their
 subagent transcripts (<project>/<session>/subagents/**/*.jsonl) and reports token
-spend and estimated list-price cost grouped by issue.
+spend and estimated list-price cost grouped by issue. `--strata` also mines the
+Codex rollouts under ~/.codex/sessions, and `--format json` projects whichever
+strata were selected into one `agent-cost-record` document instead of tables.
 
 Two counting rules are load-bearing (see the transcript-mining report):
   * Assistant records are written once per content block and every copy repeats
@@ -32,6 +34,7 @@ spec/plan markdown: bytes, fenced-code share, and decision-section share.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -40,6 +43,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 # List price per million tokens: (input, output, cache_write_1h, cache_write_5m, cache_read).
@@ -51,13 +55,23 @@ PRICING = {
     "haiku": (1.0, 5.0, 2.0, 1.25, 0.10),
 }
 
+SCHEMA_VERSION = 1
+RECORD_KIND = "agent-cost-record"
+# The one authoritative home for the comparative-telemetry caveat (D18): the
+# text footer prints it behind "NOTE: " and the record carries it as `notes`.
+DISCLAIMER = (
+    "cache reads measure logical context re-processing (tokens the model"
+    "\nattended to via prompt cache), and est $ applies public list prices — this is"
+    "\ncomparative telemetry for run-over-run analysis, NOT billing data."
+)
+
 TOKEN_FIELDS = ("fresh", "cache_create", "cache_read", "output")
 SUM_FIELDS = TOKEN_FIELDS + ("cost", "turns")
 # Scalar extras summed (or maxed, for peak_ctx) across a group's transcripts.
 EXTRA_INT_FIELDS = ("agents_killed", "interventions")
 # Counter-valued extras merged across a group's transcripts.
 COUNTER_FIELDS = ("models", "efforts", "stop_reasons", "phase_turns", "attr_turns",
-                  "agents_by_type", "agent_statuses")
+                  "agents_by_type", "agent_statuses", "cost_by_family")
 LIST_FIELDS = ("agent_prompt_bytes", "agent_result_bytes")
 
 ISSUE_RE = re.compile(r"(?:^|[-/])(?:worktree-)?issue-(\d+)")
@@ -143,6 +157,7 @@ def scan_file(path):
     plus the extended telemetry fields (models, efforts, agents, phases, ...)."""
     fresh = cache_create = cache_read = output = 0
     cost = 0.0
+    cost_by_family = Counter()
     turns = 0
     skills = Counter()
     cwds = Counter()
@@ -335,10 +350,13 @@ def scan_file(path):
             if ctx > peak_ctx:
                 peak_ctx = ctx
 
-            p_in, p_out, p_1h, p_5m, p_read = PRICING[model_family(model)]
-            cost += (
+            family = model_family(model)
+            p_in, p_out, p_1h, p_5m, p_read = PRICING[family]
+            message_cost = (
                 f_in * p_in + c_out * p_out + cw_1h * p_1h + cw_5m * p_5m + c_read * p_read
             ) / 1e6
+            cost += message_cost
+            cost_by_family[family] += message_cost
 
     attr_turns = Counter()
     for skill, count in raw_attr_turns.items():
@@ -352,6 +370,7 @@ def scan_file(path):
         "cache_read": cache_read,
         "output": output,
         "cost": cost,
+        "cost_by_family": dict(cost_by_family),
         "turns": turns,
         "skills": dict(skills),
         "cwds": dict(cwds),
@@ -389,18 +408,161 @@ def owner_issue(result):
     return issue if issue == match.group(1) else None
 
 
-def scan_paths(paths, executor_factory=ProcessPoolExecutor):
-    """Scan in order, falling back all-or-nothing when a process pool fails."""
+def scan_codex_file(path):
+    """Parse one Codex rollout. Returns per-file usage and identity, or None.
+
+    Contract: tokens are the sum of ``info.last_token_usage`` over the file's
+    ``token_count`` events (D3); ``cached_input_tokens`` and
+    ``reasoning_output_tokens`` are subsets of their parents and are never
+    added on top.
+    """
+    meta = None
+    input_total = cache_create = cache_read = output = reasoning = 0
+    peak_ctx = 0
+    turns = 0
+    models = Counter()
+    efforts = Counter()
+
+    try:
+        fh = open(path, "r", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            # Cheap prefilter, matching scan_file's style: only these three
+            # record kinds carry identity, usage or the model/effort mix.
+            if ("session_meta" not in line and "token_count" not in line
+                    and "turn_context" not in line):
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            kind = rec.get("type")
+            payload = rec.get("payload") or {}
+            if kind == "session_meta":
+                if meta is None:  # a later session_meta is ignored
+                    session_id = payload.get("session_id") or payload.get("id")
+                    meta = {
+                        "session_id": session_id,
+                        "rollout_id": payload.get("id") or session_id,
+                        "is_root": payload.get("thread_source") == "user",
+                        "cwd": payload.get("cwd") or "",
+                    }
+            elif kind == "event_msg" and payload.get("type") == "token_count":
+                last = (payload.get("info") or {}).get("last_token_usage")
+                if isinstance(last, dict):
+                    seen_input = last.get("input_tokens") or 0
+                    input_total += seen_input
+                    cache_read += last.get("cached_input_tokens") or 0
+                    cache_create += last.get("cache_write_input_tokens") or 0
+                    output += last.get("output_tokens") or 0
+                    reasoning += last.get("reasoning_output_tokens") or 0
+                    peak_ctx = max(peak_ctx, seen_input)
+                    turns += 1
+            elif kind == "turn_context":
+                if payload.get("model"):
+                    models[payload["model"]] += 1
+                if payload.get("effort"):
+                    efforts[payload["effort"]] += 1
+
+    if meta is None:
+        return None
+    return {
+        "session_id": meta["session_id"],
+        "rollout_id": meta["rollout_id"],
+        "is_root": meta["is_root"],
+        "cwd": meta["cwd"],
+        "fresh": input_total - cache_read - cache_create,
+        "cache_create": cache_create,
+        "cache_read": cache_read,
+        "output": output,
+        "reasoning": reasoning,
+        "input_total": input_total,
+        "peak_ctx": peak_ctx,
+        "turns": turns,
+        "models": dict(models),
+        "efforts": dict(efforts),
+    }
+
+
+# The only keys a Codex rollout can measure. Anything Claude-only is simply
+# absent, which is what makes it `null` in the record without an exception list.
+CODEX_SUM_FIELDS = ("fresh", "cache_create", "cache_read", "output", "reasoning", "turns")
+
+
+def new_codex_group():
+    group = dict.fromkeys(CODEX_SUM_FIELDS + ("sessions", "subagents", "peak_ctx"), 0)
+    group["models"] = {}
+    group["efforts"] = {}
+    return group
+
+
+def collect_codex_groups(root, cutoff, project_filter=None,
+                         executor_factory=ProcessPoolExecutor):
+    """Group Codex rollouts into {(project, issue): group} by session thread."""
+    if not root.is_dir():
+        sys.exit(f"no Codex session root at {root}")
+    paths = sorted(
+        path for path in root.rglob("*.jsonl")
+        if cutoff is None or path.stat().st_mtime >= cutoff
+    )
+    results = [r for r in scan_paths(paths, executor_factory, scanner=scan_codex_file) if r]
+
+    threads = defaultdict(list)
+    for result in results:
+        threads[result["session_id"]].append(result)
+
+    groups = {}
+    for session_id in sorted(threads, key=lambda sid: sid or ""):
+        rollouts = threads[session_id]
+        root_cwds = Counter(r["cwd"] for r in rollouts if r["is_root"] and r["cwd"])
+        if not root_cwds:
+            root_cwds = Counter(r["cwd"] for r in rollouts if r["cwd"])
+        # Codex has no encoded project-dir name; the literal stands in for one
+        # and matches neither ISSUE_RE nor a project, so both helpers fall
+        # through to the cwd evidence.
+        project = project_name("codex", root_cwds)
+        if project_filter and project_filter.lower() not in project.lower():
+            continue
+        issue = issue_key("codex", root_cwds)
+
+        group = groups.setdefault((project, issue), new_codex_group())
+        models = Counter(group["models"])
+        efforts = Counter(group["efforts"])
+        for result in rollouts:
+            for field in CODEX_SUM_FIELDS:
+                group[field] += result[field]
+            group["peak_ctx"] = max(group["peak_ctx"], result["peak_ctx"])
+            models.update(result["models"])
+            efforts.update(result["efforts"])
+            if result["is_root"]:
+                group["sessions"] += 1
+            else:
+                group["subagents"] += 1
+        group["models"] = dict(models)
+        group["efforts"] = dict(efforts)
+    return groups
+
+
+def scan_paths(paths, executor_factory=ProcessPoolExecutor, scanner=None):
+    """Scan in order, falling back all-or-nothing when a process pool fails.
+
+    `scanner` defaults to `scan_file` at call time, not at `def` time, so a test
+    that patches the module attribute still reaches both branches (D41).
+    """
+    if scanner is None:
+        scanner = scan_file
     paths = list(paths)
     try:
         with executor_factory(max_workers=os.cpu_count() or 4) as pool:
-            return list(pool.map(scan_file, paths, chunksize=8))
+            return list(pool.map(scanner, paths, chunksize=8))
     except Exception as error:
         print(
             f"Process pool unavailable ({type(error).__name__}); scanning sequentially.",
             file=sys.stderr,
         )
-    return [scan_file(path) for path in paths]
+    return [scanner(path) for path in paths]
 
 
 def fold_scan_totals(results):
@@ -629,6 +791,126 @@ def build_groups(sessions, per_session, project_filter=None):
     return groups, retained_results, kept_sessions, kept_files
 
 
+# Record projection. A run's scalars are read with .get: a key a stratum never
+# measures is absent from its group and projects as null, never as a truthful 0.
+RUN_SCALAR_FIELDS = ("peak_ctx", "turns", "sessions", "subagents",
+                     "skill_loads", "repeats", "agents_killed", "interventions")
+RUN_COUNTER_FIELDS = ("models", "efforts", "stop_reasons", "phase_turns",
+                      "attr_turns", "agents_by_type", "agent_statuses")
+RUN_DISTRIBUTION_FIELDS = ("agent_prompt_bytes", "agent_result_bytes")
+RECORD_TOKEN_FIELDS = ("input_total", "fresh", "cache_create", "cache_read",
+                       "output", "reasoning")
+
+
+def canonical_digest(body):
+    """Contract: 'sha256:' + sha256 over canonical JSON of `body` (D9)."""
+    payload = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def sum_or_none(values):
+    """Total the values, or None when nothing was measured.
+
+    Nothing was measured when a value is itself an absent measurement, and
+    equally when there is no value at all: `sum([])` is 0, and a stratum that
+    matched no runs has not measured zero tokens, it has measured nothing.
+    """
+    values = list(values)
+    if not values or any(value is None for value in values):
+        return None
+    return sum(values)
+
+
+def merge_families(family_maps):
+    """Family-keyed sum across runs, or None when any run carries no cost split."""
+    family_maps = list(family_maps)
+    if any(families is None for families in family_maps):
+        return None
+    merged = Counter()
+    for families in family_maps:
+        merged.update(families)
+    return dict(merged)
+
+
+def project_run(stratum, key, g):
+    """Project one group into a run object. Reads `g`; never mutates it."""
+    project, issue = key
+    segment = "none" if issue is None else "multi" if issue == MULTI_ISSUE else str(issue)
+    tokens = {field: g.get(field) for field in TOKEN_FIELDS}
+    tokens["input_total"] = sum_or_none(
+        tokens[field] for field in ("fresh", "cache_create", "cache_read")
+    )
+    tokens["reasoning"] = g.get("reasoning")
+
+    run = {
+        "run_id": f"{stratum}:{project}:{segment}",
+        "stratum": stratum,
+        "project": project,
+        "issue": issue,
+        "outcome": group_outcome(g) if "outcomes" in g else None,
+        "tokens": tokens,
+        "cost_usd": g.get("cost"),
+        "cost_by_family": dict(g["cost_by_family"]) if "cost_by_family" in g else None,
+    }
+    for field in RUN_SCALAR_FIELDS:
+        run[field] = g.get(field)
+    for field in RUN_COUNTER_FIELDS:
+        run[field] = dict(g[field]) if field in g else None
+    for field in RUN_DISTRIBUTION_FIELDS:
+        if field not in g:
+            run[field] = None
+            continue
+        values = g[field]
+        run[field] = {"n": len(values), "p50": percentile(values, 50),
+                      "p90": percentile(values, 90), "max": max(values, default=0)}
+    return run
+
+
+def build_record(groups_by_stratum, window):
+    """Project {stratum: {cost_basis, groups}} into one agent-cost-record (D9)."""
+    strata = {}
+    for name in sorted(groups_by_stratum):
+        stratum = groups_by_stratum[name]
+        runs = sorted(
+            (project_run(name, key, group) for key, group in stratum["groups"].items()),
+            key=lambda run: run["run_id"],
+        )
+        totals = {"runs": len(runs)}
+        for field in RECORD_TOKEN_FIELDS:
+            totals[field] = sum_or_none(run["tokens"][field] for run in runs)
+        totals["cost_usd"] = sum_or_none(run["cost_usd"] for run in runs)
+        totals["cost_by_family"] = merge_families(run["cost_by_family"] for run in runs)
+        strata[name] = {"cost_basis": stratum["cost_basis"], "totals": totals, "runs": runs}
+
+    # The fleet folds the strata that measured something. An idle stratum
+    # contributes nothing rather than nulling the roll-up, so `None` here means
+    # no selected stratum had a run — while a measuring stratum's own absent
+    # field (Claude's `reasoning`) still propagates through sum_or_none.
+    measuring = [s["totals"] for s in strata.values() if s["totals"]["runs"]]
+    fleet = {
+        "informative": True,
+        "totals": {
+            field: sum_or_none(totals[field] for totals in measuring)
+            for field in RECORD_TOKEN_FIELDS
+        },
+    }
+    body = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": RECORD_KIND,
+        "window": window,
+        "strata": strata,
+        "fleet": fleet,
+        "notes": DISCLAIMER,
+    }
+    return dict(
+        body,
+        record_id=canonical_digest(body),
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        ),
+    )
+
+
 def artifact_stats(paths):
     """Filesystem pass over spec/plan markdown artifacts.
 
@@ -726,35 +1008,77 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         help="also analyze spec/plan markdown under PATH (repeatable): bytes, "
              "fenced-code share, decision-ledger share",
     )
+    ap.add_argument("--format", choices=("text", "json"), default="text",
+                    help="text tables (default) or one agent-cost-record JSON document")
+    ap.add_argument("--strata", choices=("claude", "codex", "both"), default="claude",
+                    help="which strata to scan; meaningful only with --format json")
+    ap.add_argument("--codex-sessions", default=os.path.expanduser("~/.codex/sessions"),
+                    help="Codex rollout root")
     args = ap.parse_args(argv)
 
-    root = Path(args.projects_dir)
-    if not root.is_dir():
-        sys.exit(f"no transcript root at {root}")
+    json_mode = args.format == "json"
+    if not json_mode and args.strata != "claude":
+        ap.error("--strata is meaningful only with --format json")
+    if json_mode and args.artifacts:
+        ap.error("--artifacts is not available with --format json")
+    selected = ("claude", "codex") if args.strata == "both" else (args.strata,)
+
     cutoff = time.time() - args.days * 86400 if args.days > 0 else None
 
-    sessions = list(find_sessions(root, cutoff))
-    # (session index, is_root, path) — pool.map preserves input order.
-    jobs = [
-        (i, is_root, f)
-        for i, (_, root_files, sub_files) in enumerate(sessions)
-        for is_root, f in [(True, f) for f in root_files] + [(False, f) for f in sub_files]
-    ]
-    if not jobs:
-        sys.exit("no transcripts in window")
+    root = codex_root = None
+    groups, retained_results, kept_sessions, kept_files = {}, [], 0, 0
+    if "claude" in selected:
+        root = Path(args.projects_dir)
+        if not root.is_dir():
+            sys.exit(f"no transcript root at {root}")
 
-    results = scan_paths([path for _idx, _is_root, path in jobs], executor_factory)
-    per_session = defaultdict(list)
-    for (idx, is_root, _path), result in zip(jobs, results):
-        if result:
-            per_session[idx].append((is_root, result))
+        sessions = list(find_sessions(root, cutoff))
+        # (session index, is_root, path) — pool.map preserves input order.
+        jobs = [
+            (i, is_root, f)
+            for i, (_, root_files, sub_files) in enumerate(sessions)
+            for is_root, f in [(True, f) for f in root_files] + [(False, f) for f in sub_files]
+        ]
+        if not jobs and not json_mode:
+            sys.exit("no transcripts in window")
 
-    groups, retained_results, kept_sessions, kept_files = build_groups(
-        sessions, per_session, args.project
-    )
+        results = scan_paths([path for _idx, _is_root, path in jobs], executor_factory)
+        per_session = defaultdict(list)
+        for (idx, is_root, _path), result in zip(jobs, results):
+            if result:
+                per_session[idx].append((is_root, result))
 
-    if not groups:
-        sys.exit("no sessions matched the filters")
+        groups, retained_results, kept_sessions, kept_files = build_groups(
+            sessions, per_session, args.project
+        )
+
+        if not groups and not json_mode:
+            sys.exit("no sessions matched the filters")
+
+    codex_groups = {}
+    if "codex" in selected:
+        codex_root = Path(os.path.expanduser(args.codex_sessions))
+        codex_groups = collect_codex_groups(
+            codex_root, cutoff, args.project, executor_factory
+        )
+
+    if json_mode:
+        sources = {}
+        groups_by_stratum = {}
+        if "claude" in selected:
+            sources["claude"] = str(root)
+            groups_by_stratum["claude"] = {"cost_basis": "list-price", "groups": groups}
+        if "codex" in selected:
+            sources["codex"] = str(codex_root)
+            groups_by_stratum["codex"] = {"cost_basis": "subscription", "groups": codex_groups}
+        record_window = {"days": args.days,
+                         "cutoff_epoch": int(cutoff) if cutoff else None,
+                         "strata": sorted(selected),
+                         "sources": sources}
+        json.dump(build_record(groups_by_stratum, record_window), sys.stdout,
+                  sort_keys=True, separators=(",", ":"))
+        print()
+        return
 
     ordered = sorted(
         groups.items(), key=lambda kv: (kv[1]["cost"], total_tokens(kv[1])), reverse=True
@@ -895,11 +1219,7 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         print("\nArtifact pass (spec/plan markdown under --artifacts paths):\n")
         print_artifact_stats(artifact_stats(args.artifacts))
 
-    print(
-        "\nNOTE: cache reads measure logical context re-processing (tokens the model"
-        "\nattended to via prompt cache), and est $ applies public list prices — this is"
-        "\ncomparative telemetry for run-over-run analysis, NOT billing data."
-    )
+    print(f"\nNOTE: {DISCLAIMER}")
 
 
 if __name__ == "__main__":

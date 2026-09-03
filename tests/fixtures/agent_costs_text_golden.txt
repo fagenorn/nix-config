@@ -1,0 +1,29 @@
+Agent costs by issue (all time, 1 transcripts, 1 root sessions, 1 groups)
+
+issue  project  tokens  est $  turns  sess  subagents  skills  repeat
+-----  -------  ------  -----  -----  ----  ---------  ------  ------
+#120   repo      6.68k     $0      2     1          0       0       0
+
+TOTAL  6.68k tokens  $0  2 turns  0 subagents  0 skill loads (0 repeats)
+       fresh 200 | cache_create 400 | cache_read 6.00k | output 80
+
+Per issue (1 issue): median $0  mean $0  max $0
+
+Outcome, model & context per group (outcome is a final-message heuristic;
+peak-ctx = largest single-turn input+cache footprint in any of the group's transcripts):
+
+issue  project  outcome  models       effort      peak-ctx  agents  nudges  killed
+-----  -------  -------  -----------  ----------  --------  ------  ------  ------
+#120   repo     -        opus-5 100%  xhigh 100%     3.30k       0       0       0
+
+Outcomes (groups): - 1
+Models (turns): claude-opus-5 2
+Effort (turns): xhigh 2
+Stop reasons (turns): tool_use 2; sessions with agents killed at exit: 0
+Agent launches by type: -
+Agent result statuses: -
+User 'proceed' nudges (short continue-style messages): 0
+
+NOTE: cache reads measure logical context re-processing (tokens the model
+attended to via prompt cache), and est $ applies public list prices — this is
+comparative telemetry for run-over-run analysis, NOT billing data.
