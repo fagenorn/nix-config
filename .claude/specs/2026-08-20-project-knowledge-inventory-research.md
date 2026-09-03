@@ -556,8 +556,8 @@ copies the precedence sentence word for word while Argus's paraphrases all four
 rules, so Nodo carries the corpus's only verbatim copy.
 
 Both sides of that comparison were swept to the same definition — every member of
-each repository's row class, 103 files for Nodo against 19 for Argus, the difference
-being Nodo's 82 vendored skill files — so the equal totals are not an artefact of
+each repository's row class, 103 files for Nodo against 19 for Argus, a gap dominated
+by Nodo's 82 vendored skill files against Argus's 9 — so the equal totals are not an artefact of
 looking harder at one repository. The bound is the row class itself: a restatement
 living in a file outside it (an ADR, a guide, a runbook, a glossary) would not have
 been reached. #62's summary singles out Argus; this document records that the pattern

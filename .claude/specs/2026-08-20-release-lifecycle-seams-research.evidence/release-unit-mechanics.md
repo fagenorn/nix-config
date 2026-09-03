@@ -55,7 +55,10 @@ context on `main` with `enforce_admins: true`, so it gates *merging*, not releas
 dependency, so the closure is realised before activation is attempted. Nothing
 orders the two hosts relative to one another; each is switched on its own machine.
 
-**Immutability:** store paths are content-addressed by their input hash and are never
+**Immutability:** store paths are *input*-addressed — the hash derives from the
+derivation's inputs, not from the built output; Nix's own manual describes store paths
+as "usually input-addressed" and offers `nix store make-content-addressed` as the
+opt-in conversion, and nothing here declares that opt-in — and they are never
 rewritten, which makes the Nix-owned part of a generation immutable. Two parts of an
 activation are deliberately not: `hosts/common/darwin-common.nix` sets
 `homebrew.onActivation = { cleanup = "zap"; autoUpdate = true; upgrade = true; }`

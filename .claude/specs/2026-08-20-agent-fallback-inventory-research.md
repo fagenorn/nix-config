@@ -172,8 +172,12 @@ in `home/common/agent-skills/skills/` and `home/common/claude-code/skills/`
 (excluding each skill's `evals/`) and every script in
 `home/common/agent-skills/scripts/` was swept — **65 files**: 58 under the two
 skill trees, which already contain `sdd/scripts/`, plus 7 under `scripts/`,
-enumerated with `find … -type f -not -path '*/evals/*'` on 2026-09-02. Three
-inputs produced the rows.
+enumerated with `find … -type f -not -path '*/evals/*'` on 2026-09-02 at
+`d0309be`, this branch's pre-sync head. The Phase-1 sync from `main` then added
+`agent-skills/scripts/resolve-project.py` and `claude-code/skills/ship-issue/HUMAN-GATE.md`
+and rewrote `writing-plans/SKILL.md:11-13`, so this corpus, its line-anchored
+quotations and every count derived from them reproduce at `d0309be` and not at
+this file's own commit. Three inputs produced the rows.
 
 **Pass 1, broad**, over all 65 files, to find the candidates:
 

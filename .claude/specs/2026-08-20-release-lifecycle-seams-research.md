@@ -294,7 +294,7 @@ store or provider key.
 
 | Seam | What names a release | Identity sense used | What a reader inspects for current truth |
 |---|---|---|---|
-| Nix host generations (nix-config) | a content-addressed store path, plus a generation number in the system profile | record — the generation number is a profile key; nothing in the repository asserts a subject | `readlink /nix/var/nix/profiles/system`, then `readlink` on that link. No repository command does this. |
+| Nix host generations (nix-config) | an input-addressed store path, plus a generation number in the system profile | record — the generation number is a profile key; nothing in the repository asserts a subject | `readlink /nix/var/nix/profiles/system`, then `readlink` on that link. No repository command does this. |
 | Railway api and admin services (Nodo) | a provider-assigned deployment id, attributed to a commit | record, with a **known-weak** subject binding: `latestDeployment.commitHash` names the latest tagged commit on `main`, not necessarily the built one | `railway status --json` for `latestDeployment.status`, `railway deployment list` for the chronology, `GET /health` for liveness — and the runbook insists a 200 may be the *old* build answering |
 | Digest-addressed GHCR engines with reconciler convergence (Nodo) | an immutable OCI manifest-list digest | **subject** — the only one of the five where a running subject is compared against a declared desired one: the heartbeat reports the digest the device is running, against the digest the api desires | per-component heartbeat `currentImageDigest` vs `device_vps_components.desired_image_digest`, plus the supervisor heartbeat's `reconcilerAlive`/`failCount`/`fallbackDigest` |
 | Argus launchd daemon rooted in a checkout | a bare launchd label, `dev.argus.daemon` | record — and the record is a constant, so it names the *slot*, never the release in it | `daemon status`: plist present, plist still pointing at this repo, `launchctl print` pid, per-job `last_success` from the state DB |
@@ -356,7 +356,7 @@ this machine's `~/.claude/settings.json` names — read here 2026-09-02 as
 `/nix/store/966h4bf8mkvmj9984gblpiybgg6w7l8b-claude-bash-lifecycle-guard/bin/claude-bash-lifecycle-guard`.
 
 **Identity:** the *record* sense, and the record is that store path —
-content-addressed, so a changed guard is a different path. The guard keeps no
+input-addressed, so a changed guard is a different path. The guard keeps no
 identity of its own: `main()` (`:865-908`) reads one hook payload from stdin and
 returns an exit status, writing nothing anywhere. Two adjudications are
 distinguished only by the `(command string, cwd, live forge state)` triple each is
