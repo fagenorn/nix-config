@@ -64,6 +64,11 @@ in
       executable = true;
     };
 
+    ".agents/bin/conformance" = {
+      source = ./scripts/conformance.py;
+      executable = true;
+    };
+
     ".agents/bin/agent-model-matrix" = {
       source = ./scripts/agent-model-matrix.py;
       executable = true;
