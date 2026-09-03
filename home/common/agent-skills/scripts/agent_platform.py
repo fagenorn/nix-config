@@ -46,13 +46,19 @@ MIGRATION_MEMBERS = ("id", "from_schema", "to_schema")
 REGISTRY_MEMBERS = ("schema_version", "projects")
 REGISTRY_ENTRY_MEMBERS = ("project_id", "root")
 
-# The closed set of schema-compatibility reasons, kept separate from the
-# resolver's capability `REASON_CODES` (D7). `interval_verdict` names the first
-# two; `project_schema_unsupported` belongs to the contract's schema check.
+# The closed set of compatibility reasons, kept separate from the resolver's
+# capability `REASON_CODES` (D7). `interval_verdict` names the first two;
+# `project_schema_unsupported` belongs to the contract's schema check; and
+# `project_identity_mismatch` belongs to the fleet view alone — a registry
+# entry names an identity and a location and nothing else (D18), so the
+# preflight has to say when the live contract at that location no longer
+# declares the identity the registry recorded, rather than reporting the stale
+# one as compatible.
 SCHEMA_REASON_CODES = (
     "platform_too_old",
     "platform_too_new",
     "project_schema_unsupported",
+    "project_identity_mismatch",
 )
 
 # D9: strict `MAJOR.MINOR.PATCH` only. No pre-release, no build metadata, no

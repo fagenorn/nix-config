@@ -752,6 +752,12 @@ def load_module():
     `agent_platform` from `$HOME/.agents/lib/python` as it loads.
     """
     import importlib.util
+    # `agent_platform` caches in `sys.modules` under its one name, while every
+    # case here runs under a temporary `HOME` of its own. The binding guard
+    # checks *which* file answered the import, so a copy left behind by the
+    # previous case's `HOME` would fail it; a deployed run has one `HOME` and
+    # imports the library once.
+    sys.modules.pop("agent_platform", None)
     spec = importlib.util.spec_from_file_location("resolve_project", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

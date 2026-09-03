@@ -326,6 +326,44 @@ class PlatformStatusFleetTest(ResolverTestCase):
         self.assertEqual(json.loads(named_out)["error"]["code"],
                          "invalid_contract")
 
+    def test_a_registered_id_the_contract_no_longer_declares_is_incompatible(self):
+        """A registry entry is an identity and a location and nothing else
+        (D18), and the version facts beside it are read live. A root that has
+        been replaced — or whose contract renamed the project — leaves the
+        stale identity in the row, so reporting it compatible would pass the
+        stale half off as the fresh one. The preflight has to say so."""
+        contract = source_contract()
+        contract["project"]["id"] = "fagenorn/renamed"
+        entry, _ = self.registered("fagenorn/original", contract)
+        install_registry(self.home, registry(entry))
+        code, payload, err = self.fleet()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(payload["fleet"]), 1)
+        row = payload["fleet"][0]
+        self.assertEqual(sorted(row), FLEET_ROW_MEMBERS)
+        # The registry's identity still names the row, as D18 requires.
+        self.assertEqual(row["project_id"], "fagenorn/original")
+        self.assertFalse(row["compatible"])
+        self.assertEqual(row["reason_code"], "project_identity_mismatch")
+        self.assertEqual(row["repair_id"], "registry.project_id.mismatch")
+        # Only the verdict is negative: what the contract declares is still
+        # reported as declared.
+        self.assertEqual(row["project_schema_version"], 1)
+        self.assertEqual(row["platform_interval"], source_contract()["platform"])
+
+    def test_a_broken_contract_keeps_its_own_reason_over_the_identity_one(self):
+        """A row the contract already failed carries a verdict and a repair id
+        for that failure; re-labelling it with the identity question would
+        replace one true answer with another."""
+        contract = source_contract()
+        contract["project"]["id"] = "fagenorn/renamed"
+        del contract["bindings"]["deploy"]
+        entry, _ = self.registered("fagenorn/original", contract)
+        install_registry(self.home, registry(entry))
+        code, payload, err = self.fleet()
+        self.assertEqual(code, 0, err)
+        self.assert_reported_broken(payload["fleet"][0], entry)
+
     def test_the_broken_rows_touch_neither_the_registry_nor_the_roots(self):
         """The three witnesses of resolver D21 over every broken row at once.
 

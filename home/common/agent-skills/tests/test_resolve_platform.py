@@ -379,13 +379,16 @@ class PlatformLibraryTest(ResolverTestCase):
         shutil.copy(SCRIPT, binary)
         return binary
 
-    def run_deployed(self, home: Path, *args: str,
-                     unset_home: bool = False) -> tuple[int, str, str]:
+    def run_deployed(self, home: Path, *args: str, unset_home: bool = False,
+                     pythonpath: str | None = None) -> tuple[int, str, str]:
         binary = self.deployed(home)
         env = {**os.environ, "HOME": str(home)}
         # `PYTHONPATH` would be a second lookup path the deployed machine does
-        # not have; the runner's own may carry one.
+        # not have; the runner's own may carry one, so each case states the one
+        # it means to present.
         env.pop("PYTHONPATH", None)
+        if pythonpath is not None:
+            env["PYTHONPATH"] = pythonpath
         if unset_home:
             env.pop("HOME", None)
         proc = subprocess.run(
@@ -459,6 +462,23 @@ class PlatformLibraryTest(ResolverTestCase):
         second = self.run_deployed(home, "resolve", "--repo-root", str(root))
         self.assertEqual(first[0], 2)
         self.assertEqual(first[1], second[1])
+
+    def test_an_importable_library_is_not_an_installed_one(self):
+        """The guard is about *which* file answered the import, not about
+        whether the name imports at all.
+
+        With nothing installed at the one path, an `agent_platform` the
+        interpreter can still reach — through `PYTHONPATH` here, through
+        site-packages on another machine — must not answer in its place, or
+        "an uninstalled one is caught here" is not true of any machine whose
+        environment carries one.
+        """
+        home = make_home(library=False)
+        elsewhere = Path(tempfile.mkdtemp()).resolve()
+        shutil.copy(LIBRARY, elsewhere / "agent_platform.py")
+        self.assert_library_refusal(*self.run_deployed(
+            home, "resolve", "--repo-root", str(self.make_root()),
+            pythonpath=str(elsewhere)))
 
     def test_the_installed_library_answers_in_the_deployed_layout(self):
         """The control: the same shape with the library installed resolves."""
@@ -745,9 +765,11 @@ class SchemaReasonDispatchTest(InProcessTestCase):
         self.assertTrue(self.module.bootstrap_platform_library())
         self.codes = self.module.agent_platform.SCHEMA_REASON_CODES
 
-    def test_the_closed_set_is_exactly_the_three_members(self):
-        self.assertEqual(self.codes, ("platform_too_old", "platform_too_new",
-                                      "project_schema_unsupported"))
+    def test_the_closed_set_is_exactly_the_four_members(self):
+        self.assertEqual(self.codes,
+                         ("platform_too_old", "platform_too_new",
+                          "project_schema_unsupported",
+                          "project_identity_mismatch"))
 
     def test_every_member_maps_to_a_repair_id_and_a_message(self):
         ids, messages = set(), set()

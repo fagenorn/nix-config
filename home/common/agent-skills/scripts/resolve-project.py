@@ -74,6 +74,30 @@ PLATFORM_LIBRARY_MEMBERS = (
 PLATFORM_LIBRARY_REPAIR_ID = "platform.library.missing"
 
 
+def loaded_from(module: object, library_dir: Path) -> bool:
+    """Whether `module` was loaded from its own installed file in `library_dir`.
+
+    Importing by name is not the guard: `sys.path` still carries this script's
+    own directory behind the insertion, and a `PYTHONPATH` entry or a
+    site-packages install of the same name answers the import just as
+    willingly. Only the resolved `__file__` says *which* file answered, so an
+    absent installation refuses here instead of being silently substituted by
+    whatever else the interpreter can reach.
+
+    Both sides are resolved, because Home Manager installs the library as a
+    symlink into the Nix store: the module reports the symlink's path and the
+    comparison has to be made over the file they both name.
+    """
+    origin = getattr(module, "__file__", None)
+    if not origin:
+        return False
+    try:
+        return (Path(origin).resolve()
+                == (library_dir / f"{module.__name__}.py").resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def bootstrap_platform_library() -> bool:
     """Bind the shared library from its one installed path, or report failure.
 
@@ -82,18 +106,21 @@ def bootstrap_platform_library() -> bool:
     copy wins whenever it exists. The script's own directory stays on the path
     behind it, which is how the repository checkout imports the sibling in
     `scripts/`; in the deployed layout that directory is `~/.agents/bin` and
-    holds no library, so an uninstalled one is caught here.
+    holds no library, so an uninstalled one is caught here — by `loaded_from`,
+    which is what makes "caught here" true of every other importable
+    `agent_platform` as well.
     """
     global agent_platform
     home = os.environ.get("HOME")
     if not home:
         return False
-    sys.path.insert(0, str(Path(home) / ".agents" / "lib" / "python"))
+    library_dir = Path(home) / ".agents" / "lib" / "python"
+    sys.path.insert(0, str(library_dir))
     try:
         import agent_platform as loaded
     except Exception:
         return False
-    if (not getattr(loaded, "__file__", None)
+    if (not loaded_from(loaded, library_dir)
             or any(not hasattr(loaded, name)
                    for name in PLATFORM_LIBRARY_MEMBERS)):
         return False
@@ -467,6 +494,8 @@ def schema_reason_repair_id(reason_code: str) -> str:
         return "contract.platform.too_new"
     if reason_code == "project_schema_unsupported":
         return "contract.schema_version.unsupported"
+    if reason_code == "project_identity_mismatch":
+        return "registry.project_id.mismatch"
     raise ValueError(f"unknown schema reason code: {reason_code!r}")
 
 
@@ -486,6 +515,9 @@ def schema_reason_message(reason_code: str) -> str:
     if reason_code == "project_schema_unsupported":
         return ("the declared project schema version is not one this platform "
                 "supports")
+    if reason_code == "project_identity_mismatch":
+        return ("the contract at the registered root declares a different "
+                "project id than the one the registry recorded")
     raise ValueError(f"unknown schema reason code: {reason_code!r}")
 
 
@@ -1598,10 +1630,22 @@ def fleet_row(entry: dict, manifest: dict) -> dict:
     """One registry entry's verdict row.
 
     Identity and location come from the registry, because they are the two
-    facts a row still has when its contract will not load at all (D18).
+    facts a row still has when its contract will not load at all (D18). That
+    is also why the identity is checked rather than trusted: a registered root
+    that has been replaced, or whose contract now declares a different id,
+    still has a registry entry naming the old one, and reporting that entry
+    beside a *live* version verdict would call a row compatible whose stale
+    half is the very thing a preflight is asked about.
+
+    The check runs only where the row would otherwise be compatible. A row the
+    contract already failed carries a verdict and a repair id for that failure,
+    and re-labelling it with the identity question would replace one true
+    answer with another.
     """
     source, reason_code = fleet_verdict(Path(entry["root"]), manifest)
     facts = declared_facts(source)
+    if reason_code is None and facts["project_id"] != entry["project_id"]:
+        reason_code = "project_identity_mismatch"
     return {
         "project_id": entry["project_id"],
         "root": entry["root"],
