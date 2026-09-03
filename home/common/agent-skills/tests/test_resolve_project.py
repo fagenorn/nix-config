@@ -14,6 +14,7 @@ import copy
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -79,6 +80,17 @@ def install_home(home: Path, manifest: object = COMMITTED, *,
 def make_home(manifest: object = COMMITTED, *, library: bool = True) -> Path:
     return install_home(Path(tempfile.mkdtemp()).resolve(), manifest,
                         library=library)
+
+
+def library_members() -> tuple[str, ...]:
+    """The resolver's declared `PLATFORM_LIBRARY_MEMBERS`, read from its source.
+
+    Read rather than copied: a second literal here would drift from the one
+    the guard actually enforces, which is the failure this suite is about.
+    """
+    text = SCRIPT.read_text("utf-8")
+    body = text.split("PLATFORM_LIBRARY_MEMBERS = (", 1)[1].split(")", 1)[0]
+    return tuple(re.findall(r'"([^"]+)"', body))
 
 
 def committed_manifest() -> dict:
@@ -1817,6 +1829,35 @@ class PlatformLibraryTest(ResolverTestCase):
                 self.assert_library_refusal(
                     *self.run_deployed(home, subcommand, "--repo-root", str(root)))
 
+    def test_a_library_missing_one_member_refuses_the_same_way(self):
+        """The library and the binary are installed separately, so an older
+        library can pair with a newer resolver. Every member the resolver uses
+        must therefore refuse as `platform.library.missing`, not as an
+        `AttributeError` swallowed into `resolver.internal` (R1.3, D12).
+        """
+        root = self.make_root()
+        source = LIBRARY.read_text("utf-8")
+        for name in library_members():
+            with self.subTest(member=name):
+                home = make_home()
+                # A module-level `del` after the definitions: the module still
+                # imports, and only this one attribute is gone.
+                (home / ".agents" / "lib" / "python"
+                 / "agent_platform.py").write_text(
+                    source + f"\n\ndel {name}\n", encoding="utf-8")
+                self.assert_library_refusal(
+                    *self.run_deployed(home, "resolve", "--repo-root", str(root)))
+
+    def test_the_declared_members_are_exactly_the_members_used(self):
+        """The guard is only as wide as its tuple: a member the resolver reads
+        but does not declare is a hole this case closes."""
+        used = set(re.findall(r"\bagent_platform\.([A-Za-z_][A-Za-z0-9_]*)",
+                              SCRIPT.read_text("utf-8")))
+        # `agent_platform.py` appears inside the refusal message, not as an
+        # attribute read.
+        used.discard("py")
+        self.assertEqual(sorted(library_members()), sorted(used))
+
     def test_an_unset_home_refuses_on_stdout(self):
         home = make_home()
         code, out, err = self.run_deployed(
@@ -1874,9 +1915,6 @@ class CommittedManifestTest(ResolverTestCase):
                                      home=self.home)
                 self.assertEqual(code, 0, err or out)
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class PlatformIntervalShapeTest(ResolverTestCase):
@@ -2162,3 +2200,7 @@ class SchemaReasonDispatchTest(InProcessTestCase):
                     "unsupported_schema", "contract.platform.too_old",
                     [{"pointer": "", "message": "x"}], "platform_sideways")
         self.assertEqual(buffer.getvalue(), "")
+
+
+if __name__ == "__main__":
+    unittest.main()

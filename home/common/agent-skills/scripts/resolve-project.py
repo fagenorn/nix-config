@@ -51,8 +51,20 @@ import sys
 # D12 error object on stdout, not as an import traceback on stderr (R1.3).
 agent_platform = None
 
+# Exactly the library members this script uses. The library and this binary are
+# two separately installed files, so an older library can pair with a newer
+# resolver; naming every member here is what makes that pairing refuse as
+# `platform.library.missing` (R1.3, D12) rather than surface as an
+# `AttributeError` swallowed into `resolver.internal`.
 PLATFORM_LIBRARY_MEMBERS = (
-    "PlatformManifestError", "load_manifest", "write_atomically")
+    "PlatformManifestError",
+    "SCHEMA_REASON_CODES",
+    "compare_semver",
+    "interval_verdict",
+    "load_manifest",
+    "parse_semver",
+    "write_atomically",
+)
 PLATFORM_LIBRARY_REPAIR_ID = "platform.library.missing"
 
 
