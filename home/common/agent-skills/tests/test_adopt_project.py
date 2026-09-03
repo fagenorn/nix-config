@@ -1073,15 +1073,15 @@ class RefusalTest(AdoptTestCase):
         self.assertEqual(doc["error"]["repair_id"], "adopt.manifest.invalid")
 
     def test_an_unknown_subcommand_is_an_argparse_usage_error(self):
-        code, out, _ = run("apply", "--plan-id", "x", home=self.home)
+        code, out, _ = run("register", "--plan-id", "x", home=self.home)
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
 
-    def test_the_parser_exposes_plan_and_nothing_else(self):
+    def test_the_parser_exposes_plan_and_apply_and_nothing_else(self):
         code, out, err = run("--help", home=self.home)
         self.assertEqual(code, 0, err)
         self.assertIn("plan", out)
-        self.assertNotIn("apply", out)
+        self.assertIn("apply", out)
         self.assertNotIn("verify", out)
 
 

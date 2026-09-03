@@ -254,7 +254,9 @@ def binding_value(contract: dict, route: tuple) -> object:
     return None
 
 
-def legacy_binding_operations(root: Path, contract: dict) -> list[dict]:
+def legacy_binding_operations(root: Path,
+                              contract: dict) -> tuple[list[dict],
+                                                       dict[str, bytes]]:
     """The living-reference rewrites (D30) — one per member of the closed
     tuple, and never a path outside it.
 
@@ -263,6 +265,7 @@ def legacy_binding_operations(root: Path, contract: dict) -> list[dict]:
     a JSON object, or already in agreement produces no operation at all.
     """
     operations: list[dict] = []
+    contents: dict[str, bytes] = {}
     for target in LEGACY_BINDING_CONFIGS:
         resolved = contained_path(root, target)
         if resolved is None or not resolved.is_file():
@@ -285,23 +288,32 @@ def legacy_binding_operations(root: Path, contract: dict) -> list[dict]:
             continue
         operations.append(operation("write-file", [target], [target],
                                     sha256_hash(current), sha256_hash(after)))
-    return operations
+        contents[target] = after
+    return operations, contents
 
 
 def build_operations(root: Path, found: Candidates, manifest: dict,
                      contract_source: dict | None,
-                     plan_id: str) -> tuple[list[dict], list[dict]]:
+                     plan_id: str) -> tuple[list[dict], list[dict],
+                                            dict[str, bytes]]:
     """The typed operations either side of the adoption's own bookkeeping.
 
-    Returned as `(head, tail)` rather than one list because
+    Returned as `(head, tail, contents)` rather than one list because
     the migration map and the evidence record sit between them and cannot be
     built until the outcome is known — and the outcome is decided by whether
     this list has anything in it. The apply order is the concatenation: the
     contract amendment, the relocations sorted by old path, the runtime
     sentinel and the `.gitignore` amendment, then the two records, then the
     living-reference rewrite and finally the projection regenerations.
+
+    `contents` maps each `write-file` target onto the exact bytes whose hash
+    the operation publishes as `after`. The plan document carries the hash and
+    `apply` carries out the write, so the bytes are generated here once and
+    handed to both — a second generator would be a second answer to "what does
+    adoption write", which is the duplication the bar forbids.
     """
     operations: list[dict] = []
+    contents: dict[str, bytes] = {}
 
     interval = derived_interval(manifest["platform_version"])
     amended = (amended_contract(contract_source, interval, found)
@@ -313,6 +325,7 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
             operations.append(operation(
                 "write-file", [CONTRACT_FILENAME], [CONTRACT_FILENAME],
                 sha256_hash(current), sha256_hash(after)))
+            contents[CONTRACT_FILENAME] = after
 
     object_ids = {path: object_id for path, object_id in
                   [(p, o) for info in found.groups.values()
@@ -328,6 +341,7 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
             "write-file", [RUNTIME_SENTINEL], [RUNTIME_SENTINEL],
             None if sentinel is None else sha256_hash(sentinel),
             sha256_hash(RUNTIME_SENTINEL_BYTES)))
+        contents[RUNTIME_SENTINEL] = RUNTIME_SENTINEL_BYTES
 
     ignore_bytes = read_bytes_bounded(root / GITIGNORE)
     if ignore_bytes is not None:
@@ -340,10 +354,13 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
             operations.append(operation(
                 "write-file", [GITIGNORE], [GITIGNORE],
                 sha256_hash(ignore_bytes), sha256_hash(amended_ignore)))
+            contents[GITIGNORE] = amended_ignore
 
     tail: list[dict] = []
     if amended is not None:
-        tail.extend(legacy_binding_operations(root, amended))
+        rewrites, rewritten = legacy_binding_operations(root, amended)
+        tail.extend(rewrites)
+        contents.update(rewritten)
 
     projections = (amended or {}).get("projections")
     if isinstance(projections, list):
@@ -371,7 +388,7 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
                 # plan states the source it regenerates from rather than
                 # predicting the output it has not asked for yet.
                 None))
-    return operations, tail
+    return operations, tail, contents
 
 
 def adoption_records(plan_id: str) -> dict:
@@ -384,12 +401,16 @@ def adoption_records(plan_id: str) -> dict:
 def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
                            base_revision: str, platform_block: dict,
                            decisions: dict,
-                           ready_gates: list[dict]) -> list[dict]:
+                           ready_gates: list[dict]) -> tuple[list[dict],
+                                                            dict[str, bytes]]:
     """The path-migration map and the adoption evidence record.
 
     Both are named by the plan id and neither exists yet, so each is a
     `write-file` whose `before` is null; the record carries the outcome, which
     is why these two are built after routing rather than beside the moves.
+
+    Returned with the same `{target: bytes}` map `build_operations` returns,
+    for the same reason: `apply` writes the very bytes this hashed.
     """
     records = adoption_records(plan_id)
     map_bytes = document_bytes({
@@ -419,7 +440,8 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
         operation("write-file", [records["evidence_record"]],
                   [records["evidence_record"]], None,
                   sha256_hash(record_bytes)),
-    ]
+    ], {records["migration_map"]: map_bytes,
+        records["evidence_record"]: record_bytes}
 
 # --------------------------------------------------------------------------
 # Outcome routing (D10)
