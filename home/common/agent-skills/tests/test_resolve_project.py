@@ -298,11 +298,29 @@ class NormalizationTest(ResolverTestCase):
                     or value.startswith(str(root.resolve()) + "/"))
 
     def test_the_source_file_keeps_its_relative_values(self):
+        """D30: exactly what the name promises, and no literal path.
+
+        The authored value stays relative — not absolute, no leading `/`, no
+        `..` segment — and the snapshot's value is that same path joined to the
+        project root. Pinning a literal directory here would instead make this
+        case fail the moment an artifact directory is relocated, which is a
+        move the contract is meant to absorb.
+        """
         root = self.make_root()
-        self.assertEqual(self.resolve(root)[0], 0)
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
         on_disk = json.loads((root / ".agents" / "project.json").read_text("utf-8"))
-        self.assertEqual(
-            on_disk["bindings"]["paths"]["artifacts"]["plans"], ".claude/plans")
+        for name in ("specs", "plans"):
+            with self.subTest(artifacts=name):
+                authored = on_disk["bindings"]["paths"]["artifacts"][name]
+                self.assertIsInstance(authored, str)
+                self.assertTrue(authored)
+                self.assertFalse(authored.startswith("/"))
+                self.assertFalse(Path(authored).is_absolute())
+                self.assertNotIn("..", Path(authored).parts)
+                self.assertEqual(
+                    snap["bindings"]["paths"]["artifacts"][name],
+                    str(root / authored))
 
     def test_non_path_binding_values_pass_through_unchanged(self):
         root = self.make_root()
@@ -589,6 +607,36 @@ class OnePassCollectionTest(ResolverTestCase):
         self.assertEqual(
             [v["pointer"] for v in payload["error"]["violations"]],
             ["/schema_version"])
+
+    def test_every_interval_shape_violation_joins_the_same_pass(self):
+        """R2.2: the interval is validated with the rest, not on its own."""
+        source = source_contract()
+        source["platform"] = {"min_inclusive": "1.0", "max_exclusive": 7,
+                              "extra": True}
+        del source["bindings"]["deploy"]
+        code, payload, _ = self.resolve(self.make_root(source))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "invalid_contract")
+        pointers = [v["pointer"] for v in payload["error"]["violations"]]
+        for pointer in ("/bindings/deploy", "/platform/extra",
+                        "/platform/max_exclusive", "/platform/min_inclusive"):
+            self.assertIn(pointer, pointers)
+        self.assertEqual(pointers, sorted(pointers))
+
+    def test_an_inverted_interval_joins_the_same_pass(self):
+        """The ordering violation needs both bounds to parse, so it is a
+        separate case from the malformed-bound one above."""
+        source = source_contract()
+        source["platform"] = {"min_inclusive": "2.0.0",
+                              "max_exclusive": "1.0.0"}
+        del source["capabilities"]["release"]
+        code, payload, _ = self.resolve(self.make_root(source))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "invalid_contract")
+        pointers = [v["pointer"] for v in payload["error"]["violations"]]
+        self.assertIn("/capabilities/release", pointers)
+        self.assertIn("/platform/max_exclusive", pointers)
+        self.assertEqual(pointers, sorted(pointers))
 
 
 class DiscoveryTest(ResolverTestCase):
@@ -1829,3 +1877,288 @@ class CommittedManifestTest(ResolverTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlatformIntervalShapeTest(ResolverTestCase):
+    """R2.1 / R2.2: the interval's shape is `invalid_contract`, never a range
+    verdict. A malformed interval and an out-of-range one are two different
+    refusals and are never confused."""
+
+    CASES = (
+        ("the member is absent", None, "/platform"),
+        ("the member is not an object", "1.0.0", "/platform"),
+        ("min_inclusive is absent",
+         {"max_exclusive": "2.0.0"}, "/platform/min_inclusive"),
+        ("max_exclusive is absent",
+         {"min_inclusive": "1.0.0"}, "/platform/max_exclusive"),
+        ("an unexpected member",
+         {"min_inclusive": "1.0.0", "max_exclusive": "2.0.0", "pin": "1.0.0"},
+         "/platform/pin"),
+        ("a non-string bound",
+         {"min_inclusive": 1, "max_exclusive": "2.0.0"},
+         "/platform/min_inclusive"),
+        ("a null bound",
+         {"min_inclusive": "1.0.0", "max_exclusive": None},
+         "/platform/max_exclusive"),
+        ("a non-SemVer bound",
+         {"min_inclusive": "1.0", "max_exclusive": "2.0.0"},
+         "/platform/min_inclusive"),
+        ("a pre-release bound",
+         {"min_inclusive": "1.0.0", "max_exclusive": "2.0.0-rc.1"},
+         "/platform/max_exclusive"),
+        ("a build-metadata bound",
+         {"min_inclusive": "1.0.0+build", "max_exclusive": "2.0.0"},
+         "/platform/min_inclusive"),
+        ("an exact pin",
+         {"min_inclusive": "1.0.0", "max_exclusive": "1.0.0"},
+         "/platform/max_exclusive"),
+        ("an inverted interval",
+         {"min_inclusive": "2.0.0", "max_exclusive": "1.9.9"},
+         "/platform/max_exclusive"),
+    )
+
+    def test_each_malformed_interval_is_an_invalid_contract_violation(self):
+        for label, value, pointer in self.CASES:
+            with self.subTest(case=label):
+                contract = source_contract()
+                if value is None:
+                    del contract["platform"]
+                else:
+                    contract["platform"] = value
+                code, payload, _ = self.resolve(self.make_root(contract))
+                self.assertEqual(code, 2)
+                error = payload["error"]
+                self.assertEqual(error["code"], "invalid_contract")
+                self.assertNotIn("reason_code", error)
+                self.assertIn(pointer,
+                              [v["pointer"] for v in error["violations"]])
+                self.assertNotIn("schema_version", payload)
+
+
+class PlatformRangeTest(ResolverTestCase):
+    """R2.3 / R2.4: the range and schema-set questions, answered only after
+    shape validation has passed, as `unsupported_schema` with a reason code."""
+
+    def assert_unsupported(self, code: int, payload: object,
+                           reason_code: str, pointer: str) -> None:
+        self.assertEqual(code, 2)
+        error = payload["error"]
+        self.assertEqual(error["code"], "unsupported_schema")
+        self.assertEqual(error["reason_code"], reason_code)
+        self.assertEqual([v["pointer"] for v in error["violations"]], [pointer])
+        self.assertNotIn("schema_version", payload)
+
+    def test_a_platform_at_the_max_bound_is_out_of_range(self):
+        # The committed contract declares [1.0.0, 2.0.0); `max_exclusive` is
+        # exclusive, so 2.0.0 is already outside it.
+        self.set_manifest(mutated_manifest(platform_version="2.0.0"))
+        code, payload, _ = self.resolve(self.make_root())
+        self.assert_unsupported(code, payload, "platform_too_new", "/platform")
+
+    def test_a_platform_below_the_min_bound_is_out_of_range(self):
+        self.set_manifest(mutated_manifest(platform_version="0.9.0"))
+        code, payload, _ = self.resolve(self.make_root())
+        self.assert_unsupported(code, payload, "platform_too_old", "/platform")
+
+    def test_the_min_bound_itself_is_inside_the_range(self):
+        self.set_manifest(mutated_manifest(platform_version="1.0.0"))
+        code, snap, err = self.resolve(self.make_root())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["schema_version"], 1)
+
+    def test_a_malformed_interval_never_reaches_the_range_check(self):
+        """An out-of-range platform *and* a malformed interval: the shape
+        answer wins, because the range check runs only after it passes."""
+        self.set_manifest(mutated_manifest(platform_version="9.9.9"))
+        contract = source_contract()
+        contract["platform"] = {"min_inclusive": "1.0", "max_exclusive": "2.0.0"}
+        code, payload, _ = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "invalid_contract")
+        self.assertNotIn("reason_code", payload["error"])
+
+    def test_a_schema_absent_from_the_manifest_set_is_unsupported(self):
+        contract = source_contract()
+        contract["schema_version"] = 2
+        code, payload, _ = self.resolve(self.make_root(contract))
+        self.assert_unsupported(code, payload, "project_schema_unsupported",
+                                "/schema_version")
+        self.assertEqual(payload["error"]["repair_id"],
+                         "contract.schema_version.unsupported")
+
+    def test_a_supported_non_current_schema_resolves(self):
+        """R2.5: no refusal, no deprecation notice, still four members."""
+        self.set_manifest(mutated_manifest(project_schema_versions=[1, 2]))
+        code, snap, err = self.resolve(self.make_root())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            sorted(snap),
+            ["bindings", "capabilities", "project", "schema_version"])
+        for word in ("deprecat", "removal", "migration", "notice"):
+            self.assertNotIn(word, json.dumps(snap).lower())
+
+    def test_the_snapshot_version_is_the_manifests_resolved_version(self):
+        """D8: the snapshot's interface version comes from the manifest, not
+        from the contract's declared schema and not from a source literal."""
+        self.set_manifest(mutated_manifest(
+            project_schema_versions=[1, 2], resolved_schema_version=2))
+        contract = source_contract()
+        self.assertEqual(contract["schema_version"], 1)
+        code, snap, err = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["schema_version"], 2)
+
+
+class ReasonCodePositionTest(ResolverTestCase):
+    """D7: `reason_code` is a member of the error object exactly when the code
+    is `unsupported_schema`, and of no other refusal this tool can emit."""
+
+    def refusal(self, *args: str, root: Path | None = None) -> dict:
+        code, out, err = run(*args, home=self.home)
+        self.assertEqual(code, 2, err or out)
+        return json.loads(out)["error"]
+
+    def test_every_other_error_code_carries_no_reason_code(self):
+        cases: list[tuple[str, dict]] = []
+
+        empty = Path(tempfile.mkdtemp()).resolve()
+        cases.append(("not_onboarded", self.refusal(
+            "resolve", "--repo-root", str(empty))))
+
+        contract = source_contract()
+        del contract["bindings"]["deploy"]
+        cases.append(("invalid_contract", self.refusal(
+            "resolve", "--repo-root", str(self.make_root(contract)))))
+
+        drifted = self.make_root()
+        (drifted / "AGENTS.md").write_text("hand edited\n", encoding="utf-8")
+        cases.append(("invalid_projection", self.refusal(
+            "check-projections", "--repo-root", str(drifted))))
+
+        cases.append(("capability_unavailable", self.refusal(
+            "resolve", "--repo-root", str(self.make_root()),
+            "--require", "release")))
+
+        broken = self.make_root()
+        self.set_manifest(None)
+        cases.append(("resolver_failure", self.refusal(
+            "resolve", "--repo-root", str(broken))))
+
+        seen = {code for code, _ in cases}
+        self.assertEqual(seen, {"not_onboarded", "invalid_contract",
+                                "invalid_projection", "capability_unavailable",
+                                "resolver_failure"})
+        for code, error in cases:
+            with self.subTest(code=code):
+                self.assertEqual(error["code"], code)
+                self.assertNotIn("reason_code", error)
+                self.assertEqual(sorted(error),
+                                 ["code", "repair_id", "violations"])
+
+    def test_unsupported_schema_always_carries_one_from_the_closed_set(self):
+        closed = ("platform_too_old", "platform_too_new",
+                  "project_schema_unsupported")
+        contract = source_contract()
+        contract["schema_version"] = 2
+        errors = [self.refusal("resolve", "--repo-root",
+                               str(self.make_root(contract)))]
+        for version in ("0.9.0", "2.0.0"):
+            self.set_manifest(mutated_manifest(platform_version=version))
+            errors.append(self.refusal("resolve", "--repo-root",
+                                       str(self.make_root())))
+        for error in errors:
+            self.assertEqual(error["code"], "unsupported_schema")
+            self.assertIn(error["reason_code"], closed)
+            self.assertEqual(
+                sorted(error),
+                ["code", "reason_code", "repair_id", "violations"])
+        self.assertEqual({error["reason_code"] for error in errors},
+                         set(closed))
+
+
+class CommittedIntervalTest(ResolverTestCase):
+    """The mutual gate: the committed manifest and the committed contract
+    check each other, so bumping one without the other fails here."""
+
+    def test_the_committed_contract_declares_the_interval(self):
+        platform = source_contract()["platform"]
+        self.assertEqual(sorted(platform), ["max_exclusive", "min_inclusive"])
+        self.assertEqual(platform["min_inclusive"], "1.0.0")
+        self.assertEqual(platform["max_exclusive"], "2.0.0")
+
+    def test_the_committed_platform_version_is_inside_the_interval(self):
+        platform = source_contract()["platform"]
+        version = committed_manifest()["platform_version"]
+        low = tuple(int(part) for part in platform["min_inclusive"].split("."))
+        high = tuple(int(part) for part in platform["max_exclusive"].split("."))
+        active = tuple(int(part) for part in version.split("."))
+        self.assertTrue(low <= active < high,
+                        f"{version} is outside "
+                        f"[{platform['min_inclusive']}, "
+                        f"{platform['max_exclusive']})")
+
+    def test_the_committed_schema_version_is_one_the_manifest_supports(self):
+        self.assertIn(source_contract()["schema_version"],
+                      committed_manifest()["project_schema_versions"])
+
+    def test_this_repository_resolves_under_the_committed_manifest(self):
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(json.loads(out)["schema_version"],
+                         committed_manifest()["resolved_schema_version"])
+
+
+class SchemaReasonDispatchTest(InProcessTestCase):
+    """D7: both mappings over `SCHEMA_REASON_CODES` are exhaustive, and the
+    `reason_code` position rule is enforced where the object is emitted rather
+    than trusted from the caller."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.module = load_module()
+        self.assertTrue(self.module.bootstrap_platform_library())
+        self.codes = self.module.agent_platform.SCHEMA_REASON_CODES
+
+    def test_the_closed_set_is_exactly_the_three_members(self):
+        self.assertEqual(self.codes, ("platform_too_old", "platform_too_new",
+                                      "project_schema_unsupported"))
+
+    def test_every_member_maps_to_a_repair_id_and_a_message(self):
+        ids, messages = set(), set()
+        for reason_code in self.codes:
+            with self.subTest(reason_code=reason_code):
+                repair_id = self.module.schema_reason_repair_id(reason_code)
+                message = self.module.schema_reason_message(reason_code)
+                self.assertTrue(repair_id and isinstance(repair_id, str))
+                self.assertTrue(message and isinstance(message, str))
+                ids.add(repair_id)
+                messages.add(message)
+        self.assertEqual(len(ids), len(self.codes))
+        self.assertEqual(len(messages), len(self.codes))
+
+    def test_an_unknown_reason_code_raises_in_both_dispatches(self):
+        for mapping in (self.module.schema_reason_repair_id,
+                        self.module.schema_reason_message):
+            with self.subTest(mapping=mapping.__name__):
+                with self.assertRaises(ValueError):
+                    mapping("platform_sideways")
+
+    def test_emit_error_refuses_a_misplaced_reason_code(self):
+        buffer = io.StringIO()
+        with self.assertRaises(ValueError):
+            with contextlib.redirect_stdout(buffer):
+                self.module.emit_error(
+                    "invalid_contract", "contract.parse",
+                    [{"pointer": "", "message": "x"}], "platform_too_old")
+        with self.assertRaises(ValueError):
+            with contextlib.redirect_stdout(buffer):
+                self.module.emit_error(
+                    "unsupported_schema", "contract.platform.too_old",
+                    [{"pointer": "", "message": "x"}], None)
+        with self.assertRaises(ValueError):
+            with contextlib.redirect_stdout(buffer):
+                self.module.emit_error(
+                    "unsupported_schema", "contract.platform.too_old",
+                    [{"pointer": "", "message": "x"}], "platform_sideways")
+        self.assertEqual(buffer.getvalue(), "")
