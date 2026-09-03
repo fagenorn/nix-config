@@ -19,8 +19,13 @@ none can be added later without the validator refusing it.
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import importlib.util
+from importlib.machinery import SourceFileLoader
 import json
 from pathlib import Path
+import platform
+import subprocess
 import sys
 
 
@@ -50,6 +55,9 @@ MAX_FACT_LIST = 8
 
 REVISION_LENGTH = 40
 HEX_DIGITS = frozenset("0123456789abcdef")
+
+CHILD_TIMEOUT_SECONDS = 15
+ENGINE_FAILURE_MESSAGE = "the conformance engine failed unexpectedly"
 
 
 class ReportError(Exception):
@@ -490,8 +498,551 @@ def emit_error(code: str, repair_id: str, violations: list[dict]) -> int:
 
 
 # --------------------------------------------------------------------------
+# The resolver, in process
+# --------------------------------------------------------------------------
+
+
+RESOLVER_NAMES = ("resolve-project.py", "resolve_project.py", "resolve-project")
+RESOLVER_MODULE_NAME = "conformance_resolve_project"
+_RESOLVER = None
+
+
+def load_resolver():
+    """Contract: the sibling `resolve-project` module, imported once (D2).
+
+    The three names are tried in that order so an extensionless Nix-installed
+    link loads identically to the repository file, whose `main()` is
+    `__main__`-guarded — executing the module therefore runs nothing. The
+    directory is `__file__`'s parent unresolved, because the installed
+    binary is a symlink into the store while its sibling resolver is not.
+    """
+    global _RESOLVER
+    if _RESOLVER is not None:
+        return _RESOLVER
+    directory = Path(__file__).parent.resolve()
+    for name in RESOLVER_NAMES:
+        path = directory / name
+        if path.is_file():
+            break
+    else:
+        raise RuntimeError(f"no resolver module beside {directory}")
+    spec = importlib.util.spec_from_loader(
+        RESOLVER_MODULE_NAME, SourceFileLoader(RESOLVER_MODULE_NAME, str(path)))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _RESOLVER = module
+    return _RESOLVER
+
+
+def bounded_run(argv: list[str], cwd, env: dict | None = None):
+    """Contract: a completed read-only child, or None when it could not run.
+
+    Every child the engine starts is read-only and bounded; a failure to
+    launch, a timeout or a signal yields None so the caller records a null
+    fact or a finding rather than letting an environment fact escape (D19).
+    """
+    try:
+        return subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True,
+                              text=True, timeout=CHILD_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+# --------------------------------------------------------------------------
+# The ladder's cached stages
+#
+# One stage per structural check the resolver ladder settles, in ladder order.
+# `check_contract_resolvable` is the only writer; the five dependent
+# evaluators are pure reads of the cache (D17).
+# --------------------------------------------------------------------------
+
+
+STAGE_CHECKS = {
+    "present": "repository.contract.present",
+    "schema_supported": "compatibility.contract.schema_supported",
+    "valid": "repository.contract.valid",
+    "projection_fresh": "repository.projection.fresh",
+    "capability_required": "host.capability.required",
+}
+STAGE_ORDER = tuple(STAGE_CHECKS)
+# Which stage a resolver refusal names. The raising call site does not decide
+# it: `load_contract` refuses `invalid_contract` before the schema stage has
+# run, and `validate_projections` refuses it from a later call site (D33).
+CODE_STAGES = {
+    "not_onboarded": "present",
+    "unsupported_schema": "schema_supported",
+    "invalid_contract": "valid",
+    "invalid_projection": "projection_fresh",
+    "capability_unavailable": "capability_required",
+}
+RESOLVABLE_CHECK_ID = "repository.contract.resolvable"
+
+
+# --------------------------------------------------------------------------
+# The registry
+# --------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class Check:
+    """One check declaration: what it judges, what it needs, what it may emit.
+
+    `findings` is the declaration-ordered `(reason_code, repair_id)` mapping
+    and the single source for what this check may emit (D31): the evaluation
+    guard, report construction and `repair_ids_for` all read it and none
+    restates it. `run` names the evaluator, resolved with `getattr`.
+    """
+
+    id: str
+    domain: str
+    subject_kind: str
+    requirement: str
+    depends_on: tuple[str, ...]
+    findings: tuple[tuple[str, str], ...]
+    run: str
+
+    @property
+    def reason_codes(self) -> tuple[str, ...]:
+        return tuple(code for code, _ in self.findings)
+
+
+def repair_ids_for(check: Check) -> tuple[str, ...]:
+    """Contract: the distinct repair ids `check` declares, sorted ascending."""
+    return tuple(sorted({repair_id for _, repair_id in check.findings
+                         if repair_id is not None}))
+
+
+@dataclasses.dataclass(frozen=True)
+class Outcome:
+    """One evaluator's verdict, before it becomes a check object."""
+
+    status: str
+    reason_code: str | None = None
+    repair_id: str | None = None
+    facts: dict | None = None
+
+
+@dataclasses.dataclass
+class Context:
+    """Everything an evaluator may read, and the ladder's one cache.
+
+    `root_arg` is `--repo-root` verbatim — None when the flag was omitted, so
+    the resolver's ancestor walk runs — while `root` starts at the caller's
+    directory and is replaced by the discovered root (D28).
+    """
+
+    root: Path
+    root_arg: str | None
+    offline: bool
+    required: tuple[str, ...]
+    resolver: object
+    stages: dict = dataclasses.field(
+        default_factory=lambda: {name: None for name in STAGE_ORDER})
+    contract: dict | None = None
+    bindings: dict | None = None
+    capabilities: dict | None = None
+
+
+REPAIRS = {
+    "conformance.internal": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "onboarding.contract.missing": {
+        "module": "resolve-project", "safety_class": "user_action",
+        "operation": None},
+    "contract.schema.unsupported": {
+        "module": "resolve-project", "safety_class": "user_action",
+        "operation": None},
+    "contract.invalid": {
+        "module": "resolve-project", "safety_class": "user_action",
+        "operation": None},
+    "projection.regenerate": {
+        "module": "resolve-project", "safety_class": "worktree",
+        "operation": {"subcommand": "write-projections", "args": []}},
+    "capability.required.unavailable": {
+        "module": "resolve-project", "safety_class": "user_action",
+        "operation": None},
+}
+
+
+# --------------------------------------------------------------------------
+# The resolver ladder
+# --------------------------------------------------------------------------
+
+
+def dedup_violations(violations: list[dict]) -> list[dict]:
+    """The list with each `(pointer, message)` kept once, in first-seen order.
+
+    `validate_contract` re-runs `validate_schema_version` internally, so a
+    malformed version would otherwise be counted twice in the `violations`
+    fact.
+    """
+    seen = set()
+    ordered = []
+    for item in violations:
+        key = (item["pointer"], item["message"])
+        if key not in seen:
+            seen.add(key)
+            ordered.append(item)
+    return ordered
+
+
+def stage_repair_id(stage: str, reason_code: str) -> str:
+    """The repair the stage's own check declares for that code (D31)."""
+    return dict(REGISTRY_BY_ID[STAGE_CHECKS[stage]].findings)[reason_code]
+
+
+def suppress_unset_stages(context: Context, suppressed_by: str) -> None:
+    """Every stage still unset becomes `suppressed` by the named check.
+
+    Those *before* the failing stage in ladder order as well as those after:
+    an unparseable contract fails `valid` while `schema_supported` never ran,
+    and an unset stage is a hole an evaluator would raise on (D33).
+    """
+    for name in STAGE_ORDER:
+        if context.stages[name] is None:
+            context.stages[name] = Outcome(
+                "suppressed", facts={"suppressed_by": suppressed_by})
+
+
+def settle(context: Context, error) -> bool:
+    """Record one resolver refusal against the stage its code names (D33).
+
+    Returns False for a code no stage owns, which the caller reports on
+    `repository.contract.resolvable` itself.
+    """
+    stage = CODE_STAGES.get(error.code)
+    if stage is None:
+        return False
+    check_id = STAGE_CHECKS[stage]
+    # Overwrites a `passed` recording when the code names an earlier stage:
+    # `validate_projections` refuses `invalid_contract` after `valid` passed.
+    context.stages[stage] = Outcome(
+        "failed", error.code, stage_repair_id(stage, error.code),
+        {"violations": len(error.violations),
+         "first_pointer": bound_fact(error.violations[0]["pointer"])})
+    suppress_unset_stages(context, check_id)
+    return True
+
+
+def check_contract_resolvable(context: Context) -> Outcome:
+    """Run the resolver ladder once and cache every stage it settles (D17).
+
+    This is the engine's one declared exception to the single boundary in
+    `main`: a failure *of the resolver* is this check's finding, while a
+    failure of anything else is the refusal (D29).
+    """
+    resolver = context.resolver
+    stage = "present"
+    try:
+        root = resolver.discover_root(context.root_arg)
+        context.root = root
+        context.stages["present"] = Outcome("passed")
+
+        stage = "schema_supported"
+        source = resolver.load_contract(root)
+        context.contract = source
+        violations: list[dict] = []
+        resolver.validate_schema_version(source, violations)
+        context.stages["schema_supported"] = Outcome("passed")
+
+        stage = "valid"
+        violations += resolver.validate_contract(source)
+        resolver.raise_for_violations(dedup_violations(violations))
+        context.stages["valid"] = Outcome("passed")
+
+        stage = "projection_fresh"
+        context.bindings = resolver.normalize_bindings(source["bindings"], root)
+        context.capabilities = resolver.compute_capabilities(
+            context.bindings, root, source["capabilities"])
+        resolver.validate_projections(root, source)
+        context.stages["projection_fresh"] = Outcome("passed")
+
+        stage = "capability_required"
+        resolver.raise_for_unavailable(list(context.required), context.capabilities)
+        context.stages["capability_required"] = Outcome("passed")
+    except resolver.ContractError as error:
+        if not settle(context, error):
+            return resolver_failed(context, stage)
+    except Exception:
+        return resolver_failed(context, stage)
+    return Outcome("passed")
+
+
+def resolver_failed(context: Context, stage: str) -> Outcome:
+    """The ladder itself broke: every unsettled stage suppresses under it."""
+    suppress_unset_stages(context, RESOLVABLE_CHECK_ID)
+    return Outcome("failed", "resolver_failure", "conformance.internal",
+                   {"stage": stage})
+
+
+def stage_result(context: Context, stage: str) -> Outcome:
+    """The cached verdict for `stage`.
+
+    After `check_contract_resolvable` returns, no stage is unset; finding one
+    here is a control-flow bug in the ladder, not a finding about the subject.
+    """
+    outcome = context.stages[stage]
+    if outcome is None:
+        raise ValueError(f"the ladder left the {stage!r} stage unsettled")
+    return outcome
+
+
+def check_contract_present(context: Context) -> Outcome:
+    return stage_result(context, "present")
+
+
+def check_schema_supported(context: Context) -> Outcome:
+    return stage_result(context, "schema_supported")
+
+
+def check_contract_valid(context: Context) -> Outcome:
+    return stage_result(context, "valid")
+
+
+def check_projection_fresh(context: Context) -> Outcome:
+    return stage_result(context, "projection_fresh")
+
+
+def check_capability_required(context: Context) -> Outcome:
+    return stage_result(context, "capability_required")
+
+
+REGISTRY: tuple[Check, ...] = (
+    Check(RESOLVABLE_CHECK_ID, "repository", "contract", "required", (),
+          (("resolver_failure", "conformance.internal"),),
+          "check_contract_resolvable"),
+    Check("repository.contract.present", "repository", "contract", "required",
+          (RESOLVABLE_CHECK_ID,),
+          (("not_onboarded", "onboarding.contract.missing"),),
+          "check_contract_present"),
+    Check("compatibility.contract.schema_supported", "compatibility", "contract",
+          "required", ("repository.contract.present",),
+          (("unsupported_schema", "contract.schema.unsupported"),),
+          "check_schema_supported"),
+    Check("repository.contract.valid", "repository", "contract", "required",
+          ("compatibility.contract.schema_supported",),
+          (("invalid_contract", "contract.invalid"),),
+          "check_contract_valid"),
+    Check("repository.projection.fresh", "repository", "projection", "required",
+          ("repository.contract.valid",),
+          (("invalid_projection", "projection.regenerate"),),
+          "check_projection_fresh"),
+    Check("host.capability.required", "host", "capability", "required",
+          ("repository.contract.valid",),
+          (("capability_unavailable", "capability.required.unavailable"),),
+          "check_capability_required"),
+)
+REGISTRY_BY_ID = {check.id: check for check in REGISTRY}
+
+
+# --------------------------------------------------------------------------
+# Purpose selection
+# --------------------------------------------------------------------------
+
+
+WORKFLOW_ENTRY_LADDER = (
+    "repository.contract.resolvable", "repository.contract.present",
+    "compatibility.contract.schema_supported", "repository.contract.valid",
+    "repository.projection.fresh", "host.capability.required",
+)
+PURPOSE_DOMAINS = {
+    "adoption": ("repository", "compatibility"),
+    "ci":       ("repository", "compatibility", "verification"),
+    "fleet":    ("repository", "compatibility"),
+    "doctor":   DOMAINS,
+}
+
+
+def select(purpose: str) -> tuple[Check, ...]:
+    """Contract: the checks `purpose` runs, in REGISTRY (dependency) order.
+
+    Every purpose but `workflow_entry` selects by domain rather than by a
+    hand-maintained id list, so registering a check is enough for it to be
+    picked up (D21). `local` is the entry ladder plus every host check.
+    """
+    if purpose == "workflow_entry":
+        chosen = set(WORKFLOW_ENTRY_LADDER)
+    elif purpose == "local":
+        chosen = set(WORKFLOW_ENTRY_LADDER) | {
+            check.id for check in REGISTRY if check.domain == "host"}
+    elif purpose in PURPOSE_DOMAINS:
+        chosen = {check.id for check in REGISTRY
+                  if check.domain in PURPOSE_DOMAINS[purpose]}
+    else:
+        raise ValueError(f"unknown purpose: {purpose!r}")
+    return tuple(check for check in REGISTRY if check.id in chosen)
+
+
+# --------------------------------------------------------------------------
+# Evaluation
+# --------------------------------------------------------------------------
+
+
+def evaluator(name: str):
+    """The evaluator a check declares, resolved through this module."""
+    return getattr(sys.modules[__name__], name)
+
+
+def failed_ancestor(check: Check, results: dict, selected: set) -> str | None:
+    """The first failed check in `check`'s dependency closure, REGISTRY order.
+
+    The closure is taken over the *selected* set: a check a purpose does not
+    run cannot suppress one it does.
+    """
+    seen: set = set()
+    pending = [name for name in check.depends_on if name in selected]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(name for name in REGISTRY_BY_ID[current].depends_on
+                       if name in selected)
+    for ancestor in REGISTRY:
+        if ancestor.id in seen and results[ancestor.id].status == "failed":
+            return ancestor.id
+    return None
+
+
+def guard_finding(check: Check, outcome: Outcome) -> None:
+    """Refuse an outcome the check's own `findings` does not declare (D31)."""
+    if outcome.reason_code is None:
+        if outcome.repair_id is not None:
+            raise ValueError(
+                f"{check.id} named repair {outcome.repair_id!r} with no reason code")
+        return
+    if (outcome.reason_code, outcome.repair_id) not in check.findings:
+        raise ValueError(
+            f"{check.id} emitted the undeclared finding "
+            f"({outcome.reason_code!r}, {outcome.repair_id!r})")
+
+
+def as_check(check: Check, outcome: Outcome) -> dict:
+    return {
+        "id": check.id,
+        "domain": check.domain,
+        "subject_kind": check.subject_kind,
+        "requirement": check.requirement,
+        "status": outcome.status,
+        "reason_code": outcome.reason_code,
+        "repair_id": outcome.repair_id,
+        "facts": dict(outcome.facts) if outcome.facts else {},
+    }
+
+
+def evaluate(purpose: str, context: Context) -> list[dict]:
+    """Contract: the check objects `purpose` emits, sorted by id.
+
+    Evaluation walks REGISTRY order, which is topological, so every ancestor
+    has a result before its dependent asks for one (D24). `workflow_entry`
+    stops at the first `failed` or `not_run` and carries that one root cause;
+    `suppressed` never stops it, because it names a step the ladder skipped
+    rather than the cause (D3, D33).
+    """
+    checks = select(purpose)
+    selected = {check.id for check in checks}
+    results: dict = {}
+    emitted: list[dict] = []
+    for check in checks:
+        blocker = failed_ancestor(check, results, selected)
+        if blocker is not None:
+            outcome = Outcome("suppressed", facts={"suppressed_by": blocker})
+        else:
+            outcome = evaluator(check.run)(context)
+        guard_finding(check, outcome)
+        results[check.id] = outcome
+        emitted.append(as_check(check, outcome))
+        if purpose == "workflow_entry" and outcome.status in ("failed", "not_run"):
+            return [emitted[-1]]
+    return sorted(emitted, key=lambda check: check["id"])
+
+
+# --------------------------------------------------------------------------
+# Report assembly
+# --------------------------------------------------------------------------
+
+
+def contract_project_id(contract) -> str | None:
+    """The authored project id, or None when the ladder never parsed one.
+
+    A parsed contract can still be invalid, so every step is checked: an
+    explicit null beats a fabricated identity (D23).
+    """
+    if not isinstance(contract, dict):
+        return None
+    project = contract.get("project")
+    if not isinstance(project, dict):
+        return None
+    value = project.get("id")
+    return value if isinstance(value, str) else None
+
+
+def head_revision(root: Path) -> str | None:
+    """The checked-out commit, or None outside a repository (D19, D23)."""
+    completed = bounded_run(["git", "-C", str(root), "rev-parse", "HEAD"], root)
+    if completed is None or completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    if len(value) == REVISION_LENGTH and set(value) <= HEX_DIGITS:
+        return value
+    return None
+
+
+def build_report(purpose: str, context: Context, checks: list[dict]) -> dict:
+    """Contract: the six-member report for `checks`, ready for validate_report.
+
+    It runs after `evaluate` because `subject.root` is the root the ladder
+    discovered, not the directory the caller stood in (D28).
+    """
+    repair_ids = sorted({check["repair_id"] for check in checks
+                         if check["repair_id"] is not None})
+    status, primary = expected_outcome(checks)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "subject": {
+            "project_id": contract_project_id(context.contract),
+            "root": str(context.root),
+            "revision": head_revision(context.root),
+            "platform": {"system": platform.system(),
+                         "machine": platform.machine()},
+        },
+        "request": {
+            "purpose": purpose,
+            "offline": context.offline,
+            "required_capabilities": list(context.required),
+            "platform_target": f"{platform.system()}/{platform.machine()}",
+        },
+        "outcome": {"status": status, "primary_check_id": primary},
+        "checks": checks,
+        "repairs": [{"repair_id": repair_id, **REPAIRS[repair_id]}
+                    for repair_id in repair_ids],
+    }
+
+
+# --------------------------------------------------------------------------
 # Subcommands
 # --------------------------------------------------------------------------
+
+
+def command_run(args: argparse.Namespace) -> int:
+    """Contract: prints one schema-valid report and returns 0, or 2 for a
+    non-passing workflow_entry. It catches nothing: an unexpected exception
+    reaches main's single boundary and becomes the D15 refusal (D29)."""
+    context = Context(
+        root=(Path(args.repo_root).resolve() if args.repo_root
+              else Path.cwd().resolve()),
+        root_arg=args.repo_root,
+        offline=args.offline,
+        required=tuple(sorted(set(args.require))),
+        resolver=load_resolver(),
+    )
+    report = build_report(args.purpose, context, evaluate(args.purpose, context))
+    validate_report(report)
+    emit_json(report)
+    if args.purpose == "workflow_entry" and report["outcome"]["status"] != "passed":
+        return 2
+    return 0
 
 
 def command_validate_report(args: argparse.Namespace) -> int:
@@ -528,6 +1079,21 @@ def build_parser() -> argparse.ArgumentParser:
         description="Judge a project against the closed conformance registry.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    judge = subparsers.add_parser(
+        "run", help="judge a project and print one ConformanceReport")
+    judge.add_argument(
+        "--purpose", required=True, choices=PURPOSES,
+        help="the declared purpose whose check ladder the engine selects")
+    judge.add_argument(
+        "--repo-root", default=None, metavar="PATH",
+        help="the project root; omitted, the resolver discovers it (D28)")
+    judge.add_argument(
+        "--offline", action="store_true",
+        help="declare the network unavailable; never inferred, never probed")
+    judge.add_argument(
+        "--require", action="append", default=[], metavar="CAPABILITY",
+        choices=load_resolver().CAPABILITY_NAMES,
+        help="a capability this run demands; repeatable")
     validate = subparsers.add_parser(
         "validate-report",
         help="refuse unless the named file is a schema-valid ConformanceReport")
@@ -538,7 +1104,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def dispatch(args: argparse.Namespace) -> int:
-    handlers = {"validate-report": command_validate_report}
+    handlers = {"run": command_run, "validate-report": command_validate_report}
     handler = handlers.get(args.command)
     if handler is None:
         raise ValueError(f"unknown subcommand: {args.command!r}")
@@ -546,9 +1112,21 @@ def dispatch(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    return dispatch(args)
+    """The engine's one exception boundary (D15, D29).
+
+    Resolver loading, parser construction and dispatch all sit inside it —
+    `--require`'s choices come from the resolver, so a resolver that will not
+    load refuses in this shape rather than tracebacking. The violation is the
+    fixed sentence, never the exception text, which can name a path. The one
+    declared exception is the ladder's own catch (D17).
+    """
+    try:
+        return dispatch(build_parser().parse_args(argv))
+    except SystemExit:
+        raise                      # argparse usage: exit 2, no JSON
+    except Exception:
+        return emit_error("resolver_failure", "conformance.internal",
+                          [violation("", ENGINE_FAILURE_MESSAGE)])
 
 
 if __name__ == "__main__":

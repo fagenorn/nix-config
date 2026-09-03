@@ -14,6 +14,7 @@ tool outcome builds its own bin with make_stub_bin and overrides PATH.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import shutil
@@ -80,6 +81,64 @@ def doctor(case, root, *extra: str, env: dict | None = None) -> tuple[dict, dict
     case.assertEqual(code, 0, err)
     report = json.loads(out)
     return report, {c["id"]: c for c in report["checks"]}
+
+
+def make_root(tmp: Path) -> Path:
+    """A temporary project root a clean `doctor` run passes on.
+
+    The committed contract, its instruction source and both projection targets
+    are copied byte-for-byte, and every directory a knowledge path names is
+    created, so a fixture refuses only for the mutation a case applies to it.
+    """
+    root = tmp / "project"
+    (root / ".agents" / "instructions").mkdir(parents=True)
+    for relative in (".agents/project.json", ".agents/instructions/bootstrap.md",
+                     "AGENTS.md", "CLAUDE.md"):
+        shutil.copy2(REPO_ROOT / relative, root / relative)
+    paths = json.loads(
+        (root / ".agents/project.json").read_text(encoding="utf-8")
+    )["bindings"]["paths"]
+    for member in ("context", "standards", "architecture", "hints"):
+        for entry in paths[member]:
+            target = root / entry
+            if not target.exists():  # `architecture` names CLAUDE.md, already copied
+                target.mkdir(parents=True)
+    return root
+
+
+def load_module():
+    """The engine as an imported module, loaded by path (its name is hyphenated).
+
+    Registered under its spec name before exec_module: the module uses
+    postponed annotations, and dataclass construction resolves them through
+    sys.modules, so an unregistered module fails to import at all (D36).
+    """
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    fullname = "conformance_engine"
+    spec = importlib.util.spec_from_loader(
+        fullname, SourceFileLoader(fullname, str(SCRIPT)))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[fullname] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(fullname, None)
+        raise
+    return module
+
+
+class ReportAssertions:
+    """One assertion both report suites share: the engine's own output, judged
+    by the very schema every consumer checks a report against."""
+
+    def assert_validates(self, report: dict) -> None:
+        with fixture() as tmp:
+            path = tmp / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            code, out, _ = run("validate-report", "--input", str(path))
+            self.assertEqual(code, 0, out)
 
 
 def valid_report() -> dict:
@@ -334,6 +393,277 @@ class ValidateReportTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertIn("usage:", err)
+
+
+class RunReportShapeTest(ReportAssertions, unittest.TestCase):
+    """AC1: both purposes emit a schema-valid report, differing in shape."""
+
+    def test_doctor_on_a_clean_root_is_schema_valid_and_exits_zero(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp))
+            self.assertEqual(sorted(report), ["checks", "outcome", "repairs",
+                                              "request", "schema_version", "subject"])
+            self.assertGreater(len(by_id), 1)
+            self.assertEqual([c["id"] for c in report["checks"]], sorted(by_id))
+            self.assert_validates(report)
+
+    def test_workflow_entry_on_a_broken_projection_is_one_root_cause(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            (root / "AGENTS.md").write_text("drifted\n", encoding="utf-8")
+            code, out, err = run("run", "--purpose", "workflow_entry",
+                                 "--repo-root", str(root))
+            self.assertEqual(code, 2, err)
+            report = json.loads(out)
+            self.assertEqual([len(report["checks"]), len(report["repairs"])], [1, 1])
+            check, repair = report["checks"][0], report["repairs"][0]
+            self.assertEqual(
+                [check["id"], check["subject_kind"], check["status"],
+                 check["reason_code"], check["repair_id"]],
+                ["repository.projection.fresh", "projection", "failed",
+                 "invalid_projection", "projection.regenerate"])
+            self.assertEqual(report["outcome"], {
+                "status": "failed",
+                "primary_check_id": "repository.projection.fresh"})
+            self.assertEqual(repair["safety_class"], "worktree")
+            self.assertEqual(repair["operation"],
+                             {"subcommand": "write-projections", "args": []})
+            self.assert_validates(report)
+
+
+class ContractParseFailureTest(ReportAssertions, unittest.TestCase):
+    """D33: a parse refusal fills every stage; no evaluator faces a None."""
+
+    def broken(self, tmp):
+        root = make_root(tmp)
+        (root / ".agents/project.json").write_text("{ broken", encoding="utf-8")
+        return root
+
+    def test_doctor_fails_valid_and_suppresses_the_unreached_schema_stage(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, self.broken(tmp))
+            self.assertEqual(by_id["repository.contract.valid"]["reason_code"],
+                             "invalid_contract")
+            schema = by_id["compatibility.contract.schema_supported"]
+            self.assertEqual(
+                [schema["status"], schema["facts"], schema["repair_id"]],
+                ["suppressed", {"suppressed_by": "repository.contract.valid"}, None])
+            self.assertEqual(report["outcome"]["primary_check_id"],
+                             "repository.contract.valid")
+            self.assert_validates(report)
+
+    def test_workflow_entry_walks_past_the_suppressed_stage_to_the_root_cause(self):
+        with fixture() as tmp:
+            code, out, err = run("run", "--purpose", "workflow_entry",
+                                 "--repo-root", str(self.broken(tmp)))
+            self.assertEqual(code, 2, err)
+            report = json.loads(out)
+            self.assertEqual(len(report["checks"]), 1)
+            self.assertEqual(report["checks"][0]["id"], "repository.contract.valid")
+            self.assert_validates(report)
+
+
+class NotOnboardedTest(unittest.TestCase):
+    """D23, D28: identity is null rather than fabricated; the root is discovered."""
+
+    def test_missing_contract_reports_not_onboarded_with_null_identity(self):
+        with fixture() as tmp:
+            code, out, _ = run("run", "--purpose", "workflow_entry",
+                               "--repo-root", str(tmp))
+            self.assertEqual(code, 2)
+            report = json.loads(out)
+            self.assertEqual(report["checks"][0]["reason_code"], "not_onboarded")
+            self.assertEqual(
+                [report["subject"]["project_id"], report["subject"]["revision"],
+                 report["subject"]["root"]], [None, None, str(tmp.resolve())])
+
+    def test_doctor_suppresses_the_cascade_below_a_missing_contract(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, tmp)
+            self.assertEqual(by_id["repository.contract.present"]["status"], "failed")
+            downstream = by_id["compatibility.contract.schema_supported"]
+            self.assertEqual(
+                [downstream["status"], downstream["facts"]],
+                ["suppressed", {"suppressed_by": "repository.contract.present"}])
+            self.assertEqual(report["outcome"]["primary_check_id"],
+                             "repository.contract.present")
+
+    def test_omitting_repo_root_discovers_the_root_from_a_nested_directory(self):
+        """D28: no --repo-root means the resolver's ancestor walk, not the cwd."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            code, out, err = run("run", "--purpose", "doctor",
+                                 cwd=root / ".agents/instructions")
+            self.assertEqual(code, 0, err)
+            report = json.loads(out)
+            self.assertEqual(
+                [report["subject"]["root"], report["subject"]["project_id"]],
+                [str(root.resolve()), "fagenorn/nix-config"])
+
+
+class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
+    """--require reuses the resolver's own capability names, closed at the flag."""
+
+    def test_an_unavailable_capability_blocks_workflow_entry(self):
+        with fixture() as tmp:
+            code, out, err = run("run", "--purpose", "workflow_entry",
+                                 "--repo-root", str(make_root(tmp)),
+                                 "--require", "release")
+            self.assertEqual(code, 2, err)
+            report = json.loads(out)
+            self.assertEqual(len(report["checks"]), 1)
+            check = report["checks"][0]
+            self.assertEqual(
+                [check["id"], check["status"], check["reason_code"],
+                 check["repair_id"]],
+                ["host.capability.required", "failed", "capability_unavailable",
+                 "capability.required.unavailable"])
+            self.assertEqual(report["request"]["required_capabilities"], ["release"])
+            self.assert_validates(report)
+
+    def test_repeated_requires_are_deduplicated_sorted_and_known_names(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp),
+                                   "--require", "worktrees", "--require", "tracker",
+                                   "--require", "worktrees")
+            names = report["request"]["required_capabilities"]
+            self.assertEqual(names, ["tracker", "worktrees"])
+            self.assertLessEqual(
+                set(names), set(load_module().load_resolver().CAPABILITY_NAMES))
+            self.assertEqual(by_id["host.capability.required"]["status"], "passed")
+
+    def test_an_unknown_capability_is_an_argparse_error(self):
+        code, out, err = run("run", "--purpose", "doctor", "--require", "teleport")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("usage:", err)
+
+
+class ReadOnlyTest(unittest.TestCase):
+    """SF-003: `run` writes nothing under the subject root.
+
+    Three witnesses, each catching what the others miss: `git status` a
+    tracked-content or index change, the recursive path/type set a created
+    empty directory, and the mtimes — of directories and of the root itself,
+    not only of files — a rewrite with identical bytes and a create-then-delete
+    cycle that leaves the path set unchanged. Only the engine subprocess is
+    hermetic; the fixture's own git calls use the caller's environment, and
+    `commit.gpgsign=false` here is bookkeeping in a throwaway temp repository.
+    """
+
+    def git(self, root: Path, *args: str) -> str:
+        proc = subprocess.run(
+            ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.com",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=str(root), capture_output=True, text=True, timeout=60, check=True)
+        return proc.stdout
+
+    def snapshot(self, root: Path) -> list:
+        return sorted(
+            (str(path.relative_to(root)), path.is_dir(), path.stat().st_mtime_ns)
+            for path in root.rglob("*")
+            if ".git" not in path.relative_to(root).parts)
+
+    def test_a_doctor_run_leaves_the_subject_root_untouched(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            self.git(root, "init", "-q")
+            self.git(root, "add", "-A")
+            self.git(root, "commit", "-q", "-m", "fixture")
+            status = self.git(root, "status", "--porcelain")
+            paths, root_mtime = self.snapshot(root), root.stat().st_mtime_ns
+            doctor(self, root)
+            self.assertEqual(self.git(root, "status", "--porcelain"), status)
+            self.assertEqual(self.snapshot(root), paths)
+            self.assertEqual(root.stat().st_mtime_ns, root_mtime)
+
+
+class PurposeSelectionTest(unittest.TestCase):
+    """SF-002: structural rules for all six purposes; Task 7 pins the exact ids."""
+
+    def test_every_purpose_is_duplicate_free_and_dependency_closed(self):
+        module = load_module()
+        for purpose in module.PURPOSES:
+            with self.subTest(purpose=purpose):
+                ids = [check.id for check in module.select(purpose)]
+                self.assertEqual(len(ids), len(set(ids)))
+                self.assertEqual(
+                    ids, [c.id for c in module.REGISTRY if c.id in set(ids)])
+                for check in module.select(purpose):
+                    for dependency in check.depends_on:
+                        self.assertIn(dependency, ids, f"{purpose}: {check.id}")
+
+    def test_an_unknown_purpose_raises(self):
+        with self.assertRaises(ValueError):
+            load_module().select("teleport")
+
+
+class FactBoundingTest(unittest.TestCase):
+    """D30: the one route from an authored value into `facts`, tested directly.
+
+    S3 is the only seam that reaches the pair: every subprocess case observes
+    it through a subject short enough that truncation never shows.
+    """
+
+    def test_bound_fact_truncates_to_the_schema_limit(self):
+        module = load_module()
+        self.assertEqual(module.bound_fact("x" * 250), "x" * 200)
+        self.assertEqual(module.bound_fact("short"), "short")
+        self.assertTrue(module.is_fact_value(module.bound_fact("x" * 250)))
+
+    def test_bound_facts_sorts_truncates_and_caps_the_list(self):
+        module = load_module()
+        self.assertEqual(module.bound_facts(["b", "c", "a"]), ["a", "b", "c"])
+        self.assertEqual(
+            module.bound_facts([f"e{index}" for index in range(12)]),
+            ["e0", "e1", "e10", "e11", "e2", "e3", "e4", "e5"])
+        self.assertEqual(module.bound_facts(["y" * 300, "z"], limit=1), ["y" * 200])
+        self.assertTrue(module.is_fact_value(
+            module.bound_facts([f"{index}" + "w" * 300 for index in range(12)])))
+
+
+class EngineFailureTest(unittest.TestCase):
+    """S3: the boundary refuses; the ladder's declared catch does not (D17, D29).
+
+    Both cases pass --offline, and every later S3 case calling main must: in
+    process there is no hermetic runner, so evaluate's offline rule is what
+    keeps Task 4's network check from spawning a child (D35).
+    """
+
+    def rebind(self, owner, name, value):
+        original = getattr(owner, name)
+        self.addCleanup(setattr, owner, name, original)
+        setattr(owner, name, value)
+
+    def test_an_unexpected_engine_exception_becomes_the_refusal(self):
+        module = load_module()
+        self.rebind(module, "build_report", lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("sentinel-exception-detail")))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = module.main(["run", "--purpose", "doctor", "--offline",
+                                "--repo-root", str(REPO_ROOT)])
+        self.assertEqual(code, 2)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["error"]["code"], "resolver_failure")
+        self.assertEqual(payload["error"]["repair_id"], "conformance.internal")
+        self.assertEqual([v["message"] for v in payload["error"]["violations"]],
+                         [module.ENGINE_FAILURE_MESSAGE])
+        self.assertNotIn("sentinel-exception-detail", buf.getvalue())
+
+    def test_a_resolver_exception_is_a_check_finding_not_the_refusal(self):
+        module = load_module()
+        self.rebind(module.load_resolver(), "discover_root",
+                    lambda _arg: (_ for _ in ()).throw(RuntimeError("boom")))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = module.main(["run", "--purpose", "doctor", "--offline",
+                                "--repo-root", "/"])
+        self.assertEqual(code, 0)
+        check = {c["id"]: c for c in json.loads(buf.getvalue())["checks"]}[
+            "repository.contract.resolvable"]
+        self.assertEqual([check["status"], check["reason_code"]],
+                         ["failed", "resolver_failure"])
 
 
 if __name__ == "__main__":
