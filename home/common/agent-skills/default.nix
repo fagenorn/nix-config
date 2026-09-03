@@ -133,6 +133,13 @@ in
     };
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
 
+    # The shared platform library and the manifest it reads. The library is
+    # imported, never run, so it gets no `executable = true`; the manifest is
+    # authored data with nothing templated, so this store copy is byte-identical
+    # to the repository's (D1).
+    ".agents/lib/python/agent_platform.py".source = ./scripts/agent_platform.py;
+    ".agents/share/platform-manifest.json".source = ./platform-manifest.json;
+
     # Claude accepts Home Manager's recursive file links, so its generated
     # multi-file skill can continue to use that layout.
     ".claude/skills/ui-ux-pro-max" = {

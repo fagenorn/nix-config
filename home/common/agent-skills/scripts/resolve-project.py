@@ -24,6 +24,11 @@ pure function of the source bytes, the projection id and the schema version,
 so two machines regenerate byte-identical targets; a target already in sync is
 left untouched, mtime included.
 
+Every subcommand loads and validates the installed platform manifest before it
+looks at the repository, so a missing or malformed platform installation always
+surfaces as `resolver_failure` and can never be masked by `not_onboarded` or a
+contract error (R1.3).
+
 A structural refusal prints exactly one JSON object carrying an `error` member
 on stdout and exits 2 (D12). An argparse usage error also exits 2 but prints no
 JSON, which is how a caller tells the two apart (D16).
@@ -39,7 +44,20 @@ from pathlib import Path
 import re
 import shutil
 import sys
-import tempfile
+
+# The shared platform library lives at exactly one installed path (D23) — the
+# same `~/.agents/lib/python` the `artifact-budget` pair uses. One lookup path,
+# no fallback ladder: this script is itself the module rather than a wrapper
+# around one, so it puts that directory on `sys.path` and imports by name.
+sys.path.insert(
+    0, str(Path(os.environ["HOME"]) / ".agents" / "lib" / "python"))
+
+from agent_platform import (  # noqa: E402  (import follows the path insert)
+    PlatformManifestError,
+    destination_mode,
+    load_manifest,
+    write_atomically,
+)
 
 
 SCHEMA_VERSION = 1
@@ -1069,58 +1087,6 @@ def validate_projections(root: Path, contract: dict) -> None:
     )
 
 
-def destination_mode(target: Path) -> int:
-    """The permission bits the replaced target must end up holding.
-
-    `tempfile` creates at 0600 and `os.replace` carries the temporary file's
-    mode onto the destination, so an unadjusted atomic write silently narrows
-    a file other uids have to read — invisibly, since git records no bit but
-    the executable one. An existing target therefore keeps exactly the bits it
-    already had, and a new one gets what a plain `open()` would have given it:
-    0666 with the process umask applied. Reading the umask means briefly
-    setting it, which is safe here because the resolver is single-threaded and
-    forks nothing.
-    """
-    try:
-        return os.stat(target).st_mode & 0o7777
-    except OSError:
-        umask = os.umask(0)
-        os.umask(umask)
-        return 0o666 & ~umask
-
-
-def write_atomically(target: Path, data: bytes) -> None:
-    """Replace `target` with `data` in one step, never a partial file.
-
-    The temporary file is named distinctively so an orphan left by a crashed
-    process is recognizable and is caught by the repository's `.gitignore`
-    rather than offered as an untracked file.
-
-    A nested target is a safe path the validator accepts, so its parent may not
-    exist yet; it is created here, because the temporary file is opened inside
-    that directory and a missing one would surface as `resolver_failure`
-    instead of a written projection.
-    """
-    mode = destination_mode(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    pending: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-                dir=str(target.parent),
-                prefix=".resolve-project.",
-                suffix=".tmp",
-                delete=False) as handle:
-            pending = Path(handle.name)
-            handle.write(data)
-            handle.flush()
-        os.chmod(pending, mode)
-        os.replace(pending, target)
-        pending = None
-    finally:
-        if pending is not None:
-            pending.unlink(missing_ok=True)
-
-
 def apply_projection(root: Path, entry: dict, violations: list[dict]) -> str | None:
     """Bring one target into sync and name the action taken.
 
@@ -1192,12 +1158,31 @@ def emit_error(code: str, repair_id: str, violations: list[dict]) -> int:
     return 2
 
 
+def require_platform_manifest() -> None:
+    """Refuse unless the installed platform manifest loads and validates.
+
+    Every subcommand calls this before root discovery and before any contract
+    read, so a broken platform installation always surfaces as
+    `resolver_failure` and can never be masked by `not_onboarded` or a contract
+    error (R1.3). There is no default and no assumed version: the library's
+    ordered violations are published verbatim.
+    """
+    try:
+        load_manifest()
+    except PlatformManifestError as error:
+        raise ContractError(
+            "resolver_failure", error.repair_id, error.violations) from None
+
+
 # --------------------------------------------------------------------------
 # Subcommands
 # --------------------------------------------------------------------------
 
 
 def command_resolve(args: argparse.Namespace) -> int:
+    # Before root discovery, so a broken platform installation can never be
+    # masked by `not_onboarded` or a contract error (R1.3).
+    require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source))
@@ -1218,6 +1203,9 @@ def command_write_projections(args: argparse.Namespace) -> int:
     entry keep their new bytes and the refusal names only what it could not
     resolve.
     """
+    # Before root discovery, so a broken platform installation can never be
+    # masked by `not_onboarded` or a contract error (R1.3).
+    require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source))
@@ -1238,6 +1226,9 @@ def command_check_projections(args: argparse.Namespace) -> int:
     against a source the validator accepts. Like `resolve`, this reads: it
     opens no file for writing and creates no directory.
     """
+    # Before root discovery, so a broken platform installation can never be
+    # masked by `not_onboarded` or a contract error (R1.3).
+    require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source))

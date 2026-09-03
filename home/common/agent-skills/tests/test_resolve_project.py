@@ -23,7 +23,13 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "resolve-project.py"
+LIBRARY = Path(__file__).resolve().parents[1] / "scripts" / "agent_platform.py"
+MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
+
+# `install_home`'s default: copy the committed manifest verbatim. A distinct
+# sentinel because `None` already means "install no manifest at all".
+COMMITTED = object()
 
 CAPABILITY_NAMES = (
     "tracker", "worktrees", "knowledge.context", "knowledge.standards",
@@ -34,10 +40,63 @@ BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow", "deploy
 CAPABILITY_STATES = ("available", "unsupported", "blocked")
 
 
-def run(*args: str) -> tuple[int, str, str]:
+def install_home(home: Path, manifest: object = COMMITTED) -> Path:
+    """Populate `home` as the platform installation the resolver reads (D23).
+
+    Every invocation in this suite runs under a temporary `HOME`, so the
+    library and the manifest have to be materialized there: the resolver
+    imports `agent_platform` from `$HOME/.agents/lib/python` and loads the
+    manifest from `$HOME/.agents/share`, with no fallback path either side.
+
+    `manifest` is the override hook: `COMMITTED` copies the repository's own
+    manifest byte for byte, `None` installs none at all, a `str` is written
+    verbatim (for the malformed-JSON cases) and anything else is serialized as
+    JSON.
+    """
+    library_dir = home / ".agents" / "lib" / "python"
+    library_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(LIBRARY, library_dir / "agent_platform.py")
+    share = home / ".agents" / "share"
+    share.mkdir(parents=True, exist_ok=True)
+    target = share / "platform-manifest.json"
+    target.unlink(missing_ok=True)
+    if manifest is COMMITTED:
+        shutil.copy(MANIFEST, target)
+    elif manifest is None:
+        pass
+    elif isinstance(manifest, str):
+        target.write_text(manifest, encoding="utf-8")
+    else:
+        target.write_text(json.dumps(manifest), encoding="utf-8")
+    return home
+
+
+def make_home(manifest: object = COMMITTED) -> Path:
+    return install_home(Path(tempfile.mkdtemp()).resolve(), manifest)
+
+
+def committed_manifest() -> dict:
+    return json.loads(MANIFEST.read_text("utf-8"))
+
+
+def mutated_manifest(**changes: object) -> dict:
+    manifest = committed_manifest()
+    manifest.update(changes)
+    return manifest
+
+
+MANIFEST_MEMBERS = (
+    "schema_version", "platform_version", "project_schema_versions",
+    "resolved_schema_version", "migrations", "deprecations", "removals",
+)
+SUBCOMMANDS = ("resolve", "check-projections", "write-projections")
+
+
+def run(*args: str, home: Path) -> tuple[int, str, str]:
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, timeout=60,
+        env={**os.environ, "HOME": str(home)},
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -89,7 +148,7 @@ def assert_read_only(case: unittest.TestCase, root: Path,
     git(root, "commit", "--quiet", "-m", "fixture")
     before_status = git(root, "status", "--porcelain")
     before_tree = tree_snapshot(root)
-    code, _, err = run(*args, "--repo-root", str(root))
+    code, _, err = run(*args, "--repo-root", str(root), home=case.home)
     case.assertEqual(code, expected_code, err)
     case.assertEqual(git(root, "status", "--porcelain"), before_status)
     case.assertEqual(tree_snapshot(root), before_tree)
@@ -108,6 +167,16 @@ MANAGED_LINE = "@.agents/instructions/bootstrap.md"
 
 
 class ResolverTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        # Every subcommand loads the installed manifest before it looks at the
+        # repository (R1.3), so a case without one on disk would refuse
+        # `resolver_failure` whatever else it meant to exercise.
+        self.home = make_home()
+
+    def set_manifest(self, manifest: object) -> None:
+        """Replace this case's installed manifest with the fixture given."""
+        install_home(self.home, manifest)
+
     def make_root(self, contract: object | None = None, *,
                   projections: bool = True) -> Path:
         """A temp root holding a valid contract, its instruction source, and —
@@ -145,7 +214,8 @@ class ResolverTestCase(unittest.TestCase):
         return root
 
     def resolve(self, root: Path, *extra: str) -> tuple[int, object, str]:
-        code, out, err = run("resolve", "--repo-root", str(root), *extra)
+        code, out, err = run("resolve", "--repo-root", str(root), *extra,
+                             home=self.home)
         try:
             payload: object = json.loads(out)
         except json.JSONDecodeError:
@@ -188,13 +258,14 @@ class SnapshotShapeTest(ResolverTestCase):
 
     def test_two_runs_emit_byte_identical_stdout(self):
         root = self.make_root()
-        first = run("resolve", "--repo-root", str(root))
-        second = run("resolve", "--repo-root", str(root))
+        first = run("resolve", "--repo-root", str(root), home=self.home)
+        second = run("resolve", "--repo-root", str(root), home=self.home)
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(first[1], second[1])
 
     def test_stdout_is_compact_sorted_json_with_a_trailing_newline(self):
-        code, out, err = run("resolve", "--repo-root", str(self.make_root()))
+        code, out, err = run("resolve", "--repo-root", str(self.make_root()),
+                             home=self.home)
         self.assertEqual(code, 0, err)
         self.assertTrue(out.endswith("\n"))
         self.assertNotIn("\n", out[:-1])
@@ -396,7 +467,8 @@ class NoDefaultingTest(ResolverTestCase):
     def test_a_refusal_emits_no_snapshot_member(self):
         contract = source_contract()
         del contract["bindings"]["vcs"]
-        code, out, _ = run("resolve", "--repo-root", str(self.make_root(contract)))
+        code, out, _ = run("resolve", "--repo-root", str(self.make_root(contract)),
+                           home=self.home)
         self.assertEqual(code, 2)
         for member in ("schema_version", "project", "bindings", "capabilities"):
             self.assertNotIn(f'"{member}"', out)
@@ -513,7 +585,8 @@ class DiscoveryTest(ResolverTestCase):
     def resolve_from(self, cwd: Path) -> tuple[int, object, str]:
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "resolve"],
-            capture_output=True, text=True, timeout=60, cwd=str(cwd))
+            capture_output=True, text=True, timeout=60, cwd=str(cwd),
+            env={**os.environ, "HOME": str(self.home)})
         try:
             payload: object = json.loads(proc.stdout)
         except json.JSONDecodeError:
@@ -548,7 +621,7 @@ class UsageErrorTest(ResolverTestCase):
     def test_an_unregistered_subcommand_exits_two_without_json(self):
         for args in ((),):
             with self.subTest(args=args):
-                code, out, err = run(*args)
+                code, out, err = run(*args, home=self.home)
                 self.assertEqual(code, 2)
                 self.assertEqual(out, "")
                 self.assertNotEqual(err, "")
@@ -559,7 +632,9 @@ def load_module():
 
     Reserved for the seams no subprocess run can reach: the generic failure
     wrapper, and the emit-side guard that the parse-side guard keeps unreachable
-    from any authored contract.
+    from any authored contract. The importing case must already have pointed
+    `HOME` at an installed platform, because the module resolves
+    `agent_platform` from `$HOME/.agents/lib/python` as it loads.
     """
     import importlib.util
     spec = importlib.util.spec_from_file_location("resolve_project", SCRIPT)
@@ -568,7 +643,22 @@ def load_module():
     return module
 
 
-class ResolverFailureTest(unittest.TestCase):
+class InProcessTestCase(unittest.TestCase):
+    """A temporary `HOME` for the two cases that import the resolver in process.
+
+    `HOME` is patched on this process rather than a child's environment, and
+    restored afterwards, because both the load-time library import and the
+    manifest load inside `main` read it directly.
+    """
+
+    def setUp(self) -> None:
+        self.home = make_home()
+        previous = os.environ["HOME"]
+        os.environ["HOME"] = str(self.home)
+        self.addCleanup(os.environ.__setitem__, "HOME", previous)
+
+
+class ResolverFailureTest(InProcessTestCase):
     """SF-002: the generic handler maps an unexpected exception to the closed code.
 
     No external input reaches this branch deterministically — every I/O and
@@ -598,7 +688,7 @@ class ResolverFailureTest(unittest.TestCase):
                          "the internal message must not leak the exception text")
 
 
-class EmitGuardTest(unittest.TestCase):
+class EmitGuardTest(InProcessTestCase):
     """COR-001: the writing side refuses a non-finite float on its own.
 
     The parse-side guard keeps this unreachable from any authored contract,
@@ -643,13 +733,13 @@ class CommittedContractTest(ResolverTestCase):
                          legacy["orchestration"]["agentBudgetMinutes"])
 
 
-def run_with_path(path_value: str, *args: str) -> tuple[int, str, str]:
+def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, str]:
     """Run the resolver with `PATH` replaced by exactly `path_value`.
 
     The interpreter is `sys.executable`, an absolute path, because `PATH` here
     holds only the stub directory and no Python (B-002).
     """
-    env = dict(os.environ, PATH=path_value)
+    env = dict(os.environ, PATH=path_value, HOME=str(home))
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, timeout=60, env=env,
@@ -670,7 +760,8 @@ def make_stub_bin(names: tuple[str, ...]) -> Path:
 class CapabilityStateTest(ResolverTestCase):
     def resolve_with_path(self, root: Path, stub: Path, *extra: str):
         code, out, err = run_with_path(
-            str(stub), "resolve", "--repo-root", str(root), *extra)
+            str(stub), "resolve", "--repo-root", str(root), *extra,
+            home=self.home)
         try:
             payload: object = json.loads(out)
         except json.JSONDecodeError:
@@ -892,7 +983,8 @@ class RequireTest(ResolverTestCase):
         root = self.make_root()
         code, out, _ = run_with_path(
             str(make_stub_bin(("gh", "git", "just", "codex"))),
-            "resolve", "--repo-root", str(root), "--require", "release")
+            "resolve", "--repo-root", str(root), "--require", "release",
+            home=self.home)
         payload = json.loads(out)
         self.assertEqual(code, 2)
         error = payload["error"]
@@ -906,7 +998,8 @@ class RequireTest(ResolverTestCase):
         root = self.make_root()
         code, out, _ = run_with_path(
             str(make_stub_bin(("git", "just", "codex"))),
-            "resolve", "--repo-root", str(root), "--require", "tracker")
+            "resolve", "--repo-root", str(root), "--require", "tracker",
+            home=self.home)
         error = json.loads(out)["error"]
         self.assertEqual(code, 2)
         self.assertEqual(error["code"], "capability_unavailable")
@@ -917,7 +1010,7 @@ class RequireTest(ResolverTestCase):
         code, out, _ = run_with_path(
             str(make_stub_bin(("gh", "git", "just", "codex"))),
             "resolve", "--repo-root", str(root),
-            "--require", "release", "--require", "deploy")
+            "--require", "release", "--require", "deploy", home=self.home)
         error = json.loads(out)["error"]
         self.assertEqual(code, 2)
         pointers = [v["pointer"] for v in error["violations"]]
@@ -928,14 +1021,15 @@ class RequireTest(ResolverTestCase):
         root = self.make_root()
         code, out, err = run_with_path(
             str(make_stub_bin(("gh", "git", "just", "codex"))),
-            "resolve", "--repo-root", str(root), "--require", "tracker")
+            "resolve", "--repo-root", str(root), "--require", "tracker",
+            home=self.home)
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["schema_version"], 1)
 
     def test_an_unknown_require_name_is_an_argparse_usage_error(self):
         root = self.make_root()
         code, out, err = run("resolve", "--repo-root", str(root),
-                             "--require", "orchestration")
+                             "--require", "orchestration", home=self.home)
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertIn("orchestration", err)
@@ -946,7 +1040,8 @@ class NoSubprocessTest(ResolverTestCase):
         """An empty PATH must still produce a snapshot, not an execution error."""
         root = self.make_root()
         code, out, err = run_with_path(
-            str(make_stub_bin(())), "resolve", "--repo-root", str(root))
+            str(make_stub_bin(())), "resolve", "--repo-root", str(root),
+            home=self.home)
         self.assertEqual(code, 0, err)
         self.assertEqual(err, "")
         self.assertEqual(json.loads(out)["schema_version"], 1)
@@ -954,7 +1049,8 @@ class NoSubprocessTest(ResolverTestCase):
 
 class WriteProjectionsTest(ResolverTestCase):
     def write(self, root: Path) -> tuple[int, object, str]:
-        code, out, err = run("write-projections", "--repo-root", str(root))
+        code, out, err = run("write-projections", "--repo-root", str(root),
+                             home=self.home)
         try:
             payload: object = json.loads(out)
         except json.JSONDecodeError:
@@ -1108,7 +1204,8 @@ class ProjectionCollisionTest(ResolverTestCase):
     def refusal(self, contract: dict) -> dict:
         root = self.make_root(contract, projections=False)
         before = tree_snapshot(root)
-        code, out, err = run("write-projections", "--repo-root", str(root))
+        code, out, err = run("write-projections", "--repo-root", str(root),
+                             home=self.home)
         self.assertEqual(code, 2, err)
         # The refusal precedes every write: nothing under the root moved.
         self.assertEqual(tree_snapshot(root), before)
@@ -1141,7 +1238,8 @@ class ProjectionCollisionTest(ResolverTestCase):
         contract = self.contract_with(
             lambda entries: entries[0].__setitem__("target", "generated/AGENTS.md"))
         root = self.make_root(contract, projections=False)
-        code, out, err = run("write-projections", "--repo-root", str(root))
+        code, out, err = run("write-projections", "--repo-root", str(root),
+                             home=self.home)
         self.assertEqual(code, 0, err)
         self.assertEqual(
             {p["id"]: p["action"] for p in json.loads(out)["projections"]},
@@ -1162,7 +1260,8 @@ class CommittedProjectionTest(ResolverTestCase):
 
 class CheckProjectionsTest(ResolverTestCase):
     def check(self, root: Path) -> tuple[int, object, str]:
-        code, out, err = run("check-projections", "--repo-root", str(root))
+        code, out, err = run("check-projections", "--repo-root", str(root),
+                             home=self.home)
         try:
             payload: object = json.loads(out)
         except json.JSONDecodeError:
@@ -1254,7 +1353,7 @@ class ResolveFreshnessTest(ResolverTestCase):
         root = self.make_root()
         with (root / "AGENTS.md").open("a", encoding="utf-8") as handle:
             handle.write("hand edit\n")
-        code, out, _ = run("resolve", "--repo-root", str(root))
+        code, out, _ = run("resolve", "--repo-root", str(root), home=self.home)
         self.assertEqual(code, 2)
         payload = json.loads(out)
         self.assertEqual(sorted(payload), ["error"])
@@ -1282,7 +1381,8 @@ class DriftGateTest(ResolverTestCase):
     """Seam 9: this repository's own committed contract must resolve."""
 
     def test_the_repository_resolves_and_its_projections_are_current(self):
-        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT))
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT),
+                             home=self.home)
         self.assertEqual(code, 0, err or out)
         snapshot = json.loads(out)
         self.assertEqual(snapshot["schema_version"], 1)
@@ -1291,10 +1391,322 @@ class DriftGateTest(ResolverTestCase):
         self.assertEqual(snapshot["project"]["root"], str(REPO_ROOT))
 
     def test_the_repository_check_projections_is_clean(self):
-        code, out, err = run("check-projections", "--repo-root", str(REPO_ROOT))
+        code, out, err = run("check-projections", "--repo-root", str(REPO_ROOT),
+                             home=self.home)
         self.assertEqual(code, 0, err or out)
         self.assertEqual({p["action"] for p in json.loads(out)["projections"]},
                          {"unchanged"})
+
+
+class ManifestGateTest(ResolverTestCase):
+    """R1.3: a broken platform installation refuses loudly, from every subcommand.
+
+    `write-projections` is included deliberately: the gate has to close before
+    the writer, not just before the two readers.
+    """
+
+    def refusals(self, manifest: object, root: Path) -> list[list[dict]]:
+        """Refuse `resolver_failure` from every subcommand; return each list."""
+        self.set_manifest(manifest)
+        collected = []
+        for subcommand in SUBCOMMANDS:
+            with self.subTest(subcommand=subcommand):
+                code, out, err = run(subcommand, "--repo-root", str(root),
+                                     home=self.home)
+                self.assertEqual(code, 2, err or out)
+                payload = json.loads(out)
+                self.assertEqual(sorted(payload), ["error"])
+                error = payload["error"]
+                self.assertEqual(sorted(error),
+                                 ["code", "repair_id", "violations"])
+                self.assertEqual(error["code"], "resolver_failure")
+                self.assertTrue(error["repair_id"])
+                self.assertTrue(error["violations"])
+                pointers = [v["pointer"] for v in error["violations"]]
+                self.assertEqual(pointers, sorted(pointers))
+                for entry in error["violations"]:
+                    self.assertEqual(sorted(entry), ["message", "pointer"])
+                collected.append(error)
+        repair_ids = {error["repair_id"] for error in collected}
+        self.assertEqual(len(repair_ids), 1, repair_ids)
+        return [error["violations"] for error in collected]
+
+    def assert_pointers(self, manifest: object, expected: list[str]) -> None:
+        for violations in self.refusals(manifest, self.make_root()):
+            self.assertEqual([v["pointer"] for v in violations], expected)
+
+    def test_a_missing_manifest_refuses(self):
+        self.assert_pointers(None, [""])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root reads a 0000 file, so the case cannot be staged")
+    def test_an_unreadable_manifest_refuses(self):
+        root = self.make_root()
+        self.set_manifest(COMMITTED)
+        installed = self.home / ".agents" / "share" / "platform-manifest.json"
+        installed.chmod(0o000)
+        self.addCleanup(installed.chmod, 0o600)
+        for subcommand in SUBCOMMANDS:
+            with self.subTest(subcommand=subcommand):
+                code, out, _ = run(subcommand, "--repo-root", str(root),
+                                   home=self.home)
+                self.assertEqual(code, 2)
+                error = json.loads(out)["error"]
+                self.assertEqual(error["code"], "resolver_failure")
+                self.assertEqual([v["pointer"] for v in error["violations"]], [""])
+
+    def test_a_manifest_that_is_not_valid_json_refuses(self):
+        self.assert_pointers("{", [""])
+
+    def test_a_manifest_that_is_not_an_object_refuses(self):
+        self.assert_pointers([], [""])
+
+    def test_an_unexpected_member_refuses(self):
+        self.assert_pointers(mutated_manifest(surprise=1), ["/surprise"])
+
+    def test_a_missing_member_refuses(self):
+        manifest = committed_manifest()
+        del manifest["resolved_schema_version"]
+        self.assert_pointers(manifest, ["/resolved_schema_version"])
+
+    def test_a_non_semver_platform_version_refuses(self):
+        self.assert_pointers(mutated_manifest(platform_version="one"),
+                             ["/platform_version"])
+
+    def test_a_malformed_schema_version_refuses(self):
+        for value in (0, -1, True, "1"):
+            with self.subTest(schema_version=value):
+                self.assert_pointers(mutated_manifest(schema_version=value),
+                                     ["/schema_version"])
+
+    def test_a_malformed_resolved_schema_version_refuses(self):
+        for value in (0, -1, True, "1"):
+            with self.subTest(resolved_schema_version=value):
+                self.assert_pointers(
+                    mutated_manifest(resolved_schema_version=value),
+                    ["/resolved_schema_version"])
+
+    def test_a_malformed_project_schema_versions_refuses(self):
+        cases = (
+            ({}, "/project_schema_versions"),
+            ([], "/project_schema_versions"),
+            ([1, 1], "/project_schema_versions"),
+            ([2, 1], "/project_schema_versions"),
+            ([0], "/project_schema_versions/0"),
+            ([True], "/project_schema_versions/0"),
+            ([1, "2"], "/project_schema_versions/1"),
+        )
+        for value, pointer in cases:
+            with self.subTest(project_schema_versions=value):
+                self.assert_pointers(
+                    mutated_manifest(project_schema_versions=value), [pointer])
+
+    def test_the_refusal_bytes_are_stable_across_runs(self):
+        root = self.make_root()
+        self.set_manifest(None)
+        first = run("resolve", "--repo-root", str(root), home=self.home)
+        second = run("resolve", "--repo-root", str(root), home=self.home)
+        self.assertEqual(first[0], 2)
+        self.assertEqual(first[1], second[1])
+
+    def test_the_gate_closes_before_the_repository_is_read(self):
+        """A root with no contract at all still reports `resolver_failure`.
+
+        Without the gate this repository is `not_onboarded`, which is exactly
+        the masking R1.3 forbids — so the control below pins the other half:
+        with a valid manifest the same root does refuse `not_onboarded`.
+        """
+        root = self.make_root(contract=False, projections=False)
+        for subcommand in SUBCOMMANDS:
+            with self.subTest(subcommand=subcommand, manifest="valid"):
+                code, out, _ = run(subcommand, "--repo-root", str(root),
+                                   home=self.home)
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(out)["error"]["code"], "not_onboarded")
+        self.set_manifest(None)
+        for subcommand in SUBCOMMANDS:
+            with self.subTest(subcommand=subcommand, manifest="missing"):
+                code, out, _ = run(subcommand, "--repo-root", str(root),
+                                   home=self.home)
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(out)["error"]["code"],
+                                 "resolver_failure")
+
+    def test_a_manifest_refusal_leaves_the_tree_untouched(self):
+        """SF-001: the gate reads the manifest and nothing else."""
+        self.set_manifest(None)
+        # A root each: `assert_read_only` commits its fixture before running,
+        # and a second call against the same root has nothing left to commit.
+        for subcommand in SUBCOMMANDS:
+            with self.subTest(subcommand=subcommand):
+                assert_read_only(self, self.make_root(), 2, subcommand)
+
+    def test_a_manifest_refusal_runs_no_child_process(self):
+        root = self.make_root()
+        self.set_manifest(None)
+        code, out, err = run_with_path(
+            str(make_stub_bin(())), "resolve", "--repo-root", str(root),
+            home=self.home)
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "")
+        self.assertEqual(json.loads(out)["error"]["code"], "resolver_failure")
+
+
+class ManifestLifecycleArrayTest(ResolverTestCase):
+    """D36: `migrations` is validated strictly; `deprecations` and `removals`
+    are validated as arrays and never read."""
+
+    def assert_pointer(self, changes: dict, expected: str) -> None:
+        self.set_manifest(mutated_manifest(**changes))
+        code, out, _ = run("resolve", "--repo-root", str(self.make_root()),
+                           home=self.home)
+        self.assertEqual(code, 2)
+        error = json.loads(out)["error"]
+        self.assertEqual(error["code"], "resolver_failure")
+        self.assertEqual([v["pointer"] for v in error["violations"]], [expected])
+
+    def test_migrations_must_be_an_array(self):
+        self.assert_pointer({"migrations": {}}, "/migrations")
+
+    def test_an_entry_must_be_an_object(self):
+        self.assert_pointer({"migrations": ["1-2"]}, "/migrations/0")
+
+    def test_an_entry_member_may_not_be_absent(self):
+        self.assert_pointer(
+            {"migrations": [{"id": "a", "from_schema": 1}]},
+            "/migrations/0/to_schema")
+
+    def test_an_entry_member_may_not_be_unexpected(self):
+        self.assert_pointer(
+            {"migrations": [
+                {"id": "a", "from_schema": 1, "to_schema": 2, "note": "x"}]},
+            "/migrations/0/note")
+
+    def test_an_id_must_be_a_non_empty_string(self):
+        for value in (1, "", None):
+            with self.subTest(id=value):
+                self.assert_pointer(
+                    {"migrations": [
+                        {"id": value, "from_schema": 1, "to_schema": 2}]},
+                    "/migrations/0/id")
+
+    def test_ids_must_be_distinct(self):
+        self.assert_pointer(
+            {"migrations": [
+                {"id": "a", "from_schema": 1, "to_schema": 2},
+                {"id": "a", "from_schema": 2, "to_schema": 3}]},
+            "/migrations")
+
+    def test_from_schema_must_be_a_positive_non_bool_integer(self):
+        for value in ("1", True, 0, -1):
+            with self.subTest(from_schema=value):
+                self.assert_pointer(
+                    {"migrations": [
+                        {"id": "a", "from_schema": value, "to_schema": 2}]},
+                    "/migrations/0/from_schema")
+
+    def test_to_schema_must_be_a_positive_non_bool_integer(self):
+        for value in ("2", True, 0, -1):
+            with self.subTest(to_schema=value):
+                self.assert_pointer(
+                    {"migrations": [
+                        {"id": "a", "from_schema": 1, "to_schema": value}]},
+                    "/migrations/0/to_schema")
+
+    def test_to_schema_must_be_one_step_past_from_schema(self):
+        for value in (1, 3):
+            with self.subTest(to_schema=value):
+                self.assert_pointer(
+                    {"migrations": [
+                        {"id": "a", "from_schema": 1, "to_schema": value}]},
+                    "/migrations/0/to_schema")
+
+    def test_from_schemas_must_be_distinct(self):
+        self.assert_pointer(
+            {"migrations": [
+                {"id": "a", "from_schema": 1, "to_schema": 2},
+                {"id": "b", "from_schema": 1, "to_schema": 2}]},
+            "/migrations")
+
+    def test_from_schemas_must_ascend(self):
+        self.assert_pointer(
+            {"migrations": [
+                {"id": "a", "from_schema": 2, "to_schema": 3},
+                {"id": "b", "from_schema": 1, "to_schema": 2}]},
+            "/migrations")
+
+    def test_a_well_formed_migration_chain_is_accepted(self):
+        self.set_manifest(mutated_manifest(migrations=[
+            {"id": "1-to-2", "from_schema": 1, "to_schema": 2},
+            {"id": "2-to-3", "from_schema": 2, "to_schema": 3}]))
+        code, out, err = run("resolve", "--repo-root", str(self.make_root()),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+
+    def test_deprecations_and_removals_must_be_arrays(self):
+        for name in ("deprecations", "removals"):
+            for value in ({}, 1, "x"):
+                with self.subTest(member=name, value=value):
+                    self.assert_pointer({name: value}, f"/{name}")
+
+    def test_opaque_array_entries_are_never_read(self):
+        """Neither array has a declared entry shape at v1, so any entry passes."""
+        self.set_manifest(mutated_manifest(
+            deprecations=[{"anything": [1, 2]}], removals=["whatever"]))
+        code, out, err = run("resolve", "--repo-root", str(self.make_root()),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+
+
+class SemverBoundaryTest(ResolverTestCase):
+    """D9: strict `MAJOR.MINOR.PATCH`, exercised through the manifest validator."""
+
+    def test_a_loose_version_is_rejected(self):
+        for value in ("1.0", "1.0.0.0", "v1.0.0", "1.0.0-rc.1", "1.0.0+build",
+                      "01.0.0"):
+            with self.subTest(platform_version=value):
+                self.set_manifest(mutated_manifest(platform_version=value))
+                code, out, _ = run("resolve", "--repo-root",
+                                   str(self.make_root()), home=self.home)
+                self.assertEqual(code, 2)
+                error = json.loads(out)["error"]
+                self.assertEqual(error["code"], "resolver_failure")
+                self.assertEqual([v["pointer"] for v in error["violations"]],
+                                 ["/platform_version"])
+
+    def test_a_strict_version_is_accepted(self):
+        for value in ("0.0.0", "10.20.30"):
+            with self.subTest(platform_version=value):
+                self.set_manifest(mutated_manifest(platform_version=value))
+                code, out, err = run("resolve", "--repo-root",
+                                     str(self.make_root()), home=self.home)
+                self.assertEqual(code, 0, err or out)
+
+
+class CommittedManifestTest(ResolverTestCase):
+    """The committed manifest is the one the store installs (D1), so the suite
+    checks that file rather than a fixture."""
+
+    def test_it_declares_exactly_the_seven_members_with_the_v1_values(self):
+        manifest = committed_manifest()
+        self.assertEqual(sorted(manifest), sorted(MANIFEST_MEMBERS))
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["platform_version"], "1.0.0")
+        self.assertEqual(manifest["project_schema_versions"], [1])
+        self.assertEqual(manifest["resolved_schema_version"], 1)
+        for name in ("migrations", "deprecations", "removals"):
+            with self.subTest(member=name):
+                self.assertEqual(manifest[name], [])
+
+    def test_it_loads_and_validates(self):
+        # `setUp` installs this exact file; a subcommand that gets as far as
+        # answering has loaded and validated it.
+        root = self.make_root()
+        for subcommand in SUBCOMMANDS:
+            with self.subTest(subcommand=subcommand):
+                code, out, err = run(subcommand, "--repo-root", str(root),
+                                     home=self.home)
+                self.assertEqual(code, 0, err or out)
 
 
 if __name__ == "__main__":
