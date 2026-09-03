@@ -146,13 +146,15 @@ in
     ".agents/lib/python/agent_platform.py".source = ./scripts/agent_platform.py;
     ".agents/share/platform-manifest.json".source = ./platform-manifest.json;
 
-    # The two halves `adopt-project` is built from: the bounded inspection and
-    # its closed vocabulary, and the planning derived from it. Imported, never
-    # run, so neither gets `executable = true`; they install beside
-    # `agent_platform.py` because the binary binds all three from that one
-    # directory with no fallback ladder.
+    # The four layers `adopt-project` is built from: the bounded inspection and
+    # its closed vocabulary, the planning derived from it, the apply mechanics
+    # and the verify mechanics. Imported, never run, so none gets
+    # `executable = true`; they install beside `agent_platform.py` because the
+    # binary binds all five from that one directory with no fallback ladder.
     ".agents/lib/python/adopt_inspection.py".source = ./scripts/adopt_inspection.py;
     ".agents/lib/python/adopt_planning.py".source = ./scripts/adopt_planning.py;
+    ".agents/lib/python/adopt_apply.py".source = ./scripts/adopt_apply.py;
+    ".agents/lib/python/adopt_verify.py".source = ./scripts/adopt_verify.py;
 
     # Claude accepts Home Manager's recursive file links, so its generated
     # multi-file skill can continue to use that layout.

@@ -38,6 +38,10 @@ ADOPT_LIBRARIES = {
                         / "adopt_inspection.py",
     "adopt_planning": Path(__file__).resolve().parents[1] / "scripts"
                       / "adopt_planning.py",
+    "adopt_apply": Path(__file__).resolve().parents[1] / "scripts"
+                   / "adopt_apply.py",
+    "adopt_verify": Path(__file__).resolve().parents[1] / "scripts"
+                    / "adopt_verify.py",
 }
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -77,7 +81,7 @@ def install_home(home: Path, manifest: object = COMMITTED, *,
     needs: the library normally refuses a manifest carrying two records for one
     `from_schema`, so the only way to present that manifest to `adopt-project`
     is to install a library that does not check it. `adopt_suffix` is the same
-    hook for the two adoption libraries, and `adopt_libraries=False` leaves
+    hook for the adoption libraries, and `adopt_libraries=False` leaves
     them uninstalled — which only a script run from the deployed layout can
     observe, because in the repository checkout they are the script's own
     siblings.
@@ -1157,8 +1161,9 @@ class AdoptFailureWrapperTest(unittest.TestCase):
 class AdoptLibraryTest(unittest.TestCase):
     """The adoption libraries refuse exactly as the platform library does.
 
-    `adopt_inspection.py` and `adopt_planning.py` are separately installed
-    files, so an older pair can meet a newer binary. Every member the binary
+    `adopt_inspection.py`, `adopt_planning.py`, `adopt_apply.py` and
+    `adopt_verify.py` are separately installed files, so an older set can meet
+    a newer binary. Every member the binary
     reads must therefore surface as `adopt.library.missing` through the D12
     error object, never as an `AttributeError` swallowed into `adopt.internal`.
 
@@ -1205,7 +1210,9 @@ class AdoptLibraryTest(unittest.TestCase):
     def test_a_library_missing_one_member_refuses_the_same_way(self):
         for module, tuple_name in (
                 ("adopt_inspection", "ADOPT_INSPECTION_MEMBERS"),
-                ("adopt_planning", "ADOPT_PLANNING_MEMBERS")):
+                ("adopt_planning", "ADOPT_PLANNING_MEMBERS"),
+                ("adopt_apply", "ADOPT_APPLY_MEMBERS"),
+                ("adopt_verify", "ADOPT_VERIFY_MEMBERS")):
             members = declared_members(tuple_name)
             self.assertTrue(members)
             for name in members:
@@ -1223,7 +1230,9 @@ class AdoptLibraryTest(unittest.TestCase):
         source = SCRIPT.read_text("utf-8")
         for module, tuple_name in (
                 ("adopt_inspection", "ADOPT_INSPECTION_MEMBERS"),
-                ("adopt_planning", "ADOPT_PLANNING_MEMBERS")):
+                ("adopt_planning", "ADOPT_PLANNING_MEMBERS"),
+                ("adopt_apply", "ADOPT_APPLY_MEMBERS"),
+                ("adopt_verify", "ADOPT_VERIFY_MEMBERS")):
             with self.subTest(module=module):
                 used = set(re.findall(
                     rf"\b{module}\.([A-Za-z_][A-Za-z0-9_]*)", source))

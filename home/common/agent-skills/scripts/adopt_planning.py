@@ -627,3 +627,29 @@ def next_command_for(state: str, outcome: str, root: Path, plan_id: str,
     if state == "ready":
         return f"adopt-project apply --plan-id {plan_id}"
     return None
+
+
+# --------------------------------------------------------------------------
+# The plan document's home on disk
+#
+# One derivation, one identifier, one file: a plan is stored under the digest
+# half of its own content-addressed id, in user scope and nowhere near the
+# target checkout (D14). `apply` reads a plan back from exactly here, and
+# retains a failed attempt by rewriting the same file.
+# --------------------------------------------------------------------------
+
+
+def stored_plan_path(digest: str) -> Path:
+    return agent_platform.state_root() / "adopt" / "plans" / f"{digest}.json"
+
+
+def store_plan_path(plan_id: str) -> Path:
+    return stored_plan_path(plan_id.split(":", 1)[1])
+
+
+def store_document(plan_id: str, document: dict) -> None:
+    """Write a plan document to its one user-scope home, atomically (D14)."""
+    plan_path = store_plan_path(plan_id)
+    agent_platform.ensure_directory(plan_path.parent)
+    agent_platform.write_atomically(
+        plan_path, canonical_json(document) + b"\n")

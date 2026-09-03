@@ -350,6 +350,41 @@ def plan_state_is_terminal(state: str) -> bool:
 
 
 # --------------------------------------------------------------------------
+# The resolver's answer, read
+#
+# Pure readers over an already-parsed resolver payload: no subprocess, no
+# import of `resolve-project.py` (D26), nothing written. They live here rather
+# than beside either caller because `plan` and `verify` read the same refusal
+# and this module is the one layer both are built on.
+# --------------------------------------------------------------------------
+
+
+def resolver_error_code(payload: object) -> str | None:
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        code = payload["error"].get("code")
+        return code if isinstance(code, str) else None
+    return None
+
+
+def resolver_repair_id(payload: object) -> str | None:
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        repair = payload["error"].get("repair_id")
+        return repair if isinstance(repair, str) else None
+    return None
+
+
+def resolver_violation_pointers(payload: object) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    error = payload.get("error")
+    if not isinstance(error, dict) or not isinstance(error.get("violations"),
+                                                     list):
+        return []
+    return [v.get("pointer") for v in error["violations"]
+            if isinstance(v, dict) and isinstance(v.get("pointer"), str)]
+
+
+# --------------------------------------------------------------------------
 # Hashes
 # --------------------------------------------------------------------------
 

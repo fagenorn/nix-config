@@ -53,11 +53,8 @@ import argparse
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
-import tarfile
-import tempfile
 
 # The shared platform library, bound by `bootstrap_platform_library` before any
 # subcommand runs, exactly as `resolve-project.py` binds it. It is deliberately
@@ -98,59 +95,50 @@ def bootstrap_platform_library() -> bool:
     agent_platform = loaded
     return True
 
-# The two adoption libraries, bound by `bootstrap_adopt_libraries` before any
-# subcommand runs. They install beside `agent_platform.py` and are separately
-# installed files, so an older library can pair with a newer binary; naming
-# every member this script reads is what makes that pairing refuse as
-# `adopt.library.missing` through the D12 error object rather than surface as
-# an `AttributeError` swallowed into `adopt.internal`.
+# The four adoption libraries, bound by `bootstrap_adopt_libraries` before
+# any subcommand runs. They install beside `agent_platform.py` and are
+# separately installed files, so an older library can pair with a newer
+# binary; naming every member this script reads is what makes that pairing
+# refuse as `adopt.library.missing` through the D12 error object rather than
+# surface as an `AttributeError` swallowed into `adopt.internal`. What each
+# library reads from the others is guarded the same way, by naming it in
+# that library's own `from` imports.
 adopt_inspection = None
 adopt_planning = None
+adopt_apply = None
+adopt_verify = None
 
 ADOPT_INSPECTION_MEMBERS = (
     "ADOPT_SCHEMA_VERSION",
     "AdoptError",
     "COMMIT_GATES",
     "CONTRACT_FILENAME",
-    "EVIDENCE_RECORD_DIR",
     "Inventory",
     "METADATA_ONLY_IGNORED",
     "NOTES",
-    "OPERATION_KINDS",
     "OUTCOMES",
     "PLAN_STATES",
     "READY_GATES",
-    "RUNTIME_SENTINEL",
     "TARGETED_IGNORED",
-    "VERIFY_RESULTS",
-    "blob_at_head",
     "canonical_json",
-    "classify",
     "classify_inventory",
-    "commit_is_ancestor",
     "evidence_entry",
     "gate_entry",
     "git_or_fail",
     "head_revision",
-    "introducing_commit",
-    "is_agent_path",
-    "is_secret_path",
-    "matches_group",
     "outcome_is_appliable",
     "overlap_targets",
-    "parses_as_evidence_record",
-    "parses_as_migration_map",
     "read_bytes_bounded",
     "refuse",
     "registered_worktrees",
     "require_repository",
+    "resolver_error_code",
+    "resolver_repair_id",
+    "resolver_violation_pointers",
     "run_git",
-    "sha256_hash",
     "targeted_ignored",
-    "tracked_evidence_records",
     "tracked_inventory",
     "untracked_under",
-    "verify_check_entry",
 )
 
 ADOPT_PLANNING_MEMBERS = (
@@ -163,31 +151,62 @@ ADOPT_PLANNING_MEMBERS = (
     "evaluate_ready_gates",
     "next_command_for",
     "route_outcome",
+    "store_document",
+    "store_plan_path",
+)
+
+ADOPT_APPLY_MEMBERS = (
+    "GateRun",
+    "commit_message",
+    "dirty_overlap",
+    "execute_operation",
+    "load_stored_plan",
+    "plan_digest",
+    "prove_branch_carries_commit",
+    "retain_failure",
+    "run_commit_gates",
+    "signing_requested",
+    "validate_operations",
+)
+
+ADOPT_VERIFY_MEMBERS = (
+    "register_project",
+    "registration_allowed",
+    "verify_exit_code",
+    "verify_repository",
 )
 ADOPT_LIBRARY_REPAIR_ID = "adopt.library.missing"
 
 
 def bootstrap_adopt_libraries() -> bool:
-    """Bind both adoption libraries, or report failure.
+    """Bind all four adoption libraries, or report failure.
 
     `bootstrap_platform_library` has already put the one installed library
     directory on `sys.path`, so this adds no second lookup path and no
     fallback ladder: the modules are found exactly where Nix installs them or
-    they are not found at all.
+    they are not found at all. A library whose own `from` import of a sibling
+    cannot be satisfied fails this import too, so the guard reaches the names
+    the libraries read from each other as well as the ones read here.
     """
-    global adopt_inspection, adopt_planning
+    global adopt_inspection, adopt_planning, adopt_apply, adopt_verify
     try:
         import adopt_inspection as inspection
         import adopt_planning as planning
+        import adopt_apply as applying
+        import adopt_verify as verifying
     except Exception:
         return False
     for module, members in ((inspection, ADOPT_INSPECTION_MEMBERS),
-                            (planning, ADOPT_PLANNING_MEMBERS)):
+                            (planning, ADOPT_PLANNING_MEMBERS),
+                            (applying, ADOPT_APPLY_MEMBERS),
+                            (verifying, ADOPT_VERIFY_MEMBERS)):
         if (not getattr(module, "__file__", None)
                 or any(not hasattr(module, name) for name in members)):
             return False
     adopt_inspection = inspection
     adopt_planning = planning
+    adopt_apply = applying
+    adopt_verify = verifying
     return True
 
 
@@ -251,30 +270,6 @@ def run_resolver(root: Path, *args: str) -> tuple[int, object]:
             "the resolver did not print parseable JSON") from None
     return proc.returncode, payload
 
-
-def resolver_error_code(payload: object) -> str | None:
-    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
-        code = payload["error"].get("code")
-        return code if isinstance(code, str) else None
-    return None
-
-
-def resolver_repair_id(payload: object) -> str | None:
-    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
-        repair = payload["error"].get("repair_id")
-        return repair if isinstance(repair, str) else None
-    return None
-
-
-def resolver_violation_pointers(payload: object) -> list[str]:
-    if not isinstance(payload, dict):
-        return []
-    error = payload.get("error")
-    if not isinstance(error, dict) or not isinstance(error.get("violations"),
-                                                     list):
-        return []
-    return [v.get("pointer") for v in error["violations"]
-            if isinstance(v, dict) and isinstance(v.get("pointer"), str)]
 
 # --------------------------------------------------------------------------
 # Inspection
@@ -352,10 +347,12 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
     contract_source = load_contract_source(root)
     exit_code, payload = run_resolver(root, "resolve")
     contract_resolves = exit_code == 0
-    repair_id = None if contract_resolves else resolver_repair_id(payload)
+    repair_id = (None if contract_resolves
+                 else adopt_inspection.resolver_repair_id(payload))
     projections_drift = (
         not contract_resolves
-        and resolver_error_code(payload) == "invalid_projection")
+        and adopt_inspection.resolver_error_code(payload)
+        == "invalid_projection")
     # What the planned amendment can still put right, which is exactly what it
     # writes. `amended_contract` *adds* `platform` when the member is absent
     # and never rewrites an authored one, so only the absent case may forgive a
@@ -368,7 +365,8 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
     amendment_writes_platform = (contract_source is not None
                                  and "platform" not in contract_source)
     unfixable = [] if projections_drift else [
-        pointer for pointer in resolver_violation_pointers(payload)
+        pointer for pointer
+        in adopt_inspection.resolver_violation_pointers(payload)
         if not (amendment_writes_platform
                 and pointer.startswith("/platform"))]
 
@@ -445,7 +443,7 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
     if state not in adopt_inspection.PLAN_STATES:
         raise ValueError(f"unknown plan state: {state!r}")
 
-    plan_path = store_plan_path(plan_id)
+    plan_path = adopt_planning.store_plan_path(plan_id)
     document = {
         "schema_version": adopt_inspection.ADOPT_SCHEMA_VERSION,
         "plan": {
@@ -485,26 +483,11 @@ def command_plan(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
     document = compose_plan(root, manifest).document
-    store_document(document["plan"]["plan_id"], document)
+    adopt_planning.store_document(
+        document["plan"]["plan_id"], document)
     if args.format == "human":
         return emit_human(document)
     return emit_json(document)
-
-
-def store_document(plan_id: str, document: dict) -> None:
-    """Write a plan document to its one user-scope home, atomically (D14)."""
-    plan_path = store_plan_path(plan_id)
-    agent_platform.ensure_directory(plan_path.parent)
-    agent_platform.write_atomically(
-        plan_path, adopt_inspection.canonical_json(document) + b"\n")
-
-
-def stored_plan_path(digest: str) -> Path:
-    return agent_platform.state_root() / "adopt" / "plans" / f"{digest}.json"
-
-
-def store_plan_path(plan_id: str) -> Path:
-    return stored_plan_path(plan_id.split(":", 1)[1])
 
 
 def load_contract_source(root: Path) -> dict | None:
@@ -569,7 +552,9 @@ def require_manifest() -> dict:
 #
 # The ordered refusals of the spec's apply mechanics, each of which mutates
 # nothing, then one transformation carried out entirely inside a worktree in
-# user scope (D14) and one commit — or nothing at all.
+# user scope (D14) and one commit — or nothing at all. The mechanics
+# themselves live in `adopt_apply`; what is left here is the order they run in
+# and the resolver call handed to the two of them that need one.
 #
 # Naming the content-addressed plan id is the approval (D16), so the whole
 # safety of that approval rests on the recomputation below: the digest
@@ -578,454 +563,11 @@ def require_manifest() -> dict:
 # a mutable stored document (D33). Nothing here trusts a stored operation.
 # --------------------------------------------------------------------------
 
-PLAN_ID_PATTERN = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
-
-STORED_PLAN_MEMBERS = ("changes", "handoff", "plan", "verification")
-STORED_HANDOFF_MEMBERS = ("evidence_record", "migration_map", "repo_root")
-STORED_PLAN_BLOCK_MEMBERS = ("base_revision", "plan_id", "project_id", "state")
-
-# What each operation kind names. `sources` and `targets` are dispatched over
-# the closed kind set, so an operation whose arity does not match its kind is
-# refused before anything runs rather than raising mid-transformation.
-OPERATION_ARITY = {
-    "git-mv": (1, 1),
-    "write-file": (None, 1),
-    "delete-file": (1, None),
-    "regenerate-projection": (1, 1),
-}
-
-
-def plan_digest(plan_id: str) -> str:
-    """The stored plan's filename stem, or `plan_not_found`.
-
-    `--plan-id` is caller input that becomes a path, so it is matched against
-    the one shape a plan id can have — a SHA-256, with or without the `sha256:`
-    prefix the plan prints. Anything else names no stored plan.
-    """
-    match = PLAN_ID_PATTERN.fullmatch(plan_id.strip())
-    if match is None:
-        raise adopt_inspection.refuse(
-            "plan_not_found", "adopt.plan.unknown_id", "",
-            "the named plan id is not a stored plan identifier")
-    return match.group(1)
-
-
-def load_stored_plan(digest: str) -> dict:
-    """The stored document, or a refusal naming which half is wrong."""
-    path = stored_plan_path(digest)
-    data = adopt_inspection.read_bytes_bounded(path)
-    if data is None:
-        raise adopt_inspection.refuse(
-            "plan_not_found", "adopt.plan.absent", "",
-            "no plan is stored under the named id")
-    try:
-        document = json.loads(data)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise adopt_inspection.refuse(
-            "adopt_failure", "adopt.plan.malformed", "",
-            "the stored plan is not parseable JSON") from None
-    if not isinstance(document, dict) or any(
-            member not in document for member in STORED_PLAN_MEMBERS):
-        raise adopt_inspection.refuse(
-            "adopt_failure", "adopt.plan.malformed", "",
-            "the stored plan is missing a member apply reads")
-    plan = document["plan"]
-    handoff = document["handoff"]
-    if (not isinstance(plan, dict) or not isinstance(handoff, dict)
-            or not isinstance(document["changes"], list)
-            or any(member not in plan
-                   for member in STORED_PLAN_BLOCK_MEMBERS)
-            or any(member not in handoff
-                   for member in STORED_HANDOFF_MEMBERS)):
-        raise adopt_inspection.refuse(
-            "adopt_failure", "adopt.plan.malformed", "",
-            "the stored plan is missing a member apply reads")
-    return document
-
-
-def contained_relative(root: Path, relative: object) -> bool:
-    """Whether `relative` is a repository-relative path inside `root`.
-
-    Resolved rather than merely inspected, so a component that is a symlink
-    out of the checkout is caught as well as a literal `..` or a leading `/`.
-    `strict=False`: a planned destination does not exist yet.
-    """
-    if not isinstance(relative, str) or not relative:
-        return False
-    candidate = Path(relative)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    try:
-        anchor = root.resolve(strict=True)
-        resolved = (anchor / candidate).resolve()
-    except (OSError, RuntimeError):
-        return False
-    return resolved != anchor and anchor in resolved.parents
-
-
-def validate_operations(root: Path, operations: list[object]) -> None:
-    """Every operation is a known kind of the right arity over contained paths.
-
-    Run before the digest and the re-derivation, because it is a check on the
-    shape of caller-reachable stored input rather than on what the repository
-    says; the re-derivation then proves that the list executed is this one.
-    """
-    for operation in operations:
-        if not isinstance(operation, dict):
-            raise adopt_inspection.refuse(
-                "adopt_failure", "adopt.operation.malformed", "/changes",
-                "a stored operation is not an object")
-        kind = operation.get("op")
-        if kind not in adopt_inspection.OPERATION_KINDS:
-            raise adopt_inspection.refuse(
-                "adopt_failure", "adopt.operation.unknown_kind", "/changes",
-                "a stored operation names no known operation kind")
-        sources, targets = operation.get("sources"), operation.get("targets")
-        if not isinstance(sources, list) or not isinstance(targets, list):
-            raise adopt_inspection.refuse(
-                "adopt_failure", "adopt.operation.malformed", "/changes",
-                "a stored operation does not carry both path lists")
-        wanted_sources, wanted_targets = OPERATION_ARITY[kind]
-        if ((wanted_sources is not None and len(sources) != wanted_sources)
-                or (wanted_targets is not None
-                    and len(targets) != wanted_targets)):
-            raise adopt_inspection.refuse(
-                "adopt_failure", "adopt.operation.malformed", "/changes",
-                "a stored operation names the wrong number of paths for its "
-                "kind")
-        for path in sources + targets:
-            if not contained_relative(root, path):
-                raise adopt_inspection.refuse(
-                    "adopt_failure", "adopt.operation.uncontained_path",
-                    "/changes",
-                    "a stored operation names a path outside the repository")
-            if adopt_inspection.is_secret_path(path):
-                raise adopt_inspection.refuse(
-                    "adopt_failure", "adopt.operation.secret_path", "/changes",
-                    "a stored operation names a secret-shaped path")
-
-
-def status_records(root: Path) -> list[tuple[str, tuple[str, ...]]]:
-    """`git status --porcelain -z` as `(XY, paths)`, renames carrying both.
-
-    In `-z` mode a rename or copy is two records: the status and the new path,
-    then the original path. Parsed rather than pattern-matched, because the
-    rename detection this reads is the whole point of the first commit gate.
-    """
-    fields = adopt_inspection.git_or_fail(
-        root, "status", "--porcelain", "-z",
-        "--untracked-files=all").split(b"\0")
-    records: list[tuple[str, tuple[str, ...]]] = []
-    index = 0
-    while index < len(fields):
-        record = fields[index]
-        index += 1
-        if not record:
-            continue
-        text = record.decode("utf-8", "surrogateescape")
-        code, path = text[:2], text[3:]
-        if code[0] in ("R", "C") or code[1] in ("R", "C"):
-            if index >= len(fields):
-                raise adopt_inspection.refuse(
-                    "adopt_failure", "adopt.git.unparseable_status", "",
-                    "a rename status record named no original path")
-            original = fields[index].decode("utf-8", "surrogateescape")
-            index += 1
-            records.append((code, (path, original)))
-            continue
-        records.append((code, (path,)))
-    return records
-
-
-def expected_status(operations: list[dict]) -> tuple[list[tuple], set[tuple]]:
-    """`(required, optional)` status records for a list of operations.
-
-    A projection regeneration is idempotent: it is a no-op on a conformant
-    source and a rewrite otherwise, so it is the one operation whose status
-    entry is permitted rather than demanded.
-    """
-    required: list[tuple] = []
-    optional: set[tuple] = set()
-    for operation in operations:
-        kind = operation["op"]
-        if kind == "git-mv":
-            required.append(("R ", (operation["targets"][0],
-                                    operation["sources"][0])))
-        elif kind == "write-file":
-            target = operation["targets"][0]
-            required.append(
-                ("A " if operation["before"] is None else "M ", (target,)))
-        elif kind == "delete-file":
-            required.append(("D ", (operation["sources"][0],)))
-        elif kind == "regenerate-projection":
-            target = operation["targets"][0]
-            optional.update({("M ", (target,)), ("A ", (target,))})
-        else:
-            raise ValueError(f"unknown operation kind: {kind!r}")
-    return required, optional
-
-
-def staged_object_id(root: Path, relative: str) -> str | None:
-    for path, object_id in adopt_inspection.tracked_inventory(root):
-        if path == relative:
-            return object_id
-    return None
-
-
-def operation_result_matches(worktree: Path, operation: dict) -> bool:
-    """Whether the executed operation produced the hash the plan published.
-
-    The two prefixes are two different questions: a `git-object:` hash is
-    answered from the index, without reading the file, and a `sha256:` hash
-    from the bytes now on disk.
-    """
-    after = operation["after"]
-    if after is None:
-        return True
-    if not operation["targets"]:
-        return False
-    target = operation["targets"][0]
-    if after.startswith("git-object:"):
-        return staged_object_id(worktree, target) == after.split(":", 1)[1]
-    if after.startswith("sha256:"):
-        data = adopt_inspection.read_bytes_bounded(worktree / target)
-        return data is not None and adopt_inspection.sha256_hash(data) == after
-    raise ValueError(f"unknown content hash prefix: {after!r}")
-
-
-def execute_operation(worktree: Path, operation: dict,
-                      contents: dict[str, bytes]) -> None:
-    """Carry out one typed operation inside the worktree, and stage it."""
-    kind = operation["op"]
-    if kind == "git-mv":
-        source, target = operation["sources"][0], operation["targets"][0]
-        (worktree / target).parent.mkdir(parents=True, exist_ok=True)
-        # `git mv`, never a copy and never a write-plus-delete: the rename is
-        # what carries the file's history across the move.
-        code, _ = adopt_inspection.run_git(worktree, "mv", "--", source, target)
-        if code != 0:
-            raise operation_failure("a planned move did not succeed")
-    elif kind == "write-file":
-        target = operation["targets"][0]
-        data = contents.get(target)
-        if data is None:
-            raise operation_failure(
-                "a planned write named no generated content")
-        agent_platform.write_atomically(worktree / target, data)
-        # The runtime sentinel ignores itself, so it is the one path that
-        # cannot be staged without `-f`.
-        force = ["-f"] if target == adopt_inspection.RUNTIME_SENTINEL else []
-        code, _ = adopt_inspection.run_git(
-            worktree, "add", *force, "--", target)
-        if code != 0:
-            raise operation_failure("a written file could not be staged")
-    elif kind == "delete-file":
-        code, _ = adopt_inspection.run_git(
-            worktree, "rm", "--quiet", "--", operation["sources"][0])
-        if code != 0:
-            raise operation_failure("a planned deletion did not succeed")
-    elif kind == "regenerate-projection":
-        exit_code, _ = run_resolver(worktree, "write-projections")
-        if exit_code != 0:
-            raise operation_failure("a projection could not be regenerated")
-        code, _ = adopt_inspection.run_git(
-            worktree, "add", "--", operation["targets"][0])
-        if code != 0:
-            raise operation_failure(
-                "a regenerated projection could not be staged")
-    else:
-        raise ValueError(f"unknown operation kind: {kind!r}")
-    if not operation_result_matches(worktree, operation):
-        raise operation_failure(
-            "an executed operation did not produce the planned content")
-
-
-def operation_failure(message: str) -> adopt_inspection.AdoptError:
-    return adopt_inspection.refuse(
-        "verification_failed", "adopt.operation.failed", "/changes", message)
-
-
-class GateRun:
-    """One evaluation of the commit gates, and what they all read.
-
-    `resolve` is run once and judged by two gates and read by a third, so the
-    payload is observed here rather than three times: the gates are three
-    independent verdicts over one observation, not three observations.
-    """
-
-    def __init__(self, worktree: Path, operations: list[dict]) -> None:
-        self.worktree = worktree
-        self.operations = operations
-        self.resolve_code, self.resolve_payload = run_resolver(
-            worktree, "resolve")
-
-
-def gate_worktree_status_matches(run: GateRun) -> bool:
-    required, optional = expected_status(run.operations)
-    actual = status_records(run.worktree)
-    remaining = list(required)
-    for record in actual:
-        if record in remaining:
-            remaining.remove(record)
-            continue
-        if record not in optional:
-            return False
-    return not remaining
-
-
-def gate_projections_in_sync(run: GateRun) -> bool:
-    exit_code, payload = run_resolver(run.worktree, "check-projections")
-    if exit_code != 0 or not isinstance(payload, dict):
-        return False
-    entries = payload.get("projections")
-    return isinstance(entries, list) and all(
-        isinstance(entry, dict) and entry.get("action") == "unchanged"
-        for entry in entries)
-
-
-def gate_no_unclassified_agent_path(run: GateRun) -> bool:
-    return not any(
-        adopt_inspection.classify(path) is None
-        and adopt_inspection.is_agent_path(path)
-        for path, _ in adopt_inspection.tracked_inventory(run.worktree))
-
-
-def gate_cold_clone_resolves(run: GateRun) -> bool:
-    """A tracked-only export of the staged index still resolves.
-
-    `git write-tree` over the index without committing, then `git archive` of
-    that tree: what lands in the temporary directory is exactly what a fresh
-    clone would see, so an adoption that only works because of an untracked
-    file cannot pass.
-    """
-    tree = adopt_inspection.git_or_fail(
-        run.worktree, "write-tree").decode("ascii", "strict").strip()
-    with tempfile.TemporaryDirectory() as scratch:
-        archive = Path(scratch) / "tree.tar"
-        adopt_inspection.git_or_fail(
-            run.worktree, "archive", "-o", str(archive), tree)
-        export = Path(scratch) / "export"
-        export.mkdir()
-        try:
-            with tarfile.open(archive) as bundle:
-                bundle.extractall(export, filter="data")
-        except (tarfile.TarError, OSError):
-            return False
-        exit_code, payload = run_resolver(export, "resolve")
-        if exit_code != 0 or not isinstance(payload, dict):
-            return False
-        exit_code, payload = run_resolver(export, "check-projections")
-        if exit_code != 0 or not isinstance(payload, dict):
-            return False
-        entries = payload.get("projections")
-        return isinstance(entries, list) and all(
-            isinstance(entry, dict) and entry.get("action") == "unchanged"
-            for entry in entries)
-
-
-def gate_resolve_capabilities_available(run: GateRun) -> bool:
-    if run.resolve_code != 0 or not isinstance(run.resolve_payload, dict):
-        return False
-    capabilities = run.resolve_payload.get("capabilities")
-    if not isinstance(capabilities, dict):
-        return False
-    # Available or deliberately unsupported; `blocked` is a capability the
-    # contract claims and the checkout cannot deliver.
-    return all(isinstance(entry, dict)
-               and entry.get("state") in ("available", "unsupported")
-               for entry in capabilities.values())
-
-
-def gate_workflow_verification_commands(run: GateRun) -> bool:
-    """Every declared verification command, in full, in the worktree.
-
-    No timeout and no subset: a verification suite that takes minutes is what
-    the contract declared, and cutting it short is the swallowed failure the
-    bar forbids.
-    """
-    if run.resolve_code != 0 or not isinstance(run.resolve_payload, dict):
-        return False
-    bindings = run.resolve_payload.get("bindings")
-    if not isinstance(bindings, dict):
-        return False
-    workflow = bindings.get("workflow")
-    commands = bindings.get("commands")
-    if not isinstance(workflow, dict) or not isinstance(commands, dict):
-        return False
-    for command_id in workflow.get("verification", []):
-        entry = commands.get(command_id)
-        if not isinstance(entry, dict):
-            return False
-        try:
-            proc = subprocess.run(entry["argv"], cwd=entry["cwd"],
-                                  capture_output=True)
-        except (OSError, subprocess.SubprocessError):
-            return False
-        if proc.returncode != 0:
-            return False
-    return True
-
-
-COMMIT_GATE_CHECKS = {
-    "worktree-status-matches-operations": gate_worktree_status_matches,
-    "projections-in-sync": gate_projections_in_sync,
-    "no-unclassified-agent-path": gate_no_unclassified_agent_path,
-    "cold-clone-resolves": gate_cold_clone_resolves,
-    "resolve-capabilities-available": gate_resolve_capabilities_available,
-    "workflow-verification-commands": gate_workflow_verification_commands,
-}
-
-
-def run_commit_gates(run: GateRun) -> list[dict]:
-    """Every declared gate, in declaration order, each recorded.
-
-    All of them run even once one has failed: the retained evidence is meant
-    to say what the whole checkout looks like, not only where inspection
-    stopped.
-    """
-    gates = []
-    for gate_id in adopt_inspection.COMMIT_GATES:
-        check = COMMIT_GATE_CHECKS.get(gate_id)
-        if check is None:
-            raise ValueError(f"unknown commit gate: {gate_id!r}")
-        passed = check(run)
-        gates.append(adopt_inspection.gate_entry(
-            gate_id, "passed" if passed else "failed",
-            None if passed else f"adopt.gate.{gate_id}"))
-    return gates
-
-
-def commit_message(project_id: str, digest: str, records: dict) -> str:
-    """D28's fixed message: a pure function of the plan, with no trailer."""
-    return (f"chore(adopt): adopt {project_id} at plan {digest[:12]}\n"
-            "\n"
-            f"path migration map: {records['migration_map']}\n"
-            f"adoption evidence record: {records['evidence_record']}\n")
-
-
-def retain_failure(digest: str, document: dict, worktree: Path, branch: str,
-                   gates: list[dict], repair_id: str) -> None:
-    """Record why the worktree is being kept, beside it and never in the
-    target repository."""
-    document["verification"]["commit_gates"] = gates
-    store_document(document["plan"]["plan_id"], document)
-    evidence = worktree.parent / f"{digest}.failure.json"
-    agent_platform.ensure_directory(evidence.parent)
-    agent_platform.write_atomically(evidence, adopt_inspection.canonical_json({
-        "schema_version": adopt_inspection.ADOPT_SCHEMA_VERSION,
-        "plan_id": document["plan"]["plan_id"],
-        "base_revision": document["plan"]["base_revision"],
-        "branch": branch,
-        "worktree": str(worktree),
-        "repair_id": repair_id,
-        "gates": gates,
-    }) + b"\n")
-
 
 def command_apply(args: argparse.Namespace) -> int:
     manifest = require_manifest()
-    digest = plan_digest(args.plan_id)
-    document = load_stored_plan(digest)
+    digest = adopt_apply.plan_digest(args.plan_id)
+    document = adopt_apply.load_stored_plan(digest)
     stored_plan = document["plan"]
     if stored_plan["state"] != "ready":
         raise adopt_inspection.refuse(
@@ -1042,7 +584,7 @@ def command_apply(args: argparse.Namespace) -> int:
             "given")
 
     root = adopt_inspection.require_repository(document["handoff"]["repo_root"])
-    validate_operations(root, changes)
+    adopt_apply.validate_operations(root, changes)
 
     # Before the repository is re-inspected, because a retained worktree is
     # registered in the target and therefore *changes* what the inspection
@@ -1071,7 +613,7 @@ def command_apply(args: argparse.Namespace) -> int:
             "the stored operations are not the operations this repository "
             "derives")
 
-    dirty = dirty_overlap(root, composed.overlap)
+    dirty = adopt_apply.dirty_overlap(root, composed.overlap)
     if dirty:
         raise adopt_inspection.refuse(
             "dirty_worktree", "adopt.worktree.dirty", "",
@@ -1096,19 +638,20 @@ def command_apply(args: argparse.Namespace) -> int:
 
     try:
         for operation in changes:
-            execute_operation(worktree, operation, composed.contents)
+            adopt_apply.execute_operation(
+                worktree, operation, composed.contents, run_resolver)
     except adopt_inspection.AdoptError as error:
-        retain_failure(digest, document, worktree, branch, [
+        adopt_apply.retain_failure(digest, document, worktree, branch, [
             adopt_inspection.gate_entry(gate, "not_run", None)
             for gate in adopt_inspection.COMMIT_GATES], error.repair_id)
         raise
 
-    run = GateRun(worktree, changes)
-    gates = run_commit_gates(run)
+    run = adopt_apply.GateRun(worktree, changes, run_resolver)
+    gates = adopt_apply.run_commit_gates(run)
     failed = [gate for gate in gates if gate["status"] == "failed"]
     if failed:
-        retain_failure(digest, document, worktree, branch, gates,
-                       failed[0]["repair_id"])
+        adopt_apply.retain_failure(digest, document, worktree, branch,
+                                   gates, failed[0]["repair_id"])
         raise adopt_inspection.AdoptError(
             "verification_failed", failed[0]["repair_id"],
             [{"pointer": f"/verification/commit_gates/{gate['id']}",
@@ -1116,28 +659,31 @@ def command_apply(args: argparse.Namespace) -> int:
 
     records = {"migration_map": document["handoff"]["migration_map"],
                "evidence_record": document["handoff"]["evidence_record"]}
-    signed = signing_requested(run.resolve_payload)
+    signed = adopt_apply.signing_requested(run.resolve_payload)
     if signed is None:
-        retain_failure(digest, document, worktree, branch, gates,
-                       "adopt.commit.unresolved_policy")
+        adopt_apply.retain_failure(digest, document, worktree, branch,
+                                   gates,
+                                   "adopt.commit.unresolved_policy")
         raise adopt_inspection.refuse(
             "verification_failed", "adopt.commit.unresolved_policy", "",
             "the worktree's commit signing policy could not be resolved")
     code, _ = adopt_inspection.run_git(
         worktree, "commit", "--quiet", *(["-S"] if signed else []),
-        "-m", commit_message(stored_plan["project_id"], digest, records))
+        "-m", adopt_apply.commit_message(
+            stored_plan["project_id"], digest, records))
     if code != 0:
         # Never retried unsigned: a contract that asks for a signature and a
         # machine that cannot produce one is a failure, not a downgrade.
-        retain_failure(digest, document, worktree, branch, gates,
-                       "adopt.commit.failed")
+        adopt_apply.retain_failure(digest, document, worktree, branch,
+                                   gates, "adopt.commit.failed")
         raise adopt_inspection.refuse(
             "verification_failed", "adopt.commit.failed", "",
             "the adoption commit could not be created")
 
     commit = adopt_inspection.git_or_fail(
         worktree, "rev-parse", "HEAD").decode("ascii", "strict").strip()
-    prove_branch_carries_commit(root, worktree, branch, base_revision, commit)
+    adopt_apply.prove_branch_carries_commit(
+        root, worktree, branch, base_revision, commit)
     code, _ = adopt_inspection.run_git(root, "worktree", "remove", str(worktree))
     if code != 0:
         raise adopt_inspection.refuse(
@@ -1145,59 +691,9 @@ def command_apply(args: argparse.Namespace) -> int:
             "the adoption worktree could not be removed after the commit")
 
     document["verification"]["commit_gates"] = gates
-    store_document(stored_plan["plan_id"], document)
+    adopt_planning.store_document(stored_plan["plan_id"], document)
     return emit_json({"branch": branch, "commit": commit,
                       "plan_id": stored_plan["plan_id"], **records})
-
-
-def signing_requested(payload: object) -> bool | None:
-    """Whether the amended contract asks for a signed commit, or None (D28).
-
-    Read out of the resolver's own view of the worktree — the same observation
-    the gates were judged over — so the policy comes from the validated
-    contract rather than from a second reading of the file. None means the
-    policy could not be read at all, which is never silently a `false`.
-    """
-    bindings = payload.get("bindings") if isinstance(payload, dict) else None
-    vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
-    commit = vcs.get("commit") if isinstance(vcs, dict) else None
-    signed = commit.get("signed") if isinstance(commit, dict) else None
-    return signed if isinstance(signed, bool) else None
-
-
-def prove_branch_carries_commit(root: Path, worktree: Path, branch: str,
-                                base_revision: str, commit: str) -> None:
-    """The three proofs D17 makes worktree removal conditional on.
-
-    The ref holds this commit, it is the only commit the branch adds, and the
-    worktree is clean. Never elapsed time.
-    """
-    head = adopt_inspection.git_or_fail(
-        root, "rev-parse", branch).decode("ascii", "strict").strip()
-    count = adopt_inspection.git_or_fail(
-        worktree, "rev-list", "--count",
-        f"{base_revision}..{branch}").decode("ascii", "strict").strip()
-    residue = status_records(worktree)
-    if head != commit or count != "1" or residue:
-        raise adopt_inspection.refuse(
-            "adopt_failure", "adopt.commit.unproved", "",
-            "the adoption branch could not be proved to carry exactly the "
-            "adoption commit")
-
-
-def dirty_overlap(root: Path, targets: list[str]) -> list[str]:
-    """Uncommitted paths sitting inside an inspected source or destination.
-
-    Never repaired, never stashed and never reset: the refusal exists to leave
-    the caller's work exactly where they left it.
-    """
-    overlapping = []
-    for _, paths in status_records(root):
-        for path in paths:
-            if any(adopt_inspection.matches_group(path, target, "prefix")
-                   for target in targets):
-                overlapping.append(path)
-    return sorted(set(overlapping))
 
 
 # --------------------------------------------------------------------------
@@ -1205,271 +701,14 @@ def dirty_overlap(root: Path, targets: list[str]) -> list[str]:
 #
 # The conformance question, answered read-only against the *committed* state,
 # and — only with `--register` — the one write to the user-scope fleet
-# registry. Every one of the three answers is a report on exit 0 (R6.4): exit
-# 2 and the D12 error object are reserved for the closed `ADOPT_ERROR_CODES`,
-# so `not_conformant` reaches the operator as the answer they asked for rather
-# than as a refusal they have to parse.
+# registry. The checks, the report and the registration transaction live in
+# `adopt_verify`; what is left here is the order they run in.
 #
-# Nothing here stores a `ResolvedProject` snapshot or a capability verdict
-# (R6.3, D18): the report is printed and forgotten, and what registration
-# persists is exactly an identity and a location.
+# Every one of the three answers is a report on exit 0 (R6.4): exit 2 and the
+# D12 error object are reserved for the closed `ADOPT_ERROR_CODES`, so
+# `not_conformant` reaches the operator as the answer they asked for rather
+# than as a refusal they have to parse.
 # --------------------------------------------------------------------------
-
-VERIFY_SCHEMA_VERSION = 1
-
-
-def registration_allowed(result: str) -> bool:
-    """Whether `result` may register. Every member named, default raises."""
-    if result == "adopted":
-        return True
-    if result == "adopted_with_blockers":
-        return True
-    if result == "not_conformant":
-        return False
-    raise ValueError(f"unknown verify result: {result!r}")
-
-
-def verify_exit_code(result: str) -> int:
-    """The exit code each result publishes. Every member named, default raises.
-
-    All three are 0 on purpose and each is written out rather than folded into
-    one return, so a fourth result added to the closed set has to be given an
-    answer here instead of inheriting a plausible success.
-    """
-    if result == "adopted":
-        return 0
-    if result == "adopted_with_blockers":
-        return 0
-    if result == "not_conformant":
-        return 0
-    raise ValueError(f"unknown verify result: {result!r}")
-
-
-def resolved_project_id(payload: object) -> str | None:
-    project = payload.get("project") if isinstance(payload, dict) else None
-    identifier = project.get("id") if isinstance(project, dict) else None
-    return identifier if isinstance(identifier, str) and identifier else None
-
-
-def integration_branch(payload: object) -> str | None:
-    """The contract's declared integration branch, out of the resolver's view.
-
-    Read from the validated snapshot rather than from the contract file, for
-    the reason D26 exists: the resolver is the only reader of contract policy.
-    """
-    bindings = payload.get("bindings") if isinstance(payload, dict) else None
-    vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
-    branch = vcs.get("integration_branch") if isinstance(vcs, dict) else None
-    return branch if isinstance(branch, str) and branch else None
-
-
-def blocked_capabilities(payload: object) -> list[dict]:
-    """Every declared capability the host cannot deliver, and its repair id.
-
-    `unsupported` is a deliberate absence and never a blocker; only `blocked`
-    is a capability the contract claims and the machine withholds (R6.4).
-    """
-    capabilities = payload.get("capabilities") if isinstance(payload, dict) \
-        else None
-    if not isinstance(capabilities, dict):
-        return []
-    return [{"capability": name, "repair_id": entry.get("repair_id")}
-            for name, entry in sorted(capabilities.items())
-            if isinstance(entry, dict) and entry.get("state") == "blocked"]
-
-
-def projection_check(root: Path) -> tuple[str, str | None]:
-    """The `projections-in-sync` verdict and the reason it failed.
-
-    Drift is the resolver's `invalid_projection` refusal, whose violation
-    pointers name each drifted projection by id, so the reason published here
-    is the resolver's own answer rather than a second opinion about it.
-    """
-    exit_code, payload = run_resolver(root, "check-projections")
-    if exit_code == 0 and isinstance(payload, dict):
-        entries = payload.get("projections")
-        if isinstance(entries, list) and all(
-                isinstance(entry, dict) and entry.get("action") == "unchanged"
-                for entry in entries):
-            return "passed", None
-    code = resolver_error_code(payload)
-    # Drift is one refusal — `invalid_projection`, whose pointers name the
-    # drifted projections by id. Every other refusal carries pointers too
-    # (`not_onboarded` carries one empty pointer), so reading them as drift
-    # would put a false claim in the row a diagnostic verb exists to publish.
-    if code == "invalid_projection":
-        return "failed", ("the projection targets have drifted: "
-                          + ", ".join(resolver_violation_pointers(payload)))
-    return "failed", f"the projections could not be checked: {code}"
-
-
-class Verification:
-    """One repository's conformance verdict, and what registration needs.
-
-    `report` is exactly what is printed. `resolve_payload` is kept beside it
-    rather than folded in, because the integration branch registration checks
-    is contract policy the report has no business publishing.
-    """
-
-    def __init__(self, report: dict, resolve_payload: object) -> None:
-        self.report = report
-        self.resolve_payload = resolve_payload
-
-
-def verify_repository(root: Path) -> Verification:
-    """Run the ordered conformance checks and build the report.
-
-    Every check runs where its inputs exist and is recorded as `not_run` where
-    they do not, so a report always carries one row per declared check: an
-    absent evidence record is a named failure with two consequences, never two
-    silent omissions.
-    """
-    checks: list[dict] = []
-
-    def record(check_id: str, status: str, detail: str | None) -> None:
-        checks.append(adopt_inspection.verify_check_entry(
-            check_id, status, detail))
-
-    exit_code, payload = run_resolver(root, "resolve")
-    resolves = exit_code == 0 and isinstance(payload, dict)
-    record("contract-resolves", "passed" if resolves else "failed",
-           None if resolves else
-           f"the contract does not resolve: {resolver_error_code(payload)}")
-
-    # Asked even when `resolve` refused, because the commonest reason it
-    # refuses *is* projection drift: reporting the drift as "not run" would
-    # hide the one check that names which projection went stale.
-    record("projections-in-sync", *projection_check(root))
-
-    unclassified = sorted(
-        path for path, _ in adopt_inspection.tracked_inventory(root)
-        if adopt_inspection.classify(path) is None
-        and adopt_inspection.is_agent_path(path))
-    record("no-unclassified-agent-path",
-           "failed" if unclassified else "passed",
-           ("no lifecycle class covers: " + ", ".join(unclassified))
-           if unclassified else None)
-
-    record_path, map_path = None, None
-    candidates = adopt_inspection.tracked_evidence_records(root)
-    if not candidates:
-        record("adoption-evidence-record", "failed",
-               "no adoption evidence record is committed under "
-               f"{adopt_inspection.EVIDENCE_RECORD_DIR}/")
-    elif len(candidates) > 1:
-        record("adoption-evidence-record", "failed",
-               "more than one adoption evidence record is committed: "
-               + ", ".join(candidates))
-    else:
-        found = adopt_inspection.parses_as_evidence_record(
-            adopt_inspection.blob_at_head(root, candidates[0]))
-        if found is None:
-            record("adoption-evidence-record", "failed",
-                   "the committed file does not parse as an adoption "
-                   f"evidence record: {candidates[0]}")
-        else:
-            record_path = candidates[0]
-            map_path = found["path_migration_map"]
-            record("adoption-evidence-record", "passed", None)
-
-    commit = None
-    if record_path is None:
-        record("adoption-commit-derived", "not_run",
-               "no adoption evidence record was discovered")
-    else:
-        commit = adopt_inspection.introducing_commit(root, record_path)
-        record("adoption-commit-derived",
-               "failed" if commit is None else "passed",
-               None if commit is not None else
-               "git records no commit introducing the adoption evidence "
-               f"record: {record_path}")
-
-    if record_path is None:
-        record("path-migration-map", "not_run",
-               "no adoption evidence record was discovered")
-        map_path = None
-    elif not isinstance(map_path, str) or not map_path:
-        record("path-migration-map", "failed",
-               "the evidence record names no path migration map")
-        map_path = None
-    elif adopt_inspection.parses_as_migration_map(
-            adopt_inspection.blob_at_head(root, map_path)) is None:
-        record("path-migration-map", "failed",
-               f"the path migration map is absent or does not parse: "
-               f"{map_path}")
-    else:
-        record("path-migration-map", "passed", None)
-
-    blockers = blocked_capabilities(payload) if resolves else []
-    if any(entry["status"] != "passed" for entry in checks):
-        result = "not_conformant"
-    elif blockers:
-        result = "adopted_with_blockers"
-    else:
-        result = "adopted"
-    # Defence in depth behind the two exhaustive dispatches below: a result
-    # invented here crashes rather than reaching an operator.
-    if result not in adopt_inspection.VERIFY_RESULTS:
-        raise ValueError(f"unknown verify result: {result!r}")
-
-    return Verification({
-        "schema_version": VERIFY_SCHEMA_VERSION,
-        "result": result,
-        "project_id": resolved_project_id(payload),
-        "root": str(root),
-        "adoption_commit": commit,
-        "evidence_record": record_path,
-        "migration_map": map_path,
-        "checks": checks,
-        "blockers": blockers,
-        "registered": False,
-    }, payload)
-
-
-def register_project(root: Path, verification: Verification) -> None:
-    """Record `{project_id, root}` in the fleet, or refuse and change nothing.
-
-    The ancestry check comes first because it is the ordering #67 documents and
-    D19 makes checked: a commit that lives only on a feature branch names a
-    state the integration branch does not have. The duplicate check and the
-    replacement then happen inside one exclusive lock over a registry reread
-    underneath it, so two registrations racing under one `HOME` serialize
-    instead of one overwriting the other.
-    """
-    report = verification.report
-    branch = integration_branch(verification.resolve_payload)
-    project_id = report["project_id"]
-    commit = report["adoption_commit"]
-    if branch is None or project_id is None or commit is None:
-        raise adopt_inspection.refuse(
-            "adopt_failure", "adopt.registration.incomplete", "",
-            "registration needs a project id, an adoption commit and a "
-            "declared integration branch")
-    if not adopt_inspection.commit_is_ancestor(root, commit, branch):
-        raise adopt_inspection.refuse(
-            "not_integrated", "adopt.registration.not_integrated", "",
-            "the adoption commit is not reachable from the contract's "
-            "integration branch")
-    try:
-        with agent_platform.registry_transaction() as entries:
-            for entry in entries:
-                if entry["project_id"] != project_id:
-                    continue
-                if Path(entry["root"]).resolve() != root:
-                    raise adopt_inspection.refuse(
-                        "duplicate_project_id", "adopt.registry.duplicate",
-                        "/projects",
-                        "the fleet registry already holds this project id at "
-                        "another root")
-            agent_platform.write_registry(
-                [entry for entry in entries
-                 if entry["project_id"] != project_id]
-                + [{"project_id": project_id, "root": str(root)}])
-    except agent_platform.PlatformManifestError as error:
-        raise adopt_inspection.AdoptError(
-            "adopt_failure", "adopt.registry.invalid",
-            error.violations) from None
-    report["registered"] = True
 
 
 def command_verify(args: argparse.Namespace) -> int:
@@ -1477,11 +716,12 @@ def command_verify(args: argparse.Namespace) -> int:
     # as an adoption failure rather than as a non-conformant repository.
     require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
-    verification = verify_repository(root)
-    if args.register and registration_allowed(verification.report["result"]):
-        register_project(root, verification)
+    verification = adopt_verify.verify_repository(root, run_resolver)
+    if args.register and adopt_verify.registration_allowed(
+            verification.report["result"]):
+        adopt_verify.register_project(root, verification)
     emit_json(verification.report)
-    return verify_exit_code(verification.report["result"])
+    return adopt_verify.verify_exit_code(verification.report["result"])
 
 
 # --------------------------------------------------------------------------
@@ -1562,8 +802,10 @@ def main(argv: list[str] | None = None) -> int:
                 "pointer": "",
                 "message": (
                     "the adoption libraries were not found at "
-                    "~/.agents/lib/python/adopt_inspection.py and "
-                    "~/.agents/lib/python/adopt_planning.py"
+                    "~/.agents/lib/python/adopt_inspection.py, "
+                    "~/.agents/lib/python/adopt_planning.py, "
+                    "~/.agents/lib/python/adopt_apply.py and "
+                    "~/.agents/lib/python/adopt_verify.py"
                 ),
             }],
         )
