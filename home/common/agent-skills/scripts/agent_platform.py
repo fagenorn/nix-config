@@ -1,5 +1,6 @@
 """Shared platform facts for the agent binaries: the installed manifest,
-strict SemVer, the user-scope state root, and the atomic writer.
+strict SemVer, the user-scope state root, the fleet registry, and the atomic
+writer.
 
 This module is imported, never run: it has no `main`, no argparse, and no
 adoption or resolver logic. It exists so that every binary reads one manifest
@@ -38,6 +39,13 @@ MANIFEST_MEMBERS = (
 # D36: a `migrations` entry is closed on exactly these three members.
 MIGRATION_MEMBERS = ("id", "from_schema", "to_schema")
 
+# The fleet registry's members, and D18's closed entry: stable identity and
+# location, and nothing else. No version stamp and no cached verdict — the
+# preflight re-reads each project's live contract, so a stored one would be
+# stale by construction.
+REGISTRY_MEMBERS = ("schema_version", "projects")
+REGISTRY_ENTRY_MEMBERS = ("project_id", "root")
+
 # The closed set of schema-compatibility reasons, kept separate from the
 # resolver's capability `REASON_CODES` (D7). `interval_verdict` names the first
 # two; `project_schema_unsupported` belongs to the contract's schema check.
@@ -53,8 +61,9 @@ SEMVER_PATTERN = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
 
 
 class PlatformManifestError(Exception):
-    """One refusal from the manifest loader: a stable repair id and an ordered,
-    non-empty violation list, each violation `{pointer, message}` (R1.3)."""
+    """One refusal from a platform data-file loader — the manifest or the fleet
+    registry: a stable repair id and an ordered, non-empty violation list, each
+    violation `{pointer, message}` (R1.3)."""
 
     def __init__(self, repair_id: str, violations: list[dict]) -> None:
         super().__init__(repair_id)
@@ -356,6 +365,107 @@ def ensure_directory(path: Path) -> Path:
     """Create `path` and its parents if absent, and return it."""
     path.mkdir(mode=0o755, parents=True, exist_ok=True)
     return path
+
+
+# --------------------------------------------------------------------------
+# The fleet registry
+#
+# Read here; written only by `adopt-project verify --register`. The registry
+# is platform-written state, so every failure to read one that exists is an
+# installation defect published as `resolver_failure` — an absent file is the
+# one benign case, because nothing has been registered yet.
+# --------------------------------------------------------------------------
+
+
+def _registry_violation(pointer: str, message: str, code: str) -> dict:
+    return _violation(pointer, message, f"platform.registry.{code}")
+
+
+def registry_path() -> Path:
+    """The one fleet registry location. No fallback, no discovery ladder."""
+    return state_root() / "fleet" / "registry.json"
+
+
+def validate_registry(source: object) -> list[dict]:
+    """Every violation of the registry's shape, collected in one pass.
+
+    The entry shape is closed on `REGISTRY_ENTRY_MEMBERS` in both directions
+    (D18): an absent member and an extra one are equally violations, so a
+    cached verdict smuggled into an entry is refused rather than ignored.
+    """
+    if not isinstance(source, dict):
+        return [_registry_violation("", "must be a JSON object", "not_object")]
+    violations: list[dict] = []
+    for name in REGISTRY_MEMBERS:
+        if name not in source:
+            violations.append(_registry_violation(
+                f"/{name}", "required member is absent", "member_missing"))
+    for name in sorted(source):
+        if name not in REGISTRY_MEMBERS:
+            violations.append(_registry_violation(
+                f"/{name}", "member is not part of this schema",
+                "member_unexpected"))
+    if "schema_version" in source and not _is_positive_int(
+            source["schema_version"]):
+        violations.append(_registry_violation(
+            "/schema_version", "must be a positive integer",
+            "schema_version.not_positive_int"))
+    if "projects" not in source:
+        return violations
+    entries = source["projects"]
+    if not isinstance(entries, list):
+        violations.append(_registry_violation(
+            "/projects", "must be an array", "projects.not_array"))
+        return violations
+    for index, entry in enumerate(entries):
+        pointer = f"/projects/{index}"
+        if not isinstance(entry, dict):
+            violations.append(_registry_violation(
+                pointer, "must be an object", "projects.not_object"))
+            continue
+        for name in REGISTRY_ENTRY_MEMBERS:
+            if name not in entry:
+                violations.append(_registry_violation(
+                    f"{pointer}/{name}", "required member is absent",
+                    "projects.member_missing"))
+            elif not (isinstance(entry[name], str) and entry[name]):
+                violations.append(_registry_violation(
+                    f"{pointer}/{name}", "must be a non-empty string",
+                    "projects.not_string"))
+        for name in sorted(entry):
+            if name not in REGISTRY_ENTRY_MEMBERS:
+                violations.append(_registry_violation(
+                    f"{pointer}/{name}", "member is not part of this schema",
+                    "projects.member_unexpected"))
+    return violations
+
+
+def read_registry() -> list[dict]:
+    """The registered fleet entries, in the order the file declares them.
+
+    An absent registry is the empty fleet, not an error: nothing has been
+    registered yet, and creating the file to find that out would make a
+    read-only caller a writer. A registry that exists but will not read, will
+    not parse, or does not match the schema raises instead — reporting an
+    empty fleet for a corrupt file would hide exactly the projects an operator
+    registered.
+    """
+    try:
+        raw = registry_path().read_bytes()
+    except FileNotFoundError:
+        return []
+    except (OSError, RuntimeError):
+        raise _refuse([_registry_violation(
+            "", "the fleet registry could not be read", "unreadable")]) from None
+    try:
+        source = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise _refuse([_registry_violation(
+            "", "the fleet registry is not valid JSON", "parse")]) from None
+    violations = validate_registry(source)
+    if violations:
+        raise _refuse(violations)
+    return list(source["projects"])
 
 
 # --------------------------------------------------------------------------

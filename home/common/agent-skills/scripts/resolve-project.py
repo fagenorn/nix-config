@@ -16,6 +16,11 @@ refuses on drift; `resolve` runs the same check before it builds anything, so
 a hand-edited target is a structural refusal rather than a stale snapshot
 (D10).
 
+`platform-status` is the administrative operation: it reports the installed
+platform's version facts, and — when asked — one project's declared interval
+and compatibility verdict, or one verdict row per registered fleet member. It
+is never normal workflow context (R3.1).
+
 `write-projections` is the tool's only writer. It renders each declared
 projection from the single instruction source and brings its native entry
 target into sync: a wholly generated file for one agent, one managed import
@@ -63,6 +68,7 @@ PLATFORM_LIBRARY_MEMBERS = (
     "interval_verdict",
     "load_manifest",
     "parse_semver",
+    "read_registry",
     "write_atomically",
 )
 PLATFORM_LIBRARY_REPAIR_ID = "platform.library.missing"
@@ -129,6 +135,25 @@ PROJECTION_KINDS = ("generated_file", "managed_import")
 PROJECTION_STATUSES = ("in_sync", "missing", "stale")
 AGENT_IDS = ("claude", "codex")
 CONTRACT_FILENAME = ".agents/project.json"
+
+# The `platform-status` report's own interface version, independent of the
+# project schema and of `ResolvedProject.schema_version`: those two are
+# answered by the manifest (D8) and appear inside the report's `platform`
+# block, so reusing either here would publish one fact twice under two names.
+PLATFORM_STATUS_SCHEMA_VERSION = 1
+
+# The manifest members the `platform` block republishes, in the manifest's own
+# order. The manifest's `schema_version` is not among them: it versions the
+# manifest file, which is the loader's concern and not a platform fact a
+# caller can act on.
+PLATFORM_STATUS_MANIFEST_MEMBERS = (
+    "platform_version",
+    "project_schema_versions",
+    "resolved_schema_version",
+    "migrations",
+    "deprecations",
+    "removals",
+)
 
 TOP_LEVEL_MEMBERS = (
     "schema_version",
@@ -1333,7 +1358,7 @@ def emit_error(code: str, repair_id: str, violations: list[dict],
     return 2
 
 
-def require_platform_manifest() -> dict:
+def require_platform_manifest() -> tuple[dict, Path]:
     """The installed platform manifest, or a refusal if it will not load.
 
     Every subcommand calls this before root discovery and before any contract
@@ -1344,15 +1369,31 @@ def require_platform_manifest() -> dict:
 
     It returns the manifest because the manifest is now read for its values —
     `project_schema_versions` (D8), `resolved_schema_version` and
-    `platform_version` (R2.3). One load, one call site: a second
-    `load_manifest()` elsewhere would be a second failure surface for one fact.
+    `platform_version` (R2.3) — and beside it the absolute resolved path it was
+    loaded from, which is the deployment identity `platform-status` publishes
+    (D2). One load, one call site: a second `load_manifest()` elsewhere would
+    be a second failure surface for one fact.
     """
     try:
-        manifest, _ = agent_platform.load_manifest()
+        manifest, path = agent_platform.load_manifest()
     except agent_platform.PlatformManifestError as error:
         raise ContractError(
             "resolver_failure", error.repair_id, error.violations) from None
-    return manifest
+    return manifest, path
+
+
+def require_registry() -> list[dict]:
+    """The registered fleet, or a refusal when the registry will not read.
+
+    The registry is platform-written state, so a corrupt one is an installation
+    defect and reaches the caller as `resolver_failure`, exactly like a corrupt
+    manifest. An absent one is the empty fleet and never gets here.
+    """
+    try:
+        return agent_platform.read_registry()
+    except agent_platform.PlatformManifestError as error:
+        raise ContractError(
+            "resolver_failure", error.repair_id, error.violations) from None
 
 
 # --------------------------------------------------------------------------
@@ -1363,7 +1404,7 @@ def require_platform_manifest() -> dict:
 def command_resolve(args: argparse.Namespace) -> int:
     # Before root discovery, so a broken platform installation can never be
     # masked by `not_onboarded` or a contract error (R1.3).
-    manifest = require_platform_manifest()
+    manifest, _ = require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source, manifest))
@@ -1390,7 +1431,7 @@ def command_write_projections(args: argparse.Namespace) -> int:
     """
     # Before root discovery, so a broken platform installation can never be
     # masked by `not_onboarded` or a contract error (R1.3).
-    manifest = require_platform_manifest()
+    manifest, _ = require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source, manifest))
@@ -1414,7 +1455,7 @@ def command_check_projections(args: argparse.Namespace) -> int:
     """
     # Before root discovery, so a broken platform installation can never be
     # masked by `not_onboarded` or a contract error (R1.3).
-    manifest = require_platform_manifest()
+    manifest, _ = require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source, manifest))
@@ -1423,6 +1464,181 @@ def command_check_projections(args: argparse.Namespace) -> int:
         {"id": entry["id"], "action": "unchanged"}
         for entry in source["projections"]
     ]})
+
+
+# --------------------------------------------------------------------------
+# `platform-status`
+#
+# D6 fixes the split this operation turns on: a contract that cannot be parsed
+# into an interval is refused exactly as `resolve` refuses it, while an
+# interval that parses and falls outside the range is the verdict the operation
+# exists to publish. Everything below reads (R3.6): no file is opened for
+# writing, no directory is created — the registry reader reads `state_root()`
+# and never makes it — and no child process runs.
+# --------------------------------------------------------------------------
+
+
+def platform_block(manifest: dict, manifest_path: Path) -> dict:
+    """The installed platform's facts, verbatim, and where they came from.
+
+    `manifest_path` is the absolute resolved path of the file actually loaded,
+    which under Home Manager is the content-addressed store path (D2). It is
+    published as it is: shortening it would discard the deployment identity it
+    exists to carry.
+    """
+    block = {name: manifest[name] for name in PLATFORM_STATUS_MANIFEST_MEMBERS}
+    block["manifest_path"] = str(manifest_path)
+    return block
+
+
+def compatibility_block(reason_code: str | None) -> dict:
+    """One contract's verdict; `reason_code` None is the compatible answer.
+
+    The repair id comes from the same exhaustive dispatch `unsupported_schema`
+    publishes, so a reported verdict and the refusal for the same cause always
+    name one repair.
+    """
+    return {
+        "compatible": reason_code is None,
+        "reason_code": reason_code,
+        "repair_id": (None if reason_code is None
+                      else schema_reason_repair_id(reason_code)),
+    }
+
+
+def declared_facts(source: object) -> dict:
+    """What a contract declares about its identity, schema and interval.
+
+    Read defensively, because this also runs over contracts validation
+    rejected: a fleet member's, or one at a schema this platform does not
+    publish, whose remaining members were never shape-checked. A member that is
+    absent or of the wrong shape is reported as null — a description of what is
+    written, never a defaulted value, since nothing here is used as policy.
+    """
+    facts: dict = {
+        "project_id": None,
+        "project_schema_version": None,
+        "platform_interval": None,
+    }
+    if not isinstance(source, dict):
+        return facts
+    identity = source.get("project")
+    if isinstance(identity, dict) and isinstance(identity.get("id"), str) \
+            and identity["id"]:
+        facts["project_id"] = identity["id"]
+    version = source.get("schema_version")
+    if isinstance(version, int) and not isinstance(version, bool):
+        facts["project_schema_version"] = version
+    interval = source.get("platform")
+    if (isinstance(interval, dict)
+            and sorted(interval) == sorted(PLATFORM_MEMBERS)
+            and all(isinstance(interval[name], str)
+                    for name in PLATFORM_MEMBERS)):
+        facts["platform_interval"] = {
+            name: interval[name] for name in PLATFORM_MEMBERS}
+    return facts
+
+
+def evaluate_named_project(root: Path, source: dict,
+                           manifest: dict) -> tuple[dict, dict]:
+    """The `project` and `compatibility` members for the named repository (R3.3).
+
+    A structural violation refuses from here, by letting `raise_for_violations`
+    through: the operator asked about this contract, and one that will not
+    parse into an interval cannot be evaluated (R3.5). A schema this platform
+    does not publish and an out-of-range interval are the two reported
+    verdicts.
+    """
+    try:
+        raise_for_violations(validate_contract(source, manifest))
+    except ContractError as error:
+        if error.code != "unsupported_schema":
+            raise
+        reason_code = error.reason_code
+    else:
+        reason_code = agent_platform.interval_verdict(
+            manifest["platform_version"],
+            source["platform"]["min_inclusive"],
+            source["platform"]["max_exclusive"])
+    facts = declared_facts(source)
+    project = {
+        "project_id": facts["project_id"],
+        "root": str(root),
+        "project_schema_version": facts["project_schema_version"],
+        "platform_interval": facts["platform_interval"],
+    }
+    return project, compatibility_block(reason_code)
+
+
+def fleet_verdict(root: Path, manifest: dict) -> tuple[object, str | None]:
+    """One registered project's contract, and its failing reason code or None.
+
+    Nothing here refuses. The registry named this project, not the operator, so
+    a root that is gone, an unreadable or unparseable contract and a structural
+    violation are all reported as `project_schema_unsupported`: a preflight has
+    to be able to describe a broken fleet member (R3.4).
+    """
+    try:
+        source = load_contract(root)
+    except ContractError:
+        return None, "project_schema_unsupported"
+    try:
+        violations = validate_contract(source, manifest)
+    except ContractError as error:
+        return source, error.reason_code or "project_schema_unsupported"
+    if violations:
+        return source, "project_schema_unsupported"
+    return source, agent_platform.interval_verdict(
+        manifest["platform_version"],
+        source["platform"]["min_inclusive"],
+        source["platform"]["max_exclusive"])
+
+
+def fleet_row(entry: dict, manifest: dict) -> dict:
+    """One registry entry's verdict row.
+
+    Identity and location come from the registry, because they are the two
+    facts a row still has when its contract will not load at all (D18).
+    """
+    source, reason_code = fleet_verdict(Path(entry["root"]), manifest)
+    facts = declared_facts(source)
+    return {
+        "project_id": entry["project_id"],
+        "root": entry["root"],
+        "project_schema_version": facts["project_schema_version"],
+        "platform_interval": facts["platform_interval"],
+        **compatibility_block(reason_code),
+    }
+
+
+def command_platform_status(args: argparse.Namespace) -> int:
+    """Report the platform's facts, and whatever was asked about beside them.
+
+    The five members are always present, `null` where not applicable. Both
+    flags compose and neither suppresses the other.
+
+    Projection drift is deliberately not checked: a stale target is `resolve`'s
+    structural refusal (D10), not a fact about platform compatibility.
+    """
+    # Before root discovery, so a broken platform installation can never be
+    # masked by `not_onboarded` or a contract error (R1.3).
+    manifest, path = require_platform_manifest()
+    status: dict = {
+        "schema_version": PLATFORM_STATUS_SCHEMA_VERSION,
+        "platform": platform_block(manifest, path),
+        "project": None,
+        "compatibility": None,
+        "fleet": None,
+    }
+    if args.repo_root is not None:
+        root = discover_root(args.repo_root)
+        status["project"], status["compatibility"] = evaluate_named_project(
+            root, load_contract(root), manifest)
+    if args.fleet:
+        status["fleet"] = sorted(
+            (fleet_row(entry, manifest) for entry in require_registry()),
+            key=lambda row: row["project_id"])
+    return emit_json(status)
 
 
 def add_repo_root(subparser: argparse.ArgumentParser) -> None:
@@ -1461,6 +1677,22 @@ def build_parser() -> argparse.ArgumentParser:
         "write-projections",
         help="write every declared projection target that is missing or stale")
     add_repo_root(write_projections)
+    platform_status = subparsers.add_parser(
+        "platform-status",
+        help="report the installed platform's version facts",
+        description=(
+            "Report the installed platform's version facts. With --repo-root, "
+            "add that project's declared interval and its compatibility "
+            "verdict; with --fleet, add one verdict row per registered "
+            "project. Without --repo-root no project is inspected and no "
+            "project root is discovered."),
+    )
+    add_repo_root(platform_status)
+    platform_status.add_argument(
+        "--fleet",
+        action="store_true",
+        help="add one compatibility row per project in the fleet registry",
+    )
     return parser
 
 
@@ -1471,6 +1703,8 @@ def dispatch(args: argparse.Namespace) -> int:
         return command_check_projections(args)
     if args.command == "write-projections":
         return command_write_projections(args)
+    if args.command == "platform-status":
+        return command_platform_status(args)
     raise ValueError(f"unknown subcommand: {args.command!r}")
 
 
