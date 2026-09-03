@@ -198,6 +198,13 @@ class VerifyReadOnlyTest(VerifyTestCase):
         contract = self.check(report, "contract-resolves")
         self.assertEqual(contract["status"], "failed")
         self.assertIn("not_onboarded", contract["detail"])
+        # A refusal that is not about projections must not be reported as
+        # drift: `not_onboarded` carries one empty violation pointer, which
+        # once read as a drift list produced a dangling, false claim.
+        projections = self.check(report, "projections-in-sync")
+        self.assertEqual(projections["status"], "failed")
+        self.assertNotIn("drifted", projections["detail"])
+        self.assertIn("not_onboarded", projections["detail"])
         self.assertIsNone(report["project_id"])
 
     def test_a_plain_directory_is_not_a_repository(self):

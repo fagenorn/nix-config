@@ -1292,12 +1292,15 @@ def projection_check(root: Path) -> tuple[str, str | None]:
                 isinstance(entry, dict) and entry.get("action") == "unchanged"
                 for entry in entries):
             return "passed", None
-    pointers = resolver_violation_pointers(payload)
-    if pointers:
+    code = resolver_error_code(payload)
+    # Drift is one refusal — `invalid_projection`, whose pointers name the
+    # drifted projections by id. Every other refusal carries pointers too
+    # (`not_onboarded` carries one empty pointer), so reading them as drift
+    # would put a false claim in the row a diagnostic verb exists to publish.
+    if code == "invalid_projection":
         return "failed", ("the projection targets have drifted: "
-                          + ", ".join(pointers))
-    return "failed", ("the projections could not be checked: "
-                      f"{resolver_error_code(payload)}")
+                          + ", ".join(resolver_violation_pointers(payload)))
+    return "failed", f"the projections could not be checked: {code}"
 
 
 class Verification:
