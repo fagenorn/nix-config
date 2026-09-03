@@ -637,6 +637,137 @@ class RequiredCapabilitySelectionTest(unittest.TestCase):
                     self.assertEqual(check["reason_code"], "capability_unavailable")
 
 
+class PolicyPathSymlinkTest(ReportAssertions, unittest.TestCase):
+    """D18: a declared policy path reached through a symlink is a host finding,
+    and the walk is bounded at the project root.
+
+    The subject set is every knowledge path the contract declares plus every
+    projection source; a projection target is generated and so is excluded.
+    """
+
+    CHECK_ID = "host.policy_path.no_follow_readable"
+    REPAIR_ID = "host.policy_path.materialize"
+    STANDARDS = "home/common/agent-skills/standards"
+
+    def policy_check(self, root, **kwargs) -> tuple[dict, dict]:
+        report, by_id = doctor(self, root, **kwargs)
+        return report, by_id[self.CHECK_ID]
+
+    def test_a_symlinked_standards_directory_names_it_with_its_link_depth(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            declared = root / self.STANDARDS
+            real = declared.parent / "standards-materialised"
+            declared.rename(real)
+            declared.symlink_to(real, target_is_directory=True)
+            report, check = self.policy_check(root)
+            self.assertEqual(
+                [check["domain"], check["subject_kind"], check["status"],
+                 check["reason_code"], check["repair_id"]],
+                ["host", "path", "failed", "policy_path_symlinked",
+                 self.REPAIR_ID])
+            self.assertEqual(check["facts"], {
+                "paths": [self.STANDARDS], "count": 1, "link_depth": 4,
+                "in_nix_store": False})
+            repair = {r["repair_id"]: r for r in report["repairs"]}[self.REPAIR_ID]
+            self.assertEqual([repair["safety_class"], repair["operation"]],
+                             ["user_action", None])
+            self.assert_validates(report)
+
+    def test_a_symlinked_projection_source_is_a_finding(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            source = root / ".agents/instructions/bootstrap.md"
+            real = source.parent / "bootstrap-materialised.md"
+            source.rename(real)
+            source.symlink_to(real)
+            report, check = self.policy_check(root)
+            self.assertEqual(check["status"], "failed")
+            self.assertEqual(check["facts"]["paths"],
+                             [".agents/instructions/bootstrap.md"])
+            self.assert_validates(report)
+
+    def test_a_clean_root_passes_with_no_repair_and_no_facts(self):
+        with fixture() as tmp:
+            report, check = self.policy_check(make_root(tmp))
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"],
+                 check["facts"]],
+                ["passed", None, None, {}])
+            self.assert_validates(report)
+
+    def test_a_symlinked_ancestor_above_the_root_is_never_inspected(self):
+        """D18: the walk starts at the root, so a link above it is not its finding."""
+        with fixture() as tmp:
+            real = tmp / "real"
+            real.mkdir()
+            root = make_root(real)
+            (tmp / "linked").symlink_to(real, target_is_directory=True)
+            _, check = self.policy_check(tmp / "linked" / root.name)
+            self.assertEqual(check["status"], "passed")
+
+    def test_a_very_long_offending_path_is_bounded_to_the_schema_limit(self):
+        """D30: an unbounded fact would fail the engine's own report validation."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            long_path = "/".join(["d" * 40] * 8)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            authored["bindings"]["paths"]["standards"] = [long_path]
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            declared = root / long_path
+            declared.parent.mkdir(parents=True)
+            real = declared.parent / "materialised"
+            real.mkdir()
+            declared.symlink_to(real, target_is_directory=True)
+            report, check = self.policy_check(root)
+            self.assertEqual(check["status"], "failed")
+            self.assertEqual(check["facts"]["paths"], [long_path[:200]])
+            self.assertEqual(len(check["facts"]["paths"][0]), 200)
+            self.assertEqual(check["facts"]["link_depth"], 8)
+            self.assert_validates(report)
+
+
+class HelperOnPathTest(ReportAssertions, unittest.TestCase):
+    """The helper check projects the resolver's capability states; it runs no
+    PATH search of its own, so the empty-PATH fixture is the whole witness."""
+
+    CHECK_ID = "host.executor.helper_on_path"
+    REPAIR_ID = "host.helper.install"
+
+    def test_an_empty_path_reports_the_tool_shaped_blocked_capabilities(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp),
+                                   env=dict(HERMETIC_ENV, PATH=""))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual(
+                [check["subject_kind"], check["status"], check["reason_code"],
+                 check["repair_id"]],
+                ["host_tool", "failed", "helper_missing", self.REPAIR_ID])
+            names = check["facts"]["capabilities"]
+            self.assertIn("tracker", names)
+            self.assertLessEqual(len(names), 8)
+            # blocked for vcs_worktree_unsupported, which is not a missing helper
+            self.assertNotIn("worktrees", names)
+            codes = check["facts"]["reason_codes"]
+            self.assertEqual(codes, sorted(set(codes)))
+            self.assertLessEqual(set(codes),
+                                 {"command_missing", "tracker_cli_missing"})
+            repair = {r["repair_id"]: r for r in report["repairs"]}[self.REPAIR_ID]
+            self.assertEqual([repair["safety_class"], repair["operation"]],
+                             ["user_action", None])
+            self.assert_validates(report)
+
+    def test_the_fixture_stub_bin_resolves_every_declared_helper(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp))
+            check = by_id[self.CHECK_ID]
+            self.assertEqual([check["status"], check["reason_code"],
+                              check["repair_id"], check["facts"]],
+                             ["passed", None, None, {}])
+            self.assert_validates(report)
+
+
 class FactBoundingTest(unittest.TestCase):
     """D30: the one route from an authored value into `facts`, tested directly.
 

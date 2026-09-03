@@ -23,6 +23,7 @@ import dataclasses
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import json
+import os
 from pathlib import Path
 import platform
 import subprocess
@@ -55,6 +56,16 @@ MAX_FACT_LIST = 8
 
 REVISION_LENGTH = 40
 HEX_DIGITS = frozenset("0123456789abcdef")
+
+# Every contract member naming policy a reader opens, plus each projection
+# source. A projection target is generated and rewritten by the project, so
+# it is not policy and is deliberately absent.
+POLICY_PATH_MEMBERS = ("context", "standards", "architecture", "operations",
+                       "hints", "rejections")
+# The capability reason codes that mean "a helper is not on PATH". A
+# capability blocked for any other code is not this check's subject.
+TOOL_REASON_CODES = ("command_missing", "tracker_cli_missing")
+NIX_STORE_PREFIX = "/nix/store/"
 
 CHILD_TIMEOUT_SECONDS = 15
 ENGINE_FAILURE_MESSAGE = "the conformance engine failed unexpectedly"
@@ -663,6 +674,14 @@ REPAIRS = {
     "capability.required.unavailable": {
         "module": "resolve-project", "safety_class": "user_action",
         "operation": None},
+    # No command materialises a store-linked policy file or installs a helper,
+    # so both operations are null (D25).
+    "host.policy_path.materialize": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "host.helper.install": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
 }
 
 
@@ -809,6 +828,93 @@ def check_capability_required(context: Context) -> Outcome:
     return stage_result(context, "capability_required")
 
 
+# --------------------------------------------------------------------------
+# Host installation
+#
+# Both checks depend on `repository.contract.valid`, so the authored contract
+# is parsed and the resolver's capability states are computed before either
+# runs. Neither opens a file, follows a link to read its target, or starts a
+# process.
+# --------------------------------------------------------------------------
+
+
+def declared_policy_paths(contract: dict) -> list[str]:
+    """Every repository-relative policy path the contract declares, sorted.
+
+    Read from the authored contract rather than `context.bindings`, whose
+    entries are already absolute: an absolute path in `facts` would leak the
+    caller's home directory.
+    """
+    paths = contract["bindings"]["paths"]
+    subjects = {entry for member in POLICY_PATH_MEMBERS for entry in paths[member]}
+    subjects.update(projection["source"] for projection in contract["projections"])
+    return sorted(subjects)
+
+
+def first_symlinked_component(root: Path, relative: str) -> tuple[int, Path] | None:
+    """The 1-based depth and path of `relative`'s first symlinked component.
+
+    The walk accumulates from `root` and never tests `root` itself or any of
+    its parents (D18). A component that does not exist ends the walk without a
+    finding: an absent knowledge path is the resolver's own refusal, not a
+    symlinked one.
+    """
+    current = root
+    for depth, part in enumerate(Path(relative).parts, start=1):
+        current = current / part
+        if current.is_symlink():       # an lstat: the link is never followed
+            return depth, current
+        if not current.exists():
+            return None
+    return None
+
+
+def points_into_nix_store(component: Path) -> bool:
+    """Whether the link points into the Nix store — the bool only, never the
+    store path itself, which would be an absolute path in `facts` (D9)."""
+    target = os.readlink(component)
+    if not os.path.isabs(target):
+        target = os.path.join(str(component.parent), target)
+    return target.startswith(NIX_STORE_PREFIX)
+
+
+def check_policy_path_no_follow_readable(context: "Context") -> "Outcome":
+    """Contract: failed when any declared policy path reaches its target through
+    a symlink at or below the project root, never above it (D18)."""
+    offending: list[str] = []
+    first: tuple[int, Path] | None = None
+    for relative in declared_policy_paths(context.contract):
+        found = first_symlinked_component(context.root, relative)
+        if found is None:
+            continue
+        offending.append(relative)
+        if first is None:
+            first = found
+    if first is None:
+        return Outcome("passed")
+    depth, component = first
+    return Outcome("failed", "policy_path_symlinked", "host.policy_path.materialize",
+                   {"paths": bound_facts(offending),
+                    "count": len(offending),
+                    "link_depth": depth,
+                    "in_nix_store": points_into_nix_store(component)})
+
+
+def check_executor_helper_on_path(context: "Context") -> "Outcome":
+    """Contract: failed when the resolver computed a capability as blocked for a
+    tool-shaped reason; performs no PATH search of its own."""
+    offending = [name for name, entry in sorted(context.capabilities.items())
+                 if entry["state"] == "blocked"
+                 and entry["reason_code"] in TOOL_REASON_CODES]
+    if not offending:
+        return Outcome("passed")
+    codes = {context.capabilities[name]["reason_code"] for name in offending}
+    return Outcome("failed", "helper_missing", "host.helper.install",
+                   {"capabilities": bound_facts(offending),
+                    "count": len(offending),
+                    "reason_codes": bound_facts(codes)})
+
+
 REGISTRY: tuple[Check, ...] = (
     Check(RESOLVABLE_CHECK_ID, "repository", "contract", "required", (),
           (("resolver_failure", "conformance.internal"),),
@@ -833,6 +939,14 @@ REGISTRY: tuple[Check, ...] = (
           ("repository.contract.valid",),
           (("capability_unavailable", "capability.required.unavailable"),),
           "check_capability_required"),
+    Check("host.policy_path.no_follow_readable", "host", "path", "required",
+          ("repository.contract.valid",),
+          (("policy_path_symlinked", "host.policy_path.materialize"),),
+          "check_policy_path_no_follow_readable"),
+    Check("host.executor.helper_on_path", "host", "host_tool", "required",
+          ("repository.contract.valid",),
+          (("helper_missing", "host.helper.install"),),
+          "check_executor_helper_on_path"),
 )
 REGISTRY_BY_ID = {check.id: check for check in REGISTRY}
 
