@@ -21,6 +21,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,12 @@ from unittest import mock
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "adopt-project.py"
 RESOLVER = Path(__file__).resolve().parents[1] / "scripts" / "resolve-project.py"
 LIBRARY = Path(__file__).resolve().parents[1] / "scripts" / "agent_platform.py"
+ADOPT_LIBRARIES = {
+    "adopt_inspection": Path(__file__).resolve().parents[1] / "scripts"
+                        / "adopt_inspection.py",
+    "adopt_planning": Path(__file__).resolve().parents[1] / "scripts"
+                      / "adopt_planning.py",
+}
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -61,20 +68,32 @@ HANDOFF_MEMBERS = ["evidence_record", "migration_map", "next_command",
 
 
 def install_home(home: Path, manifest: object = COMMITTED, *,
-                 library_suffix: str = "") -> Path:
+                 library_suffix: str = "", adopt_libraries: bool = True,
+                 adopt_suffix: dict[str, str] | None = None) -> Path:
     """Populate `home` as the platform installation `adopt-project` reads.
 
-    `library_suffix` is appended to the installed copy of the shared library.
-    It is the fixture-level bypass the ambiguous-forward-step case needs: the
-    library normally refuses a manifest carrying two records for one
+    `library_suffix` is appended to the installed copy of the shared platform
+    library. It is the fixture-level bypass the ambiguous-forward-step case
+    needs: the library normally refuses a manifest carrying two records for one
     `from_schema`, so the only way to present that manifest to `adopt-project`
-    is to install a library that does not check it.
+    is to install a library that does not check it. `adopt_suffix` is the same
+    hook for the two adoption libraries, and `adopt_libraries=False` leaves
+    them uninstalled — which only a script run from the deployed layout can
+    observe, because in the repository checkout they are the script's own
+    siblings.
     """
     library_dir = home / ".agents" / "lib" / "python"
     library_dir.mkdir(parents=True, exist_ok=True)
     installed = library_dir / "agent_platform.py"
     installed.write_text(
         LIBRARY.read_text("utf-8") + library_suffix, encoding="utf-8")
+    for name, source in ADOPT_LIBRARIES.items():
+        target = library_dir / f"{name}.py"
+        target.unlink(missing_ok=True)
+        if adopt_libraries:
+            target.write_text(
+                source.read_text("utf-8")
+                + (adopt_suffix or {}).get(name, ""), encoding="utf-8")
     binaries = home / ".agents" / "bin"
     binaries.mkdir(parents=True, exist_ok=True)
     resolver = binaries / "resolve-project"
@@ -95,10 +114,24 @@ def install_home(home: Path, manifest: object = COMMITTED, *,
     return home
 
 
-def make_home(manifest: object = COMMITTED, *,
-              library_suffix: str = "") -> Path:
+def make_home(manifest: object = COMMITTED, *, library_suffix: str = "",
+              adopt_libraries: bool = True,
+              adopt_suffix: dict[str, str] | None = None) -> Path:
     return install_home(Path(tempfile.mkdtemp()).resolve(), manifest,
-                        library_suffix=library_suffix)
+                        library_suffix=library_suffix,
+                        adopt_libraries=adopt_libraries,
+                        adopt_suffix=adopt_suffix)
+
+
+def declared_members(tuple_name: str) -> tuple[str, ...]:
+    """The named member tuple, read out of the script's own source.
+
+    Read rather than copied: a second literal here would drift from the one the
+    guard actually enforces, which is the failure these cases are about.
+    """
+    body = SCRIPT.read_text("utf-8").split(
+        f"{tuple_name} = (", 1)[1].split(")", 1)[0]
+    return tuple(re.findall(r'"([^"]+)"', body))
 
 
 def install_registry(home: Path, entries: list[dict]) -> None:
@@ -1083,6 +1116,101 @@ class AdoptFailureWrapperTest(unittest.TestCase):
         self.assertEqual(payload["error"]["repair_id"], "adopt.internal")
         self.assertNotIn("SECRET-TRACEBACK-TEXT", buffer.getvalue())
         self.assertNotIn("RuntimeError", buffer.getvalue())
+
+
+class AdoptLibraryTest(unittest.TestCase):
+    """The adoption libraries refuse exactly as the platform library does.
+
+    `adopt_inspection.py` and `adopt_planning.py` are separately installed
+    files, so an older pair can meet a newer binary. Every member the binary
+    reads must therefore surface as `adopt.library.missing` through the D12
+    error object, never as an `AttributeError` swallowed into `adopt.internal`.
+
+    Every case runs a copy of the script from `$HOME/.agents/bin`, the deployed
+    layout, because in the repository checkout the libraries are the script's
+    own siblings — a run from `scripts/` imports them whatever `HOME` says and
+    could never observe an uninstalled one.
+    """
+
+    def run_deployed(self, home: Path, root: Path) -> tuple[int, str, str]:
+        binary = home / ".agents" / "bin" / "adopt-project"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(SCRIPT, binary)
+        env = {**os.environ, "HOME": str(home)}
+        # `PYTHONPATH` would be a second lookup path the deployed machine does
+        # not have; the runner's own may carry one.
+        env.pop("PYTHONPATH", None)
+        proc = subprocess.run(
+            [sys.executable, str(binary), "plan", "--repo-root", str(root)],
+            capture_output=True, text=True, timeout=300, cwd=str(home),
+            env=env)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def assert_library_refusal(self, code: int, out: str, err: str) -> None:
+        self.assertEqual(code, 2, err or out)
+        self.assertEqual(err, "")
+        payload = json.loads(out)
+        self.assertEqual(sorted(payload), ["error"])
+        error = payload["error"]
+        self.assertEqual(sorted(error), ["code", "repair_id", "violations"])
+        self.assertEqual(error["code"], "adopt_failure")
+        self.assertEqual(error["repair_id"], "adopt.library.missing")
+        self.assertTrue(error["violations"])
+        for entry in error["violations"]:
+            self.assertEqual(sorted(entry), ["message", "pointer"])
+
+    def test_uninstalled_adoption_libraries_refuse_on_stdout(self):
+        """A valid manifest and platform library are installed, so only the
+        missing adoption libraries can refuse."""
+        home = make_home(adopt_libraries=False)
+        self.assert_library_refusal(
+            *self.run_deployed(home, bootstrap_repo(home)))
+
+    def test_a_library_missing_one_member_refuses_the_same_way(self):
+        for module, tuple_name in (
+                ("adopt_inspection", "ADOPT_INSPECTION_MEMBERS"),
+                ("adopt_planning", "ADOPT_PLANNING_MEMBERS")):
+            members = declared_members(tuple_name)
+            self.assertTrue(members)
+            for name in members:
+                with self.subTest(module=module, member=name):
+                    # A module-level `del` after the definitions: the module
+                    # still imports, and only this one attribute is gone.
+                    home = make_home(
+                        adopt_suffix={module: f"\n\ndel {name}\n"})
+                    self.assert_library_refusal(
+                        *self.run_deployed(home, bootstrap_repo(home)))
+
+    def test_the_declared_members_are_exactly_the_members_used(self):
+        """The guard is only as wide as its tuple: a member the binary reads
+        but does not declare is a hole these cases close."""
+        source = SCRIPT.read_text("utf-8")
+        for module, tuple_name in (
+                ("adopt_inspection", "ADOPT_INSPECTION_MEMBERS"),
+                ("adopt_planning", "ADOPT_PLANNING_MEMBERS")):
+            with self.subTest(module=module):
+                used = set(re.findall(
+                    rf"\b{module}\.([A-Za-z_][A-Za-z0-9_]*)", source))
+                # The module file name appears in the refusal message, not as
+                # an attribute read.
+                used.discard("py")
+                self.assertEqual(sorted(declared_members(tuple_name)),
+                                 sorted(used))
+
+    def test_the_refusal_bytes_are_stable_across_runs(self):
+        home = make_home(adopt_libraries=False)
+        root = bootstrap_repo(home)
+        first = self.run_deployed(home, root)
+        second = self.run_deployed(home, root)
+        self.assertEqual(first[0], 2)
+        self.assertEqual(first[1], second[1])
+
+    def test_the_installed_libraries_answer_in_the_deployed_layout(self):
+        """The control: the same shape with both libraries installed plans."""
+        home = make_home()
+        code, out, err = self.run_deployed(home, bootstrap_repo(home))
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(json.loads(out)["plan"]["outcome"], "bootstrap")
 
 
 if __name__ == "__main__":
