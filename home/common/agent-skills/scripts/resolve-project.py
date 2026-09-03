@@ -45,19 +45,42 @@ import re
 import shutil
 import sys
 
-# The shared platform library lives at exactly one installed path (D23) — the
-# same `~/.agents/lib/python` the `artifact-budget` pair uses. One lookup path,
-# no fallback ladder: this script is itself the module rather than a wrapper
-# around one, so it puts that directory on `sys.path` and imports by name.
-sys.path.insert(
-    0, str(Path(os.environ["HOME"]) / ".agents" / "lib" / "python"))
+# The shared platform library, bound by `bootstrap_platform_library` before any
+# subcommand runs. It is deliberately not imported at module scope: an absent
+# library is a platform installation defect and has to reach the caller as the
+# D12 error object on stdout, not as an import traceback on stderr (R1.3).
+agent_platform = None
 
-from agent_platform import (  # noqa: E402  (import follows the path insert)
-    PlatformManifestError,
-    destination_mode,
-    load_manifest,
-    write_atomically,
-)
+PLATFORM_LIBRARY_MEMBERS = (
+    "PlatformManifestError", "load_manifest", "write_atomically")
+PLATFORM_LIBRARY_REPAIR_ID = "platform.library.missing"
+
+
+def bootstrap_platform_library() -> bool:
+    """Bind the shared library from its one installed path, or report failure.
+
+    `$HOME/.agents/lib/python` — the same directory the `artifact-budget` pair
+    installs into (D23) — goes on `sys.path` at position 0, so the installed
+    copy wins whenever it exists. The script's own directory stays on the path
+    behind it, which is how the repository checkout imports the sibling in
+    `scripts/`; in the deployed layout that directory is `~/.agents/bin` and
+    holds no library, so an uninstalled one is caught here.
+    """
+    global agent_platform
+    home = os.environ.get("HOME")
+    if not home:
+        return False
+    sys.path.insert(0, str(Path(home) / ".agents" / "lib" / "python"))
+    try:
+        import agent_platform as loaded
+    except Exception:
+        return False
+    if (not getattr(loaded, "__file__", None)
+            or any(not hasattr(loaded, name)
+                   for name in PLATFORM_LIBRARY_MEMBERS)):
+        return False
+    agent_platform = loaded
+    return True
 
 
 SCHEMA_VERSION = 1
@@ -1100,13 +1123,13 @@ def apply_projection(root: Path, entry: dict, violations: list[dict]) -> str | N
     if status == "in_sync":
         return "unchanged"
     if status == "missing":
-        write_atomically(target, rendered)
+        agent_platform.write_atomically(target, rendered)
         return "written"
     if status != "stale":
         raise ValueError(f"unknown projection status: {status!r}")
     kind = entry["kind"]
     if kind == "generated_file":
-        write_atomically(target, rendered)
+        agent_platform.write_atomically(target, rendered)
         return "written"
     if kind != "managed_import":
         raise ValueError(f"unknown projection kind: {kind!r}")
@@ -1122,7 +1145,7 @@ def apply_projection(root: Path, entry: dict, violations: list[dict]) -> str | N
     # line is appended, on a line of its own.
     suffix = rendered if existing.endswith(b"\n") or not existing \
         else b"\n" + rendered
-    write_atomically(target, existing + suffix)
+    agent_platform.write_atomically(target, existing + suffix)
     return "written"
 
 
@@ -1168,8 +1191,8 @@ def require_platform_manifest() -> None:
     ordered violations are published verbatim.
     """
     try:
-        load_manifest()
-    except PlatformManifestError as error:
+        agent_platform.load_manifest()
+    except agent_platform.PlatformManifestError as error:
         raise ContractError(
             "resolver_failure", error.repair_id, error.violations) from None
 
@@ -1291,6 +1314,23 @@ def dispatch(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # After argparse, so a usage error stays argparse's own (D16), and before
+    # dispatch, so the library half of the installation refuses exactly like
+    # the manifest half: one JSON object on stdout, exit 2 (R1.3, D12). The
+    # message names the fixed installed path and embeds nothing variable, so
+    # two runs refusing for this reason emit identical bytes.
+    if not bootstrap_platform_library():
+        return emit_error(
+            "resolver_failure",
+            PLATFORM_LIBRARY_REPAIR_ID,
+            [{
+                "pointer": "",
+                "message": (
+                    "the shared platform library was not found at "
+                    "~/.agents/lib/python/agent_platform.py"
+                ),
+            }],
+        )
     try:
         return dispatch(args)
     except ContractError as error:

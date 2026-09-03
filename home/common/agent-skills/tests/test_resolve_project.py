@@ -40,7 +40,8 @@ BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow", "deploy
 CAPABILITY_STATES = ("available", "unsupported", "blocked")
 
 
-def install_home(home: Path, manifest: object = COMMITTED) -> Path:
+def install_home(home: Path, manifest: object = COMMITTED, *,
+                 library: bool = True) -> Path:
     """Populate `home` as the platform installation the resolver reads (D23).
 
     Every invocation in this suite runs under a temporary `HOME`, so the
@@ -51,11 +52,15 @@ def install_home(home: Path, manifest: object = COMMITTED) -> Path:
     `manifest` is the override hook: `COMMITTED` copies the repository's own
     manifest byte for byte, `None` installs none at all, a `str` is written
     verbatim (for the malformed-JSON cases) and anything else is serialized as
-    JSON.
+    JSON. `library=False` leaves the library uninstalled, which only a script
+    run from the deployed layout can observe (see `PlatformLibraryTest`).
     """
     library_dir = home / ".agents" / "lib" / "python"
     library_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(LIBRARY, library_dir / "agent_platform.py")
+    installed_library = library_dir / "agent_platform.py"
+    installed_library.unlink(missing_ok=True)
+    if library:
+        shutil.copy(LIBRARY, installed_library)
     share = home / ".agents" / "share"
     share.mkdir(parents=True, exist_ok=True)
     target = share / "platform-manifest.json"
@@ -71,8 +76,9 @@ def install_home(home: Path, manifest: object = COMMITTED) -> Path:
     return home
 
 
-def make_home(manifest: object = COMMITTED) -> Path:
-    return install_home(Path(tempfile.mkdtemp()).resolve(), manifest)
+def make_home(manifest: object = COMMITTED, *, library: bool = True) -> Path:
+    return install_home(Path(tempfile.mkdtemp()).resolve(), manifest,
+                        library=library)
 
 
 def committed_manifest() -> dict:
@@ -1698,6 +1704,92 @@ class SemverBoundaryTest(ResolverTestCase):
                 code, out, err = run("resolve", "--repo-root",
                                      str(self.make_root()), home=self.home)
                 self.assertEqual(code, 0, err or out)
+
+
+class PlatformLibraryTest(ResolverTestCase):
+    """R1.3 / D12: the library half of the installation refuses like the
+    manifest half.
+
+    Every case here runs a copy of the script from `$HOME/.agents/bin`, the
+    deployed layout, because in the repository checkout the script's own
+    directory holds `agent_platform.py` as a sibling — so a run from `scripts/`
+    imports the library whatever `HOME` says and could never observe an
+    uninstalled one.
+    """
+
+    def deployed(self, home: Path) -> Path:
+        binary = home / ".agents" / "bin" / "resolve-project"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(SCRIPT, binary)
+        return binary
+
+    def run_deployed(self, home: Path, *args: str,
+                     unset_home: bool = False) -> tuple[int, str, str]:
+        binary = self.deployed(home)
+        env = {**os.environ, "HOME": str(home)}
+        # `PYTHONPATH` would be a second lookup path the deployed machine does
+        # not have; the runner's own may carry one.
+        env.pop("PYTHONPATH", None)
+        if unset_home:
+            env.pop("HOME", None)
+        proc = subprocess.run(
+            [sys.executable, str(binary), *args],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(home), env=env)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def assert_library_refusal(self, code: int, out: str, err: str) -> None:
+        self.assertEqual(code, 2, err or out)
+        self.assertEqual(err, "")
+        payload = json.loads(out)
+        self.assertEqual(sorted(payload), ["error"])
+        error = payload["error"]
+        self.assertEqual(sorted(error), ["code", "repair_id", "violations"])
+        self.assertEqual(error["code"], "resolver_failure")
+        self.assertEqual(error["repair_id"], "platform.library.missing")
+        self.assertTrue(error["violations"])
+        for entry in error["violations"]:
+            self.assertEqual(sorted(entry), ["message", "pointer"])
+
+    def test_an_uninstalled_library_refuses_on_stdout(self):
+        """A valid manifest is installed, so only the missing library can refuse."""
+        home = make_home(library=False)
+        root = self.make_root()
+        for subcommand in SUBCOMMANDS:
+            with self.subTest(subcommand=subcommand):
+                self.assert_library_refusal(
+                    *self.run_deployed(home, subcommand, "--repo-root", str(root)))
+
+    def test_an_unset_home_refuses_on_stdout(self):
+        home = make_home()
+        code, out, err = self.run_deployed(
+            home, "resolve", "--repo-root", str(self.make_root()),
+            unset_home=True)
+        self.assert_library_refusal(code, out, err)
+
+    def test_the_refusal_bytes_are_stable_across_runs(self):
+        home = make_home(library=False)
+        root = self.make_root()
+        first = self.run_deployed(home, "resolve", "--repo-root", str(root))
+        second = self.run_deployed(home, "resolve", "--repo-root", str(root))
+        self.assertEqual(first[0], 2)
+        self.assertEqual(first[1], second[1])
+
+    def test_the_installed_library_answers_in_the_deployed_layout(self):
+        """The control: the same shape with the library installed resolves."""
+        home = make_home()
+        code, out, err = self.run_deployed(
+            home, "resolve", "--repo-root", str(self.make_root()))
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(json.loads(out)["schema_version"], 1)
+
+    def test_a_usage_error_still_belongs_to_argparse(self):
+        """D16: the library guard runs after parsing, so no JSON appears here."""
+        home = make_home(library=False)
+        code, out, err = self.run_deployed(home)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertNotEqual(err, "")
 
 
 class CommittedManifestTest(ResolverTestCase):
