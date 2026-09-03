@@ -531,10 +531,12 @@ day. `ls ~/.claude/skills/` returns nineteen entries, among them every sibling
 this table names — `codex-collaboration`, `doc-grounded-questions`,
 `grill-with-docs`, `sdd`, `ship-issue` — and `ls ~/.claude/skills/sdd/scripts/`
 returns `review-package`, `sdd-workspace`, `task-brief`, so D8, D14, E2-E5,
-E8-E11 and E15-E20 do not fire either.
+E8-E11, E15, E16 and E18-E20 do not fire either.
 `ls "$(jq -r '.extraKnownMarketplaces["nix-codex"].source.path' ~/.claude/settings.json)"/plugins/codex/agents/`
 returns `codex-rescue.md` and `codex-reviewer.md`, which with that skill listing
-covers E12's two conditions, and `command -v codex-companion` returns
+covers E12's two conditions, and `codex-rescue.md` is the rescue plugin agent
+`fix-loop.md:10-11` dispatches, so E17 does not fire either. `command -v
+codex-companion` returns
 `/etc/profiles/per-user/anis/bin/codex-companion`, covering E13. Two rows lie
 outside what any presence read can settle, and nothing is claimed for them here:
 E6 branches on the harness's own sub-agent dispatch capability, and E14 on Codex

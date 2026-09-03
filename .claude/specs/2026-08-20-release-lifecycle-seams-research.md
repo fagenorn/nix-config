@@ -660,7 +660,7 @@ switches to the main checkout or surfaces, because a release is repo-wide (`:84`
 Live: `ls .superpowers/workflows/ship-release/` fails with `No such file or
 directory`. But the rule runs one way only — a present file means an unfinished
 release (`:34`, `:340`) — and Phase 0 writes it only at its end, "when neither
-resume path applies" (`:80`), so a release inside Phase 0, or one that died
+resume path applies" (`:83`), so a release inside Phase 0, or one that died
 before it, leaves none. The absence rules out an unfinished release past that
 write, not one in flight.
 
