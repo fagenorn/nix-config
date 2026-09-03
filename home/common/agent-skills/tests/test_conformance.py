@@ -1340,6 +1340,27 @@ class NestedLedgerResidueTest(ReportAssertions, unittest.TestCase):
                              [r["safety_class"] for r in report["repairs"]])
             self.assert_validates(report)
 
+    def test_an_unlistable_worktree_root_yields_no_runs_rather_than_an_error(self):
+        """D19, D32: `Path.is_dir` swallows an OSError and answers False, so it
+        never protects the listing after it. One unreadable directory must not
+        turn a whole doctor run into `resolver_failure` with no report."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            make_run(root, "worktree-a", "run-1", ["merged"])
+            worktrees = root / ".worktrees"
+            worktrees.chmod(0o000)
+            try:
+                if os.access(worktrees, os.R_OK):  # root, or a mode-less fs
+                    self.skipTest("mode bits do not restrict this process")
+                report, by_id = doctor(self, root)
+            finally:
+                worktrees.chmod(0o755)
+            check = by_id[self.CHECK_ID]
+            self.assertEqual([check["status"], check["reason_code"],
+                              check["facts"]], ["passed", None, {}])
+            self.assert_validates(report)
+
+
 
 class RootScratchResidueTest(ReportAssertions, unittest.TestCase):
     """Scratch that escaped $TMPDIR into the repository root. The pattern set is
@@ -1397,6 +1418,26 @@ class RootScratchResidueTest(ReportAssertions, unittest.TestCase):
                  by_id[self.CHECK_ID]["reason_code"]],
                 ["failed", "suppressed", "warning", "root_scratch_present"])
             self.assert_validates(report)
+
+    def test_an_unlistable_root_yields_no_names_rather_than_an_error(self):
+        """Traversable but unreadable (mode 0o111): the resolver still opens the
+        contract by name while the root itself cannot be listed, so the check
+        can only answer `passed` (D19, D32)."""
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "producer-report-x.json", "{}\n")
+            root.chmod(0o111)
+            try:
+                if os.access(root, os.R_OK) or not os.access(root, os.X_OK):
+                    self.skipTest("mode bits do not restrict this process")
+                report, by_id = doctor(self, root)
+            finally:
+                root.chmod(0o755)
+            check = by_id[self.CHECK_ID]
+            self.assertEqual([check["status"], check["reason_code"],
+                              check["facts"]], ["passed", None, {}])
+            self.assert_validates(report)
+
 
 
 class ScratchPatternConsistencyTest(unittest.TestCase):

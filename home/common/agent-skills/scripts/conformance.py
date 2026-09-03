@@ -1210,6 +1210,21 @@ ROOT_SCRATCH_PATTERNS = ("producer-report-*.json", "review-package-report-*.json
                          "*.tmp.??????", ".resolve-project.*.tmp")
 
 
+def listed(directory: Path) -> list:
+    """Contract: `directory`'s children sorted by path, or none at all.
+
+    `Path.is_dir` swallows an OSError and answers False, so it never protects
+    the listing that follows it: an absent path, a file, and a directory that
+    stats fine but cannot be read all land here. None of the three is an engine
+    bug — an unlistable directory is an environment fact that contributes no
+    subject, exactly as an unreadable ledger records no attempt (D19, D32).
+    """
+    try:
+        return sorted(directory.iterdir())
+    except OSError:
+        return []
+
+
 def nested_ledger_runs(context: "Context") -> list:
     """Every ledger run directory living inside a worktree, sorted by path.
 
@@ -1218,17 +1233,10 @@ def nested_ledger_runs(context: "Context") -> list:
     """
     worktree_root = (context.root
                      / context.contract["bindings"]["vcs"]["worktree"]["root"])
-    if not worktree_root.is_dir():
-        return []
-    runs = []
-    for worktree in sorted(worktree_root.iterdir()):
-        if not worktree.is_dir():
-            continue
-        workflows = worktree.joinpath(*LEDGER_RUNS_RELATIVE)
-        if not workflows.is_dir():
-            continue
-        runs.extend(run for run in sorted(workflows.iterdir()) if run.is_dir())
-    return runs
+    return [run
+            for worktree in listed(worktree_root)
+            for run in listed(worktree.joinpath(*LEDGER_RUNS_RELATIVE))
+            if run.is_dir()]
 
 
 def ledger_attempts(run: Path) -> list | None:
@@ -1325,10 +1333,10 @@ def check_residue_root_scratch(context: "Context") -> "Outcome":
     repository root and nowhere else, and a deeper walk would sweep in the real
     homes the same names legitimately have.
     """
-    names = sorted(entry.name for entry in context.root.iterdir()
-                   if entry.is_file()
-                   and any(fnmatch.fnmatch(entry.name, pattern)
-                           for pattern in ROOT_SCRATCH_PATTERNS))
+    names = [entry.name for entry in listed(context.root)
+             if entry.is_file()
+             and any(fnmatch.fnmatch(entry.name, pattern)
+                     for pattern in ROOT_SCRATCH_PATTERNS)]
     if not names:
         return Outcome("passed")
     return Outcome("warning", "root_scratch_present", "lifecycle.residue.root_scratch",
