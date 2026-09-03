@@ -98,7 +98,8 @@ def make_root(tmp: Path) -> Path:
     paths = json.loads(
         (root / ".agents/project.json").read_text(encoding="utf-8")
     )["bindings"]["paths"]
-    for member in ("context", "standards", "architecture", "hints"):
+    for member in ("context", "standards", "architecture", "operations",
+                   "hints", "rejections"):
         for entry in paths[member]:
             target = root / entry
             if not target.exists():  # `architecture` names CLAUDE.md, already copied
@@ -696,8 +697,14 @@ class PolicyPathSymlinkTest(ReportAssertions, unittest.TestCase):
                 ["passed", None, None, {}])
             self.assert_validates(report)
 
-    def test_a_symlinked_ancestor_above_the_root_is_never_inspected(self):
-        """D18: the walk starts at the root, so a link above it is not its finding."""
+    def test_a_root_reached_through_a_symlink_reports_no_component_finding(self):
+        """A root the caller names through a symlink: the resolver resolves it
+        before any evaluator sees it, so the run reports no component finding.
+
+        This pins that behaviour; it does not falsify the root bound itself
+        (D39) — against an already-resolved root, an unbounded walk would find
+        nothing above the root either.
+        """
         with fixture() as tmp:
             real = tmp / "real"
             real.mkdir()

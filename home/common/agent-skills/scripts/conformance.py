@@ -855,7 +855,9 @@ def first_symlinked_component(root: Path, relative: str) -> tuple[int, Path] | N
     """The 1-based depth and path of `relative`'s first symlinked component.
 
     The walk accumulates from `root` and never tests `root` itself or any of
-    its parents (D18). A component that does not exist ends the walk without a
+    its parents (D18). The resolver resolves the root before any evaluator sees
+    it, so today the bound is defense-in-depth rather than a falsifiable
+    invariant (D39). A component that does not exist ends the walk without a
     finding: an absent knowledge path is the resolver's own refusal, not a
     symlinked one.
     """
