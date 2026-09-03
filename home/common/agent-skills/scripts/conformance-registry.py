@@ -74,8 +74,22 @@ def bound_fact(value: str) -> str:
 
 
 def bound_facts(values, limit: int = MAX_FACT_LIST) -> list[str]:
-    """Contract: the first `limit` of `sorted(values)`, each through bound_fact."""
-    return [bound_fact(value) for value in sorted(values)[:limit]]
+    """Contract: up to `limit` distinct `bound_fact` results, in sorted order.
+
+    Each value is bounded *first* and de-duplicated afterwards, so no two
+    entries are equal: offenders sharing a prefix longer than MAX_FACT_STRING
+    truncate to the same string, and slicing before bounding spent the whole
+    list naming one subject (D41). The companion `count` fact, never this
+    list, reports the true total.
+    """
+    bounded: list[str] = []
+    for value in sorted(values):
+        if len(bounded) >= limit:
+            break
+        candidate = bound_fact(value)
+        if candidate not in bounded:
+            bounded.append(candidate)
+    return bounded
 
 
 # --------------------------------------------------------------------------

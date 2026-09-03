@@ -105,7 +105,7 @@ def load_resolver():
 BOOTSTRAP_ERROR: Exception | None = None
 try:
     registry = load_sibling(REGISTRY_NAMES, REGISTRY_MODULE_NAME)
-    checks = load_sibling(CHECKS_NAMES, CHECKS_MODULE_NAME)
+    CHECKS_MODULE = load_sibling(CHECKS_NAMES, CHECKS_MODULE_NAME)
     from conformance_registry import (
         CHECK_MEMBERS, Check, Context, DOMAINS, FORBIDDEN_MEMBER_NAMES,
         HEX_DIGITS, MAX_FACT_KEYS, MAX_FACT_LIST, MAX_FACT_STRING,
@@ -546,14 +546,15 @@ def emit_error(code: str, repair_id: str, violations: list[dict]) -> int:
 def evaluator(name: str):
     """The evaluator a check declares, resolved through the checks module.
 
-    `checks` — this instance's own sibling — rather than
+    `CHECKS_MODULE` — this instance's own sibling — rather than
     `sys.modules[CHECKS_MODULE_NAME]`: the S3 loader builds a fresh engine
     instance per call, each loading a sibling under one shared name, so
     resolving through `sys.modules` would fetch the newest sibling's function
     and silently bypass a rebind made on the instance under test. The lookup
-    is deferred to call time for the same reason.
+    is deferred to call time for the same reason. The name is shouted because
+    three functions here bind a local `checks` holding a list of check objects.
     """
-    return getattr(checks, name)
+    return getattr(CHECKS_MODULE, name)
 
 
 def failed_ancestor(check: Check, results: dict, selected: set) -> str | None:

@@ -53,10 +53,12 @@ HERMETIC_ENV = {
 }
 
 
-def run(*args: str, env: dict | None = None,
-        cwd: str | Path | None = None) -> tuple[int, str, str]:
+def run(*args: str, env: dict | None = None, cwd: str | Path | None = None,
+        script: str | Path | None = None) -> tuple[int, str, str]:
+    """One S1 subprocess run of the engine. `script` names a copy of the entry
+    module elsewhere, which is how the bootstrap boundary is reached (D40)."""
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
+        [sys.executable, str(SCRIPT if script is None else script), *args],
         capture_output=True, text=True, timeout=60,
         env=HERMETIC_ENV if env is None else env, cwd=None if cwd is None else str(cwd),
     )

@@ -179,7 +179,7 @@ class RegistryClosureTest(unittest.TestCase):
             with self.subTest(code=code):
                 check = module.REGISTRY_BY_ID[module.registry.STAGE_CHECKS[stage]]
                 self.assertIn(code, check.reason_codes)
-                self.assertIn(module.checks.stage_repair_id(stage, code),
+                self.assertIn(module.CHECKS_MODULE.stage_repair_id(stage, code),
                               module.REPAIRS)
 
     def test_every_purpose_selects_exactly_the_declared_ids(self):

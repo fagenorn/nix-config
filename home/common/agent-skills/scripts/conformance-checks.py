@@ -502,10 +502,9 @@ def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
 # Residue
 # --------------------------------------------------------------------------
 
-# The ledger's own terminal vocabulary. Only `merged` admits the removal
-# repair: a run that stopped or failed terminated without the outcome the
-# lifecycle was after, and a reader — not the engine — decides what it owes.
-TERMINAL_LEDGER_STATES = ("merged", "stopped", "failed")
+# Only `merged` admits the removal repair: a run that stopped or failed
+# terminated without the outcome the lifecycle was after, and a reader — not
+# the engine — decides what it owes.
 REMOVABLE_LEDGER_STATE = "merged"
 
 LEDGER_RUNS_RELATIVE = (".superpowers", "workflows")

@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 import unittest
@@ -25,7 +26,7 @@ from pathlib import Path
 # already on sys.path; the shared support module lives beside them.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from conformance_test_support import (  # noqa: E402
-    REPO_ROOT, HERMETIC_ENV, ReportAssertions, Rebinding, doctor,
+    REPO_ROOT, HERMETIC_ENV, SCRIPT, ReportAssertions, Rebinding, doctor,
     fixture, load_module, make_root, make_stub_bin, run,
 )
 
@@ -542,25 +543,36 @@ class PolicyPathSymlinkTest(ReportAssertions, unittest.TestCase):
             _, check = self.policy_check(tmp / "linked" / root.name)
             self.assertEqual(check["status"], "passed")
 
-    def test_a_very_long_offending_path_is_bounded_to_the_schema_limit(self):
-        """D30: an unbounded fact would fail the engine's own report validation."""
+    def test_very_long_offending_paths_are_bounded_then_de_duplicated(self):
+        """D30: an unbounded fact would fail the engine's own report validation.
+        D41: bounding happens before de-duplication, not after slicing.
+
+        All twelve declared paths share a prefix longer than MAX_FACT_STRING,
+        so all twelve bound to one identical string and the list names that
+        subject once. `count` still reports the true twelve.
+        """
         with fixture() as tmp:
             root = make_root(tmp)
-            long_path = "/".join(["d" * 40] * 8)
+            prefix = "/".join(["d" * 40] * 5)          # 204 characters
+            declared = [f"{prefix}/s{index:02d}" for index in range(12)]
             contract = root / ".agents/project.json"
             authored = json.loads(contract.read_text(encoding="utf-8"))
-            authored["bindings"]["paths"]["standards"] = [long_path]
+            authored["bindings"]["paths"]["standards"] = declared
             contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
-            declared = root / long_path
-            declared.parent.mkdir(parents=True)
-            real = declared.parent / "materialised"
+            parent = root / prefix
+            parent.mkdir(parents=True)
+            real = parent / "materialised"
             real.mkdir()
-            declared.symlink_to(real, target_is_directory=True)
+            for relative in declared:
+                (root / relative).symlink_to(real, target_is_directory=True)
             report, check = self.policy_check(root)
+            paths = check["facts"]["paths"]
             self.assertEqual(check["status"], "failed")
-            self.assertEqual(check["facts"]["paths"], [long_path[:200]])
-            self.assertEqual(len(check["facts"]["paths"][0]), 200)
-            self.assertEqual(check["facts"]["link_depth"], 8)
+            self.assertEqual(check["facts"]["count"], 12)
+            self.assertEqual(paths, [prefix[:200]])
+            self.assertEqual(len(set(paths)), len(paths))   # never a repeat
+            self.assertEqual(len(paths[0]), 200)
+            self.assertEqual(check["facts"]["link_depth"], 6)
             self.assert_validates(report)
 
 
@@ -642,7 +654,7 @@ class EvaluatorResolutionTest(Rebinding, unittest.TestCase):
     def test_a_rebound_evaluator_is_the_one_evaluate_calls(self):
         module = load_module()
         load_module()  # a second instance now owns the shared sys.modules name
-        self.rebind(module.checks, "check_contract_present",
+        self.rebind(module.CHECKS_MODULE, "check_contract_present",
                     lambda _context: module.Outcome(
             "failed", "not_onboarded", "onboarding.contract.missing"))
         buf = io.StringIO()
@@ -694,6 +706,33 @@ class EngineFailureTest(Rebinding, unittest.TestCase):
             "repository.contract.resolvable"]
         self.assertEqual([check["status"], check["reason_code"]],
                          ["failed", "resolver_failure"])
+
+
+class BootstrapFailureTest(unittest.TestCase):
+    """S1: the entry module with no siblings beside it (D40).
+
+    The decomposition put two modules between the engine and its own code, so
+    a sibling that will not load is a new way for the engine to fail. The
+    bootstrap captures that failure and `main` re-raises it inside the single
+    D15/D29 boundary; only a run of the entry module *alone* reaches it.
+    """
+
+    def test_a_missing_sibling_refuses_in_the_boundary_shape(self):
+        with fixture() as tmp:
+            lone = tmp / "conformance.py"
+            shutil.copy2(SCRIPT, lone)
+            code, out, err = run("run", "--purpose", "doctor", "--offline",
+                                 "--repo-root", str(REPO_ROOT), script=lone)
+            self.assertEqual(code, 2, err)
+            # The whole payload: the refusal carries no report, and the
+            # violation is the fixed sentence rather than the exception text,
+            # which names the directory the siblings were looked for in.
+            self.assertEqual(json.loads(out), {"error": {
+                "code": "resolver_failure",
+                "repair_id": "conformance.internal",
+                "violations": [{
+                    "pointer": "",
+                    "message": "the conformance engine failed unexpectedly"}]}})
 
 
 def gh_env(tmp: Path, exit_code: int) -> dict:

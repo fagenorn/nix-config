@@ -79,22 +79,32 @@ class PathClassificationTest(ReportAssertions, unittest.TestCase):
             self.assertEqual([check["status"], check["facts"]], ["passed", {}])
             self.assert_validates(report)
 
-    def test_many_long_offending_paths_are_capped_and_bounded(self):
+    def test_many_long_offending_paths_are_capped_bounded_and_distinct(self):
         """D30: a repository-relative path has no length ceiling, so an
         unbounded fact would fail the engine's own report validation and turn a
-        repository finding into `resolver_failure`."""
+        repository finding into `resolver_failure`. D41: the eight slots name
+        eight subjects.
+
+        Ten sibling trees each share a prefix longer than MAX_FACT_STRING, so
+        the three paths inside a tree bound to one identical string. Bounding
+        before de-duplicating is the whole difference between eight subjects
+        and one subject repeated eight times.
+        """
         with fixture() as tmp:
             root = make_root(tmp)
-            deep = "/".join([".agents/scratchpad"] + ["d" * 40] * 6)
-            for index in range(12):
-                write_file(root, f"{deep}/f{index:02d}.txt")
+            for group in range(10):
+                deep = "/".join([f".agents/scratchpad/g{group}"] + ["d" * 40] * 6)
+                for index in range(3):
+                    write_file(root, f"{deep}/f{index}.txt")
             report, by_id = doctor(self, root)
             check = by_id[self.CHECK_ID]
+            paths = check["facts"]["paths"]
             self.assertEqual(check["status"], "failed")
-            self.assertEqual(len(check["facts"]["paths"]), 8)
-            self.assertEqual(check["facts"]["count"], 12)
-            self.assertEqual({len(path) for path in check["facts"]["paths"]},
-                             {200})
+            self.assertEqual(check["facts"]["count"], 30)
+            self.assertEqual(len(paths), 8)
+            self.assertEqual({len(path) for path in paths}, {200})
+            self.assertEqual(len(set(paths)), 8)   # eight subjects, not one
+            self.assertEqual(paths, sorted(paths))
             self.assert_validates(report)
 
 
@@ -470,7 +480,7 @@ class ScratchPatternConsistencyTest(unittest.TestCase):
     def test_every_scratch_pattern_is_backstopped_by_the_tracked_gitignore(self):
         rules = {line.strip() for line
                  in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()}
-        for pattern in load_module().checks.ROOT_SCRATCH_PATTERNS:
+        for pattern in load_module().CHECKS_MODULE.ROOT_SCRATCH_PATTERNS:
             with self.subTest(pattern=pattern):
                 self.assertIn(pattern, rules)
 
@@ -533,7 +543,7 @@ class ReleaseProfileLintTest(ReportAssertions, unittest.TestCase):
 
     def test_an_unknown_locator_state_raises(self):
         """S3: the closed-set default branch (D32)."""
-        checks = load_module().checks
+        checks = load_module().CHECKS_MODULE
         original = checks.find_release_profile
         checks.find_release_profile = lambda _context: ("compiled", "x")
         self.addCleanup(setattr, checks, "find_release_profile", original)
