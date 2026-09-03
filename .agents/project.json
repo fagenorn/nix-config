@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "project": { "id": "fagenorn/nix-config", "name": "nix-config" },
+  "bindings": {
+    "vcs": {
+      "kind": "git",
+      "default_branch": "main",
+      "integration_branch": "main",
+      "branch_pattern": "issue-<num>-<slug>",
+      "worktree": { "root": ".worktrees", "prefix": "worktree-" },
+      "commit": { "co_authored_by": true, "signed": true },
+      "merge": { "strategy": "merge", "delete_branch": true }
+    },
+    "tracker": {
+      "kind": "github",
+      "cli": "gh",
+      "repo_slug": "fagenorn/nix-config",
+      "credential_env": { "unset_before_invocation": [] }
+    },
+    "paths": {
+      "artifacts": { "specs": ".claude/specs", "plans": ".claude/plans" },
+      "context": [],
+      "standards": ["home/common/agent-skills/standards"],
+      "architecture": ["CLAUDE.md"],
+      "operations": [],
+      "hints": [],
+      "rejections": [".out-of-scope"]
+    },
+    "commands": {
+      "nix-build": { "argv": ["just", "build"], "cwd": ".", "env": [] },
+      "agent-workflow-tests": { "argv": ["just", "agent-workflow-tests"], "cwd": ".", "env": [] },
+      "codex-review": { "argv": ["codex"], "cwd": ".", "env": [] }
+    },
+    "workflow": {
+      "verification": ["nix-build", "agent-workflow-tests"],
+      "orchestration": { "max_parallel": 2, "attempt_budget_minutes": 180 },
+      "review": { "plan": "codex-review", "code": "codex-review" },
+      "release": null
+    },
+    "deploy": { "adapter": "none", "command": null, "config": {} }
+  },
+  "capabilities": {
+    "tracker": { "support": "supported" },
+    "worktrees": { "support": "supported" },
+    "knowledge.context": { "support": "unsupported" },
+    "knowledge.standards": { "support": "supported" },
+    "knowledge.architecture": { "support": "supported" },
+    "knowledge.hints": { "support": "unsupported" },
+    "verification": { "support": "supported" },
+    "review.plan": { "support": "supported" },
+    "review.code": { "support": "supported" },
+    "release": { "support": "unsupported" },
+    "deploy": { "support": "unsupported" }
+  },
+  "projections": [
+    { "id": "codex.entry", "agent": "codex", "kind": "generated_file",
+      "target": "AGENTS.md", "source": ".agents/instructions/bootstrap.md" },
+    { "id": "claude.entry", "agent": "claude", "kind": "managed_import",
+      "target": "CLAUDE.md", "source": ".agents/instructions/bootstrap.md" }
+  ]
+}

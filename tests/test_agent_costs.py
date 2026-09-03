@@ -617,5 +617,398 @@ class EndToEndTest(unittest.TestCase):
             )
 
 
+def codex_meta(session_id, rollout_id=None, cwd="/Users/me/repo",
+               thread_source="user", parent=None):
+    payload = {
+        "session_id": session_id,
+        "id": rollout_id or session_id,
+        "cwd": cwd,
+        "thread_source": thread_source,
+        "originator": "codex-tui",
+    }
+    if thread_source == "subagent":
+        payload["parent_thread_id"] = parent or session_id
+        payload["source"] = {"subagent": {"thread_spawn": {
+            "parent_thread_id": parent or session_id,
+            "depth": 1, "agent_nickname": "Nash", "agent_role": None}}}
+    return record({"timestamp": "2026-08-04T14:08:50.499Z",
+                   "type": "session_meta", "payload": payload})
+
+
+def codex_usage(inp, cached=0, write=0, out=0, reasoning=0, total=None):
+    """One token_count event. `total` is the (untrustworthy) running counter."""
+    last = {"input_tokens": inp, "cached_input_tokens": cached,
+            "cache_write_input_tokens": write, "output_tokens": out,
+            "reasoning_output_tokens": reasoning,
+            "total_tokens": inp + out}
+    running = dict(last) if total is None else dict(last, input_tokens=total)
+    return record({"timestamp": "2026-08-04T14:08:55.871Z", "type": "event_msg",
+                   "payload": {"type": "token_count",
+                               "info": {"total_token_usage": running,
+                                        "last_token_usage": last,
+                                        "model_context_window": 258400}}})
+
+
+def codex_turn_context(model="gpt-5.6-sol", effort="xhigh"):
+    return record({"timestamp": "2026-08-04T14:08:50.873Z", "type": "turn_context",
+                   "payload": {"turn_id": "t1", "cwd": "/Users/me/repo",
+                               "model": model, "effort": effort, "summary": "auto"}})
+
+
+def codex_compacted():
+    return record({"timestamp": "2026-08-04T14:20:00.000Z", "type": "event_msg",
+                   "payload": {"type": "compacted"}})
+
+
+class ScanCodexFileTest(unittest.TestCase):
+    def write_rollout(self, *lines):
+        tmp = Path(tempfile.mkdtemp())
+        path = tmp / "rollout-2026-08-04T16-08-42-abc.jsonl"
+        path.write_text("".join(lines), encoding="utf-8")
+        return path
+
+    def test_sums_last_token_usage_and_ignores_the_rebased_running_total(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            codex_turn_context(),
+            codex_usage(1000, cached=600, write=0, out=50, reasoning=20, total=1000),
+            codex_compacted(),
+            # After compaction the running counter rebases; summing it would
+            # lose the pre-compaction turn, and reading the last one alone
+            # would report 400 input tokens instead of 1400.
+            codex_usage(400, cached=100, write=0, out=10, reasoning=5, total=400),
+        )
+        got = agent_costs.scan_codex_file(path)
+        self.assertEqual(got["input_total"], 1400)
+        self.assertEqual(got["cache_read"], 700)
+        self.assertEqual(got["cache_create"], 0)
+        self.assertEqual(got["fresh"], 700)
+        self.assertEqual(got["output"], 60)
+        self.assertEqual(got["reasoning"], 25)
+        self.assertEqual(got["turns"], 2)
+
+    def test_cached_and_reasoning_are_subsets_not_addends(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            codex_usage(1000, cached=900, write=100, out=80, reasoning=70),
+        )
+        got = agent_costs.scan_codex_file(path)
+        self.assertEqual(got["input_total"], 1000)      # not 1900
+        self.assertEqual(got["fresh"], 0)               # 1000 - 900 - 100
+        self.assertEqual(got["output"], 80)             # not 150
+        self.assertEqual(got["reasoning"], 70)
+
+    def test_peak_ctx_is_the_largest_single_turn_input(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            codex_usage(500), codex_usage(9000), codex_usage(700),
+        )
+        self.assertEqual(agent_costs.scan_codex_file(path)["peak_ctx"], 9000)
+
+    def test_root_and_subagent_classification_and_identity(self):
+        root = self.write_rollout(codex_meta("s1"), codex_usage(10))
+        sub = self.write_rollout(
+            codex_meta("s1", rollout_id="r2", thread_source="subagent",
+                       cwd="/Users/me/repo/.claude/worktrees/issue-120-x"),
+            codex_usage(20))
+        got_root = agent_costs.scan_codex_file(root)
+        got_sub = agent_costs.scan_codex_file(sub)
+        self.assertTrue(got_root["is_root"])
+        self.assertEqual(got_root["rollout_id"], "s1")
+        self.assertFalse(got_sub["is_root"])
+        self.assertEqual(got_sub["session_id"], "s1")
+        self.assertEqual(got_sub["rollout_id"], "r2")
+        self.assertEqual(got_sub["cwd"],
+                         "/Users/me/repo/.claude/worktrees/issue-120-x")
+
+    def test_models_and_efforts_come_from_turn_context(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            codex_turn_context("gpt-5.6-sol", "xhigh"),
+            codex_turn_context("gpt-5.6-sol", "xhigh"),
+            codex_turn_context("gpt-5.6", "medium"),
+            codex_usage(10),
+        )
+        got = agent_costs.scan_codex_file(path)
+        self.assertEqual(got["models"], {"gpt-5.6-sol": 2, "gpt-5.6": 1})
+        self.assertEqual(got["efforts"], {"xhigh": 2, "medium": 1})
+
+    def test_no_session_meta_and_unreadable_file_return_none(self):
+        headless = self.write_rollout(codex_usage(10))
+        self.assertIsNone(agent_costs.scan_codex_file(headless))
+        missing = Path(tempfile.mkdtemp()) / "absent.jsonl"
+        self.assertIsNone(agent_costs.scan_codex_file(missing))
+
+    def test_malformed_line_is_skipped_not_raised(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            '{"type":"event_msg","payload":{"type":"token_count"\n',
+            codex_usage(10))
+        self.assertEqual(agent_costs.scan_codex_file(path)["input_total"], 10)
+
+
+
+def claude_tree(tmp, dir_name="-Users-me-repo-issue-120-x", session="s1"):
+    """A one-session Claude fixture: 2 assistant turns, one deduped message id."""
+    proj = tmp / dir_name
+    proj.mkdir(parents=True)
+    usage = {"input_tokens": 100, "cache_creation_input_tokens": 200,
+             "cache_read_input_tokens": 3000, "output_tokens": 40}
+    (proj / f"{session}.jsonl").write_text(
+        assistant("m1", usage, cwd="/Users/me/repo")
+        + assistant("m1", usage, cwd="/Users/me/repo")   # duplicate id: deduped
+        + assistant("m2", usage, cwd="/Users/me/repo"),
+        encoding="utf-8")
+    return proj
+
+
+def codex_tree(tmp, cwd="/Users/me/repo/.claude/worktrees/issue-120-x"):
+    day = tmp / "2026" / "08" / "04"
+    day.mkdir(parents=True)
+    (day / "rollout-root.jsonl").write_text(
+        codex_meta("s1", cwd=cwd) + codex_turn_context() + codex_usage(
+            1000, cached=600, out=50, reasoning=20),
+        encoding="utf-8")
+    (day / "rollout-sub.jsonl").write_text(
+        codex_meta("s1", rollout_id="r2", thread_source="subagent", cwd=cwd)
+        + codex_usage(500, cached=100, out=10, reasoning=5),
+        encoding="utf-8")
+    return tmp
+
+
+def run_main(*argv):
+    """main() with stdout captured; returns (stdout, SystemExit code or None)."""
+    buf = io.StringIO()
+    code = None
+    with contextlib.redirect_stdout(buf):
+        try:
+            agent_costs.main(list(argv),
+                             executor_factory=EndToEndTest.DeterministicExecutor)
+        except SystemExit as exit_error:
+            code = exit_error.code
+    return buf.getvalue(), code
+
+
+class BuildRecordTest(unittest.TestCase):
+    def strata(self):
+        claude = agent_costs.new_group()
+        claude.update(fresh=100, cache_create=200, cache_read=3000, output=40,
+                      cost=1.5, turns=2, sessions=1, peak_ctx=3300)
+        claude["models"].update({"claude-opus-5": 2})
+        claude["cost_by_family"].update({"opus": 1.2, "sonnet": 0.3})
+        claude["outcomes"].append("completed")
+        claude["agent_prompt_bytes"].extend([10, 20, 30])
+        codex = {"fresh": 300, "cache_create": 0, "cache_read": 700, "output": 60,
+                 "reasoning": 25, "turns": 2, "sessions": 1, "subagents": 1,
+                 "peak_ctx": 1000, "models": {"gpt-5.6-sol": 1}, "efforts": {}}
+        return {"claude": {"cost_basis": "list-price",
+                           "groups": {("repo", "120"): claude}},
+                "codex": {"cost_basis": "subscription",
+                          "groups": {("repo", "120"): codex}}}
+
+    def window(self):
+        return {"days": 7, "cutoff_epoch": 1785852530,
+                "strata": ["claude", "codex"],
+                "sources": {"claude": "/p", "codex": "/c"}}
+
+    def test_input_total_is_the_sum_of_the_three_input_categories(self):
+        rec = agent_costs.build_record(self.strata(), self.window())
+        run = rec["strata"]["claude"]["runs"][0]
+        self.assertEqual(run["tokens"]["input_total"], 3300)
+        self.assertEqual(run["tokens"]["fresh"], 100)
+        self.assertEqual(run["tokens"]["cache_create"], 200)
+        self.assertEqual(run["tokens"]["cache_read"], 3000)
+        self.assertEqual(run["run_id"], "claude:repo:120")
+        self.assertEqual(run["outcome"], "completed")
+        self.assertEqual(run["agent_prompt_bytes"],
+                         {"n": 3, "p50": 20, "p90": 30, "max": 30})
+
+    def test_cost_is_carried_per_model_family(self):
+        rec = agent_costs.build_record(self.strata(), self.window())
+        run = rec["strata"]["claude"]["runs"][0]
+        self.assertEqual(run["cost_by_family"], {"opus": 1.2, "sonnet": 0.3})
+        self.assertAlmostEqual(sum(run["cost_by_family"].values()), run["cost_usd"])
+        self.assertEqual(rec["strata"]["claude"]["totals"]["cost_by_family"],
+                         {"opus": 1.2, "sonnet": 0.3})
+        self.assertIsNone(rec["strata"]["codex"]["runs"][0]["cost_by_family"])
+        self.assertIsNone(rec["strata"]["codex"]["totals"]["cost_by_family"])
+        self.assertNotIn("cost_by_family", rec["fleet"]["totals"])
+
+    def test_absent_measurements_are_null_not_zero(self):
+        rec = agent_costs.build_record(self.strata(), self.window())
+        run = rec["strata"]["codex"]["runs"][0]
+        for field in ("outcome", "cost_usd", "cost_by_family", "phase_turns", "attr_turns",
+                      "stop_reasons", "agents_by_type", "agent_statuses",
+                      "skill_loads", "repeats", "agents_killed", "interventions",
+                      "agent_prompt_bytes", "agent_result_bytes"):
+            self.assertIsNone(run[field], field)
+        self.assertEqual(run["tokens"]["reasoning"], 25)
+        self.assertIsNone(rec["strata"]["claude"]["runs"][0]["tokens"]["reasoning"])
+        self.assertEqual(rec["strata"]["codex"]["cost_basis"], "subscription")
+        self.assertIsNone(rec["strata"]["codex"]["totals"]["cost_usd"])
+
+    def test_fleet_is_informative_and_carries_no_cost(self):
+        rec = agent_costs.build_record(self.strata(), self.window())
+        self.assertTrue(rec["fleet"]["informative"])
+        self.assertEqual(rec["fleet"]["totals"]["input_total"], 3300 + 1000)
+        self.assertNotIn("cost_usd", rec["fleet"]["totals"])
+        self.assertNotIn("cost", rec["fleet"]["totals"])
+        self.assertIsNone(rec["fleet"]["totals"]["reasoning"])  # claude side is null
+
+    def test_record_id_digests_the_body_and_excludes_generated_at(self):
+        rec = agent_costs.build_record(self.strata(), self.window())
+        body = {k: v for k, v in rec.items()
+                if k not in ("record_id", "generated_at")}
+        self.assertEqual(rec["record_id"], agent_costs.canonical_digest(body))
+        self.assertTrue(rec["record_id"].startswith("sha256:"))
+        self.assertEqual(len(rec["record_id"]), 71)
+        again = agent_costs.build_record(self.strata(), self.window())
+        self.assertEqual(rec["record_id"], again["record_id"])
+        mutated = self.strata()
+        mutated["claude"]["groups"][("repo", "120")]["fresh"] = 101
+        self.assertNotEqual(
+            rec["record_id"],
+            agent_costs.build_record(mutated, self.window())["record_id"])
+
+    def test_fleet_folds_only_the_strata_that_measured_something(self):
+        strata = self.strata()
+        strata["codex"]["groups"] = {}          # one idle, one measuring
+        fleet = agent_costs.build_record(strata, self.window())["fleet"]["totals"]
+        self.assertEqual(fleet["input_total"], 3300)
+        self.assertEqual(fleet["fresh"], 100)
+        self.assertEqual(fleet["cache_create"], 200)
+        self.assertEqual(fleet["cache_read"], 3000)
+        self.assertEqual(fleet["output"], 40)
+        # a measuring stratum's genuinely absent field still propagates as null
+        self.assertIsNone(fleet["reasoning"])
+        idle = {name: dict(stratum, groups={})
+                for name, stratum in strata.items()}
+        blank = agent_costs.build_record(idle, self.window())["fleet"]["totals"]
+        for field in ("input_total", "fresh", "cache_create", "cache_read",
+                      "output", "reasoning"):
+            self.assertIsNone(blank[field], field)
+
+    def test_a_stratum_with_no_runs_totals_null_not_zero(self):
+        strata = self.strata()
+        strata["codex"]["groups"] = {}
+        rec = agent_costs.build_record(strata, self.window())
+        totals = rec["strata"]["codex"]["totals"]
+        self.assertEqual(totals["runs"], 0)
+        for field in ("input_total", "fresh", "cache_create", "cache_read",
+                      "output", "reasoning", "cost_usd"):
+            self.assertIsNone(totals[field], field)
+        self.assertEqual(totals["cost_by_family"], {})  # a mapping stays {}
+
+    def test_runs_are_sorted_by_run_id(self):
+        strata = self.strata()
+        groups = strata["claude"]["groups"]
+        for key in (("repo", None), ("repo", agent_costs.MULTI_ISSUE), ("aaa", "9")):
+            groups[key] = agent_costs.new_group()
+        ids = [r["run_id"] for r in
+               agent_costs.build_record(strata, self.window())["strata"]["claude"]["runs"]]
+        self.assertEqual(ids, sorted(ids))
+        self.assertIn("claude:repo:none", ids)
+        self.assertIn("claude:repo:multi", ids)
+
+
+GOLDEN = Path(__file__).resolve().parent / "fixtures" / "agent_costs_text_golden.txt"
+
+
+class TextByteIdentityTest(unittest.TestCase):
+    def test_default_stdout_is_byte_for_byte_the_pre_change_golden(self):
+        tmp = Path(tempfile.mkdtemp())
+        claude_tree(tmp)
+        bare, code = run_main("--projects-dir", str(tmp), "--days", "0")
+        self.assertIsNone(code)
+        self.assertEqual(bare, GOLDEN.read_text(encoding="utf-8"))
+
+    def test_explicit_defaults_reproduce_the_no_flag_bytes(self):
+        tmp = Path(tempfile.mkdtemp())
+        claude_tree(tmp)
+        bare, code_a = run_main("--projects-dir", str(tmp), "--days", "0")
+        explicit, code_b = run_main("--projects-dir", str(tmp), "--days", "0",
+                                    "--format", "text", "--strata", "claude")
+        self.assertIsNone(code_a)
+        self.assertIsNone(code_b)
+        self.assertEqual(bare, explicit)
+        self.assertIn("NOTE: cache reads measure logical context re-processing", bare)
+
+    def test_json_reports_the_same_numbers_the_table_prints(self):
+        tmp = Path(tempfile.mkdtemp())
+        claude_tree(tmp)
+        text, _ = run_main("--projects-dir", str(tmp), "--days", "0")
+        raw, _ = run_main("--projects-dir", str(tmp), "--days", "0",
+                          "--format", "json")
+        record = json.loads(raw)
+        totals = record["strata"]["claude"]["totals"]
+        run = record["strata"]["claude"]["runs"][0]
+        printed = agent_costs.human(totals["input_total"] + totals["output"])
+        self.assertIn(f"TOTAL  {printed} tokens", text)
+        # every shared group/total quantity, not one substring
+        self.assertEqual(totals["fresh"], run["tokens"]["fresh"])
+        self.assertEqual(totals["cache_create"], run["tokens"]["cache_create"])
+        self.assertEqual(totals["cache_read"], run["tokens"]["cache_read"])
+        self.assertEqual(totals["output"], run["tokens"]["output"])
+        self.assertEqual(totals["input_total"], run["tokens"]["input_total"])
+        self.assertEqual(totals["cost_usd"], run["cost_usd"])
+        self.assertEqual(totals["cost_by_family"], run["cost_by_family"])
+        self.assertAlmostEqual(sum(run["cost_by_family"].values()), run["cost_usd"])
+        for value in (agent_costs.human(run["tokens"]["fresh"]),
+                      agent_costs.human(run["tokens"]["cache_create"]),
+                      agent_costs.human(run["tokens"]["cache_read"]),
+                      agent_costs.human(run["tokens"]["output"]),
+                      agent_costs.human(run["peak_ctx"]),
+                      # the table's own cost format, whole dollars behind a '$'
+                      f"${run['cost_usd']:,.0f}"):
+            self.assertIn(value, text)
+
+
+class StrataCliTest(unittest.TestCase):
+    def test_non_claude_strata_in_text_mode_is_a_usage_error(self):
+        tmp = Path(tempfile.mkdtemp())
+        claude_tree(tmp)
+        with contextlib.redirect_stderr(io.StringIO()):
+            out, code = run_main("--projects-dir", str(tmp), "--strata", "both")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+
+    def test_artifacts_with_json_is_a_usage_error(self):
+        tmp = Path(tempfile.mkdtemp())
+        claude_tree(tmp)
+        with contextlib.redirect_stderr(io.StringIO()):
+            out, code = run_main("--projects-dir", str(tmp), "--format", "json",
+                                 "--artifacts", str(tmp))
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+
+    def test_codex_only_run_never_touches_the_claude_root(self):
+        tmp = Path(tempfile.mkdtemp())
+        codex_tree(tmp)
+        raw, code = run_main("--projects-dir", "/nonexistent/claude/root",
+                             "--codex-sessions", str(tmp), "--days", "0",
+                             "--format", "json", "--strata", "codex")
+        self.assertIsNone(code)
+        rec = json.loads(raw)
+        self.assertEqual(rec["kind"], "agent-cost-record")
+        self.assertEqual(rec["schema_version"], 1)
+        self.assertEqual(rec["window"]["strata"], ["codex"])
+        self.assertNotIn("claude", rec["strata"])
+        runs = rec["strata"]["codex"]["runs"]
+        self.assertEqual([r["run_id"] for r in runs], ["codex:repo:120"])
+        self.assertEqual(runs[0]["tokens"]["input_total"], 1500)
+        self.assertEqual(runs[0]["sessions"], 1)
+        self.assertEqual(runs[0]["subagents"], 1)
+        self.assertEqual(runs[0]["turns"], 2)
+        self.assertIsNone(runs[0]["cost_usd"])
+
+    def test_empty_window_in_json_mode_emits_a_record_with_no_runs(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "empty-project").mkdir()
+        raw, code = run_main("--projects-dir", str(tmp), "--days", "0",
+                             "--format", "json")
+        self.assertIsNone(code)
+        self.assertEqual(json.loads(raw)["strata"]["claude"]["runs"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

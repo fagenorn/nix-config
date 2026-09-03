@@ -9,5 +9,11 @@ __pycache__/
 .worktrees/
 **/.claude/worktrees/
 *.tmp.??????
+.resolve-project.*.tmp
 producer-report-*.json
 review-package-report-*.json
+
+# The lazily created runtime bucket of the .agents/ taxonomy. Unlike the
+# scratch patterns above this is its own real home, not a backstop for a path
+# that lives elsewhere, and it is never tracked.
+.agents/runtime/
