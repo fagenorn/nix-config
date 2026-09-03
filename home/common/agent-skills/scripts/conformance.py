@@ -718,6 +718,18 @@ REPAIRS = {
     "lifecycle.residue.root_scratch": {
         "module": "conformance", "safety_class": "worktree",
         "operation": None},
+    # Every release-profile repair is an edit to an authored profile this
+    # engine neither reads nor writes, so all three are `user_action` with a
+    # null operation (D25).
+    "release_profile.compensate.add": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "release_profile.materialize.add": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "release_profile.deadline.require": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
 }
 
 
@@ -1343,6 +1355,65 @@ def check_residue_root_scratch(context: "Context") -> "Outcome":
                    {"files": bound_facts(names), "count": len(names)})
 
 
+# --------------------------------------------------------------------------
+# The release-profile lint items
+#
+# Three #86 findings registered with a declared subject and nothing more. This
+# slice ships no profile compiler, so every one of them reports `not_run`:
+# `subject_absent` where the contract declares no release command at all, and
+# `profile_unsupported` where it declares one this engine cannot read (D27).
+# Each also declares the code it will emit once a compiler exists, which is
+# what closes the registry now rather than growing it later (D5, D31).
+# --------------------------------------------------------------------------
+
+
+def find_release_profile(context: "Context") -> tuple[str, str | None]:
+    """Contract: ("absent", None) when the contract declares no release command,
+    else ("unsupported", <the declared command id>). This slice ships no profile
+    compiler, so a declared release command is a subject it cannot read (D27)."""
+    command_id = context.contract["bindings"]["workflow"]["release"]
+    if command_id is None:
+        return ("absent", None)
+    return ("unsupported", command_id)
+
+
+def release_profile_outcome(context: "Context", repair_id: str) -> "Outcome":
+    """The verdict every release-profile item shares, given its own repair.
+
+    Neither branch can read as a pass, and neither drives `incomplete`, because
+    all three checks are optional (D6).
+    """
+    state, command_id = find_release_profile(context)
+    if state == "absent":
+        return Outcome("not_run", "subject_absent", repair_id, {"declared": False})
+    if state == "unsupported":
+        return Outcome("not_run", "profile_unsupported", repair_id,
+                       {"declared": True, "release_command": bound_fact(command_id)})
+    raise ValueError(f"unknown release profile state: {state!r}")
+
+
+def check_release_profile_rolled_back_reachable(context: "Context") -> "Outcome":
+    """Will fail a publication unit that has activation and immutable
+    publication but no residue-only compensate edge, which makes rolled_back
+    structurally unreachable (#86). This slice ships no profile compiler, so it
+    reports not_run."""
+    return release_profile_outcome(context, "release_profile.compensate.add")
+
+
+def check_release_profile_restore_anchor(context: "Context") -> "Outcome":
+    """Will fail a publication unit that destroys the anchor its restore edge
+    returns to, which the profile has to materialize before the unit runs
+    (#86). This slice ships no profile compiler, so it reports not_run."""
+    return release_profile_outcome(context, "release_profile.materialize.add")
+
+
+def check_release_profile_observation_deadline(context: "Context") -> "Outcome":
+    """Will fail a publication unit whose observation phase leaves its deadline
+    optional, so an observation that never concludes never resolves the unit
+    (#86). This slice ships no profile compiler, so it reports not_run."""
+    return release_profile_outcome(context, "release_profile.deadline.require")
+
+
 REGISTRY: tuple[Check, ...] = (
     Check(RESOLVABLE_CHECK_ID, "repository", "contract", "required", (),
           (("resolver_failure", "conformance.internal"),),
@@ -1403,6 +1474,26 @@ REGISTRY: tuple[Check, ...] = (
           ("repository.contract.present",),
           (("root_scratch_present", "lifecycle.residue.root_scratch"),),
           "check_residue_root_scratch"),
+    # The third code of each trio is emitted by the compiler slice; declaring
+    # it now is what closes the registry rather than growing it later (D5).
+    Check("repository.release_profile.rolled_back_reachable", "repository",
+          "release_profile", "optional", ("repository.contract.valid",),
+          (("subject_absent", "release_profile.compensate.add"),
+           ("profile_unsupported", "release_profile.compensate.add"),
+           ("rolled_back_unreachable", "release_profile.compensate.add")),
+          "check_release_profile_rolled_back_reachable"),
+    Check("repository.release_profile.restore_anchor", "repository",
+          "release_profile", "optional", ("repository.contract.valid",),
+          (("subject_absent", "release_profile.materialize.add"),
+           ("profile_unsupported", "release_profile.materialize.add"),
+           ("restore_anchor_destroyed", "release_profile.materialize.add")),
+          "check_release_profile_restore_anchor"),
+    Check("repository.release_profile.observation_deadline", "repository",
+          "release_profile", "optional", ("repository.contract.valid",),
+          (("subject_absent", "release_profile.deadline.require"),
+           ("profile_unsupported", "release_profile.deadline.require"),
+           ("observation_deadline_optional", "release_profile.deadline.require")),
+          "check_release_profile_observation_deadline"),
 )
 REGISTRY_BY_ID = {check.id: check for check in REGISTRY}
 

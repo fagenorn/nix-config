@@ -1452,5 +1452,216 @@ class ScratchPatternConsistencyTest(unittest.TestCase):
                 self.assertIn(pattern, rules)
 
 
+# --------------------------------------------------------------------------
+# The release-profile lint trio, the closed registry, and the acceptance gate
+# --------------------------------------------------------------------------
+
+
+RELEASE_PROFILE_IDS = (
+    "repository.release_profile.observation_deadline",
+    "repository.release_profile.restore_anchor",
+    "repository.release_profile.rolled_back_reachable",
+)
+
+
+class ReleaseProfileLintTest(ReportAssertions, unittest.TestCase):
+    """AC2: the three prototype lint items are registered with declared subjects."""
+
+    def test_all_three_are_registered_with_a_declared_subject(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp))
+            for check_id in RELEASE_PROFILE_IDS:
+                with self.subTest(check=check_id):
+                    check = by_id[check_id]
+                    self.assertEqual(
+                        [check["domain"], check["subject_kind"],
+                         check["requirement"], check["status"],
+                         check["reason_code"], check["facts"]],
+                        ["repository", "release_profile", "optional", "not_run",
+                         "subject_absent", {"declared": False}])
+                    self.assertIsNotNone(check["repair_id"])
+            self.assertEqual(report["outcome"],
+                             {"status": "passed", "primary_check_id": None})
+            repairs = {r["repair_id"]: r for r in report["repairs"]}
+            for repair_id in ("release_profile.compensate.add",
+                              "release_profile.materialize.add",
+                              "release_profile.deadline.require"):
+                self.assertEqual(repairs[repair_id]["safety_class"], "user_action")
+                self.assertIsNone(repairs[repair_id]["operation"])
+            self.assert_validates(report)
+
+    def test_a_declared_release_command_is_unsupported_not_absent(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            path = root / ".agents/project.json"
+            contract = json.loads(path.read_text(encoding="utf-8"))
+            contract["bindings"]["workflow"]["release"] = "codex-review"
+            contract["capabilities"]["release"] = {"support": "supported"}
+            path.write_text(json.dumps(contract), encoding="utf-8")
+            report, by_id = doctor(self, root)
+            for check_id in RELEASE_PROFILE_IDS:
+                check = by_id[check_id]
+                self.assertEqual([check["status"], check["reason_code"]],
+                                 ["not_run", "profile_unsupported"])
+                self.assertEqual(check["facts"], {"declared": True,
+                                                  "release_command": "codex-review"})
+            self.assertEqual(report["outcome"]["status"], "passed")
+            self.assert_validates(report)
+
+    def test_an_unknown_locator_state_raises(self):
+        """S3: the closed-set default branch (D32)."""
+        module = load_module()
+        original = module.find_release_profile
+        module.find_release_profile = lambda _context: ("compiled", "x")
+        self.addCleanup(setattr, module, "find_release_profile", original)
+        with self.assertRaises(ValueError):
+            module.check_release_profile_restore_anchor(object())
+
+
+REGISTERED_CHECK_IDS = (
+    "compatibility.contract.schema_supported",
+    "host.capability.required",
+    "host.executor.helper_on_path",
+    "host.policy_path.no_follow_readable",
+    "host.tracker.credential",
+    "repository.contract.present",
+    "repository.contract.resolvable",
+    "repository.contract.valid",
+    "repository.ignore.runtime_sentinel",
+    "repository.paths.classified",
+    "repository.projection.fresh",
+    "repository.release_profile.observation_deadline",
+    "repository.release_profile.restore_anchor",
+    "repository.release_profile.rolled_back_reachable",
+    "repository.residue.nested_ledger",
+    "repository.residue.root_scratch",
+    "verification.commands.no_shell_indirection",
+)
+
+ENTRY_LADDER_IDS = (
+    "repository.contract.resolvable", "repository.contract.present",
+    "compatibility.contract.schema_supported", "repository.contract.valid",
+    "repository.projection.fresh", "host.capability.required")
+
+
+def ids_with(*prefixes):
+    return tuple(i for i in REGISTERED_CHECK_IDS if i.startswith(prefixes))
+
+
+PURPOSE_SELECTION = {
+    "workflow_entry": ENTRY_LADDER_IDS,
+    "adoption": ids_with("repository.", "compatibility."),
+    "fleet": ids_with("repository.", "compatibility."),
+    "ci": ids_with("repository.", "compatibility.", "verification."),
+    "local": tuple(dict.fromkeys(ENTRY_LADDER_IDS + ids_with("host."))),
+    "doctor": REGISTERED_CHECK_IDS,
+}
+
+
+class RegistryClosureTest(unittest.TestCase):
+    def test_the_registry_is_exactly_the_seventeen_declared_checks(self):
+        module = load_module()
+        self.assertEqual(sorted(c.id for c in module.REGISTRY),
+                         sorted(REGISTERED_CHECK_IDS))
+
+    def test_every_declared_repair_resolves_and_none_is_unreachable(self):
+        """D31: repair_ids_for reads the registry's own findings declaration."""
+        module = load_module()
+        declared = set()
+        for check in module.REGISTRY:
+            for repair_id in module.repair_ids_for(check):
+                self.assertIn(repair_id, module.REPAIRS, check.id)
+                declared.add(repair_id)
+        self.assertEqual(declared, set(module.REPAIRS))
+
+    def test_no_declared_repair_is_destructive(self):
+        """D10: the whole v1 repair vocabulary, judged in one place."""
+        module = load_module()
+        for repair_id, repair in sorted(module.REPAIRS.items()):
+            with self.subTest(repair=repair_id):
+                self.assertIn(repair["safety_class"], module.SAFETY_CLASSES)
+                self.assertNotEqual(repair["safety_class"], "destructive")
+
+    def test_registry_order_is_topological(self):
+        module = load_module()
+        seen = set()
+        for check in module.REGISTRY:
+            for dependency in check.depends_on:
+                self.assertIn(dependency, seen, f"{check.id} precedes {dependency}")
+            seen.add(check.id)
+
+    def test_the_workflow_entry_ladder_names_only_registered_checks(self):
+        """`select` intersects the ladder with REGISTRY, so an id no check
+        declares is dropped in silence rather than refused."""
+        module = load_module()
+        self.assertEqual(
+            [check_id for check_id in module.WORKFLOW_ENTRY_LADDER
+             if check_id not in module.REGISTRY_BY_ID], [])
+
+    def test_every_network_check_declares_the_offline_finding(self):
+        """D7: the offline rule emits that pair before the dispatch, so a
+        network check not declaring it is a guard_finding refusal at runtime."""
+        module = load_module()
+        network = [check for check in module.REGISTRY if check.network]
+        self.assertTrue(network)
+        for check in network:
+            with self.subTest(check=check.id):
+                self.assertIn(("offline_constraint", "conformance.rerun_online"),
+                              check.findings)
+
+    def test_every_resolver_code_is_declared_by_the_check_its_stage_names(self):
+        """D33 against D31: `stage_repair_id` reads the stage check's own
+        findings, so a code whose stage names a check that never declares it
+        is a KeyError at the moment the resolver refuses."""
+        module = load_module()
+        for code, stage in sorted(module.CODE_STAGES.items()):
+            with self.subTest(code=code):
+                check = module.REGISTRY_BY_ID[module.STAGE_CHECKS[stage]]
+                self.assertIn(code, check.reason_codes)
+                self.assertIn(module.stage_repair_id(stage, code), module.REPAIRS)
+
+    def test_every_purpose_selects_exactly_the_declared_ids(self):
+        """SF-002: one discriminating matrix over the closed registry."""
+        module = load_module()
+        for purpose, expected in PURPOSE_SELECTION.items():
+            with self.subTest(purpose=purpose):
+                ids = [c.id for c in module.select(purpose)]
+                self.assertEqual(sorted(ids), sorted(expected))
+                self.assertEqual(len(ids), len(set(ids)))
+
+
+class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
+    """D22: the demo the issue names, against this repository's committed root."""
+
+    def test_doctor_on_this_repository_reports_every_registered_check(self):
+        report, by_id = doctor(self, REPO_ROOT, "--offline")
+        self.assertEqual([c["id"] for c in report["checks"]],
+                         sorted(REGISTERED_CHECK_IDS))
+        self.assertEqual(report["subject"]["project_id"], "fagenorn/nix-config")
+        self.assertNotIn("failed", [c["status"] for c in report["checks"]])
+        self.assertEqual(by_id["host.tracker.credential"]["reason_code"],
+                         "offline_constraint")
+        self.assertEqual(report["outcome"]["status"], "incomplete")
+        for repair in report["repairs"]:
+            self.assertNotEqual(repair["safety_class"], "destructive")
+        self.assert_validates(report)
+
+    def test_workflow_entry_on_a_broken_contract_stops_at_one_root_cause(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            (root / ".agents/project.json").write_text("{ broken", encoding="utf-8")
+            code, out, err = run("run", "--purpose", "workflow_entry",
+                                 "--repo-root", str(root))
+            self.assertEqual(code, 2, err)
+            report = json.loads(out)
+            self.assertEqual(len(report["checks"]), 1)
+            self.assertEqual(len(report["repairs"]), 1)
+            self.assertEqual(report["checks"][0]["id"], "repository.contract.valid")
+            self.assertEqual(report["checks"][0]["reason_code"], "invalid_contract")
+            self.assertEqual(report["outcome"]["primary_check_id"],
+                             "repository.contract.valid")
+            self.assert_validates(report)
+
+
 if __name__ == "__main__":
     unittest.main()
