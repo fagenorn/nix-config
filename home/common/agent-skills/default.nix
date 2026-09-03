@@ -82,6 +82,11 @@ in
       executable = false;
     };
 
+    ".agents/bin/adopt-project" = {
+      source = ./scripts/adopt-project.py;
+      executable = true;
+    };
+
     ".agents/bin/agent-model-matrix" = {
       source = ./scripts/agent-model-matrix.py;
       executable = true;
