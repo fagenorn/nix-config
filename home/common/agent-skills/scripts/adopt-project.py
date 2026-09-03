@@ -24,8 +24,9 @@ scope — outside the target checkout, so it cannot appear in the target's own
 `git status` (D14). Every refusal in it mutates nothing; a failed pre-commit
 gate leaves no commit and retains the worktree with its evidence (D17); a
 green run produces exactly one commit on one new branch and removes the
-worktree only after proving the ref carries it. It never pushes, never merges
-and never writes the fleet registry.
+worktree only after proving that the commit changes exactly the paths the plan
+declared and that the ref carries it. It never pushes, never merges and never
+writes the fleet registry.
 
 `verify` answers the conformance question read-only against the committed
 state — the contract resolves, every projection is in sync, no agent path is
@@ -77,18 +78,52 @@ PLATFORM_LIBRARY_MEMBERS = (
 PLATFORM_LIBRARY_REPAIR_ID = "platform.library.missing"
 
 
+def library_dir() -> Path | None:
+    """The one directory every platform library is bound from, or None.
+
+    Without `HOME` there is no installed platform at all, which is the same
+    installation defect an absent library is and refuses the same way.
+    """
+    home = os.environ.get("HOME")
+    return Path(home) / ".agents" / "lib" / "python" if home else None
+
+
+def loaded_from(module: object, directory: Path) -> bool:
+    """Whether `module` was loaded from its own installed file in `directory`.
+
+    Importing by name is not the guard: `sys.path` still carries this script's
+    own directory behind the insertion, and a `PYTHONPATH` entry or a
+    site-packages install of the same name answers the import just as
+    willingly. Only the resolved `__file__` says *which* file answered, so an
+    absent installation refuses here instead of being silently substituted by
+    whatever else the interpreter can reach.
+
+    Both sides are resolved, because Home Manager installs each library as a
+    symlink into the Nix store: the module reports the symlink's path and the
+    comparison has to be made over the file they both name.
+    """
+    origin = getattr(module, "__file__", None)
+    if not origin:
+        return False
+    try:
+        return (Path(origin).resolve()
+                == (directory / f"{module.__name__}.py").resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def bootstrap_platform_library() -> bool:
     """Bind the shared library from its one installed path, or report failure."""
     global agent_platform
-    home = os.environ.get("HOME")
-    if not home:
+    directory = library_dir()
+    if directory is None:
         return False
-    sys.path.insert(0, str(Path(home) / ".agents" / "lib" / "python"))
+    sys.path.insert(0, str(directory))
     try:
         import agent_platform as loaded
     except Exception:
         return False
-    if (not getattr(loaded, "__file__", None)
+    if (not loaded_from(loaded, directory)
             or any(not hasattr(loaded, name)
                    for name in PLATFORM_LIBRARY_MEMBERS)):
         return False
@@ -150,6 +185,7 @@ ADOPT_PLANNING_MEMBERS = (
     "derive_identity",
     "evaluate_ready_gates",
     "next_command_for",
+    "require_unclaimed_digest",
     "route_outcome",
     "store_document",
     "store_plan_path",
@@ -163,6 +199,7 @@ ADOPT_APPLY_MEMBERS = (
     "load_stored_plan",
     "plan_digest",
     "prove_branch_carries_commit",
+    "prove_commit_content",
     "retain_failure",
     "run_commit_gates",
     "signing_requested",
@@ -184,11 +221,17 @@ def bootstrap_adopt_libraries() -> bool:
     `bootstrap_platform_library` has already put the one installed library
     directory on `sys.path`, so this adds no second lookup path and no
     fallback ladder: the modules are found exactly where Nix installs them or
-    they are not found at all. A library whose own `from` import of a sibling
-    cannot be satisfied fails this import too, so the guard reaches the names
-    the libraries read from each other as well as the ones read here.
+    they are not found at all — `loaded_from` holds each of the four to that
+    directory for the same reason it holds `agent_platform` there, since the
+    path behind the insertion can satisfy these imports too. A library whose
+    own `from` import of a sibling cannot be satisfied fails this import too,
+    so the guard reaches the names the libraries read from each other as well
+    as the ones read here.
     """
     global adopt_inspection, adopt_planning, adopt_apply, adopt_verify
+    directory = library_dir()
+    if directory is None:
+        return False
     try:
         import adopt_inspection as inspection
         import adopt_planning as planning
@@ -200,7 +243,7 @@ def bootstrap_adopt_libraries() -> bool:
                             (planning, ADOPT_PLANNING_MEMBERS),
                             (applying, ADOPT_APPLY_MEMBERS),
                             (verifying, ADOPT_VERIFY_MEMBERS)):
-        if (not getattr(module, "__file__", None)
+        if (not loaded_from(module, directory)
                 or any(not hasattr(module, name) for name in members)):
             return False
     adopt_inspection = inspection
@@ -483,6 +526,10 @@ def command_plan(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
     document = compose_plan(root, manifest).document
+    # Before the write, never after: storing is what binds this id to this
+    # checkout, and the binding a stored document already carries is never
+    # re-pointed at a second one (D15, D16).
+    adopt_planning.require_unclaimed_digest(document["plan"]["plan_id"], root)
     adopt_planning.store_document(
         document["plan"]["plan_id"], document)
     if args.format == "human":
@@ -682,6 +729,15 @@ def command_apply(args: argparse.Namespace) -> int:
 
     commit = adopt_inspection.git_or_fail(
         worktree, "rev-parse", "HEAD").decode("ascii", "strict").strip()
+    # The gates judged the worktree before the commit; these two judge the
+    # commit itself. Content first — a verification command or a `pre-commit`
+    # hook can stage after the last gate passed — then the ref.
+    try:
+        adopt_apply.prove_commit_content(worktree, commit, changes)
+    except adopt_inspection.AdoptError as error:
+        adopt_apply.retain_failure(digest, document, worktree, branch, gates,
+                                   error.repair_id)
+        raise
     adopt_apply.prove_branch_carries_commit(
         root, worktree, branch, base_revision, commit)
     code, _ = adopt_inspection.run_git(root, "worktree", "remove", str(worktree))

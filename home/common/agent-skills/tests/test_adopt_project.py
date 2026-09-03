@@ -749,11 +749,20 @@ class PlanIdentityTest(AdoptTestCase):
         self.assertEqual(first[1], second[1])
 
     def test_a_second_checkout_yields_the_same_id_at_a_different_root(self):
+        """D15: the id is a property of the repository, not of the machine.
+
+        The copy is planned under a user scope of its own, because a stored
+        plan stays bound to the one checkout it was derived from and the
+        second checkout's plan is refused rather than allowed to re-point it
+        (`test_adopt_project_boundaries.PlanClaimTest`). The two ids are equal
+        all the same, which is the property D15 is about.
+        """
         root = nix_config_shape_repo(self.home)
         other = Path(tempfile.mkdtemp()).resolve() / "copy"
         shutil.copytree(root, other)
         first = self.ready_plan(root)
-        second = self.ready_plan(other)
+        code, second, err = self.plan(other, home=make_home())
+        self.assertEqual(code, 0, err)
         self.assertEqual(first["plan"]["plan_id"], second["plan"]["plan_id"])
         self.assertNotEqual(first["handoff"]["repo_root"],
                             second["handoff"]["repo_root"])
@@ -1134,6 +1143,12 @@ class AdoptFailureWrapperTest(unittest.TestCase):
     """
 
     def load(self):
+        # Each library caches in `sys.modules` under its one name, while every
+        # case here runs under a temporary `HOME` of its own. The binding guard
+        # checks *which* file answered the import, so a copy left behind by an
+        # earlier `HOME` would fail it; a deployed run has one `HOME`.
+        for name in ("agent_platform", *ADOPT_LIBRARIES):
+            sys.modules.pop(name, None)
         spec = importlib.util.spec_from_file_location("adopt_project", SCRIPT)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)

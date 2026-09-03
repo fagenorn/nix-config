@@ -574,6 +574,102 @@ class CommitGateTest(ApplyTestCase):
 
 
 # --------------------------------------------------------------------------
+# What the commit itself carries
+# --------------------------------------------------------------------------
+
+
+class CommitContentTest(ApplyTestCase):
+    """The commit changes exactly the paths the plan's operations declare.
+
+    The gates judge the worktree *before* the commit, and they are ordered:
+    the status gate runs first, the one that executes every declared
+    verification command runs last, and a `pre-commit` hook runs after all six
+    have passed. Whatever either of those stages is in the index `git commit`
+    reads, so it lands in the commit — while the ref proofs stay true of it,
+    because the branch still adds exactly one commit and the worktree is clean
+    once that commit has swallowed the extra content.
+
+    Both cases smuggle one file in and prove the refusal names it.
+    """
+
+    SMUGGLED = "smuggled.txt"
+
+    def assert_refused(self, root: Path, plan_id: str, base: str) -> None:
+        """The refusal, the untouched target, and the retained evidence.
+
+        The commit exists — it is what was judged — so unlike a failed gate
+        this leaves a branch carrying it, retained beside its worktree for the
+        operator to inspect rather than amended or reset away (D17).
+        """
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["code"], "verification_failed")
+        self.assertEqual(payload["error"]["repair_id"],
+                         "adopt.commit.unplanned_content")
+        self.assertTrue(payload["error"]["violations"])
+        self.assertEqual(git(root, "rev-parse", "HEAD").strip(), base)
+        self.assertEqual(git(root, "status", "--porcelain"), "")
+        self.assertTrue(self.worktree(plan_id).is_dir())
+        evidence = self.state(
+            "adopt", "worktrees", self.digest(plan_id) + ".failure.json")
+        self.assertEqual(
+            json.loads(evidence.read_text("utf-8"))["repair_id"],
+            "adopt.commit.unplanned_content")
+        # The file the plan never named is exactly what the commit carries
+        # beyond it, which is what the proof read.
+        branch = f"adopt-{self.digest(plan_id)[:12]}"
+        self.assertIn(self.SMUGGLED, git(
+            root, "show", "--name-only", "--format=", branch).split())
+
+    def staging_command(self) -> tuple[str, ...]:
+        return ("sh", "-c",
+                f"printf x > {self.SMUGGLED} && git add {self.SMUGGLED}")
+
+    def test_a_verification_command_that_stages_content_is_refused(self):
+        """The last gate runs project commands in the worktree; the first gate
+        checked the status before any of them ran."""
+        root = apply_repo(self.home, verification=self.staging_command())
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        self.assert_refused(root, plan_id,
+                            git(root, "rev-parse", "HEAD").strip())
+
+    def test_a_pre_commit_hook_that_stages_content_is_refused(self):
+        """Nothing at all runs between the last gate and this hook, so no
+        pre-commit check can see what it adds."""
+        root = apply_repo(self.home)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        # Hooks live in the common directory, which the adoption worktree
+        # shares with the repository it was added from.
+        hook = root / ".git" / "hooks" / "pre-commit"
+        hook.write_text(
+            f"#!/bin/sh\nprintf x > {self.SMUGGLED}\n"
+            f"git add {self.SMUGGLED}\n", encoding="utf-8")
+        hook.chmod(0o755)
+        self.assert_refused(root, plan_id,
+                            git(root, "rev-parse", "HEAD").strip())
+
+    def test_the_planned_commit_changes_exactly_the_planned_paths(self):
+        """The control: with nothing smuggled in, the proof passes and the set
+        of changed paths is the operations' own."""
+        root = apply_repo(self.home)
+        document = self.ready_plan(root)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        # `--no-renames`, because a move is two paths here: the operation
+        # names both, and a rename-detected view would show only the new one.
+        changed = set(git(root, "show", "--no-renames", "--name-only",
+                          "--format=", result["commit"]).split())
+        required, optional = set(), set()
+        for operation in document["changes"]:
+            if operation["op"] == "regenerate-projection":
+                optional.update(operation["targets"])
+            else:
+                required.update(operation["sources"] + operation["targets"])
+        self.assertTrue(required)
+        self.assertTrue(required <= changed, required - changed)
+        self.assertTrue(changed <= required | optional, changed - required)
+
+
+# --------------------------------------------------------------------------
 # The parser
 # --------------------------------------------------------------------------
 

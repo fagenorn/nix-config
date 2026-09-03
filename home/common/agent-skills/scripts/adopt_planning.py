@@ -647,6 +647,50 @@ def store_plan_path(plan_id: str) -> Path:
     return stored_plan_path(plan_id.split(":", 1)[1])
 
 
+def stored_repo_root(plan_id: str) -> str | None:
+    """The checkout a plan already stored under this id was derived from.
+
+    None when nothing is stored, and None as well when what is stored will not
+    parse or names no `repo_root`: a file in that state describes no checkout,
+    so it claims none, and `apply` refuses it as `adopt.plan.malformed` anyway.
+    """
+    data = read_bytes_bounded(store_plan_path(plan_id))
+    if data is None:
+        return None
+    try:
+        document = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    handoff = document.get("handoff") if isinstance(document, dict) else None
+    root = handoff.get("repo_root") if isinstance(handoff, dict) else None
+    return root if isinstance(root, str) else None
+
+
+def require_unclaimed_digest(plan_id: str, root: Path) -> None:
+    """Refuse to re-point a stored plan at a second checkout.
+
+    The content address deliberately excludes the absolute checkout path (D15),
+    so two checkouts holding identical content at one revision produce one
+    `plan_id` — and therefore one stored document, at one path. Without this,
+    planning the second checkout would silently rewrite the first document's
+    `handoff.repo_root`, and `apply <plan_id>` — whose only argument is that id
+    (D16) — would carry an approval given for one checkout out against the
+    other. Storing is what binds the id to a checkout, so the binding is made
+    immutable here rather than re-checked at apply time: `apply` reads its
+    target from the document, and by then there is nothing left to compare it
+    against.
+
+    Re-planning the same checkout is unaffected and stays idempotent.
+    """
+    claimed = stored_repo_root(plan_id)
+    if claimed is not None and claimed != str(root):
+        raise refuse(
+            "adopt_failure", "adopt.plan.repo_root_claimed",
+            "/handoff/repo_root",
+            "a plan under this identifier is already stored for a different "
+            "checkout")
+
+
 def store_document(plan_id: str, document: dict) -> None:
     """Write a plan document to its one user-scope home, atomically (D14)."""
     plan_path = store_plan_path(plan_id)

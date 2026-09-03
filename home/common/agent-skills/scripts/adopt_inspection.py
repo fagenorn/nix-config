@@ -403,32 +403,46 @@ def object_hash(object_id: str) -> str:
     return "git-object:" + object_id
 
 
+def encoded(text: str) -> bytes:
+    """`text` as bytes, undoing the `surrogateescape` every git path arrives by.
+
+    A git path is a byte string and nothing guarantees it is UTF-8, so every
+    one of them is decoded `surrogateescape` here; encoding back the same way
+    is the exact inverse, and a path that carries no surrogate encodes exactly
+    as a strict UTF-8 encode would. A strict encode instead raises on a
+    perfectly valid non-UTF-8 filename, and that raise reaches the caller as
+    `adopt.internal` rather than as a decision anyone made.
+    """
+    return text.encode("utf-8", "surrogateescape")
+
+
 def group_fingerprint(members: list[tuple[str, str]]) -> str:
     """`sha256` over `Σ sorted(path \\0 object-id \\n)` for a tracked group."""
     digest = hashlib.sha256()
     for path, object_id in sorted(members):
-        digest.update(path.encode("utf-8"))
+        digest.update(encoded(path))
         digest.update(b"\0")
-        digest.update(object_id.encode("utf-8"))
+        digest.update(encoded(object_id))
         digest.update(b"\n")
     return "sha256:" + digest.hexdigest()
 
 
 def canonical_json(value: object) -> bytes:
+    """Compact, sorted JSON. `ensure_ascii` stays on, so a surrogate-escaped
+    path is escaped rather than encoded and every digest over this is ASCII."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       allow_nan=False).encode("utf-8")
 
 
 def document_bytes(value: object) -> bytes:
     """A committed generated artifact: readable, sorted, newline-terminated."""
-    return (json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False)
-            + "\n").encode("utf-8")
+    return encoded(
+        json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False) + "\n")
 
 
 def authored_bytes(value: object) -> bytes:
     """An amended authored file: key order preserved, newline-terminated."""
-    return (json.dumps(value, indent=2, ensure_ascii=False)
-            + "\n").encode("utf-8")
+    return encoded(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
 
 # --------------------------------------------------------------------------
 # Paths

@@ -3,8 +3,10 @@
 Everything `adopt-project apply` is made of below its command function: the
 stored document's loader, the validation of every caller-reachable operation,
 the typed execution of the operations themselves, the six pre-commit gates and
-their ordered run, the fixed commit message (D28), and the retention of a
-failed attempt beside its worktree (D17).
+their ordered run, the fixed commit message (D28), the two proofs taken over
+the commit once it exists — that it changes exactly the planned paths, and
+that the branch carries it and nothing else — and the retention of a failed
+attempt beside its worktree (D17).
 
 Every refusal here mutates nothing, and nothing here trusts a stored
 operation: the plan id authenticates the plan's *inputs*, and the entry point
@@ -526,6 +528,71 @@ def signing_requested(payload: object) -> bool | None:
     commit = vcs.get("commit") if isinstance(vcs, dict) else None
     signed = commit.get("signed") if isinstance(commit, dict) else None
     return signed if isinstance(signed, bool) else None
+
+
+def expected_commit_paths(operations: list[dict]) -> tuple[set[str], set[str]]:
+    """`(required, optional)` paths a commit of these operations may change.
+
+    The same split `expected_status` makes, over paths rather than status
+    records: a projection regeneration is idempotent, so its target is
+    permitted rather than demanded, and every other kind names paths the
+    commit has to carry. Dispatched exhaustively over the closed kind set.
+    """
+    required: set[str] = set()
+    optional: set[str] = set()
+    for operation in operations:
+        kind = operation["op"]
+        if kind == "git-mv":
+            required.update({operation["sources"][0],
+                             operation["targets"][0]})
+        elif kind == "write-file":
+            required.add(operation["targets"][0])
+        elif kind == "delete-file":
+            required.add(operation["sources"][0])
+        elif kind == "regenerate-projection":
+            optional.add(operation["targets"][0])
+        else:
+            raise ValueError(f"unknown operation kind: {kind!r}")
+    return required, optional
+
+
+def commit_paths(worktree: Path, commit: str) -> set[str]:
+    """Every path the commit changes against its parent.
+
+    Rename detection is turned off explicitly rather than left to the default,
+    so a move reports both its old and its new path — exactly the pair the
+    operation declares — whatever `diff.renames` the machine carries.
+    """
+    out = git_or_fail(worktree, "diff-tree", "--root", "-r", "-z",
+                      "--no-renames", "--no-commit-id", "--name-only", commit)
+    return {chunk.decode("utf-8", "surrogateescape")
+            for chunk in out.split(b"\0") if chunk}
+
+
+def prove_commit_content(worktree: Path, commit: str,
+                         operations: list[dict]) -> None:
+    """The commit changes exactly the paths the planned operations declare.
+
+    The gates judge the worktree *before* the commit, and the earliest of them
+    — the status gate — runs before the last one executes every declared
+    verification command in the checkout. Anything those commands stage, and
+    anything a `pre-commit` hook stages after every gate has already passed, is
+    in the index when `git commit` reads it and lands in the commit. Counting
+    commits and finding the worktree clean afterwards cannot see that: both are
+    still true of a commit carrying content no gate ever approved.
+
+    So the commit's own content is proved rather than its shape. Nothing is
+    amended and nothing is reset: the refusal retains the worktree and its
+    branch exactly as a failed gate does, and the operator inspects what was
+    smuggled in (D17).
+    """
+    required, optional = expected_commit_paths(operations)
+    changed = commit_paths(worktree, commit)
+    if not required <= changed or not changed <= required | optional:
+        raise refuse(
+            "verification_failed", "adopt.commit.unplanned_content", "",
+            "the adoption commit does not change exactly the paths the "
+            "plan's operations declare")
 
 
 def prove_branch_carries_commit(root: Path, worktree: Path, branch: str,
