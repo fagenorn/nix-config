@@ -45,7 +45,7 @@ if (
     and argv[0:2] == ["pr", "view"]
     and argv[3] == "--repo"
     and argv[5] == "--json"
-    and argv[6] == "state,baseRefName,url"
+    and argv[6] == "state,baseRefName,headRefName,url,statusCheckRollup"
 ):
     stage, number, slug, branch = "pr", argv[2], argv[4], "main"
 elif len(argv) == 2 and argv[0] == "api":
@@ -76,7 +76,10 @@ if mode == "invalid":
 if stage == "pr":
     default = (
         '{"state":"OPEN","baseRefName":"' + branch + '",'
-        '"url":"https://github.com/' + slug + "/pull/" + number + '"}'
+        '"headRefName":"issue-' + number + '-topic",'
+        '"url":"https://github.com/' + slug + "/pull/" + number + '",'
+        '"statusCheckRollup":[{"__typename":"CheckRun",'
+        '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
     )
 else:
     default = (
@@ -568,6 +571,122 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         blocked = self.run_guard(merge, cwd=repo, env=main_pr)
         self.assertEqual(2, blocked.returncode)
         self.assertIn("protection lookup failed", blocked.stderr)
+
+    # ------------------------------------------------------------------
+    # Release arm: the declared integration branch promoted into the default
+    # branch. Its head is permanent, so the merge omits `--delete-branch`, and
+    # the guard demands exactly that PR shape plus a fully green rollup.
+    # ------------------------------------------------------------------
+
+    RELEASE_PR = {
+        "state": "OPEN",
+        "baseRefName": "main",
+        "headRefName": "dev",
+        "url": "https://github.com/elevenyellow/nodocom/pull/1484",
+        "statusCheckRollup": [
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SKIPPED"},
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+            {"__typename": "StatusContext", "state": "SUCCESS"},
+        ],
+    }
+
+    def release_env(self, **overrides):
+        pr = dict(self.RELEASE_PR)
+        pr.update(overrides)
+        # Protection is poisoned on purpose: the release arm must never consult it.
+        return {"FAKE_PR_JSON": json.dumps(pr), "FAKE_PROTECTION_MODE": "nonzero"}
+
+    def test_release_merge_omits_delete_branch_for_integration_into_default(self):
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        for command in (
+            "gh pr merge 1484 --repo elevenyellow/nodocom --merge",
+            "unset GITHUB_TOKEN && gh pr merge 1484 --repo elevenyellow/nodocom --merge",
+            "unset GITHUB_TOKEN && gh pr merge 1484 --repo elevenyellow/nodocom --merge "
+            '--subject "merge: dev — showcases, engine roll (dev → main)"',
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo, env=self.release_env())
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_release_merge_arm_requires_exactly_integration_into_default(self):
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        merge = "gh pr merge 7 --repo elevenyellow/nodocom --merge"
+        for head, base in (
+            ("issue-7-topic", "main"),   # a feature branch into the default branch
+            ("issue-7-topic", "dev"),    # a feature branch into the integration branch
+            ("main", "dev"),             # the wrong way round
+        ):
+            with self.subTest(head=head, base=base):
+                result = self.run_guard(
+                    merge, cwd=repo, env=self.release_env(headRefName=head, baseRefName=base))
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn(
+                    "--delete-branch may be omitted only when merging dev into main",
+                    result.stderr,
+                )
+        # The feature arm is untouched: the same feature PR still merges into
+        # the integration branch when it says --delete-branch.
+        allowed = self.run_guard(
+            merge + " --delete-branch", cwd=repo,
+            env=self.release_env(headRefName="issue-7-topic", baseRefName="dev"))
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+
+    def test_release_merge_arm_needs_a_declared_integration_base(self):
+        # Without a declared integration branch there is no permanent head to
+        # spare; the arm is refused before any forge lookup (poisoned to prove it).
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "gh pr merge 1 --repo fagenorn/nix-config --merge",
+            'gh pr merge 1 --repo fagenorn/nix-config --merge --subject "x"',
+            "unset GITHUB_TOKEN && gh pr merge 1 --repo fagenorn/nix-config --merge",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo, env={"FAKE_PR_MODE": "nonzero"})
+                self.assertEqual(2, result.returncode)
+                self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+                self.assertIn("declared integration branch", result.stderr)
+
+    def test_release_merge_arm_blocks_unless_every_check_is_green(self):
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        merge = "gh pr merge 1484 --repo elevenyellow/nodocom --merge"
+        green = self.RELEASE_PR["statusCheckRollup"]
+        for rollup in (
+            [],
+            None,
+            "green",
+            [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}],
+            [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "CANCELLED"}],
+            [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "TIMED_OUT"}],
+            [{"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": None}],
+            [{"__typename": "StatusContext", "state": "PENDING"}],
+            [{"__typename": "StatusContext", "state": "FAILURE"}],
+            green + [{"__typename": "CheckRun", "status": "QUEUED", "conclusion": None}],
+        ):
+            with self.subTest(rollup=rollup):
+                result = self.run_guard(
+                    merge, cwd=repo, env=self.release_env(statusCheckRollup=rollup))
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("check rollup is not entirely green", result.stderr)
+        absent = dict(self.RELEASE_PR)
+        del absent["statusCheckRollup"]
+        result = self.run_guard(
+            merge, cwd=repo,
+            env={"FAKE_PR_JSON": json.dumps(absent), "FAKE_PROTECTION_MODE": "nonzero"})
+        self.assertEqual(2, result.returncode)
+        self.assertIn("check rollup is not entirely green", result.stderr)
+
+    def test_release_merge_arm_keeps_the_open_pr_predicate(self):
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        merge = "gh pr merge 1484 --repo elevenyellow/nodocom --merge"
+        for overrides in (
+            {"state": "MERGED"},
+            {"url": "https://github.com/other/repo/pull/1484"},
+        ):
+            with self.subTest(overrides=overrides):
+                result = self.run_guard(merge, cwd=repo, env=self.release_env(**overrides))
+                self.assertEqual(2, result.returncode)
+                self.assertIn("PR predicate failed", result.stderr)
 
     def test_prefixed_merge_near_misses_fail_closed(self):
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
