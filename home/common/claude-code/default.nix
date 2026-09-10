@@ -60,6 +60,10 @@ let
   # could stand in for the release PR's actual checks.
   integrationBases = {
     "elevenyellow/nodocom" = "dev";
+    # arcwave is a private free-plan repository: GitHub refuses branch
+    # protection there, so the default-branch merge demand can never be met.
+    # Feature PRs integrate on `dev`; releases promote `dev` to `main`.
+    "fagenorn/arcwave" = "dev";
   };
 
   lifecycleGuard = pkgs.writeTextFile {
