@@ -25,7 +25,7 @@ Work from whatever is already in the conversation context. If the user passes an
 
 ### 2. Explore the codebase (optional)
 
-If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use the project's domain vocabulary. If the project documents a domain glossary (the map's area files, else `docPaths.context`) or architectural decision records (each area's `docs/areas/<slug>/adr/`, plus `system`; legacy repos: `docPaths.adrDir`), read the relevant parts so titles and descriptions use the project's terminology and respect existing decisions in the area you're touching. If those docs are absent, skip this grounding step silently.
+If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use terminology from retained `bindings.paths.context` and the knowledge capability's passed records. An authored unsupported knowledge capability takes its documented no-knowledge route.
 
 Look for opportunities to prefactor the code to make the implementation easier — "make the change easy, then make the easy change." Prefactoring is its own leading slice, not a preamble folded into the first feature slice.
 

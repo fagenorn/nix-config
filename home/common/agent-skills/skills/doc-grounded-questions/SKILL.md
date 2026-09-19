@@ -17,13 +17,13 @@ Run `resolve-project resolve --repo-root <checkout>` once and retain the full `R
 
 For every clarifying question or option set you're about to surface, do this pass first. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter call, one selects that absolute path, and more than one is an invalid caller contract that stops before invocation. Never probe, sort, or infer a location.
 
-1. **Read the context map, then only the areas you need.** `docPaths.contextMap` if configured, otherwise `docs/CONTEXT-MAP.md` (or legacy root `CONTEXT-MAP.md`). Always read the map in full — it is capped at 150 lines. Then open an area's `CONTEXT.md` **only** when its `governs:` globs intersect the paths the issue touches, or one of its terms (per the map's term table) appears in the issue or your question. Use canonical terms without re-asking. No map → legacy single-doc fallback (REFERENCE.md).
+1. **Read the selected context map, then only the areas you need.** Always read the selected map in full — it is capped at 150 lines. Then open an area's `CONTEXT.md` only when its `governs:` globs intersect the paths the issue touches, or one of its terms appears in the issue or your question. With no selected map, use only the retained `bindings.paths.context` entries passed by the owner.
 
 2. **Scan the decision log.** The `adr/` dirs of the areas you opened in step 1, plus `docs/areas/system/adr/` always (legacy ADR homes: REFERENCE.md). List the directory, read the titles, open any that look relevant. A settled decision → state it and ask only whether anything has *changed* since.
 
-3. **Read the standards that apply.** `~/.agents/standards/the-bar.md`, its `stacks/*.md` shards matching the change's file extensions, and project deltas at `docPaths.standards` (layer detail: REFERENCE.md). If a proposed option violates a rule you found, drop it or say why you're surfacing it anyway.
+3. **Read the standards that apply.** Use the retained `bindings.paths.standards` list and `capabilities.knowledge.*`. If a proposed option violates a rule you found, drop it or say why you're surfacing it anyway.
 
-4. **Read the architecture doc** if the question touches more than one component (`docPaths.architecture`, else `ARCHITECTURE.md` / `docs/architecture.md` / a README section) for cross-tier invariants. Past ~400 lines, read by governing section, never whole — the rule for every long doc this pass sends you to, map excepted (why: REFERENCE.md).
+4. **Read architecture** from retained `bindings.paths.architecture` if the question touches more than one component. Past ~400 lines, read by governing section, never whole.
 
 5. **Grep the codebase** for the central concept. Keep a small direct grep inline; when the result set needs a sharply bounded read-only exploration pass, use the explicit explorer dispatch instead:
 
@@ -32,7 +32,7 @@ Agent(subagent_type="Explore", model="haiku", effort="medium") performs one shar
 
    If the codebase already commits to a pattern, the default option should be "match the existing pattern" and you must justify any divergence. If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the caller's existing ledger or fixed-schema report.
 
-If `projectHints` is configured and present (a directory → its `review.md`; a single file → itself), read it too.
+Use retained `bindings.paths.hints` only when the knowledge capability documents that route.
 
 ## Ground once per phase, cache the result
 

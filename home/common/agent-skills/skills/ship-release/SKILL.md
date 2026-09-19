@@ -23,11 +23,11 @@ release ownership across cheaper transport or mechanic agents.
 
 Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.release`, and `bindings.deploy`. A blocked required capability stops; authored unsupported takes only the existing no-capability route.
 
-`<integration>` means the resolved `integrationBranch`, `<default>` the resolved `defaultBranch`. When they're identical (the common single-branch repo) there is no PR to open: run Phases 0 **and** 1 — the pre-flight and the changelog body / bump evidence are still required — then skip Phases 2–4 and continue at Phase 4.5. The release ref is the confirmed tip of `<default>`. The two-branch flow below is the general case.
+`<integration>` and `<default>` come from `bindings.vcs.integration_branch` and `bindings.vcs.default_branch`; repository identity comes only from `bindings.tracker.repo_slug`. When they're identical there is no PR: run Phases 0 **and** 1, skip Phases 2–4, and continue at Phase 4.5. The release ref is the confirmed tip of `<default>`.
 
-Derive `repoSlug` once from `git remote get-url origin` when config doesn't set it (strip the `git@github.com:` / `https://github.com/` prefix and trailing `.git`), and reuse it for every PR/commit/release URL. **Never hardcode an owner/name.**
+Use `bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}` for all forge actions. An authored unsupported tracker takes only the existing tracker-free route; a blocked tracker stops the dependent forge operation. Never derive a repository value from Git or configuration.
 
-When `issueTracker.kind == "none"` there is no forge: run Phases 0–1, then replace Phases 2–4 with a local true merge (`git checkout <default> && git merge --no-ff <integration>`), tag the **local merge result** — `git rev-parse <default>` *after* the merge, never `origin/<default>`, which is still the stale pre-merge tip — skip the PR / CI-wait / GitHub-Release steps, and report the merge SHA + tag.
+For the tracker-free route, run Phases 0–1, replace Phases 2–4 with a local true merge (`git checkout <default> && git merge --no-ff <integration>`), tag the local merge result, skip forge steps, and report the merge SHA and tag.
 
 ## Durable release state
 

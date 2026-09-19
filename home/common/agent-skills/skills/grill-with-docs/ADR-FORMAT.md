@@ -4,7 +4,7 @@ This included document receives values from the phase owner's retained `Resolved
 
 ADRs live in the area they concern: `docs/areas/<slug>/adr/`, named `NNN-kebab-title.md`. **Each directory numbers its own records** — three digits, starting at `001`. Writing one means listing that directory and taking its next free number at merge time; what other areas have numbered is irrelevant.
 
-**Which directory.** The area whose `governs:` globs cover the code the decision constrains, or `docs/areas/system/` when it spans areas or belongs to none. The map's Areas table is the list to choose from — ADR homes are derived from the map, not configured. (`docPaths.adrDir` is a legacy override, honoured only in repos still on a single central ADR directory.) Create the `adr/` directory lazily, with the first record that needs it.
+**Which directory.** Use the ADR home passed from the phase owner's retained `bindings.paths.context` selection. The map's Areas table is the list to choose from. Create the `adr/` directory lazily, with the first record that needs it.
 
 **The id is `ADR-<slug>-NNN`** and the header line restates it: `# ADR-<slug>-NNN — Title`, where `<slug>` equals the containing area directory's name and `NNN` equals the filename's number. Both are linted. That full id is the only citation form anywhere in the repo — never a bare number, not even from inside the record's own area.
 

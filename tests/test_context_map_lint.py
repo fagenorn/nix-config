@@ -33,6 +33,15 @@ class ContextMapLintTest(unittest.TestCase):
             outside = self.run_lint(root, Path(temp).parent / "outside.md")
             self.assertEqual(outside.returncode, 2)
 
+    def test_missing_context_map_and_malformed_map(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            missing = subprocess.run(["python3", str(LINTER), "--repo-root", str(root)], text=True, capture_output=True)
+            self.assertEqual(missing.returncode, 2)
+            context_map = root / "CONTEXT-MAP.md"
+            context_map.write_text("not a context map")
+            self.assertEqual(self.run_lint(root, context_map).returncode, 1)
+
     def test_source_has_no_policy_discovery(self):
         source = LINTER.read_text(encoding="utf-8")
         for token in ("resolve-project", ".agents/project.json", "find_map(", "docs/CONTEXT-MAP.md"):

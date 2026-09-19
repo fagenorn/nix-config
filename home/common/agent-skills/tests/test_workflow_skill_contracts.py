@@ -230,6 +230,13 @@ def assert_retained_policy_support(case, root, documents):
                 case.assertNotIn(forbidden, text)
 
 
+def select_context_map(paths):
+    matches = [path for path in paths if Path(path).name == "CONTEXT-MAP.md"]
+    if len(matches) > 1:
+        raise ValueError("invalid caller contract")
+    return matches[0] if matches else None
+
+
 class ProjectPolicySurfaceTest(unittest.TestCase):
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -249,6 +256,25 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
 
     def test_ship_issue_configured_review_pair_is_complete(self):
         assert_configured_code_review_pair(self, SHIP_ISSUE, SHIP_ISSUE_REVIEW)
+
+    def test_context_map_selection_uses_only_authored_order(self):
+        table = (
+            ([], None),
+            (["/repo/CONTEXT.md"], None),
+            (["/repo/other.md", "/repo/CONTEXT-MAP.md", "/repo/end.md"], "/repo/CONTEXT-MAP.md"),
+        )
+        for paths, expected in table:
+            with self.subTest(paths=paths):
+                self.assertEqual(select_context_map(paths), expected)
+        with self.assertRaisesRegex(ValueError, "invalid caller contract"):
+            select_context_map(["/repo/a/CONTEXT-MAP.md", "/repo/b/CONTEXT-MAP.md"])
+
+    def test_context_map_consumers_forbid_discovery(self):
+        for relative in ("doc-grounded-questions/SKILL.md", "grill-with-docs/SKILL.md", "grill-with-docs/CONTEXT-FORMAT.md"):
+            text = (REPO_ROOT / "home/common/agent-skills/skills" / relative).read_text(encoding="utf-8")
+            self.assertIn("bindings.paths.context", text)
+            for forbidden in ("docPaths.contextMap", "select the first match", "sort("):
+                self.assertNotIn(forbidden, text)
 
 
 def assert_configured_code_review_pair(case, owner, support):

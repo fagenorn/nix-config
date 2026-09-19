@@ -1,5 +1,7 @@
 # Context Map & Area Glossary Format
 
+This included format receives the phase owner's retained `ResolvedProject`. Context-map selection filters `bindings.paths.context` in authored order for basename `CONTEXT-MAP.md`: zero selects no map and invokes no linter, one selects that absolute path, and more than one is an invalid caller contract before invocation. Never probe, sort, or infer a map location.
+
 Domain knowledge lives as a **map plus area glossaries**. The map is an index, never a store: it names the areas, the paths each one governs, and which area owns each term. The definitions live in the area files. Readers load the map every time (cheap) and open only the area files whose `governs:` globs intersect the paths they are touching.
 
 **Location: contained in `docs/`.** The docs root holds exactly two loose files — `README.md`, the routing index, and `CONTEXT-MAP.md`, the map. Everything else lives in a reserved directory:
@@ -26,7 +28,7 @@ docs/
 
 `docs/areas/system/` is the reserved pseudo-area for decisions that belong to no single area. Its map row is real — gist "decisions spanning areas", `governs:` glob `*` — and its `CONTEXT.md` is a stub of a few lines, because every grounding pass loads it. **There is no central `docs/adr/`**: every ADR lives in exactly one `docs/areas/<slug>/adr/`, so tooling has one shape and no special cases.
 
-Prefer `.claude/skills.config.json`'s `docPaths.contextMap` / `docPaths.context` when set. (Two legacy layouts survive where a repo still uses them — a root `CONTEXT-MAP.md` with code-colocated area files, and flat `docs/<slug>/` areas beside a central `docs/adr/`. Follow what a repo actually has rather than imposing this tree on it mid-migration.)
+Use only the caller-selected path from `bindings.paths.context`; included formats never read configuration or discover locations.
 
 Skill output is not documentation and does not live here: specs, plans, handoffs and notes go to `.claude/specs/`, `.claude/plans/`, `.claude/handoffs/`, `.claude/notes/`.
 
