@@ -64,5 +64,9 @@ Phase-5 reviewer `fresh-sol-high` reviewed head `c4b4a0d7b9de4feaf8d48d2497f0c1f
 | B4 | Applied — Task 5 patches first, immediately retains its sole resolver result, then adds/runs the contract test. |
 | B5 | Applied — release-contract tests migrate and stage with resolved tracker behavior. |
 | S1 | Applied — configured-review assertions are ordered and scoped to each owning skill/support-document pair. |
+| B2 residual | Applied — exact-basename selection now has explicit zero/one/multiple contract tests over the authored snapshot list. |
+| B3 residual | Applied — the tracked scan skips deleted entries before decoding and separately asserts every legacy deletion. |
+
+Residual re-review of head `e1003b0` supplied the two residual findings above; no other scope changed.
 
 ---

@@ -27,7 +27,7 @@
 - The fixture contract is complete schema 1: project `fixture/tinytask`; Git/main with `issue-<num>-<slug>` and `.worktrees`/`worktree-`; tracker unsupported with kind `none`; artifact paths `.claude/specs` and `.claude/plans`; its existing context/standards/architecture paths; verification command argv `["python3","-m","unittest","discover"]`; orchestration 180 minutes / max 2; plan/code review, release, and deploy unsupported; deploy adapter `none`; current Claude/Codex projections.
 - `run-eval.sh` resolves each fresh sandbox once after initialization, retains the JSON in one shell variable, and derives only snapshot fields with `jq`. Resolver refusal terminates the trial; no legacy config/default path exists.
 - Source and installed descriptors name the same consumers. Installed shared files live under `~/.agents/skills`; installed Claude-only files live under `~/.claude/skills`. If either managed root exists, both and every expected consumer are mandatory (D4).
-- Living-source checks enumerate tracked paths with `git ls-files -z`, admit only explicit text suffixes/extensionless managed scripts, and cover managed source, evaluation harness/fixtures, installation declarations, root guidance, lifecycle-guard comments, and `scripts/context-map-lint.py`. They explicitly exclude historical `.claude/specs/**` and `.claude/plans/**`; ignored caches, binaries, generated build output, and untracked files are never opened as UTF-8 (D8).
+- Living-source checks enumerate tracked paths with `git ls-files -z`, skip entries deleted in the working tree, admit only explicit text suffixes/extensionless managed scripts, and cover managed source, evaluation harness/fixtures, installation declarations, root guidance, lifecycle-guard comments, and `scripts/context-map-lint.py`. They explicitly exclude historical `.claude/specs/**` and `.claude/plans/**`; ignored caches, binaries, generated build output, untracked files, and deleted paths are never opened as UTF-8. Separate assertions require every legacy path scheduled for deletion to be absent (D8).
 - Parser symbols for the allowed literal `unset GITHUB_TOKEN` remain. Comments/tests describe the allowed names as coming from `bindings.tracker.credential_env.unset_before_invocation`; issue 116's parser architecture is unchanged.
 
 - [ ] **Step 1: Add zero-reference and installed-matrix tests first**
@@ -64,6 +64,8 @@ def test_living_source_has_no_legacy_policy_surface(self):
                for prefix in historical_prefixes):
             continue
         path = REPO_ROOT / relative
+        if not path.is_file():
+            continue
         if path.suffix not in text_suffixes and path.name not in {
             "resolve-project", "context-map-lint", "artifact-budget",
             "agent-evidence", "agent-model-matrix", "diff-scope",
@@ -78,6 +80,10 @@ def test_living_source_has_no_legacy_policy_surface(self):
     self.assertFalse((REPO_ROOT / ".claude" / ("skills." "config.json")).exists())
     self.assertFalse((REPO_ROOT /
         ("home/common/agent-skills/scripts/resolve-" "bindings")).exists())
+    self.assertFalse((REPO_ROOT /
+        ("home/common/agent-skills/tests/test_resolve_" "bindings.py")).exists())
+    self.assertFalse((REPO_ROOT / "home/common/agent-skills/evals/fixture-repo" /
+        ".claude" / ("skills." "config.json")).exists())
 
 def test_installed_policy_surface_matches_source_contract(self):
     if os.environ.get("WORKFLOW_POLICY_SURFACE") == "source":
@@ -134,7 +140,7 @@ Update `CLAUDE.md`, `home/common/claude-code/default.nix`, and `tests/test_claud
 
 Run: `python3 home/common/agent-skills/tests/test_workflow_skill_contracts.py ProjectPolicySurfaceTest.test_living_source_has_no_legacy_policy_surface ProjectPolicySurfaceTest.test_shared_source_phase_entries_use_one_resolved_project ProjectPolicySurfaceTest.test_claude_source_phase_entries_use_one_resolved_project -v`
 
-Expected: PASS. Missing expected consumers, any living legacy string, fallback instruction, extra resolver entry, untracked/binary read, or context-map-lint policy discovery fails.
+Expected: PASS. Missing expected consumers or legacy-path absence, any living legacy string, fallback instruction, extra resolver entry, attempted read of a deleted/untracked/binary path, or context-map-lint policy discovery fails.
 
 Run: `python3 -m unittest discover -s home/common/agent-skills/tests -p 'test_resolve_project.py' -q`
 
