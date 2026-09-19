@@ -22,7 +22,7 @@
 
 ## Task index
 
-Task 1 — Reconcile authorized workflow progress and check delivery size early — home/common/agent-skills/skills/{from-issue,handoff,wayfind,design,writing-plans,sdd}, home/common/claude-code/skills/orchestrate-issues — full — [task-1.md](2026-09-19-harness-workflow-safeguards.tasks/task-1.md)
+Task 1 — Reconcile authorized workflow progress and check delivery size early — home/common/agent-skills/skills/{from-issue,handoff,wayfind,design,writing-plans,sdd,ship-issue}, home/common/claude-code/skills/orchestrate-issues — full — [task-1.md](2026-09-19-harness-workflow-safeguards.tasks/task-1.md)
 
 ## Decisions
 
