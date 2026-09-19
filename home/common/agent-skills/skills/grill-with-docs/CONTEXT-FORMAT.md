@@ -1,6 +1,6 @@
 # Context Map & Area Glossary Format
 
-This included format receives the phase owner's retained `ResolvedProject`. Context-map selection filters `bindings.paths.context` in authored order for basename `CONTEXT-MAP.md`: zero selects no map and invokes no linter, one selects that absolute path, and multiple matches are an invalid caller contract before invocation. Never probe, sort, or infer a map location.
+This included format receives the phase owner's retained `ResolvedProject`. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter invocation, one selects that absolute path, and multiple matches are an invalid caller contract that stops before invocation. Never probe the filesystem, sort the list, take a first match, or infer a location.
 
 Domain knowledge lives as a **map plus area glossaries**. The map is an index, never a store: it names the areas, the paths each one governs, and which area owns each term. The definitions live in the area files. Readers load the map every time (cheap) and open only the area files whose `governs:` globs intersect the paths they are touching.
 

@@ -4,7 +4,7 @@ Loaded by Phase 1 of [`SKILL.md`](./SKILL.md). This file owns the *content* of a
 
 This included document receives the phase owner's retained `ResolvedProject`; it uses `bindings.tracker`, `bindings.vcs`, and `bindings.workflow.release` without resolving or inferring policy.
 
-`<integration>`, `<default>`, and `<repoSlug>` resolve as in SKILL.md. Build every PR/commit/ADR URL from `<repoSlug>`; never hardcode an owner/name.
+`<integration>` and `<default>` come from `bindings.vcs`; the repository slug comes from `bindings.tracker.repo_slug`. Build every PR/commit/ADR URL from that passed slug; never hardcode an owner/name.
 
 The audience is the operator debugging something three months from now — usually you. They don't care about the SHA of every cherry-pick; they care about *what landed and what they need to know to operate it*.
 
@@ -20,7 +20,7 @@ Field separator `%x1f` (US), record separator `%x1e` (RS) — neither collides w
 
 Single-branch (`<integration> == <default>`): the range is `$PREV..origin/<default>` where `PREV=$(git describe --tags --abbrev=0 origin/<default> 2>/dev/null)` (whole history when no tag yet), and drop `--merges` — direct commits are the release units there.
 
-For each merge, resolve the PR (skip when `issueTracker.kind == "none"`):
+For each merge, resolve the PR only when `capabilities.tracker` permits it:
 
 ```bash
 ${GH_PREFIX}gh pr list --search "<merge-sha>" --state merged \
@@ -53,18 +53,18 @@ Judgment notes:
 ## Step 3 — Write each entry
 
 **One short sentence, imperative voice, operator-facing meaning, PR link.** The project's worked
-examples (entry rewrites, synthesis, bump calls) live in the project hints (`projectHints` directory
-→ its `changelog.md`); read them now if present.
+examples (entry rewrites, synthesis, bump calls) arrive through passed
+`bindings.paths.hints` paths; read them now if present.
 
 | Bad | Good |
 |---|---|
-| `c7d3002a merge: <slug> — <terse desc> (issue-N → <integration>)` | `<What changed, in the words an operator would search for> — <the consequence they'd notice> ([#N](https://github.com/<repoSlug>/pull/N))` |
+| `c7d3002a merge: <slug> — <terse desc> (issue-N → <integration>)` | `<What changed, in the words an operator would search for> — <the consequence they'd notice> ([#N](https://github.com/<passed-repo-slug>/pull/N))` |
 | `Various fixes and improvements` | (delete; if you're tempted to write this, you haven't read enough merges yet) |
 
 - Lead with the *change*, not the issue number.
 - Use the words an operator would search for — feature names, endpoint paths, env var names, table names. Not internal class names unless they're the user-facing surface.
 - Link the PR inline with the **full URL**, never a bare `#N` — many forges auto-link a bare `#N` against the wrong repo under cross-references.
-- Link ADRs when relevant: `[ADR-<slug>-NNN](docs/areas/<slug>/adr/NNN-<kebab>.md)`, cited by full id. In a legacy repo with a central ADR directory, use `docPaths.adrDir` and that repo's own id form instead. Skip when the repo keeps no ADRs.
+- Link ADRs only from the caller-passed context paths, cited by their full id. Skip when none were passed.
 - Don't include the SHA; the PR link is enough.
 - One PR that shipped two distinct operator-visible changes gets two entries linking the same PR.
 
@@ -106,7 +106,7 @@ Tone: factual, not promotional. No "exciting new", no "we're thrilled" — opera
 <details>
 <summary>All <N> merged PRs, in commit order</summary>
 
-- [#N](https://github.com/<repoSlug>/pull/N) — <merge subject verbatim>
+- [#N](https://github.com/<passed-repo-slug>/pull/N) — <merge subject verbatim>
 - ...
 </details>
 
@@ -158,4 +158,4 @@ When the rubric is ambiguous:
 - **A NOT NULL column added with a backfill default** → MINOR, with the backfill timeline in Deploy notes. Compatible from the application's side, but downstream consumers querying the column directly see nothing pre-migration.
 - **In genuine doubt, propose the higher bump** and show the reasoning. Over-bumping costs one tag; under-bumping ships a break the operator wasn't warned about. The cost is asymmetric.
 
-Whether release notes carry an AI-assistance trailer follows `commit.coAuthoredBy` (default: include).
+Whether release notes carry an AI-assistance trailer follows `bindings.vcs`.

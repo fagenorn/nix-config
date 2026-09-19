@@ -2,7 +2,7 @@
 
 Phase 3 of `ship-issue`. Mine the session for high-signal learnings and promote them to docs that already exist — or drop them.
 
-This included document receives the phase owner's retained `ResolvedProject`; it uses passed D3 paths and workflow values without resolving or inferring policy.
+This included document receives the phase owner's retained `ResolvedProject`; it uses passed `bindings.paths`, `bindings.vcs`, and `bindings.workflow` values without resolving or inferring policy.
 
 Project-agnostic: destination paths come only from the parent’s retained `bindings.paths` and `capabilities.knowledge.*`. An authored unsupported knowledge capability takes its documented no-knowledge route.
 
@@ -31,11 +31,11 @@ A surviving candidate maps to exactly one **existing** doc. If the mapped path i
 
 | Type of learning | Destination (config key) |
 |---|---|
-| New domain term, clarified invariant | `docPaths.context` |
-| Hard-to-reverse decision with real alternatives | New record in the owning area's `adr/` (`docs/areas/<slug>/adr/`, or `system` when it spans areas; legacy repos: `docPaths.adrDir`) — must pass the three-part test: hard-to-reverse + surprising-without-context + result-of-a-real-trade-off |
-| Tooling, CI, or operations quirk | `docPaths.gitWorktrees`, `docPaths.operationsDir`, or `docPaths.devenvTooling` — whichever covers the surface |
-| Codebase-wide rule | `docPaths.standards` |
-| Skill workflow issue (a phase failed predictably, a prompt was unclear, a step got skipped wrongly) | The relevant `.claude/skills/<name>/SKILL.md` |
+| New domain term, clarified invariant | A passed `bindings.paths.context` destination |
+| Hard-to-reverse decision with real alternatives | A passed context-area ADR destination, after the three-part test: hard-to-reverse + surprising-without-context + result-of-a-real-trade-off |
+| Tooling, CI, or operations quirk | The passed `bindings.paths` destination that covers the surface |
+| Codebase-wide rule | A passed `bindings.paths.standards` destination |
+| Skill workflow issue (a phase failed predictably, a prompt was unclear, a step got skipped wrongly) | The caller-provided skill source destination |
 
 Where the project ships format references next to the grilling skill (`grill-with-docs`'s `CONTEXT-FORMAT.md` / `ADR-FORMAT.md`), use them for the context/ADR rows; if absent, match the destination doc's existing neighbours.
 
@@ -47,9 +47,9 @@ A candidate requiring a brand-new top-level doc is a leap — push back unless t
 
 Look only at what actually happened; don't speculate about what could go wrong in the abstract.
 
-- `git log <branch> ^origin/<integrationBranch> --oneline` — look for `fixup!`/`squash!` (review blockers fixed) and merge commits (semantic conflicts that needed thought).
-- `gh run list --branch <branch> --json conclusion,name,databaseId` + `gh run view <id>` for failed CI runs resolved in-flow. (Skip when `issueTracker.kind=none`.)
-- `git diff <first-commit> <head> -- '<specDir>/*issue-<num>*' '<planDir>/*issue-<num>*'` — spec/plan revisions during execution mark where the original design was wrong.
+- `git log <branch> ^origin/<integration-branch> --oneline` — look for `fixup!`/`squash!` and merge commits that needed thought.
+- Use the caller-selected verification command for failed CI runs; skip it when `capabilities.tracker` is unsupported.
+- Diff the caller-provided artifact paths from `bindings.paths.artifacts` — spec/plan revisions during execution mark where the original design was wrong.
 - Conversation context: tooling surprises, escalations, repeated friction.
 
 ### 2. Apply the rubric
@@ -74,12 +74,12 @@ The user responds per candidate: accept / refine / reject. Default to reject und
 
 ### 5. Apply
 
-Edit each accepted destination inline, matching the format that doc already uses. Commit as `docs(<scope>): <one-line summary>`, one commit per destination file, following `commit.coAuthoredBy`.
+Edit each accepted destination inline, matching the format that doc already uses. Commit as `docs(<scope>): <one-line summary>`, one commit per destination file, following `bindings.vcs`.
 
 ### 6. Empty outcome
 
 The expected outcome for most issues — but it's a *claim*, so back it with the evidence trail from step 1 so a reviewer can confirm the mining actually happened:
 
-> "No high-signal learnings to promote — continuing to PR. (`git log <branch> ^origin/<integrationBranch>`: N commits, no `fixup!`/`squash!`; `gh run list`: no failed runs; spec/plan diff: clean.)"
+> "No high-signal learnings to promote — continuing to PR. (`git log <branch> ^origin/<integration-branch>`: N commits, no `fixup!`/`squash!`; selected verification: clean; artifact diff: clean.)"
 
 Don't force a learning that isn't there, and don't skip the mining to declare "empty" by default.

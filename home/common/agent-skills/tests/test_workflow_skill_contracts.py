@@ -196,6 +196,34 @@ SHARED_POLICY_SUPPORT = {
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
 }
 
+RETAINED_SUPPORT_CONTRACTS = {
+    "from-issue/bindings.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
+    "from-issue/AUTO.md": ("bindings.paths.artifacts", "bindings.tracker", "bindings.vcs", "bindings.workflow"),
+    "from-issue/REVIEW-CONTRACT.md": ("bindings.workflow.review", "bindings.commands"),
+    "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
+    "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
+    "ship-issue/CONSOLIDATE.md": ("bindings.paths", "bindings.vcs"),
+    "ship-issue/HUMAN-GATE.md": ("bindings.vcs", "bindings.tracker"),
+    "ship-issue/SYNC.md": ("bindings.vcs", "bindings.paths.hints"),
+    "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
+}
+
+SUPPORT_POLICY_FORBIDDEN = (
+    "resolve-project resolve", "resolve-bindings", "skills.config.json",
+    ".agents/project.json", "docPaths", "specDir", "planDir", "projectHints",
+    "integrationBranch", "repoSlug", "unsetGithubToken", "issueTracker.",
+    "commit.coAuthoredBy", "auto-detect", "helper missing", "not_onboarded",
+    ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md",
+)
+
+CONTEXT_MAP_SELECTION_CONTRACT = (
+    "Select context maps only from the retained `bindings.paths.context` list in "
+    "authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; "
+    "zero means no map and no linter invocation, one selects that absolute path, "
+    "and multiple matches are an invalid caller contract that stops before invocation. "
+    "Never probe the filesystem, sort the list, take a first match, or infer a location."
+)
+
 RESOLUTION_SENTENCE = (
     "Resolve once at phase entry, retain the returned `ResolvedProject` in "
     "memory, and treat every resolver error as fatal before mutation or "
@@ -218,7 +246,7 @@ def assert_policy_entries(case, root, entries):
                 case.assertNotIn(forbidden, text)
 
 
-def assert_retained_policy_support(case, root, documents):
+def assert_retained_policy_support(case, root, documents, forbidden=SUPPORT_POLICY_FORBIDDEN):
     for relative, fields in documents.items():
         text = (root / relative).read_text(encoding="utf-8")
         with case.subTest(relative=relative):
@@ -226,8 +254,8 @@ def assert_retained_policy_support(case, root, documents):
             case.assertIn("retained `ResolvedProject`", text)
             for field in fields:
                 case.assertIn(field, text)
-            for forbidden in ("resolve-" "bindings", ".claude/skills.", "config.json", "helper missing", "not_" "onboarded", "auto-detect", ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md"):
-                case.assertNotIn(forbidden, text)
+            for prohibited in forbidden:
+                case.assertNotIn(prohibited, text)
 
 
 def select_context_map(paths):
@@ -249,7 +277,13 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         assert_policy_entries(self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_ENTRIES)
 
     def test_shared_support_documents_reuse_the_retained_snapshot(self):
-        assert_retained_policy_support(self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_SUPPORT)
+        assert_retained_policy_support(
+            self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_SUPPORT,
+            ("resolve-bindings", "skills.config.json", "helper missing", "not_onboarded", "auto-detect", ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md"),
+        )
+
+    def test_listed_support_documents_reuse_only_passed_snapshot_fields(self):
+        assert_retained_policy_support(self, REPO_ROOT / "home/common/agent-skills/skills", RETAINED_SUPPORT_CONTRACTS)
 
     def test_sdd_configured_review_pair_is_complete(self):
         assert_configured_code_review_pair(self, SDD, SDD_DIR / "final-review.md")
@@ -272,30 +306,13 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_context_map_consumers_forbid_discovery(self):
         for relative in ("doc-grounded-questions/SKILL.md", "grill-with-docs/SKILL.md", "grill-with-docs/CONTEXT-FORMAT.md"):
             text = (REPO_ROOT / "home/common/agent-skills/skills" / relative).read_text(encoding="utf-8")
-            contract = text
-            self.assert_ordered(contract, "bindings.paths.context", "basename", "CONTEXT-MAP.md", "zero", "no map", "no linter", "one", "absolute path", "multiple", "invalid caller contract", "before invocation")
-            for forbidden in ("docPaths.contextMap", "docs/CONTEXT-MAP.md", "select the first match", "sort("):
+            contract = normalized(text)
+            self.assertIn(CONTEXT_MAP_SELECTION_CONTRACT, contract)
+            for forbidden in (
+                "docPaths.contextMap", "docs/CONTEXT-MAP.md", "select the first match",
+                "sort(", "filesystem search", "first match wins", "default map location",
+            ):
                 self.assertNotIn(forbidden, contract)
-
-    def test_listed_support_documents_receive_retained_snapshot(self):
-        root = REPO_ROOT / "home/common/agent-skills/skills"
-        documents = {
-            "from-issue/bindings.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
-            "from-issue/AUTO.md": (),
-            "from-issue/REVIEW-CONTRACT.md": ("bindings.workflow.review", "bindings.commands"),
-            "ship-issue/CONSOLIDATE.md": ("bindings.paths",),
-            "ship-issue/HUMAN-GATE.md": (), "ship-issue/SYNC.md": ("bindings.vcs",),
-            "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
-        }
-        for relative, fields in documents.items():
-            with self.subTest(relative=relative):
-                text = (root / relative).read_text(encoding="utf-8")
-                self.assertIn("retained `ResolvedProject`", text)
-                for field in fields:
-                    self.assertIn(field, text)
-                if relative == "from-issue/bindings.md":
-                    for forbidden in ("skills.config.json", "docPaths", "auto-detect", "default `"):
-                        self.assertNotIn(forbidden, text)
 
 
 def assert_configured_code_review_pair(case, owner, support):
@@ -1062,7 +1079,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             delegated,
             "Before reading either artifact",
-            "`branchPattern` and `worktreePrefix`",
+            "caller-passed `bindings.vcs` branch and",
             "decimal `owner.issue`",
             "final path component",
             "binding-derived accepted branch regex",
@@ -2294,7 +2311,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             normalized(gate_1),
             "git push -u origin <branch>",
-            'gh pr create --base <integrationBranch> --title "<title>" --body',
+            'gh pr create --base <integration-branch> --title "<title>" --body',
             "Closes #<num>",
         )
         gate_2 = self.section(
@@ -2333,8 +2350,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             ban,
             "On this path the session must not:",
-            "- merge the feature branch into `<integrationBranch>` locally;",
-            "- push to `<integrationBranch>`;",
+            "- merge the feature branch into the passed `<integration-branch>` locally;",
+            "- push to the passed `<integration-branch>`;",
             "- push to any remote other than `origin`;",
             "- pass `--admin`, `--force`, `--force-with-lease`, or any "
             "hook-bypass flag;",

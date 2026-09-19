@@ -15,7 +15,7 @@ Run `resolve-project resolve --repo-root <checkout>` once and retain the full `R
 
 ## The grounding pass
 
-For every clarifying question or option set you're about to surface, do this pass first. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter call, one selects that absolute path, and multiple matches are an invalid caller contract that stops before invocation. Never probe, sort, or infer a location.
+For every clarifying question or option set you're about to surface, do this pass first. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter invocation, one selects that absolute path, and multiple matches are an invalid caller contract that stops before invocation. Never probe the filesystem, sort the list, take a first match, or infer a location.
 
 1. **Read the selected context map, then only the areas you need.** Always read the selected map in full — it is capped at 150 lines. Then open an area's `CONTEXT.md` only when its `governs:` globs intersect the paths the issue touches, or one of its terms appears in the issue or your question. With no selected map, use only the retained `bindings.paths.context` entries passed by the owner.
 
