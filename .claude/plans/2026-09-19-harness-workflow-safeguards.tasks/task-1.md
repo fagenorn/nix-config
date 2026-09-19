@@ -1,6 +1,6 @@
 # Task 1: Reconcile authorized workflow progress and check delivery size early
 
-**Files:** Shared skills `from-issue/SKILL.md`, `from-issue/investigate.md`, `handoff/SKILL.md`, `wayfind/SKILL.md`, `design/SKILL.md`, `writing-plans/SKILL.md`, `sdd/SKILL.md`, `ship-issue/SKILL.md`, `ship-issue/HUMAN-GATE.md`; Claude skill `orchestrate-issues/SKILL.md`; owning `evals/evals.json` files. Modify existing contract tests only to remove expectations made obsolete by these requirements, never add wording-mirror tests.
+**Files:** Shared skills `from-issue/SKILL.md`, `from-issue/investigate.md`, `from-issue/AUTO.md` (only matching Phase-0 and authorization contradictions), `handoff/SKILL.md`, `wayfind/SKILL.md`, `design/SKILL.md`, `writing-plans/SKILL.md`, `sdd/SKILL.md`, `ship-issue/SKILL.md`, `ship-issue/HUMAN-GATE.md`; Claude skill `orchestrate-issues/SKILL.md`; owning `evals/evals.json` files. Modify existing contract tests only to remove expectations made obsolete by these requirements, never add wording-mirror tests.
 
 **Interfaces:** Existing artifact-budget/review-package commands and fixed workflow/result JSON are unchanged. Handoff scope is prose inside the handoff artifact, not new transport keys. New behavior evals use existing prompt/expected_output structures.
 
