@@ -1028,20 +1028,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("unchanged", phase_gate)
 
     def test_auto_gate_enumeration_covers_an_unguarded_host(self):
-        # AUTO.md's final paragraph is the one suspension route for shipping
-        # gates. It gains the review-adjudicated host as a third qualifying
-        # case, so the operator gate reuses the mechanism that already exists.
-        self.assertIn(
-            "At any Phase-6 or Phase-7 push, PR-open, or merge gate the "
-            "lifecycle guard does not stand — a repository the guard does not "
-            "cover, a merge it fails closed on, or a host that has no such "
-            "guard at all and adjudicates intent by review instead — do not die "
-            "at the prompt: follow `SKILL.md`'s suspension procedure, "
-            "suspending `blocked_on: human_gate` and printing the canonical "
-            "re-entry line, so a later human approval resumes the same attempt "
-            "without penalty.",
-            normalized(self.auto),
-        )
         # No second pause shape is introduced: after Step 3b the file names
         # `blocked_on: human_gate` twice — the shipping-gate route here and
         # the self-answer exemption — and `human_gate` is still the only
@@ -1050,29 +1036,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(
             sorted(set(re.findall(r"blocked_on[:=] ?(\w+)", normalized(self.auto)))),
             ["human_gate"],
-        )
-
-    def test_auto_never_self_answers_an_irreversible_authorization_gate(self):
-        # D13: the general self-answer instruction cannot stand unqualified
-        # once a gate exists that `--auto` must NOT answer for the operator.
-        # Grounded in D2's #84 (a fresh, single-use confirmation, never
-        # inherited) and #90 (one operator touchpoint; silence is never yes).
-        self.assertIn(
-            "One class of gate is exempt: a gate that asks a human to "
-            "authorize an irreversible action is never self-answered. Its "
-            "confirmation must be fresh and single-use, and silence never "
-            "means yes — so present the gate's block and follow `SKILL.md`'s "
-            "suspension procedure, suspending `blocked_on: human_gate` and "
-            "printing the canonical re-entry line, rather than answering on "
-            "the operator's behalf.",
-            normalized(self.auto),
-        )
-        # The general rule itself is unchanged and still stands first.
-        self.assert_ordered(
-            normalized(self.auto),
-            "when one tells you to ask or wait, run the self-answer pattern "
-            "instead.",
-            "One class of gate is exempt:",
         )
 
     def test_human_gate_carries_no_affirmative_bypass_instruction(self):
@@ -1430,22 +1393,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "progress requires an active attempt",
             "suspension procedure",
             "Persistence precedes notification",
-        )
-
-    def test_authorization_truth_is_single_and_shared(self):
-        sentence = (
-            "Standing authorization exists exactly where the lifecycle guard grants it: "
-            "pushing a non-default branch, opening a PR to the default branch, and the "
-            "guarded merge, in fagenorn-owned repositories; everywhere else these commands "
-            "stay per-action gated — suspend with blocked_on=human_gate and print the "
-            "re-entry line instead of dying at the prompt."
-        )
-        self.assertIn(sentence, self.ship_issue)
-        self.assertIn(sentence, self.from_issue)
-        self.assertNotIn("Don't re-prompt for `git push`", self.ship_issue)
-        self.assertNotIn(
-            "Push, PR open/merge, force-push, and hook bypass stay per-action gated.",
-            self.from_issue,
         )
 
     def test_suspension_procedure_pins_verb_line_and_distinction(self):
@@ -2107,12 +2054,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         expected_occurrences = [
             "7. Merge                   → "
             f"{optional_subject} (true merge commit)",
-            "In a qualifying repository, on a host whose permission layer "
-            "adjudicates each command deterministically against validated "
-            "spellings — the Claude host's `PreToolUse` guard — this skill IS "
-            "that chain: `git push`, `gh pr create`, "
-            f"`{optional_subject}`, branch delete, and worktree remove need no "
-            "re-prompt; pause only where a phase says to.",
             rendered_subject,
         ]
         occurrences = [
@@ -2146,75 +2087,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertNotIn(
             "In a qualifying repository this skill IS that chain:", auth
         )
-        # D15/D3: pin the section's *complete* normalized shape. Selection is
-        # then provably by these two enforcement-model rows and nothing else —
-        # no probe, no env-var sniff and no capability handshake can hide in a
-        # sentence the assertions below do not name.
-        self.assertEqual(
-            normalized(auth).strip(),
-            normalized(
-                "## Standing authorization "
-                "Standing authorization exists exactly where the lifecycle "
-                "guard grants it: pushing a non-default branch, opening a PR "
-                "to the default branch, and the guarded merge, in "
-                "fagenorn-owned repositories; everywhere else these commands "
-                "stay per-action gated — suspend with blocked_on=human_gate "
-                "and print the re-entry line instead of dying at the prompt. "
-                "In a qualifying repository, on a host whose permission layer "
-                "adjudicates each command deterministically against validated "
-                "spellings — the Claude host's `PreToolUse` guard — this skill "
-                "IS that chain: `git push`, `gh pr create`, "
-                '`gh pr merge <pr-num> --repo <repoSlug> --merge '
-                '[--subject "<rendered mergeSubjectTemplate>"] '
-                "--delete-branch`, branch delete, and worktree remove need no "
-                "re-prompt; pause only where a phase says to. "
-                "On a host whose permission layer adjudicates intent by review "
-                "rather than by validating spellings — the Codex host, whose "
-                "risk reviewer honours literal human messages and repository "
-                "guidance but not this skill's prose — no wording here makes "
-                "that chain executable: it is denied by default. Take the "
-                "consolidated operator gate of "
-                "[`HUMAN-GATE.md`](./HUMAN-GATE.md) instead, and never route "
-                "around a denial."
-            ).strip(),
-        )
-        self.assert_ordered(
-            auth,
-            "adjudicates each command deterministically",
-            "adjudicates intent by review",
-        )
-        # D3, kept as a named guard on top of the equality above.
+        self.assertIn("[`HUMAN-GATE.md`](./HUMAN-GATE.md)", auth)
         self.assertNotIn("CLAUDECODE", auth)
-        # Both phase pointers, entered instead of the attempt (D7).
         phase4 = self.section(
             self.ship_issue, "## Phase 4 — Open PR", "## Phase 5 — Review the PR"
-        )
-        self.assertIn(
-            "On the review-adjudicated path of `## Standing authorization`, "
-            "enter Gate 1 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before running "
-            "anything below — instead of the push, never after a denial.",
-            phase4,
         )
         phase7 = self.section(
             self.ship_issue, "## Phase 7 — Merge", "## Phase 8 — Cleanup"
         )
-        self.assertIn(
-            "On the review-adjudicated path of `## Standing authorization`, "
-            "enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before "
-            "anything below — present the command rendered below, never "
-            "attempt it first. The gate comes first on this path because it "
-            "waits for the operator's own message; `check-launch` is then "
-            "re-validated after the grant arrives, immediately before the "
-            "merge, exactly as the next paragraph requires, so the launch "
-            "identity is fresh at the moment of the write.",
-            phase7,
-        )
-        # D12: the gate waits for a human, so it must not sit between
-        # `check-launch` and the merge. Order on this path is
-        # Gate 2 → check-launch → merge.
         self.assert_ordered(
             phase7,
-            "enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md)",
+            "Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md)",
             "Run `check-launch` (see `## Launch guard`) immediately before the merge",
             "gh pr merge <pr-num> --repo <repoSlug> --merge",
         )
@@ -2268,15 +2151,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "shipping verb and then react to the denial.",
             flat,
         )
-        # D16: two *planned* locations on the successful path — not a hard
-        # count of entries, because a failed command re-enters its own gate.
-        self.assertIn(
-            "There are two planned gate locations on the successful path — one "
-            "before the first push, one before the merge. A failed command "
-            "re-enters its own gate for a fresh single-use grant, so the gate "
-            "can be entered more often than twice; it is never entered fewer.",
-            flat,
-        )
         # D2/#90: Gate 1 shows the whole remaining chain once.
         self.assertIn(
             "Gate 1 also names that a second and final gate follows after CI and "
@@ -2287,17 +2161,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # D6: Gate 2 refers to the merge, never re-spells it.
         self.assertIn(
             "Present the merge command exactly as Phase 7 renders it.", flat
-        )
-        # AC2, qualified per D18 the way D16 qualified the gate count: the
-        # session resumes in place through to issue closure on the *successful*
-        # path. Unqualified, this contradicted the grant semantics below, which
-        # send a failed execution back through its own gate.
-        self.assertIn(
-            "After this grant nothing further is asked on the successful path: "
-            "the same session resumes in place and runs the chain to issue "
-            "closure and cleanup. A failed execution is the exception the grant "
-            "semantics name: it re-enters its own gate for a fresh grant.",
-            flat,
         )
         # D15/AC2: the literal payloads are what make the handoff
         # *consolidated*. Pin each gate's block, in order, inside its own
@@ -2332,14 +2195,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "git branch -d <branch>",
         )
         for clause in (
-            "A grant covers exactly the literal command strings presented, each "
-            "consumed by exactly one execution.",
-            "A command that renders differently in any byte from the granted "
-            "literal is not covered and needs a fresh gate.",
             "Silence is not a grant.",
             "A partial reply grants only the commands it names.",
-            "A failed execution is not re-run under the same grant; re-entering "
-            "the gate is the only path.",
             # D8: additional to, never a substitute for, the existing checks.
             "The grant is additional to every check the Claude path performs, "
             "never a substitute:",

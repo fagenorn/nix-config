@@ -35,10 +35,32 @@ or anything the package mandates that the review rubric treats as a defect — a
 present findings as one batched question (each beside the plan text mandating it,
 asking which governs) before execution begins. A missing or unreadable member is a contract error, never a fallback to monolithic parsing. Clean scan → proceed
 without comment. After that, the controller holds only the plan root **header** —
-summary, Global Constraints, Test seams, and the `## Task index` (ID, title,
+summary, Global Constraints, Test seams, Delivery estimate and boundaries, and the `## Task index` (ID, title,
 files touched, risk lane, member link per task) — its compact checker metrics,
 plus the current task's brief from `scripts/task-brief`; never re-read the whole
 package or retain other task bodies. Build the todo list from the Task index.
+
+### Cumulative delivery gate
+
+Resolve the integration branch from the project bindings, then pin
+`DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD
+origin/<integration-branch>`. Never derive it from an independently advanced
+local integration branch. Before the first implementer, and after each completed
+task before any next dispatch, pin `DELIVERY_HEAD` to the full `git rev-parse
+HEAD` SHA and run `scripts/review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD`.
+Apply the producer-boundary validation and independent `artifact-budget check
+--kind review-package` metric comparison defined in the task loop. This
+cumulative gate supplements the task-scoped package and review; it does not
+replace either.
+
+A validated existing package satisfies a gate only when its manifest's full
+`range.base` and `range.head` equal the intended full SHAs, its retained producer
+report still validates, and a fresh independent artifact check agrees with all
+four metrics. Seven-character path prefixes never establish range identity.
+Record both full SHAs and the four checked metrics in the ledger. Exit 2 or 3,
+malformed output, stale range identity, or metric disagreement cannot advance:
+preserve completed work and identify an independently deliverable split for the
+caller instead of dispatching more work.
 
 ## Agent tiers
 
@@ -176,7 +198,7 @@ Never fix findings yourself in the controller session — controller fixes skip 
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, move on. Never advance past open Critical/Important findings that are neither fixed nor parked.
+Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked.
 
 ## Final review — two axes
 

@@ -48,12 +48,13 @@ must be persisted before notification.
 Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`,
 `ship-issue`) don't know about `--auto`. *You* carry the autonomous-mode
 context — when one tells you to ask or wait, run the self-answer pattern
-instead. One class of gate is exempt: a gate that asks a human to authorize an
-irreversible action is never self-answered. Its confirmation must be fresh and
-single-use, and silence never means yes — so present the gate's block and
-follow `SKILL.md`'s suspension procedure, suspending `blocked_on: human_gate`
-and printing the canonical re-entry line, rather than answering on the
-operator's behalf.
+instead. Never self-answer a request for new authorization. First apply any
+existing explicit user grant whose scope covers the concrete action and target;
+a phase or session boundary does not erase it. Silence never creates or expands
+a grant. When authority is absent, present the gate's concrete block and follow
+`SKILL.md`'s suspension procedure, suspending `blocked_on: human_gate` and
+printing the canonical re-entry line. An actual permission denial stops that
+action and is never routed around.
 
 ## When *not* to auto-resolve
 
@@ -62,9 +63,11 @@ about the work itself rather than user-approval gates:
 
 - **Phase 0 wrong-issue-type stop.** If the issue is several issues bundled, a duplicate, a pure
   question, or otherwise not implementable, surface that and stop. Auto-mode means "decide without
-  asking", not "implement something incoherent". The same holds for the Phase-0 pre-flight stops
-  (open/merged PR, dirty or multiple matching worktrees, and a matching worktree whose
-  disposability cannot be proven — prefer resuming it; never delete on ambiguity).
+  asking", not "implement something incoherent". Phase 0 reconciles an exact
+  open or merged PR per `investigate.md`; it remains a stop only when ownership,
+  target, scope, acceptance evidence, or authority is unknown. The same stop
+  rule applies to dirty or multiple matching worktrees and a matching worktree
+  whose disposability cannot be proven — prefer an authorized resume; never delete on ambiguity.
   When lifecycle identity exists, finalize this terminal result through the
   SKILL.md terminal return procedure before stopping.
 - **Phase 0 fog gate.** Before any worktree exists, test the grounded issue: can every open question
@@ -354,9 +357,11 @@ runs `sdd`, and Phase 7 dispatches `ship-issue` with the appropriate handoff.
 Reviewer, SDD, and shipping contracts remain unchanged for these routes, and
 the owning controller continues to verify and disposition findings.
 
-At any Phase-6 or Phase-7 push, PR-open, or merge gate the lifecycle guard does
-not stand — a repository the guard does not cover, a merge it fails closed on,
-or a host that has no such guard at all and adjudicates intent by review
-instead — do not die at the prompt: follow `SKILL.md`'s suspension procedure,
-suspending `blocked_on: human_gate` and printing the canonical re-entry line, so
-a later human approval resumes the same attempt without penalty.
+At every Phase-6 or Phase-7 push, PR-open, or merge gate, first apply repository
+policy or an explicit user grant covering the concrete action, target, and
+effect. A host without standing repository authorization may continue under an
+existing scoped user grant and its normal approval review. When neither source
+grants the action, follow `SKILL.md`'s suspension procedure with
+`blocked_on: human_gate` and the canonical re-entry line. This never bypasses
+`check-launch`: `current: false`, helper failure, or an actual permission denial
+stops the action and is never routed around.

@@ -33,9 +33,19 @@ Don't block on it: an in-flight lookup is an unsettled prerequisite, so only the
 
 **Ground before round 1.** Invoke `doc-grounded-questions`, or read this phase's `GROUNDING.md` cache when the caller already built one. A question the project's docs already answer is not a question — state the answer, cite it, move on.
 
-## Autonomous mode
+## Authorized autonomous decisions
 
-When the caller runs autonomously (`from-issue --auto`), **the `➡️` recommendation is the answer.** Don't post the round and don't wait: resolve each question with its recommendation and record it in the spec's `## Decision ledger` (see Output). Log only non-obvious decisions — scope, interface, behavioral, test-seam, irreversible, user-preference; skip routine task splits, commit boundaries, obvious verification commands, and mechanical pattern-following. Consolidation is permitted and encouraged: related decisions merge into one row. Rounds still run in order; the frontier is what keeps dependent decisions from being settled out of sequence.
+When the caller has already authorized autonomous decisions within a stated scope
+(including, but not limited to, literal `from-issue --auto`), **the `➡️`
+recommendation is the answer within that scope.** Don't post the round and don't
+wait: resolve each question with its recommendation and record it in the spec's
+`## Decision ledger` (see Output). Log only non-obvious decisions — scope,
+interface, behavioral, test-seam, irreversible, user-preference; skip routine
+task splits, commit boundaries, obvious verification commands, and mechanical
+pattern-following. Consolidation is permitted and encouraged: related decisions
+merge into one row. Rounds still run in order; the frontier is what keeps
+dependent decisions from being settled out of sequence. A decision that expands
+the approved scope still returns to the caller.
 
 ## Guards
 

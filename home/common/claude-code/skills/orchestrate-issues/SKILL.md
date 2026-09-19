@@ -34,6 +34,14 @@ Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
   worktree. Then select the `run_id` per the run-reuse rule in §2 — reuse an
   existing non-final run for the same issue set before minting a new one.
 
+Treat known host capacity as a capability boundary, not scheduling policy. Do
+not calculate available slots, alter control's `max_parallel`, create competing
+owners or nested relays, or repeat a rejected spawn. When the host explicitly
+cannot support an issue owner plus its required independent review, use a
+documented direct or sequential route that preserves the returned lifecycle
+identity; if none exists, report the unsupported capability. This does not add
+reservation or notification scheduling.
+
 ## 2. Bootstrap and observe
 
 Before `init-run`, list `<ledger_repo_root>/.superpowers/workflows/` for an existing run whose state covers the same issue set and still has any non-final attempt or a missing outcome; reuse that run id.

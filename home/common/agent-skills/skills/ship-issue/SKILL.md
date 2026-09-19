@@ -53,11 +53,23 @@ review prompt.
 
 ## Standing authorization
 
-Standing authorization exists exactly where the lifecycle guard grants it: pushing a non-default branch, opening a PR to the default branch, and the guarded merge, in fagenorn-owned repositories; everywhere else these commands stay per-action gated — suspend with blocked_on=human_gate and print the re-entry line instead of dying at the prompt.
+Standing authorization exists where repository policy or an explicit user grant
+covers the concrete action, target, and external effect. Carry that grant across
+phase and session boundaries; do not demand that Codex receive the same literal
+command text again. A harmless quoting or spelling change and a transient command
+failure do not erase scoped authorization. The launch guard, required CI,
+reviewed-tip check, protected-branch rules, and the host's actual automatic
+approval decision still bind.
 
-In a qualifying repository, on a host whose permission layer adjudicates each command deterministically against validated spellings — the Claude host's `PreToolUse` guard — this skill IS that chain: `git push`, `gh pr create`, `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered mergeSubjectTemplate>"] --delete-branch`, branch delete, and worktree remove need no re-prompt; pause only where a phase says to.
+In a qualifying repository, the lifecycle guard covers pushing a non-default
+branch, opening a PR to the default branch, the guarded merge, branch deletion,
+and worktree removal. Execute that authorized chain without a phase-boundary
+re-prompt while every check above passes.
 
-On a host whose permission layer adjudicates intent by review rather than by validating spellings — the Codex host, whose risk reviewer honours literal human messages and repository guidance but not this skill's prose — no wording here makes that chain executable: it is denied by default. Take the consolidated operator gate of [`HUMAN-GATE.md`](./HUMAN-GATE.md) instead, and never route around a denial.
+On a host whose permission layer adjudicates intent by review, use an existing
+user grant when it covers the same chain. When authority is absent, take the
+consolidated operator gate of [`HUMAN-GATE.md`](./HUMAN-GATE.md). An actual
+denial stops the denied action; never route around it.
 
 ## Launch guard
 
@@ -177,7 +189,9 @@ Test failures: separate *environmental* (container connectivity, missing network
 
 Skip entirely when `issueTracker.kind=none` (push the branch and stop, or merge locally per the user's request).
 
-On the review-adjudicated path of `## Standing authorization`, enter Gate 1 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before running anything below — instead of the push, never after a denial.
+When `## Standing authorization` finds no existing grant for these concrete
+actions, enter Gate 1 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before running
+anything below. Never use the gate to retry an actual denial.
 
 Run `check-launch` (see `## Launch guard`); on anything but `current: true`,
 stop without pushing. Then:
@@ -282,7 +296,11 @@ timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30
 
 (When `issueTracker.kind=none`, merge the branch into the integration branch locally per the user's instruction instead.)
 
-On the review-adjudicated path of `## Standing authorization`, enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before anything below — present the command rendered below, never attempt it first. The gate comes first on this path because it waits for the operator's own message; `check-launch` is then re-validated after the grant arrives, immediately before the merge, exactly as the next paragraph requires, so the launch identity is fresh at the moment of the write.
+When `## Standing authorization` finds no existing grant for the merge and
+cleanup chain, enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before
+anything below. The gate comes first because it waits for the operator's own
+message; `check-launch` is then re-validated after the grant arrives,
+immediately before the merge. Never use the gate to retry an actual denial.
 
 Run `check-launch` (see `## Launch guard`) immediately before the merge, and
 run it regardless of how Phase 6's tip check came out. On anything but

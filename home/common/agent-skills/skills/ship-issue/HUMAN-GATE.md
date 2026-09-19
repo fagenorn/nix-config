@@ -1,19 +1,16 @@
 # Consolidated operator gate
 
-Read this when `ship-issue` runs on the review-adjudicated path named in
-SKILL.md's `## Standing authorization` — a host whose permission layer
-adjudicates intent by review rather than by validating command spellings. On
-that path `git push`, PR creation and the merge are denied by default, and no
-wording in a skill can change that: the reviewer honours literal human messages
-and repository guidance only, never a skill's own claim to be pre-authorized.
+Read this only when SKILL.md's `## Standing authorization` finds no repository
+policy or explicit user grant covering the concrete action and target. The gate
+makes the remaining external effects reviewable; it does not grant them itself,
+and the host's actual automatic approval decision still governs execution.
 
 Enter the gate *instead of* attempting the verb — never attempt a shipping verb
 and then react to the denial.
 
-There are two planned gate locations on the successful path — one before the
-first push, one before the merge. A failed command re-enters its own gate for a
-fresh single-use grant, so the gate can be entered more often than twice; it is
-never entered fewer.
+There are up to two planned gate locations on the successful path — one before
+the first push, one before the merge — and only those whose actions lack existing
+authorization are entered.
 
 In `--auto`, present the gate's block and then pause through whoever owns the
 ledger. A fresh ship owner launched per `from-issue/ship-handoff.md` writes no
@@ -79,21 +76,24 @@ does not re-litigate it.
 
 After this grant nothing further is asked on the successful path: the same
 session resumes in place and runs the chain to issue closure and cleanup. A
-failed execution is the exception the grant semantics name: it re-enters its own
-gate for a fresh grant.
+transient execution failure does not erase the grant; retry only after
+diagnosing the failure and re-validating the same required checks. An actual
+permission denial stops the action and is never retried through another spelling.
 
 ## Grant semantics
 
 These apply to both gates.
 
-- A grant covers exactly the literal command strings presented, each consumed by
-  exactly one execution.
-- A command that renders differently in any byte from the granted literal is not
-  covered and needs a fresh gate.
+- A grant covers the concrete actions, targets, and external effects presented.
+  It survives harmless quoting or spelling changes and transient failures; it
+  does not expand to a different repository, branch, PR, or effect.
 - Silence is not a grant. No reply → keep waiting (interactive) or stay
   suspended (`--auto`). A partial reply grants only the commands it names.
-- A failed execution is not re-run under the same grant; re-entering the gate is
-  the only path.
+- An actual automatic approval denial stops the current attempt. Report the
+  denied action and reason; do not change its spelling, delegate it, or switch
+  hosts to obtain a different result. A later user message that supplies
+  genuinely missing authority or material new evidence may resume through the
+  normal approval review. Never infer that authority from a retry.
 - The grant is additional to every check the Claude path performs, never a
   substitute: `check-launch` still runs before every pre-merge forge write,
   Phase 6's tip check and the CI wait still bind, and the merge still requires

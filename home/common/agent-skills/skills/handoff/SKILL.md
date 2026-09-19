@@ -6,6 +6,12 @@ argument-hint: "What will the next session be used for?"
 
 Write a handoff document summarising the current conversation so a fresh agent can continue the work.
 
+Near the start, record four compact continuation facts in prose: the exact
+deliverable, the source and scope of existing user authorization, the next
+authorized action, and any actual permission denial. A phase transition or new
+session does not erase authorization, while a changed target or external effect
+must be called out as outside it. Do not add transport or lifecycle JSON keys.
+
 By default, create a nondurable candidate with a portable name — e.g. `mktemp
 "${TMPDIR:-/tmp}/handoff-XXXXXX.md"` (the explicit `XXXXXX` template works on
 both macOS/BSD and Linux). `mktemp` creates the empty file as it generates the

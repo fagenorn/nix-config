@@ -5,8 +5,17 @@ Loaded from `SKILL.md` at Phase 0. The stop rules and worktree-safety inspection
 ## PR pre-flight queries
 
 1. `<tracker-cli> pr list --state all --search "issue-<num>" --json number,title,headRefName,state`. The default search hits titles, bodies *and* branch names, catching PRs whose branch is `<worktreePrefix>issue-<num>-...` even when the title omits the number; don't narrow with `in:title,body`.
-2. **Open PR** for this issue: stop. Surface the URL and recommend `/ship-issue <num>` to resume it, or that the user close it first.
-3. **Merged PR**: stop. Surface the merge commit; ask whether they meant a different issue or a follow-up.
+2. **Open PR**: verify the exact issue, head branch, target branch, and acceptance
+   evidence. When it belongs to this requested work and existing authorization
+   covers delivery, resume its worktree and shipping path; do not rebuild it.
+   Unknown ownership, a competing attempt, a changed target, or different scope
+   stops for that specific missing decision.
+3. **Merged PR**: verify the same identity and compare the landed change and live
+   tracker state with the issue's acceptance criteria. Finish authorized missing
+   bookkeeping such as issue closure, or report the satisfied criteria and the
+   exact remaining unknown. Do not rebuild delivered work. Unmet criteria define
+   follow-up scope and require that scope decision; they do not make the old
+   implementation current work again.
 4. **Closed unmerged**: check why (`<tracker-cli> pr view <pr>` for body + comments). Duplicate/superseded/replaced → surface and stop. Otherwise it was abandoned: continue, and Phase 1 makes a fresh branch. In `--auto`, carry this into the spec's decision ledger.
 
 ## Investigate

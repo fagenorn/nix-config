@@ -3,7 +3,9 @@
 Loaded by `SKILL.md` when all tasks are complete. This gate runs for **every**
 risk lane — lanes narrow per-task review, never this one.
 
-Run `scripts/review-package PLAN_FILE MERGE_BASE HEAD` (MERGE_BASE = `git merge-base <integration-branch> HEAD`) once. Capture its stdout unchanged and pass those bytes through
+Run `scripts/review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD` once, using the
+full SHA values pinned in the ledger by the cumulative delivery gate. Do not
+recompute a merge base against a local integration branch. Capture its stdout unchanged and pass those bytes through
 `artifact-budget validate-report --boundary producer --input -` before either
 axis is dispatched. Generator exit 0 plus validator exit 0, a strict
 `complete` report, and report/checker agreement permits dispatch. Generator
