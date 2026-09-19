@@ -768,6 +768,63 @@ class ScanCodexFileTest(unittest.TestCase):
         self.assertIsNone(run["tokens"]["input_total"])
         self.assertEqual(run["measurement"]["missing_usage_observations"], 1)
 
+    def public_codex_run_for_sessions(self, sessions):
+        """Project same-cwd sessions through the public record shape."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            day = root / "2026" / "08" / "04"
+            day.mkdir(parents=True)
+            for name, session_id, tokens in sessions:
+                contents = codex_meta(session_id, source="cli")
+                if tokens is None:
+                    contents += record({"type": "token_usage_record", "payload": {
+                        "thread_id": session_id, "response_id": f"{session_id}-response",
+                    }})
+                else:
+                    contents += codex_usage(tokens)
+                (day / name).write_text(contents, encoding="utf-8")
+            groups = agent_costs.collect_codex_groups(
+                root, None, executor_factory=EndToEndTest.DeterministicExecutor)
+        document = agent_costs.build_record(
+            {"codex": {"cost_basis": "subscription", "groups": groups}},
+            {"days": 0, "cutoff_epoch": None, "strata": ["codex"], "sources": {}})
+        return document["strata"]["codex"]["runs"][0]
+
+    def test_same_project_missing_session_before_measured_session_projects_measurement(self):
+        run = self.public_codex_run_for_sessions((
+            ("missing.jsonl", "a-missing", None),
+            ("measured.jsonl", "z-measured", 100),
+        ))
+        self.assertEqual((run["tokens"]["input_total"], run["tokens"]["fresh"],
+                          run["turns"]), (100, 100, 1))
+        self.assertEqual((run["measurement"]["files_selected"],
+                          run["measurement"]["files_with_usage"],
+                          run["measurement"]["missing_usage_observations"]), (2, 1, 1))
+
+    def test_same_project_measured_session_before_missing_session_projects_measurement(self):
+        run = self.public_codex_run_for_sessions((
+            ("measured.jsonl", "a-measured", 100),
+            ("missing.jsonl", "z-missing", None),
+        ))
+        self.assertEqual((run["tokens"]["input_total"], run["tokens"]["fresh"],
+                          run["turns"]), (100, 100, 1))
+        self.assertEqual((run["measurement"]["files_selected"],
+                          run["measurement"]["files_with_usage"],
+                          run["measurement"]["missing_usage_observations"]), (2, 1, 1))
+
+    def test_same_project_multiple_missing_sessions_project_null_and_keep_coverage(self):
+        run = self.public_codex_run_for_sessions((
+            ("first.jsonl", "a-missing", None),
+            ("second.jsonl", "z-missing", None),
+        ))
+        for field in ("input_total", "fresh", "cache_create", "cache_read", "output",
+                      "reasoning"):
+            self.assertIsNone(run["tokens"][field], field)
+        self.assertIsNone(run["turns"])
+        self.assertEqual((run["measurement"]["files_selected"],
+                          run["measurement"]["files_with_usage"],
+                          run["measurement"]["missing_usage_observations"]), (2, 0, 2))
+
     def test_modern_source_subagent_metadata_classifies_a_child(self):
         path = self.write_rollout(
             codex_meta("s1", rollout_id="child", thread_source="user",

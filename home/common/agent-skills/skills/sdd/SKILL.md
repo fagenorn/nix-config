@@ -35,7 +35,7 @@ or anything the package mandates that the review rubric treats as a defect — a
 present findings as one batched question (each beside the plan text mandating it,
 asking which governs) before execution begins. A missing or unreadable member is a contract error, never a fallback to monolithic parsing. Clean scan → proceed
 without comment. After that, the controller holds only the plan root **header** —
-summary, Global Constraints, Test seams, and the `## Task index` (ID, title,
+summary, Global Constraints, Test seams, Delivery estimate and boundaries, and the `## Task index` (ID, title,
 files touched, risk lane, member link per task) — its compact checker metrics,
 plus the current task's brief from `scripts/task-brief`; never re-read the whole
 package or retain other task bodies. Build the todo list from the Task index.

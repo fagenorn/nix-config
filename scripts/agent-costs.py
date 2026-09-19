@@ -780,6 +780,10 @@ def collect_codex_groups(root, cutoff, project_filter=None,
                 group["subagents"] += 1
         group["models"] = dict(models)
         group["efforts"] = dict(efforts)
+    # A project/issue can span several session threads. Keep its accumulators
+    # numeric until all of those threads have contributed, then project a
+    # genuinely unmeasured group as null.
+    for group in groups.values():
         if not group["usage_measured"]:
             for field in CODEX_SUM_FIELDS:
                 group[field] = None
