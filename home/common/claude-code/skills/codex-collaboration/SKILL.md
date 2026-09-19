@@ -94,7 +94,8 @@ Here `<operation>` is the operation currently being invoked. The first line lets
 the bridge key runtime job state to the reviewed worktree, and the second
 preserves the operation across the detached transport. Launch mechanics live
 solely in that agent's definition. This selection changes only the Claude
-transport tier; it does not select or change the external Codex runtime model.
+transport tier. The plugin transport pins the external reviewer to
+`gpt-6-astra`; other Codex sessions keep their own runtime model selection.
 The contract: the review runs fresh in an isolated read-only Codex runtime
 (fresh `CODEX_HOME`, approval policy `never`, sandbox `read-only`), survives the
 bridge's own lifetime, and is bounded by a per-operation runtime budget — expect

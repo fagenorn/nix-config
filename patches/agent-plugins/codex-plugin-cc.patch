@@ -19,7 +19,7 @@ index 937a303..f418e48 100644
 -
 diff --git a/plugins/codex/agents/codex-reviewer.md b/plugins/codex/agents/codex-reviewer.md
 new file mode 100644
-index 0000000..1aa0a4e
+index 0000000..9cf8696
 --- /dev/null
 +++ b/plugins/codex/agents/codex-reviewer.md
 @@ -0,0 +1,57 @@
@@ -48,7 +48,7 @@ index 0000000..1aa0a4e
 +  `CODEX_REVIEW_FAILURE: codex-companion not on PATH` without running anything else.
 +- Write the delegation prompt, unchanged, to a temporary file outside the repository.
 +- Enqueue exactly one review with one sub-second foreground call:
-+  `cd "<worktree-root>" && codex-companion task --fresh --reviewer <operation> --background --json < "<tmpfile>"`.
++  `cd "<worktree-root>" && codex-companion task --fresh --reviewer <operation> --model gpt-6-astra --background --json < "<tmpfile>"`.
 +  The `cd` keys the runtime's job state to the reviewed worktree. Note the `jobId`
 +  from the printed JSON. From this moment a detached worker owns the review;
 +  nothing that happens to you can stop it, and its result is durable in the job
@@ -3390,7 +3390,7 @@ index 0000000..c871991
 +  assert.equal(fs.existsSync(broker.sessionDir), false);
 +});
 diff --git a/tests/commands.test.mjs b/tests/commands.test.mjs
-index c34b060..1c65055 100644
+index c34b060..71664da 100644
 --- a/tests/commands.test.mjs
 +++ b/tests/commands.test.mjs
 @@ -6,0 +7,9 @@ import { fileURLToPath } from "node:url";
@@ -3421,7 +3421,7 @@ index c34b060..1c65055 100644
 +  assert.match(agent, /exactly one `REVIEW_OPERATION:` declaration/);
 +  assert.match(agent, /only accepted values are `plan-review` and `diff-review`/);
 +  // Pin value forwarding, bounded waits, raw extraction, and failures.
-+  assert.match(agent, /task --fresh --reviewer <operation> --background --json/);
++  assert.match(agent, /task --fresh --reviewer <operation> --model gpt-6-astra --background --json/);
 +  assert.match(agent, /--wait --timeout-ms 540000/);
 +  // The transport's own numbers stay; the wait count and the ceiling it measures
 +  // are pinned here so the invariant test below has a stable subject.
