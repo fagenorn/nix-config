@@ -717,7 +717,7 @@ class DiffScopeCommandTest(unittest.TestCase):
         self.assertIn(b"work tree", completed.stderr)
 
     def test_an_absolute_or_escaping_artifact_path_exits_one(self):
-        for bad in ("/etc/passwd", "../outside.md", "a/../../b.md"):
+        for bad in ("/etc/passwd", ".//x", "../outside.md", "a/../../b.md"):
             with self.subTest(value=bad):
                 completed = run_helper(self.root, self.range, "--artifact-path", bad)
                 self.assertEqual(completed.returncode, 1, completed.stdout)
