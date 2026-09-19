@@ -685,7 +685,7 @@ class CommittedContractTest(ResolverTestCase):
         orchestration = source_contract()["bindings"]["workflow"]["orchestration"]
         self.assertEqual(orchestration["max_parallel"], 2)
         self.assertEqual(orchestration["attempt_budget_minutes"], 180)
-        self.assertFalse((REPO_ROOT / ".claude" / ("skills." "config.json")).exists())
+        self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
 
 def run_with_path(path_value: str, *args: str) -> tuple[int, str, str]:

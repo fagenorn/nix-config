@@ -69,5 +69,5 @@ Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh fi
 Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, close the
 issue, and publish every non-empty review detail beneath the primary worktree's
 `.superpowers/issue-delivery/` home before cleanup. Publication failure must keep
-the worktree and report `unpublished`. With `issueTracker.kind=none`, merge
+the worktree and report `unpublished`. With an unsupported tracker capability, merge
 locally and clean up under the same detail rule.

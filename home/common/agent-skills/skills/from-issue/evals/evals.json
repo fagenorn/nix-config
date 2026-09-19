@@ -14,7 +14,7 @@
           "shell": "[ -n \"$WT\" ] || fail \"no worktree beyond the base checkout\""
         },
         {
-          "name": "spec file exists under specDir",
+          "name": "spec file exists under the retained specifications directory",
           "shell": "has_file \"$WT/$SPEC_DIR\"/*.md"
         },
         {
@@ -22,7 +22,7 @@
           "shell": "f=$(first_file \"$WT/$SPEC_DIR\"/*.md); ledger_has_rows \"$f\" '## Decision ledger' || ledger_has_rows \"$f\" '## Auto-resolved decisions'"
         },
         {
-          "name": "plan file exists under planDir",
+          "name": "plan file exists under the retained plans directory",
           "shell": "has_file \"$WT/$PLAN_DIR\"/*.md"
         },
         {

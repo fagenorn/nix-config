@@ -21,11 +21,11 @@ bare name does not resolve on PATH):
 ```
 diff-scope <base-sha>..<head-sha> \
   --root <absolute worktree root> \
-  --artifact-path <specDir> --artifact-path <planDir> \
+  --artifact-path <specification-directory> --artifact-path <plan-directory> \
   --format json
 ```
 
-`<specDir>` and `<planDir>` are paths passed from the caller's retained snapshot,
+The specification and plan directories are paths passed from the caller's retained snapshot,
 without fallback locations.
 
 Read exactly three fields from the JSON:
@@ -92,7 +92,7 @@ not that packet plus tweaks. It contains exactly:
    `docs/standards/` shards whose globs intersect).
 
 Nothing else rides along: no issue investigation, no spec, no domain docs, no
-`codex.planReview.focus`, no `REVIEW-CONTRACT.md`. The light packet is what keeps
+no separate review-focus setting and no `REVIEW-CONTRACT.md`. The light packet is what keeps
 Codex inside its runtime budget; domain conformance belongs to the other axis.
 
 ### When the range is over budget

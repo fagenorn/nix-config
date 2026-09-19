@@ -143,8 +143,10 @@ run_trial() {
   git -C "$REPO" push -q -u origin main
 
   local RESOLVED_PROJECT SPEC_DIR PLAN_DIR
-  RESOLVED_PROJECT=$(resolve-project resolve --repo-root "$REPO") ||
+  if ! RESOLVED_PROJECT=$(resolve-project resolve --repo-root "$REPO"); then
+    printf '%s\n' "$RESOLVED_PROJECT" >&2
     die "resolver refused the initialized fixture"
+  fi
   jq -e 'has("schema_version") and has("project") and has("bindings") and has("capabilities")' \
     <<<"$RESOLVED_PROJECT" >/dev/null || die "resolver returned an invalid snapshot"
   SPEC_DIR=$(jq -er '.bindings.paths.artifacts.specs' <<<"$RESOLVED_PROJECT") ||

@@ -26,7 +26,7 @@ skip the ones that don't apply. If a term in your question is defined in an area
 you opened, use the canonical term and don't ask the user to disambiguate it
 again.
 
-**No map?** Fall back to the legacy layout: read whichever of `docPaths.context`,
+**No map?** Use only the retained `bindings.paths.context` list;
 `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md` or a top-of-`README` domain section
 exists — whole when it is short, by governing section when it is not (see the
 long-doc rule below). Read it once, not per question.
@@ -36,13 +36,13 @@ long-doc rule below). Read it once, not per question.
 Areas own their decisions: each area in the map has an `adr/` directory beside
 its `CONTEXT.md` (`docs/areas/<slug>/adr/`), plus the reserved
 `docs/areas/system/adr/` for decisions spanning areas. Legacy fallback, for
-repos with no `docs/areas/`: `docPaths.adrDir` if configured, else whichever of
+repos with no `docs/areas/`: use the relevant retained context path;
 `docs/adr/`, `docs/adrs/`, `docs/decisions/`, `adr/` exists.
 
 ## Step 3 expanded — standards layers
 
 Load a stack shard only when the change's file extensions match it. Project
-deltas live at `docPaths.standards` (a `docs/standards/` directory with a README
+deltas live at `bindings.paths.standards` (a `docs/standards/` directory with a README
 index carrying `governs:` globs, or a single `CONTRIBUTING.md` /
 `docs/coding-standards.md` in older repos). See `~/.agents/standards/README.md`
 for the precedence ladder.

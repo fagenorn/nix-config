@@ -46,7 +46,7 @@ workspace/worktree root. Build one self-contained delegation prompt containing:
    file types, and the project's `docs/standards/` shards whose globs
    intersect. A worktree `GROUNDING.md` is a routing hint for this selection,
    never a substitute for it. Only when the project has no map, fall back to
-   the `docPaths.{context,standards,architecture}` whole-doc paths.
+   the retained `bindings.paths.{context,standards,architecture}` paths.
 6. Relevant manifests and inferred verification commands, labelled in the packet
    as context describing how this work is verified elsewhere — explicitly not a
    request to execute anything. Item 3's four metrics are supplied so the

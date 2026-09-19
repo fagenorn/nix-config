@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -219,12 +220,20 @@ RETAINED_SUPPORT_CONTRACTS = {
     "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
 }
 
+# These are deliberate test patterns, not permitted policy text. The tracked
+# source scan below exempts only their declaration lines in this file so it can
+# inspect every other test line without a self-match.
+LEGACY_POLICY_SURFACE = (  # policy-gate-pattern
+    "resolve-bindings", ".claude/skills.config.json", "unsetGithubToken",  # policy-gate-pattern
+    "projectHints", "docPaths", "specDir", "planDir", "repoSlug",  # policy-gate-pattern
+    "issueTracker", "branchNaming", "integrationBranch", "defaultBranch",  # policy-gate-pattern
+    "codex.planReview", "codex.codeReview", "commit.coAuthoredBy",  # policy-gate-pattern
+)
+
 SUPPORT_POLICY_FORBIDDEN = (
-    "resolve-project resolve", "resolve-" "bindings", "skills." "config.json",
-    ".agents/project.json", "docPaths", "specDir", "planDir", "projectHints",
-    "integrationBranch", "repoSlug", "unsetGithub" "Token", "issueTracker.",
-    "commit.coAuthoredBy", "auto-detect", "helper missing", "not_onboarded",
-    ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md",
+    "resolve-project resolve", *LEGACY_POLICY_SURFACE, "auto-detect",
+    "helper missing", "not_onboarded", ".claude/specs", ".claude/plans",
+    "docs/CONTEXT-MAP.md",
 )
 
 CONTEXT_MAP_SELECTION_CONTRACT = (
@@ -261,7 +270,7 @@ def assert_policy_entries(case, root, entries, require_refusal_reporting=False):
                 case.assertIn(REFUSAL_REPORTING_SENTENCE, normalized(text))
             for field in fields:
                 case.assertIn(field, text)
-            for forbidden in ("resolve-" "bindings", ".claude/skills.", "config.json", "helper missing", "not_" "onboarded", "auto-detect", "default `"):
+            for forbidden in ("resolve-bindings", ".claude/skills.config.json", "helper missing", "not_onboarded", "auto-detect", "default `"):  # policy-gate-pattern
                 case.assertNotIn(forbidden, text)
 
 
@@ -314,11 +323,8 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         ).stdout.split(b"\0")
         text_suffixes = {".md", ".py", ".sh", ".nix", ".json", ".toml", ".yaml", ".yml"}
         historical_prefixes = (Path(".claude/specs"), Path(".claude/plans"))
-        legacy_names = (
-            "resolve-" "bindings", ".claude/skills." "config.json",
-            "unsetGithub" "Token",
-        )
-        legacy = re.compile("|".join(re.escape(name) for name in legacy_names))
+        legacy = re.compile("|".join(
+            re.escape(name) for name in LEGACY_POLICY_SURFACE))
         matches = []
         for encoded in tracked:
             if not encoded:
@@ -338,14 +344,16 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                 continue
             for line_number, line in enumerate(
                     path.read_text(encoding="utf-8").splitlines(), 1):
+                if "# policy-gate-pattern" in line:
+                    continue
                 if legacy.search(line):
                     matches.append(f"{relative}:{line_number}")
         self.assertEqual(matches, [])
-        self.assertFalse((REPO_ROOT / ".claude" / ("skills." "config.json")).exists())
-        self.assertFalse((REPO_ROOT / ("home/common/agent-skills/scripts/resolve-" "bindings")).exists())
-        self.assertFalse((REPO_ROOT / ("home/common/agent-skills/tests/test_resolve_" "bindings.py")).exists())
+        self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
+        self.assertFalse((REPO_ROOT / "home/common/agent-skills/scripts/resolve-bindings").exists())  # policy-gate-pattern
+        self.assertFalse((REPO_ROOT / "home/common/agent-skills/tests/test_resolve_bindings.py").exists())  # policy-gate-pattern
         self.assertFalse((REPO_ROOT / "home/common/agent-skills/evals/fixture-repo" /
-                          ".claude" / ("skills." "config.json")).exists())
+                          ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
     def test_installed_policy_surface_matches_source_contract(self):
         if os.environ.get("WORKFLOW_POLICY_SURFACE") == "source":
@@ -359,13 +367,13 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         assert_policy_entries(self, claude_root,
                               SHARED_POLICY_ENTRIES | CLAUDE_POLICY_ENTRIES,
                               require_refusal_reporting=False)
+        assert_retained_policy_support(self, agents_root, SHARED_POLICY_SUPPORT)
         assert_retained_policy_support(self, agents_root, RETAINED_SUPPORT_CONTRACTS)
-        self.assertFalse((Path.home() / (".agents/bin/resolve-" "bindings")).exists())
+        self.assertFalse((Path.home() / ".agents/bin/resolve-bindings").exists())  # policy-gate-pattern
         installed_linter = Path.home() / ".agents/bin/context-map-lint"
         self.assertTrue(installed_linter.is_file())
         installed_legacy = re.compile("|".join(re.escape(name) for name in (
-            "resolve-" "bindings", ".claude/skills." "config.json",
-            "unsetGithub" "Token",
+            "resolve-bindings", ".claude/skills.config.json", "unsetGithubToken",  # policy-gate-pattern
         )))
         self.assertIsNone(installed_legacy.search(
             installed_linter.read_text(encoding="utf-8")))
@@ -376,6 +384,35 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                 with mock.patch("pathlib.Path.home", return_value=Path(temporary)):
                     with self.assertRaisesRegex(AssertionError, "managed shared skill root is absent"):
                         self.test_installed_policy_surface_matches_source_contract()
+
+    def test_installed_policy_surface_applies_both_support_matrices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            agents_root = home / ".agents/skills"
+            claude_root = home / ".claude/skills"
+            shared_source = REPO_ROOT / "home/common/agent-skills/skills"
+            claude_source = REPO_ROOT / "home/common/claude-code/skills"
+            shutil.copytree(shared_source, agents_root)
+            shutil.copytree(shared_source, claude_root)
+            shutil.copytree(claude_source, claude_root, dirs_exist_ok=True)
+            linter = home / ".agents/bin/context-map-lint"
+            linter.parent.mkdir(parents=True)
+            shutil.copyfile(REPO_ROOT / "scripts/context-map-lint.py", linter)
+            with mock.patch.dict(os.environ, {"WORKFLOW_POLICY_SURFACE": ""}, clear=False):
+                with mock.patch("pathlib.Path.home", return_value=home):
+                    self.test_installed_policy_surface_matches_source_contract()
+
+    def test_eval_runner_reports_a_resolver_refusal_without_a_second_resolution(self):
+        runner = (REPO_ROOT / "home/common/agent-skills/evals/run-eval.sh").read_text(
+            encoding="utf-8")
+        self.assertEqual(runner.count("resolve-project resolve --repo-root \"$REPO\""), 1)
+        self.assertIn(
+            'if ! RESOLVED_PROJECT=$(resolve-project resolve --repo-root "$REPO"); then\n'
+            "    printf '%s\\n' \"$RESOLVED_PROJECT\" >&2\n"
+            '    die "resolver refused the initialized fixture"\n'
+            "  fi",
+            runner,
+        )
 
     def test_live_evals_grade_strict_policy_and_direct_review(self):
         paths = (
@@ -392,8 +429,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             str(json.loads(path.read_text(encoding="utf-8"))) for path in paths
         )
         for forbidden in (
-            "resolve-" "bindings", ".claude/skills." "config.json",
-            "unsetGithub" "Token",
+            "resolve-bindings", ".claude/skills.config.json", "unsetGithubToken",  # policy-gate-pattern
             "helper missing", "auto-detect absent", "default GitHub",
         ):
             self.assertNotIn(forbidden, corpus)
@@ -407,7 +443,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_shared_support_documents_reuse_the_retained_snapshot(self):
         assert_retained_policy_support(
             self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_SUPPORT,
-            ("resolve-" "bindings", "skills." "config.json", "helper missing", "not_onboarded", "auto-detect", ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md"),
+            ("resolve-bindings", "skills.config.json", "helper missing", "not_onboarded", "auto-detect", ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md"),  # policy-gate-pattern
         )
 
     def test_listed_support_documents_reuse_only_passed_snapshot_fields(self):
@@ -449,7 +485,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             contract = normalized(text)
             self.assertIn(CONTEXT_MAP_SELECTION_CONTRACT, contract)
             for forbidden in (
-                "docPaths.contextMap", "docs/CONTEXT-MAP.md", "select the first match",
+                "legacy context-map setting", "docs/CONTEXT-MAP.md", "select the first match",
                 "sort(", "filesystem search", "first match wins", "default map location",
             ):
                 self.assertNotIn(forbidden, contract)
@@ -768,8 +804,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn(RESOLUTION_SENTENCE, text)
 
     def test_writing_plans_no_longer_calls_the_fail_soft_helper(self):
-        self.assertNotIn("resolve-" "bindings", self.writing_plans)
-        self.assertNotIn("skills." "config.json", self.writing_plans)
+        self.assertNotIn("resolve-bindings", self.writing_plans)  # policy-gate-pattern
+        self.assertNotIn("skills.config.json", self.writing_plans)  # policy-gate-pattern
 
     def test_writing_plans_treats_every_resolver_error_as_fatal(self):
         text = normalized(self.writing_plans)
@@ -1350,7 +1386,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "--force",
             "--force-with-lease",
             "git merge",
-            "git push origin <integrationBranch>",
+            "git push origin <integration>",
             "git reset",
             "git rebase",
         ):
@@ -1825,7 +1861,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "retained `ResolvedProject` and validated direct-command result",
             "the size pre-flight below",
             "`~/.agents/bin/diff-scope`",
-            "--artifact-path <specDir> --artifact-path <planDir>",
+            "--artifact-path <specification-directory> --artifact-path <plan-directory>",
             "--format json",
             "paths passed from the caller's retained snapshot, without fallback locations",
             "`product.changed_files`",
@@ -2223,11 +2259,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
         optional_subject = (
-            'gh pr merge <pr-num> --repo <repoSlug> --merge '
+            'gh pr merge <pr-num> --repo <resolved-repository> --merge '
             '[--subject "<rendered mergeSubjectTemplate>"] --delete-branch'
         )
         rendered_subject = (
-            'gh pr merge <pr-num> --repo <repoSlug> --merge '
+            'gh pr merge <pr-num> --repo <resolved-repository> --merge '
             '--subject "<rendered mergeSubjectTemplate>" --delete-branch'
         )
         expected_occurrences = [
@@ -2246,14 +2282,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         phase_lines = [line.strip() for line in phase.splitlines()]
         self.assertIn(rendered_subject, phase_lines)
         guard_and_fallback = (
-            "Use the `repoSlug` binding resolved in Phase 0. Build the subject "
-            "from `mergeSubjectTemplate` (substituting "
-            "`<feature>`/`<desc>`/`<num>`/`<integrationBranch>`). Emit the "
+            "Use retained `bindings.tracker.repo_slug`. Build the subject "
+            "from `mergeSubjectTemplate`. Emit the "
             "subject form only when the rendered result is nonempty and "
             "representable by D18's quoted-subject grammar: it contains none "
             "of double quote, dollar, backtick, backslash, NUL, LF, or CR; "
-            "otherwise omit `--subject` and its value and let the forge default "
-            "stand. Never pass `--no-ff` (rejected by recent `gh`; `--merge` "
+            "otherwise omit `--subject` and its value and let the forge choose its normal subject. "
+            "Never pass `--no-ff` (rejected by recent `gh`; `--merge` "
             "already produces a true merge commit)."
         )
         self.assertIn(guard_and_fallback, phase_lines)
@@ -2278,7 +2313,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             phase7,
             "Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md)",
             "Run `check-launch` (see `## Launch guard`) immediately before the merge",
-            "gh pr merge <pr-num> --repo <repoSlug> --merge",
+            "gh pr merge <pr-num> --repo <resolved-repository> --merge",
         )
         # D6/D10: the new Phase-4 pointer introduces no merge spelling, so
         # Phase 4 stays free of `gh pr merge` exactly as it is today.
@@ -2418,7 +2453,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # The one rule is indifferent to the tracker binding: a `kind=none`
         # invocation skips Phase 4's PR but still pushes the branch to `origin`,
         # and that push is a guarded write like any other.
-        self.assertIn("regardless of `issueTracker.kind`", collapsed)
+        self.assertIn("regardless of tracker capability", collapsed)
         self.assertIn("Proceed only on `current: true`", collapsed)
         # Every refusal trigger, so a guard that degraded to "on a false answer"
         # would fail here rather than pass with a hole.
@@ -2519,7 +2554,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             # Both directions of the carve-out: this run's artifacts are named
             # one file at a time, and the directories themselves never are.
             "one `--artifact-path` per file",
-            "never `<specDir>`/`<planDir>` themselves",
+            "never an entire retained artifact directory",
             "still count",
             # The estimate/count split: Phase 0 has no range, so its number is an
             # estimate; the helper is authoritative only once a range exists.

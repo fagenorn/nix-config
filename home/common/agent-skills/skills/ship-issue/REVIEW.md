@@ -15,9 +15,8 @@ review" in the PR body and continue to Phase 6. Non-empty → dispatch SKILL.md'
 merge-delta reviewer over only that delta (nested dispatch works even inside an
 `Agent` subagent; if `Agent` isn't in your tool surface, `ToolSearch`
 `select:Agent` first), with Phase 1's scope-creep categories (retirement /
-addition, see SYNC.md) as its checklist plus the project-hints review paragraph
-when `projectHints` exists (a directory → its `review.md`; a single file →
-itself; omit silently when absent). Findings come back Blocking / Should-fix /
+addition, see SYNC.md) as its checklist plus every review hint path passed in
+the retained snapshot. Findings come back Blocking / Should-fix /
 Discussion, ≤400 words, file:line anchors.
 
 ## Full two-axis review — templates
@@ -65,7 +64,7 @@ Phase 6 polling CI on the stale tip." Follow this order:
 1. Edit the file(s).
 2. Re-run `verify.lint` + `verify.test` against the modified surface.
 3. `git add` the changed files; commit `fix(issue-<num>): address PR review —
-   <short blocker>` (follow `commit.coAuthoredBy`).
+   <short blocker>` (follow retained `bindings.vcs.commit.co_authored_by`).
 4. Run `check-launch` (SKILL.md's `## Launch guard`); on anything but
    `current: true`, stop without pushing and take the no-write stop. Then
    `git push`.

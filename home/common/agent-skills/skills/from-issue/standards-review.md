@@ -17,9 +17,10 @@ claim mismatch fails before any reviewer dispatch. This caller-side validation
 is mandatory for both the Codex plan-review route and the native reviewer route;
 neither may trust the producer's validation. It happens before any state access or reviewer dispatch.
 
-1. Resolve `codex.planReview.enabled` (default `true`) and `.focus` (default `null`; when set, pass its emphasis alongside `projectHints`).
-2. **Enabled and `codex-collaboration` available** → invoke its `plan-review` operation. It assembles the packet itself (its SKILL.md enumerates the contents) and owns foreground execution, isolation, read-only enforcement, validation, and a one-time native fallback on a real Codex failure — a busy or concurrent reviewer is never a fallback condition. Supply the issue and acceptance criteria, the Phase-0 investigation and open questions, the worktree base SHA, the spec and plan paths, the optional focus, and — as the review contract — **the absolute path to `REVIEW-CONTRACT.md` beside `SKILL.md`**, which it reads into the packet.
-3. **Disabled or unavailable** (including when this skill runs natively in Codex) →
+1. Read `capabilities.review.plan` from the retained snapshot and pass the
+   snapshot's explicit hint paths to the reviewer packet.
+2. **Available and `codex-collaboration` available** → invoke its `plan-review` operation. It assembles the packet itself (its SKILL.md enumerates the contents) and owns foreground execution, isolation, read-only enforcement, validation, and a one-time native fallback on a real Codex failure — a busy or concurrent reviewer is never a fallback condition. Supply the issue and acceptance criteria, the Phase-0 investigation and open questions, the worktree base SHA, the spec and plan paths, and — as the review contract — **the absolute path to `REVIEW-CONTRACT.md` beside `SKILL.md`**, which it reads into the packet.
+3. **Unsupported, blocked, or unavailable** (including when this skill runs natively in Codex) →
 
 <!-- agent-dispatch: id=from-issue-plan-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") launches one fresh plan reviewer with no inherited context, the same inputs, and the same `REVIEW-CONTRACT.md` path, told to read that file first.

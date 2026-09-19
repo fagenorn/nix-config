@@ -151,9 +151,9 @@ name does not resolve on PATH, invoke it by that full path.
 ```
 0. Investigate        → summary + open questions (no files yet)
 1. Worktree (skill)   → isolated workspace off origin/<integration-branch>
-2. Brainstorm (skill) → <specDir>/<date>-<topic>-design.md
+2. Brainstorm (skill) → <specification-directory>/<date>-<topic>-design.md
 3. Grill (skill)      → spec refinements + context-doc / ADR updates
-4. Plan (skill)       → <planDir>/<date>-<feature>.md
+4. Plan (skill)       → <plan-directory>/<date>-<feature>.md
 5. Standards review   → Codex plan review, native fallback, or self-grade
 6. Execute (skill)    → subagent-driven-development
 7. Ship (skill)       → ship-issue: PR, review, CI, merge, cleanup
@@ -335,12 +335,12 @@ Handoff is the deliberate context rollover with a handoff document; suspension i
 
 ## Phase 0 — Investigate
 
-Build a shared mental model *before* the brainstorm. No files yet. Read `investigate.md` for the pre-flight queries and the note structure. (When `issueTracker.kind=none`, skip the fetch and PR pre-flight.)
+Build a shared mental model *before* the brainstorm. No files yet. Read `investigate.md` for the pre-flight queries and the note structure. (When the retained tracker capability is unsupported, skip the fetch and PR pre-flight.)
 
 **Pre-flight** — two sessions racing on one issue is the most expensive failure this flow produces. Run the PR pre-flight per `investigate.md`: exact matching open or merged work is reconciled within existing authorization; unknown, competing, or differently scoped work stops for the specific missing decision. Then `git worktree list | grep <worktreePrefix>issue-<num>-`:
 
 - none → continue;
-- one → **inspect before touching it**; a "clean" tree can still hold committed work that only ships at Phase 7. Check four signals: unpushed commits (`git log origin/<integration-branch>..<branch> --oneline`); workflow-state ledger attempts naming it that are `active` or `handed_off`; tracker/PR state referencing the branch; spec/plan artifacts under `specDir`/`planDir` inside it. If **any** exist → prefer resume: resume that worktree when existing authorization covers the exact continuation; otherwise ask for the missing decision. On conflicting signals stop as blocked through the terminal return procedure. Deletion (`git worktree remove` + `git branch -D`) only when **provably disposable**: zero commits ahead, no active or handed-off ledger attempt, no spec/plan artifacts, no uncommitted work;
+- one → **inspect before touching it**; a "clean" tree can still hold committed work that only ships at Phase 7. Check four signals: unpushed commits (`git log origin/<integration-branch>..<branch> --oneline`); workflow-state ledger attempts naming it that are `active` or `handed_off`; tracker/PR state referencing the branch; spec/plan artifacts under the retained specification and plan directories inside it. If **any** exist → prefer resume: resume that worktree when existing authorization covers the exact continuation; otherwise ask for the missing decision. On conflicting signals stop as blocked through the terminal return procedure. Deletion (`git worktree remove` + `git branch -D`) only when **provably disposable**: zero commits ahead, no active or handed-off ledger attempt, no spec/plan artifacts, no uncommitted work;
 - one with uncommitted work → **stop and ask the user**; their in-progress state isn't yours to discard;
 - several → stop and ask which to resume or discard.
 
@@ -383,7 +383,7 @@ stays bound to this path through shipping and cleanup. No lifecycle acquisition 
 
 A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
 
-1. `git fetch origin`. Invoke `worktrees` (it encodes the destructive-ops carve-out, the prefix contract, and the position checks before `EnterWorktree`/`ExitWorktree`). Branch = `branchNaming.pattern`; the on-disk branch carries `branchNaming.worktreePrefix` — both forms are accepted downstream, don't strip it.
+1. `git fetch origin`. Invoke `worktrees` (it encodes the destructive-ops carve-out, the prefix contract, and the position checks before `EnterWorktree`/`ExitWorktree`). Branch names come from retained `bindings.vcs`; both configured forms are accepted downstream, don't strip them.
 2. **Base on `origin/<integration-branch>`**, never the local branch, which may carry other agents' in-flight commits. The merge happens later, in `ship-issue`.
 3. `cd` into the worktree; every later phase runs inside it. Verify `git rev-parse --git-common-dir` ≠ `git rev-parse --git-dir`.
 
@@ -391,7 +391,7 @@ A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
 
 ## Phase 2 — Brainstorm
 
-Invoke `design` for a design doc under `specDir`, committed in the worktree. Ground first per `grounding.md`. Resolve every Phase-0 carryover before opening a new question.
+Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Ground first per `grounding.md`. Resolve every Phase-0 carryover before opening a new question.
 
 **CHECKPOINT** — Record the spec path and approval source. Apply the shared checkpoint rule; existing authorization for autonomous design decisions suffices within its scope.
 
@@ -403,7 +403,7 @@ Invoke `grill-with-docs`. It sharpens the spec against the context doc, surfaces
 
 ## Phase 4 — Plan
 
-Invoke `writing-plans` for a plan under `planDir`, committed in the worktree. The plan header carries a `## Task index` — one line per task: ID, title, files touched, and risk lane assigned here per §Risk lanes. The plan cites ledger rows by ID and appends new non-obvious plan-level decisions to the spec's ledger.
+Invoke `writing-plans` for a plan under the retained plans directory, committed in the worktree. The plan header carries a `## Task index` — one line per task: ID, title, files touched, and risk lane assigned here per §Risk lanes. The plan cites ledger rows by ID and appends new non-obvious plan-level decisions to the specification's ledger.
 
 **Plan-prose ≠ code-prose.** Prose the plan dictates verbatim into the codebase (docstrings, comments, doc sentences, ADR clauses) must describe how the live code *will actually behave*; if you can't say precisely yet, write a TODO and let the execute phase rewrite it from the implemented code.
 
@@ -477,6 +477,6 @@ failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8;
   actions. When neither source grants the action, suspend with
   `blocked_on=human_gate` and print the re-entry line. An actual permission or
   launch-guard denial stops the action and is never routed around.
-- Append `Co-Authored-By` unless `commit.coAuthoredBy` is false. **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
-- **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`**; derive the slug from `repoSlug` if configured, else `git remote get-url origin`.
+- Append `Co-Authored-By` when retained `bindings.vcs.commit.co_authored_by` is true. **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
+- **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`**; use retained `bindings.tracker.repo_slug`.
 - If a phase reveals the previous one was wrong, back up to that phase and redo it. Don't paper over it.
