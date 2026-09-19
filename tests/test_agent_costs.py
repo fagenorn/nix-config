@@ -796,6 +796,25 @@ class ScanCodexFileTest(unittest.TestCase):
                          {"modern": 1, "legacy": 0})
         self.assertEqual(group["measurement"]["duplicate_observations_skipped"], 1)
 
+    def test_modern_wins_when_one_rollout_is_split_across_legacy_and_modern_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            day = root / "2026" / "08" / "04"
+            day.mkdir(parents=True)
+            (day / "legacy.jsonl").write_text(
+                codex_meta("s1", rollout_id="r1", source="cli") + codex_usage(100, out=10),
+                encoding="utf-8")
+            (day / "modern.jsonl").write_text(
+                codex_meta("s1", rollout_id="r1", source="cli")
+                + codex_response("resp-1", 40, out=4), encoding="utf-8")
+            groups = agent_costs.collect_codex_groups(
+                root, None, executor_factory=EndToEndTest.DeterministicExecutor)
+        group = groups[("repo", None)]
+        self.assertEqual((group["fresh"], group["output"], group["turns"]), (40, 4, 1))
+        self.assertEqual(group["measurement"]["selected_source_counts"],
+                         {"modern": 1, "legacy": 0})
+        self.assertEqual(group["measurement"]["legacy_observations_excluded"], 1)
+
     def test_conflicting_modern_duplicates_are_ambiguous_and_not_summed(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -809,6 +828,40 @@ class ScanCodexFileTest(unittest.TestCase):
                 root, None, executor_factory=EndToEndTest.DeterministicExecutor)
         group = groups[("repo", None)]
         self.assertIsNone(group["fresh"])
+        self.assertEqual(group["measurement"]["ambiguous_modern_observations"], 2)
+
+    def test_same_file_modern_conflict_has_the_cross_file_coverage_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            day = root / "2026" / "08" / "04"
+            day.mkdir(parents=True)
+            (day / "conflict.jsonl").write_text(
+                codex_meta("s1", source="cli")
+                + codex_response("resp-1", 100) + codex_response("resp-1", 200),
+                encoding="utf-8")
+            groups = agent_costs.collect_codex_groups(
+                root, None, executor_factory=EndToEndTest.DeterministicExecutor)
+        group = groups[("repo", None)]
+        self.assertIsNone(group["fresh"])
+        self.assertEqual(group["measurement"]["ambiguous_modern_observations"], 2)
+
+    def test_legacy_copy_cannot_restore_a_conflicted_modern_rollout(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            day = root / "2026" / "08" / "04"
+            day.mkdir(parents=True)
+            (day / "legacy.jsonl").write_text(
+                codex_meta("s1", rollout_id="r1", source="cli") + codex_usage(100, out=10),
+                encoding="utf-8")
+            (day / "modern-conflict.jsonl").write_text(
+                codex_meta("s1", rollout_id="r1", source="cli")
+                + codex_response("resp-1", 40, out=4) + codex_response("resp-1", 50, out=5),
+                encoding="utf-8")
+            groups = agent_costs.collect_codex_groups(
+                root, None, executor_factory=EndToEndTest.DeterministicExecutor)
+        group = groups[("repo", None)]
+        self.assertIsNone(group["fresh"])
+        self.assertEqual(group["measurement"]["legacy_observations_excluded"], 1)
         self.assertEqual(group["measurement"]["ambiguous_modern_observations"], 2)
 
     def test_cached_and_reasoning_are_subsets_not_addends(self):

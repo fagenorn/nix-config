@@ -490,6 +490,28 @@ def add_codex_usage(result, usages, source):
     }
 
 
+def select_modern_observations(observations):
+    """Select unambiguous modern observations and count every participant.
+
+    The observation list is intentionally retained only until collection: its
+    response identities are required to make copied files and in-file replays
+    produce the same coverage counters.
+    """
+    by_identity = defaultdict(list)
+    for identity, usage in observations:
+        by_identity[identity].append(usage)
+    selected = []
+    duplicates = ambiguous = 0
+    for identity in sorted(by_identity, key=lambda value: (value[0] or "", value[1])):
+        usages = by_identity[identity]
+        if len({codex_usage_key(usage) for usage in usages}) != 1:
+            ambiguous += len(usages)
+            continue
+        selected.append(usages[0])
+        duplicates += len(usages) - 1
+    return selected, duplicates, ambiguous
+
+
 def codex_is_root(payload):
     """Use each format's metadata shape to classify root and child rollouts."""
     source = payload.get("source")
@@ -527,8 +549,7 @@ def scan_codex_file(path):
     efforts = Counter()
     legacy = []
     previous_cumulative = None
-    modern = {}
-    modern_conflicts = set()
+    modern_observations = []
     modern_seen = 0
     measurement = new_codex_measurement()
 
@@ -605,15 +626,7 @@ def scan_codex_file(path):
                     measurement["invalid_usage_observations"] += 1
                     continue
                 identity = (thread_id, response_id)
-                previous = modern.get(identity)
-                if previous is None and identity not in modern_conflicts:
-                    modern[identity] = usage
-                elif previous == usage:
-                    measurement["duplicate_observations_skipped"] += 1
-                else:
-                    modern.pop(identity, None)
-                    modern_conflicts.add(identity)
-                    measurement["ambiguous_modern_observations"] += 1
+                modern_observations.append((identity, usage))
             elif kind == "turn_context":
                 if payload.get("model"):
                     models[payload["model"]] += 1
@@ -630,16 +643,22 @@ def scan_codex_file(path):
         "models": dict(models),
         "efforts": dict(efforts),
         "measurement": measurement,
-        "modern_records": modern,
-        "modern_conflicts": modern_conflicts,
+        "modern_observations": modern_observations,
         "modern_seen": modern_seen,
         "legacy_records": legacy,
         "path": str(path),
     }
     if modern_seen:
         measurement["legacy_observations_excluded"] = len(legacy)
-        add_codex_usage(result, list(modern.values()), "modern")
+        selected, duplicates, ambiguous = select_modern_observations(modern_observations)
+        measurement["duplicate_observations_skipped"] += duplicates
+        measurement["ambiguous_modern_observations"] += ambiguous
+        result["modern_duplicate_observations"] = duplicates
+        result["modern_ambiguous_observations"] = ambiguous
+        add_codex_usage(result, selected, "modern")
     else:
+        result["modern_duplicate_observations"] = 0
+        result["modern_ambiguous_observations"] = 0
         add_codex_usage(result, legacy, "legacy")
     return result
 
@@ -669,39 +688,52 @@ def collect_codex_groups(root, cutoff, project_filter=None,
     )
     results = [r for r in scan_paths(paths, executor_factory, scanner=scan_codex_file) if r]
 
-    # Modern response identities are thread-scoped and deduped across every
-    # selected file.  Prefer a root occurrence when a child copied it; sorting
-    # paths makes the remaining tie deterministic.
-    identities = defaultdict(list)
-    conflicted_identities = set()
+    # Source choice belongs to a stable rollout, even when its records are
+    # copied across selected files.  Resolve that choice before cross-file
+    # response deduplication so legacy copies cannot restore modern usage.
+    rollouts = defaultdict(list)
     for result in results:
-        if result["modern_seen"]:
-            add_codex_usage(result, [], "modern")
-            result["selected_modern_identities"] = set()
-        conflicted_identities.update(result["modern_conflicts"])
-        for identity, usage in result["modern_records"].items():
-            identities[identity].append((result, usage))
+        rollouts[(result["session_id"], result["rollout_id"])].append(result)
+
+    identities = defaultdict(list)
+    for rollout in rollouts.values():
+        has_modern = any(result["modern_seen"] for result in rollout)
+        for result in rollout:
+            measurement = result["measurement"]
+            measurement["duplicate_observations_skipped"] -= result[
+                "modern_duplicate_observations"]
+            measurement["ambiguous_modern_observations"] -= result[
+                "modern_ambiguous_observations"]
+            measurement["legacy_observations_excluded"] = 0
+            add_codex_usage(result, [], None)
+            result["selected_modern_usages"] = []
+            if has_modern:
+                measurement["legacy_observations_excluded"] += len(result["legacy_records"])
+                for identity, usage in result["modern_observations"]:
+                    identities[identity].append((result, usage))
+            else:
+                add_codex_usage(result, result["legacy_records"], "legacy")
+
+    # Modern response identities are thread-scoped and deduped across every
+    # selected modern rollout. Prefer a root occurrence when a child copied it;
+    # all duplicate or conflicting participants receive the same accounting.
     for identity in sorted(identities, key=lambda value: (value[0] or "", value[1])):
         observations = identities[identity]
         usages = {codex_usage_key(usage) for _result, usage in observations}
-        if identity in conflicted_identities or len(usages) != 1:
+        if len(usages) != 1:
             for result, _usage in observations:
                 result["measurement"]["ambiguous_modern_observations"] += 1
             continue
-        chosen, usage = min(observations, key=lambda item: (
-            not item[0]["is_root"], item[0]["path"],
+        chosen_index, (chosen, usage) = min(enumerate(observations), key=lambda item: (
+            not item[1][0]["is_root"], item[1][0]["path"], item[0],
         ))
-        chosen["selected_modern_identities"].add(identity)
-        for result, _usage in observations:
-            if result is not chosen:
+        chosen["selected_modern_usages"].append(usage)
+        for index, (result, _usage) in enumerate(observations):
+            if index != chosen_index:
                 result["measurement"]["duplicate_observations_skipped"] += 1
     for result in results:
         if result["modern_seen"]:
-            # Keep only identities this selected file owns after cross-file
-            # deduplication.  Conflicting identities are deliberately absent.
-            owned = [usage for identity, usage in result["modern_records"].items()
-                     if identity in result["selected_modern_identities"]]
-            add_codex_usage(result, owned, "modern")
+            add_codex_usage(result, result["selected_modern_usages"], "modern")
 
     threads = defaultdict(list)
     for result in results:
