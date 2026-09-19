@@ -16,7 +16,8 @@ For code review, select `bindings.workflow.review.code`, copy `bindings.commands
 
 A blocked required capability stops. An authored unsupported tracker takes the existing tracker-free route; the sync/verify/consolidate/merge machinery still applies.
 
-Optional `review.criticalPaths` globs: diffs intersecting any always get Phase 5's full two-axis review; absent = the `risky` label is the only always-full trigger.
+Retained `capabilities.review.code` governs the full review route; blocked stops
+and authored unsupported takes only its documented route.
 
 **Invocation paths.** From `from-issue`, treat the handoff as received stdin
 bytes: pass them through `artifact-budget validate-report --boundary
@@ -49,7 +50,7 @@ review prompt.
 4. Open PR                 → push -u; gh pr create with "Closes #<num>"
 5. Review the PR           → merge-delta check or full two-axis review
 6. Wait for CI             → gh pr checks --watch (one blocking call)
-7. Merge                   → gh pr merge <pr-num> --repo <resolved-repository> --merge [--subject "<rendered mergeSubjectTemplate>"] --delete-branch (true merge commit)
+7. Merge                   → gh pr merge <pr-num> --repo <resolved-repository> --merge [--subject "<rendered subject>"] --delete-branch (true merge commit)
 8. Cleanup                 → issue closed; worktree + branches removed
 ```
 
@@ -173,13 +174,16 @@ Otherwise `git merge origin/<integration>`; commit the merge with the configured
 ## Phase 2 — Verify locally
 
 ```
-<verify.lint>
-<verify.test>
+<each bindings.workflow.verification command, dereferenced through bindings.commands>
 ```
 
-No retained command binding → **skip that step and note the skip in the PR body**. Declared architecture or hint paths are the source of truth if commands have moved.
+Run every command id in retained `bindings.workflow.verification` through its
+`bindings.commands` argv and cwd. A blocked verification capability stops and
+reports its `reason_code` and `repair_id`; authored unsupported follows only its
+documented no-verification route.
 
-Lint failures: try `verify.lintFix`, re-run `verify.lint`. Still failing → pause, ground, surface.
+On a failing verification command, pause, ground, and surface; do not invent a
+fix command outside retained `bindings.commands`.
 
 Test failures: separate *environmental* (container connectivity, missing network, sandbox limits) from *real* by baselining the same project in a scratch worktree on `origin/<integration>`. Same failures → pre-existing; continue and note the baseline diff in the PR body. Different failures → real; pause, ground, surface.
 
@@ -240,7 +244,7 @@ The branch normally arrives already reviewed on two axes by sdd's final review (
 - `review_state` is `clean` (handoff / sdd report: both axis verdicts clean, or every residual parked-with-ruling). `unknown` never degrades.
 - The Phase-1 sync needed no manual conflict escalation (allowlist auto-resolves count as clean).
 - The branch diff is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: start with `~/.agents/bin/diff-scope $BASE_SHA..$HEAD_SHA --format text --artifact-path <spec_path> --artifact-path <plan_path>`, then append one argument for each plan member and any other process artifact this run wrote. Each exclusion is an individual `--artifact-path <path>` argument. Its first line reads `product: <lines> lines, <files> files`, after the helper drops lockfiles, generated-header files, and those exact artifacts. The gate measures PRODUCT changes, not process artifacts; never exclude the resolved artifact directories themselves, which hold every artifact this repo has ever accepted, and a historical artifact that is itself the requested product still counts. No measurement, invalid plan discovery, or non-zero exit is not a small diff: run the full two-axis review.
-- The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num> --json labels`; with an unsupported tracker capability the condition passes), and no path from `git diff --name-only $BASE_SHA..$HEAD_SHA` matches a `review.criticalPaths` glob.
+- The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num> --json labels`; with an unsupported tracker capability the condition passes), and the retained `capabilities.review.code` state permits the documented review route.
 
 **Merge-delta check (degraded path).** Scope and checklist per REVIEW.md; over exactly the non-empty merge delta, dispatch:
 
@@ -308,10 +312,10 @@ Run `check-launch` (see `## Launch guard`) immediately before the merge, and
 run it regardless of how Phase 6's tip check came out. On anything but
 `current: true`, refuse the merge and take the no-write stop.
 
-Use retained `bindings.tracker.repo_slug`. Build the subject from `mergeSubjectTemplate`. Emit the subject form only when the rendered result is nonempty and representable by D18's quoted-subject grammar: it contains none of double quote, dollar, backtick, backslash, NUL, LF, or CR; otherwise omit `--subject` and its value and let the forge choose its normal subject. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
+Use retained `bindings.tracker.repo_slug` and `bindings.vcs` values to build the subject. Emit the subject form only when the rendered result is nonempty and representable by D18's quoted-subject grammar: it contains none of double quote, dollar, backtick, backslash, NUL, LF, or CR; otherwise omit `--subject` and its value and let the forge choose its normal subject. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
 
 ```
-gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered mergeSubjectTemplate>" --delete-branch
+gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered subject>" --delete-branch
 ```
 
 **Judge success by the verify below, never by the exit code** — in a worktree checkout the merge can land on the remote while local post-merge steps fail (details: CI-MERGE.md).

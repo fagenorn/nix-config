@@ -228,6 +228,8 @@ LEGACY_POLICY_SURFACE = (  # policy-gate-pattern
     "projectHints", "docPaths", "specDir", "planDir", "repoSlug",  # policy-gate-pattern
     "issueTracker", "branchNaming", "integrationBranch", "defaultBranch",  # policy-gate-pattern
     "codex.planReview", "codex.codeReview", "commit.coAuthoredBy",  # policy-gate-pattern
+    "deploy.services", "deploy.watchDoc", "verify.lint", "verify.test",  # policy-gate-pattern
+    "verify.lintFix", "review.criticalPaths", "mergeSubjectTemplate",  # policy-gate-pattern
 )
 
 SUPPORT_POLICY_FORBIDDEN = (
@@ -1023,6 +1025,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("native", text)
             self.assertIn("validate-report --boundary producer --input -", text)
             self.assertIn("before any state access or reviewer dispatch", text)
+
+    def test_standards_review_stops_a_blocked_plan_review_capability(self):
+        self.assert_ordered(
+            self.standards_review,
+            "capabilities.review.plan", "**Blocked** stops", "reason_code",
+            "repair_id", "never takes a fallback",
+        )
+        self.assertIn(
+            "Authored unsupported, or the completed non-capacity runtime/output failure",
+            self.standards_review,
+        )
 
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
@@ -2233,7 +2246,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "needed no manual conflict escalation",
             GATE_LINE_BOUNDARY,
             "does NOT carry the `risky` label",
-            "`review.criticalPaths` glob",
+            "`capabilities.review.code` state",
         )
 
     def test_ship_issue_eval_restates_the_gate_boundary_it_grades(self):
@@ -2260,11 +2273,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
         optional_subject = (
             'gh pr merge <pr-num> --repo <resolved-repository> --merge '
-            '[--subject "<rendered mergeSubjectTemplate>"] --delete-branch'
+            '[--subject "<rendered subject>"] --delete-branch'
         )
         rendered_subject = (
             'gh pr merge <pr-num> --repo <resolved-repository> --merge '
-            '--subject "<rendered mergeSubjectTemplate>" --delete-branch'
+            '--subject "<rendered subject>" --delete-branch'
         )
         expected_occurrences = [
             "7. Merge                   → "
@@ -2282,8 +2295,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         phase_lines = [line.strip() for line in phase.splitlines()]
         self.assertIn(rendered_subject, phase_lines)
         guard_and_fallback = (
-            "Use retained `bindings.tracker.repo_slug`. Build the subject "
-            "from `mergeSubjectTemplate`. Emit the "
+            "Use retained `bindings.tracker.repo_slug` and `bindings.vcs` values to build the subject. Emit the "
             "subject form only when the rendered result is nonempty and "
             "representable by D18's quoted-subject grammar: it contains none "
             "of double quote, dollar, backtick, backslash, NUL, LF, or CR; "

@@ -26,18 +26,16 @@ skip the ones that don't apply. If a term in your question is defined in an area
 you opened, use the canonical term and don't ask the user to disambiguate it
 again.
 
-**No map?** Use only the retained `bindings.paths.context` list;
-`CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md` or a top-of-`README` domain section
-exists — whole when it is short, by governing section when it is not (see the
-long-doc rule below). Read it once, not per question.
+**No map?** Use only the retained `bindings.paths.context` list. Do not probe
+for a conventional filename or a README section; an empty retained list means
+there is no context document for this phase.
 
 ## Step 2 expanded — decision-log homes
 
 Areas own their decisions: each area in the map has an `adr/` directory beside
 its `CONTEXT.md` (`docs/areas/<slug>/adr/`), plus the reserved
-`docs/areas/system/adr/` for decisions spanning areas. Legacy fallback, for
-repos with no `docs/areas/`: use the relevant retained context path;
-`docs/adr/`, `docs/adrs/`, `docs/decisions/`, `adr/` exists.
+`docs/areas/system/adr/` for decisions spanning areas. With no map, use only
+the relevant retained context path; never infer a decision-log location.
 
 ## Step 3 expanded — standards layers
 

@@ -111,7 +111,7 @@ Tone: factual, not promotional. No "exciting new", no "we're thrilled" — opera
 </details>
 
 ## Verification (post-merge)
-- <when deploy.adapter != none: per-service running-commit check — the latest deployment's status is the platform's SUCCESS value AND its commit starts with the merge SHA. See deploy.watchDoc for the exact command.>
+- <when bindings.deploy.adapter != none: per-service running-commit check — the latest deployment's status is the platform's SUCCESS value AND its commit starts with the merge SHA. Use retained bindings.deploy command/config values.>
 - A health probe returning 200 is *not* proof — verify the running commit equals the merge SHA at a SUCCESS status (SKILL.md Phase 5).
 ```
 

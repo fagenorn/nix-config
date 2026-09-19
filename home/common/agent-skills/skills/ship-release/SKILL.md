@@ -284,7 +284,8 @@ is the generic shape; the declared documents carry the specifics.
 
 ### 5a. Enumerate services
 
-Enumerate dynamically rather than hardcoding, so a new service is picked up without a skill edit. Start from `deploy.services` as the expected set and cross-check it against what the platform actually reports.
+Enumerate only the services declared in retained `bindings.deploy.config`, then
+cross-check that explicit set against what the platform actually reports.
 
 ### 5b. Decide which to watch
 
@@ -314,7 +315,9 @@ railway deployment list --service <name> --json \
 # success: .meta.commitHash startswith MERGE_SHA, .meta.branch == "<default>", .status == "SUCCESS"
 ```
 
-For any other adapter, follow the same 5a–5c shape using the verbs in `deploy.watchDoc`. If the adapter is unrecognised and no `watchDoc` is set, say so and skip active polling rather than guessing platform verbs.
+For any other adapter, follow the same 5a–5c shape using only retained
+`bindings.deploy` command/config values. An unrecognised adapter stops and
+surfaces its declared state rather than guessing platform verbs.
 
 ### 5e. Wakeup prompt
 
