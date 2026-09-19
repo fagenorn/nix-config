@@ -687,6 +687,22 @@ class CommittedContractTest(ResolverTestCase):
         self.assertEqual(orchestration["attempt_budget_minutes"], 180)
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
+    def test_nix_activate_is_exact_and_deploy_stays_unsupported(self):
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT))
+        self.assertEqual(code, 0, err or out)
+        snapshot = json.loads(out)
+        self.assertEqual(snapshot["bindings"]["commands"]["nix-activate"], {
+            "argv": ["just", "switch"],
+            "cwd": str(REPO_ROOT),
+            "env": [],
+        })
+        self.assertEqual(snapshot["bindings"]["deploy"], {
+            "adapter": "none", "command": None, "config": {},
+        })
+        self.assertEqual(snapshot["capabilities"]["deploy"], {
+            "state": "unsupported", "reason_code": None, "repair_id": None,
+        })
+
 
 def run_with_path(path_value: str, *args: str) -> tuple[int, str, str]:
     """Run the resolver with `PATH` replaced by exactly `path_value`.
