@@ -49,7 +49,7 @@ Write it atomically (temp file in the same dir, then `mv`) at every transition: 
 1. Changelog     → mine merges since last release; assemble the categorised PR body per CHANGELOG.md
 2. Open PR       → nothing to push; gh pr create --base <default> --head <integration>
 3. Wait for CI   → one blocking gh pr checks --watch call (no wakeup loop, no improvised polling)
-4. Merge         → gh pr merge --merge (NO --delete-branch — the integration branch is permanent)
+4. Merge         → gh pr merge <pr-num> --repo <repoSlug> --merge --subject "…" (NO --delete-branch — the integration branch is permanent)
 4.5. Tag+Release → resolve MERGE_SHA, skip-check for an existing release, THEN semver bump from the
                    CHANGELOG.md categories; tag the merge commit; gh release create
 5. Watch deploy  → only when deploy.adapter != none: poll per service until the running commit is the
@@ -153,9 +153,10 @@ Exit codes:
 ## Phase 4 — Merge
 
 ```bash
-${GH_PREFIX}gh pr merge <pr-num> --merge \
-  --subject "merge: <integration> — <scope summary> (<integration> → <default>)"
+${GH_PREFIX}gh pr merge <pr-num> --repo <repoSlug> --merge --subject "merge: <integration> — <scope summary> (<integration> → <default>)"
 ```
+
+**Spell it exactly like that, on one line.** The `PreToolUse` lifecycle guard adjudicates `gh pr merge` against a fixed grammar — `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<text>"]`, optionally behind the literal `unset GITHUB_TOKEN && ` prefix — with nothing else chained and no line continuation. The form without `--delete-branch` is the guard's *release arm*: it is accepted only when the PR's head is the repository's declared integration branch and its base is the default branch, and only when every check in the PR's rollup has completed green — which is what Phase 3 just established. The subject must contain none of `"`, `$`, backtick, backslash, or a newline.
 
 **Do NOT pass `--delete-branch` when `<integration> != <default>`.** The integration branch is permanent; deleting it breaks every in-flight `ship-issue` worktree.
 

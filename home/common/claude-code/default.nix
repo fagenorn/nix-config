@@ -47,10 +47,23 @@ let
   # the development-pace branch, deliberately unprotected, and its CI gate
   # lives in the shipping flow's wait-for-checks (nodo's CI is path-filtered,
   # so no required status check could report on every PR shape anyway). The
-  # default branch keeps the full demand — required status checks plus
-  # enforce_admins — even if it is ever also declared here.
+  # default branch keeps the full demand for feature merges — required status
+  # checks plus enforce_admins — even if it is ever also declared here.
+  #
+  # Declaring a branch also opens the merge grammar's release arm: a PR whose
+  # head IS the declared integration branch and whose base is the default
+  # branch may be merged without `--delete-branch` (the integration branch is
+  # permanent; deleting it would strand every in-flight worktree). That arm is
+  # gated on the PR's own check rollup — every check completed and green — read
+  # by the guard itself, in place of the forge-protection demand: the same
+  # path-filtered CI means no required-status-check rule on the default branch
+  # could stand in for the release PR's actual checks.
   integrationBases = {
     "elevenyellow/nodocom" = "dev";
+    # arcwave is a private free-plan repository: GitHub refuses branch
+    # protection there, so the default-branch merge demand can never be met.
+    # Feature PRs integrate on `dev`; releases promote `dev` to `main`.
+    "fagenorn/arcwave" = "dev";
   };
 
   lifecycleGuard = pkgs.writeTextFile {
@@ -605,6 +618,13 @@ let
 
 
       def parse_merge_raw(command, repository):
+          """The guarded merge as (number, subject, delete_branch), or None.
+
+          Two arms share one spelling. The feature arm ends in `--delete-branch`:
+          a feature branch is disposable once merged. The release arm omits it,
+          because there the head is the declared integration branch, which is
+          permanent; `validate_merge` confines that arm to exactly that PR shape.
+          """
           prefix = "gh pr merge "
           if not command.startswith(prefix):
               return None
@@ -618,19 +638,23 @@ let
           ):
               return None
 
-          no_subject = f"--repo {repository} --merge --delete-branch"
-          if remainder == no_subject:
-              return number, None
+          delete_branch_suffix = " --delete-branch"
+          delete_branch = remainder.endswith(delete_branch_suffix)
+          if delete_branch:
+              remainder = remainder[:-len(delete_branch_suffix)]
+
+          if remainder == f"--repo {repository} --merge":
+              return number, None, delete_branch
 
           subject_prefix = f'--repo {repository} --merge --subject "'
-          subject_suffix = '" --delete-branch'
+          subject_suffix = '"'
           if not remainder.startswith(subject_prefix) or not remainder.endswith(subject_suffix):
               return None
 
           subject = remainder[len(subject_prefix):-len(subject_suffix)]
           if free_text_problem(subject, False) is not None:
               return None
-          return number, subject
+          return number, subject, delete_branch
 
 
       def validate_branch_delete(command, git_bin, timeout):
@@ -744,7 +768,7 @@ let
           merge_parts = parse_merge_raw(command, repository)
           if merge_parts is None:
               return block("unsafe merge: command does not match the guarded merge grammar")
-          number, subject = merge_parts
+          number, subject, delete_branch = merge_parts
           try:
               command_argv = shlex.split(command)
           except ValueError as error:
@@ -754,18 +778,30 @@ let
           ]
           if subject is not None:
               expected_argv.extend(["--subject", subject])
-          expected_argv.append("--delete-branch")
+          if delete_branch:
+              expected_argv.append("--delete-branch")
           if command_argv != expected_argv:
               return block("unsafe merge: tokenised command does not match guarded argv")
           if context.base_branch is None:
               return block("unsafe merge: cannot resolve the repository default branch")
           allowed_bases = authorized_bases(repository, context.base_branch)
+          integration_base = INTEGRATION_BASES.get(repository)
+
+          # The release arm — no `--delete-branch` — exists for one PR shape
+          # only: the declared integration branch promoted into the default
+          # branch, whose head must survive the merge. Where no such branch is
+          # declared there is nothing to spare, so refuse before any lookup.
+          if not delete_branch and integration_base is None:
+              return block(
+                  "unsafe merge: --delete-branch may be omitted only in a repository "
+                  "with a declared integration branch"
+              )
 
           try:
               pr_lookup = subprocess.run(
                   [
                       context.gh_bin, "pr", "view", number, "--repo", repository,
-                      "--json", "state,baseRefName,url",
+                      "--json", "state,baseRefName,headRefName,url,statusCheckRollup",
                   ],
                   capture_output=True,
                   text=True,
@@ -807,11 +843,15 @@ let
           # the default branch. The predicate above already confined it to
           # `allowed_bases`, so this reads back one of those names.
           try:
-              base = json.loads(pr_lookup.stdout)["baseRefName"]
-          except (ValueError, KeyError):
+              pr_facts = json.loads(pr_lookup.stdout)
+              base = pr_facts["baseRefName"]
+          except (ValueError, KeyError, TypeError):
               return block("unsafe merge: cannot read the PR base branch")
           if base not in allowed_bases:
               return block(f"unsafe merge: PR base {base} is not an authorized base")
+
+          if not delete_branch:
+              return validate_release_merge(pr_facts, base, integration_base, context)
 
           # A declared integration branch is deliberately exempt from the
           # protection demand: it is the development-pace branch, and its CI
@@ -819,7 +859,6 @@ let
           # path-filtered, so no required check could report on every PR shape
           # anyway). The default branch keeps the full demand — even if it is
           # ever also declared as the integration base.
-          integration_base = INTEGRATION_BASES.get(repository)
           if (
               integration_base is not None
               and base == integration_base
@@ -859,6 +898,54 @@ let
               return block("protection predicate timed out")
           if protection_predicate.returncode != 0:
               return block_child_failure("protection predicate failed", protection_predicate)
+          return 0
+
+
+      def validate_release_merge(pr_facts, base, integration_base, context):
+          """The release arm: the integration branch promoted into the default branch.
+
+          Its head is permanent, so the merge may omit `--delete-branch`, and in
+          return exactly that PR shape is required. Forge protection is not
+          consulted: with path-filtered CI no required-status-check rule on the
+          default branch can stand in for the release PR's actual checks, so the
+          guard reads the PR's own rollup and demands every check completed and
+          green — a pending, failed, cancelled, or empty rollup blocks.
+          """
+          head = pr_facts.get("headRefName")
+          if not isinstance(head, str) or not head:
+              return block("unsafe merge: cannot read the PR head branch")
+          if head != integration_base or base != context.base_branch:
+              return block(
+                  "unsafe merge: --delete-branch may be omitted only when merging "
+                  f"{integration_base} into {context.base_branch}; this PR merges "
+                  f"{head} into {base}"
+              )
+          try:
+              rollup_predicate = subprocess.run(
+                  [
+                      context.jq_bin,
+                      "-e",
+                      '(.statusCheckRollup | type) == "array" '
+                      "and (.statusCheckRollup | length) > 0 "
+                      "and all(.statusCheckRollup[]; "
+                      '(.__typename == "CheckRun" and .status == "COMPLETED" '
+                      'and (.conclusion == "SUCCESS" or .conclusion == "SKIPPED" '
+                      'or .conclusion == "NEUTRAL")) '
+                      'or (.__typename == "StatusContext" and .state == "SUCCESS"))',
+                  ],
+                  input=json.dumps(pr_facts),
+                  capture_output=True,
+                  text=True,
+                  timeout=context.timeout,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              return block("check rollup predicate timed out")
+          if rollup_predicate.returncode != 0:
+              return block_child_failure(
+                  "unsafe merge: the PR's check rollup is not entirely green",
+                  rollup_predicate,
+              )
           return 0
 
 
