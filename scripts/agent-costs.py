@@ -408,20 +408,129 @@ def owner_issue(result):
     return issue if issue == match.group(1) else None
 
 
-def scan_codex_file(path):
-    """Parse one Codex rollout. Returns per-file usage and identity, or None.
+def codex_usage(usage, *, modern):
+    """Return validated Codex usage, or ``None`` for an unusable observation.
 
-    Contract: tokens are the sum of ``info.last_token_usage`` over the file's
-    ``token_count`` events (D3); ``cached_input_tokens`` and
-    ``reasoning_output_tokens`` are subsets of their parents and are never
-    added on top.
+    Legacy token-count records predate some of the subset counters, so those
+    omitted fields are zero there.  A modern response record has the complete
+    shape and must say so explicitly.
     """
-    meta = None
+    if not isinstance(usage, dict):
+        return None
+    required = ("input_tokens", "output_tokens")
+    optional = ("cached_input_tokens", "cache_write_input_tokens",
+                "reasoning_output_tokens")
+    if modern:
+        required += optional + ("total_tokens",)
+    values = {}
+    fields = required if modern else required + optional
+    for field in fields:
+        if field not in usage:
+            if modern or field not in optional:
+                return None
+            values[field] = 0
+            continue
+        value = usage[field]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        values[field] = value
+    if not modern:
+        total = usage.get("total_tokens")
+        if total is None:
+            values["total_tokens"] = None
+        elif (not isinstance(total, int) or isinstance(total, bool)
+              or total < 0):
+            return None
+        else:
+            values["total_tokens"] = total
+    if (values["cached_input_tokens"] + values["cache_write_input_tokens"]
+            > values["input_tokens"]):
+        return None
+    if values["reasoning_output_tokens"] > values["output_tokens"]:
+        return None
+    if modern and values["total_tokens"] != (
+            values["input_tokens"] + values["output_tokens"]):
+        return None
+    return values
+
+
+def codex_usage_key(usage):
+    """A stable cumulative signature and duplicate-comparison key."""
+    return tuple(usage[field] for field in (
+        "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+        "output_tokens", "reasoning_output_tokens", "total_tokens",
+    ))
+
+
+def add_codex_usage(result, usages, source):
+    """Replace a rollout's selected usage without exposing response identities."""
     input_total = cache_create = cache_read = output = reasoning = 0
     peak_ctx = 0
-    turns = 0
+    for usage in usages:
+        input_total += usage["input_tokens"]
+        cache_read += usage["cached_input_tokens"]
+        cache_create += usage["cache_write_input_tokens"]
+        output += usage["output_tokens"]
+        reasoning += usage["reasoning_output_tokens"]
+        peak_ctx = max(peak_ctx, usage["input_tokens"])
+    result.update(
+        fresh=input_total - cache_read - cache_create,
+        cache_create=cache_create,
+        cache_read=cache_read,
+        output=output,
+        reasoning=reasoning,
+        input_total=input_total,
+        peak_ctx=peak_ctx,
+        turns=len(usages),
+        usage_measured=bool(usages),
+    )
+    result["measurement"]["selected_source_counts"] = {
+        "modern": len(usages) if source == "modern" else 0,
+        "legacy": len(usages) if source == "legacy" else 0,
+    }
+
+
+def codex_is_root(payload):
+    """Use each format's metadata shape to classify root and child rollouts."""
+    source = payload.get("source")
+    if source == "cli":
+        return True
+    if isinstance(source, dict) and isinstance(source.get("subagent"), dict):
+        return False
+    return payload.get("thread_source") == "user"
+
+
+def new_codex_measurement():
+    """Public, additive coverage metadata for one selected Codex run."""
+    return {
+        "selected_source_counts": {"modern": 0, "legacy": 0},
+        "duplicate_observations_skipped": 0,
+        "missing_usage_observations": 0,
+        "invalid_usage_observations": 0,
+        "ambiguous_legacy_observations": 0,
+        "ambiguous_modern_observations": 0,
+        "legacy_observations_excluded": 0,
+        "files_selected": 0,
+        "files_with_usage": 0,
+    }
+
+
+def scan_codex_file(path):
+    """Parse one Codex rollout, retaining only transient response identities.
+
+    Modern response usage wins for the rollout.  The collector later performs
+    the same identity comparison across selected files; response IDs never
+    reach the JSON record.
+    """
+    meta = None
     models = Counter()
     efforts = Counter()
+    legacy = []
+    previous_cumulative = None
+    modern = {}
+    modern_conflicts = set()
+    modern_seen = 0
+    measurement = new_codex_measurement()
 
     try:
         fh = open(path, "r", errors="replace")
@@ -432,6 +541,7 @@ def scan_codex_file(path):
             # Cheap prefilter, matching scan_file's style: only these three
             # record kinds carry identity, usage or the model/effort mix.
             if ("session_meta" not in line and "token_count" not in line
+                    and "token_usage_record" not in line
                     and "turn_context" not in line):
                 continue
             try:
@@ -446,20 +556,64 @@ def scan_codex_file(path):
                     meta = {
                         "session_id": session_id,
                         "rollout_id": payload.get("id") or session_id,
-                        "is_root": payload.get("thread_source") == "user",
+                        "is_root": codex_is_root(payload),
                         "cwd": payload.get("cwd") or "",
                     }
             elif kind == "event_msg" and payload.get("type") == "token_count":
-                last = (payload.get("info") or {}).get("last_token_usage")
-                if isinstance(last, dict):
-                    seen_input = last.get("input_tokens") or 0
-                    input_total += seen_input
-                    cache_read += last.get("cached_input_tokens") or 0
-                    cache_create += last.get("cache_write_input_tokens") or 0
-                    output += last.get("output_tokens") or 0
-                    reasoning += last.get("reasoning_output_tokens") or 0
-                    peak_ctx = max(peak_ctx, seen_input)
-                    turns += 1
+                info = payload.get("info") or {}
+                last = codex_usage(info.get("last_token_usage"), modern=False)
+                if last is None:
+                    if info.get("last_token_usage") is None:
+                        measurement["missing_usage_observations"] += 1
+                    else:
+                        measurement["invalid_usage_observations"] += 1
+                    continue
+                cumulative = codex_usage(info.get("total_token_usage"), modern=False)
+                if cumulative is None:
+                    measurement["ambiguous_legacy_observations"] += 1
+                    if info.get("total_token_usage") is None:
+                        measurement["missing_usage_observations"] += 1
+                    else:
+                        measurement["invalid_usage_observations"] += 1
+                    legacy.append(last)
+                    continue
+                signature = codex_usage_key(cumulative)
+                if signature == previous_cumulative:
+                    measurement["duplicate_observations_skipped"] += 1
+                    continue
+                # A changed cumulative signature is either progress or a new
+                # epoch after compaction/reset.  In both cases `last` is one
+                # observed completion; the cumulative total is never summed.
+                previous_cumulative = signature
+                legacy.append(last)
+            elif kind == "token_usage_record":
+                modern_seen += 1
+                response_id = payload.get("response_id")
+                usage = codex_usage(payload.get("usage"), modern=True)
+                if not isinstance(response_id, str) or not response_id:
+                    measurement["invalid_usage_observations"] += 1
+                    continue
+                if usage is None:
+                    if payload.get("usage") is None:
+                        measurement["missing_usage_observations"] += 1
+                    else:
+                        measurement["invalid_usage_observations"] += 1
+                    continue
+                thread_id = payload.get("thread_id") or (
+                    meta["session_id"] if meta else None)
+                if not isinstance(thread_id, str) or not thread_id:
+                    measurement["invalid_usage_observations"] += 1
+                    continue
+                identity = (thread_id, response_id)
+                previous = modern.get(identity)
+                if previous is None and identity not in modern_conflicts:
+                    modern[identity] = usage
+                elif previous == usage:
+                    measurement["duplicate_observations_skipped"] += 1
+                else:
+                    modern.pop(identity, None)
+                    modern_conflicts.add(identity)
+                    measurement["ambiguous_modern_observations"] += 1
             elif kind == "turn_context":
                 if payload.get("model"):
                     models[payload["model"]] += 1
@@ -468,22 +622,26 @@ def scan_codex_file(path):
 
     if meta is None:
         return None
-    return {
+    result = {
         "session_id": meta["session_id"],
         "rollout_id": meta["rollout_id"],
         "is_root": meta["is_root"],
         "cwd": meta["cwd"],
-        "fresh": input_total - cache_read - cache_create,
-        "cache_create": cache_create,
-        "cache_read": cache_read,
-        "output": output,
-        "reasoning": reasoning,
-        "input_total": input_total,
-        "peak_ctx": peak_ctx,
-        "turns": turns,
         "models": dict(models),
         "efforts": dict(efforts),
+        "measurement": measurement,
+        "modern_records": modern,
+        "modern_conflicts": modern_conflicts,
+        "modern_seen": modern_seen,
+        "legacy_records": legacy,
+        "path": str(path),
     }
+    if modern_seen:
+        measurement["legacy_observations_excluded"] = len(legacy)
+        add_codex_usage(result, list(modern.values()), "modern")
+    else:
+        add_codex_usage(result, legacy, "legacy")
+    return result
 
 
 # The only keys a Codex rollout can measure. Anything Claude-only is simply
@@ -495,6 +653,8 @@ def new_codex_group():
     group = dict.fromkeys(CODEX_SUM_FIELDS + ("sessions", "subagents", "peak_ctx"), 0)
     group["models"] = {}
     group["efforts"] = {}
+    group["measurement"] = new_codex_measurement()
+    group["usage_measured"] = False
     return group
 
 
@@ -508,6 +668,40 @@ def collect_codex_groups(root, cutoff, project_filter=None,
         if cutoff is None or path.stat().st_mtime >= cutoff
     )
     results = [r for r in scan_paths(paths, executor_factory, scanner=scan_codex_file) if r]
+
+    # Modern response identities are thread-scoped and deduped across every
+    # selected file.  Prefer a root occurrence when a child copied it; sorting
+    # paths makes the remaining tie deterministic.
+    identities = defaultdict(list)
+    conflicted_identities = set()
+    for result in results:
+        if result["modern_seen"]:
+            add_codex_usage(result, [], "modern")
+            result["selected_modern_identities"] = set()
+        conflicted_identities.update(result["modern_conflicts"])
+        for identity, usage in result["modern_records"].items():
+            identities[identity].append((result, usage))
+    for identity in sorted(identities, key=lambda value: (value[0] or "", value[1])):
+        observations = identities[identity]
+        usages = {codex_usage_key(usage) for _result, usage in observations}
+        if identity in conflicted_identities or len(usages) != 1:
+            for result, _usage in observations:
+                result["measurement"]["ambiguous_modern_observations"] += 1
+            continue
+        chosen, usage = min(observations, key=lambda item: (
+            not item[0]["is_root"], item[0]["path"],
+        ))
+        chosen["selected_modern_identities"].add(identity)
+        for result, _usage in observations:
+            if result is not chosen:
+                result["measurement"]["duplicate_observations_skipped"] += 1
+    for result in results:
+        if result["modern_seen"]:
+            # Keep only identities this selected file owns after cross-file
+            # deduplication.  Conflicting identities are deliberately absent.
+            owned = [usage for identity, usage in result["modern_records"].items()
+                     if identity in result["selected_modern_identities"]]
+            add_codex_usage(result, owned, "modern")
 
     threads = defaultdict(list)
     for result in results:
@@ -531,17 +725,33 @@ def collect_codex_groups(root, cutoff, project_filter=None,
         models = Counter(group["models"])
         efforts = Counter(group["efforts"])
         for result in rollouts:
-            for field in CODEX_SUM_FIELDS:
-                group[field] += result[field]
-            group["peak_ctx"] = max(group["peak_ctx"], result["peak_ctx"])
+            if result["usage_measured"]:
+                for field in CODEX_SUM_FIELDS:
+                    group[field] += result[field]
+                group["usage_measured"] = True
+            if result["peak_ctx"] is not None:
+                group["peak_ctx"] = max(group["peak_ctx"], result["peak_ctx"])
             models.update(result["models"])
             efforts.update(result["efforts"])
+            for field, value in result["measurement"].items():
+                if isinstance(value, dict):
+                    for key, count in value.items():
+                        group["measurement"][field][key] += count
+                else:
+                    group["measurement"][field] += value
+            group["measurement"]["files_selected"] += 1
+            if result["usage_measured"]:
+                group["measurement"]["files_with_usage"] += 1
             if result["is_root"]:
                 group["sessions"] += 1
             else:
                 group["subagents"] += 1
         group["models"] = dict(models)
         group["efforts"] = dict(efforts)
+        if not group["usage_measured"]:
+            for field in CODEX_SUM_FIELDS:
+                group[field] = None
+            group["peak_ctx"] = None
     return groups
 
 
@@ -863,6 +1073,7 @@ def project_run(stratum, key, g):
         values = g[field]
         run[field] = {"n": len(values), "p50": percentile(values, 50),
                       "p90": percentile(values, 90), "max": max(values, default=0)}
+    run["measurement"] = dict(g["measurement"]) if "measurement" in g else None
     return run
 
 
@@ -1073,6 +1284,10 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
             groups_by_stratum["codex"] = {"cost_basis": "subscription", "groups": codex_groups}
         record_window = {"days": args.days,
                          "cutoff_epoch": int(cutoff) if cutoff else None,
+                         # `--days` selects transcript files by mtime; all
+                         # records in each selected file are then accounted.
+                         "file_mtime_selection": True,
+                         "whole_selected_file_usage": True,
                          "strata": sorted(selected),
                          "sources": sources}
         json.dump(build_record(groups_by_stratum, record_window), sys.stdout,

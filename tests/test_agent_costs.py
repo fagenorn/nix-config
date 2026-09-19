@@ -618,7 +618,7 @@ class EndToEndTest(unittest.TestCase):
 
 
 def codex_meta(session_id, rollout_id=None, cwd="/Users/me/repo",
-               thread_source="user", parent=None):
+               thread_source="user", parent=None, source=None):
     payload = {
         "session_id": session_id,
         "id": rollout_id or session_id,
@@ -631,6 +631,8 @@ def codex_meta(session_id, rollout_id=None, cwd="/Users/me/repo",
         payload["source"] = {"subagent": {"thread_spawn": {
             "parent_thread_id": parent or session_id,
             "depth": 1, "agent_nickname": "Nash", "agent_role": None}}}
+    if source is not None:
+        payload["source"] = source
     return record({"timestamp": "2026-08-04T14:08:50.499Z",
                    "type": "session_meta", "payload": payload})
 
@@ -647,6 +649,16 @@ def codex_usage(inp, cached=0, write=0, out=0, reasoning=0, total=None):
                                "info": {"total_token_usage": running,
                                         "last_token_usage": last,
                                         "model_context_window": 258400}}})
+
+
+def codex_response(response_id, inp, cached=0, write=0, out=0, reasoning=0):
+    usage = {"input_tokens": inp, "cached_input_tokens": cached,
+             "cache_write_input_tokens": write, "output_tokens": out,
+             "reasoning_output_tokens": reasoning,
+             "total_tokens": inp + out}
+    return record({"timestamp": "2026-08-04T14:08:55.871Z", "type": "token_usage_record",
+                   "payload": {"thread_id": "thread-1", "response_id": response_id,
+                               "usage": usage}})
 
 
 def codex_turn_context(model="gpt-5.6-sol", effort="xhigh"):
@@ -686,6 +698,118 @@ class ScanCodexFileTest(unittest.TestCase):
         self.assertEqual(got["output"], 60)
         self.assertEqual(got["reasoning"], 25)
         self.assertEqual(got["turns"], 2)
+
+    def test_replayed_legacy_snapshot_is_not_a_new_turn(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            event = codex_usage(1000, cached=600, out=50)
+            path.write_text("\n".join(json.dumps(x) for x in [
+                json.loads(codex_meta("s1")), json.loads(event), json.loads(event),
+            ]) + "\n", encoding="utf-8")
+            result = agent_costs.scan_codex_file(path)
+            self.assertEqual(result["input_total"], 1000)
+            self.assertEqual(result["turns"], 1)
+            self.assertEqual(result["measurement"]["duplicate_observations_skipped"], 1)
+
+    def test_equal_legacy_calls_with_changed_cumulative_snapshots_are_distinct(self):
+        path = self.write_rollout(
+            codex_meta("s1"),
+            codex_usage(100, cached=50, out=10, total=100),
+            codex_usage(100, cached=50, out=10, total=200),
+        )
+        result = agent_costs.scan_codex_file(path)
+        self.assertEqual((result["input_total"], result["turns"]), (200, 2))
+
+    def test_missing_cumulative_evidence_is_explicitly_ambiguous(self):
+        event = json.loads(codex_usage(100))
+        del event["payload"]["info"]["total_token_usage"]
+        path = self.write_rollout(codex_meta("s1"), record(event))
+        result = agent_costs.scan_codex_file(path)
+        self.assertEqual(result["input_total"], 100)
+        self.assertEqual(result["measurement"]["ambiguous_legacy_observations"], 1)
+        self.assertEqual(result["measurement"]["missing_usage_observations"], 1)
+
+    def test_modern_usage_wins_over_legacy_for_a_rollout(self):
+        path = self.write_rollout(
+            codex_meta("s1", source="cli"), codex_usage(1000, cached=600, out=50),
+            codex_response("resp-1", 40, cached=20, out=4, reasoning=2),
+        )
+        result = agent_costs.scan_codex_file(path)
+        self.assertTrue(result["is_root"])
+        self.assertEqual((result["input_total"], result["output"], result["turns"]), (40, 4, 1))
+        self.assertEqual(result["measurement"]["selected_source_counts"],
+                         {"modern": 1, "legacy": 0})
+        self.assertEqual(result["measurement"]["legacy_observations_excluded"], 1)
+
+    def test_invalid_modern_usage_does_not_claim_a_measured_zero(self):
+        invalid = json.loads(codex_response("resp-1", 10))
+        invalid["payload"]["usage"]["cached_input_tokens"] = True
+        path = self.write_rollout(codex_meta("s1", source="cli"), record(invalid))
+        result = agent_costs.scan_codex_file(path)
+        self.assertFalse(result["usage_measured"])
+        self.assertEqual(result["measurement"]["invalid_usage_observations"], 1)
+
+    def test_missing_only_codex_run_projects_null_tokens_not_zero(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            day = root / "2026" / "08" / "04"
+            day.mkdir(parents=True)
+            missing = record({"type": "token_usage_record", "payload": {
+                "thread_id": "thread-1", "response_id": "resp-1",
+            }})
+            (day / "missing.jsonl").write_text(
+                codex_meta("s1", source="cli") + missing, encoding="utf-8")
+            groups = agent_costs.collect_codex_groups(
+                root, None, executor_factory=EndToEndTest.DeterministicExecutor)
+        record_document = agent_costs.build_record(
+            {"codex": {"cost_basis": "subscription", "groups": groups}},
+            {"days": 0, "cutoff_epoch": None, "strata": ["codex"], "sources": {}})
+        run = record_document["strata"]["codex"]["runs"][0]
+        self.assertIsNone(run["tokens"]["input_total"])
+        self.assertEqual(run["measurement"]["missing_usage_observations"], 1)
+
+    def test_modern_source_subagent_metadata_classifies_a_child(self):
+        path = self.write_rollout(
+            codex_meta("s1", rollout_id="child", thread_source="user",
+                       source={"subagent": {}}),
+            codex_response("resp-1", 10),
+        )
+        self.assertFalse(agent_costs.scan_codex_file(path)["is_root"])
+
+    def test_copied_modern_response_across_files_counts_once_at_the_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            day = root / "2026" / "08" / "04"
+            day.mkdir(parents=True)
+            (day / "root.jsonl").write_text(
+                codex_meta("s1", source="cli") + codex_response("resp-1", 100),
+                encoding="utf-8")
+            (day / "child.jsonl").write_text(
+                codex_meta("s1", rollout_id="child", thread_source="subagent")
+                + codex_response("resp-1", 100), encoding="utf-8")
+            groups = agent_costs.collect_codex_groups(
+                root, None, executor_factory=EndToEndTest.DeterministicExecutor)
+        group = groups[("repo", None)]
+        self.assertEqual((group["fresh"], group["turns"]), (100, 1))
+        self.assertEqual((group["sessions"], group["subagents"]), (1, 1))
+        self.assertEqual(group["measurement"]["selected_source_counts"],
+                         {"modern": 1, "legacy": 0})
+        self.assertEqual(group["measurement"]["duplicate_observations_skipped"], 1)
+
+    def test_conflicting_modern_duplicates_are_ambiguous_and_not_summed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            day = root / "2026" / "08" / "04"
+            day.mkdir(parents=True)
+            for name, tokens in (("one.jsonl", 100), ("two.jsonl", 200)):
+                (day / name).write_text(
+                    codex_meta("s1", source="cli") + codex_response("resp-1", tokens),
+                    encoding="utf-8")
+            groups = agent_costs.collect_codex_groups(
+                root, None, executor_factory=EndToEndTest.DeterministicExecutor)
+        group = groups[("repo", None)]
+        self.assertIsNone(group["fresh"])
+        self.assertEqual(group["measurement"]["ambiguous_modern_observations"], 2)
 
     def test_cached_and_reasoning_are_subsets_not_addends(self):
         path = self.write_rollout(
@@ -1000,6 +1124,25 @@ class StrataCliTest(unittest.TestCase):
         self.assertEqual(runs[0]["subagents"], 1)
         self.assertEqual(runs[0]["turns"], 2)
         self.assertIsNone(runs[0]["cost_usd"])
+
+    def test_codex_window_selects_by_file_mtime_and_uses_the_whole_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            day = root / "2026" / "08" / "04"
+            day.mkdir(parents=True)
+            # The event timestamp predates this window.  Its file is new, so
+            # mtime selection still includes the record without event filtering.
+            (day / "recent-file.jsonl").write_text(
+                codex_meta("s1", source="cli") + codex_response("resp-1", 10),
+                encoding="utf-8")
+            raw, code = run_main("--projects-dir", "/nonexistent/claude/root",
+                                 "--codex-sessions", str(root), "--days", "1",
+                                 "--format", "json", "--strata", "codex")
+        self.assertIsNone(code)
+        record = json.loads(raw)
+        self.assertTrue(record["window"]["file_mtime_selection"])
+        self.assertTrue(record["window"]["whole_selected_file_usage"])
+        self.assertEqual(record["strata"]["codex"]["runs"][0]["tokens"]["input_total"], 10)
 
     def test_empty_window_in_json_mode_emits_a_record_with_no_runs(self):
         tmp = Path(tempfile.mkdtemp())
