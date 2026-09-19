@@ -3,7 +3,6 @@
 **Files:**
 - Modify: `.agents/project.json`
 - Modify: `home/common/agent-skills/tests/test_resolve_project.py`
-- Modify only if the resolver reports projection drift: `AGENTS.md`, `CLAUDE.md`
 
 **Interfaces:**
 - Consumes: D6's pre-resolution bootstrap exception; the existing `nix-build` command object as the reviewed structural patch anchor; Tasks 1–4's green source contracts.
@@ -13,12 +12,32 @@
 - This task never prints, parses, or reads raw `.agents/project.json`. Its only pre-resolution mutation is one narrow `apply_patch` that inserts the exact sibling command at the existing `nix-build` structural anchor (D6).
 - Immediately after that patch, invoke `resolve-project resolve --repo-root <worktree>` exactly once, retain the successful object in memory for the task, and make no second project-policy read.
 - `nix-activate` preserves exact argv words, authored cwd `.`, and empty env names; normalized cwd equals the project root. `bindings.deploy` remains adapter `none`, command null, config `{}`, and `capabilities.deploy.state` remains `unsupported`.
-- Command entries do not participate in projection rendering, so the expected resolver result is success with current projections. Run `write-projections` only if the resolver specifically reports projection drift caused by the patch; inspect the two generated targets and restart this task's resolution boundary before any other mutation.
+- Command entries do not participate in projection rendering, so the sole resolver result must be success with current projections. Any refusal stops this task before another mutation; it does not license a second policy read or projection repair inside this task (D8).
 - Source build/tests finish and Task 5's full-lane review completes before Task 6 activates anything.
 
-- [ ] **Step 1: Add the exact public-contract test**
+- [ ] **Step 1: Apply the single bootstrap patch as the first mutation**
 
-Append to `CommittedContractTest`:
+Use `apply_patch` against the existing `nix-build` command object captured by the retained caller contract. Insert exactly this sibling JSON member and change no other byte:
+
+```json
+"nix-activate": {
+  "argv": ["just", "switch"],
+  "cwd": ".",
+  "env": []
+}
+```
+
+Do not use `cat`, `jq`, Python, `rg`, `sed`, or an editor to inspect or rewrite `.agents/project.json`. A patch-context mismatch is a stop for review, not permission to read the raw file.
+
+- [ ] **Step 2: Immediately perform and retain the sole phase resolution**
+
+Run: `resolve-project resolve --repo-root /Users/anis/tmp/nix-config/.worktrees/worktree-issue-100-strict-project-resolver`
+
+Expected: exit 0; retain this `ResolvedProject` in memory. Assert from the returned object that the exact normalized `nix-activate` entry exists, deploy remains unsupported, and projections were accepted. Do not persist the output. A refusal ends the task before adding tests or changing any other file.
+
+- [ ] **Step 3: Add and run the exact public-contract test**
+
+Only after Step 2 succeeds, append to `CommittedContractTest`:
 
 ```python
 def test_nix_activate_is_exact_and_deploy_stays_unsupported(self):
@@ -38,35 +57,11 @@ def test_nix_activate_is_exact_and_deploy_stays_unsupported(self):
     })
 ```
 
-Run before the contract patch: `python3 home/common/agent-skills/tests/test_resolve_project.py CommittedContractTest.test_nix_activate_is_exact_and_deploy_stays_unsupported -v`
-
-Expected: FAIL because `nix-activate` is absent. A deploy assertion failure indicates scope drift and must not be accepted.
-
-- [ ] **Step 2: Apply the single bootstrap patch without reading the contract**
-
-Use `apply_patch` against the existing `nix-build` command object captured by the retained caller contract. Insert exactly this sibling JSON member and change no other byte:
-
-```json
-"nix-activate": {
-  "argv": ["just", "switch"],
-  "cwd": ".",
-  "env": []
-}
-```
-
-Do not use `cat`, `jq`, Python, `rg`, `sed`, or an editor to inspect or rewrite `.agents/project.json`. A patch-context mismatch is a stop for review, not permission to read the raw file.
-
-- [ ] **Step 3: Perform the first and only phase resolution**
-
-Run: `resolve-project resolve --repo-root /Users/anis/tmp/nix-config/.worktrees/worktree-issue-100-strict-project-resolver`
-
-Expected: exit 0; retain this `ResolvedProject` in memory. Assert from the returned object that the exact normalized `nix-activate` entry exists, deploy remains unsupported, and projections were accepted. Do not persist the output.
-
-- [ ] **Step 4: Verify the command contract and source-only workflow suite**
-
 Run: `python3 home/common/agent-skills/tests/test_resolve_project.py CommittedContractTest.test_nix_activate_is_exact_and_deploy_stays_unsupported -v`
 
 Expected: PASS.
+
+- [ ] **Step 4: Verify the source-only workflow suite**
 
 Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests`
 
@@ -81,8 +76,8 @@ Expected: `just build` exits 0. Inspect the build result/declaration tests: it c
 - [ ] **Step 6: Commit for full-lane review**
 
 ```bash
-git add .agents/project.json home/common/agent-skills/tests/test_resolve_project.py AGENTS.md CLAUDE.md
+git add .agents/project.json home/common/agent-skills/tests/test_resolve_project.py
 git commit -S -m "feat(project): declare local nix activation" -m "Co-Authored-By: Codex <noreply@openai.com>"
 ```
 
-Expected: `AGENTS.md` and `CLAUDE.md` are staged only if Step 3 required projection repair. The committed source build and tests now receive Task 5's normal full-lane review; activation waits for that review to pass.
+Expected: only `.agents/project.json` and `test_resolve_project.py` are staged. The committed source build and tests now receive Task 5's normal full-lane review; activation waits for that review to pass.

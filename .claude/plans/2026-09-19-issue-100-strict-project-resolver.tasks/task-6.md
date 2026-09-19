@@ -2,6 +2,7 @@
 
 **Files:**
 - Verify after managed activation: `~/.agents/bin/resolve-project`
+- Verify after managed activation: `~/.agents/bin/context-map-lint`
 - Verify absent after managed activation: `~/.agents/bin/resolve-bindings`
 - Verify after managed activation: `~/.agents/skills/**`
 - Verify after managed activation: `~/.claude/skills/**`
@@ -16,7 +17,7 @@
 - Resolve once at this phase entry and retain the returned object. Invoke build, activation, and workflow verification by their resolved command entries, preserving argv, absolute cwd, and declared env-name removal.
 - Activation is exactly `just switch` from the repository root. It does not use a deploy adapter and does not change `capabilities.deploy` from unsupported (D6).
 - Installed Agents phase entries equal `SHARED_POLICY_ENTRIES`; installed Claude phase entries equal `SHARED_POLICY_ENTRIES | CLAUDE_POLICY_ENTRIES`. Missing roots or consumers fail rather than downgrading.
-- Both installed trees have zero `resolve-bindings`, `.claude/skills.config.json`, and `unsetGithubToken` references. `~/.agents/bin/resolve-bindings` is absent and `~/.agents/bin/resolve-project` is executable.
+- Both installed trees and installed `context-map-lint` have zero `resolve-bindings`, `.claude/skills.config.json`, and `unsetGithubToken` references. `~/.agents/bin/resolve-bindings` is absent; `resolve-project` and `context-map-lint` are executable.
 - Do not inspect, mutate, or onboard Nodo, Argus, or Arcwave. Do not run garbage collection, prune generations, or disturb issue-130 recovery generations.
 
 - [ ] **Step 1: Resolve once and verify the reviewed head**
@@ -49,8 +50,9 @@ Run:
 
 ```bash
 test -x "$HOME/.agents/bin/resolve-project"
+test -x "$HOME/.agents/bin/context-map-lint"
 test ! -e "$HOME/.agents/bin/resolve-bindings"
-if rg -n 'resolve-bindings|\.claude/skills\.config\.json|unsetGithubToken' "$HOME/.agents/skills" "$HOME/.claude/skills"; then exit 1; fi
+if rg -n 'resolve-bindings|\.claude/skills\.config\.json|unsetGithubToken' "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.agents/bin/context-map-lint"; then exit 1; fi
 ```
 
 Expected: exit 0 and no grep output. This gate scopes exactly to nix-config's installed helper and skill surfaces; it does not search unrelated repositories or historical source artifacts.

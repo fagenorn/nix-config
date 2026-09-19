@@ -76,6 +76,39 @@ def test_live_evals_grade_strict_policy_and_direct_review(self):
         "selected model", "last-message",
     ):
         self.assertIn(required, corpus)
+
+def assert_codex_operation_pair(case, support, review_field, headings):
+    owner = normalized(COLLABORATION.read_text(encoding="utf-8"))
+    support_text = normalized(support.read_text(encoding="utf-8"))
+    case.assert_ordered(
+        owner,
+        review_field, "bindings.commands[review_id].argv",
+        "exec", "--sandbox read-only", "--model gpt-6-astra",
+        'model_reasoning_effort="xhigh"', "--json",
+        "--output-last-message", "--ephemeral",
+        "selected model", "selected reasoning effort",
+        "terminal agent-message", "last-message", "capacity rejection",
+        "no retry", "no native fallback",
+    )
+    case.assertIn("retained `ResolvedProject`", support_text)
+    case.assertIn(review_field, support_text)
+    for heading in headings:
+        case.assertIn(heading, support_text)
+    case.assertNotIn("resolve-project resolve", support_text)
+
+def test_codex_plan_review_owner_and_support_are_complete(self):
+    assert_codex_operation_pair(
+        self, CODEX_PLAN_REVIEW, "bindings.workflow.review.plan",
+        ("Blocking", "Should fix", "Discussion"),
+    )
+
+def test_codex_diff_review_owner_and_support_are_complete(self):
+    assert_codex_operation_pair(
+        self,
+        REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/DIFF-REVIEW.md",
+        "bindings.workflow.review.code",
+        ("Critical", "Important", "Minor"),
+    )
 ```
 
 Run: `python3 home/common/agent-skills/tests/test_workflow_skill_contracts.py ProjectPolicySurfaceTest.test_claude_source_phase_entries_use_one_resolved_project ProjectPolicySurfaceTest.test_live_evals_grade_strict_policy_and_direct_review -v`
@@ -91,7 +124,7 @@ In `codex-collaboration/SKILL.md`, replace the config/default and plugin-agent s
 3. Validate each JSONL object, require the runtime-selection event to report `gpt-6-astra` and `xhigh`, require exactly one terminal agent-message, compare its UTF-8 text byte-for-byte with the last-message file, then apply PLAN-REVIEW or DIFF-REVIEW heading validation. Only this success is reviewer identity `Codex`.
 4. `blocked` stops with the capability reason and repair ID. `unsupported` takes the operation's documented native route. A daemon/slot/capacity rejection is a binding stop that is surfaced verbatim, with no retry, plugin dispatch, or native bypass. Another available-command runtime failure, malformed/mismatched metadata/output, or operation-schema failure uses the existing one-time native fallback with the same packet; never retry Codex.
 
-Delete `CERTIFICATION.md`, whose bridge certification is no longer a live route. Update PLAN-REVIEW and DIFF-REVIEW to receive the retained snapshot and validated direct-command result; keep their packet contents, scope rules, finding schemas, and disposition behavior unchanged.
+Delete `CERTIFICATION.md`, whose bridge certification is no longer a live route. Update PLAN-REVIEW and DIFF-REVIEW to state that they consume the owning skill's retained snapshot and validated direct-command result without another resolver/default path; name their operation-specific review field and headings exactly. Keep their packet contents, scope rules, finding schemas, and disposition behavior unchanged.
 
 In `orchestrate-issues/SKILL.md`, map tracker CLI/repository/credential env, worktree policy, and both orchestration limits directly from the retained snapshot. Remove every config/default/legacy helper instruction; do not add scheduling policy or a second task ledger.
 

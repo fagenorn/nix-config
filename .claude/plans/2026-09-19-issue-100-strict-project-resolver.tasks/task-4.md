@@ -27,7 +27,7 @@
 - The fixture contract is complete schema 1: project `fixture/tinytask`; Git/main with `issue-<num>-<slug>` and `.worktrees`/`worktree-`; tracker unsupported with kind `none`; artifact paths `.claude/specs` and `.claude/plans`; its existing context/standards/architecture paths; verification command argv `["python3","-m","unittest","discover"]`; orchestration 180 minutes / max 2; plan/code review, release, and deploy unsupported; deploy adapter `none`; current Claude/Codex projections.
 - `run-eval.sh` resolves each fresh sandbox once after initialization, retains the JSON in one shell variable, and derives only snapshot fields with `jq`. Resolver refusal terminates the trial; no legacy config/default path exists.
 - Source and installed descriptors name the same consumers. Installed shared files live under `~/.agents/skills`; installed Claude-only files live under `~/.claude/skills`. If either managed root exists, both and every expected consumer are mandatory (D4).
-- Living-source checks cover managed source, evaluation harness/fixtures, installation declarations, root guidance, and lifecycle-guard comments. They exclude historical `.claude/specs/**` and `.claude/plans/**` by construction rather than allowlisting matches.
+- Living-source checks enumerate tracked paths with `git ls-files -z`, admit only explicit text suffixes/extensionless managed scripts, and cover managed source, evaluation harness/fixtures, installation declarations, root guidance, lifecycle-guard comments, and `scripts/context-map-lint.py`. They explicitly exclude historical `.claude/specs/**` and `.claude/plans/**`; ignored caches, binaries, generated build output, and untracked files are never opened as UTF-8 (D8).
 - Parser symbols for the allowed literal `unset GITHUB_TOKEN` remain. Comments/tests describe the allowed names as coming from `bindings.tracker.credential_env.unset_before_invocation`; issue 116's parser architecture is unchanged.
 
 - [ ] **Step 1: Add zero-reference and installed-matrix tests first**
@@ -36,12 +36,18 @@ Extend `ProjectPolicySurfaceTest` with the source scan and installed descriptor.
 
 ```python
 def test_living_source_has_no_legacy_policy_surface(self):
-    roots = (
-        REPO_ROOT / "home/common/agent-skills",
-        REPO_ROOT / "home/common/claude-code/skills",
-        REPO_ROOT / "home/common/claude-code/default.nix",
-        REPO_ROOT / "tests/test_claude_permission_guard.py",
-        REPO_ROOT / "CLAUDE.md",
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--",
+         "AGENTS.md", "CLAUDE.md", ".agents/instructions",
+         "home/common/agent-skills", "home/common/claude-code",
+         "scripts/context-map-lint.py", "tests"],
+        cwd=REPO_ROOT, check=True, capture_output=True,
+    ).stdout.split(b"\0")
+    text_suffixes = {
+        ".md", ".py", ".sh", ".nix", ".json", ".toml", ".yaml", ".yml",
+    }
+    historical_prefixes = (
+        Path(".claude/specs"), Path(".claude/plans"),
     )
     legacy_names = (
         "resolve-" "bindings",
@@ -50,14 +56,24 @@ def test_living_source_has_no_legacy_policy_surface(self):
     )
     legacy = re.compile("|".join(re.escape(name) for name in legacy_names))
     matches = []
-    for root in roots:
-        paths = (root,) if root.is_file() else root.rglob("*")
-        for path in paths:
-            if path.is_file():
-                for line_number, line in enumerate(
-                        path.read_text(encoding="utf-8").splitlines(), 1):
-                    if legacy.search(line):
-                        matches.append(f"{path.relative_to(REPO_ROOT)}:{line_number}")
+    for encoded in tracked:
+        if not encoded:
+            continue
+        relative = Path(os.fsdecode(encoded))
+        if any(relative == prefix or prefix in relative.parents
+               for prefix in historical_prefixes):
+            continue
+        path = REPO_ROOT / relative
+        if path.suffix not in text_suffixes and path.name not in {
+            "resolve-project", "context-map-lint", "artifact-budget",
+            "agent-evidence", "agent-model-matrix", "diff-scope",
+            "review-package", "sdd-workspace", "workflow-state",
+        }:
+            continue
+        for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            if legacy.search(line):
+                matches.append(f"{relative}:{line_number}")
     self.assertEqual(matches, [])
     self.assertFalse((REPO_ROOT / ".claude" / ("skills." "config.json")).exists())
     self.assertFalse((REPO_ROOT /
@@ -77,6 +93,15 @@ def test_installed_policy_surface_matches_source_contract(self):
         self, claude_root, SHARED_POLICY_ENTRIES | CLAUDE_POLICY_ENTRIES)
     self.assertFalse((Path.home() /
         (".agents/bin/resolve-" "bindings")).exists())
+    installed_linter = Path.home() / ".agents/bin/context-map-lint"
+    self.assertTrue(installed_linter.is_file())
+    installed_legacy = re.compile("|".join(re.escape(name) for name in (
+        "resolve-" "bindings",
+        ".claude/skills." "config.json",
+        "unsetGithub" "Token",
+    )))
+    self.assertIsNone(installed_legacy.search(
+        installed_linter.read_text(encoding="utf-8")))
 ```
 
 Run before deletion: `python3 home/common/agent-skills/tests/test_workflow_skill_contracts.py ProjectPolicySurfaceTest.test_living_source_has_no_legacy_policy_surface -v`
@@ -109,7 +134,7 @@ Update `CLAUDE.md`, `home/common/claude-code/default.nix`, and `tests/test_claud
 
 Run: `python3 home/common/agent-skills/tests/test_workflow_skill_contracts.py ProjectPolicySurfaceTest.test_living_source_has_no_legacy_policy_surface ProjectPolicySurfaceTest.test_shared_source_phase_entries_use_one_resolved_project ProjectPolicySurfaceTest.test_claude_source_phase_entries_use_one_resolved_project -v`
 
-Expected: PASS. Missing expected consumers, any living legacy string, fallback instruction, or extra resolver entry fails.
+Expected: PASS. Missing expected consumers, any living legacy string, fallback instruction, extra resolver entry, untracked/binary read, or context-map-lint policy discovery fails.
 
 Run: `python3 -m unittest discover -s home/common/agent-skills/tests -p 'test_resolve_project.py' -q`
 

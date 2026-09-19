@@ -36,10 +36,10 @@
 ## Task index
 
 Task 1 — Pin workflow-facing resolver refusals — `home/common/agent-skills/tests/test_resolve_project.py` — full — [task-1.md](2026-09-19-issue-100-strict-project-resolver.tasks/task-1.md)
-Task 2 — Migrate shared workflow consumers to one snapshot — `home/common/agent-skills/skills/**`, `home/common/agent-skills/README.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-2.md](2026-09-19-issue-100-strict-project-resolver.tasks/task-2.md)
+Task 2 — Migrate shared workflow consumers to one snapshot — `home/common/agent-skills/{skills,tests}/**`, `home/common/agent-skills/README.md`, `scripts/context-map-lint.py`, `tests/test_context_map_lint.py` — full — [task-2.md](2026-09-19-issue-100-strict-project-resolver.tasks/task-2.md)
 Task 3 — Migrate Claude-only consumers and live evaluations — `home/common/claude-code/skills/**`, `home/common/agent-skills/skills/*/evals/evals.json`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-3.md](2026-09-19-issue-100-strict-project-resolver.tasks/task-3.md)
 Task 4 — Onboard the eval fixture and remove the legacy surface — `.claude/skills.config.json`, `CLAUDE.md`, `home/common/agent-skills/{evals,scripts,tests,default.nix}`, `home/common/claude-code/default.nix`, `tests/test_claude_permission_guard.py` — full — [task-4.md](2026-09-19-issue-100-strict-project-resolver.tasks/task-4.md)
-Task 5 — Author activation policy and prove the reviewed source generation — `.agents/project.json`, `home/common/agent-skills/tests/test_resolve_project.py`, generated instruction projections only if required — full — [task-5.md](2026-09-19-issue-100-strict-project-resolver.tasks/task-5.md)
+Task 5 — Author activation policy and prove the reviewed source generation — `.agents/project.json`, `home/common/agent-skills/tests/test_resolve_project.py` — full — [task-5.md](2026-09-19-issue-100-strict-project-resolver.tasks/task-5.md)
 Task 6 — Activate and verify the exact installed migration — managed `~/.agents` and `~/.claude` paths through resolved commands; no repository source edits — full — [task-6.md](2026-09-19-issue-100-strict-project-resolver.tasks/task-6.md)
 
 ## Decisions
@@ -50,5 +50,19 @@ Task 6 — Activate and verify the exact installed migration — managed `~/.age
 - Closed refusal fixtures follow D5.
 - The bootstrap contract patch, activation command, and unsupported deploy state follow D6.
 - Configured direct reviews and their binding capacity/metadata gate follow D7.
+- The reviewed exhaustive support/helper inventory, tracked-text scan boundary, pair-owned review assertions, and patch-before-resolve activation bootstrap follow D8.
+
+## Review provenance
+
+Phase-5 reviewer `fresh-sol-high` reviewed head `c4b4a0d7b9de4feaf8d48d2497f0c1f50f0ae03e`. Verified dispositions:
+
+| Finding | Disposition |
+|---|---|
+| B1 | Applied — Task 2 now names and tests every omitted retained-snapshot support document. |
+| B2 | Applied — `context-map-lint` receives the snapshot-selected absolute map path, with focused source and installed coverage. |
+| B3 | Applied — the living-source gate reads only tracked, explicitly textual paths and excludes historical artifacts. |
+| B4 | Applied — Task 5 patches first, immediately retains its sole resolver result, then adds/runs the contract test. |
+| B5 | Applied — release-contract tests migrate and stage with resolved tracker behavior. |
+| S1 | Applied — configured-review assertions are ordered and scoped to each owning skill/support-document pair. |
 
 ---
