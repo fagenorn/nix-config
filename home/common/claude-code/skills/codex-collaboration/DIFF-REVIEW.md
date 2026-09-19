@@ -1,24 +1,18 @@
 # Operation: `diff-review`
 
 Read this when running `diff-review` — the correctness axis of the two-axis diff
-review (the sdd skill defines the axes and owns dispatching the parallel native
-conformance axis — that axis never comes through this skill). SKILL.md owns the
-shared runtime contract: resolve policy, capability pre-flight, packet by paths,
-exact ordered first lines `WORKTREE_ROOT: <absolute path>` then
-`REVIEW_OPERATION: diff-review`, one foreground `codex:codex-reviewer` dispatch,
-validation, one-time native `reviewer` fallback on a real Codex failure, never a
-retry, concurrency never a fallback reason. The axis is never skipped. This
-operation adds one pre-flight of its own — the size pre-flight below — which runs
-after that capability check.
+review. It consumes SKILL.md's retained `ResolvedProject` and validated direct-command
+result; it does not resolve, read policy, infer a path, or supply a default. This
+operation uses `bindings.workflow.review.code` and validates the `Critical`,
+`Important`, and `Minor` headings. The sdd skill owns the parallel native
+conformance axis. The axis is never skipped. This operation adds the size
+pre-flight below after the operation selection.
 
 ## Size pre-flight
 
-SKILL.md's `command -v codex-companion` check is the capability pre-flight and runs
-first; this size pre-flight runs after it, never before. A missing capability takes
-the native flow and never dispatches, so measuring first would be wasted work, and
-the native path is unscoped by construction. The separate capability fallback — this
-skill or the bridge agent unavailable, so the controller dispatches the native
-correctness reviewer itself — never reaches this pre-flight and is never scoped.
+The retained `capabilities.review.code` selection runs first; this size pre-flight
+runs after it, never before. An unsupported capability takes the documented native
+route and never dispatches, so measuring first would be wasted work.
 
 Measure the range in product terms before building the packet. Run it from the
 worktree root (the helper is `~/.agents/bin/diff-scope`; use the full path if the
@@ -31,10 +25,8 @@ diff-scope <base-sha>..<head-sha> \
   --format json
 ```
 
-`<specDir>` and `<planDir>` are the caller's already-resolved bindings, passed
-repository-relative. A dispatcher that has none passes the documented defaults
-`.claude/specs` and `.claude/plans` rather than omitting the flags, so the run's own
-spec and plan never consume review budget.
+`<specDir>` and `<planDir>` are paths passed from the caller's retained snapshot,
+without fallback locations.
 
 Read exactly three fields from the JSON:
 

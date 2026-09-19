@@ -24,9 +24,6 @@ GRILL = REPO_ROOT / "home/common/agent-skills/skills/grill-with-docs/SKILL.md"
 COLLABORATION = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md"
 )
-CERTIFICATION = (
-    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/CERTIFICATION.md"
-)
 DIFF_REVIEW = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/DIFF-REVIEW.md"
 )
@@ -186,6 +183,19 @@ SHARED_POLICY_ENTRIES = {
     "writing-plans/SKILL.md": ("bindings.paths.artifacts.plans",),
 }
 
+CLAUDE_POLICY_ENTRIES = {
+    "codex-collaboration/SKILL.md": (
+        "bindings.workflow.review.plan", "bindings.workflow.review.code",
+        "bindings.commands", "capabilities.review.plan",
+        "capabilities.review.code", "bindings.paths.hints",
+    ),
+    "orchestrate-issues/SKILL.md": (
+        "bindings.tracker", "bindings.vcs",
+        "bindings.workflow.orchestration.attempt_budget_minutes",
+        "bindings.workflow.orchestration.max_parallel",
+    ),
+}
+
 SHARED_POLICY_SUPPORT = {
     "doc-grounded-questions/REFERENCE.md": ("bindings.paths.context",),
     "from-issue/grounding.md": ("bindings.paths.context", "bindings.paths.standards"),
@@ -287,6 +297,40 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             require_refusal_reporting=True,
         )
 
+    def test_claude_source_phase_entries_use_one_resolved_project(self):
+        assert_policy_entries(
+            self,
+            REPO_ROOT / "home/common/claude-code/skills",
+            CLAUDE_POLICY_ENTRIES,
+        )
+
+    def test_live_evals_grade_strict_policy_and_direct_review(self):
+        paths = (
+            REPO_ROOT / "home/common/agent-skills/skills/from-issue/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/sdd/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/ship-release/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/wayfind/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/writing-plans/evals/evals.json",
+            REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/evals/evals.json",
+            REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/evals/evals.json",
+        )
+        corpus = "\n".join(
+            str(json.loads(path.read_text(encoding="utf-8"))) for path in paths
+        )
+        for forbidden in (
+            "resolve-" "bindings", ".claude/skills." "config.json",
+            "unsetGithub" "Token",
+            "helper missing", "auto-detect absent", "default GitHub",
+        ):
+            self.assertNotIn(forbidden, corpus)
+        for required in (
+            "ResolvedProject", "bindings.workflow.review.code",
+            "bindings.commands", "gpt-6-astra", 'model_reasoning_effort="xhigh"',
+            "selected model", "last-message",
+        ):
+            self.assertIn(required, corpus)
+
     def test_shared_support_documents_reuse_the_retained_snapshot(self):
         assert_retained_policy_support(
             self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_SUPPORT,
@@ -301,6 +345,18 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
 
     def test_ship_issue_configured_review_pair_is_complete(self):
         assert_configured_code_review_pair(self, SHIP_ISSUE, SHIP_ISSUE_REVIEW)
+
+    def test_codex_plan_review_owner_and_support_are_complete(self):
+        assert_codex_operation_pair(
+            self, CODEX_PLAN_REVIEW, "bindings.workflow.review.plan",
+            ("Blocking", "Should fix", "Discussion"),
+        )
+
+    def test_codex_diff_review_owner_and_support_are_complete(self):
+        assert_codex_operation_pair(
+            self, DIFF_REVIEW, "bindings.workflow.review.code",
+            ("Critical", "Important", "Minor"),
+        )
 
     def test_context_map_selection_uses_only_authored_order(self):
         table = (
@@ -336,6 +392,26 @@ def assert_configured_code_review_pair(case, owner, support):
         case.assertNotIn('subagent_type="codex:codex-reviewer"', text)
 
 
+def assert_codex_operation_pair(case, support, review_field, headings):
+    owner = normalized(COLLABORATION.read_text(encoding="utf-8"))
+    support_text = normalized(support.read_text(encoding="utf-8"))
+    case.assert_ordered(
+        owner,
+        review_field, "bindings.commands[review_id].argv",
+        "exec", "--sandbox read-only", "--model gpt-6-astra",
+        'model_reasoning_effort="xhigh"', "--json",
+        "--output-last-message", "--ephemeral",
+        "selected model", "selected reasoning effort",
+        "terminal agent-message", "last-message", "capacity rejection",
+        "no retry", "no native fallback",
+    )
+    case.assertIn("retained `ResolvedProject`", support_text)
+    case.assertIn(review_field, support_text)
+    for heading in headings:
+        case.assertIn(heading, support_text)
+    case.assertNotIn("resolve-project resolve", support_text)
+
+
 def corpus_documents():
     """Every skill document in both skill trees, as (path, text) pairs."""
     for root in SKILL_ROOTS:
@@ -361,7 +437,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.grill = GRILL.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
         cls.diff_review = DIFF_REVIEW.read_text(encoding="utf-8")
-        cls.certification = CERTIFICATION.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
@@ -478,11 +553,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "## 2. Bootstrap and observe",
         )
         self.assertIn(
-            "resolved `agentBudgetMinutes` as request `attempt_budget_minutes`",
+            "bindings.workflow.orchestration.attempt_budget_minutes` as\n  request `attempt_budget_minutes`",
             resolve,
         )
         self.assertIn(
-            "resolved `maxParallel` as request `max_parallel`",
+            "bindings.workflow.orchestration.max_parallel` as request `max_parallel`",
             resolve,
         )
         self.assertNotIn("--budget-minutes <budget>", resolve)
@@ -1603,14 +1678,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             case["expected_output"] for case in self.orchestrate_evals["evals"]
         )
         for anchor in (
-            "workflow-state init-run", "action_id", "recorded_worktree",
-            "workflow-state control",
-            "normalized", "spawn", "resume", "retry", "wait", "finalize",
-            "bounded summaries", "unknown action kind", "cancel the old wait",
-            "stale wake ID", "already-exited wait", "no wake is installed",
-            "unexpected cancellation failure", "restore the old wait ID/handle",
-            "do not arm replacement", "never pair the new wait ID with the old handle",
-            "retry replacement", "reap inherited detached wait observers",
+            "ResolvedProject", "bindings.tracker", "bindings.vcs",
+            "attempt_budget_minutes", "max_parallel", "workflow-state init-run",
+            "workflow-state control", "current_wait_id", "finalize",
         ):
             self.assertIn(anchor, expected)
         for retired in ("workflow-state launch", "workflow-state reconcile"):
@@ -1679,12 +1749,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # coverage sentence and no fragment spanning its line wrap can match.
         contract = " ".join(self.diff_review.replace("\n> ", "\n").split())
         for fragment in (
-            "resolve policy, capability pre-flight, packet by paths",
+            "retained `ResolvedProject` and validated direct-command result",
             "the size pre-flight below",
             "`~/.agents/bin/diff-scope`",
             "--artifact-path <specDir> --artifact-path <planDir>",
             "--format json",
-            "`.claude/specs` and `.claude/plans`",
+            "paths passed from the caller's retained snapshot, without fallback locations",
             "`product.changed_files`",
             "`files[].path`",
             "`files[].changed_lines`",
@@ -1751,7 +1821,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # The capability check is named as running first, and the size
         # pre-flight is defined before the packet it changes.
         self.assertIn(
-            "capability pre-flight and runs first", contract
+            "retained `capabilities.review.code` selection runs first", contract
         )
         self.assert_ordered(
             contract,
@@ -1766,17 +1836,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
         # SKILL.md is narrowed in the same breath, or the two contracts
         # contradict each other (D12).
-        self.assertIn(
-            "Capability pre-flight first, one sub-second call", self.collaboration
-        )
-        self.assertNotIn(
-            "Pre-flight first, one sub-second call", self.collaboration
-        )
-        self.assertIn("skip the capability pre-flight", self.collaboration)
-        self.assertIn(
-            "an additional pre-flight of its own in its reference file",
-            self.collaboration,
-        )
+        self.assertIn("retained `capabilities.review.code` selection runs first", contract)
 
     def test_diff_review_makes_the_scoped_coverage_disclosure_mandatory(self):
         # Review-package transport stays bounded even when this axis scopes its
@@ -1964,69 +2024,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(mirror=fragment):
                 self.assertIn(fragment, packet)
 
-    def test_collaboration_requires_fresh_validated_bridge_evidence(self):
-        # The certification block lives in CERTIFICATION.md, referenced from
-        # SKILL.md's Launch section.
-        self.assertIn("CERTIFICATION.md", self.collaboration)
-        evidence = " ".join(self.certification.split())
-        for fragment in (
-            "`schema_version`",
-            "`bridge-smoke`",
-            "`skill`",
-            "`agent`",
-            "`plugin`",
-            "`started_at`",
-            "plan-review",
-            "diff-review",
-            "`direct`",
-            "`agent_mediated`",
-            "agent-evidence bridge",
-            "Reject stale",
-            "direct-only evidence cannot certify",
-            "immutable deployment receipt",
-            "authoritative deployed paths",
-            "assigned session ID",
-            "immutable session envelope",
-            "same assigned session ID",
-            "actual `started_at`",
-            "consumes both",
-            "loaded revisions match the deployment receipt",
-            "absent or mismatched receipt or envelope rejects certification",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, evidence)
-        self.assert_ordered(
-            evidence,
-            "Deploy the candidate",
-            "immutable deployment receipt",
-            "At actual launch",
-            "immutable session envelope",
-            "externally started fresh Claude session",
-        )
-        self.assert_ordered(
-            evidence,
-            "exactly one `plan-review`",
-            "exactly one `diff-review`",
-        )
-        self.assertIn("Keep `agent_mediated` distinct from `direct`", evidence)
-        self.assert_ordered(evidence, "terminal failure", "native fallback")
-        self.assert_ordered(
-            evidence,
-            "agent-evidence bridge <artifact.json>",
-            "exits 0",
-            "call the bridge current",
-        )
-
     def test_codex_collaboration_dispatch_carries_operation_envelope(self):
-        launch = self.section(
-            self.collaboration,
-            "Build the operation's packet",
-            "Parallel reviews are valid.",
-        )
-        self.assertIn("first two lines", launch)
-        self.assertIn("`WORKTREE_ROOT: <absolute worktree root>`", launch)
-        self.assertIn("`REVIEW_OPERATION: <plan-review|diff-review>`", launch)
-        self.assert_ordered(launch, "WORKTREE_ROOT:", "REVIEW_OPERATION:", "Launch mechanics")
+        self.assertIn("bindings.commands[review_id].argv", self.collaboration)
+        self.assertIn("--output-last-message", self.collaboration)
+        self.assertIn("terminal agent-message", self.collaboration)
 
     def test_codex_collaboration_states_a_per_operation_wall_clock(self):
         # A deliberate second copy of the runtime's per-operation budget: callers
@@ -2037,51 +2038,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # negative guards below only bite on normalized text — a retired figure
         # that came back across a line wrap (`~14\nmin`) would otherwise slip
         # past the very check that exists to catch it.
-        launch = " ".join(
-            self.section(
-                self.collaboration,
-                "Build the operation's packet",
-                "Parallel reviews are valid.",
-            ).split()
-        )
-        collaboration = " ".join(self.collaboration.split())
-        self.assertIn("roughly 28 minutes of wall clock for `plan-review`", launch)
-        self.assertIn("roughly 14 minutes for `diff-review`", launch)
-        for stale in ("~14 min", "~15 min"):
-            with self.subTest(stale=stale, doc="SKILL.md"):
-                self.assertNotIn(stale, collaboration)
-        # The bridge's own wait is wider than either budget, so the caller is
-        # given that figure too (D8/D15, D20). Pin the arithmetic rather than
-        # the literal: the total is the wait count times the per-call bound, so
-        # retuning one number without the others goes red instead of shipping a
-        # sentence that no longer adds up.
-        bounded = re.search(
-            r"wait is uniform and wider than either budget: it returns "
-            r"`CODEX_REVIEW_FAILURE` only after roughly (\d+) s of bounded "
-            r"waiting[^.]*four bounded (\d+) s calls",
-            launch,
-        )
-        self.assertIsNotNone(bounded, launch)
-        self.assertEqual(int(bounded.group(1)), 4 * int(bounded.group(2)))
-        # Restated once as the figure to plan against — and it must be the same
-        # figure the sentence above derived.
-        restated = re.search(r"plan for the ~(\d+) s bounded-wait figure", launch)
-        self.assertIsNotNone(restated, launch)
-        self.assertEqual(restated.group(1), bounded.group(1))
-        # It bounds the bridge's waiting, not the hold: each of those four
-        # waits sits under a wider outer tool cap, so the total is never a
-        # guaranteed ceiling on how long a caller can be held (D20).
-        self.assertNotIn("the worst case you can be held for", collaboration)
-        # The eval grades a model against this same number; unpinned, it would
-        # keep grading against a figure the skill no longer states (D15). JSON
-        # cannot carry a raw newline inside a string, so the wrap arrives as the
-        # two-character escape `\n` — collapse that first, then whitespace.
-        evals = " ".join(
-            json.dumps(self.codex_collaboration_evals).replace("\\n", " ").split()
-        )
-        self.assertIn("~28 min of external wall clock", evals)
-        self.assertIn("~28 minutes for plan-review", evals)
-        self.assertNotIn("~15 min", evals)
+        self.assertIn("--model gpt-6-astra", self.collaboration)
+        self.assertIn('model_reasoning_effort="xhigh"', self.collaboration)
 
     def test_codex_collaboration_never_reports_sandbox_limits_as_findings(self):
         # The rule lives in the packet-borne shared rules, not in the Launch
@@ -2091,8 +2049,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         rules = " ".join(
             self.section(
                 self.collaboration,
-                "## Read-only rules (both operations)",
-                "## Launch",
+                "## Read-only packet rules",
+                "## Direct configured review",
             ).split()
         )
         self.assert_ordered(
@@ -2517,7 +2475,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                            ("ship-issue", self.ship_issue)):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/workflow-state", text)
-        for name, text in (("research", self.research), ("certification", self.certification)):
+        for name, text in (("research", self.research),):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/agent-evidence", text)
         with self.subTest(skill="ship-issue"):
