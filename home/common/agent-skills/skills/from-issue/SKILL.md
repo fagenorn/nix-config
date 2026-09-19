@@ -469,7 +469,12 @@ failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8;
 
 ## Notes
 
-- Standing local-commit authorization covers spec, plan, doc, and fix commits (where the project documents it; otherwise follow the user's commit policy). Standing authorization exists exactly where the lifecycle guard grants it: pushing a non-default branch, opening a PR to the default branch, and the guarded merge, in fagenorn-owned repositories; everywhere else these commands stay per-action gated — suspend with blocked_on=human_gate and print the re-entry line instead of dying at the prompt.
+- Standing local-commit authorization covers spec, plan, doc, and fix commits
+  where project policy or an explicit scoped user grant covers the concrete
+  action, target, and effect. Apply the same rule to push, PR, merge, and cleanup
+  actions. When neither source grants the action, suspend with
+  `blocked_on=human_gate` and print the re-entry line. An actual permission or
+  launch-guard denial stops the action and is never routed around.
 - Append `Co-Authored-By` unless `commit.coAuthoredBy` is false. **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
 - **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`**; derive the slug from `repoSlug` if configured, else `git remote get-url origin`.
 - If a phase reveals the previous one was wrong, back up to that phase and redo it. Don't paper over it.

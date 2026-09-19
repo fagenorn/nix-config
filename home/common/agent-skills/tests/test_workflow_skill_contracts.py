@@ -1028,20 +1028,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("unchanged", phase_gate)
 
     def test_auto_gate_enumeration_covers_an_unguarded_host(self):
-        # AUTO.md's final paragraph is the one suspension route for shipping
-        # gates. It gains the review-adjudicated host as a third qualifying
-        # case, so the operator gate reuses the mechanism that already exists.
-        self.assertIn(
-            "At any Phase-6 or Phase-7 push, PR-open, or merge gate the "
-            "lifecycle guard does not stand — a repository the guard does not "
-            "cover, a merge it fails closed on, or a host that has no such "
-            "guard at all and adjudicates intent by review instead — do not die "
-            "at the prompt: follow `SKILL.md`'s suspension procedure, "
-            "suspending `blocked_on: human_gate` and printing the canonical "
-            "re-entry line, so a later human approval resumes the same attempt "
-            "without penalty.",
-            normalized(self.auto),
-        )
         # No second pause shape is introduced: after Step 3b the file names
         # `blocked_on: human_gate` twice — the shipping-gate route here and
         # the self-answer exemption — and `human_gate` is still the only

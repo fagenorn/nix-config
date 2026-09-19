@@ -357,9 +357,11 @@ runs `sdd`, and Phase 7 dispatches `ship-issue` with the appropriate handoff.
 Reviewer, SDD, and shipping contracts remain unchanged for these routes, and
 the owning controller continues to verify and disposition findings.
 
-At any Phase-6 or Phase-7 push, PR-open, or merge gate the lifecycle guard does
-not stand — a repository the guard does not cover, a merge it fails closed on,
-or a host that has no such guard at all and adjudicates intent by review
-instead — do not die at the prompt: follow `SKILL.md`'s suspension procedure,
-suspending `blocked_on: human_gate` and printing the canonical re-entry line, so
-a later human approval resumes the same attempt without penalty.
+At every Phase-6 or Phase-7 push, PR-open, or merge gate, first apply repository
+policy or an explicit user grant covering the concrete action, target, and
+effect. A host without standing repository authorization may continue under an
+existing scoped user grant and its normal approval review. When neither source
+grants the action, follow `SKILL.md`'s suspension procedure with
+`blocked_on: human_gate` and the canonical re-entry line. This never bypasses
+`check-launch`: `current: false`, helper failure, or an actual permission denial
+stops the action and is never routed around.
