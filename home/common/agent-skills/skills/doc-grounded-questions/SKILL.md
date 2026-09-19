@@ -9,7 +9,7 @@ Before asking the user a design question or presenting options during a planning
 
 ## Project bindings (resolve first)
 
-Run `resolve-project resolve --repo-root <checkout>` once and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.paths.context`, `bindings.paths.standards`, `bindings.paths.architecture`, and `bindings.paths.hints`; a required blocked capability stops, while authored unsupported takes its documented no-capability route.
+Run `resolve-project resolve --repo-root <checkout>` once and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.context`, `bindings.paths.standards`, `bindings.paths.architecture`, and `bindings.paths.hints`; a required blocked capability stops, while authored unsupported takes its documented no-capability route.
 
 **Keys this skill uses:** `bindings.paths.{context,standards,architecture,hints}` and `capabilities.knowledge.*`.
 

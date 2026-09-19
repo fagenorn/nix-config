@@ -5,7 +5,7 @@ description: Investigate a question against primary sources in a background agen
 
 # Research
 
-Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.paths.artifacts.specs` for the findings artifact.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.artifacts.specs` for the findings artifact.
 
 <!-- agent-dispatch: id=research-background-researcher role=researcher model=sonnet effort=medium -->
 Agent(subagent_type="general-purpose", model="sonnet", effort="medium", run_in_background=true) performs the bounded primary-source synthesis and writes exactly one cited findings artifact while the caller keeps working.

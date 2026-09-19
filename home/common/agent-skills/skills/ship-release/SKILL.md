@@ -21,7 +21,7 @@ release ownership across cheaper transport or mechanic agents.
 
 ## Project bindings (resolve first)
 
-Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.release`, and `bindings.deploy`. A blocked required capability stops; authored unsupported takes only the existing no-capability route.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.release`, and `bindings.deploy`. A blocked required capability stops; authored unsupported takes only the existing no-capability route.
 
 `<integration>` and `<default>` come from `bindings.vcs.integration_branch` and `bindings.vcs.default_branch`; repository identity comes only from `bindings.tracker.repo_slug`. When they're identical there is no PR: run Phases 0 **and** 1, skip Phases 2–4, and continue at Phase 4.5. The release ref is the confirmed tip of `<default>`.
 

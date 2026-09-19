@@ -9,7 +9,7 @@ Break a plan into independently-grabbable issues using vertical slices (tracer b
 
 ## Project bindings (resolve first)
 
-Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.tracker` and `bindings.paths`; required blocked capabilities stop, and authored unsupported takes its documented tracker-free route.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker` and `bindings.paths`; required blocked capabilities stop, and authored unsupported takes its documented tracker-free route.
 
 Keys this skill uses: `bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}` and `bindings.paths`.
 

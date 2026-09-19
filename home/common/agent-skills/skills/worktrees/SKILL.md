@@ -5,7 +5,7 @@ description: Put work in an isolated git worktree and leave it safely. Use befor
 
 # Worktrees
 
-Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. All branch, worktree naming, signing, merge, and deletion policy comes from `bindings.vcs`.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. All branch, worktree naming, signing, merge, and deletion policy comes from `bindings.vcs`.
 
 Guarantee an isolated workspace exists, then hand control back. The caller owns branching policy, the work, and shipping.
 

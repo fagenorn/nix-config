@@ -5,7 +5,7 @@ description: Turn an idea or issue into an approved design doc by grilling the o
 
 # Design
 
-Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.paths.artifacts.specs` for the design artifact path.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.artifacts.specs` for the design artifact path.
 
 Turn an idea into a design doc the plan phase can execute from. You own the interview and the spec; the caller owns planning, review, and execution.
 

@@ -230,8 +230,14 @@ RESOLUTION_SENTENCE = (
     "external effects."
 )
 
+REFUSAL_REPORTING_SENTENCE = (
+    "On refusal, preserve and report the resolver's `error.code`, `repair_id`, "
+    "and ordered `violations` exactly; never translate it into a partial snapshot "
+    "or fallback."
+)
 
-def assert_policy_entries(case, root, entries):
+
+def assert_policy_entries(case, root, entries, require_refusal_reporting=False):
     actual = {str(path.relative_to(root)) for path in root.glob("*/SKILL.md")
               if "resolve-project resolve" in path.read_text(encoding="utf-8")}
     case.assertEqual(actual, set(entries))
@@ -240,6 +246,8 @@ def assert_policy_entries(case, root, entries):
         with case.subTest(relative=relative):
             case.assertEqual(text.count("resolve-project resolve"), 1)
             case.assertIn(RESOLUTION_SENTENCE, normalized(text))
+            if require_refusal_reporting:
+                case.assertIn(REFUSAL_REPORTING_SENTENCE, normalized(text))
             for field in fields:
                 case.assertIn(field, text)
             for forbidden in ("resolve-" "bindings", ".claude/skills.", "config.json", "helper missing", "not_" "onboarded", "auto-detect", "default `"):
@@ -274,7 +282,10 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             position = next_position
 
     def test_shared_source_phase_entries_use_one_resolved_project(self):
-        assert_policy_entries(self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_ENTRIES)
+        assert_policy_entries(
+            self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_ENTRIES,
+            require_refusal_reporting=True,
+        )
 
     def test_shared_support_documents_reuse_the_retained_snapshot(self):
         assert_retained_policy_support(
