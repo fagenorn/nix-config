@@ -356,6 +356,53 @@ class ErrorOutputTest(ResolverTestCase):
         self.assertIn("/capabilities/release", pointers)
 
 
+class WorkflowRefusalFixtureTest(ResolverTestCase):
+    SNAPSHOT_MEMBERS = ("schema_version", "project", "bindings", "capabilities")
+
+    def assert_workflow_refusal(self, root, code_name, repair_id):
+        before = tree_snapshot(root)
+        code, out, err = run("resolve", "--repo-root", str(root))
+        self.assertEqual(code, 2, err)
+        self.assertEqual(tree_snapshot(root), before)
+        payload = json.loads(out)
+        self.assertEqual(set(payload), {"error"})
+        self.assertEqual(payload["error"]["code"], code_name)
+        self.assertEqual(payload["error"]["repair_id"], repair_id)
+        self.assertTrue(payload["error"]["violations"])
+        for member in self.SNAPSHOT_MEMBERS:
+            self.assertNotIn(member, payload)
+
+    def test_missing_contract_fails_closed(self):
+        self.assert_workflow_refusal(
+            self.make_root(contract=False),
+            "not_onboarded",
+            "onboarding.contract.missing",
+        )
+
+    def test_malformed_contract_fails_closed(self):
+        root = self.make_root()
+        (root / ".agents" / "project.json").write_text("{", encoding="utf-8")
+        self.assert_workflow_refusal(root, "invalid_contract", "contract.parse")
+
+    def test_non_repository_without_contract_fails_closed(self):
+        root = Path(tempfile.mkdtemp()).resolve()
+        self.assert_workflow_refusal(
+            root,
+            "not_onboarded",
+            "onboarding.contract.missing",
+        )
+
+    def test_stale_projection_fails_closed(self):
+        root = self.make_root()
+        with (root / "AGENTS.md").open("a", encoding="utf-8") as handle:
+            handle.write("\nhand edit\n")
+        self.assert_workflow_refusal(
+            root,
+            "invalid_projection",
+            "projection.codex.entry.stale",
+        )
+
+
 class NoDefaultingTest(ResolverTestCase):
     def test_dropping_any_binding_namespace_refuses(self):
         for namespace in BINDING_NAMESPACES:
