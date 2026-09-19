@@ -138,7 +138,7 @@ Before forming *any* user-facing question this skill raises mid-flow, invoke the
 
 ## gh hygiene
 
-When `unsetGithubToken` is true, prefix every `gh` call with `unset GITHUB_TOKEN &&` — for harnesses whose exported token lacks access to the target org (default false). When `issueTracker.cli` is `glab`, substitute the equivalent `glab` verbs.
+Prefix a forge invocation only with the names in `bindings.tracker.credential_env.unset_before_invocation`; for example, an exhaustive list containing `GITHUB_TOKEN` yields `unset GITHUB_TOKEN && gh ...` when a harness token lacks access to the target org. When `bindings.tracker.cli` is `glab`, substitute the equivalent `glab` verbs.
 
 Throughout, follow `writing-plans`' Payload discipline: targeted `rg` over whole-file reads, bounded reads, summarized command output, logs on disk, artifacts handed over as paths.
 

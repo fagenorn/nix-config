@@ -104,6 +104,7 @@ fi
 [ "$MODE" = "pipeline" ] || die "unknown mode '$MODE'"
 command -v claude >/dev/null || die "claude CLI is required"
 command -v git >/dev/null || die "git is required"
+command -v resolve-project >/dev/null || die "resolve-project is required"
 
 # run_trial <trial-number> — build a fresh sandbox, run the eval, grade it.
 # Sets TRIAL_VERDICT and TRIAL_WALL_S. Records one results.jsonl line.
@@ -141,9 +142,15 @@ run_trial() {
   git -C "$REPO" remote add origin "$ORIGIN"
   git -C "$REPO" push -q -u origin main
 
-  local SPEC_DIR PLAN_DIR
-  SPEC_DIR=$(jq -r '.specDir // ".claude/specs"' "$REPO/.claude/skills.config.json")
-  PLAN_DIR=$(jq -r '.planDir // ".claude/plans"' "$REPO/.claude/skills.config.json")
+  local RESOLVED_PROJECT SPEC_DIR PLAN_DIR
+  RESOLVED_PROJECT=$(resolve-project resolve --repo-root "$REPO") ||
+    die "resolver refused the initialized fixture"
+  jq -e 'has("schema_version") and has("project") and has("bindings") and has("capabilities")' \
+    <<<"$RESOLVED_PROJECT" >/dev/null || die "resolver returned an invalid snapshot"
+  SPEC_DIR=$(jq -er '.bindings.paths.artifacts.specs' <<<"$RESOLVED_PROJECT") ||
+    die "resolver snapshot has no specs artifact path"
+  PLAN_DIR=$(jq -er '.bindings.paths.artifacts.plans' <<<"$RESOLVED_PROJECT") ||
+    die "resolver snapshot has no plans artifact path"
 
   # --- optional setup hook ----------------------------------------------------
 

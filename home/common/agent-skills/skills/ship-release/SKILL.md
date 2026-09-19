@@ -72,7 +72,7 @@ Before forming any user-facing question, invoke `doc-grounded-questions` (if una
 
 ## gh hygiene
 
-`GH_PREFIX` below means `unset GITHUB_TOKEN && ` when `unsetGithubToken` is true, else nothing — some harnesses inject a token scoped to the wrong org, which surfaces as an opaque `Resource not accessible by integration` that reads like a transient error. Default is OFF; do not strip the token unconditionally. When `issueTracker.cli == "glab"`, translate to `glab mr create/merge/view`, `glab ci status`, `glab release create` — the methodology is identical, only the verbs differ.
+`GH_PREFIX` below is assembled only from the exhaustive names in `bindings.tracker.credential_env.unset_before_invocation`; for example, the list containing `GITHUB_TOKEN` yields `unset GITHUB_TOKEN && `. Some harnesses inject a token scoped to the wrong org, which surfaces as an opaque `Resource not accessible by integration` that reads like a transient error. An empty list yields no prefix. When `bindings.tracker.cli == "glab"`, translate to `glab mr create/merge/view`, `glab ci status`, `glab release create` — the methodology is identical, only the verbs differ.
 
 ## Phase 0 — Pre-flight
 

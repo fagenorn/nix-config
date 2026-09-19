@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -219,9 +220,9 @@ RETAINED_SUPPORT_CONTRACTS = {
 }
 
 SUPPORT_POLICY_FORBIDDEN = (
-    "resolve-project resolve", "resolve-bindings", "skills.config.json",
+    "resolve-project resolve", "resolve-" "bindings", "skills." "config.json",
     ".agents/project.json", "docPaths", "specDir", "planDir", "projectHints",
-    "integrationBranch", "repoSlug", "unsetGithubToken", "issueTracker.",
+    "integrationBranch", "repoSlug", "unsetGithub" "Token", "issueTracker.",
     "commit.coAuthoredBy", "auto-detect", "helper missing", "not_onboarded",
     ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md",
 )
@@ -304,6 +305,78 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             CLAUDE_POLICY_ENTRIES,
         )
 
+    def test_living_source_has_no_legacy_policy_surface(self):
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--", "AGENTS.md", "CLAUDE.md",
+             ".agents/instructions", "home/common/agent-skills",
+             "home/common/claude-code", "scripts/context-map-lint.py", "tests"],
+            cwd=REPO_ROOT, check=True, capture_output=True,
+        ).stdout.split(b"\0")
+        text_suffixes = {".md", ".py", ".sh", ".nix", ".json", ".toml", ".yaml", ".yml"}
+        historical_prefixes = (Path(".claude/specs"), Path(".claude/plans"))
+        legacy_names = (
+            "resolve-" "bindings", ".claude/skills." "config.json",
+            "unsetGithub" "Token",
+        )
+        legacy = re.compile("|".join(re.escape(name) for name in legacy_names))
+        matches = []
+        for encoded in tracked:
+            if not encoded:
+                continue
+            relative = Path(os.fsdecode(encoded))
+            if any(relative == prefix or prefix in relative.parents
+                   for prefix in historical_prefixes):
+                continue
+            path = REPO_ROOT / relative
+            if not path.is_file():
+                continue
+            if path.suffix not in text_suffixes and path.name not in {
+                "resolve-project", "context-map-lint", "artifact-budget",
+                "agent-evidence", "agent-model-matrix", "diff-scope",
+                "review-package", "sdd-workspace", "workflow-state",
+            }:
+                continue
+            for line_number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1):
+                if legacy.search(line):
+                    matches.append(f"{relative}:{line_number}")
+        self.assertEqual(matches, [])
+        self.assertFalse((REPO_ROOT / ".claude" / ("skills." "config.json")).exists())
+        self.assertFalse((REPO_ROOT / ("home/common/agent-skills/scripts/resolve-" "bindings")).exists())
+        self.assertFalse((REPO_ROOT / ("home/common/agent-skills/tests/test_resolve_" "bindings.py")).exists())
+        self.assertFalse((REPO_ROOT / "home/common/agent-skills/evals/fixture-repo" /
+                          ".claude" / ("skills." "config.json")).exists())
+
+    def test_installed_policy_surface_matches_source_contract(self):
+        if os.environ.get("WORKFLOW_POLICY_SURFACE") == "source":
+            self.skipTest("explicit pre-activation source-only verification")
+        agents_root = Path.home() / ".agents/skills"
+        claude_root = Path.home() / ".claude/skills"
+        self.assertTrue(agents_root.is_dir(), "managed shared skill root is absent")
+        self.assertTrue(claude_root.is_dir(), "managed Claude skill root is absent")
+        assert_policy_entries(self, agents_root, SHARED_POLICY_ENTRIES,
+                              require_refusal_reporting=True)
+        assert_policy_entries(self, claude_root,
+                              SHARED_POLICY_ENTRIES | CLAUDE_POLICY_ENTRIES,
+                              require_refusal_reporting=False)
+        assert_retained_policy_support(self, agents_root, RETAINED_SUPPORT_CONTRACTS)
+        self.assertFalse((Path.home() / (".agents/bin/resolve-" "bindings")).exists())
+        installed_linter = Path.home() / ".agents/bin/context-map-lint"
+        self.assertTrue(installed_linter.is_file())
+        installed_legacy = re.compile("|".join(re.escape(name) for name in (
+            "resolve-" "bindings", ".claude/skills." "config.json",
+            "unsetGithub" "Token",
+        )))
+        self.assertIsNone(installed_legacy.search(
+            installed_linter.read_text(encoding="utf-8")))
+
+    def test_installed_policy_surface_refuses_when_managed_roots_are_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.dict(os.environ, {"WORKFLOW_POLICY_SURFACE": ""}, clear=False):
+                with mock.patch("pathlib.Path.home", return_value=Path(temporary)):
+                    with self.assertRaisesRegex(AssertionError, "managed shared skill root is absent"):
+                        self.test_installed_policy_surface_matches_source_contract()
+
     def test_live_evals_grade_strict_policy_and_direct_review(self):
         paths = (
             REPO_ROOT / "home/common/agent-skills/skills/from-issue/evals/evals.json",
@@ -334,7 +407,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_shared_support_documents_reuse_the_retained_snapshot(self):
         assert_retained_policy_support(
             self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_SUPPORT,
-            ("resolve-bindings", "skills.config.json", "helper missing", "not_onboarded", "auto-detect", ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md"),
+            ("resolve-" "bindings", "skills." "config.json", "helper missing", "not_onboarded", "auto-detect", ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md"),
         )
 
     def test_listed_support_documents_reuse_only_passed_snapshot_fields(self):
@@ -695,8 +768,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn(RESOLUTION_SENTENCE, text)
 
     def test_writing_plans_no_longer_calls_the_fail_soft_helper(self):
-        self.assertNotIn("resolve-bindings", self.writing_plans)
-        self.assertNotIn("skills.config.json", self.writing_plans)
+        self.assertNotIn("resolve-" "bindings", self.writing_plans)
+        self.assertNotIn("skills." "config.json", self.writing_plans)
 
     def test_writing_plans_treats_every_resolver_error_as_fatal(self):
         text = normalized(self.writing_plans)

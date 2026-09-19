@@ -24,6 +24,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "resolve-project.py"
 REPO_ROOT = Path(__file__).resolve().parents[4]
+EVAL_FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
 
 CAPABILITY_NAMES = (
     "tracker", "worktrees", "knowledge.context", "knowledge.standards",
@@ -680,14 +681,11 @@ class CommittedContractTest(ResolverTestCase):
         self.assertEqual(sorted(contract["capabilities"]), sorted(CAPABILITY_NAMES))
         self.assertEqual(sorted(contract["bindings"]), sorted(BINDING_NAMESPACES))
 
-    def test_orchestration_values_match_the_legacy_config(self):
-        legacy = json.loads(
-            (REPO_ROOT / ".claude" / "skills.config.json").read_text("utf-8"))
+    def test_orchestration_values_are_committed_contract_values(self):
         orchestration = source_contract()["bindings"]["workflow"]["orchestration"]
-        self.assertEqual(orchestration["max_parallel"],
-                         legacy["orchestration"]["maxParallel"])
-        self.assertEqual(orchestration["attempt_budget_minutes"],
-                         legacy["orchestration"]["agentBudgetMinutes"])
+        self.assertEqual(orchestration["max_parallel"], 2)
+        self.assertEqual(orchestration["attempt_budget_minutes"], 180)
+        self.assertFalse((REPO_ROOT / ".claude" / ("skills." "config.json")).exists())
 
 
 def run_with_path(path_value: str, *args: str) -> tuple[int, str, str]:
@@ -1341,6 +1339,30 @@ class DriftGateTest(ResolverTestCase):
         code, out, err = run("check-projections", "--repo-root", str(REPO_ROOT))
         self.assertEqual(code, 0, err or out)
         self.assertEqual({p["action"] for p in json.loads(out)["projections"]},
+                         {"unchanged"})
+
+    def test_eval_fixture_resolves_with_current_projections(self):
+        code, out, err = run("resolve", "--repo-root", str(EVAL_FIXTURE))
+        self.assertEqual(code, 0, err or out)
+        snapshot = json.loads(out)
+        self.assertEqual(snapshot["project"]["id"], "fixture/tinytask")
+        self.assertEqual(
+            snapshot["bindings"]["paths"]["artifacts"],
+            {"specs": str(EVAL_FIXTURE / ".claude/specs"),
+             "plans": str(EVAL_FIXTURE / ".claude/plans")},
+        )
+        self.assertEqual(
+            {name: entry["state"] for name, entry in snapshot["capabilities"].items()},
+            {"tracker": "unsupported", "worktrees": "available",
+             "knowledge.context": "available", "knowledge.standards": "available",
+             "knowledge.architecture": "available", "knowledge.hints": "unsupported",
+             "verification": "available", "review.plan": "unsupported",
+             "review.code": "unsupported", "release": "unsupported",
+             "deploy": "unsupported"},
+        )
+        code, out, err = run("check-projections", "--repo-root", str(EVAL_FIXTURE))
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual({entry["action"] for entry in json.loads(out)["projections"]},
                          {"unchanged"})
 
 
