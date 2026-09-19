@@ -6,7 +6,7 @@ argument-hint: "<issue number or URL> [--auto]"
 
 # From Issue
 
-Counterpart to `to-issues`. Take one tracker issue from triage to merged code by chaining the canonical skills, with a human checkpoint at every phase.
+Counterpart to `to-issues`. Take one tracker issue from triage to merged code by chaining the canonical skills, carrying the caller's scoped authorization across phase boundaries.
 
 ## Files beside this one
 
@@ -157,7 +157,13 @@ name does not resolve on PATH, invoke it by that full path.
 7. Ship (skill)       → ship-issue: PR, review, CI, merge, cleanup
 ```
 
-**Checkpoints.** Checkpoint between every phase; don't auto-chain. State the artifact produced and wait for the user. A wrong spec costs one revision; a wrong plan costs a worktree of execution. With `--auto`, checkpoints become self-resolved ledger rows — see `AUTO.md`; only the Phase-0 stops and unfixable Phase-5 blockers still stop.
+**Checkpoints.** At every phase boundary, state the artifact produced and the next
+action. Continue when the user's existing explicit authorization covers that
+action and its target; a phase transition or fresh session does not erase that
+authorization and does not imply literal `--auto`. Ask only for a concrete
+missing decision when scope or authority changes. An actual permission denial
+stops the denied action and is never routed around. With literal `--auto`, also
+apply `AUTO.md`'s lifecycle and decision-ledger rules.
 
 ## Decision ledger (artifact discipline)
 
@@ -329,10 +335,10 @@ Handoff is the deliberate context rollover with a handoff document; suspension i
 
 Build a shared mental model *before* the brainstorm. No files yet. Read `investigate.md` for the pre-flight queries and the note structure. (When `issueTracker.kind=none`, skip the fetch and PR pre-flight.)
 
-**Pre-flight** — two sessions racing on one issue is the most expensive failure this flow produces. Run the PR pre-flight per `investigate.md` (open PR → stop; merged → stop; closed-unmerged → judge). Then `git worktree list | grep <worktreePrefix>issue-<num>-`:
+**Pre-flight** — two sessions racing on one issue is the most expensive failure this flow produces. Run the PR pre-flight per `investigate.md`: exact matching open or merged work is reconciled within existing authorization; unknown, competing, or differently scoped work stops for the specific missing decision. Then `git worktree list | grep <worktreePrefix>issue-<num>-`:
 
 - none → continue;
-- one → **inspect before touching it**; a "clean" tree can still hold committed work that only ships at Phase 7. Check four signals: unpushed commits (`git log origin/<integration-branch>..<branch> --oneline`); workflow-state ledger attempts naming it that are `active` or `handed_off`; tracker/PR state referencing the branch; spec/plan artifacts under `specDir`/`planDir` inside it. If **any** exist → resume that worktree (interactively, propose resume and wait; in `--auto`, prefer resume, and on conflicting signals stop as blocked through the terminal return procedure). Deletion (`git worktree remove` + `git branch -D`) only when **provably disposable**: zero commits ahead, no active or handed-off ledger attempt, no spec/plan artifacts, no uncommitted work;
+- one → **inspect before touching it**; a "clean" tree can still hold committed work that only ships at Phase 7. Check four signals: unpushed commits (`git log origin/<integration-branch>..<branch> --oneline`); workflow-state ledger attempts naming it that are `active` or `handed_off`; tracker/PR state referencing the branch; spec/plan artifacts under `specDir`/`planDir` inside it. If **any** exist → prefer resume: resume that worktree when existing authorization covers the exact continuation; otherwise ask for the missing decision. On conflicting signals stop as blocked through the terminal return procedure. Deletion (`git worktree remove` + `git branch -D`) only when **provably disposable**: zero commits ahead, no active or handed-off ledger attempt, no spec/plan artifacts, no uncommitted work;
 - one with uncommitted work → **stop and ask the user**; their in-progress state isn't yours to discard;
 - several → stop and ask which to resume or discard.
 
@@ -343,7 +349,10 @@ exists: write a `stopped` or `failed` result through `workflow-state finish` bef
 
 **Mechanical-only shortcut.** Declare `mechanical-only` only when the **entire** change fits the mechanical lane (§Risk lanes). Then Phase 5 self-grades against `REVIEW-CONTRACT.md` and Phase 6 dispatches one mechanic+reviewer pair for the whole change. Every phase still runs; skip manufactured TDD framing.
 
-**CHECKPOINT** — Confirm restatement + scope. Require a per-question disposition for each open question: an answer, "defer to brainstorm", or "agent-choose". A bare "proceed" means re-prompt.
+**CHECKPOINT** — Record the restatement and scope. Every open question needs a
+disposition: an answer, "defer to brainstorm", or "agent-choose". Apply the
+shared checkpoint rule; ask only for a disposition that existing authorization
+does not cover.
 
 ## Phase 1 — Worktree
 
@@ -376,19 +385,19 @@ A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
 2. **Base on `origin/<integration-branch>`**, never the local branch, which may carry other agents' in-flight commits. The merge happens later, in `ship-issue`.
 3. `cd` into the worktree; every later phase runs inside it. Verify `git rev-parse --git-common-dir` ≠ `git rev-parse --git-dir`.
 
-**CHECKPOINT** — Confirm worktree path and base; in `--auto` log the base SHA in the investigation note.
+**CHECKPOINT** — Record the worktree path and base; in `--auto` log the base SHA in the investigation note. Apply the shared checkpoint rule.
 
 ## Phase 2 — Brainstorm
 
 Invoke `design` for a design doc under `specDir`, committed in the worktree. Ground first per `grounding.md`. Resolve every Phase-0 carryover before opening a new question.
 
-**CHECKPOINT** — User approves the spec file in writing.
+**CHECKPOINT** — Record the spec path and approval source. Apply the shared checkpoint rule; existing authorization for autonomous design decisions suffices within its scope.
 
 ## Phase 3 — Grill
 
 Invoke `grill-with-docs`. It sharpens the spec against the context doc, surfaces glossary conflicts, and may produce ADRs; those and any context-doc edits commit in the worktree and ship when the PR merges.
 
-**CHECKPOINT** — Confirm all doc updates and the refined spec.
+**CHECKPOINT** — Record all doc updates and the refined spec. Apply the shared checkpoint rule.
 
 ## Phase 4 — Plan
 
@@ -396,7 +405,7 @@ Invoke `writing-plans` for a plan under `planDir`, committed in the worktree. Th
 
 **Plan-prose ≠ code-prose.** Prose the plan dictates verbatim into the codebase (docstrings, comments, doc sentences, ADR clauses) must describe how the live code *will actually behave*; if you can't say precisely yet, write a TODO and let the execute phase rewrite it from the implemented code.
 
-**CHECKPOINT** — User reviews the plan file.
+**CHECKPOINT** — Record the plan path and review state. Apply the shared checkpoint rule.
 
 ## Phase 5 — Standards review
 
@@ -406,7 +415,7 @@ Both routes consume the planning producer's received stdout bytes through the
 Artifact report boundary above before decoding JSON or dispatching. This caller
 validation is required even when the producer already validated its own candidate.
 
-**CHECKPOINT** — Confirm standards review is clean.
+**CHECKPOINT** — Record that standards review is clean. Apply the shared checkpoint rule.
 
 ## Phase 6 — Execute
 
@@ -419,7 +428,7 @@ Agent(subagent_type="mechanic", model="sonnet", effort="high") executes the full
 <!-- agent-dispatch: id=from-issue-mechanical-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs its first-pass review.
 
-**CHECKPOINT** — Confirm the implementation is committed on the feature branch.
+**CHECKPOINT** — Record the implementation commit on the feature branch. Apply the shared checkpoint rule.
 
 sdd returns only canonical JSON. Pipe the received bytes through
 `artifact-budget validate-report --boundary sdd --input -` before decoding any

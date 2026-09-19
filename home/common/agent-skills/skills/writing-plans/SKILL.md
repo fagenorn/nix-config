@@ -59,7 +59,8 @@ Steps inside a task are one action each (2–5 minutes): write the failing test 
 
 Every plan root starts with the following header and contains no numbered task
 bodies or copied decision-ledger rationale. It holds the goal, architecture,
-technology, Global Constraints, Test seams, Task index, and decision-ID
+technology, Global Constraints, Test seams, Delivery estimate and boundaries,
+Task index, and decision-ID
 citations. Numbered tasks live only in members (D3).
 
 ```markdown
@@ -84,6 +85,13 @@ verbatim from the spec. Every task's requirements implicitly include this sectio
 
 <The seams the spec agreed on, one line each. Implementers test at these and
 nowhere else; a task needing a new seam is a plan bug, not an implementer's call.>
+
+## Delivery estimate and boundaries
+
+<A compact planning estimate: expected changed files, likely aggregate-growth
+risks, and independently deliverable slices when the whole change may exceed a
+review-package boundary. Label every number as an estimate; do not promise final
+bytes for code that has not been written.>
 
 ## Task index
 

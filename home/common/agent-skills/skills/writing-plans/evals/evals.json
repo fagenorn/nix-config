@@ -47,6 +47,13 @@
       "prompt": "You're writing the plan for a two-task feature in a repo where from-issue drives the flow: the plan and spec land as `docs(plans):`/`docs(specs):` commits on the same branch, and ship-time syncs merge the integration branch in. I want you to write the verification gate for the final task. Before you write it, explain what a BAD gate looks like here and why, then give me the exact gate you'd write instead. Plan-only — no files, just the reasoning and the gate text.",
       "expected_output": "The answer must reject raw commit-range expectations — 'exactly N files changed between BASE..HEAD', 'every commit in the range is a feat:' — and explain the two concrete failure modes: the caller's spec/plan artifact commits land in the range, and a ship-time sync merge pulls in everything the integration branch advanced by, so an unscoped gate reads another issue's shipped work as scope creep. The good gate is scoped to the files the plan owns: a pathspec'd diff (`git diff --stat BASE..HEAD -- <paths from the plan's Files: blocks>`) or a direct file-content assertion; where commit shape genuinely is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`) and exempt the artifact and review-fixup subjects. The gate must also be falsifiable at the base commit — a criterion already true at BASE is how an implementer completes a no-op.",
       "files": []
+    },
+    {
+      "id": 3,
+      "name": "estimate-review-growth-and-delivery-boundaries",
+      "mode": "plan-only",
+      "prompt": "Plan a six-task change that is likely to touch many policy files and could exceed the cumulative review-package budget late in execution. Plan-only: show the compact plan-header section that addresses delivery size and explain how you would split it.",
+      "expected_output": "The plan header gives an explicitly labeled estimate of expected changed files and aggregate-growth risks, then names independently testable and reviewable delivery slices where needed. It does not promise byte-accurate final size for unwritten code, raise the package caps, or defer all size discovery until final review. Each boundary leaves working behavior that can be tested and delivered independently."
     }
   ]
 }

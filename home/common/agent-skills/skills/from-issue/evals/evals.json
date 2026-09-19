@@ -97,6 +97,13 @@
           "shell": "[ -z \"$(ls -A \"$REPO/$SPEC_DIR\" \"$REPO/$PLAN_DIR\" \"$PRE_WT/$SPEC_DIR\" \"$PRE_WT/$PLAN_DIR\" 2>/dev/null)\" ] || fail \"artifacts written despite the pre-flight stop\""
         }
       ]
+    },
+    {
+      "id": 4,
+      "name": "reconcile-existing-pr-with-scoped-authorization",
+      "mode": "plan-only",
+      "prompt": "I already authorized you to finish issue #97 through merge and tracker closure. Plan-only: the pre-flight now finds either (a) an open PR from the recorded issue worktree targeting the expected integration branch, or (b) that same PR already merged while the issue is still open. Explain what you do in each case and what facts would make you stop.",
+      "expected_output": "For the open PR, verify the exact issue, head branch, target branch, lifecycle ownership and acceptance evidence, then resume the existing shipping path under the user's still-valid delivery authorization; do not create another worktree or rebuild the implementation. For the merged PR, verify the same identity, compare the landed change with the issue acceptance criteria, and complete authorized missing bookkeeping such as closing the still-open issue. Report satisfied criteria and remaining unknowns. Stop for a specific decision only if ownership is competing or unknown, the target or scope differs, acceptance evidence is missing, or the requested follow-up expands scope. A merged PR is evidence to reconcile, not an unconditional stop or an instruction to reimplement delivered work. Preserve lifecycle acquisition rules: this does not authorize takeover, a new run after terminal replay, or broader external effects."
     }
   ]
 }
