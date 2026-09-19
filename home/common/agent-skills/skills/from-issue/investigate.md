@@ -1,5 +1,7 @@
 # Phase 0 detail — pre-flight queries and the investigation note
 
+This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.tracker` and `bindings.vcs` and never resolve, infer, or read project policy.
+
 Loaded from `SKILL.md` at Phase 0. The stop rules and worktree-safety inspection live in `SKILL.md`; this file carries the working detail.
 
 ## PR pre-flight queries

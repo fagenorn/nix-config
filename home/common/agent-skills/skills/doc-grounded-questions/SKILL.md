@@ -9,13 +9,13 @@ Before asking the user a design question or presenting options during a planning
 
 ## Project bindings (resolve first)
 
-Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
+Run `resolve-project resolve --repo-root <checkout>` once and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.paths.context`, `bindings.paths.standards`, `bindings.paths.architecture`, and `bindings.paths.hints`; a required blocked capability stops, while authored unsupported takes its documented no-capability route.
 
-**Keys this skill uses:** `docPaths.{contextMap,context,standards,architecture}`, `docPaths.adrDir` (legacy override only — ADR homes normally come from the map), and `projectHints` (optional vocab / review-hints appendix). All optional — none configured → discovery below.
+**Keys this skill uses:** `bindings.paths.{context,standards,architecture,hints}` and `capabilities.knowledge.*`.
 
 ## The grounding pass
 
-For every clarifying question or option set you're about to surface, do this pass first. Ground **discovery-first**: read whichever sources actually exist; skip absent ones silently.
+For every clarifying question or option set you're about to surface, do this pass first. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter call, one selects that absolute path, and more than one is an invalid caller contract that stops before invocation. Never probe, sort, or infer a location.
 
 1. **Read the context map, then only the areas you need.** `docPaths.contextMap` if configured, otherwise `docs/CONTEXT-MAP.md` (or legacy root `CONTEXT-MAP.md`). Always read the map in full — it is capped at 150 lines. Then open an area's `CONTEXT.md` **only** when its `governs:` globs intersect the paths the issue touches, or one of its terms (per the map's term table) appears in the issue or your question. Use canonical terms without re-asking. No map → legacy single-doc fallback (REFERENCE.md).
 

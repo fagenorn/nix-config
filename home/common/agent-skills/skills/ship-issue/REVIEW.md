@@ -4,6 +4,8 @@ Read this when Phase 5 picks its path. It owns the reviewer templates, severity
 mapping, and the apply/push fix flow. The dispatch selections themselves live in
 SKILL.md — never inline a review.
 
+For configured code review, copy the selected command entry, unset only its declared environment names, and execute its base argv followed exactly by `exec --sandbox read-only --model gpt-6-astra -c model_reasoning_effort="xhigh" --json --output-last-message <absolute-last-message> --ephemeral -C <absolute-worktree> -`. Keep JSONL and last-message files outside worktrees under unconditional cleanup. Validate the selected model and selected reasoning effort, then require terminal agent-message equality with the non-empty last-message before operation headings identify Codex. A capacity rejection has no retry and no native fallback; blocked stops. Authored unsupported or a completed non-capacity runtime/output failure uses the existing single native fallback and records why.
+
 ## Merge-delta check (degraded path)
 
 The reviewable delta is the sync-merge commit's combined diff (`git show --cc

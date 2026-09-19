@@ -1,5 +1,7 @@
 # Doc-Grounded Questions — rationale, expanded guidance, examples
 
+This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.paths.context` and never resolve, infer, or read project policy.
+
 SKILL.md owns the pass itself; this file owns the why, the legacy fallbacks, and
 the worked examples.
 
@@ -74,8 +76,8 @@ as well.
 ```
 
 Never write the cache inside the working tree: a committed cache collides across
-parallel runs (observed: two `--auto` branches add/add-conflicted on
-`.claude/specs/GROUNDING.md` at merge).
+parallel runs (observed: two `--auto` branches add/add-conflicted on a
+worktree grounding cache at merge).
 
 ## The question shape
 

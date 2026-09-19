@@ -9,13 +9,13 @@ Break a plan into independently-grabbable issues using vertical slices (tracer b
 
 ## Project bindings (resolve first)
 
-This skill is project-agnostic. Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set (tracker kind/CLI, `specDir`, `planDir`, branches) from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.tracker` and `bindings.paths`; required blocked capabilities stop, and authored unsupported takes its documented tracker-free route.
 
-Keys this skill uses: `issueTracker{kind,cli}`, `docPaths{context,contextMap}` (optional, used only for grounding; `docPaths.adrDir` is a legacy override where a repo still has a central ADR directory).
+Keys this skill uses: `bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}` and `bindings.paths`.
 
 ### Resolve the issue tracker
 
-The helper's `trackerKind`/`trackerCli` say where issues live. `kind: github` → the `cli` (default `gh`); `kind: gitlab` → `glab`; `kind: none` → there is no tracker: present the breakdown but do not publish (output the slices as a markdown list / file for the user to file manually). If neither config nor remote resolves a tracker, ask the user exactly one question: *"Where do issues live, and which CLI or MCP creates them?"* — then proceed with their answer.
+`bindings.tracker.kind` and `bindings.tracker.cli` say where issues live. An authored unsupported tracker means there is no tracker: present the breakdown but do not publish (output the slices as a markdown list / file for the user to file manually). A blocked tracker stops the dependent forge operation.
 
 ## Process
 

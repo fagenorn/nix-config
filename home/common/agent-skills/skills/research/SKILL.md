@@ -5,6 +5,8 @@ description: Investigate a question against primary sources in a background agen
 
 # Research
 
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.paths.artifacts.specs` for the findings artifact.
+
 <!-- agent-dispatch: id=research-background-researcher role=researcher model=sonnet effort=medium -->
 Agent(subagent_type="general-purpose", model="sonnet", effort="medium", run_in_background=true) performs the bounded primary-source synthesis and writes exactly one cited findings artifact while the caller keeps working.
 
@@ -13,7 +15,7 @@ The research question must be sharply bounded before launch. If it becomes open-
 Its job:
 
 1. Investigate the question against **primary sources** — official docs, source code, specs, first-party APIs — not a secondary write-up of them. Follow every claim back to the source that owns it.
-2. Write the findings to exactly one Markdown file under the project's `specDir` (from `~/.agents/bin/resolve-bindings`; helper missing → `.claude/skills.config.json`, default `.claude/specs`), citing the source for each claim. Create no other artifact. State the artifact's durability explicitly at the top of the file — **committed** (the caller commits it with the work), **attached** (linked from the ticket/issue that asked), or **intentionally temporary** (deleted once the decision that needed it is recorded) — chosen deliberately from the caller's intent, never left implicit.
+2. Write the findings to exactly one Markdown file under `bindings.paths.artifacts.specs`, citing the source for each claim. Create no other artifact. State the artifact's durability explicitly at the top of the file — **committed** (the caller commits it with the work), **attached** (linked from the ticket/issue that asked), or **intentionally temporary** (deleted once the decision that needed it is recorded) — chosen deliberately from the caller's intent, never left implicit.
 3. Report back exactly `{file_path, key_facts[]}` — the path it wrote, and only the facts the caller asked for. Everything else stays in the file.
 
 ## Live availability and blocking evidence

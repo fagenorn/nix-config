@@ -10,9 +10,11 @@ Counterpart to `to-issues` and `from-issue`. Take a worktree branch with the imp
 
 ## Project bindings (resolve first)
 
-Run `~/.agents/bin/resolve-bindings` from the worktree — it prints the standard binding set (`specDir`, `planDir`, branches, tracker kind/CLI, branch naming, commit flags) from `.claude/skills.config.json` plus auto-detection and the shared defaults. Helper missing → read the config and apply the defaults it documents. Verify commands: config, else the manifest (`package.json` scripts, `*.slnx`/`*.sln` → `dotnet test`, `Cargo.toml` → `cargo test`, `go.mod` → `go test`, `Makefile` → `make test`).
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.review.code`, and `bindings.workflow.verification`; dereference verification IDs through `bindings.commands`.
 
-Degrade gracefully: never read a configured doc/hints path that doesn't exist, never hard-fail on a missing optional binding. `issueTracker.kind=none` skips every issue/PR/CI step; the sync/verify/consolidate/merge machinery still applies.
+For code review, select `bindings.workflow.review.code`, copy `bindings.commands[review_id].argv`, then require `capabilities.review.code` before execution.
+
+A blocked required capability stops. An authored unsupported tracker takes the existing tracker-free route; the sync/verify/consolidate/merge machinery still applies.
 
 Optional `review.criticalPaths` globs: diffs intersecting any always get Phase 5's full two-axis review; absent = the `risky` label is the only always-full trigger.
 
@@ -237,7 +239,7 @@ The branch normally arrives already reviewed on two axes by sdd's final review (
 
 - `review_state` is `clean` (handoff / sdd report: both axis verdicts clean, or every residual parked-with-ruling). `unknown` never degrades.
 - The Phase-1 sync needed no manual conflict escalation (allowlist auto-resolves count as clean).
-- The branch diff is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: start with `diff-scope $BASE_SHA..$HEAD_SHA --format text --artifact-path <spec_path> --artifact-path <plan_path>`, then append one argument for each discovered plan member and any other process artifact this run wrote. Each exclusion is an individual `--artifact-path <path>` argument (executable `~/.agents/bin/diff-scope`; use the full path if the bare name does not resolve). Its first line reads `product: <lines> lines, <files> files`, after the helper drops lockfiles, generated-header files, and those exact artifacts. The gate measures PRODUCT changes, not process artifacts; never exclude `<specDir>`/`<planDir>` themselves, which hold every artifact this repo has ever accepted, and a historical artifact that is itself the requested product still counts. No measurement — helper missing, invalid plan discovery, or non-zero exit — is not a small diff: run the full two-axis review.
+- The branch diff is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: start with `~/.agents/bin/diff-scope $BASE_SHA..$HEAD_SHA --format text --artifact-path <spec_path> --artifact-path <plan_path>`, then append one argument for each plan member and any other process artifact this run wrote. Each exclusion is an individual `--artifact-path <path>` argument. Its first line reads `product: <lines> lines, <files> files`, after the helper drops lockfiles, generated-header files, and those exact artifacts. The gate measures PRODUCT changes, not process artifacts; never exclude the resolved artifact directories themselves, which hold every artifact this repo has ever accepted, and a historical artifact that is itself the requested product still counts. No measurement, invalid plan discovery, or non-zero exit is not a small diff: run the full two-axis review.
 - The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num> --json labels`; with `issueTracker.kind=none` the condition passes), and no path from `git diff --name-only $BASE_SHA..$HEAD_SHA` matches a `review.criticalPaths` glob.
 
 **Merge-delta check (degraded path).** Scope and checklist per REVIEW.md; over exactly the non-empty merge delta, dispatch:

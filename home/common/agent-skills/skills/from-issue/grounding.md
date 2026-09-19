@@ -1,5 +1,7 @@
 # Doc grounding (from-issue)
 
+This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.paths.context` and `bindings.paths.standards` and never resolve, infer, or read project policy.
+
 Loaded from `SKILL.md`; applies to Phases 2–5, which ground in the project's docs before their first clarifying question, option set, or review pass.
 
 Invoke `doc-grounded-questions`: it reads the context map / context doc, the ADRs owned by the areas it loaded (`docs/areas/<slug>/adr/`, plus `system`), and `docPaths.standards`, then caches the result in the worktree's git-dir `GROUNDING.md` (`"$(git rev-parse --git-dir)/GROUNDING.md"` — never a working-tree path, which would get committed and collide across parallel runs).

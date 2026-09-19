@@ -172,6 +172,95 @@ def normalized(text):
     return re.sub(r"\s+", " ", text)
 
 
+SHARED_POLICY_ENTRIES = {
+    "design/SKILL.md": ("bindings.paths.artifacts.specs",),
+    "doc-grounded-questions/SKILL.md": ("bindings.paths.context", "bindings.paths.standards", "bindings.paths.architecture", "bindings.paths.hints"),
+    "from-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
+    "grill-with-docs/SKILL.md": ("bindings.paths.context",),
+    "research/SKILL.md": ("bindings.paths.artifacts.specs",),
+    "ship-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.review.code", "bindings.workflow.verification"),
+    "ship-release/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.release", "bindings.deploy"),
+    "to-issues/SKILL.md": ("bindings.tracker", "bindings.paths"),
+    "wayfind/SKILL.md": ("bindings.tracker",),
+    "worktrees/SKILL.md": ("bindings.vcs",),
+    "writing-plans/SKILL.md": ("bindings.paths.artifacts.plans",),
+}
+
+SHARED_POLICY_SUPPORT = {
+    "doc-grounded-questions/REFERENCE.md": ("bindings.paths.context",),
+    "from-issue/grounding.md": ("bindings.paths.context", "bindings.paths.standards"),
+    "from-issue/investigate.md": ("bindings.tracker", "bindings.vcs"),
+    "from-issue/ship-handoff.md": ("bindings.vcs", "bindings.workflow"),
+    "from-issue/standards-review.md": ("bindings.paths.standards",),
+    "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
+    "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
+}
+
+RESOLUTION_SENTENCE = (
+    "Resolve once at phase entry, retain the returned `ResolvedProject` in "
+    "memory, and treat every resolver error as fatal before mutation or "
+    "external effects."
+)
+
+
+def assert_policy_entries(case, root, entries):
+    actual = {str(path.relative_to(root)) for path in root.glob("*/SKILL.md")
+              if "resolve-project resolve" in path.read_text(encoding="utf-8")}
+    case.assertEqual(actual, set(entries))
+    for relative, fields in entries.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        with case.subTest(relative=relative):
+            case.assertEqual(text.count("resolve-project resolve"), 1)
+            case.assertIn(RESOLUTION_SENTENCE, normalized(text))
+            for field in fields:
+                case.assertIn(field, text)
+            for forbidden in ("resolve-" "bindings", ".claude/skills.", "config.json", "helper missing", "not_" "onboarded", "auto-detect", "default `"):
+                case.assertNotIn(forbidden, text)
+
+
+def assert_retained_policy_support(case, root, documents):
+    for relative, fields in documents.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        with case.subTest(relative=relative):
+            case.assertEqual(text.count("resolve-project resolve"), 0)
+            case.assertIn("retained `ResolvedProject`", text)
+            for field in fields:
+                case.assertIn(field, text)
+            for forbidden in ("resolve-" "bindings", ".claude/skills.", "config.json", "helper missing", "not_" "onboarded", "auto-detect", ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md"):
+                case.assertNotIn(forbidden, text)
+
+
+class ProjectPolicySurfaceTest(unittest.TestCase):
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    def test_shared_source_phase_entries_use_one_resolved_project(self):
+        assert_policy_entries(self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_ENTRIES)
+
+    def test_shared_support_documents_reuse_the_retained_snapshot(self):
+        assert_retained_policy_support(self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_SUPPORT)
+
+    def test_sdd_configured_review_pair_is_complete(self):
+        assert_configured_code_review_pair(self, SDD, SDD_DIR / "final-review.md")
+
+    def test_ship_issue_configured_review_pair_is_complete(self):
+        assert_configured_code_review_pair(self, SHIP_ISSUE, SHIP_ISSUE_REVIEW)
+
+
+def assert_configured_code_review_pair(case, owner, support):
+    owner_text = normalized(owner.read_text(encoding="utf-8"))
+    support_text = normalized(support.read_text(encoding="utf-8"))
+    case.assert_ordered(owner_text, "bindings.workflow.review.code", "bindings.commands[review_id].argv", "capabilities.review.code")
+    case.assert_ordered(support_text, "exec", "--sandbox read-only", "--model gpt-6-astra", 'model_reasoning_effort="xhigh"', "--json", "--output-last-message", "--ephemeral", "selected model", "selected reasoning effort", "terminal agent-message", "last-message", "capacity rejection", "no retry", "no native fallback")
+    for text in (owner_text, support_text):
+        case.assertNotIn("command -v codex-companion", text)
+        case.assertNotIn('subagent_type="codex:codex-reviewer"', text)
+
+
 def corpus_documents():
     """Every skill document in both skill trees, as (path, text) pairs."""
     for root in SKILL_ROOTS:
@@ -453,44 +542,28 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         text = normalized(self.writing_plans)
         self.assertIn("resolve-project resolve", text)
         self.assertIn("bindings.paths.artifacts.plans", text)
-        self.assertIn("planDir", self.writing_plans)
+        self.assertIn(RESOLUTION_SENTENCE, text)
 
     def test_writing_plans_no_longer_calls_the_fail_soft_helper(self):
         self.assertNotIn("resolve-bindings", self.writing_plans)
         self.assertNotIn("skills.config.json", self.writing_plans)
 
-    def test_writing_plans_treats_only_not_onboarded_as_non_fatal(self):
+    def test_writing_plans_treats_every_resolver_error_as_fatal(self):
         text = normalized(self.writing_plans)
-        self.assertIn("not_onboarded", text)
-        self.assertIn("`.claude/plans`", text)
-        self.assertIn("Every other error code is fatal", text)
-        # An unonboarded repository is not licence to relocate the plan: the
-        # caller's own `planDir` outranks the literal default, which is reached
-        # only when the caller supplied none.
-        self.assert_ordered(
-            text, "not_onboarded", "`planDir` your caller handed you",
-            "only to the literal `.claude/plans` when it handed you none")
-        for code in ("invalid_contract", "unsupported_schema",
-                     "invalid_projection", "capability_unavailable",
-                     "resolver_failure"):
-            with self.subTest(code=code):
-                self.assertNotIn(f"{code} → ", text)
+        self.assertIn(RESOLUTION_SENTENCE, text)
+        for forbidden in ("not_onboarded", ".claude/plans"):
+            self.assertNotIn(forbidden, text)
 
-    def test_only_writing_plans_migrated_off_resolve_bindings(self):
-        still_calling = (
-            "research", "doc-grounded-questions", "design",
-            "ship-issue", "to-issues",
-        )
-        for name in still_calling:
+    def test_shared_entries_use_the_project_resolver(self):
+        for name in (
+            "research", "doc-grounded-questions", "design", "ship-issue",
+            "to-issues", "from-issue", "grill-with-docs", "ship-release",
+            "wayfind", "worktrees", "writing-plans",
+        ):
             path = (REPO_ROOT / "home/common/agent-skills/skills"
                     / name / "SKILL.md")
             with self.subTest(skill=name):
-                self.assertIn("resolve-bindings", path.read_text(encoding="utf-8"))
-        orchestrate = (REPO_ROOT / "home/common/claude-code/skills"
-                       / "orchestrate-issues" / "SKILL.md")
-        self.assertIn("resolve-bindings", orchestrate.read_text(encoding="utf-8"))
-        self.assertTrue(
-            (REPO_ROOT / "home/common/agent-skills/scripts/resolve-bindings").is_file())
+                self.assertIn("resolve-project resolve", path.read_text(encoding="utf-8"))
 
     def test_design_and_grill_measure_after_last_write_and_stop_truthfully(self):
         for producer in (self.design, self.grill):

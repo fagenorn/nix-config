@@ -1,5 +1,7 @@
 # Conformance Reviewer Prompt Template (final review, conformance axis)
 
+This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.workflow.review.code` and never resolve, infer, or read project policy.
+
 One of the two isolated axis reviewers in the final review. This axis grades
 delivered-vs-promised; the parallel correctness axis grades bugs and build quality —
 this prompt tells its reviewer not to duplicate that job.
@@ -18,15 +20,12 @@ Subagent (reviewer, Sonnet/high as selected above):
 
     ## Ground first
 
-    Invoke `doc-grounded-questions` via the Skill tool if available; otherwise
-    ground map-first yourself: read the context map (the configured
-    `docPaths.contextMap`, else `docs/CONTEXT-MAP.md`, else legacy root
-    `CONTEXT-MAP.md`), open only the area `CONTEXT.md` files whose `governs:`
+    Receive the phase owner's retained snapshot. Ground map-first using its
+    selected `bindings.paths.context` entry, open only the area `CONTEXT.md` files whose `governs:`
     globs intersect the diff's paths or whose terms appear in the issue; ADRs
     (from the loaded areas' `adr/` dirs, plus `system`) only when cited by the
     issue, spec, plan, or a selected area file; and the standards shards whose
-    globs intersect the diff. No map → read whichever of
-    `docPaths.{context,standards}` exist.
+    globs intersect the diff. With no selected map, use only passed context and standards paths.
 
     ## Requirements
 

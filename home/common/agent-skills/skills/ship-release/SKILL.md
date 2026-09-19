@@ -21,7 +21,7 @@ release ownership across cheaper transport or mechanic agents.
 
 ## Project bindings (resolve first)
 
-Read `.claude/skills.config.json` at the project root. Auto-detect absent keys: tracker = `gh` for a github.com remote (else `glab`/none); branches from the repo default. Remaining defaults: `integrationBranch=main`, `defaultBranch=main`, `commit.coAuthoredBy=true`, `unsetGithubToken=false`, `deploy.adapter=none`. Degrade gracefully — never read a configured doc/hints path that doesn't exist, never hard-fail on a missing optional binding.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.release`, and `bindings.deploy`. A blocked required capability stops; authored unsupported takes only the existing no-capability route.
 
 `<integration>` means the resolved `integrationBranch`, `<default>` the resolved `defaultBranch`. When they're identical (the common single-branch repo) there is no PR to open: run Phases 0 **and** 1 — the pre-flight and the changelog body / bump evidence are still required — then skip Phases 2–4 and continue at Phase 4.5. The release ref is the confirmed tip of `<default>`. The two-branch flow below is the general case.
 

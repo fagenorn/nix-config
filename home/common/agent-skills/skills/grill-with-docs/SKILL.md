@@ -5,6 +5,8 @@ description: Stress-test a spec or design against the project's domain docs — 
 
 <what-to-do>
 
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. Read `bindings.paths.context` and `capabilities.knowledge.*`. Select context maps only by filtering the retained authored-order list for basename `CONTEXT-MAP.md`: zero means no map/no linter call, one selects its absolute path, and multiple is an invalid caller contract before invocation; never probe, sort, or take a first match.
+
 Interview me relentlessly about every aspect of this spec (the design under discussion — `from-issue` invokes this skill on the spec, not the plan) until we reach a shared understanding. Model the design as a tree of decisions; the **frontier** is every question whose prerequisites are already settled.
 
 Ask the whole frontier as one numbered round of `❓ question / ➡️ recommended answer` pairs. A question whose answer depends on another question still open in this round belongs to a later round. The round's answers reshape the tree — recompute the frontier and ask the next round; done when it's empty.
@@ -38,7 +40,7 @@ During codebase exploration, also look for existing documentation. Read a long o
 
 1. **The standard** — `docs/CONTEXT-MAP.md` plus `docs/areas/`. Areas and their decisions live under `docs/areas/<slug>/`; that is the tree below and the one to create in a repo that has nothing yet.
 2. **Legacy conventions** — a root `CONTEXT-MAP.md` with area files beside the code, or flat `docs/<slug>/` areas beside a central `docs/adr/`. For a glossary: `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md`, `docs/CONTEXT.md`, `docs/glossary.md`. For decisions: `docs/adr/`, `docs/decisions/`, `doc/adr/`, `adr/`, `RFCs/`. Follow what the repo has; don't impose the standard tree on it mid-flight.
-3. **`.claude/skills.config.json`** may name paths explicitly under `docPaths` (e.g. `docPaths.context`, `docPaths.contextMap`) — prefer those when present. `docPaths.adrDir` is a legacy override: where the map has areas, each area owns its own `adr/`.
+3. The retained `bindings.paths.context` list names documentation sources; each selected area owns its own `adr/`.
 
 ### File structure
 

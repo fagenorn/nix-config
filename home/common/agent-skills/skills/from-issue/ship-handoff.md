@@ -1,5 +1,7 @@
 # Phase 7 detail — ship handoff and inline fallback
 
+This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.vcs` and `bindings.workflow` and never resolve, infer, or read project policy.
+
 Loaded from `SKILL.md` at Phase 7.
 
 ## Ship-owner subagent prompt

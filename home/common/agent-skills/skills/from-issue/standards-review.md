@@ -1,5 +1,7 @@
 # Phase 5 detail — standards review
 
+This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.paths.standards` and never resolve, infer, or read project policy.
+
 Loaded from `SKILL.md` at Phase 5. A plan reviewed only by its author risks blind spots, and you are the author. Unless Phase 0 marked the issue `mechanical-only`:
 
 ## Caller input gate

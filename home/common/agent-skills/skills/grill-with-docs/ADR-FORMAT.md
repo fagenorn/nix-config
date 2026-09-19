@@ -1,5 +1,7 @@
 # ADR Format
 
+This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.paths.context` and never resolve, infer, or read project policy.
+
 ADRs live in the area they concern: `docs/areas/<slug>/adr/`, named `NNN-kebab-title.md`. **Each directory numbers its own records** — three digits, starting at `001`. Writing one means listing that directory and taking its next free number at merge time; what other areas have numbered is irrelevant.
 
 **Which directory.** The area whose `governs:` globs cover the code the decision constrains, or `docs/areas/system/` when it spans areas or belongs to none. The map's Areas table is the list to choose from — ADR homes are derived from the map, not configured. (`docPaths.adrDir` is a legacy override, honoured only in repos still on a single central ADR directory.) Create the `adr/` directory lazily, with the first record that needs it.

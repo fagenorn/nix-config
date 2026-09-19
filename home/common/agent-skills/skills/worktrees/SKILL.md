@@ -5,6 +5,8 @@ description: Put work in an isolated git worktree and leave it safely. Use befor
 
 # Worktrees
 
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. All branch, worktree naming, signing, merge, and deletion policy comes from `bindings.vcs`.
+
 Guarantee an isolated workspace exists, then hand control back. The caller owns branching policy, the work, and shipping.
 
 ## Destructive-ops carve-out
@@ -32,7 +34,7 @@ True → you are already in a linked worktree; report the path and branch and st
 
 ## Branch and prefix contract
 
-The caller's `branchNaming.pattern` (default `issue-<num>-<slug>`) names the branch. **`EnterWorktree` prepends `branchNaming.worktreePrefix`** (default `worktree-`), so the on-disk branch is `<worktreePrefix><pattern>`. Both forms are accepted by everything downstream — pre-flight searches, PR lookups, cleanup — so never strip the prefix to "correct" it, and never assume its absence.
+`bindings.vcs.branch_naming.pattern` names the branch. **`EnterWorktree` prepends `bindings.vcs.branch_naming.worktree_prefix`**, so the on-disk branch is `<worktree_prefix><pattern>`. Both forms are accepted by everything downstream — pre-flight searches, PR lookups, cleanup — so never strip the prefix to "correct" it, and never assume its absence.
 
 No native worktree tool: `git worktree add -b <branch> <path> origin/<integration-branch>`. Base on the remote ref, not the local branch, which may carry another agent's in-flight commits. Put worktrees in `.worktrees/` at the repo root and confirm it is ignored (`git check-ignore -q .worktrees`) before creating anything inside it. If creation fails — sandbox permission error or anything else — **never silently work in place**: isolation was the caller's requirement, and in-place work puts commits on a branch the caller promised not to touch. Report blocked with the exact failure and ask for direction; the caller decides between fixing permissions, another location, or explicitly authorizing in-place work.
 
