@@ -4,7 +4,7 @@ Phase 3 of `ship-issue`. Mine the session for high-signal learnings and promote 
 
 This included document receives the phase owner's retained `ResolvedProject`; it uses passed D3 paths and workflow values without resolving or inferring policy.
 
-Project-agnostic: destination paths come from `.claude/skills.config.json` (`docPaths.*`, `specDir`, `planDir`) as resolved by the parent skill. A destination the project doesn't declare has no home — see the table below.
+Project-agnostic: destination paths come only from the parent’s retained `bindings.paths` and `capabilities.knowledge.*`. An authored unsupported knowledge capability takes its documented no-knowledge route.
 
 ## The bar
 

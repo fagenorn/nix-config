@@ -7,8 +7,8 @@ This included document receives the phase owner's retained `ResolvedProject`; it
 hand this file's **path** to the reviewer (or to `codex-collaboration`, which
 passes it by path in the review packet). It supplies concrete values for every
 `<placeholder>` and binding named below — plan root path, its four checker
-metrics, spec path, issue number, `<tracker-cli>`, `unsetGithubToken`,
-`docPaths.*`, `projectHints`, and the optional review focus. The orchestrator
+metrics, spec path, issue number, passed `bindings.tracker`, `bindings.paths`,
+and the configured review capability. The orchestrator
 never inlines this text into its own context.
 
 ## Caller pre-dispatch boundary

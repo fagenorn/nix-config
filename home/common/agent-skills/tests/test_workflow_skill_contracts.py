@@ -279,13 +279,23 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
 
     def test_listed_support_documents_receive_retained_snapshot(self):
         root = REPO_ROOT / "home/common/agent-skills/skills"
-        for relative in (
-            "from-issue/bindings.md", "from-issue/AUTO.md", "from-issue/REVIEW-CONTRACT.md",
-            "ship-issue/CONSOLIDATE.md", "ship-issue/HUMAN-GATE.md", "ship-issue/SYNC.md",
-            "ship-release/CHANGELOG.md",
-        ):
+        documents = {
+            "from-issue/bindings.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
+            "from-issue/AUTO.md": (),
+            "from-issue/REVIEW-CONTRACT.md": ("bindings.workflow.review", "bindings.commands"),
+            "ship-issue/CONSOLIDATE.md": ("bindings.paths",),
+            "ship-issue/HUMAN-GATE.md": (), "ship-issue/SYNC.md": ("bindings.vcs",),
+            "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
+        }
+        for relative, fields in documents.items():
             with self.subTest(relative=relative):
-                self.assertIn("retained `ResolvedProject`", (root / relative).read_text(encoding="utf-8"))
+                text = (root / relative).read_text(encoding="utf-8")
+                self.assertIn("retained `ResolvedProject`", text)
+                for field in fields:
+                    self.assertIn(field, text)
+                if relative == "from-issue/bindings.md":
+                    for forbidden in ("skills.config.json", "docPaths", "auto-detect", "default `"):
+                        self.assertNotIn(forbidden, text)
 
 
 def assert_configured_code_review_pair(case, owner, support):

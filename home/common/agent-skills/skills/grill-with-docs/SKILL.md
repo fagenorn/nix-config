@@ -39,14 +39,13 @@ During codebase exploration, also look for existing documentation. Read a long o
 **Detect the layout before writing anything**, in this order:
 
 1. **The selected map** — the retained selected context-map path plus its passed area paths. Areas and decisions live only where those retained paths name them.
-2. **Legacy conventions** — a root `CONTEXT-MAP.md` with area files beside the code, or flat `docs/<slug>/` areas beside a central `docs/adr/`. For a glossary: `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md`, `docs/CONTEXT.md`, `docs/glossary.md`. For decisions: `docs/adr/`, `docs/decisions/`, `doc/adr/`, `adr/`, `RFCs/`. Follow what the repo has; don't impose the standard tree on it mid-flight.
-3. The retained `bindings.paths.context` list names documentation sources; each selected area owns its own `adr/`.
+2. The retained `bindings.paths.context` list names documentation sources; each selected area owns its passed decision records.
 
 ### File structure
 
 The steady state is contained in `docs/`: a map plus one directory per area under `areas/` — the full tree, reserved directories, and budgets live in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md); read it before creating any doc file. ADR numbering is **per directory** (`ADR-<slug>-NNN`), so an area's records never collide with another's.
 
-A young repo may still be a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md`) with no map; that is fine, and the first split creates the map.
+With no selected map, use only passed context paths and do not create or discover a map.
 
 Create files lazily — only when you have something to write. If no glossary exists, create one when the first term resolves (named to match the project's convention, `CONTEXT.md` by default). If no decision-record directory exists, create it when the first ADR is needed.
 
