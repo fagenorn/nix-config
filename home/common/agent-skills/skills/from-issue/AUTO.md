@@ -3,6 +3,8 @@
 Read this file once, when you detect `--auto` in the invocation. It replaces the checkpoint
 behavior in `SKILL.md`; everything else in `SKILL.md` still applies.
 
+This included document receives the phase owner's retained `ResolvedProject`; it never resolves or infers policy.
+
 The shift is *what you do at a decision point*, not *what work gets done*. Every phase still
 produces the same artifact at the same quality bar. Brainstorm still happens. Grill still happens.
 Standards review still happens. You don't get to skip thinking — you only stop waiting for the user.

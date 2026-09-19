@@ -38,7 +38,7 @@ During codebase exploration, also look for existing documentation. Read a long o
 
 **Detect the layout before writing anything**, in this order:
 
-1. **The standard** — `docs/CONTEXT-MAP.md` plus `docs/areas/`. Areas and their decisions live under `docs/areas/<slug>/`; that is the tree below and the one to create in a repo that has nothing yet.
+1. **The selected map** — the retained selected context-map path plus its passed area paths. Areas and decisions live only where those retained paths name them.
 2. **Legacy conventions** — a root `CONTEXT-MAP.md` with area files beside the code, or flat `docs/<slug>/` areas beside a central `docs/adr/`. For a glossary: `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md`, `docs/CONTEXT.md`, `docs/glossary.md`. For decisions: `docs/adr/`, `docs/decisions/`, `doc/adr/`, `adr/`, `RFCs/`. Follow what the repo has; don't impose the standard tree on it mid-flight.
 3. The retained `bindings.paths.context` list names documentation sources; each selected area owns its own `adr/`.
 

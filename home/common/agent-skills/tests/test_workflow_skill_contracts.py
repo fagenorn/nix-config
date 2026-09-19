@@ -272,9 +272,20 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_context_map_consumers_forbid_discovery(self):
         for relative in ("doc-grounded-questions/SKILL.md", "grill-with-docs/SKILL.md", "grill-with-docs/CONTEXT-FORMAT.md"):
             text = (REPO_ROOT / "home/common/agent-skills/skills" / relative).read_text(encoding="utf-8")
-            self.assertIn("bindings.paths.context", text)
-            for forbidden in ("docPaths.contextMap", "select the first match", "sort("):
-                self.assertNotIn(forbidden, text)
+            contract = text
+            self.assert_ordered(contract, "bindings.paths.context", "basename", "CONTEXT-MAP.md", "zero", "no map", "no linter", "one", "absolute path", "multiple", "invalid caller contract", "before invocation")
+            for forbidden in ("docPaths.contextMap", "docs/CONTEXT-MAP.md", "select the first match", "sort("):
+                self.assertNotIn(forbidden, contract)
+
+    def test_listed_support_documents_receive_retained_snapshot(self):
+        root = REPO_ROOT / "home/common/agent-skills/skills"
+        for relative in (
+            "from-issue/bindings.md", "from-issue/AUTO.md", "from-issue/REVIEW-CONTRACT.md",
+            "ship-issue/CONSOLIDATE.md", "ship-issue/HUMAN-GATE.md", "ship-issue/SYNC.md",
+            "ship-release/CHANGELOG.md",
+        ):
+            with self.subTest(relative=relative):
+                self.assertIn("retained `ResolvedProject`", (root / relative).read_text(encoding="utf-8"))
 
 
 def assert_configured_code_review_pair(case, owner, support):

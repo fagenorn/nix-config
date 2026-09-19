@@ -1,8 +1,8 @@
 # Agent skills — project adapter contract
 
 The skills in `skills/` are project-agnostic: they carry zero project residue and read everything
-project-specific through the adapter surfaces below. A new project onboards by writing a config file
-and a map skeleton; nothing in this tree changes.
+project-specific through one retained `ResolvedProject` snapshot at each phase entry. A new project
+onboards through the project contract; included documents receive the owner's snapshot and never infer policy.
 
 | Surface | Lives at (per repo) | Carries |
 |---|---|---|

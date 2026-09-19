@@ -15,11 +15,11 @@ Run `resolve-project resolve --repo-root <checkout>` once and retain the full `R
 
 ## The grounding pass
 
-For every clarifying question or option set you're about to surface, do this pass first. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter call, one selects that absolute path, and more than one is an invalid caller contract that stops before invocation. Never probe, sort, or infer a location.
+For every clarifying question or option set you're about to surface, do this pass first. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter call, one selects that absolute path, and multiple matches are an invalid caller contract that stops before invocation. Never probe, sort, or infer a location.
 
 1. **Read the selected context map, then only the areas you need.** Always read the selected map in full — it is capped at 150 lines. Then open an area's `CONTEXT.md` only when its `governs:` globs intersect the paths the issue touches, or one of its terms appears in the issue or your question. With no selected map, use only the retained `bindings.paths.context` entries passed by the owner.
 
-2. **Scan the decision log.** The `adr/` dirs of the areas you opened in step 1, plus `docs/areas/system/adr/` always (legacy ADR homes: REFERENCE.md). List the directory, read the titles, open any that look relevant. A settled decision → state it and ask only whether anything has *changed* since.
+2. **Scan decision records.** Use only decision-record paths passed through the retained `bindings.paths.context` selection and allowed by `capabilities.knowledge.*`. List each passed directory, read titles, and open relevant records. A settled decision → state it and ask only whether anything has changed since.
 
 3. **Read the standards that apply.** Use the retained `bindings.paths.standards` list and `capabilities.knowledge.*`. If a proposed option violates a rule you found, drop it or say why you're surfacing it anyway.
 

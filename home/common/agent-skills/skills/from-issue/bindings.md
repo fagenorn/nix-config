@@ -2,6 +2,8 @@
 
 Loaded from `SKILL.md` at startup. Resolve once, carry the values.
 
+This included document receives the phase owner's retained `ResolvedProject`; use only `bindings.tracker`, `bindings.vcs`, `bindings.paths.artifacts`, and `bindings.workflow`, and never resolve or infer policy.
+
 1. Read `.claude/skills.config.json` at the project root if it exists.
 2. Auto-detect what it doesn't set: issue tracker = `gh` if the remote is github.com, else `glab`/none; verify commands from the manifest (npm scripts, dotnet, cargo, go, make); branches from the repo default.
 3. Defaults when neither yields a value: integrationBranch=main, defaultBranch=main, commit.coAuthoredBy=true, unsetGithubToken=false, specDir=.claude/specs, planDir=.claude/plans, codex.planReview.enabled=true, codex.planReview.focus=null.

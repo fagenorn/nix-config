@@ -2,6 +2,8 @@
 
 Loaded by Phase 1 of [`SKILL.md`](./SKILL.md). This file owns the *content* of a release's PR body — the categorisation rubric, the output template, and the version-bump signals. SKILL.md owns the workflow around it.
 
+This included document receives the phase owner's retained `ResolvedProject`; it uses `bindings.tracker`, `bindings.vcs`, and `bindings.workflow.release` without resolving or inferring policy.
+
 `<integration>`, `<default>`, and `<repoSlug>` resolve as in SKILL.md. Build every PR/commit/ADR URL from `<repoSlug>`; never hardcode an owner/name.
 
 The audience is the operator debugging something three months from now — usually you. They don't care about the SHA of every cherry-pick; they care about *what landed and what they need to know to operate it*.

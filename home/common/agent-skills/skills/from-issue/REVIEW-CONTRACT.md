@@ -2,6 +2,8 @@
 
 Operational contract for `from-issue` Phase 5. The Phase-5 caller executes the
 caller sections in order. Only after the pre-dispatch boundary passes does it
+
+This included document receives the phase owner's retained `ResolvedProject`; it uses passed `bindings.workflow.review`, `bindings.commands`, and capability states without resolving or inferring policy.
 hand this file's **path** to the reviewer (or to `codex-collaboration`, which
 passes it by path in the review packet). It supplies concrete values for every
 `<placeholder>` and binding named below — plan root path, its four checker

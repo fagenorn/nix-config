@@ -2,6 +2,8 @@
 
 Read this only when SKILL.md's `## Standing authorization` finds no repository
 policy or explicit user grant covering the concrete action and target. The gate
+
+This included document receives the phase owner's retained `ResolvedProject`; it uses passed tracker and VCS values without resolving or inferring policy.
 makes the remaining external effects reviewable; it does not grant them itself,
 and the host's actual automatic approval decision still governs execution.
 
