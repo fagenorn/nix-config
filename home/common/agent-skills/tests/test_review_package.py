@@ -1258,6 +1258,79 @@ class ReviewPackageCliTest(unittest.TestCase):
                     os.fstat(descriptor)
             self.assertFalse(final_root.exists())
 
+    def test_replaced_member_name_keeps_primary_failure_and_release_note(self):
+        for replacement in ("symlink", "file"):
+            with (self.subTest(replacement=replacement),
+                  tempfile.TemporaryDirectory() as raw):
+                directory = Path(raw)
+                stage_root, final_root, final_members = self.publication_fixture(
+                    directory, (b"staged-one",)
+                )
+                original_members = directory / "review-original"
+                outside = directory / "outside"
+                outside.mkdir()
+                primary = RuntimeError("injected primary publication failure")
+                real_open = review_package_module.os.open
+                real_close = review_package_module.os.close
+                member_fds: list[int] = []
+                release_failed = False
+
+                def replace_then_fail(label: str, _path: Path):
+                    if label != "manifest":
+                        return
+                    final_members.rename(original_members)
+                    if replacement == "symlink":
+                        (outside / "competitor").write_bytes(b"competitor-bytes")
+                        final_members.symlink_to(outside, target_is_directory=True)
+                    else:
+                        final_members.write_bytes(b"competitor-bytes")
+                    raise primary
+
+                def observe_open(path, flags, *args, **kwargs):
+                    descriptor = real_open(path, flags, *args, **kwargs)
+                    if Path(path) == final_members:
+                        member_fds.append(descriptor)
+                    return descriptor
+
+                def fail_member_close(descriptor):
+                    nonlocal release_failed
+                    if member_fds and descriptor == member_fds[-1] and not release_failed:
+                        real_close(descriptor)
+                        release_failed = True
+                        raise OSError("injected member release failure")
+                    return real_close(descriptor)
+
+                with (mock.patch.object(review_package_module.os, "open",
+                                        side_effect=observe_open),
+                      mock.patch.object(review_package_module.os, "close",
+                                        side_effect=fail_member_close)):
+                    with self.assertRaises(
+                        review_package_module.PublicationError
+                    ) as raised:
+                        review_package_module.publish_package(
+                            stage_root, final_root, replace_then_fail
+                        )
+
+                failure = raised.exception
+                self.assertIs(failure.__cause__, primary)
+                self.assertTrue(release_failed)
+                self.assertTrue(any(
+                    "OSError: injected member release failure" in note
+                    for note in getattr(failure, "__notes__", [])
+                ))
+                self.assertFalse(final_root.exists())
+                self.assertEqual(list(original_members.iterdir()), [])
+                self.assertTrue(member_fds)
+                for descriptor in member_fds:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+                if replacement == "symlink":
+                    self.assertEqual(
+                        (outside / "competitor").read_bytes(), b"competitor-bytes"
+                    )
+                else:
+                    self.assertEqual(final_members.read_bytes(), b"competitor-bytes")
+
     def test_stage_write_failure_removes_partial_stage_directory(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)

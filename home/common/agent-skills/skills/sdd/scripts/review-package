@@ -402,7 +402,9 @@ def _cleanup_published_members(
     if not empty:
         return failures
     try:
-        if _directory_identity(member_dir) == directory_identity:
+        info = member_dir.lstat()
+        if (stat.S_ISDIR(info.st_mode)
+                and (info.st_dev, info.st_ino) == directory_identity):
             member_dir.rmdir()
     except FileNotFoundError:
         pass
