@@ -1271,6 +1271,49 @@ class ExecutionTelemetrySchedulingTest(unittest.TestCase):
         self.assertEqual(telemetry["source_coverage"]["scheduling"]["spawn_attempts"],
                          codex["scheduling"]["spawn_attempts"])
 
+    def test_scheduling_only_versionless_root_preserves_routing_coverage(self):
+        self.write_root(assistant("ordinary", usage=USAGE_1, timestamp="2026-09-20T10:05:00Z"))
+        telemetry = self.run_record()["execution_telemetry"]
+        expected = {"state": "none", "eligible_events": 0, "paired_events": 0,
+                    "reasons": [{"code": "runtime_version_missing", "count": 1}]}
+        self.assertEqual(telemetry["runs"][0]["routing"]["coverage"], expected)
+        self.assertEqual(telemetry["source_coverage"]["routing"], expected)
+        self.assertEqual(telemetry["runs"][0]["scheduling"]["spawn_attempts"]["value"], 0)
+
+    def test_spawn_attempts_deduplicate_identical_tool_ids_across_root_files(self):
+        project = self.projects / "-Users-me-repo-issue-120-x"
+        project.mkdir(parents=True)
+        launch = {"type": "tool_use", "id": "toolu-copied", "name": "Task",
+                  "input": {"subagent_type": "reviewer"}}
+        line = assistant("copied", usage=USAGE_1, content=[launch],
+                         timestamp="2026-09-20T10:05:00Z", version="2.1.0")
+        (project / "s1.jsonl").write_text(line, encoding="utf-8")
+        (project / "s2.jsonl").write_text(line, encoding="utf-8")
+        metric = self.run_record()["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertEqual((metric["value"], metric["coverage"]["eligible_events"],
+                          metric["coverage"]["paired_events"]), (1, 1, 1))
+
+    def test_future_token_and_slot_pairs_require_declared_digest_shapes(self):
+        full = {"state": "full", "eligible_events": 1, "paired_events": 1, "reasons": []}
+        event_window = {"start": "2026-09-20T10:00:00Z", "end": "2026-09-20T11:00:00Z"}
+        metrics = {name: agent_costs.unsupported_metric() for name in agent_costs.SCHEDULING_METRICS}
+        for name, value in (("wait_input_tokens", 1), ("covered_input_tokens", 2)):
+            metrics[name] = {"value": value, "coverage": full, "cohort_digest": None}
+        with self.assertRaises(ValueError):
+            agent_costs._validate_scheduling(metrics, event_window)
+        token_digest = agent_costs.cohort_digest([("toolu-1",)])
+        for name, value in (("wait_input_tokens", 1), ("covered_input_tokens", 2)):
+            metrics[name] = {"value": value, "coverage": full, "cohort_digest": token_digest}
+        slot_digest = agent_costs.canonical_digest(event_window)
+        self.assertNotEqual(slot_digest, agent_costs.cohort_digest([tuple(event_window.values())]))
+        for name, value in (("slot_capacity_seconds", 10), ("claimed_slot_seconds", 5)):
+            metrics[name] = {"value": value, "coverage": full, "cohort_digest": slot_digest}
+        agent_costs._validate_scheduling(metrics, event_window)
+        for name in ("slot_capacity_seconds", "claimed_slot_seconds"):
+            metrics[name]["cohort_digest"] = agent_costs.cohort_digest([tuple(event_window.values())])
+        with self.assertRaises(ValueError):
+            agent_costs._validate_scheduling(metrics, event_window)
+
 
 class BuildRecordTest(unittest.TestCase):
     def strata(self):

@@ -60,7 +60,7 @@ RECORD_KIND = "agent-cost-record"
 EXECUTION_TELEMETRY_SCHEMA_VERSION = 1
 EXECUTION_TELEMETRY_PRODUCER_VERSION = 1
 TELEMETRY_REASON_CODES: tuple[str, ...] = (
-    "timestamp_missing", "request_missing", "request_host_missing",
+    "timestamp_missing", "timestamp_conflict", "request_missing", "request_host_missing",
     "request_host_conflict", "result_missing", "child_missing",
     "dispatch_missing", "role_ambiguous", "execution_model_missing",
     "execution_effort_missing", "runtime_version_missing",
@@ -1131,8 +1131,12 @@ def _merge_coverage(values):
 
 def cohort_digest(identities: list[tuple[str, ...]]) -> str:
     """Return a stable digest for the bounded cohort identities."""
-    canonical = json.dumps(sorted([list(identity) for identity in identities]),
-                           sort_keys=True, separators=(",", ":"))
+    return canonical_digest(sorted([list(identity) for identity in identities]))
+
+
+def canonical_digest(value) -> str:
+    """Return a SHA-256 digest of one canonical JSON value."""
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -1166,13 +1170,16 @@ def _validate_scheduling(metrics, event_window):
         a, b = metrics[left], metrics[right]
         if (a["value"] is None) != (b["value"] is None):
             raise ValueError("paired scheduling metrics must project together")
+        digest = a["cohort_digest"]
         if a["value"] is not None and (a["coverage"]["state"] != "full" or
                                         b["coverage"]["state"] != "full" or
-                                        a["cohort_digest"] != b["cohort_digest"]):
+                                        not isinstance(digest, str) or
+                                        not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or
+                                        digest != b["cohort_digest"]):
             raise ValueError("paired scheduling metrics require one full cohort")
     capacity, claimed = metrics["slot_capacity_seconds"], metrics["claimed_slot_seconds"]
     if capacity["value"] is not None:
-        if capacity["cohort_digest"] != cohort_digest([event_window]):
+        if capacity["cohort_digest"] != canonical_digest(event_window):
             raise ValueError("slot metrics require the event-window cohort")
         if claimed["value"] > capacity["value"]:
             raise ValueError("claimed slots exceed capacity")
@@ -1184,13 +1191,15 @@ def _spawn_metric(source, launches, start, end):
     reasons = Counter()
     identities = []
     eligible = paired = 0
-    for tool_id, timestamp in launches:
-        selected = event_in_window(timestamp, start, end)
-        if selected is False:
+    for tool_id, timestamps in launches.items():
+        selected = {event_in_window(timestamp, start, end) for timestamp in timestamps}
+        if selected == {False}:
             continue
         eligible += 1
-        if selected is None:
+        if None in selected:
             reasons["timestamp_missing"] += 1
+        elif len({format_rfc3339_utc(parse_rfc3339_utc(timestamp)) for timestamp in timestamps}) != 1:
+            reasons["timestamp_conflict"] += 1
         else:
             paired += 1
             identities.append((tool_id,))
@@ -1203,8 +1212,8 @@ def _spawn_metric(source, launches, start, end):
 def _scheduling(source, launches, start, end):
     metrics = {"spawn_attempts": _spawn_metric(source, launches, start, end)}
     metrics.update({name: unsupported_metric() for name in SCHEDULING_METRICS[1:]})
-    _validate_scheduling(metrics, (format_rfc3339_utc(start) if start else None,
-                                   format_rfc3339_utc(end) if end else None))
+    _validate_scheduling(metrics, {"start": format_rfc3339_utc(start) if start else None,
+                                   "end": format_rfc3339_utc(end) if end else None})
     return metrics
 
 
@@ -1219,7 +1228,7 @@ def _empty_telemetry(selected, start=None, end=None):
                                          "cohort_incomplete": 1 if start is None else 0}))
         for source in selected
     }
-    scheduling = {source: _scheduling_coverage(_scheduling(source, [], start, end))
+    scheduling = {source: _scheduling_coverage(_scheduling(source, {}, start, end))
                   for source in selected}
     aggregate = _merge_coverage(contributions.values()) if contributions else coverage(
         0, 0, Counter({"cohort_incomplete": 1})
@@ -1317,7 +1326,7 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
     del executor_factory  # correlation requires a deterministic global index
     source_versions = {source: set() for source in selected}
     runs = defaultdict(lambda: {"events": [], "observations": {}, "reasons": Counter(),
-                                "launches": []})
+                                "launches": defaultdict(list)})
     source_events = defaultdict(list)
     source_reasons = defaultdict(Counter)
     unassigned_events = defaultdict(list)
@@ -1347,12 +1356,16 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
             requests, results = {}, defaultdict(list)
             for rec in records:
                 if rec.get("type") == "assistant":
+                    version = rec.get("version")
+                    if isinstance(version, str) and version:
+                        source_versions["claude"].add(version)
                     for block in ((rec.get("message") or {}).get("content") or []):
                         if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in ("Agent", "Task"):
                             bid = block.get("id")
                             if isinstance(bid, str) and bid not in requests:
                                 requests[bid] = (block.get("input") if isinstance(block.get("input"), dict) else {}, rec.get("timestamp"))
-                                runs[run_id]["launches"].append((bid, rec.get("timestamp")))
+                            if isinstance(bid, str):
+                                runs[run_id]["launches"][bid].append(rec.get("timestamp"))
                 elif rec.get("type") == "user":
                     tur = rec.get("toolUseResult")
                     content = (rec.get("message") or {}).get("content")
@@ -1491,8 +1504,7 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
     for source in selected:
         if not source_versions[source]:
             if source in run_sources:
-                first = next((value for key, value in runs.items()
-                              if key.startswith(source + ":") and value["events"]), None)
+                first = next((value for key, value in runs.items() if key.startswith(source + ":")), None)
                 if first is not None:
                     first["reasons"]["runtime_version_missing"] += 1
             else:
@@ -1509,7 +1521,7 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
             source_only[source] = {"routing": _routing_coverage(
                 unassigned_events[source] if source in run_sources else source_events[source],
                 source_reasons[source]), "scheduling": _scheduling_coverage(
-                    _scheduling(source, [], start, end))}
+                    _scheduling(source, {}, start, end))}
     for run, item in zip(projected_runs, (runs[run_id] for run_id in sorted(runs))):
         run["scheduling"] = _scheduling(run["run_id"].split(":", 1)[0], item["launches"], start, end)
     top = _merge_coverage([run["routing"]["coverage"] for run in projected_runs] +
