@@ -23,12 +23,13 @@
 
 - `publish_package` plus `before_mutation` is the mutation and cleanup seam. Assert errors, bytes, entries, descriptor usability, and cwd restoration; do not assert private-helper calls.
 - A narrow wrapper around real `os.link`, `os.open`, `os.fstat`, or `os.close` may move entries or inject an error at the syscall boundary while delegating every unaffected operation.
+- `os.open` boundary tests cover replacement before delegation and after opening the original; descriptor-release tests cover success/failure with and without the optional parent fd, restoration failure, and primary/secondary exception visibility (D7).
 - `home/common/agent-skills/tests/test_review_package.py` remains the portable behavior/CLI seam; the full `just agent-workflow-tests` run preserves collision, cap, coverage, no-follow, report, and exclusive-publication behavior.
 - The existing Ubuntu `Agent Workflow Tests (advisory)` job is the Linux evidence seam. Its raw suite outcome, exact checkout head, runner context, and bounded identity diagnostic must agree; a green job with a failed raw suite is still a failure (D6).
 
 ## Delivery estimate and boundaries
 
-Estimate: two changed files and 220–360 added or changed lines. Task 1 changes only the test file and deliberately commits a portable red regression against the original producer; it is an independently reviewable evidence checkpoint and must not merge alone. Task 2 changes the producer and extends the same test file, then delivers the green behavior. The main aggregate-growth risk is repeated fixture setup, so Task 1 introduces one focused fixture helper reused by Task 2.
+Estimate: two changed files and 300–480 added or changed lines. Task 1 changes only the test file and deliberately commits a portable red regression against the original producer; it is an independently reviewable evidence checkpoint and must not merge alone. Task 2 changes the producer and extends the same test file, then delivers the green behavior. The main aggregate-growth risk is repeated fixture setup, so Task 1 introduces one focused fixture helper reused by Task 2.
 
 The Darwin baseline at `4ec9cd53ffcbbc5e7385efa1fec01be8bca352ec` is `just build` exit 0 and 836 passing ordinary tests in 165.405 seconds. Final acceptance requires the expanded suite on Darwin and the raw ordinary suite on an actual Ubuntu advisory run. Terra implements each task with a fresh owner for Task 2; Astra independently reviews the diagnostic commit before publication and the final acquisition/mutation/cleanup/release boundary before the final Ubuntu run.
 
@@ -40,6 +41,10 @@ Task 2 — Retain publication identity and close every owned lifetime — `home/
 
 ## Decisions
 
-The design specification owns the issue ledger. This plan applies D1–D6. In particular, Task 1 is the D6 Linux evidence gate, and Task 2 implements the D1–D4 lifetime while testing only the D5 seams. No new non-obvious design decision was required during planning.
+The design specification owns the issue ledger. This plan applies D1–D7. In particular, Task 1 is the D6 Linux evidence gate, and Task 2 implements the D1–D4 lifetime while testing only the D5/D7 seams.
+
+## Accepted review provenance
+
+The independent Phase 5 review of `7640da3056cb14a031514b5fd07f2c5639d5db2d` returned zero Blocking and three Should-fix findings. All were accepted: P5-S1 adds before-open/after-open acquisition replacements; P5-S2 covers the production no-parent call shape, restoration failure, and publication/release precedence; P5-S3 corrects the platform-specific red-state wording. D7 records the non-obvious test/exception contract; the wording correction required no ledger row.
 
 ---

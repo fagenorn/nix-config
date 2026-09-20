@@ -148,7 +148,7 @@ git commit -S -m "test(review-package): diagnose directory identity reuse (#160)
   -m "Co-Authored-By: Codex <noreply@openai.com>"
 ```
 
-Expected: the commit is signed, changes only the named test file, retains the original producer blob `4c912551ebdc81000b7d4627c249825a1171da11`, and is intentionally red only because it exposes the known cleanup defect.
+Expected: the commit is signed, changes only the named test file, and retains the original producer blob `4c912551ebdc81000b7d4627c249825a1171da11`. It is deterministically red on Darwin and Ubuntu because it exposes the known cleanup defect; Ubuntu may additionally fail the bounded identity diagnostic when inode reuse lets the original producer accept the replacement.
 
 - [ ] **Step 4: Pause for independent review and root-owned Ubuntu evidence**
 
