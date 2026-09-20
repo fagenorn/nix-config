@@ -77,6 +77,7 @@ agent-workflow-tests:
     tests/test_agent_model_drift_schema.py \
     tests/test_agent_model_drift_routing.py \
     tests/test_agent_model_drift_scheduling.py \
+    tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
     tests/test_branch_protection.py
 
