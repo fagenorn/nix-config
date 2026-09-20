@@ -9,7 +9,10 @@ the only offline place that failure can surface.
 """
 
 import json
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -234,6 +237,66 @@ def job_if_expression(key):
     return None
 
 
+def step_blocks(key):
+    """Return the named steps in a job, including each step's owned lines."""
+    steps = {}
+    current = None
+    for line in job_blocks()[key]:
+        match = re.match(r"^      - name: (.+)$", line)
+        if match:
+            current = match.group(1)
+            steps[current] = [line]
+        elif current is not None:
+            steps[current].append(line)
+    return steps
+
+
+def summary_shell_body():
+    """Extract the advisory summary shell body from the workflow source."""
+    lines = job_blocks()["agent-workflow-tests"]
+    marker = "      - name: Record advisory observation"
+    start = lines.index(marker)
+    run = lines.index("        run: |", start)
+    body = []
+    for line in lines[run + 1:]:
+        if line.startswith("      - "):
+            break
+        if line.startswith("          "):
+            body.append(line[10:])
+    return "\n".join(body)
+
+
+def execute_summary(event="pull_request"):
+    """Run the checked-in summary with fixture GitHub expression values."""
+    substitutions = {
+        "${{ github.event_name }}": event,
+        "${{ steps.started.outputs.epoch }}": "100",
+        "${{ steps.checkout.outcome }}": "success",
+        "${{ steps.install_nix.outcome }}": "success",
+        "${{ steps.provision_just.outcome }}": "success",
+        "${{ steps.suite.outcome }}": "failure",
+    }
+    body = summary_shell_body()
+    for expression, value in substitutions.items():
+        body = body.replace(expression, value)
+    with tempfile.TemporaryDirectory() as directory:
+        summary = Path(directory) / "summary"
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", body],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GITHUB_STEP_SUMMARY": str(summary)},
+        )
+        return result.stdout, summary.read_text(encoding="utf-8")
+
+
+def has_measurement_contract(steps, name, step_id):
+    """A measurement's continuation belongs to that named step alone."""
+    owned = "\n".join(steps.get(name, []))
+    return f"id: {step_id}" in owned and "continue-on-error: true" in owned
+
+
 def payload():
     return json.loads(PROTECTION.read_text(encoding="utf-8"))
 
@@ -245,6 +308,79 @@ def required_contexts():
 
 
 class WorkflowShape(unittest.TestCase):
+    def test_advisory_job_observes_each_step_and_writes_the_v1_record(self):
+        blocks = job_blocks()
+        self.assertIn("agent-workflow-tests", blocks)
+        self.assertEqual(
+            "agent-workflow-tests",
+            job_names().get("Agent Workflow Tests (advisory)"),
+        )
+        body = job_body("agent-workflow-tests")
+        self.assertIn("runs-on: ubuntu-24.04", body)
+        self.assertIn("timeout-minutes: 10", body)
+        self.assertIn("if: github.event_name != 'schedule'", body)
+        self.assertNotIn("needs:", body)
+        self.assertNotIn("strategy:", body)
+        self.assertNotIn("matrix:", body)
+        self.assertNotIn("conclusion", summary_shell_body())
+        self.assertIn("github.event_name", summary_shell_body())
+        self.assertIn("unknown", summary_shell_body())
+        self.assertNotRegex(body, re.compile(r"^    continue-on-error:", re.MULTILINE))
+        self.assertIn("nix shell --inputs-from . nixpkgs#just --command just --version", body)
+        self.assertIn("nix shell --inputs-from . nixpkgs#just --command just agent-workflow-tests", body)
+
+        expected_steps = {
+            "Checkout": "checkout",
+            "Install Nix": "install_nix",
+            "Provision just": "provision_just",
+            "Run agent workflow tests": "suite",
+        }
+        steps = step_blocks("agent-workflow-tests")
+        for name, step_id in expected_steps.items():
+            with self.subTest(step=name):
+                self.assertIn(name, steps)
+                owned = "\n".join(steps[name])
+                self.assertIn(f"id: {step_id}", owned)
+                self.assertIn("continue-on-error: true", owned)
+                self.assertTrue(has_measurement_contract(steps, name, step_id))
+                self.assertIn(f"steps.{step_id}.outcome", summary_shell_body())
+        without_checkout = dict(steps)
+        without_checkout.pop("Checkout", None)
+        self.assertFalse(
+            has_measurement_contract(without_checkout, "Checkout", "checkout"),
+            "another step's continuation must not satisfy missing checkout",
+        )
+
+        stdout, summary = execute_summary()
+        self.assertEqual(stdout, summary)
+        marker = "AGENT_WORKFLOW_OBSERVATION_V1="
+        self.assertTrue(stdout.startswith(marker))
+        record = json.loads(stdout.removeprefix(marker))
+        self.assertEqual("agent-workflow-observation/v1", record["schema"])
+        self.assertEqual("pull_request", record["trigger"])
+        self.assertEqual(
+            {
+                "checkout": "success",
+                "install_nix": "success",
+                "provision_just": "success",
+                "suite": "failure",
+            },
+            record["raw"],
+        )
+        self.assertIsInstance(record["elapsed_seconds"], int)
+
+    def test_advisory_job_has_the_required_triggers_without_schedule(self):
+        self.assertIsNotNone(trigger_block("pull_request"))
+        self.assertEqual(["main"], trigger_branches("pull_request"))
+        self.assertEqual(["main"], trigger_branches("push"))
+        self.assertIsNotNone(trigger_block("workflow_dispatch"))
+        self.assertIsNotNone(trigger_block("schedule"))
+        for trigger in ("pull_request", "push"):
+            self.assertFalse(
+                any(line.startswith("    paths") for line in trigger_block(trigger))
+            )
+        self.assertEqual("github.event_name != 'schedule'", job_if_expression("agent-workflow-tests"))
+
     def test_workflow_uses_only_minimum_permissions(self):
         self.assertEqual(EXPECTED_WORKFLOW_PERMISSIONS, workflow_permissions())
 

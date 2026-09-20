@@ -65,3 +65,48 @@ jobs:
           nix eval --show-trace \
             --extra-experimental-features 'nix-command flakes' \
             --raw '.#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath'
+
+  agent-workflow-tests:
+    name: Agent Workflow Tests (advisory)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Started
+        id: started
+        run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: Checkout
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+      - name: Install Nix
+        id: install_nix
+        continue-on-error: true
+        uses: DeterminateSystems/nix-installer-action@v4
+      - name: Provision just
+        id: provision_just
+        continue-on-error: true
+        run: nix shell --inputs-from . nixpkgs#just --command just --version
+      - name: Run agent workflow tests
+        id: suite
+        continue-on-error: true
+        run: nix shell --inputs-from . nixpkgs#just --command just agent-workflow-tests
+      - name: Record advisory observation
+        if: always()
+        run: |
+          started="${{ steps.started.outputs.epoch }}"
+          now="$(date +%s)"
+          if [[ "$started" =~ ^[0-9]+$ ]]; then
+            elapsed_seconds=$((now - started))
+          else
+            elapsed_seconds=0
+          fi
+          checkout="${{ steps.checkout.outcome }}"
+          install_nix="${{ steps.install_nix.outcome }}"
+          provision_just="${{ steps.provision_just.outcome }}"
+          suite="${{ steps.suite.outcome }}"
+          for raw_name in checkout install_nix provision_just suite; do
+            [[ -n "${!raw_name}" ]] || printf -v "$raw_name" '%s' unknown
+          done
+          printf -v record 'AGENT_WORKFLOW_OBSERVATION_V1={"schema":"agent-workflow-observation/v1","trigger":"%s","raw":{"checkout":"%s","install_nix":"%s","provision_just":"%s","suite":"%s"},"elapsed_seconds":%s}' "${{ github.event_name }}" "$checkout" "$install_nix" "$provision_just" "$suite" "$elapsed_seconds"
+          printf '%s\n' "$record" | tee -a "$GITHUB_STEP_SUMMARY"
