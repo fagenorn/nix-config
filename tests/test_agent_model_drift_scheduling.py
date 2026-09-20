@@ -131,6 +131,17 @@ class SchedulingProjectionTest(DriftCliCase):
                 self.assertEqual(out, "")
                 self.assertNotEqual(err, "")
 
+    def test_paired_metrics_reject_each_asymmetric_availability(self):
+        pairs = (("wait_input_tokens", "covered_input_tokens"),
+                 ("slot_capacity_seconds", "claimed_slot_seconds"))
+        for left, right in pairs:
+            for measured, unavailable in ((left, right), (right, left)):
+                with self.subTest(measured=measured, unavailable=unavailable):
+                    value = scheduled_record({measured: full_metric(0, digest([]))})
+                    code, out, err = self.run(record=value)
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertTrue(err)
+
     def test_report_has_no_scheduling_conclusion_vocabulary(self):
         code, out, _ = self.run()
         self.assertEqual(code, 0)
@@ -172,7 +183,7 @@ class SchedulingProjectionTest(DriftCliCase):
                                          "denominator": denominator,
                                          "coverage": "unavailable"})
 
-    def test_cache_ratio_projects_absent_fleet_total_members(self):
+    def test_cache_ratio_rejects_absent_fleet_total_members(self):
         cases = (("totals", None, None), ("cache_read", None, 0),
                  ("input_total", 0, None))
         for member, numerator, denominator in cases:
@@ -183,10 +194,8 @@ class SchedulingProjectionTest(DriftCliCase):
                 else:
                     del value["fleet"]["totals"][member]
                 code, out, err = self.run(record=seal_record(value))
-                self.assertEqual((code, err), (0, ""))
-                self.assertEqual(json.loads(out)["context"]["cache_read_ratio"], {
-                    "value": None, "numerator": numerator,
-                    "denominator": denominator, "coverage": "unavailable"})
+                self.assertEqual((code, out), (2, ""))
+                self.assertNotEqual(err, "")
 
     def test_invalid_cache_totals_are_malformed_without_report(self):
         cases = [record_with_components(*components) for components in ((0, 0, -1), (0, 0, True))]

@@ -1352,9 +1352,6 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
             requests, results = {}, defaultdict(list)
             for rec in records:
                 if rec.get("type") == "assistant":
-                    version = rec.get("version")
-                    if isinstance(version, str) and version:
-                        source_versions["claude"].add(version)
                     for block in ((rec.get("message") or {}).get("content") or []):
                         if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in ("Agent", "Task"):
                             bid = block.get("id")
@@ -1368,7 +1365,9 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
                     if isinstance(tur, dict) and isinstance(content, list):
                         for block in content:
                             if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
-                                results[block["tool_use_id"]].append(tur.get("agentId"))
+                                agent_id = tur.get("agentId")
+                                if agent_id not in results[block["tool_use_id"]]:
+                                    results[block["tool_use_id"]].append(agent_id)
             used_agents = set()
             for tool_id, (request, _request_at) in requests.items():
                 reasons = Counter()

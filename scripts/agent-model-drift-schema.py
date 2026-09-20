@@ -119,6 +119,14 @@ def _scheduling(value, pointer):
         _coverage(value[name], pointer + "/" + name)
 
 
+def _paired_metrics(value, pointer):
+    for left, right in (("wait_input_tokens", "covered_input_tokens"),
+                        ("slot_capacity_seconds", "claimed_slot_seconds")):
+        if ((value[left]["coverage"]["state"] == "full") !=
+                (value[right]["coverage"]["state"] == "full")):
+            raise InputError(pointer + " paired metrics must be jointly available")
+
+
 def _metric(value, pointer):
     _closed(value, ("value", "coverage", "cohort_digest"), pointer)
     _coverage(value["coverage"], pointer + "/coverage")
@@ -152,6 +160,10 @@ def _observation(value, pointer):
     for key in ("host", "model", "effort"): _nullable_string(value["observed"][key], pointer)
     if value["observed"]["authority"] not in ("assistant-execution", "codex-rollout"):
         raise InputError(pointer + " observed authority invalid")
+    if (value["observed"]["authority"] == "codex-rollout" and
+            (value["observed"]["model"] is not None or
+             value["observed"]["effort"] is not None)):
+        raise InputError(pointer + " codex rollout only observes host")
     if value["escalation"] is not None:
         _closed(value["escalation"], ("source_dispatch_id", "reason_code"), pointer + "/escalation")
         for key in value["escalation"]: _nullable_string(value["escalation"][key], pointer)
@@ -200,7 +212,7 @@ def _telemetry(value, selected):
         if not isinstance(run["run_id"], str) or ":" not in run["run_id"]:
             raise InputError("run id invalid")
         run_source = run["run_id"].split(":", 1)[0]
-        if run_source not in selected or run_source in source["source_only"]:
+        if run_source not in selected:
             raise InputError("run/source-only contribution invalid")
         seen_sources.add(run_source)
         _closed(run["routing"], ("coverage", "observations"), "/execution_telemetry/runs/routing")
@@ -215,6 +227,7 @@ def _telemetry(value, selected):
         if observed != sorted(observed, key=lambda item: json.dumps({key: item[key] for key in ("declaration", "requested", "configured", "observed", "escalation")}, sort_keys=True, separators=(",", ":"))):
             raise InputError("routing observations must be canonical order")
         _closed(run["scheduling"], SCHEDULING_METRICS, "/execution_telemetry/runs/scheduling")
+        _paired_metrics(run["scheduling"], "/execution_telemetry/runs/scheduling")
         routing.append(run["routing"]["coverage"])
         for name in SCHEDULING_METRICS:
             _metric(run["scheduling"][name], "/execution_telemetry/runs/scheduling/" + name)
@@ -225,6 +238,8 @@ def _telemetry(value, selected):
         if item["routing"]["paired_events"] != 0:
             raise InputError("source-only routing cannot have paired observations")
         _scheduling(item["scheduling"], "source-only scheduling")
+        _paired_metrics({name: {"coverage": item["scheduling"][name]}
+                         for name in SCHEDULING_METRICS}, "source-only scheduling")
         routing.append(item["routing"])
         for metric in SCHEDULING_METRICS:
             scheduling[metric].append(item["scheduling"][metric])
@@ -235,6 +250,90 @@ def _telemetry(value, selected):
     for name in SCHEDULING_METRICS:
         if source["scheduling"][name] != _merged(scheduling[name]):
             raise InputError("scheduling aggregate does not match contributions")
+    _paired_metrics({name: {"coverage": source["scheduling"][name]}
+                     for name in SCHEDULING_METRICS}, "/execution_telemetry/source_coverage/scheduling")
+
+
+_WINDOW_FIELDS = ("days", "cutoff_epoch", "file_mtime_selection",
+                  "whole_selected_file_usage", "strata", "sources")
+_RUN_FIELDS = ("run_id", "stratum", "project", "issue", "outcome", "tokens",
+               "cost_usd", "cost_by_family", "peak_ctx", "turns", "sessions",
+               "subagents", "skill_loads", "repeats", "agents_killed", "interventions",
+               "models", "efforts", "stop_reasons", "phase_turns", "attr_turns",
+               "agents_by_type", "agent_statuses", "agent_prompt_bytes",
+               "agent_result_bytes", "measurement")
+_TOKEN_FIELDS = ("fresh", "cache_create", "cache_read", "output", "input_total", "reasoning")
+_COUNTER_FIELDS = ("models", "efforts", "stop_reasons", "phase_turns", "attr_turns",
+                   "agents_by_type", "agent_statuses")
+_SCALAR_FIELDS = ("peak_ctx", "turns", "sessions", "subagents", "skill_loads",
+                  "repeats", "agents_killed", "interventions")
+_MEASUREMENT_FIELDS = ("selected_source_counts", "duplicate_observations_skipped",
+                       "missing_usage_observations", "invalid_usage_observations",
+                       "ambiguous_legacy_observations", "ambiguous_modern_observations",
+                       "legacy_observations_excluded", "files_selected", "files_with_usage")
+
+
+def _nullable_nonnegative(value, pointer):
+    if value is not None:
+        _nonnegative(value, pointer)
+
+
+def _record_body(value):
+    _closed(value["window"], _WINDOW_FIELDS, "/window")
+    window = value["window"]
+    _nonnegative(window["days"], "/window/days")
+    if window["cutoff_epoch"] is not None:
+        _nonnegative(window["cutoff_epoch"], "/window/cutoff_epoch")
+    if not isinstance(window["file_mtime_selection"], bool) or not isinstance(window["whole_selected_file_usage"], bool):
+        raise InputError("window selection flags invalid")
+    selected = window["strata"]
+    if (not isinstance(selected, list) or not selected or selected != sorted(set(selected)) or
+            any(item not in ("claude", "codex") for item in selected)):
+        raise InputError("selected sources invalid")
+    if not isinstance(window["sources"], dict) or set(window["sources"]) != set(selected) or any(not isinstance(path, str) for path in window["sources"].values()):
+        raise InputError("window sources invalid")
+    if not isinstance(value["strata"], dict) or set(value["strata"]) != set(selected):
+        raise InputError("record strata invalid")
+    for name, stratum in value["strata"].items():
+        _closed(stratum, ("cost_basis", "totals", "runs"), "/strata/" + name)
+        if stratum["cost_basis"] != ("list-price" if name == "claude" else "subscription"):
+            raise InputError("stratum cost basis invalid")
+        _closed(stratum["totals"], ("runs",) + _TOKEN_FIELDS + ("cost_usd", "cost_by_family"), "/strata/totals")
+        _nonnegative(stratum["totals"]["runs"], "/strata/totals/runs")
+        for field in _TOKEN_FIELDS: _nullable_nonnegative(stratum["totals"][field], "/strata/totals/" + field)
+        if stratum["totals"]["cost_usd"] is not None and (isinstance(stratum["totals"]["cost_usd"], bool) or not isinstance(stratum["totals"]["cost_usd"], (int, float))): raise InputError("cost invalid")
+        families = stratum["totals"]["cost_by_family"]
+        if (families is not None and (not isinstance(families, dict) or any(
+                not isinstance(key, str) or not key or isinstance(cost, bool) or
+                not isinstance(cost, (int, float)) for key, cost in families.items()))) or not isinstance(stratum["runs"], list) or len(stratum["runs"]) != stratum["totals"]["runs"]: raise InputError("stratum projection invalid")
+        for run in stratum["runs"]:
+            _closed(run, _RUN_FIELDS, "/strata/runs")
+            if run["stratum"] != name or not all(isinstance(run[key], str) and run[key] for key in ("run_id", "project")) or run["issue"] is not None and not isinstance(run["issue"], str): raise InputError("run identity invalid")
+            if run["outcome"] is not None and run["outcome"] not in ("completed", "interrupted", "blocked", "abandoned", "-"): raise InputError("run outcome invalid")
+            _closed(run["tokens"], _TOKEN_FIELDS, "/strata/runs/tokens")
+            for field in _TOKEN_FIELDS: _nullable_nonnegative(run["tokens"][field], "/strata/runs/tokens/" + field)
+            for field in _SCALAR_FIELDS: _nullable_nonnegative(run[field], "/strata/runs/" + field)
+            for field in _COUNTER_FIELDS:
+                if run[field] is not None and (not isinstance(run[field], dict) or any(not isinstance(key, str) or not key or isinstance(count, bool) or not isinstance(count, int) or count <= 0 for key, count in run[field].items())): raise InputError("run counter invalid")
+            for field in ("agent_prompt_bytes", "agent_result_bytes"):
+                item = run[field]
+                if item is not None:
+                    _closed(item, ("n", "p50", "p90", "max"), "/strata/runs/" + field)
+                    for component in item.values(): _nonnegative(component, "/strata/runs/" + field)
+            families = run["cost_by_family"]
+            if (families is not None and (not isinstance(families, dict) or any(
+                    not isinstance(key, str) or not key or isinstance(cost, bool) or
+                    not isinstance(cost, (int, float)) for key, cost in families.items()))): raise InputError("run cost families invalid")
+            if run["measurement"] is not None:
+                _closed(run["measurement"], _MEASUREMENT_FIELDS, "/strata/runs/measurement")
+                counts = run["measurement"]["selected_source_counts"]
+                _closed(counts, ("modern", "legacy"), "/strata/runs/measurement/selected_source_counts")
+                for count in counts.values(): _nonnegative(count, "/strata/runs/measurement")
+                for field in _MEASUREMENT_FIELDS[1:]: _nonnegative(run["measurement"][field], "/strata/runs/measurement/" + field)
+    _closed(value["fleet"], ("informative", "totals"), "/fleet")
+    if not isinstance(value["fleet"]["informative"], bool): raise InputError("fleet invalid")
+    _closed(value["fleet"]["totals"], _TOKEN_FIELDS, "/fleet/totals")
+    for field in _TOKEN_FIELDS: _nullable_nonnegative(value["fleet"]["totals"][field], "/fleet/totals/" + field)
 
 
 def validate_record(value):
@@ -251,6 +350,7 @@ def validate_record(value):
         raise InputError("selected sources invalid")
     if not isinstance(value.get("strata"), dict) or set(value["strata"]) != set(selected) or not isinstance(value.get("fleet"), dict) or not isinstance(value.get("notes"), str):
         raise InputError("record projection invalid")
+    _record_body(value)
     canonical_time(value["generated_at"])
     if not isinstance(value.get("record_id"), str) or not _DIGEST.fullmatch(value["record_id"]):
         raise InputError("record digest invalid")

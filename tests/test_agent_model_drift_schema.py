@@ -24,6 +24,16 @@ class BaselineLifecycleTest(DriftCliCase):
         unavailable=coverage("none",reasons=[{"code":"source_unsupported","count":1}]); source_only={"codex":{"routing":coverage("none",reasons=[{"code":"runtime_version_missing","count":1}]),"scheduling":{x:copy.deepcopy(unavailable) for x in ("spawn_attempts","capacity_rejections","waits","follow_ups","wait_input_tokens","covered_input_tokens","slot_capacity_seconds","claimed_slot_seconds")}}}
         value=record_value(selected=("claude","codex"),source_only=source_only); self.assertEqual(self.run(record=value)[0],3)
         value["execution_telemetry"]["source_coverage"]["routing"]=coverage(); self.assertEqual(self.run(record=seal_record(value))[0],2)
+    def test_strict_body_and_codex_authority_boundaries_exit_two(self):
+        cases=[]
+        for mutate in (
+                lambda record: record["fleet"]["totals"].update(extra=1),
+                lambda record: record["strata"]["claude"]["runs"][0]["tokens"].update(fresh="bad"),
+                lambda record: record["window"].pop("sources"),
+                lambda record: record["execution_telemetry"]["runs"][0]["routing"]["observations"].append({"declaration":{"dispatch_id":None,"role":"reviewer","authority":"runtime-agent-type"},"requested":{"host":"codex","model":"opus","effort":"high"},"configured":{"host":"codex","model":"gpt","effort":"high"},"observed":{"host":"codex","model":"gpt","effort":None,"authority":"codex-rollout"},"escalation":None,"count":1,"first_event_at":"2026-09-20T10:00:00Z","last_event_at":"2026-09-20T10:00:00Z"})):
+            value=record_value(); mutate(value); cases.append(seal_record(value))
+        for value in cases:
+            code,out,err=self.run(record=value); self.assertEqual((code,out),(2,"")); self.assertTrue(err)
     def test_baseline_lifecycle_and_identity_are_inconclusive(self):
         baseline=baseline_value(self.matrix,self.matrix_digest,valid_before="2026-09-20T12:00:00Z"); code,out,err=self.run(baseline=baseline); self.assertEqual((code,err),(3,"")); self.assertIn("BASELINE_STALE",[x["code"] for x in json.loads(out)["routing"]["findings"]])
     def test_malformed_inputs_exit_two(self):

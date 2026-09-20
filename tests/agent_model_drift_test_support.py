@@ -38,7 +38,12 @@ def _producer_record(execution_telemetry, selected=("claude",)):
     group=agent_costs.new_group(); group["sessions"]=1
     groups={"claude":{"cost_basis":"list-price","groups":{("repo","98"):group}}}
     if "codex" in selected: groups["codex"]={"cost_basis":"subscription","groups":{}}
-    value=agent_costs.build_record(groups,{"days":1,"cutoff_epoch":1,"file_mtime_selection":True,"whole_selected_file_usage":True,"strata":list(selected),"sources":{x:"/redacted" for x in selected}},execution_telemetry=execution_telemetry); value["generated_at"]="2026-09-20T11:01:00Z"; return value
+    window={"days":1,"cutoff_epoch":1,"file_mtime_selection":True,
+            "whole_selected_file_usage":True,"strata":list(selected),
+            "sources":{x:"/redacted" for x in selected}}
+    value=agent_costs.build_record(groups,window,execution_telemetry=execution_telemetry)
+    value["generated_at"]="2026-09-20T11:01:00Z"
+    return value
 def record_value(*, selected=("claude",), source_only=None, **kwargs):
     kwargs.setdefault("harness", {x:["2.1.0"] if x=="claude" else None for x in selected}); return _producer_record(telemetry(source_only=source_only, **kwargs), selected)
 def seal_record(value):

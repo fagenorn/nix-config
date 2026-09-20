@@ -1113,6 +1113,28 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
         self.assertEqual(tuple(telemetry["runs"][0]["scheduling"]),
                          agent_costs.SCHEDULING_METRICS)
 
+    def test_replayed_result_preserves_one_exact_pair_but_conflicts_do_not(self):
+        root = self.claude_pair()
+        replay = agent_result("toolu-route-1", "agent-child-1",
+                              timestamp="2026-09-20T10:05:30Z")
+        root.write_text(root.read_text(encoding="utf-8") + replay, encoding="utf-8")
+        coverage = self.json_record()["execution_telemetry"]["source_coverage"]["routing"]
+        self.assertEqual(coverage, {"state": "full", "eligible_events": 1,
+                                    "paired_events": 1, "reasons": []})
+        root.write_text(root.read_text(encoding="utf-8") + agent_result(
+            "toolu-route-1", "agent-child-2", timestamp="2026-09-20T10:05:31Z"),
+                        encoding="utf-8")
+        coverage = self.json_record()["execution_telemetry"]["source_coverage"]["routing"]
+        self.assertEqual((coverage["eligible_events"], coverage["paired_events"]), (2, 0))
+
+    def test_harness_versions_exclude_old_root_history(self):
+        root = self.claude_pair()
+        root.write_text(assistant("old", usage=USAGE_1, timestamp="2026-09-19T10:00:00Z",
+                                  version="old-runtime") + root.read_text(encoding="utf-8"),
+                        encoding="utf-8")
+        self.assertEqual(self.json_record()["execution_telemetry"]["producer"]["harness_versions"],
+                         {"claude": ["2.1.0"]})
+
     def test_requested_host_missing_or_conflicting_is_null_with_reason(self):
         for host, reason in ((None, "request_host_missing"), ("codex", "request_host_conflict")):
             with self.subTest(host=host):
@@ -1317,7 +1339,8 @@ class ExecutionTelemetrySchedulingTest(unittest.TestCase):
         for name in agent_costs.SCHEDULING_METRICS:
             self.assertEqual(codex["scheduling"][name], {"state": "none", "eligible_events": 0,
                              "paired_events": 0, "reasons": [{"code": "source_unsupported", "count": 1}]})
-        self.assertEqual(telemetry["source_coverage"]["routing"]["reasons"], codex["routing"]["reasons"])
+        self.assertEqual(telemetry["source_coverage"]["routing"]["reasons"], [
+            {"code": "runtime_version_missing", "count": 2}])
         self.assertEqual(telemetry["source_coverage"]["scheduling"]["spawn_attempts"],
                          codex["scheduling"]["spawn_attempts"])
 
