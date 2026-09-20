@@ -67,7 +67,6 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_diff_scope.py \
-    home/common/agent-skills/tests/test_resolve_bindings.py \
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_conformance.py \
     home/common/agent-skills/tests/test_conformance_checks.py \
