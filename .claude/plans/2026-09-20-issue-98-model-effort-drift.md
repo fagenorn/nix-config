@@ -87,7 +87,7 @@ Independent scoped re-reviewer `/root/issue_98/issue98_plan_rereview`, requested
 
 **3 accepted / 0 rejected / 0 deferred.** Accepted: restore exact report identity/time/input-digest assertions plus corrupted record/baseline-id cases; construct current and legacy consumer fixtures through the real producer projection and preserve complete accounting members when varying cache counters; and align the design boundary with the five task slices. These restore already-decided contracts and introduce no new decision-ledger row.
 
-Final scoped reviewer `/root/issue_98/issue98_plan_final_review` (`gpt-5.6-sol` / `high`; observed telemetry `unknown`) read all six members over `afa1d975b2400c930fd325519fe008bf46a9ce91..4aaaff6f7763c122fb02a5630c752d4314c2dafc` and confirmed all nine prior findings resolved.
+Final scoped reviewer `/root/issue_98/issue98_plan_final_review` (`gpt-5.6-sol` / `high`; observed telemetry `unknown`) read all six members over `afa1d975b2400c930fd325519fe008bf46a9ce91..4aaaff6f7763c122fb02a5630c752d4314c2dafc`, confirmed 9 of 10 pre-existing findings resolved, and reported four findings.
 
 **4 accepted / 0 rejected / 0 deferred.** Revised D2 for request-host provenance and D5 for zero-run source coverage; made cache fixtures component-derived; separated `member_bytes` file splitting from the `aggregate_bytes` independent-delivery stop.
 
