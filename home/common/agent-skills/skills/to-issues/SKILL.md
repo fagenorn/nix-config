@@ -31,9 +31,11 @@ Look for opportunities to prefactor the code to make the implementation easier �
 
 ### 3. Draft vertical slices
 
-**Check the rejection KB first.** If `.out-of-scope/` exists at the repo root, read its files (one per
-consciously-rejected idea) before drafting. Never propose a slice that re-litigates a rejected
-direction — mention the rejection file instead; only the user can revive one.
+**Check the rejection KB first.** Read the retained
+`bindings.paths.rejections` entries in authored order before drafting; each entry
+records a consciously rejected idea. Never propose a slice that re-litigates a
+rejected direction — mention the retained rejection path instead; only the user
+can revive one.
 
 Break the plan into **tracer bullet** issues. Each issue is a thin vertical slice that cuts through ALL integration layers end-to-end, NOT a horizontal slice of one layer.
 
@@ -68,10 +70,10 @@ Ask the user:
 Iterate until the user approves the breakdown.
 
 **Record conscious rejections.** When the user rules a proposed direction out during this quiz (not
-merely deferring it), write one short file per rejection to `.out-of-scope/<slug>.md` — the idea in a
-line, why it was rejected, the date, and any link (spec section, wayfind ticket) — and commit them
-with the breakdown. This is the KB step 3 checks; it stops future sessions from re-proposing settled
-rejections for near-zero cost.
+merely deferring it), write one short file per rejection only to an authored
+`bindings.paths.rejections` location — the idea in a line, why it was rejected,
+the date, and any link (spec section, wayfind ticket) — and commit them with the
+breakdown. An empty or unsupported retained list has no rejection write route.
 
 ### 5. Publish the issues to the issue tracker
 

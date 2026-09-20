@@ -15,19 +15,20 @@ agent owns plan edits and disposition.
 Run `resolve-project resolve --repo-root <checkout>` once at phase entry and
 retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain
 the returned `ResolvedProject` in memory, and treat every resolver error as fatal
-before mutation or external effects. Do not read raw policy, infer Git policy,
-or resolve again in either support document.
+before mutation or external effects. On refusal, preserve and report the
+resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never
+translate it into a partial snapshot or fallback. Do not read raw policy, infer
+Git policy, or resolve again in either support document.
 
 For `plan-review`, select `bindings.workflow.review.plan` and
 `capabilities.review.plan`; for `diff-review`, select
-`bindings.workflow.review.code` and `capabilities.review.code`. Retain the
-selected `review_id`, capability, and `bindings.commands[review_id]` object.
-`bindings.paths.hints` is the only project-hint input and is supplied by path
-when it is available.
-
-`blocked` stops with its capability reason and repair ID. `unsupported` takes
-that operation's documented native route. Do not use a default, a plugin bridge,
-or a second resolver.
+`bindings.workflow.review.code` and `capabilities.review.code`. Route that
+retained capability before dereferencing any command entry: `blocked` stops with
+its capability reason and repair ID; `unsupported` takes that operation's
+documented native route. Only for `available`, retain the selected `review_id`
+and dereference `bindings.commands[review_id]`. Do not use a default, a plugin bridge,
+or a second resolver. `bindings.paths.hints` is the only project-hint input and
+is supplied by path when it is available.
 
 ## Read-only packet rules
 

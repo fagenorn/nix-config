@@ -2,8 +2,7 @@
 
 This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.paths.context` and never resolve, infer, or read project policy.
 
-SKILL.md owns the pass itself; this file owns the why, the legacy fallbacks, and
-the worked examples.
+SKILL.md owns the pass itself; this file owns the why and worked examples.
 
 ## Why this matters
 

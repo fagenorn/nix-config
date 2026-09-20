@@ -1,10 +1,10 @@
 # Phase 1 — Sync mechanics
 
-Read this when Phase 1 starts. It owns the divergence rationale, foreign-commit
-handling, scope-creep sweeps, the auto-resolve allowlist, and the conflict
-
-This included document receives the phase owner's retained `ResolvedProject`; it uses `bindings.vcs` and `bindings.paths.hints` without resolving or inferring policy.
-escalation format.
+Read this when Phase 1 starts. This included document receives the phase owner's
+retained `ResolvedProject`; it uses `bindings.vcs` and `bindings.paths.hints`
+without resolving or inferring policy. It owns the divergence rationale,
+foreign-commit handling, scope-creep sweeps, the auto-resolve allowlist, and the
+conflict escalation format.
 
 ## Local integration-branch divergence
 

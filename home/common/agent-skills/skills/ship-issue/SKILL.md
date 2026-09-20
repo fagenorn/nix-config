@@ -12,12 +12,14 @@ Counterpart to `to-issues` and `from-issue`. Take a worktree branch with the imp
 
 Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.review.code`, and `bindings.workflow.verification`; dereference verification IDs through `bindings.commands`.
 
-For code review, select `bindings.workflow.review.code`, copy `bindings.commands[review_id].argv`, then require `capabilities.review.code` before execution.
+For code review, select `bindings.workflow.review.code` and route retained
+`capabilities.review.code` first. `blocked` stops; authored `unsupported` takes
+only its documented route. Only `available` dereferences
+`bindings.commands[review_id].argv` before execution.
 
 A blocked required capability stops. An authored unsupported tracker takes the existing tracker-free route; the sync/verify/consolidate/merge machinery still applies.
 
-Retained `capabilities.review.code` governs the full review route; blocked stops
-and authored unsupported takes only its documented route.
+Retained `capabilities.review.code` governs the full review route.
 
 **Invocation paths.** From `from-issue`, treat the handoff as received stdin
 bytes: pass them through `artifact-budget validate-report --boundary

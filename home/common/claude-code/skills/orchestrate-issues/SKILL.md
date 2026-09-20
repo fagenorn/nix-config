@@ -18,7 +18,9 @@ Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
 Run `resolve-project resolve --repo-root <checkout>` once at phase entry and
 retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain
 the returned `ResolvedProject` in memory, and treat every resolver error as fatal
-before mutation or external effects. Map `bindings.tracker` to the tracker CLI,
+before mutation or external effects. On refusal, preserve and report the
+resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never
+translate it into a partial snapshot or fallback. Map `bindings.tracker` to the tracker CLI,
 repository, and credential environment; map `bindings.vcs` to worktree and branch
 policy; and map `bindings.workflow.orchestration.attempt_budget_minutes` and
 `bindings.workflow.orchestration.max_parallel` directly to the request. Nested

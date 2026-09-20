@@ -4,7 +4,9 @@ This included format receives the phase owner's retained `ResolvedProject`. Sele
 
 Domain knowledge lives as a **map plus area glossaries**. The map is an index, never a store: it names the areas, the paths each one governs, and which area owns each term. The definitions live in the area files. Readers load the map every time (cheap) and open only the area files whose `governs:` globs intersect the paths they are touching.
 
-**Location: contained in `docs/`.** The docs root holds exactly two loose files — `README.md`, the routing index, and `CONTEXT-MAP.md`, the map. Everything else lives in a reserved directory:
+**Illustrative layout:** when the caller-selected map is in `docs/`, that docs
+root holds exactly two loose files — `README.md`, the routing index, and
+`CONTEXT-MAP.md`, the map. Everything else lives in a reserved directory:
 
 ```
 docs/
@@ -30,7 +32,8 @@ docs/
 
 Use only the caller-selected path from `bindings.paths.context`; included formats never read configuration or discover locations.
 
-Skill output is not documentation and does not live here: specs, plans, handoffs and notes go to `.claude/specs/`, `.claude/plans/`, `.claude/handoffs/`, `.claude/notes/`.
+Skill output is not documentation and does not live here: specs, plans, handoffs
+and notes use their respective retained `bindings.paths.artifacts` locations.
 
 > The Order / Invoice / Customer names below are illustrative DDD samples — substitute the project's real terms.
 

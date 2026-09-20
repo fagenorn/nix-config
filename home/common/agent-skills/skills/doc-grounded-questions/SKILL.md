@@ -5,7 +5,7 @@ description: Invoke before asking a design question, presenting options, or open
 
 # Doc-Grounded Questions
 
-Before asking the user a design question or presenting options during a planning/brainstorming phase, ground the question in the project's docs and code. Rationale, legacy fallbacks, and worked examples live in [REFERENCE.md](./REFERENCE.md); load it when a step below points there.
+Before asking the user a design question or presenting options during a planning/brainstorming phase, ground the question in the project's docs and code. Rationale and worked examples live in [REFERENCE.md](./REFERENCE.md); load it when a step below points there.
 
 ## Project bindings (resolve first)
 

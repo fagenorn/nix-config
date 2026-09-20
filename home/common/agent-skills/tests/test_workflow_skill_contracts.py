@@ -259,6 +259,10 @@ REFUSAL_REPORTING_SENTENCE = (
 )
 
 
+def assert_refusal_reporting(case, text):
+    case.assertIn(REFUSAL_REPORTING_SENTENCE, normalized(text))
+
+
 def assert_policy_entries(case, root, entries, require_refusal_reporting=False):
     actual = {str(path.relative_to(root)) for path in root.glob("*/SKILL.md")
               if "resolve-project resolve" in path.read_text(encoding="utf-8")}
@@ -269,7 +273,7 @@ def assert_policy_entries(case, root, entries, require_refusal_reporting=False):
             case.assertEqual(text.count("resolve-project resolve"), 1)
             case.assertIn(RESOLUTION_SENTENCE, normalized(text))
             if require_refusal_reporting:
-                case.assertIn(REFUSAL_REPORTING_SENTENCE, normalized(text))
+                assert_refusal_reporting(case, text)
             for field in fields:
                 case.assertIn(field, text)
             for forbidden in ("resolve-bindings", ".claude/skills.config.json", "helper missing", "not_onboarded", "auto-detect", "default `"):  # policy-gate-pattern
@@ -314,7 +318,32 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             self,
             REPO_ROOT / "home/common/claude-code/skills",
             CLAUDE_POLICY_ENTRIES,
+            require_refusal_reporting=True,
         )
+
+    def test_refusal_reporting_matrix_rejects_a_missing_clause(self):
+        text = COLLABORATION.read_text(encoding="utf-8")
+        missing = text.replace("error.code", "error kind", 1)
+        with self.assertRaises(AssertionError):
+            assert_refusal_reporting(self, missing)
+
+    def test_worktree_contract_uses_retained_schema_fields_and_root(self):
+        text = WORKTREES.read_text(encoding="utf-8")
+        self.assertIn("bindings.vcs.branch_pattern", text)
+        self.assertIn("bindings.vcs.worktree.prefix", text)
+        self.assertIn("bindings.vcs.worktree.root", text)
+        self.assertIn("against `project.root`", text)
+        self.assertNotIn("bindings.vcs.branch_naming", text)
+        self.assertNotIn("Put worktrees in `.worktrees/`", text)
+
+    def test_review_capability_routes_before_command_lookup(self):
+        for path in (COLLABORATION, SHIP_ISSUE, SDD):
+            text = normalized(path.read_text(encoding="utf-8"))
+            with self.subTest(path=path):
+                capability = text.index("capabilities.review.code")
+                lookup = text.index("bindings.commands[review_id].argv")
+                self.assertLess(capability, lookup)
+                self.assertIn("unsupported", text[capability:lookup])
 
     def test_living_source_has_no_legacy_policy_surface(self):
         tracked = subprocess.run(
@@ -368,12 +397,16 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                               require_refusal_reporting=True)
         assert_policy_entries(self, claude_root,
                               SHARED_POLICY_ENTRIES | CLAUDE_POLICY_ENTRIES,
-                              require_refusal_reporting=False)
+                              require_refusal_reporting=True)
         assert_retained_policy_support(self, agents_root, SHARED_POLICY_SUPPORT)
         assert_retained_policy_support(self, agents_root, RETAINED_SUPPORT_CONTRACTS)
         self.assertFalse((Path.home() / ".agents/bin/resolve-bindings").exists())  # policy-gate-pattern
+        installed_resolver = Path.home() / ".agents/bin/resolve-project"
+        self.assertTrue(installed_resolver.is_file())
+        self.assertTrue(os.access(installed_resolver, os.X_OK))
         installed_linter = Path.home() / ".agents/bin/context-map-lint"
         self.assertTrue(installed_linter.is_file())
+        self.assertTrue(os.access(installed_linter, os.X_OK))
         installed_legacy = re.compile("|".join(re.escape(name) for name in (
             "resolve-bindings", ".claude/skills.config.json", "unsetGithubToken",  # policy-gate-pattern
         )))
@@ -399,7 +432,10 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             shutil.copytree(claude_source, claude_root, dirs_exist_ok=True)
             linter = home / ".agents/bin/context-map-lint"
             linter.parent.mkdir(parents=True)
+            resolver = home / ".agents/bin/resolve-project"
+            shutil.copy2(REPO_ROOT / "home/common/agent-skills/scripts/resolve-project.py", resolver)
             shutil.copyfile(REPO_ROOT / "scripts/context-map-lint.py", linter)
+            linter.chmod(0o755)
             with mock.patch.dict(os.environ, {"WORKFLOW_POLICY_SURFACE": ""}, clear=False):
                 with mock.patch("pathlib.Path.home", return_value=home):
                     self.test_installed_policy_surface_matches_source_contract()
@@ -496,7 +532,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
 def assert_configured_code_review_pair(case, owner, support):
     owner_text = normalized(owner.read_text(encoding="utf-8"))
     support_text = normalized(support.read_text(encoding="utf-8"))
-    case.assert_ordered(owner_text, "bindings.workflow.review.code", "bindings.commands[review_id].argv", "capabilities.review.code")
+    case.assert_ordered(owner_text, "bindings.workflow.review.code", "capabilities.review.code", "bindings.commands[review_id].argv")
     case.assert_ordered(support_text, "exec", "--sandbox read-only", "--model gpt-6-astra", 'model_reasoning_effort="xhigh"', "--json", "--output-last-message", "--ephemeral", "selected model", "selected reasoning effort", "terminal agent-message", "last-message", "capacity rejection", "no retry", "no native fallback")
     for text in (owner_text, support_text):
         case.assertNotIn("command -v codex-companion", text)

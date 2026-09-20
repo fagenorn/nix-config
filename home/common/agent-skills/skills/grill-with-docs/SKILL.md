@@ -47,7 +47,11 @@ The steady state is contained in `docs/`: a map plus one directory per area unde
 
 With no selected map, use only passed context paths and do not create or discover a map.
 
-Create files lazily — only when you have something to write. If no glossary exists, create one when the first term resolves (named to match the project's convention, `CONTEXT.md` by default). If no decision-record directory exists, create it when the first ADR is needed.
+Create files lazily — only when you have something to write. With a selected
+context map, create a glossary or decision-record directory only where that
+selected map and its passed area paths authorize it. With no selected map, use
+only a passed writable context path; an empty or unsupported path set has no
+documentation write route.
 
 > The Order / Invoice / Customer / Fulfillment names used throughout these docs are illustrative DDD samples — substitute your project's actual domain terms.
 

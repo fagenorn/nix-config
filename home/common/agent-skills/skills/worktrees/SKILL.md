@@ -34,9 +34,13 @@ True → you are already in a linked worktree; report the path and branch and st
 
 ## Branch and prefix contract
 
-`bindings.vcs.branch_naming.pattern` names the branch. **`EnterWorktree` prepends `bindings.vcs.branch_naming.worktree_prefix`**, so the on-disk branch is `<worktree_prefix><pattern>`. Both forms are accepted by everything downstream — pre-flight searches, PR lookups, cleanup — so never strip the prefix to "correct" it, and never assume its absence.
+`bindings.vcs.branch_pattern` names the branch. **`EnterWorktree` prepends
+`bindings.vcs.worktree.prefix`**, so the on-disk branch is
+`<worktree-prefix><pattern>`. Both forms are accepted by everything downstream
+— pre-flight searches, PR lookups, cleanup — so never strip the prefix to
+"correct" it, and never assume its absence.
 
-No native worktree tool: `git worktree add -b <branch> <path> origin/<integration-branch>`. Base on the remote ref, not the local branch, which may carry another agent's in-flight commits. Put worktrees in `.worktrees/` at the repo root and confirm it is ignored (`git check-ignore -q .worktrees`) before creating anything inside it. If creation fails — sandbox permission error or anything else — **never silently work in place**: isolation was the caller's requirement, and in-place work puts commits on a branch the caller promised not to touch. Report blocked with the exact failure and ask for direction; the caller decides between fixing permissions, another location, or explicitly authorizing in-place work.
+No native worktree tool: `git worktree add -b <branch> <path> origin/<integration-branch>`. Base on the remote ref, not the local branch, which may carry another agent's in-flight commits. Resolve an authored relative `bindings.vcs.worktree.root` against `project.root`, put worktrees only beneath that resolved root, and confirm that root is ignored before creating anything inside it. If creation fails — sandbox permission error or anything else — **never silently work in place**: isolation was the caller's requirement, and in-place work puts commits on a branch the caller promised not to touch. Report blocked with the exact failure and ask for direction; the caller decides between fixing permissions, another location, or explicitly authorizing in-place work.
 
 ## refs/stash is shared
 
