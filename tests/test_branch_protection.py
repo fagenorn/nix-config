@@ -272,9 +272,9 @@ def execute_summary(event="pull_request"):
         "${{ github.event_name }}": event,
         "${{ steps.started.outputs.epoch }}": "100",
         "${{ steps.checkout.outcome }}": "success",
-        "${{ steps.install_nix.outcome }}": "success",
-        "${{ steps.provision_just.outcome }}": "success",
-        "${{ steps.suite.outcome }}": "failure",
+        "${{ steps.install_nix.outcome }}": "failure",
+        "${{ steps.provision_just.outcome }}": "cancelled",
+        "${{ steps.suite.outcome }}": "skipped",
     }
     body = summary_shell_body()
     for expression, value in substitutions.items():
@@ -370,13 +370,14 @@ class WorkflowShape(unittest.TestCase):
         self.assertEqual(
             {
                 "checkout": "success",
-                "install_nix": "success",
-                "provision_just": "success",
-                "suite": "failure",
+                "install_nix": "failure",
+                "provision_just": "cancelled",
+                "suite": "skipped",
             },
             record["raw"],
         )
-        self.assertIsInstance(record["elapsed_seconds"], int)
+        self.assertIs(type(record["elapsed_seconds"]), int)
+        self.assertGreaterEqual(record["elapsed_seconds"], 0)
 
     def test_advisory_contract_rejects_step_and_summary_mutations(self):
         """The evidence seam fails closed for each independently owned YAML line."""
