@@ -1,34 +1,54 @@
-# Task 2: Publish, dispatch, and record bounded Ubuntu evidence
+# Task 2: Record completed pinned Ubuntu evidence
 
 **Files:** Modify `.github/agent-workflow-observation.md`.
 
-**Interfaces:** Consumes Task 1's signed, independently reviewed commit and its published feature ref; the issue owner's current lifecycle launch; `POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches` using API version `2026-03-10`; and V1 records. Produces the retained original three-run evidence cohort, separately labelled non-passing/fallback rows, and only a documented keep-advisory decision after the cohort is evaluated (D9).
+**Interfaces:** Consumes the immutable `/private/tmp/issue-37-observations/cohort-summary.json` manifest and its raw artifacts; three V1 records for runs `35513790832`, `35514069941`, and `35514254859`; and the current `.github/agent-workflow-observation.md`. Produces a ledger that replaces its retired success-only definition with original-cohort, non-passing, and incomplete/fallback classifications, records the pinned cohort, and makes only the D9 keep-advisory decision.
 
 **Invariants:**
 
-- The issue owner, never an unowned worker, repeats the lifecycle launch check and verifies the exact published feature head before every dispatch. The feature ref comes from owner context; do not hardcode a lifecycle identifier.
-- The original initial cohort is exactly three serial manual attempts. Each accepted response must be HTTP 200 with `workflow_run_id`, `run_url`, and `html_url`. Validate the observed run's `workflow_dispatch` event, feature branch, and exact head before one bounded `gh run watch <workflow_run_id> --exit-status` foreground watch of 15 minutes.
-- A complete `AGENT_WORKFLOW_OBSERVATION_V1=` JSON object with schema exactly `agent-workflow-observation/v1`, trigger `workflow_dispatch`, four raw-string outcomes, and non-negative integer elapsed seconds is a valid raw observation when its run/job completed on Ubuntu without cancellation or timeout. `suite: failure` remains a valid, non-passing observation. Unknown/missing/malformed records, cancellation, timeout, and setup failures are separately classified; job metadata fallback is labelled and never supplies raw outcomes or a passing result.
-- Do not replace a failed, missing, or non-passing attempt to seek success, do not poll guessed run IDs, and do not mark Task 2 or the issue complete before all real evidence and the later lifecycle phases.
+- The completed cohort is exactly runs `35513790832`, `35514069941`, and `35514254859` at `d1094c968ea16818de8073889d25ea9f99bd8deb`; each is `workflow_dispatch`, completed on `ubuntu-24.04`, has one valid V1 record, successful raw checkout/install_nix/provision_just, raw `suite: failure`, and elapsed 111/122/121 seconds.
+- A complete `AGENT_WORKFLOW_OBSERVATION_V1=` JSON object with schema exactly `agent-workflow-observation/v1`, trigger `workflow_dispatch`, four raw-string outcomes, and non-negative integer elapsed seconds is a valid raw observation when its run/job completed on Ubuntu without cancellation or timeout. `suite: failure` remains valid and non-passing. Unknown/missing/malformed records, cancellation, timeout, and setup failures are separately classified; metadata fallback never supplies raw outcomes or a passing result.
+- The manifest's `qualifies: false` is retained raw historical D4 success-only output. Do not copy it to the ledger or use it as D9 validity; derive validity from the V1 record and preserve the suite failure separately.
+- Do not dispatch, watch, poll, replace, or otherwise create a run. The original cohort is complete; no additional evidence may be collected for this decision.
 
-- [ ] **Step 1: Establish the owner-controlled preconditions**
+- [ ] **Step 1: Verify the retained completed cohort**
 
-The issue owner checks the current lifecycle launch, confirms Task 1's signed commit and independent task-review acceptance, and verifies that the published feature branch resolves to that exact commit. If any condition is false, leave Task 2 open and record no invented evidence.
+Read `/private/tmp/issue-37-observations/cohort-summary.json` and the referenced immutable raw artifacts. Confirm its pinned head, three run IDs, V1 schema/trigger/raw values, runner, and elapsed seconds against the manifest. Treat the three historical dispatches and watches as complete facts; do not make any lifecycle, forge, or workflow call.
 
-- [ ] **Step 2: Dispatch one exact published revision at a time**
+- [ ] **Step 2: Replace the ledger's retired success-only contract**
 
-For the original three serial attempts, re-run the precondition guard, then POST the versioned GitHub workflow-dispatch API with the published feature ref. Accept only HTTP 200 structured responses containing non-empty `workflow_run_id`, `run_url`, and `html_url`; otherwise retain the failure detail in that cohort position and stop that attempt. Do not replace this response with a `gh run list` search, guessed-ID polling, or another attempt.
+In `.github/agent-workflow-observation.md`, replace the definition requiring raw `suite: success` and the headings `## Qualifying observations` and `## Failed attempts`. Define `## Original cohort observations` as complete valid V1 records, whether passing or non-passing; add `## Non-passing suite observations` and `## Incomplete or fallback records`. State that the original cohort is fixed, `suite: failure` is valid but non-passing, and metadata fallback/incomplete evidence cannot become a passing result.
 
-- [ ] **Step 3: Validate and watch the returned run**
+- [ ] **Step 3: Record the cohort and decision**
 
-Using the returned ID, retrieve the identified run and prove its event is `workflow_dispatch`, branch is the feature branch, and head SHA is the published SHA. Run `gh run watch <workflow_run_id> --exit-status` once in the foreground with a 15-minute timeout. Retain a watch timeout/cancellation/failure as evidence; do not dispatch a replacement attempt for that reason.
+Record each run URL/ID, pinned commit, job conclusion, four raw outcomes, elapsed seconds, and resolution/flake note under `## Original cohort observations`. Record all three under `## Non-passing suite observations`: valid observations `3`, passing suite outcomes `0`, non-passing suite outcomes `3`, and incomplete/fallback records `0`. State `keep advisory — original three-run Ubuntu cohort evaluated`; cite follow-up #160 and say it must be resolved before any future promotion decision. Do not copy the manifest's legacy `qualifies` field.
 
-- [ ] **Step 4: Extract and record deterministic outcomes**
+- [ ] **Step 4: Assert the ledger decision exactly**
 
-Read the returned run's log/summary record. Parse the single labeled JSON line exactly; copy run URL/ID, commit, job conclusion, all raw outcomes, elapsed seconds, and resolution/flake note to the ledger. A completed non-scheduled Ubuntu run with a complete valid record enters its original-cohort position even if `raw.suite` is `failure`; record the non-passing result, failure count, and the required observed-failure follow-up #160. For summary absence, cancellation, timeout, setup failure, or malformed/unknown raw data, retain the separate classification and metadata-derived conclusion/duration where available; leave unavailable raw outcomes missing. Never use fallback metadata to make a passing result.
+Run the following content assertions; any missing required value or surviving retired heading/definition fails the task:
 
-- [ ] **Step 5: Verify the evidence boundary and commit only a qualified window**
+```sh
+set -euo pipefail
+ledger=.github/agent-workflow-observation.md
+for required in \
+  '35513790832' '35514069941' '35514254859' \
+  'd1094c968ea16818de8073889d25ea9f99bd8deb' \
+  '111' '122' '121' 'valid observations: 3' \
+  'passing suite outcomes: 0' 'non-passing suite outcomes: 3' \
+  'incomplete/fallback records: 0' 'keep advisory' '#160' \
+  '## Original cohort observations' '## Non-passing suite observations' \
+  '## Incomplete or fallback records'; do
+  rg -Fq -- "$required" "$ledger"
+done
+if rg -Fq -- '## Qualifying observations' "$ledger" ||
+   rg -Fq -- '## Failed attempts' "$ledger" ||
+   rg -Fq -- 'and has successful raw' "$ledger"; then
+  exit 1
+fi
+```
 
-Run: `rg -n 'AGENT_WORKFLOW_OBSERVATION_V1=|workflow_run_id|raw checkout|raw install_nix|raw provision_just|raw suite|elapsed|metadata fallback|keep advisory' .github/agent-workflow-observation.md`
+- [ ] **Step 5: Verify and commit the consumed evidence**
 
-Expected: exit 0 and show the deterministic fields and decision. After all three original cohort positions are recorded, write a truthful `keep advisory — initial three-run Ubuntu cohort evaluated` decision that includes the valid-observation count, non-passing suite count, every fallback/incomplete classification, and observed-failure follow-up #160 before any future promotion decision. If a cohort position lacks complete evidence, say so and do not claim it passed. Stage only the ledger, and create signed commit `docs(ci): record advisory workflow evidence`. Do not promote, PR, merge, close, or clean up.
+Run: `git diff --check -- .github/agent-workflow-observation.md` and the Step 4 assertion.
+
+Expected: both commands exit 0. A failure means the live ledger still contradicts D9 or lacks measured evidence. Stage only the ledger and create signed commit `docs(ci): record advisory workflow evidence`. Do not dispatch, promote, PR, merge, close, or clean up.

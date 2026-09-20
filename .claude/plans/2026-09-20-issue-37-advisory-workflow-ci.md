@@ -5,7 +5,7 @@
 
 **Goal:** Run the workflow-suite recipe on Ubuntu as measured advisory CI without altering the required `Nix Eval` contract.
 
-**Architecture:** Task 1 adds the advisory job, its deterministic log-and-summary record, the empty evidence ledger, and local CI guidance. Once that slice locally passes, is signed committed, and independently task-reviewed, the issue owner checks the current lifecycle launch and publishes the feature branch under the existing grant; Task 2 alone owns the original bounded manual cohort, foreground observation, and record updates while the issue remains open.
+**Architecture:** Task 1 added the advisory job, its deterministic log-and-summary record, the empty evidence ledger, and local CI guidance. The original three-run manual cohort has completed at its pinned published head; Task 2 consumes its retained evidence, replaces the ledger's superseded success-only classification, and records the keep-advisory decision. It performs no dispatch or watch.
 
 **Tech stack:** GitHub Actions YAML, Nix flakes, just, Python unittest, GitHub Actions summaries, GitHub REST Actions API, gh CLI.
 
@@ -15,7 +15,7 @@
 - Use `nix shell --inputs-from . nixpkgs#just`; add no dependency, activation, protection write, PR, merge, closure, or cleanup (D2, D7).
 - Report `Agent Workflow Tests (advisory)`, set a ten-minute timeout, run for PR/main-push/manual dispatch, skip schedules, and add no path filter (D2, D6).
 - Emit one compact, stable `AGENT_WORKFLOW_OBSERVATION_V1=` JSON line identically to logs and `$GITHUB_STEP_SUMMARY`; raw step outcomes are never inferred from continued-step conclusions (D3, D8).
-- Evaluate all three original completed non-scheduled Ubuntu manual runs. A valid V1 raw record, including `suite: failure`, counts as an observation; preserve non-passing counts and permit only keep-advisory. Setup failure, missing, malformed, cancelled, timed-out, and fallback-only records are separately classified and never become passing outcomes; cite follow-up #160 before any future promotion decision (D9).
+- Consume the completed original cohort at `d1094c968ea16818de8073889d25ea9f99bd8deb`: runs `35513790832`, `35514069941`, and `35514254859` are three valid non-passing V1 observations with elapsed times 111/122/121, zero passing outcomes, and zero incomplete/fallback records. Do not dispatch or replace runs. Preserve all classifications, interpret manifest `qualifies: false` only as retired D4 success-only data, and cite follow-up #160 before any future promotion decision (D9).
 
 ## Test seams
 
@@ -25,13 +25,13 @@
 
 ## Delivery estimate and boundaries
 
-Estimate: four product/documentation files and 170–250 changed lines for Task 1. Task 2 has one owner-controlled publication/dispatch handoff, exactly three original serial manual attempts, and a 15-minute foreground watch per accepted run; non-passing evidence is recorded without replacement. It remains incomplete until the cohort is truthfully recorded and must never be fabricated from local execution.
+Estimate: four product/documentation files and 170–250 changed lines for historical Task 1. Task 2 modifies one evidence ledger using the completed retained cohort; it makes zero dispatches and zero watches. It remains incomplete until the ledger replaces its success-only definition and truthfully records the measured cohort.
 
 ## Task index
 
 Task 1 — Add deterministic advisory CI observation — `.github/workflows/ci.yaml`, `tests/test_branch_protection.py`, `.github/agent-workflow-observation.md`, `CLAUDE.md` — full — [task-1.md](2026-09-20-issue-37-advisory-workflow-ci.tasks/task-1.md)
 
-Task 2 — Publish, dispatch, and record bounded Ubuntu evidence — `.github/agent-workflow-observation.md` — full — [task-2.md](2026-09-20-issue-37-advisory-workflow-ci.tasks/task-2.md)
+Task 2 — Record completed pinned Ubuntu evidence — `.github/agent-workflow-observation.md` — full — [task-2.md](2026-09-20-issue-37-advisory-workflow-ci.tasks/task-2.md)
 
 ## Decisions
 
