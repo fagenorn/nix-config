@@ -137,7 +137,7 @@ Run: `python3 -m unittest -v tests/test_agent_costs.py`
 
 Expected: PASS; scheduling tests distinguish zero from null and every pre-existing PR 156 accounting, attribution, digest, empty-window, and text-byte test remains green.
 
-Run: `git diff --check "$DELIVERY_BASE" -- scripts/agent-costs.py tests/test_agent_costs.py`
+Run: `git diff --check -- scripts/agent-costs.py tests/test_agent_costs.py`
 
 Expected: exit `0`; the task owns no other path.
 

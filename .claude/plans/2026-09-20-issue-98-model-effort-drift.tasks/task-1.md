@@ -234,7 +234,7 @@ Run: `python3 -m unittest -v tests.test_agent_costs.ExecutionTelemetryRoutingTes
 
 Expected: PASS; the new routing class passes, all existing record/dedup/text tests remain green, and the golden text bytes are unchanged.
 
-Run: `git diff --check "$DELIVERY_BASE" -- scripts/agent-costs.py tests/test_agent_costs.py`
+Run: `git diff --check -- scripts/agent-costs.py tests/test_agent_costs.py`
 
 Expected: exit `0`; any whitespace error or change outside the two pathspecs leaves the task incomplete.
 

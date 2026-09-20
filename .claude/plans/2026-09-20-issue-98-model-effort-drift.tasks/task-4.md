@@ -1,22 +1,25 @@
-# Task 4: Evaluate declarations, concrete execution, and escalation lineage
+# Task 4: Emit comparisons and evaluate declarations, execution, and escalation
 
 **Files:**
 - Modify: `scripts/agent-model-drift.py`
-- Modify: `tests/test_agent_model_drift.py`
+- Create: `scripts/agent-model-drift-routing.py`
+- Create: `tests/test_agent_model_drift_routing.py`
 
 **Risk lane:** full — routing conformance/drift decisions and escalation semantics.
 
 **Interfaces:**
 - Consumes: Task 3's strict decoded record/matrix/baseline, pure `evaluate`, report/finding schema, lifecycle and identity findings.
 - Produces:
-  - `def evaluate_observation(observation: dict, run_id: str, matrix: dict, baseline: dict, baseline_usable: bool) -> list[dict]` — returns sorted findings for one aggregate observation; never mutates inputs.
+  - `agent-model-drift-routing.py`, loaded as a sibling by the CLI, with `evaluate_observation(...) -> tuple[dict, list[dict], int]` returning one deterministic comparison row, findings, and evaluated-event count.
   - `def classify_concrete(catalog: dict, host: str, kind: str, tier: str, concrete: str) -> str` — returns exactly `allowed | prohibited | unclassified`; raises `AssertionError` if one concrete value is both allowed and prohibited.
   - `def declaration_for(observation: dict, matrix: dict) -> tuple[dict | None, list[dict]]` — resolves an authoritative carried dispatch first, otherwise an unambiguous canonical role; it returns findings rather than guessing.
   - `def validate_escalation(observation: dict, matrix: dict, baseline: dict) -> bool` — true only for a declared target dispatch, a different declared source dispatch, and an allowed reason code.
-  - Task 3's `evaluate` now folds every run/observation, aggregates identical findings by `(code, run_id, dispatch, role)`, and applies drift precedence.
+  - Task 3's `evaluate` folds every run/observation, sorts comparison rows, aggregates identical findings by `(code, run_id, dispatch, role)`, and applies drift precedence.
+
+Each comparison row is exactly `run_id`, `dispatch`, `role`, `count`, `declaration`, `requested`, `observed`, `coverage`, `escalation`. `declaration` is exactly dispatch_id/role/host/model/effort/authority. Requested and observed are exactly host/model/effort; observed execution authority remains producer evidence and is not copied into the public comparison. `escalation` is null or exactly source_dispatch_id/target_dispatch_id/reason_code (D10).
 
 **Invariants:**
-- Requested `role`, `model`, and `effort` are checked against the validated matrix before any concrete observed value is classified. A carried dispatch must match its row exactly (D6).
+- Requested host, role, model, and effort are checked against the validated matrix/baseline declaration before any concrete observed value is classified. A carried dispatch must match its row exactly; a requested host unequal to the permitted host yields `REQUEST_DECLARATION_MISMATCH` (D6, D10).
 - A missing/unknown/ambiguous role yields `ROLE_AMBIGUOUS`. Reviewer-lite and every non-null escalation require a carried dispatch; absent dispatch yields `DISPATCH_REQUIRED` and cannot conform (D6).
 - For a role-only declaration, the permitted host is derivable only when every matrix dispatch for that role has one identical `dispatch_hosts` value. Otherwise dispatch is required. No host alias is normalized.
 - Concrete host unequal to the permitted host yields `OBSERVED_HOST_PROHIBITED`. A concrete model/effort in the requested tier's `prohibited` list yields its drift code; absent from both lists yields its unclassified inconclusive code. Null model/effort yields the corresponding missing code (D3, D4).
@@ -25,16 +28,20 @@
 - Valid escalation changes the declaration to the target dispatch already carried in `declaration.dispatch_id`; it never blesses a model substitution on the source request. `source_dispatch_id == target`, unknown source/target, absent reason, or a reason outside `escalation_reason_codes` yields `ESCALATION_INVALID` (D6).
 - The strict observation decoder accepts `escalation: null` or the exact two-member object from Task 1; either member may be null so missing lineage reaches `ESCALATION_INVALID`. Other types or extra members remain malformed-input exit `2`.
 - Findings multiply by observation `count`, are aggregated and sorted, and never include request/result/child/source identities.
+- Every valid observation produces a comparison row even when it conforms or its evidence is inconclusive. Rows are sorted by run/dispatch/role and canonical JSON of requested/observed/escalation; missing coverage remains visible in both the row and findings (D10).
 
-- [ ] **Step 1: Add the failing routing decision table**
+- [ ] **Step 1: Write the failing comparison/routing CLI tests**
 
-Append these helpers and tests before the module's `if __name__ == "__main__"` guard:
+Create `tests/test_agent_model_drift_routing.py` with this complete test module:
 
 ```python
-def seal_baseline(value):
-    body = copy.deepcopy(value)
-    body.pop("baseline_id", None)
-    return dict(body, baseline_id=digest(body))
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from agent_model_drift_test_support import (
+    DriftCliCase, baseline_value, coverage, record_value, seal_baseline)
 
 
 def observation(matrix, dispatch_id="sdd-first-pass-task-review", *,
@@ -86,6 +93,18 @@ class RoutingEvaluationTest(DriftCliCase):
         self.assertEqual(report["state"], "conforming")
         self.assertEqual(report["routing"]["evaluated_events"], 1)
         self.assertEqual(report["routing"]["findings"], [])
+        self.assertEqual(report["routing"]["comparisons"], [{
+            "run_id": "claude:repo:98", "dispatch": "sdd-first-pass-task-review",
+            "role": "reviewer", "count": 1,
+            "declaration": {"dispatch_id": "sdd-first-pass-task-review",
+                            "role": "reviewer", "host": "claude",
+                            "model": "opus", "effort": "high",
+                            "authority": "structured-dispatch"},
+            "requested": {"host": "claude", "model": "opus", "effort": "high"},
+            "observed": {"host": "claude", "model": "claude-opus-5-20260901",
+                         "effort": "high"},
+            "coverage": coverage("full", 1, 1), "escalation": None,
+        }])
 
     def test_request_declaration_mismatch_is_drift(self):
         item = observation(self.matrix)
@@ -95,6 +114,19 @@ class RoutingEvaluationTest(DriftCliCase):
         report = json.loads(out)
         self.assertEqual(report["state"], "drifted")
         self.assertIn("REQUEST_DECLARATION_MISMATCH", self.finding_codes(report))
+        self.assertEqual(report["routing"]["comparisons"][0]["requested"]["model"],
+                         "sonnet")
+
+    def test_requested_host_mismatch_is_drift_and_remains_visible(self):
+        item = observation(self.matrix)
+        item["requested"]["host"] = "codex"
+        code, out, _ = self.run_observations([item])
+        self.assertEqual(code, 3)
+        report = json.loads(out)
+        self.assertEqual(report["state"], "drifted")
+        self.assertIn("REQUEST_DECLARATION_MISMATCH", self.finding_codes(report))
+        self.assertEqual(report["routing"]["comparisons"][0]["requested"]["host"],
+                         "codex")
 
     def test_prohibited_model_effort_and_host_are_drift(self):
         base = baseline_value(self.matrix, self.matrix_digest)
@@ -151,6 +183,8 @@ class RoutingEvaluationTest(DriftCliCase):
         self.assertEqual(report["state"], "inconclusive")
         self.assertIn("ROUTING_COVERAGE_MISSING", self.finding_codes(report))
         self.assertNotIn("REQUEST_DECLARATION_MISMATCH", self.finding_codes(report))
+        self.assertEqual(report["routing"]["eligible_events"], 3)
+        self.assertEqual(report["routing"]["comparisons"], [])
 
     def test_reviewer_lite_requires_dispatch(self):
         item = observation(self.matrix, "sdd-scoped-task-rereview", dispatch=False)
@@ -167,7 +201,13 @@ class RoutingEvaluationTest(DriftCliCase):
                         "reason_code": "capacity"})
         code, out, err = self.run_observations([item])
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual(json.loads(out)["state"], "conforming")
+        report = json.loads(out)
+        self.assertEqual(report["state"], "conforming")
+        self.assertEqual(report["routing"]["comparisons"][0]["escalation"], {
+            "source_dispatch_id": "sdd-scoped-task-rereview",
+            "target_dispatch_id": "sdd-task-rereview-escalation",
+            "reason_code": "capacity",
+        })
 
     def test_missing_or_out_of_scope_escalation_reason_is_drift(self):
         for reason in (None, "cheaper"):
@@ -217,13 +257,13 @@ class RoutingEvaluationTest(DriftCliCase):
 
 - [ ] **Step 2: Run the routing table and watch it fail**
 
-Run: `python3 -m unittest -v tests.test_agent_model_drift.RoutingEvaluationTest`
+Run: `python3 -m unittest -v tests/test_agent_model_drift_routing.py`
 
 Expected: FAIL — Task 3 does not classify per-observation request, catalog, host, or escalation evidence.
 
 - [ ] **Step 3: Implement the pure routing evaluator**
 
-Index the validated matrix once inside `evaluate`: roles by name, dispatches by id, and dispatch hosts by role. Validate each observation against exact closed member sets before evaluation. Resolve the current declaration, then request correctness, escalation validity, observed host, model, and effort in that order; collect all independent findings rather than returning after the first.
+Create `agent-model-drift-routing.py`. Index the validated matrix once: roles by name, dispatches by id, and dispatch hosts by role. Validate each observation against exact closed member sets in the schema module. Resolve the declaration, then requested host/model/effort, escalation validity, observed host, model, and effort in that order; collect all independent findings rather than returning after the first. Build the comparison from decoded values before classifying them so conforming and inconclusive inputs remain inspectable.
 
 For baseline-dependent classifications, use the requested matrix tier and the literal observed host. `classify_concrete` consults only that host/tier pair. It does not search other hosts or tiers and never compares names lexically. A concrete value missing from both arrays is unclassified.
 
@@ -231,18 +271,19 @@ Count `evaluated_events` only for observations whose exact execution host/model/
 
 - [ ] **Step 4: Verify routing and retained lifecycle behavior**
 
-Run: `python3 -m unittest -v tests/test_agent_model_drift.py`
+Run: `python3 -m unittest -v tests/test_agent_model_drift_schema.py tests/test_agent_model_drift_routing.py`
 
 Expected: PASS; request, host, model, effort, escalation, coverage, sorting, lifecycle, strict-input, exit, and deterministic-output tests are green.
 
-Run: `git diff --check "$DELIVERY_BASE" -- scripts/agent-model-drift.py tests/test_agent_model_drift.py`
+Run: `git diff --check -- scripts/agent-model-drift.py scripts/agent-model-drift-routing.py tests/test_agent_model_drift_routing.py`
 
 Expected: exit `0`; no producer or matrix file changes are present in this task.
 
 - [ ] **Step 5: Commit the routing evaluator**
 
 ```bash
-git add scripts/agent-model-drift.py tests/test_agent_model_drift.py
+git add scripts/agent-model-drift.py scripts/agent-model-drift-routing.py \
+  tests/test_agent_model_drift_routing.py
 git commit -S -m "feat(telemetry): evaluate routing drift" \
   -m "Co-Authored-By: Codex <noreply@openai.com>"
 ```
