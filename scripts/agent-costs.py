@@ -59,7 +59,7 @@ SCHEMA_VERSION = 1
 RECORD_KIND = "agent-cost-record"
 EXECUTION_TELEMETRY_SCHEMA_VERSION = 1
 EXECUTION_TELEMETRY_PRODUCER_VERSION = 1
-TELEMETRY_REASON_CODES = (
+TELEMETRY_REASON_CODES: tuple[str, ...] = (
     "timestamp_missing", "request_missing", "request_host_missing",
     "request_host_conflict", "result_missing", "child_missing",
     "dispatch_missing", "role_ambiguous", "execution_model_missing",
@@ -1064,9 +1064,12 @@ def canonical_digest(body):
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def parse_rfc3339_utc(value):
+RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+
+
+def parse_rfc3339_utc(value: str) -> datetime:
     """Parse an RFC3339 instant and return an aware UTC datetime."""
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not RFC3339_UTC_RE.fullmatch(value):
         raise ValueError("timestamp must be a string")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
@@ -1081,7 +1084,7 @@ def format_rfc3339_utc(value):
     return value.isoformat().replace("+00:00", "Z")
 
 
-def event_in_window(value, start, end):
+def event_in_window(value: object, start: datetime | None, end: datetime | None) -> bool | None:
     """Whether a source event is in [start, end), or None when unknowable."""
     try:
         event = parse_rfc3339_utc(value)
@@ -1090,7 +1093,7 @@ def event_in_window(value, start, end):
     return (start is None or event >= start) and (end is None or event < end)
 
 
-def coverage(eligible, paired, reasons):
+def coverage(eligible: int, paired: int, reasons: Counter) -> dict:
     items = [{"code": code, "count": reasons[code]} for code in sorted(reasons) if reasons[code]]
     if not items:
         state = "full"
@@ -1130,7 +1133,9 @@ def _empty_telemetry(selected, start=None, end=None):
                                          "cohort_incomplete": 1 if start is None else 0}))
         for source in selected
     }
-    aggregate = _merge_coverage(contributions.values())
+    aggregate = _merge_coverage(contributions.values()) if contributions else coverage(
+        0, 0, Counter({"cohort_incomplete": 1})
+    )
     return {
         "schema_version": EXECUTION_TELEMETRY_SCHEMA_VERSION,
         "producer": {"name": "agent-costs", "version": EXECUTION_TELEMETRY_PRODUCER_VERSION,
@@ -1176,17 +1181,28 @@ def _declaration(value, reasons):
     subagent_type = value.get("subagent_type")
     # The matrix is deliberately not read here. These are the source's known
     # canonical role spellings; shared transport types remain ambiguous.
-    canonical = {"implementer", "reviewer", "reviewer-lite", "planner", "researcher"}
+    canonical = {"bookkeeper", "codex-transport", "conformance-reviewer", "explorer",
+                 "implementer", "issue-owner", "mechanic", "researcher", "reviewer",
+                 "reviewer-lite", "ship-owner"}
     if role in canonical:
         authority = "structured-dispatch" if dispatch else "runtime-agent-type"
         return {"dispatch_id": dispatch, "role": role, "authority": authority}
-    if subagent_type in canonical:
+    if subagent_type in canonical - {"reviewer", "mechanic"}:
         return {"dispatch_id": dispatch, "role": subagent_type,
                 "authority": "runtime-agent-type"}
     reasons["role_ambiguous"] += 1
     if dispatch is None:
         reasons["dispatch_missing"] += 1
     return {"dispatch_id": dispatch, "role": None, "authority": "unknown"}
+
+
+def _escalation(value):
+    if "source_dispatch_id" not in value and "reason_code" not in value:
+        return None
+    return {"source_dispatch_id": value.get("source_dispatch_id")
+            if isinstance(value.get("source_dispatch_id"), str) else None,
+            "reason_code": value.get("reason_code")
+            if isinstance(value.get("reason_code"), str) else None}
 
 
 def _add_observation(bucket, observation, event_at):
@@ -1223,7 +1239,7 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
             if "subagents" in path.parts:
                 for rec in records:
                     if rec.get("type") == "assistant" and rec.get("agentId"):
-                        children[str(rec["agentId"])].append(rec)
+                        children[(path.parent.parent.name, str(rec["agentId"]))].append(rec)
             else:
                 roots.append((path, records))
         for path, records in roots:
@@ -1252,13 +1268,16 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
                             if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
                                 if block["tool_use_id"] not in results:
                                     results[block["tool_use_id"]] = tur.get("agentId")
+            used_agents = set()
             for tool_id, (request, _request_at) in requests.items():
                 reasons = Counter()
                 agent_id = results.get(tool_id)
+                if agent_id:
+                    used_agents.add(str(agent_id))
                 if not agent_id:
                     reasons["result_missing"] += 1
-                executions = children.get(str(agent_id), []) if agent_id else []
-                if not executions:
+                executions = children.get((path.stem, str(agent_id)), []) if agent_id else []
+                if len(executions) != 1:
                     reasons["child_missing"] += 1
                     request_window = event_in_window(_request_at, start, end)
                     if request_window is not False:
@@ -1292,8 +1311,19 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
                            "configured": {"host": None, "model": None, "effort": None},
                            "observed": {"host": "claude", "model": model, "effort": effort,
                                         "authority": "assistant-execution"},
-                           "escalation": None}
+                           "escalation": _escalation(request)}
                     _add_observation(runs[run_id]["observations"], obs, format_rfc3339_utc(parse_rfc3339_utc(execution["timestamp"])))
+            for (session_id, agent_id), executions in children.items():
+                if session_id != path.stem or agent_id in used_agents:
+                    continue
+                for execution in executions:
+                    verdict = event_in_window(execution.get("timestamp"), start, end)
+                    if verdict is not False:
+                        why = Counter({"request_missing": 1})
+                        if verdict is None:
+                            why["timestamp_missing"] += 1
+                        event = {"paired": False, "reasons": why}
+                        source_events["claude"].append(event); runs[run_id]["events"].append(event)
 
     if "codex" in selected and codex_root and codex_root.is_dir():
         for path in sorted(codex_root.rglob("*.jsonl")):
@@ -1302,7 +1332,13 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
             payload = meta.get("payload") or {}; version = payload.get("cli_version")
             if isinstance(version, str) and version: source_versions["codex"].add(version)
             spawn = ((payload.get("source") or {}).get("subagent") or {}).get("thread_spawn") if isinstance(payload.get("source"), dict) else None
-            if not isinstance(spawn, dict): continue
+            if not isinstance(spawn, dict):
+                # A subagent rollout is execution-side evidence even when its
+                # structured launch was lost; do not manufacture full zero coverage.
+                if payload.get("thread_source") == "subagent" or payload.get("source"):
+                    source_events["codex"].append({"paired": False,
+                                                   "reasons": Counter({"request_missing": 1})})
+                continue
             project = project_name("codex", Counter([payload.get("cwd") or ""]))
             if project_filter and project_filter.lower() not in project.lower(): continue
             issue = issue_key("codex", Counter([payload.get("cwd") or ""]))
@@ -1326,7 +1362,7 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
                            "requested": {"host": requested_host, "model": spawn.get("model"), "effort": spawn.get("effort")},
                            "configured": {"host": "codex", "model": configured.get("model"), "effort": configured.get("effort")},
                            "observed": {"host": "codex", "model": None, "effort": None, "authority": "codex-rollout"},
-                           "escalation": None}
+                           "escalation": _escalation(spawn)}
                     _add_observation(runs[run_id]["observations"], obs, format_rfc3339_utc(parse_rfc3339_utc(context["timestamp"])))
 
     source_only, projected_runs = {}, []

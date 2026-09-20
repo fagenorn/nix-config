@@ -1121,6 +1121,36 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
                                  "--events-since", "2026-09-20T10:00:00Z")
         self.assertEqual((out, code), ("", 2))
 
+        with contextlib.redirect_stderr(io.StringIO()):
+            out, code = run_main("--projects-dir", str(self.root), "--format", "json",
+                                 "--events-since", "2026-09-20T11:00:00Z",
+                                 "--events-before", "2026-09-20T10:00:00Z")
+        self.assertEqual((out, code), ("", 2))
+
+    def test_codex_turn_context_is_configured_and_not_observed(self):
+        codex = self.root / "codex" / "2026" / "09" / "20"; codex.mkdir(parents=True)
+        (codex / "rollout.jsonl").write_text(
+            codex_meta("thread-1", thread_source="subagent", source={"subagent": {"thread_spawn": {
+                "parent_thread_id": "parent", "depth": 1, "agent_role": "reviewer",
+                "model": "gpt-5.6-sol", "effort": "high"}}})
+            + codex_turn_context("gpt-5.6-sol", "high") + codex_usage(10), encoding="utf-8")
+        raw, code = run_main("--projects-dir", "/nonexistent/claude", "--codex-sessions", str(self.root / "codex"),
+                             "--strata", "codex", "--format", "json", "--days", "0",
+                             "--events-since", "2026-08-04T00:00:00Z", "--events-before", "2026-08-05T00:00:00Z")
+        self.assertIsNone(code)
+        observation = json.loads(raw)["execution_telemetry"]["runs"][0]["routing"]["observations"][0]
+        self.assertEqual(observation["configured"], {"host": "codex", "model": "gpt-5.6-sol", "effort": "high"})
+        self.assertEqual(observation["observed"], {"host": "codex", "model": None, "effort": None,
+                                                    "authority": "codex-rollout"})
+
+    def test_unbounded_direct_projection_and_shared_transport_are_inconclusive(self):
+        rec = agent_costs.build_record({}, {})
+        self.assertIn({"code": "cohort_incomplete", "count": 1},
+                      rec["execution_telemetry"]["source_coverage"]["routing"]["reasons"])
+        reasons = agent_costs.Counter()
+        self.assertEqual(agent_costs._declaration({"subagent_type": "reviewer"}, reasons)["authority"], "unknown")
+        self.assertEqual(reasons["role_ambiguous"], 1)
+
 
 class BuildRecordTest(unittest.TestCase):
     def strata(self):
