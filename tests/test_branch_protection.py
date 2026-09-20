@@ -12,6 +12,7 @@ import json
 import re
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
@@ -21,8 +22,13 @@ PROTECTION = REPO_ROOT / ".github" / "branch-protection.json"
 # spaces, job attributes at four, step attributes at six or more. PyYAML is not a
 # guaranteed dependency on this host, so the convention is the parser.
 JOB_KEY_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
-JOB_NAME_RE = re.compile(r"^    name:\s*(\S.*?)\s*$")
+JOB_NAME_RE = re.compile(
+    r"^    name:\s*(?:\"([^\"]*)\"|'([^']*)'|(\S.*?))\s*$"
+)
 JOB_IF_RE = re.compile(r"^    if:\s*(\S.*?)\s*$")
+JOB_PERMISSIONS_RE = re.compile(
+    r'''^    (?:"permissions"|'permissions'|permissions)\s*:(?:\s|$)'''
+)
 RENAMING_KEY_RE = re.compile(r"^    (strategy|uses):")
 # Keys that let a required job report success without its steps having run. A
 # step-level `if:` sits at six or eight spaces (`      - if:` as a step's first key,
@@ -49,6 +55,17 @@ REQUIRED_PAYLOAD_KEYS = {
     "enforce_admins",
     "required_pull_request_reviews",
     "restrictions",
+}
+
+EXPECTED_WORKFLOW_PERMISSIONS = {"contents": "read"}
+EXPECTED_PROTECTION_PAYLOAD = {
+    "required_status_checks": {
+        "strict": False,
+        "checks": [{"context": "Nix Eval", "app_id": 15368}],
+    },
+    "enforce_admins": True,
+    "required_pull_request_reviews": None,
+    "restrictions": None,
 }
 
 
@@ -84,6 +101,66 @@ def job_blocks():
     return blocks
 
 
+def _mapping_entry(line, indentation, scope):
+    """Return one constrained YAML mapping entry or reject an unknown one.
+
+    The workflow shape makes a full YAML parser unnecessary, but silently
+    ignoring a valid alternative spelling would turn this assertion into a
+    bypass.  This accepts the spellings used for permission and job keys, then
+    fails loudly when a non-comment entry at the guarded indentation falls
+    outside that constrained grammar.
+    """
+    prefix = " " * indentation
+    if not line.startswith(prefix) or line.startswith(prefix + " "):
+        return None
+    entry = line[indentation:]
+    if not entry or entry.startswith("#"):
+        return None
+    match = re.fullmatch(
+        r'''(?:"(?P<double>[^"]+)"|'(?P<single>[^']+)'|(?P<bare>[A-Za-z0-9_-]+))
+            \s*:\s*(?P<value>.*?)''',
+        entry,
+        re.VERBOSE,
+    )
+    if not match:
+        raise AssertionError(
+            f"cannot classify {scope} entry {line!r}; refusing to ignore it"
+        )
+    if match.group("double") is not None and "\\" in match.group("double"):
+        raise AssertionError(
+            f"cannot classify {scope} entry {line!r}; refusing to ignore it"
+        )
+    key = next(value for value in match.group("double", "single", "bare") if value)
+    return key, match.group("value")
+
+
+def workflow_permissions():
+    """Return the two-space token permissions declared at workflow scope."""
+    permissions = {}
+    for line in _top_level_block("permissions"):
+        entry = _mapping_entry(line, 2, "workflow permission")
+        if entry is not None:
+            key, value = entry
+            permissions[key] = value
+    return permissions
+
+
+def job_permission_lines(block):
+    """Return job-level permission entries after validating job attributes."""
+    permissions = []
+    for line in block:
+        entry = _mapping_entry(line, 4, "job attribute")
+        if entry is not None and entry[0] == "permissions":
+            # Keep the spelling pin close to the parser so the assertion is
+            # explicit about the job-level override it rejects.
+            if not JOB_PERMISSIONS_RE.match(line):
+                raise AssertionError(
+                    f"cannot classify job permission entry {line!r}; refusing to ignore it"
+                )
+            permissions.append(line.strip())
+    return permissions
+
+
 def job_body(key):
     """The job's block with comment lines dropped.
 
@@ -102,11 +179,19 @@ def job_names():
     names = {}
     for key, block in job_blocks().items():
         for line in block:
-            match = JOB_NAME_RE.match(line)
-            if match:
-                names[match.group(1)] = key
+            name = job_name(line)
+            if name is not None:
+                names[name] = key
                 break
     return names
+
+
+def job_name(line):
+    """Extract a job name scalar from a four-space YAML `name:` line."""
+    match = JOB_NAME_RE.match(line)
+    if not match:
+        return None
+    return next(value for value in match.groups() if value is not None)
 
 
 def trigger_block(name):
@@ -154,10 +239,66 @@ def payload():
 
 
 def required_contexts():
-    return payload()["required_status_checks"]["contexts"]
+    # D2 pins one provider-bound check in the exact payload; job assertions use
+    # the context list derived from those checks.
+    return [check["context"] for check in payload()["required_status_checks"]["checks"]]
 
 
 class WorkflowShape(unittest.TestCase):
+    def test_workflow_uses_only_minimum_permissions(self):
+        self.assertEqual(EXPECTED_WORKFLOW_PERMISSIONS, workflow_permissions())
+
+    def test_jobs_do_not_override_workflow_permissions(self):
+        offenders = {
+            key: job_permission_lines(block)
+            for key, block in job_blocks().items()
+        }
+        self.assertEqual({}, {key: lines for key, lines in offenders.items() if lines})
+
+    def test_permission_guards_recognize_quoted_keys_and_space_before_colons(self):
+        for source in ('  "issues": write', "  issues : write"):
+            with self.subTest(source=source):
+                with mock.patch(f"{__name__}.workflow_lines", return_value=[
+                    "permissions:",
+                    "  contents: read",
+                    source,
+                    "jobs:",
+                ]):
+                    self.assertEqual(
+                        {"contents": "read", "issues": "write"},
+                        workflow_permissions(),
+                    )
+
+        for source in ('    "permissions": write-all', "    permissions : write-all"):
+            with self.subTest(source=source):
+                self.assertEqual([source.strip()], job_permission_lines([source]))
+
+    def test_permission_guards_reject_unclassified_entries(self):
+        with mock.patch(f"{__name__}.workflow_lines", return_value=[
+            "permissions:",
+            "  contents: read",
+            "  [issues]: write",
+            "jobs:",
+        ]):
+            with self.assertRaisesRegex(
+                AssertionError, "cannot classify workflow permission"
+            ):
+                workflow_permissions()
+        with self.assertRaisesRegex(AssertionError, "cannot classify job attribute"):
+            job_permission_lines(["    [permissions]: write-all"])
+        with self.assertRaisesRegex(AssertionError, "cannot classify job attribute"):
+            job_permission_lines([r'    "permissio\u006es": write-all'])
+
+    def test_job_name_extraction_removes_yaml_quotes(self):
+        for source in (
+            "    name: Nix Eval",
+            '    name: "Nix Eval"',
+            "    name: 'Nix Eval'",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual("Nix Eval", job_name(source))
+        self.assertIsNone(job_name("      - name: step name"))
+
     def test_job_names_are_extractable(self):
         """Guards every other test here: an extractor that matches nothing would
         make the context/job-name comparisons pass vacuously."""
@@ -269,9 +410,10 @@ class WorkflowShape(unittest.TestCase):
         while `Nix Eval` keeps certifying a tree it never looked at."""
         contexts = required_contexts()
         # Ties this assertion to the required context rather than to a job that
-        # merely happens to be named this. D2 pins `contexts` to exactly this one;
-        # if that ever widens, this test must be rewritten rather than extended,
-        # because a second required context would not be a Nix evaluation.
+        # merely happens to be named this. D2 pins one provider-bound check and
+        # this list derives from it; if that ever widens, this test must be
+        # rewritten rather than extended, because a second required context would
+        # not be a Nix evaluation.
         self.assertEqual(["Nix Eval"], contexts)
         names = job_names()
         self.assertIn("Nix Eval", names)
@@ -334,6 +476,9 @@ class RequiredContexts(unittest.TestCase):
 
 
 class ProtectionPayload(unittest.TestCase):
+    def test_payload_is_the_exact_replacement_contract(self):
+        self.assertEqual(EXPECTED_PROTECTION_PAYLOAD, payload())
+
     def test_payload_carries_every_key_the_api_requires(self):
         """The API rejects a body missing any of the four keys with a 422 at apply
         time — long after the hand-edit that dropped one."""
@@ -341,8 +486,6 @@ class ProtectionPayload(unittest.TestCase):
         self.assertEqual(REQUIRED_PAYLOAD_KEYS, set(data))
         self.assertIs(True, data["enforce_admins"])
         self.assertIs(False, data["required_status_checks"]["strict"])
-        # D2: exactly one required context. A second one doubles the brick surface.
-        self.assertEqual(["Nix Eval"], data["required_status_checks"]["contexts"])
         # D10: present and explicitly null. A non-null value here would block every
         # solo and unattended merge, which is the opposite of the issue's ask.
         self.assertIsNone(data["required_pull_request_reviews"])
