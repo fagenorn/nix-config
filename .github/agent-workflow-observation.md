@@ -31,6 +31,12 @@ Pinned commit: `d1094c968ea16818de8073889d25ea9f99bd8deb`.
    raw outcomes: `checkout: success`, `install_nix: success`,
    `provision_just: success`, `suite: failure`; job-work elapsed: 121 seconds.
 
+All three rows share the unresolved failure in
+`ReviewPackageCliTest.test_publication_rejects_changed_directory_and_link_identities`:
+mutation `directory-before-first` observed `PublicationError not raised`. It is
+tracked by [#160](https://github.com/fagenorn/nix-config/issues/160). The repeated
+identical failure does not prove intermittent flakiness or an inode mechanism.
+
 ## Non-passing suite observations
 
 - valid observations: 3
