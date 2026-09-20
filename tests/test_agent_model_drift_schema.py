@@ -36,6 +36,7 @@ class BaselineLifecycleTest(DriftCliCase):
                  "future": (None, baseline_value(self.matrix, self.matrix_digest, captured_at="2026-09-20T13:00:00Z"), "BASELINE_FUTURE"),
                  "outside": (record_value(start="2026-09-19T23:00:00Z"), None, "WINDOW_OUTSIDE_BASELINE"),
                  "identity-missing": (record_value(harness={"claude":None}), None, "IDENTITY_MISSING"),
+                 "producer-mismatch": (None, baseline_value(self.matrix,self.matrix_digest,producer={"name":"agent-costs","version":2,"telemetry_schema_version":1}), "IDENTITY_MISMATCH"),
                  "harness-mismatch": (None, baseline_value(self.matrix,self.matrix_digest,harness_versions={"claude":["2.0.0"]}), "IDENTITY_MISMATCH"),
                  "matrix-mismatch": (None, baseline_value(self.matrix,"sha256:" + "0"*64), "IDENTITY_MISMATCH")}
         for name,(record,baseline,expected) in cases.items():

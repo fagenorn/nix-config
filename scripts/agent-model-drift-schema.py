@@ -291,11 +291,12 @@ def validate_baseline(value, matrix, matrix_digest):
         raise InputError("baseline digest invalid")
     _closed(value["producer"], ("name", "version", "telemetry_schema_version"), "/baseline/producer")
     producer = value["producer"]
-    if (producer["name"] != "agent-costs" or isinstance(producer["version"], bool)
-            or not isinstance(producer["version"], int) or producer["version"] != 1
+    if (not isinstance(producer["name"], str) or not producer["name"]
+            or isinstance(producer["version"], bool)
+            or not isinstance(producer["version"], int) or producer["version"] <= 0
             or isinstance(producer["telemetry_schema_version"], bool)
             or not isinstance(producer["telemetry_schema_version"], int)
-            or producer["telemetry_schema_version"] != 1):
+            or producer["telemetry_schema_version"] <= 0):
         raise InputError("baseline producer invalid")
     if (not isinstance(value["harness_versions"], dict) or not value["harness_versions"]
             or not isinstance(value["model_catalog_version"], str) or not value["model_catalog_version"]
