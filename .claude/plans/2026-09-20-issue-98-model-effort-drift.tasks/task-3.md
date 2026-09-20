@@ -13,7 +13,7 @@
 - `agent-model-drift-schema.py` produces `InputError`, `load_json(path)`, `canonical_digest(value)`, `canonical_time(value)`, `load_validated_matrix(root)`, `validate_record(value)`, and `validate_baseline(value, matrix, matrix_digest)`.
 - `validate_record` returns `{"record": <decoded>, "telemetry": dict | None}`. `telemetry: None` is reserved for an otherwise valid legacy v1 record; malformed or unsupported telemetry is never downgraded to legacy.
 - `agent-model-drift.py` loads its schema sibling with `SourceFileLoader`, owns the CLI `--record PATH --baseline PATH --matrix-root PATH --now RFC3339-UTC`, and produces `main(argv) -> int` plus a pure lifecycle `evaluate(...) -> dict`. Tasks 4–5 add routing and scheduling sibling loaders without moving schema code back into the entry point.
-- `tests/agent_model_drift_test_support.py` produces shared production-shaped builders `digest`, `coverage`, `unsupported_metric`, `telemetry`, `record_value`, `legacy_record_value`, `seal_record`, `matrix_fixture`, `baseline_value`, `seal_baseline`, and `DriftCliCase`.
+- `tests/agent_model_drift_test_support.py` produces shared production-shaped builders `digest`, `coverage`, `merge_coverage`, `unsupported_metric`, `telemetry`, `record_value`, `legacy_record_value`, `seal_record`, `matrix_fixture`, `baseline_value`, `seal_baseline`, and `DriftCliCase`.
 - `record_value` calls Task 2's real `agent_costs.build_record(...)` projection with a complete Claude group, deterministic window, and supplied telemetry. `legacy_record_value` removes only the additive telemetry member from that emitted record and reseals it. The helpers never invent abbreviated `strata` or `fleet.totals` shapes.
 
 The baseline has exactly the design fields: `schema_version`, `kind`, `baseline_id`, `captured_at`, `valid_from`, `valid_before`, `matrix_digest`, `producer`, `harness_versions`, `model_catalog_version`, `dispatch_hosts`, `catalog`, and `escalation_reason_codes`. `baseline_id` digests every other member. Dispatch-host keys equal every matrix dispatch. Per host, model/effort tier keys equal the declared tier sets; sorted unique non-empty string arrays are disjoint within a tier.
@@ -22,7 +22,7 @@ The report has exactly `schema_version`, `kind`, `evaluated_at`, `inputs`, `stat
 
 **Invariants:**
 - Matrix validation failure is exit `2`, diagnostic stderr, empty stdout. The reporter never accepts a locally parsed matrix after the repository validator rejects it (D3, D8).
-- Current records require the exact post-change outer members and exact telemetry shape. Legacy records require the exact pre-extension v1 outer members. Both verify `record_id` over the body excluding only `record_id` and `generated_at`; an `execution_telemetry` member with a wrong type/version/shape is malformed, not legacy (D1, D12).
+- Current records require the exact post-change outer members and exact telemetry shape. `source_coverage.source_only` keys are selected sources whose contribution is not represented by a run; each entry has exact routing and scheduling coverage shapes. Top-level routing and every scheduling coverage value must equal the deterministic merge of all run and source-only contributions, including summed reason counts. Legacy records require the exact pre-extension v1 outer members. Both verify `record_id` over the body excluding only `record_id` and `generated_at`; an `execution_telemetry` member with a wrong type/version/shape is malformed, not legacy (D1, D5, D12).
 - A valid legacy record exits `3` with routing `inconclusive`, exactly `IDENTITY_MISSING` and `ROUTING_COVERAGE_MISSING` global findings, empty comparisons, scheduling `unmeasured`, and no fabricated routing/scheduling values (D12).
 - Baseline timestamps are UTC and ordered `valid_from <= captured_at < valid_before`. Malformed time/interval is exit `2`; future capture, stale validity, outside window, or concrete matrix/producer/harness mismatch is valid inconclusive exit `3` (D3, D4).
 - Baseline dispatch/tier coverage is exact; missing/extra dispatches or tiers, wrong types, duplicate keys, overlapping classification arrays, digest errors, and unsupported versions are exit `2`.
@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+from collections import Counter
 import hashlib
 import importlib.util
 import io
@@ -72,6 +73,19 @@ def coverage(state="full", eligible=0, paired=0, reasons=None):
             "paired_events": paired, "reasons": reasons or []}
 
 
+def merge_coverage(*values):
+    eligible = sum(value["eligible_events"] for value in values)
+    paired = sum(value["paired_events"] for value in values)
+    reasons = Counter()
+    for value in values:
+        reasons.update({item["code"]: item["count"]
+                        for item in value["reasons"]})
+    state = "full" if not reasons else "partial" if paired else "none"
+    return coverage(state, eligible, paired, [
+        {"code": code, "count": count}
+        for code, count in sorted(reasons.items())])
+
+
 def unsupported_metric():
     return {"value": None,
             "coverage": coverage("none", reasons=[
@@ -81,21 +95,29 @@ def unsupported_metric():
 
 def telemetry(*, start="2026-09-20T10:00:00Z",
               end="2026-09-20T11:00:00Z", harness=None,
-              routing_coverage=None, observations=None):
+              routing_coverage=None, observations=None, source_only=None):
     metrics = {name: unsupported_metric() for name in (
         "spawn_attempts", "capacity_rejections", "waits", "follow_ups",
         "wait_input_tokens", "covered_input_tokens",
         "slot_capacity_seconds", "claimed_slot_seconds")}
     route = routing_coverage or coverage()
+    source_only = copy.deepcopy(source_only or {})
+    routing_parts = [route] + [item["routing"]
+                               for item in source_only.values()]
+    scheduling = {
+        name: merge_coverage(
+            metric["coverage"],
+            *(item["scheduling"][name] for item in source_only.values()))
+        for name, metric in metrics.items()}
     return {
         "schema_version": 1,
         "producer": {"name": "agent-costs", "version": 1,
                      "harness_versions": harness or {"claude": ["2.1.0"]}},
         "event_window": {"start": start, "end": end},
         "source_coverage": {
-            "routing": copy.deepcopy(route),
-            "scheduling": {name: copy.deepcopy(metric["coverage"])
-                           for name, metric in metrics.items()}},
+            "routing": merge_coverage(*routing_parts),
+            "scheduling": scheduling,
+            "source_only": source_only},
         "runs": [{"run_id": "claude:repo:98",
                   "routing": {"coverage": copy.deepcopy(route),
                               "observations": observations or []},
@@ -103,23 +125,32 @@ def telemetry(*, start="2026-09-20T10:00:00Z",
     }
 
 
-def _producer_record(execution_telemetry):
+def _producer_record(execution_telemetry, selected=("claude",)):
     group = agent_costs.new_group()
     group["sessions"] = 1
+    groups = {"claude": {"cost_basis": "list-price",
+                         "groups": {("repo", "98"): group}}}
+    if "codex" in selected:
+        groups["codex"] = {"cost_basis": "subscription", "groups": {}}
     record = agent_costs.build_record(
-        {"claude": {"cost_basis": "list-price",
-                    "groups": {("repo", "98"): group}}},
+        groups,
         {"days": 1, "cutoff_epoch": 1,
          "file_mtime_selection": True,
          "whole_selected_file_usage": True,
-         "strata": ["claude"], "sources": {"claude": "/redacted"}},
+         "strata": list(selected),
+         "sources": {name: "/redacted" for name in selected}},
         execution_telemetry=execution_telemetry)
     record["generated_at"] = "2026-09-20T11:01:00Z"
     return record
 
 
-def record_value(**overrides):
-    return _producer_record(telemetry(**overrides))
+def record_value(*, selected=("claude",), source_only=None, **overrides):
+    if "harness" not in overrides:
+        overrides["harness"] = {
+            name: ["2.1.0"] if name == "claude" else None
+            for name in selected}
+    return _producer_record(
+        telemetry(source_only=source_only, **overrides), selected)
 
 
 def legacy_record_value():
@@ -219,7 +250,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_model_drift_test_support import (
-    DriftCliCase, agent_model_drift, baseline_value, legacy_record_value,
+    DriftCliCase, agent_model_drift, baseline_value, coverage, legacy_record_value,
     record_value, seal_baseline, seal_record)
 
 
@@ -255,6 +286,33 @@ class BaselineLifecycleTest(DriftCliCase):
                          ["IDENTITY_MISSING", "ROUTING_COVERAGE_MISSING"])
         self.assertEqual(report["routing"]["comparisons"], [])
         self.assertEqual(report["scheduling"]["state"], "unmeasured")
+
+    def test_zero_run_selected_source_reasons_survive_the_cli_boundary(self):
+        unavailable = coverage(
+            "none", reasons=[{"code": "source_unsupported", "count": 1}])
+        source_only = {"codex": {
+            "routing": coverage(
+                "none", reasons=[
+                    {"code": "runtime_version_missing", "count": 1}]),
+            "scheduling": {name: copy.deepcopy(unavailable) for name in (
+                "spawn_attempts", "capacity_rejections", "waits", "follow_ups",
+                "wait_input_tokens", "covered_input_tokens",
+                "slot_capacity_seconds", "claimed_slot_seconds")},
+        }}
+        value = record_value(selected=("claude", "codex"),
+                             source_only=source_only)
+        code, out, err = self.run(record=value)
+        self.assertEqual((code, err), (3, ""))
+        report = json.loads(out)
+        self.assertIn("ROUTING_COVERAGE_MISSING", [
+            item["code"] for item in report["routing"]["findings"]])
+
+        broken = copy.deepcopy(value)
+        broken["execution_telemetry"]["source_coverage"]["routing"] = coverage()
+        code, out, err = self.run(record=seal_record(broken))
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertNotEqual(err, "")
 
     def test_lifecycle_and_concrete_identity_incompatibility_exit_three(self):
         cases = {
@@ -384,13 +442,13 @@ Expected: ERROR at support-module import because `scripts/agent-model-drift.py` 
 
 Create `agent-model-drift-schema.py` with all strict loaders/validators. Load the matrix validator from the supplied root, register it in `sys.modules`, call `validate(root)`, reject any errors, then call `load_matrix(root)`. Schema validation collects stable JSON-pointer violations but `main` prints one concise diagnostic line without source content.
 
-Create `agent-model-drift.py` as the thin entry point and lifecycle report shell. Recompute record/baseline digests; distinguish exact current and legacy outer-member sets; validate top-level aggregate coverage against run sums. Emit global findings with null run/dispatch/role and count 1. For Task 3's unavailable scheduling/context, emit the final exact shapes with null values and unavailable coverage so later modules replace values without changing the report schema.
+Create `agent-model-drift.py` as the thin entry point and lifecycle report shell. Recompute record/baseline digests; distinguish exact current and legacy outer-member sets; validate selected-source/source-only membership and top-level aggregate coverage against the merge of run plus source-only contributions. Reject a missing contribution for a selected zero-run source, a contribution duplicated by a run, or any count/reason mismatch. Pass authoritative top-level routing coverage into lifecycle evaluation. Emit global findings with null run/dispatch/role and count 1. For Task 3's unavailable scheduling/context, emit the final exact shapes with null values and unavailable coverage so later modules replace values without changing the report schema.
 
 - [ ] **Step 4: Verify strict compatibility and lifecycle boundaries**
 
 Run: `python3 -m unittest -v tests/test_agent_model_drift_schema.py`
 
-Expected: PASS; valid producer-projected current and legacy records, exact report identity/time/input digests, lifecycle/identity incompatibility, corrupted record/baseline ids, malformed types/times/catalog coverage/overlap, and rejected matrix cases have the specified exits/stdout.
+Expected: PASS; valid producer-projected current and legacy records, exact report identity/time/input digests, zero-run selected-source reason preservation and aggregate validation, lifecycle/identity incompatibility, corrupted record/baseline ids, malformed types/times/catalog coverage/overlap, and rejected matrix cases have the specified exits/stdout.
 
 Run: `git diff --check -- scripts/agent-model-drift.py scripts/agent-model-drift-schema.py tests/agent_model_drift_test_support.py tests/test_agent_model_drift_schema.py`
 

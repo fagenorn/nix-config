@@ -11,7 +11,7 @@
 **Interfaces:**
 - Consumes: Task 2's eight per-run scheduling metrics and coverage/cohort contracts; Task 4's final routing state/report/exit behavior.
 - Produces:
-  - `def project_scheduling(runs: list[dict], event_window: dict) -> dict` — returns exactly `state`, `metrics`, `wait_token_share`, `occupancy`.
+  - `def project_scheduling(runs: list[dict], source_coverage: dict, event_window: dict) -> dict` — returns exactly `state`, `metrics`, `wait_token_share`, `occupancy`; `source_coverage` is the validated authoritative aggregate plus source-only map from Task 3.
   - `def project_context(fleet: dict) -> dict` — returns exactly `{"cache_read_ratio": {"value", "numerator", "denominator", "coverage"}}` from structured fleet totals (D11).
   - Report `metrics` has exactly the eight producer metric keys; each aggregate is exactly `value`, `coverage`, `cohort_digest`.
   - Just recipe `agent-model-drift *args` invoking `python3 scripts/agent-model-drift.py {{args}}`.
@@ -19,7 +19,7 @@
 
 **Invariants:**
 - Scheduling aggregation uses only producer metric objects. Context reads only `record.fleet.totals.cache_read` and `input_total`; neither path inspects prompts, source files, current files, or the matrix (D5, D11).
-- An aggregate metric is numeric only when every contributing run has `full` coverage and a numeric value. Counts/sums add. Aggregate eligible/paired/reasons use Task 2's coverage merge. Aggregate cohort digest is `cohort_digest(sorted per-run cohort digests)` when every run supplies one; otherwise null.
+- An aggregate metric is numeric only when every contributing run and source-only contribution has `full` coverage and a numeric value (a full zero-event source-only count contributes zero). Counts/sums add. Aggregate eligible/paired/reasons must equal the already-validated authoritative top-level coverage. Aggregate cohort digest is `cohort_digest(sorted per-run cohort digests)` when every value-bearing run supplies one and source-only contributions are full zero-event coverage; otherwise null. An unavailable zero-run source therefore keeps the aggregate null and preserves its reasons (D5).
 - Scheduling state is `measured` only when all eight aggregate metrics are full; `partial` when at least one metric is full/partial and the set is not fully measured; otherwise `unmeasured`.
 - `wait_token_share = wait_input_tokens / covered_input_tokens` only when both metrics are full, their per-run cohort digests agree pairwise, and the aggregate denominator is positive. `occupancy = claimed_slot_seconds / slot_capacity_seconds` only when both are full, each per-run cohort digest equals `canonical_digest(event_window)`, and the aggregate denominator is positive. Zero denominators yield null ratios, not zero or an error.
 - A full token pair with different cohort digests, a full slot pair with a non-window digest, negative/non-integer values, or claimed slots above capacity is malformed input: exit `2`, diagnostic on stderr, empty stdout.
@@ -60,22 +60,22 @@ def scheduled_record(values):
     return seal_record(value)
 
 
-def record_with_totals(cache_read, input_total):
+def record_with_components(fresh, cache_create, cache_read):
     value = record_value()
-    _set_cache_totals(value, cache_read, input_total)
+    _set_input_components(value, fresh, cache_create, cache_read)
     return seal_record(value)
 
 
-def legacy_record_with_totals(cache_read, input_total):
+def legacy_record_with_components(fresh, cache_create, cache_read):
     value = legacy_record_value()
-    _set_cache_totals(value, cache_read, input_total)
+    _set_input_components(value, fresh, cache_create, cache_read)
     return seal_record(value)
 
 
-def _set_cache_totals(value, cache_read, input_total):
-    numeric = all(isinstance(item, int) and not isinstance(item, bool)
-                  for item in (cache_read, input_total))
-    fresh = input_total - cache_read if numeric else None
+def _set_input_components(value, fresh, cache_create, cache_read):
+    components = (fresh, cache_create, cache_read)
+    input_total = (None if any(item is None for item in components)
+                   else sum(components))
     layers = (
         value["strata"]["claude"]["runs"][0]["tokens"],
         value["strata"]["claude"]["totals"],
@@ -83,7 +83,7 @@ def _set_cache_totals(value, cache_read, input_total):
     )
     for totals in layers:
         totals["fresh"] = fresh
-        totals["cache_create"] = 0 if numeric else None
+        totals["cache_create"] = cache_create
         totals["cache_read"] = cache_read
         totals["input_total"] = input_total
 
@@ -175,7 +175,7 @@ class SchedulingProjectionTest(DriftCliCase):
             self.assertNotIn(forbidden, scheduling)
 
     def test_high_cache_read_ratio_is_context_only(self):
-        code, out, err = self.run(record=record_with_totals(900, 1000))
+        code, out, err = self.run(record=record_with_components(100, 0, 900))
         self.assertEqual((code, err), (0, ""))
         report = json.loads(out)
         self.assertEqual(report["context"], {"cache_read_ratio": {
@@ -191,7 +191,7 @@ class SchedulingProjectionTest(DriftCliCase):
 
     def test_legacy_record_keeps_available_context_while_routing_is_unknown(self):
         code, out, err = self.run(
-            record=legacy_record_with_totals(75, 100))
+            record=legacy_record_with_components(25, 0, 75))
         self.assertEqual((code, err), (3, ""))
         report = json.loads(out)
         self.assertEqual(report["state"], "inconclusive")
@@ -199,10 +199,15 @@ class SchedulingProjectionTest(DriftCliCase):
         self.assertEqual(report["scheduling"]["state"], "unmeasured")
 
     def test_cache_ratio_nulls_missing_and_zero_denominators(self):
-        for numerator, denominator in ((None, None), (0, 0), (None, 100)):
-            with self.subTest(values=(numerator, denominator)):
+        cases = (
+            ((None, None, None), None, None),
+            ((0, 0, 0), 0, 0),
+            ((None, 0, 25), 25, None),
+        )
+        for components, numerator, denominator in cases:
+            with self.subTest(components=components):
                 code, out, _ = self.run(
-                    record=record_with_totals(numerator, denominator))
+                    record=record_with_components(*components))
                 self.assertEqual(code, 0)
                 ratio = json.loads(out)["context"]["cache_read_ratio"]
                 self.assertEqual(ratio, {
@@ -210,13 +215,44 @@ class SchedulingProjectionTest(DriftCliCase):
                     "denominator": denominator, "coverage": "unavailable"})
 
     def test_invalid_cache_totals_are_malformed_without_report(self):
-        for numerator, denominator in ((-1, 10), (11, 10), (True, 10)):
-            with self.subTest(values=(numerator, denominator)):
+        cases = []
+        for components in ((0, 0, -1), (0, 0, True)):
+            cases.append(record_with_components(*components))
+        above_total = record_with_components(0, 0, 10)
+        above_total["fleet"]["totals"]["input_total"] = 9
+        cases.append(seal_record(above_total))
+        for value in cases:
+            with self.subTest(record=value):
                 code, out, err = self.run(
-                    record=record_with_totals(numerator, denominator))
+                    record=value)
                 self.assertEqual(code, 2)
                 self.assertEqual(out, "")
                 self.assertNotEqual(err, "")
+
+    def test_zero_run_selected_source_prevents_false_measured_scheduling(self):
+        names = (
+            "spawn_attempts", "capacity_rejections", "waits", "follow_ups",
+            "wait_input_tokens", "covered_input_tokens",
+            "slot_capacity_seconds", "claimed_slot_seconds")
+        unavailable = coverage(
+            "none", reasons=[{"code": "source_unsupported", "count": 1}])
+        source_only = {"codex": {
+            "routing": coverage(
+                "none", reasons=[
+                    {"code": "runtime_version_missing", "count": 1}]),
+            "scheduling": {name: copy.deepcopy(unavailable) for name in names},
+        }}
+        value = record_value(selected=("claude", "codex"),
+                             source_only=source_only)
+        run = value["execution_telemetry"]["runs"][0]
+        run["scheduling"]["spawn_attempts"] = full_metric(0, digest([]))
+        value["execution_telemetry"]["source_coverage"]["scheduling"] \
+            ["spawn_attempts"] = copy.deepcopy(unavailable)
+        code, out, err = self.run(record=seal_record(value))
+        self.assertEqual((code, err), (3, ""))
+        metric = json.loads(out)["scheduling"]["metrics"]["spawn_attempts"]
+        self.assertIsNone(metric["value"])
+        self.assertEqual(metric["coverage"], unavailable)
 
 
 class RepositoryWiringTest(unittest.TestCase):
@@ -245,7 +281,7 @@ Expected: FAIL — scheduling is not aggregated/derived and the new suite/recipe
 
 - [ ] **Step 3: Implement scheduling projection and additive wiring**
 
-Create `agent-model-drift-scheduling.py`. Validate every per-run metric and top-level aggregate coverage before projection. Validate token and slot pairs per run before summing. Aggregate only exact metric names from the closed tuple shared by the schema module; any unknown/missing metric is an input error. Compute ratios with ordinary division only after a positive denominator. Project context from the already-decoded fleet totals and keep it outside scheduling/routing decisions.
+Create `agent-model-drift-scheduling.py`. Accept the schema-validated top-level source coverage with runs and the event window. Validate every per-run metric and token/slot pair before summing. Aggregate only exact metric names from the closed tuple shared by the schema module; any unknown/missing metric is an input error. Retain source-only reasons and allow a full zero-event source-only count to contribute zero; never infer a value from partial/none coverage. Require the result coverage to equal the authoritative top-level value already checked in Task 3. Compute ratios with ordinary division only after a positive denominator. Project context from the already-decoded fleet totals and keep it outside scheduling/routing decisions.
 
 Add the three Just test entries immediately after `tests/test_agent_costs.py` and add the recipe beside `agent-costs`. Make no other runner or recipe edit.
 

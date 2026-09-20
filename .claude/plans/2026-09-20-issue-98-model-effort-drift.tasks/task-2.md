@@ -11,16 +11,16 @@
 - Produces:
   - `SCHEDULING_METRICS = ("spawn_attempts", "capacity_rejections", "waits", "follow_ups", "wait_input_tokens", "covered_input_tokens", "slot_capacity_seconds", "claimed_slot_seconds")`.
   - Every run's `scheduling` is an object with exactly those keys. Every value is `{"value": int | None, "coverage": <coverage>, "cohort_digest": str | None}`.
-  - Top-level `source_coverage.scheduling` has exactly the same metric keys and each value is the aggregate coverage object for that metric.
+  - Top-level `source_coverage.scheduling` has exactly the same metric keys and each value is the aggregate coverage object for that metric. `source_coverage.source_only` is keyed by selected source with no telemetry run; each value is exactly `routing` plus the same closed scheduling coverage map.
   - `def cohort_digest(identities: list[tuple[str, ...]]) -> str` — a `sha256:` digest over sorted canonical JSON identities, retained only long enough to compute the digest.
   - `def merge_metric_coverage(metrics: list[dict]) -> dict` — combines eligible/paired/reasons; any selected source/run with unavailable coverage prevents `full` and therefore projects the aggregate value as `null`.
 
 **Invariants:**
 - `spawn_attempts` is the only presently supported historical scheduling metric. In a bounded Claude cohort it counts deduplicated structured `Agent`/`Task` tool uses whose timestamps are inside the window. Complete timestamp coverage proves zero; missing timestamps make the value `null`, never zero.
-- Codex and every other scheduling metric currently emit `source_unsupported`, `state: none`, `value: null`, and `cohort_digest: null`. No filename, token aggregate, cache-read counter, final message, or fixture supplies production scheduling evidence (D5).
+- Codex and every other scheduling metric currently emit `source_unsupported`, `state: none`, `value: null`, and `cohort_digest: null`. For a zero-run selected source the same coverage lives in `source_only`, without inventing a run id. No filename, token aggregate, cache-read counter, final message, or fixture supplies production scheduling evidence (D5).
 - `wait_input_tokens` and `covered_input_tokens` may become numeric only together, with `full` coverage and the same non-null cohort digest. `slot_capacity_seconds` and `claimed_slot_seconds` may become numeric only together, with `full` coverage and a cohort digest equal to `canonical_digest(event_window)`; `claimed_slot_seconds <= slot_capacity_seconds`.
 - A metric with `partial` or `none` always has `value: null`. A numeric value is a non-boolean integer `>= 0`; synthetic fixture values exercise projection rules but make no production-source claim.
-- Routing coverage and state inputs are not changed by scheduling. Scheduling never adds a routing finding or edits a routing observation (D5).
+- Routing coverage and state inputs are not changed by scheduling. Scheduling never adds a routing finding or edits a routing observation. It does complete the closed scheduling maps in run and source-only contributions (D5).
 - The producer emits no scheduling conclusion, ratio, or words/keys `waste`, `cheap`, `useful`, `savings`, `billing`, or `utilization` inside `execution_telemetry` (D5).
 - The bounded event range used by all scheduling metrics is byte-identical to the routing `event_window`; there is no second scheduling range.
 
@@ -34,9 +34,16 @@ class ExecutionTelemetrySchedulingTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        self.projects = self.root / "claude"
+        self.projects.mkdir()
 
-    def run_record(self, *, bounded=True):
-        args = ["--projects-dir", str(self.root), "--days", "0", "--format", "json"]
+    def run_record(self, *, bounded=True, strata="claude"):
+        args = ["--projects-dir", str(self.projects),
+                "--days", "0", "--format", "json"]
+        if strata != "claude":
+            codex_root = self.root / "codex"
+            codex_root.mkdir(exist_ok=True)
+            args += ["--strata", strata, "--codex-sessions", str(codex_root)]
         if bounded:
             args += ["--events-since", "2026-09-20T10:00:00Z",
                      "--events-before", "2026-09-20T11:00:00Z"]
@@ -45,7 +52,7 @@ class ExecutionTelemetrySchedulingTest(unittest.TestCase):
         return json.loads(raw)
 
     def write_root(self, *lines):
-        project = self.root / "-Users-me-repo-issue-120-x"
+        project = self.projects / "-Users-me-repo-issue-120-x"
         project.mkdir(parents=True, exist_ok=True)
         (project / "s1.jsonl").write_text("".join(lines), encoding="utf-8")
 
@@ -115,6 +122,30 @@ class ExecutionTelemetrySchedulingTest(unittest.TestCase):
         encoded = json.dumps(telemetry, sort_keys=True).lower()
         for forbidden in ("waste", "cheap", "useful", "savings", "billing", "utilization"):
             self.assertNotIn(forbidden, encoded)
+
+    def test_selected_empty_codex_contributes_without_a_run(self):
+        self.write_root(assistant(
+            "ordinary", usage=USAGE_1, timestamp="2026-09-20T10:05:00Z",
+            version="2.1.0", stop_reason="end_turn"))
+        telemetry = self.run_record(strata="both")["execution_telemetry"]
+        self.assertFalse(any(run["run_id"].startswith("codex:")
+                             for run in telemetry["runs"]))
+        codex = telemetry["source_coverage"]["source_only"]["codex"]
+        self.assertEqual(codex["routing"], {
+            "state": "none", "eligible_events": 0, "paired_events": 0,
+            "reasons": [{"code": "runtime_version_missing", "count": 1}],
+        })
+        for name in agent_costs.SCHEDULING_METRICS:
+            self.assertEqual(codex["scheduling"][name], {
+                "state": "none", "eligible_events": 0, "paired_events": 0,
+                "reasons": [{"code": "source_unsupported", "count": 1}],
+            })
+        self.assertEqual(
+            telemetry["source_coverage"]["routing"]["reasons"],
+            codex["routing"]["reasons"])
+        self.assertEqual(
+            telemetry["source_coverage"]["scheduling"]["spawn_attempts"],
+            codex["scheduling"]["spawn_attempts"])
 ```
 
 - [ ] **Step 2: Run the scheduling class and watch it fail**
@@ -129,7 +160,7 @@ Add the closed metric tuple and helpers above. During Task 1's telemetry scan, r
 
 Create all other metric entries through one `unsupported_metric(reason_count=1)` constructor so null, coverage, and cohort behavior cannot drift by field. Validate the token-pair and slot-pair invariants in the producer projection function even though current sources cannot populate them; the validation raises `ValueError` on an internally inconsistent future collector rather than emitting a false metric.
 
-Aggregate coverage by selected source and run. If `--strata both` selects Claude and Codex, Codex's unsupported spawn coverage prevents the fleet-level `spawn_attempts` from becoming full even when Claude is full; its aggregate value remains null.
+Aggregate coverage across run contributions and every selected source's source-only contribution. If `--strata both` selects Claude and an empty Codex source, retain Codex under `source_only`; its unsupported spawn coverage prevents fleet `spawn_attempts` from becoming full even when Claude is full, and its runtime-version reason prevents routing from becoming full. Merge identical reason counts instead of replacing either source. A source-only contribution exists only for coverage not represented by a run, so no fact is counted twice.
 
 - [ ] **Step 4: Run producer and full accounting verification**
 

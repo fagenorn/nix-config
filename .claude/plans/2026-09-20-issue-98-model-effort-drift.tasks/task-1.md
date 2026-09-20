@@ -28,7 +28,10 @@ The exact producer subdocument is:
     "harness_versions": {"claude": ["2.1.0"], "codex": null}
   },
   "event_window": {"start": "2026-09-20T10:00:00Z", "end": "2026-09-20T11:00:00Z"},
-  "source_coverage": {"routing": {"state": "full", "eligible_events": 1, "paired_events": 1, "reasons": []}},
+  "source_coverage": {
+    "routing": {"state": "full", "eligible_events": 1, "paired_events": 1, "reasons": []},
+    "source_only": {}
+  },
   "runs": [{
     "run_id": "claude:repo:120",
     "routing": {"coverage": {}, "observations": []},
@@ -37,14 +40,15 @@ The exact producer subdocument is:
 }
 ```
 
-Task 1 fills `routing`; Task 2 replaces the empty `scheduling` object with the complete closed metric map. Each routing observation has exactly the declaration/requested/configured/observed/escalation/count/first/last members shown in the design. Declaration authority is exactly `structured-dispatch | runtime-agent-type | unknown`; requested/configured always have exactly `host`, `model`, `effort`; observed also has `authority`. `escalation` is null or exactly `{"source_dispatch_id": str | null, "reason_code": str | null}` so missing lineage remains a semantic drift finding rather than a parser failure.
+Task 1 fills `routing`; Task 2 adds top-level `scheduling`, replaces every run's empty `scheduling` object with the complete closed metric map, and adds scheduling coverage inside any `source_only` entry. `source_only` is keyed by selected `claude`/`codex` sources whose coverage contribution has no run; in Task 1 each entry is exactly `{"routing": <coverage>, "scheduling": {}}`. Each routing observation has exactly the declaration/requested/configured/observed/escalation/count/first/last members shown in the design. Declaration authority is exactly `structured-dispatch | runtime-agent-type | unknown`; requested/configured always have exactly `host`, `model`, `effort`; observed also has `authority`. `escalation` is null or exactly `{"source_dispatch_id": str | null, "reason_code": str | null}` so missing lineage remains a semantic drift finding rather than a parser failure.
 
 **Invariants:**
 - The telemetry pass is independent of `--days`: it visits every `.jsonl` below each selected source root, then filters individual events on timestamps. It never feeds a result into the accounting accumulators (D2, D7).
-- A Claude observation requires one deduplicated `Agent`/`Task` tool-use id, one matching `tool_result.tool_use_id` whose `toolUseResult.agentId` is non-empty, and one child transcript whose `agentId` agrees. Requested values come only from that tool input; observed values come only from the paired child assistant execution (D2).
+- A Claude observation requires one deduplicated `Agent`/`Task` tool-use id, one matching `tool_result.tool_use_id` whose `toolUseResult.agentId` is non-empty, and one child transcript whose `agentId` agrees. Requested model/effort come only from that tool input. Requested host is the explicit input `host` when it is the string `claude`, otherwise the intrinsic `claude` target when the field is absent. A present null/non-string host yields null plus `request_host_missing`; a present different string yields null plus `request_host_conflict`. Observed values come only from the paired child assistant execution (D2).
 - `subagent_type` becomes a role only when it is a canonical matrix role string; `general-purpose`, `reviewer`, and `mechanic` remain ambiguous unless the exact request carries a canonical `role`. `dispatch_id` is used only when the request carries it as a field; prompt text is never searched (D2, D6).
 - Claude source `version` and Codex `session_meta.payload.cli_version` are collected into sorted unique arrays. A selected source with no version evidence gets `null` and `runtime_version_missing`; no file name or installed binary supplies a version.
-- Codex `turn_context` populates configured values only. A selected rollout proves observed host `codex`; observed model/effort stay `null` with their missing reasons until a future execution source carries them.
+- A recognized Codex `thread_spawn` has intrinsic requested host `codex` with the same absent/equal/missing/conflict rules. Codex `turn_context` populates configured values only. A selected rollout proves observed host `codex`; observed model/effort stay `null` with their missing reasons until a future execution source carries them. No request host is copied from rollout location, configured context, or observed host when the structured spawn is absent.
+- Top-level routing coverage merges every run coverage with one `source_only` routing contribution for each selected source that emits no telemetry run. Reason counts combine exactly; a zero-run selected source is never dropped (D2, D5).
 - Observations aggregate only identical semantic tuples; count and first/last event time are updated, then observations and runs are sorted by canonical JSON/run id. Raw correlation ids and paths never enter the result.
 - An unbounded event window is `{start: null, end: null}` and adds `cohort_incomplete`; it can never have routing coverage `full`.
 - Existing token/cost fields and text output are unchanged. The existing `record_id` changes only because its documented body now includes `execution_telemetry` (D1, D7).
@@ -93,15 +97,21 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
+    REQUEST_HOST_ABSENT = object()
+
     def claude_pair(self, *, request_at="2026-09-20T10:05:00Z",
-                    execution_at="2026-09-20T10:06:00Z"):
+                    execution_at="2026-09-20T10:06:00Z",
+                    request_host=REQUEST_HOST_ABSENT):
         project = self.root / "-Users-me-repo-issue-120-x"
         child_dir = project / "s1" / "subagents"
         child_dir.mkdir(parents=True)
+        launch_input = {"subagent_type": "reviewer", "role": "reviewer",
+                        "model": "opus", "effort": "high",
+                        "prompt": "review the delivery"}
+        if request_host is not self.REQUEST_HOST_ABSENT:
+            launch_input["host"] = request_host
         launch = {"type": "tool_use", "id": "toolu-route-1", "name": "Agent",
-                  "input": {"subagent_type": "reviewer", "role": "reviewer",
-                            "model": "opus", "effort": "high",
-                            "prompt": "review the delivery"}}
+                  "input": launch_input}
         root_file = project / "s1.jsonl"
         root_file.write_text(
             assistant("launch", usage=USAGE_1, content=[launch],
@@ -141,6 +151,7 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
             "state": "full", "eligible_events": 1, "paired_events": 1,
             "reasons": [],
         })
+        self.assertEqual(result["source_coverage"]["source_only"], {})
         self.assertEqual(len(result["runs"]), 1)
         run = result["runs"][0]
         self.assertEqual(run["run_id"], "claude:repo:120")
@@ -158,6 +169,20 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
             "last_event_at": "2026-09-20T10:06:00Z",
         }])
         self.assertEqual(result["runs"][0]["scheduling"], {})
+
+    def test_requested_host_missing_or_conflicting_is_null_with_coverage_reason(self):
+        for host, reason in ((None, "request_host_missing"),
+                             ("codex", "request_host_conflict")):
+            with self.subTest(host=host):
+                self.claude_pair(request_host=host)
+                telemetry = self.json_record()["execution_telemetry"]
+                observation = telemetry["runs"][0]["routing"]["observations"][0]
+                self.assertIsNone(observation["requested"]["host"])
+                self.assertNotEqual(observation["configured"]["host"], "claude")
+                self.assertNotEqual(observation["observed"]["host"],
+                                    observation["requested"]["host"])
+                self.assertIn({"code": reason, "count": 1},
+                              telemetry["source_coverage"]["routing"]["reasons"])
 
     def test_event_window_uses_event_time_while_accounting_keeps_file_mtime(self):
         old_file = self.claude_pair()
@@ -207,6 +232,9 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
         self.assertIsNone(code)
         observation = json.loads(raw)["execution_telemetry"]["runs"][0]
         observation = observation["routing"]["observations"][0]
+        self.assertEqual(observation["requested"],
+                         {"host": "codex", "model": "gpt-5.6-sol",
+                          "effort": "high"})
         self.assertEqual(observation["configured"],
                          {"host": "codex", "model": "gpt-5.6-sol", "effort": "high"})
         self.assertEqual(observation["observed"],
@@ -222,11 +250,11 @@ Expected: FAIL/ERROR — the CLI rejects `--events-since/--events-before` and em
 
 - [ ] **Step 3: Implement the event-time routing projection**
 
-Add the constants and functions in **Interfaces**. Keep cost scanning unchanged; use a distinct all-file telemetry pass. Parse each source line once in that pass, retain correlation ids only in local dictionaries, aggregate only after exact linkage, and delete those ids at projection. Canonicalize all accepted times to `YYYY-MM-DDTHH:MM:SS[.fraction]Z` and compare aware UTC values.
+Add the constants and functions in **Interfaces**. Keep cost scanning unchanged; use a distinct all-file telemetry pass. Parse each source line once in that pass, retain correlation ids only in local dictionaries, aggregate only after exact linkage, and delete those ids at projection. Canonicalize all accepted times to `YYYY-MM-DDTHH:MM:SS[.fraction]Z` and compare aware UTC values. Resolve request host before execution pairing from the explicit launch member and recognized transport target rules above; do not consult configured or observed fields. Preserve missing/conflicting request-host reasons in both run and aggregate coverage.
 
 For Claude, resolve the projected run with the same project/issue rules as `build_groups`; for Codex, use the same thread grouping as `collect_codex_groups`. Do not join existing `models`, `efforts`, or `agents_by_type` counters. Build the telemetry document before `build_record`, and include it in `body` before calling `canonical_digest`.
 
-When no explicit event window is present, emit the same schema with null bounds, retain any bounded observations the source can state, and add `cohort_incomplete` so routing cannot become full. When a source is selected but has no runtime version field, set its harness version to `null` and add `runtime_version_missing`.
+When no explicit event window is present, emit the same schema with null bounds, retain any bounded observations the source can state, and add `cohort_incomplete` so routing cannot become full. When a source is selected but has no runtime version field, set its harness version to `null` and add `runtime_version_missing`. If a selected source emits no telemetry run, write its coverage to `source_only` and merge that contribution into top-level routing coverage.
 
 - [ ] **Step 4: Verify the producer contract and accounting oracle**
 

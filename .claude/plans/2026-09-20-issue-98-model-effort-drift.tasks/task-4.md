@@ -14,12 +14,12 @@
   - `def classify_concrete(catalog: dict, host: str, kind: str, tier: str, concrete: str) -> str` — returns exactly `allowed | prohibited | unclassified`; raises `AssertionError` if one concrete value is both allowed and prohibited.
   - `def declaration_for(observation: dict, matrix: dict) -> tuple[dict | None, list[dict]]` — resolves an authoritative carried dispatch first, otherwise an unambiguous canonical role; it returns findings rather than guessing.
   - `def validate_escalation(observation: dict, matrix: dict, baseline: dict) -> bool` — true only for a declared target dispatch, a different declared source dispatch, and an allowed reason code.
-  - Task 3's `evaluate` folds every run/observation, sorts comparison rows, aggregates identical findings by `(code, run_id, dispatch, role)`, and applies drift precedence.
+  - Task 3's `evaluate` folds every run/observation while retaining authoritative top-level routing coverage (including source-only contributions), sorts comparison rows, aggregates identical findings by `(code, run_id, dispatch, role)`, and applies drift precedence.
 
 Each comparison row is exactly `run_id`, `dispatch`, `role`, `count`, `declaration`, `requested`, `observed`, `coverage`, `escalation`. `declaration` is exactly dispatch_id/role/host/model/effort/authority. Requested and observed are exactly host/model/effort; observed execution authority remains producer evidence and is not copied into the public comparison. `escalation` is null or exactly source_dispatch_id/target_dispatch_id/reason_code (D10).
 
 **Invariants:**
-- Requested host, role, model, and effort are checked against the validated matrix/baseline declaration before any concrete observed value is classified. A carried dispatch must match its row exactly; a requested host unequal to the permitted host yields `REQUEST_DECLARATION_MISMATCH` (D6, D10).
+- Requested host, role, model, and effort are checked against the validated matrix/baseline declaration before any concrete observed value is classified. A carried dispatch must match its row exactly; a concrete requested host unequal to the permitted host yields `REQUEST_DECLARATION_MISMATCH`. A null requested host remains null and is inconclusive through producer coverage; it is never copied from configured or observed host (D2, D6, D10).
 - A missing/unknown/ambiguous role yields `ROLE_AMBIGUOUS`. Reviewer-lite and every non-null escalation require a carried dispatch; absent dispatch yields `DISPATCH_REQUIRED` and cannot conform (D6).
 - For a role-only declaration, the permitted host is derivable only when every matrix dispatch for that role has one identical `dispatch_hosts` value. Otherwise dispatch is required. No host alias is normalized.
 - Concrete host unequal to the permitted host yields `OBSERVED_HOST_PROHIBITED`. A concrete model/effort in the requested tier's `prohibited` list yields its drift code; absent from both lists yields its unclassified inconclusive code. Null model/effort yields the corresponding missing code (D3, D4).
@@ -263,7 +263,7 @@ Expected: FAIL — Task 3 does not classify per-observation request, catalog, ho
 
 - [ ] **Step 3: Implement the pure routing evaluator**
 
-Create `agent-model-drift-routing.py`. Index the validated matrix once: roles by name, dispatches by id, and dispatch hosts by role. Validate each observation against exact closed member sets in the schema module. Resolve the declaration, then requested host/model/effort, escalation validity, observed host, model, and effort in that order; collect all independent findings rather than returning after the first. Build the comparison from decoded values before classifying them so conforming and inconclusive inputs remain inspectable.
+Create `agent-model-drift-routing.py`. Index the validated matrix once: roles by name, dispatches by id, and dispatch hosts by role. Validate each observation against exact closed member sets in the schema module. Resolve the declaration, then requested host/model/effort, escalation validity, observed host, model, and effort in that order; collect all independent findings rather than returning after the first. Build the comparison from decoded values before classifying them so conforming and inconclusive inputs remain inspectable. Use the validated top-level routing coverage for report counts and `ROUTING_COVERAGE_MISSING`; do not reconstruct it from runs and thereby discard source-only reasons.
 
 For baseline-dependent classifications, use the requested matrix tier and the literal observed host. `classify_concrete` consults only that host/tier pair. It does not search other hosts or tiers and never compares names lexically. A concrete value missing from both arrays is unclassified.
 
