@@ -18,8 +18,9 @@ from the branch-protection payload.
 
 The job is a measured advisory wrapper. Checkout, Nix setup, and the suite each
 have a stable step identifier and step-level `continue-on-error`; a final
-`always()` summary writes their raw `steps.<id>.outcome` values and the elapsed
-time. The step conclusion becomes successful for the observation job, which
+`always()` summary writes one compact `AGENT_WORKFLOW_OBSERVATION_V1=` JSON
+record, with its raw `steps.<id>.outcome` values and elapsed time, identically
+to logs and `$GITHUB_STEP_SUMMARY`. The step conclusion becomes successful for the observation job, which
 keeps the current all-check `gh pr checks --watch --fail-fast` shipping wait
 from halting on an advisory failure. The summary distinguishes observation-job
 completion from suite success. A setup failure remains visible as its raw
@@ -76,8 +77,9 @@ decision requiring stronger evidence and an updated protection fixture/test.
 
 - Applying or changing live branch protection, adding a required context, or
   altering the sole `Nix Eval` context, app ID, job behavior, or permissions.
-- Declaring the observation window complete, promoting the job, or treating
-  absent Linux evidence as evidence of reliability.
+- Prematurely declaring the observation window complete, promoting the job, or
+  treating absent Linux evidence as evidence of reliability. Recording a real,
+  qualified completed window is the follow-up task's allowed keep-advisory outcome.
 - Changing the workflow-suite recipe, adding a Python dependency, activating a
   NixOS or Darwin host, or incorporating unmerged issues 98 or 100.
 
@@ -91,3 +93,13 @@ decision requiring stronger evidence and an updated protection fixture/test.
 | D4 | Collect three non-scheduled Ubuntu raw suite outcomes, then make only a keep-advisory decision; any missing, failed, cancelled, or timed-out outcome extends the sample. | The audit requires a bounded observation window and evidence-grounded follow-up; the standards require truthful claims and observable tests. | Invent a long wait to force promotion, count local Darwin runs, or promote from incomplete Linux data. |
 | D5 | Preserve the exact sole required `Nix Eval` provider-bound context and app ID 15368. | The checked protection fixture and live contract bind that context to the Linux evaluation job. | Add the advisory job to required checks in this rollout. |
 | D6 | Report the advisory job as `Agent Workflow Tests (advisory)` and pin that name offline. | The job name is the human-facing check interface distinguishing a completed observation from the required `Nix Eval` gate. | Reuse or leave an unspecified check name, which obscures advisory status in CI output. |
+| D7 | After Task 1 passes locally, is signed committed, and receives independent task review, the issue owner verifies the current lifecycle launch and publishes only the feature branch; Task 2 then dispatches and records evidence while the issue stays open. | The accepted Phase-5 review found shipping-after-SDD circular; lifecycle writes require the owner to re-check the active launch. | Have an unowned worker dispatch from an unpublished revision, or wait for PR/merge/closure before evidence can exist. |
+| D8 | Make one labeled V1 JSON record the raw-outcome source in both logs and summary; parse it exactly and use GitHub metadata only as a labelled fallback for missing-summary cancellation/timeout status and duration. | The accepted review found that summary-only data was not deterministically retrievable and continued-step conclusions lose raw outcomes. | Infer raw outcomes from job/step conclusions or use an unstructured log scrape. |
+
+## Planning revision provenance
+
+Accepted Phase-5 dispositions B1, B2, S1, and S2 came from
+`/root/issue37_plan_review`, reviewed at
+`117e8cedcc5d4fa11b1ab972828b62604b431b2d` against `a656dd9`. The review was a
+native independent first pass; the requested Sol/high model identity was not
+attested by the reviewer runtime.

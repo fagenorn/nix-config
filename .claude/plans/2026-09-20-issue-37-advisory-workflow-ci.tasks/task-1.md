@@ -1,63 +1,42 @@
-# Task 1: Add the measured advisory CI job
+# Task 1: Add deterministic advisory CI observation
 
-**Files:** Modify `.github/workflows/ci.yaml` and `tests/test_branch_protection.py`; create `.github/agent-workflow-observation.md`.
+**Files:** Modify `.github/workflows/ci.yaml`, `tests/test_branch_protection.py`, and `CLAUDE.md`; create `.github/agent-workflow-observation.md`.
 
-**Interfaces:** Consumes current CI triggers/concurrency/permissions and `just agent-workflow-tests`. Produces plain job key `agent-workflow-tests`, reported name `Agent Workflow Tests (advisory)`, and an empty three-row observation record.
+**Interfaces:** Consumes current CI triggers/concurrency/permissions and `just agent-workflow-tests`. Produces job key `agent-workflow-tests`, reported name `Agent Workflow Tests (advisory)`, and the exact V1 record `AGENT_WORKFLOW_OBSERVATION_V1={"schema":"agent-workflow-observation/v1","trigger":"<event>","raw":{"checkout":"<outcome>","install_nix":"<outcome>","provision_just":"<outcome>","suite":"<outcome>"},"elapsed_seconds":<integer>}`.
 
 **Invariants:**
 
-- Run on `ubuntu-24.04` for PRs, main pushes, and manual dispatch, but skip schedules; add no path filter.
-- Set `timeout-minutes: 10`; do not add `needs`, a matrix, job-level `continue-on-error`, or a job permission override.
-- Stable `started`, `checkout`, `install_nix`, `provision_just`, and `suite` steps preserve raw outcomes with step-level continuation. An `always()` summary writes raw outcomes and elapsed seconds to `$GITHUB_STEP_SUMMARY`.
-- The complete protection payload remains semantically identical: only `Nix Eval` from app `15368` is required.
-- The record says no Ubuntu evidence exists and three real raw suite outcomes can yield only keep-advisory.
+- The job runs on `ubuntu-24.04` for PRs, main pushes, and manual dispatch; it skips schedules, has `timeout-minutes: 10`, no path filter, `needs`, matrix, job continuation, or permission override.
+- `checkout`, `install_nix`, `provision_just`, and `suite` have stable IDs and their own `continue-on-error: true`. The summary is `always()`, labels each raw `steps.<id>.outcome`, and writes the byte-identical V1 JSON marker to both log and summary.
+- The record uses `unknown` when a raw value cannot be observed, an integer elapsed time, and never turns a step conclusion into a raw outcome. The empty ledger distinguishes missing summary, setup failure, cancellation, and timeout from qualifying evidence.
+- The protection payload remains exactly one `Nix Eval` context from app `15368`; `CLAUDE.md:23` says this advisory job runs in CI.
 
-- [ ] **Step 1: Write the failing offline contract test**
+- [ ] **Step 1: Write failing offline contracts**
 
-Add this `WorkflowShape` test; it must fail on the base because the job is absent.
-
-    def test_advisory_workflow_suite_job_is_a_measured_observation(self):
-        names = job_names()
-        self.assertIn("Agent Workflow Tests (advisory)", names)
-        block = job_blocks()[names["Agent Workflow Tests (advisory)"]]
-        body = "\n".join(block)
-        self.assertIn("    if: github.event_name != 'schedule'", block)
-        self.assertIn("    runs-on: ubuntu-24.04", block)
-        self.assertIn("    timeout-minutes: 10", block)
-        self.assertNotIn("    continue-on-error: true", block)
-        self.assertNotIn("    needs:", block)
-        for step in ("started", "checkout", "install_nix", "provision_just", "suite"):
-            self.assertRegex(body, rf"(?ms)^      - id: {step}$.*?^        continue-on-error: true$")
-        self.assertIn("nix shell --inputs-from . nixpkgs#just --command just --version", body)
-        self.assertIn("nix shell --inputs-from . nixpkgs#just --command just agent-workflow-tests", body)
-        self.assertRegex(body, r"(?m)^        if: \$\{\{ always\(\) \}\}$")
-
-Also assert `required_contexts() == ["Nix Eval"]`; retain the existing full-payload equality assertion.
+Add focused `WorkflowShape` assertions that parse the actual summary-shell body with a fixture event and temporary `GITHUB_STEP_SUMMARY`, then assert separately for each named measurement step: its exact ID, its immediately owned `continue-on-error: true`, and its own `steps.<id>.outcome` reference. Assert a missing step's continuation cannot satisfy another step. Assert the V1 marker, every JSON field (`schema`, `trigger`, four raw keys, `elapsed_seconds`), both output sinks, `github.event_name`, PR/main-push/manual triggers, schedule exclusion, commands, timeout, runner, lack of job continuation/needs, and advisory name. Retain the existing exact full branch-protection payload equality assertion.
 
 - [ ] **Step 2: Run the focused test and observe failure**
 
 Run: `python3 -m unittest tests.test_branch_protection -v`
 
-Expected: FAIL because the advisory job name is absent from `job_names()`.
+Expected: FAIL because the advisory job and its V1 record are absent.
 
-- [ ] **Step 3: Implement the workflow and observation template**
+- [ ] **Step 3: Implement the workflow, ledger, and guidance**
 
-Add the plain job with the interface and invariants above, independent of `nix-eval`. Do not edit either existing job. The provisioning command is exactly `nix shell --inputs-from . nixpkgs#just --command just --version`; the suite command is the same prefix followed by `just agent-workflow-tests`.
+Add the independent job. `started` emits an epoch value; checkout, Nix install, provisioning (`nix shell --inputs-from . nixpkgs#just --command just --version`), and suite (`nix shell --inputs-from . nixpkgs#just --command just agent-workflow-tests`) use the specified IDs and continuation. The `always()` summary computes elapsed seconds from `started`, substitutes `unknown` only for absent raw values, constructs the compact V1 JSON in the stated field order, and sends exactly that line through `tee -a "$GITHUB_STEP_SUMMARY"`; this makes it retrievable in logs and summary without a dependency.
 
-Give the first step ID `started` and make it emit an epoch output. Give checkout, Nix install, provisioning, and suite exactly the IDs in the invariants and mark each measurement step `continue-on-error: true`. The final summary uses `if: ${{ always() }}`, labels values as raw outcomes, and emits all five outcomes and elapsed seconds. It must never call completed observation a successful suite.
-
-Create `.github/agent-workflow-observation.md` with the job purpose; a three-run non-scheduled Ubuntu window; a table for run URL/ID, commit, GitHub job conclusion, raw checkout/Nix/provision/suite outcomes, elapsed seconds, and Nix resolution/flake note; and `keep advisory — evidence not yet collected`. State that timeout/cancellation may lack a summary and must use GitHub job conclusion/duration.
+Create the ledger with its schema, fields, three empty qualifying slots, and failed-attempt section. It requires the exact marker to parse all fields, treats malformed/missing marker, `unknown`, cancelled/timed-out run/job, and setup failure as non-qualifying, and treats GitHub job metadata as fallback only for cancellation/timeout/missing-summary status and duration. Update `CLAUDE.md:23` to state that CI also runs this advisory suite while `Nix Eval` remains the sole required context.
 
 - [ ] **Step 4: Verify changed seams**
 
-Run: `python3 -m unittest tests.test_branch_protection -v` — expected PASS, including advisory-job and unchanged required-check assertions.
+Run: `python3 -m unittest tests.test_branch_protection -v` — expected PASS, including independent per-step, record, trigger, and full-payload assertions.
 
-Run: `just agent-workflow-tests` — expected PASS; a failure means the workflow contract is not ready to ship.
+Run: `just agent-workflow-tests` — expected PASS; failure means the slice is not publishable.
 
 Run: `just build` — expected PASS with only the known system-to-hostPlatform rename warning.
 
-Run: `git diff --check -- .github/workflows/ci.yaml tests/test_branch_protection.py .github/agent-workflow-observation.md` — expected exit 0.
+Run: `git diff --check -- .github/workflows/ci.yaml tests/test_branch_protection.py .github/agent-workflow-observation.md CLAUDE.md` — expected exit 0.
 
-- [ ] **Step 5: Commit the advisory slice**
+- [ ] **Step 5: Commit and hand off the bounded lifecycle action**
 
-Stage exactly the three task files and create signed commit `ci: observe agent workflow tests`.
+Stage exactly the four task files and create signed commit `ci: observe agent workflow tests`. After the local gates pass, the signed commit exists, and an independent task review accepts it, the **issue owner** checks the current lifecycle launch identity and publishes only the feature branch under the existing grant. Do not open a PR, merge, close the issue, or clean up. Task 2 remains open and normal SDD final review and ship follow only after real evidence.
