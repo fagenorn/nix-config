@@ -293,8 +293,16 @@ def execute_summary(event="pull_request"):
 
 def has_measurement_contract(steps, name, step_id):
     """A measurement's continuation belongs to that named step alone."""
-    owned = "\n".join(steps.get(name, []))
-    return f"id: {step_id}" in owned and "continue-on-error: true" in owned
+    owned = steps.get(name, [])
+    return (
+        f"        id: {step_id}" in owned
+        and "        continue-on-error: true" in owned
+    )
+
+
+def has_summary_always_guard(steps):
+    """The evidence writer must run even after an earlier measurement failed."""
+    return "        if: always()" in steps.get("Record advisory observation", [])
 
 
 def payload():
@@ -339,9 +347,9 @@ class WorkflowShape(unittest.TestCase):
         for name, step_id in expected_steps.items():
             with self.subTest(step=name):
                 self.assertIn(name, steps)
-                owned = "\n".join(steps[name])
-                self.assertIn(f"id: {step_id}", owned)
-                self.assertIn("continue-on-error: true", owned)
+                owned = steps[name]
+                self.assertIn(f"        id: {step_id}", owned)
+                self.assertIn("        continue-on-error: true", owned)
                 self.assertTrue(has_measurement_contract(steps, name, step_id))
                 self.assertIn(f"steps.{step_id}.outcome", summary_shell_body())
         without_checkout = dict(steps)
@@ -350,6 +358,7 @@ class WorkflowShape(unittest.TestCase):
             has_measurement_contract(without_checkout, "Checkout", "checkout"),
             "another step's continuation must not satisfy missing checkout",
         )
+        self.assertTrue(has_summary_always_guard(steps))
 
         stdout, summary = execute_summary()
         self.assertEqual(stdout, summary)
@@ -368,6 +377,30 @@ class WorkflowShape(unittest.TestCase):
             record["raw"],
         )
         self.assertIsInstance(record["elapsed_seconds"], int)
+
+    def test_advisory_contract_rejects_step_and_summary_mutations(self):
+        """The evidence seam fails closed for each independently owned YAML line."""
+        steps = step_blocks("agent-workflow-tests")
+        wrong_id = dict(steps)
+        wrong_id["Checkout"] = [
+            line.replace("id: checkout", "id: checkout_bogus")
+            for line in wrong_id["Checkout"]
+        ]
+        self.assertFalse(has_measurement_contract(wrong_id, "Checkout", "checkout"))
+
+        absent_always = dict(steps)
+        absent_always["Record advisory observation"] = [
+            line
+            for line in absent_always["Record advisory observation"]
+            if line.strip() != "if: always()"
+        ]
+        self.assertFalse(has_summary_always_guard(absent_always))
+
+        misplaced_always = dict(absent_always)
+        misplaced_always["Checkout"] = [
+            *misplaced_always["Checkout"], "        if: always()"
+        ]
+        self.assertFalse(has_summary_always_guard(misplaced_always))
 
     def test_advisory_job_has_the_required_triggers_without_schedule(self):
         self.assertIsNotNone(trigger_block("pull_request"))
