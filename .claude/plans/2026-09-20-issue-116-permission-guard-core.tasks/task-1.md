@@ -57,6 +57,7 @@ Do not reflow or otherwise rewrite the surrounding guard description. This imple
 - [ ] **Step 3: Prove the scoped prose and link contract**
 
 ```bash
+set -euo pipefail
 python3 - <<'PY'
 from pathlib import Path
 text = Path("CLAUDE.md").read_text(encoding="utf-8")
@@ -89,6 +90,7 @@ Expected: exit 0 with the nix-darwin configuration built. These results do not c
 - [ ] **Step 5: Verify scope and commit**
 
 ```bash
+set -euo pipefail
 python3 - <<'PY'
 import subprocess
 
@@ -109,6 +111,7 @@ git diff --check -- CLAUDE.md
 Expected: exit 0. The NUL-delimited whole-worktree inventory proves the index and untracked set are empty and `CLAUDE.md` is the only changed path. The accepted decision spec is tracked and still hashes to `8f9b341897b59d85a3f6f5883db56b4df384f35c29947af942c4592e2e4171a8`.
 
 ```bash
+set -euo pipefail
 git add CLAUDE.md
 test -z "$(git diff --name-only)"
 test "$(git diff --cached --name-only)" = "CLAUDE.md"
