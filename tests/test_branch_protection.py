@@ -126,6 +126,10 @@ def _mapping_entry(line, indentation, scope):
         raise AssertionError(
             f"cannot classify {scope} entry {line!r}; refusing to ignore it"
         )
+    if match.group("double") is not None and "\\" in match.group("double"):
+        raise AssertionError(
+            f"cannot classify {scope} entry {line!r}; refusing to ignore it"
+        )
     key = next(value for value in match.group("double", "single", "bare") if value)
     return key, match.group("value")
 
@@ -282,6 +286,8 @@ class WorkflowShape(unittest.TestCase):
                 workflow_permissions()
         with self.assertRaisesRegex(AssertionError, "cannot classify job attribute"):
             job_permission_lines(["    [permissions]: write-all"])
+        with self.assertRaisesRegex(AssertionError, "cannot classify job attribute"):
+            job_permission_lines([r'    "permissio\u006es": write-all'])
 
     def test_job_name_extraction_removes_yaml_quotes(self):
         for source in (
