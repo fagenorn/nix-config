@@ -97,12 +97,15 @@ Scheduling reports `measured`, `partial`, or `unmeasured` separately. Context re
 
 ### Change boundary
 
-The implementation is four independently reviewable slices:
+The implementation is five task-aligned, independently reviewable slices:
 
-1. the additive producer contract and event-time extraction, preserving the accounting projection;
-2. the strict baseline loader and pure drift evaluator;
-3. the report CLI and deterministic exit/output behavior;
-4. production-shaped fixtures and regression gates for the producer, matrix validator, and report.
+1. additive producer routing telemetry and event-time extraction, preserving the accounting projection;
+2. producer scheduling metrics plus range-agreement and accounting regression gates;
+3. the strict current/legacy record decoder, baseline loader, and lifecycle report shell;
+4. routing comparison rows and declaration, execution, classification, and escalation evaluation;
+5. scheduling/context projection, final report integration, and repository gate wiring.
+
+Production-shaped CLI fixtures live with the slice they prove. The first two slices exercise the producer boundary; the last three exercise the reporter boundary and retain the existing matrix validator as the declaration oracle.
 
 The consumer and its tests are new siblings. The current matrix declarations and current validator assertions stay intact. In particular, issue 98 does not remove retired bridge entries, legacy resolver references, or release-evaluation gates covered by issue 100's pending approval; any later overlap is reconciled after issue 100 lands.
 

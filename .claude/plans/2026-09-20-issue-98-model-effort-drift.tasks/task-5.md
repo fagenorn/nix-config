@@ -62,16 +62,30 @@ def scheduled_record(values):
 
 def record_with_totals(cache_read, input_total):
     value = record_value()
-    value["fleet"]["totals"] = {
-        "cache_read": cache_read, "input_total": input_total}
+    _set_cache_totals(value, cache_read, input_total)
     return seal_record(value)
 
 
 def legacy_record_with_totals(cache_read, input_total):
     value = legacy_record_value()
-    value["fleet"]["totals"] = {
-        "cache_read": cache_read, "input_total": input_total}
+    _set_cache_totals(value, cache_read, input_total)
     return seal_record(value)
+
+
+def _set_cache_totals(value, cache_read, input_total):
+    numeric = all(isinstance(item, int) and not isinstance(item, bool)
+                  for item in (cache_read, input_total))
+    fresh = input_total - cache_read if numeric else None
+    layers = (
+        value["strata"]["claude"]["runs"][0]["tokens"],
+        value["strata"]["claude"]["totals"],
+        value["fleet"]["totals"],
+    )
+    for totals in layers:
+        totals["fresh"] = fresh
+        totals["cache_create"] = 0 if numeric else None
+        totals["cache_read"] = cache_read
+        totals["input_total"] = input_total
 
 
 class SchedulingProjectionTest(DriftCliCase):

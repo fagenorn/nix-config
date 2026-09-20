@@ -14,6 +14,7 @@
 - `validate_record` returns `{"record": <decoded>, "telemetry": dict | None}`. `telemetry: None` is reserved for an otherwise valid legacy v1 record; malformed or unsupported telemetry is never downgraded to legacy.
 - `agent-model-drift.py` loads its schema sibling with `SourceFileLoader`, owns the CLI `--record PATH --baseline PATH --matrix-root PATH --now RFC3339-UTC`, and produces `main(argv) -> int` plus a pure lifecycle `evaluate(...) -> dict`. Tasks 4–5 add routing and scheduling sibling loaders without moving schema code back into the entry point.
 - `tests/agent_model_drift_test_support.py` produces shared production-shaped builders `digest`, `coverage`, `unsupported_metric`, `telemetry`, `record_value`, `legacy_record_value`, `seal_record`, `matrix_fixture`, `baseline_value`, `seal_baseline`, and `DriftCliCase`.
+- `record_value` calls Task 2's real `agent_costs.build_record(...)` projection with a complete Claude group, deterministic window, and supplied telemetry. `legacy_record_value` removes only the additive telemetry member from that emitted record and reseals it. The helpers never invent abbreviated `strata` or `fleet.totals` shapes.
 
 The baseline has exactly the design fields: `schema_version`, `kind`, `baseline_id`, `captured_at`, `valid_from`, `valid_before`, `matrix_digest`, `producer`, `harness_versions`, `model_catalog_version`, `dispatch_hosts`, `catalog`, and `escalation_reason_codes`. `baseline_id` digests every other member. Dispatch-host keys equal every matrix dispatch. Per host, model/effort tier keys equal the declared tier sets; sorted unique non-empty string arrays are disjoint within a tier.
 
@@ -48,11 +49,17 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "agent-model-drift.py"
+COST_SCRIPT = REPO_ROOT / "scripts" / "agent-costs.py"
 MATRIX = REPO_ROOT / "home/common/agent-skills/model-matrix.json"
 
 _spec = importlib.util.spec_from_file_location("agent_model_drift", SCRIPT)
 agent_model_drift = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(agent_model_drift)
+
+_cost_spec = importlib.util.spec_from_file_location(
+    "agent_costs_fixture", COST_SCRIPT)
+agent_costs = importlib.util.module_from_spec(_cost_spec)
+_cost_spec.loader.exec_module(agent_costs)
 
 
 def digest(value):
@@ -96,31 +103,29 @@ def telemetry(*, start="2026-09-20T10:00:00Z",
     }
 
 
-def _record_body(include_telemetry=True, **overrides):
-    body = {
-        "schema_version": 1, "kind": "agent-cost-record",
-        "window": {"days": 1, "cutoff_epoch": 1,
-                   "file_mtime_selection": True,
-                   "whole_selected_file_usage": True,
-                   "strata": ["claude"], "sources": {"claude": "/redacted"}},
-        "strata": {},
-        "fleet": {"informative": True,
-                  "totals": {"input_total": None, "cache_read": None}},
-        "notes": "comparative telemetry",
-    }
-    if include_telemetry:
-        body["execution_telemetry"] = telemetry(**overrides)
-    return body
+def _producer_record(execution_telemetry):
+    group = agent_costs.new_group()
+    group["sessions"] = 1
+    record = agent_costs.build_record(
+        {"claude": {"cost_basis": "list-price",
+                    "groups": {("repo", "98"): group}}},
+        {"days": 1, "cutoff_epoch": 1,
+         "file_mtime_selection": True,
+         "whole_selected_file_usage": True,
+         "strata": ["claude"], "sources": {"claude": "/redacted"}},
+        execution_telemetry=execution_telemetry)
+    record["generated_at"] = "2026-09-20T11:01:00Z"
+    return record
 
 
 def record_value(**overrides):
-    body = _record_body(True, **overrides)
-    return dict(body, record_id=digest(body), generated_at="2026-09-20T11:01:00Z")
+    return _producer_record(telemetry(**overrides))
 
 
 def legacy_record_value():
-    body = _record_body(False)
-    return dict(body, record_id=digest(body), generated_at="2026-09-20T11:01:00Z")
+    value = record_value()
+    value.pop("execution_telemetry")
+    return seal_record(value)
 
 
 def seal_record(value):
@@ -225,6 +230,18 @@ class BaselineLifecycleTest(DriftCliCase):
         code, out, err = first
         self.assertEqual((code, err), (0, ""))
         report = json.loads(out)
+        self.assertEqual(set(report), {
+            "schema_version", "kind", "evaluated_at", "inputs", "state",
+            "routing", "scheduling", "context"})
+        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["kind"], "agent-model-drift-report")
+        self.assertEqual(report["evaluated_at"], "2026-09-20T12:00:00Z")
+        self.assertEqual(report["inputs"], {
+            "record": record_value()["record_id"],
+            "matrix": self.matrix_digest,
+            "baseline": baseline_value(
+                self.matrix, self.matrix_digest)["baseline_id"],
+        })
         self.assertEqual((report["state"], report["routing"]), (
             "conforming", {"state": "conforming", "eligible_events": 0,
                            "evaluated_events": 0, "comparisons": [], "findings": []}))
@@ -326,6 +343,21 @@ class BaselineLifecycleTest(DriftCliCase):
         self.assertEqual(out, "")
         self.assertNotEqual(err, "")
 
+    def test_corrupted_record_and_baseline_ids_exit_two_without_report(self):
+        cases = {
+            "record-id": (dict(record_value(), record_id="sha256:" + "0" * 64),
+                          None),
+            "baseline-id": (None, dict(
+                baseline_value(self.matrix, self.matrix_digest),
+                baseline_id="sha256:" + "0" * 64)),
+        }
+        for name, (record, baseline) in cases.items():
+            with self.subTest(case=name):
+                code, out, err = self.run(record=record, baseline=baseline)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertNotEqual(err, "")
+
     def test_duplicate_json_keys_exit_two_before_decode(self):
         record_path = self.write("record.json", record_value())
         duplicate = self.root / "duplicate.json"
@@ -358,7 +390,7 @@ Create `agent-model-drift.py` as the thin entry point and lifecycle report shell
 
 Run: `python3 -m unittest -v tests/test_agent_model_drift_schema.py`
 
-Expected: PASS; valid current and legacy records, lifecycle/identity incompatibility, malformed types/times/catalog coverage/overlap, and rejected matrix cases have the specified exits/stdout.
+Expected: PASS; valid producer-projected current and legacy records, exact report identity/time/input digests, lifecycle/identity incompatibility, corrupted record/baseline ids, malformed types/times/catalog coverage/overlap, and rejected matrix cases have the specified exits/stdout.
 
 Run: `git diff --check -- scripts/agent-model-drift.py scripts/agent-model-drift-schema.py tests/agent_model_drift_test_support.py tests/test_agent_model_drift_schema.py`
 

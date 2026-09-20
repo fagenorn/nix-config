@@ -83,4 +83,8 @@ Independent Phase-5 reviewer `/root/issue_98/issue98_plan_review`, requested `gp
 
 **7 accepted / 0 rejected / 0 deferred.** Accepted: correct task/delivery SHA identities; forbid path-filtered evidence and spell the producer/validator/checker/range gate; pre-decompose cumulative files for review caps; add comparison rows and requested-host validation (D10); add context-only cache-read ratio (D11); accept legacy v1 without telemetry as inconclusive (D12); and expand malformed/incompatible CLI fixtures. The module/test split is D13.
 
+Independent scoped re-reviewer `/root/issue_98/issue98_plan_rereview`, requested `gpt-5.6-sol` / `high`, observed execution telemetry `unknown`, reviewed all six members from `afa1d975b2400c930fd325519fe008bf46a9ce91` through `d9f941c0af1047defc2e7adbe07a13efeb2f3c0b` and confirmed all seven original findings resolved.
+
+**3 accepted / 0 rejected / 0 deferred.** Accepted: restore exact report identity/time/input-digest assertions plus corrupted record/baseline-id cases; construct current and legacy consumer fixtures through the real producer projection and preserve complete accounting members when varying cache counters; and align the design boundary with the five task slices. These restore already-decided contracts and introduce no new decision-ledger row.
+
 ---
