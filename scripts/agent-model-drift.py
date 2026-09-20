@@ -21,6 +21,13 @@ routing_logic = importlib.util.module_from_spec(_routing_spec)
 sys.modules[_routing_spec.name] = routing_logic
 _routing_loader.exec_module(routing_logic)
 
+_scheduling_loader = importlib.machinery.SourceFileLoader(
+    "agent_model_drift_scheduling", str(Path(__file__).with_name("agent-model-drift-scheduling.py")))
+_scheduling_spec = importlib.util.spec_from_loader(_scheduling_loader.name, _scheduling_loader)
+scheduling_logic = importlib.util.module_from_spec(_scheduling_spec)
+sys.modules[_scheduling_spec.name] = scheduling_logic
+_scheduling_loader.exec_module(scheduling_logic)
+
 
 def _finding(code):
     return {"code": code, "run_id": None, "dispatch": None, "role": None, "count": 1}
@@ -72,16 +79,21 @@ def evaluate(record, baseline, matrix, matrix_digest, now):
     state = ("drifted" if any(item["code"] in routing_logic.DRIFT_CODES for item in findings)
              else "conforming" if not findings else "inconclusive")
     routing = {"state": state, "eligible_events": 0 if telemetry is None else telemetry["source_coverage"]["routing"]["eligible_events"], "evaluated_events": evaluated_events, "comparisons": comparisons, "findings": findings}
-    unavailable = {"value": None, "coverage": {"state": "unavailable"}}
-    metrics = {name: dict(unavailable) for name in (
-        "spawn_attempts", "capacity_rejections", "waits", "follow_ups",
-        "wait_input_tokens", "covered_input_tokens", "slot_capacity_seconds",
-        "claimed_slot_seconds")}
+    if telemetry is None:
+        metrics = {name: {"value": None, "coverage": {"state": "none",
+                   "eligible_events": 0, "paired_events": 0,
+                   "reasons": [{"code": "source_unsupported", "count": 1}]},
+                   "cohort_digest": None} for name in scheduling_logic.METRICS}
+        scheduling = {"state": "unmeasured", "metrics": metrics,
+                      "wait_token_share": None, "occupancy": None}
+    else:
+        scheduling = scheduling_logic.project_scheduling(
+            telemetry["runs"], telemetry["source_coverage"], telemetry["event_window"])
+    context = scheduling_logic.project_context(record["record"]["fleet"])
     return {"schema_version": 1, "kind": "agent-model-drift-report", "evaluated_at": now,
             "inputs": {"record": record["record"]["record_id"], "matrix": matrix_digest, "baseline": baseline["baseline_id"]},
             "state": state, "routing": routing,
-            "scheduling": {"state": "unmeasured", "metrics": metrics, "wait_token_share": unavailable, "occupancy": unavailable},
-            "context": {"cache_read_ratio": unavailable}}
+            "scheduling": scheduling, "context": context}
 
 
 def main(argv=None):
