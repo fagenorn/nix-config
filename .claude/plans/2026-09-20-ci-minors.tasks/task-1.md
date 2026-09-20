@@ -10,7 +10,7 @@
 - Produces: `workflow_permissions() -> dict[str, str]`, `job_name(line: str) -> str | None`, `required_contexts() -> list[str]`, and an exact `EXPECTED_PROTECTION_PAYLOAD` fixture used by the existing assertions.
 
 **Invariants:**
-- The only top-level token permission is `contents: read` (D1).
+- The only top-level token permission is `contents: read`, and no job overrides it (D1, D4).
 - The complete protection payload contains all four API keys and one provider-bound check: `{"context": "Nix Eval", "app_id": 15368}` (D2).
 - `job_name` returns `Nix Eval` for plain, single-quoted, and double-quoted YAML scalar spellings, and returns `None` for non-job-name lines (D3).
 - All existing trigger, plain-job, green-without-work, command, and evaluated-attribute assertions remain green.
@@ -36,6 +36,13 @@ class WorkflowShape(unittest.TestCase):
     def test_workflow_uses_only_minimum_permissions(self):
         self.assertEqual(EXPECTED_WORKFLOW_PERMISSIONS, workflow_permissions())
 
+    def test_jobs_do_not_override_workflow_permissions(self):
+        offenders = {
+            key: [line.strip() for line in block if JOB_PERMISSIONS_RE.match(line)]
+            for key, block in job_blocks().items()
+        }
+        self.assertEqual({}, {key: lines for key, lines in offenders.items() if lines})
+
     def test_job_name_extraction_removes_yaml_quotes(self):
         for source in (
             "    name: Nix Eval",
@@ -52,7 +59,7 @@ class ProtectionPayload(unittest.TestCase):
         self.assertEqual(EXPECTED_PROTECTION_PAYLOAD, payload())
 ```
 
-Implement only the parsing helpers needed to let the tests run far enough to demonstrate fixture failures. `workflow_permissions()` must read the `permissions` top-level block through `_top_level_block` and accept only two-space `key: value` entries. `job_name()` must return the first non-`None` capture from `JOB_NAME_RE` or `None` when it does not match. Update `job_names()` to call `job_name()`.
+Implement only the parsing helpers needed to let the tests run far enough to demonstrate fixture failures. `workflow_permissions()` must read the `permissions` top-level block through `_top_level_block` and accept only two-space `key: value` entries. Define `JOB_PERMISSIONS_RE` to match only a four-space job attribute named `permissions`, in block or inline form, so nested step text cannot trigger it; the assertion must fail on any job-level override (D4). `job_name()` must return the first non-`None` capture from `JOB_NAME_RE` or `None` when it does not match. Update `job_names()` to call `job_name()`.
 
 - [ ] **Step 2: Run the focused suite and confirm the contract failures**
 
@@ -75,7 +82,7 @@ at workflow scope before `jobs:`. In `.github/branch-protection.json`, replace t
 "checks": [{"context": "Nix Eval", "app_id": 15368}]
 ```
 
-Keep the other three top-level payload members and `strict: false` unchanged. Define `JOB_NAME_RE` with three alternatives that separately capture double-quoted, single-quoted, or plain scalar contents; the quote delimiters must sit outside every capture. Make `required_contexts()` derive context strings from the `checks` array. Remove any assertion of the deprecated `contexts` member in favor of the full-payload equality test.
+Keep the other three top-level payload members and `strict: false` unchanged. Define `JOB_NAME_RE` with three alternatives that separately capture double-quoted, single-quoted, or plain scalar contents; the quote delimiters must sit outside every capture. Make `required_contexts()` derive context strings from the `checks` array. Remove any assertion of the deprecated `contexts` member in favor of the full-payload equality test. Update the workflow's adjacent “sole entry” comment and the test's D2 `contexts` comment to describe the single provider-bound check and the context list derived from `checks`.
 
 - [ ] **Step 4: Verify the focused and repository workflow suites**
 
