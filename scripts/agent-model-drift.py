@@ -36,13 +36,14 @@ def evaluate(record, baseline, matrix, matrix_digest, now):
         if now_time >= schema.canonical_time(baseline["valid_before"]):
             findings.append(_finding("BASELINE_STALE"))
         producer = telemetry["producer"]
-        if producer["harness_versions"] and any(value is None for value in producer["harness_versions"].values()):
+        missing_identity = any(value is None for value in producer["harness_versions"].values())
+        if missing_identity:
             findings.append(_finding("IDENTITY_MISSING"))
-        if (baseline["matrix_digest"] != matrix_digest or baseline["producer"] != {"name": producer["name"], "version": producer["version"], "telemetry_schema_version": telemetry["schema_version"]} or baseline["harness_versions"] != producer["harness_versions"]):
+        if (baseline["matrix_digest"] != matrix_digest or baseline["producer"] != {"name": producer["name"], "version": producer["version"], "telemetry_schema_version": telemetry["schema_version"]} or (not missing_identity and baseline["harness_versions"] != producer["harness_versions"])):
             findings.append(_finding("IDENTITY_MISMATCH"))
         if telemetry["source_coverage"]["routing"]["state"] != "full":
             findings.append(_finding("ROUTING_COVERAGE_MISSING"))
-    findings.sort(key=lambda item: (item["code"], "", "", ""))
+    findings.sort(key=lambda item: (item["code"], item["run"] or "", item["dispatch"] or "", item["role"] or ""))
     state = "conforming" if not findings else "inconclusive"
     routing = {"state": state, "eligible_events": 0 if telemetry is None else telemetry["source_coverage"]["routing"]["eligible_events"], "evaluated_events": 0, "comparisons": [], "findings": findings}
     unavailable = {"value": None, "coverage": {"state": "unavailable"}}

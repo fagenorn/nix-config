@@ -13,6 +13,11 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _METRICS = ("spawn_attempts", "capacity_rejections", "waits", "follow_ups",
             "wait_input_tokens", "covered_input_tokens", "slot_capacity_seconds",
             "claimed_slot_seconds")
+_REASONS = {"timestamp_missing", "request_missing", "request_host_missing",
+            "request_host_conflict", "result_missing", "child_missing",
+            "dispatch_missing", "role_ambiguous", "execution_model_missing",
+            "execution_effort_missing", "runtime_version_missing",
+            "source_unsupported", "cohort_incomplete"}
 
 
 class InputError(ValueError):
@@ -77,7 +82,7 @@ def _coverage(value, pointer):
     codes = []
     for item in value["reasons"]:
         _closed(item, ("code", "count"), pointer + "/reasons")
-        if not isinstance(item["code"], str) or not item["code"]:
+        if item["code"] not in _REASONS:
             raise InputError(pointer + " reason invalid")
         _nonnegative(item["count"], pointer)
         if item["count"] == 0:
@@ -86,7 +91,8 @@ def _coverage(value, pointer):
     if codes != sorted(set(codes)):
         raise InputError(pointer + " reasons must be sorted unique")
     expected = "full" if not codes else "partial" if value["paired_events"] else "none"
-    if value["state"] != expected:
+    if (value["state"] != expected or (value["state"] == "full" and
+            value["paired_events"] != value["eligible_events"])):
         raise InputError(pointer + " state does not match coverage")
 
 
@@ -111,12 +117,45 @@ def _scheduling(value, pointer):
 def _metric(value, pointer):
     _closed(value, ("value", "coverage", "cohort_digest"), pointer)
     _coverage(value["coverage"], pointer + "/coverage")
-    if value["value"] is not None:
+    if value["coverage"]["state"] == "full":
+        if value["value"] is None:
+            raise InputError(pointer + " full metric unavailable")
         _nonnegative(value["value"], pointer + "/value")
-        if value["coverage"]["state"] != "full" or not isinstance(value["cohort_digest"], str) or not _DIGEST.fullmatch(value["cohort_digest"]):
+        if not isinstance(value["cohort_digest"], str) or not _DIGEST.fullmatch(value["cohort_digest"]):
             raise InputError(pointer + " metric identity invalid")
-    elif value["cohort_digest"] is not None:
+    elif value["value"] is not None or value["cohort_digest"] is not None:
         raise InputError(pointer + " unavailable metric has digest")
+
+
+def _nullable_string(value, pointer):
+    if value is not None and (not isinstance(value, str) or not value):
+        raise InputError(pointer + " must be a non-empty string or null")
+
+
+def _observation(value, pointer):
+    _closed(value, ("declaration", "requested", "configured", "observed", "escalation",
+                    "count", "first_event_at", "last_event_at"), pointer)
+    _closed(value["declaration"], ("dispatch_id", "role", "authority"), pointer + "/declaration")
+    if value["declaration"]["authority"] not in ("structured-dispatch", "runtime-agent-type", "unknown"):
+        raise InputError(pointer + " declaration authority invalid")
+    _nullable_string(value["declaration"]["dispatch_id"], pointer)
+    _nullable_string(value["declaration"]["role"], pointer)
+    for member in ("requested", "configured"):
+        _closed(value[member], ("host", "model", "effort"), pointer + "/" + member)
+        for key in value[member]: _nullable_string(value[member][key], pointer)
+    _closed(value["observed"], ("host", "model", "effort", "authority"), pointer + "/observed")
+    for key in ("host", "model", "effort"): _nullable_string(value["observed"][key], pointer)
+    if value["observed"]["authority"] not in ("assistant-execution", "codex-rollout"):
+        raise InputError(pointer + " observed authority invalid")
+    if value["escalation"] is not None:
+        _closed(value["escalation"], ("source_dispatch_id", "reason_code"), pointer + "/escalation")
+        for key in value["escalation"]: _nullable_string(value["escalation"][key], pointer)
+    _nonnegative(value["count"], pointer)
+    if value["count"] == 0:
+        raise InputError(pointer + " count invalid")
+    first, last = canonical_time(value["first_event_at"]), canonical_time(value["last_event_at"])
+    if first > last:
+        raise InputError(pointer + " event order invalid")
 
 
 def _telemetry(value, selected):
@@ -136,6 +175,10 @@ def _telemetry(value, selected):
     for endpoint in ("start", "end"):
         if value["event_window"][endpoint] is not None:
             canonical_time(value["event_window"][endpoint])
+    if ((value["event_window"]["start"] is None) != (value["event_window"]["end"] is None)):
+        raise InputError("telemetry window must be bounded or absent")
+    if value["event_window"]["start"] is not None and not (canonical_time(value["event_window"]["start"]) < canonical_time(value["event_window"]["end"])):
+        raise InputError("telemetry window order invalid")
     source = value["source_coverage"]
     _closed(source, ("routing", "scheduling", "source_only"), "/execution_telemetry/source_coverage")
     _coverage(source["routing"], "/execution_telemetry/source_coverage/routing")
@@ -159,6 +202,11 @@ def _telemetry(value, selected):
         _coverage(run["routing"]["coverage"], "/execution_telemetry/runs/routing/coverage")
         if not isinstance(run["routing"]["observations"], list):
             raise InputError("routing observations invalid")
+        observed = run["routing"]["observations"]
+        for index, observation in enumerate(observed):
+            _observation(observation, "/execution_telemetry/runs/routing/observations/" + str(index))
+        if observed != sorted(observed, key=lambda item: json.dumps({key: item[key] for key in ("declaration", "requested", "configured", "observed", "escalation")}, sort_keys=True, separators=(",", ":"))):
+            raise InputError("routing observations must be canonical order")
         _closed(run["scheduling"], _METRICS, "/execution_telemetry/runs/scheduling")
         routing.append(run["routing"]["coverage"])
         for name in _METRICS:
@@ -200,8 +248,9 @@ def validate_record(value):
     body = {key: item for key, item in value.items() if key not in ("record_id", "generated_at")}
     if canonical_digest(body) != value["record_id"]:
         raise InputError("record digest mismatch")
-    telemetry = value.get("execution_telemetry")
-    if telemetry is not None:
+    telemetry = None
+    if "execution_telemetry" in value:
+        telemetry = value["execution_telemetry"]
         _telemetry(telemetry, selected)
     return {"record": value, "telemetry": telemetry}
 
@@ -209,6 +258,7 @@ def validate_record(value):
 def load_validated_matrix(root):
     root = Path(root)
     module_path = root / "home/common/agent-skills/scripts/agent-model-matrix.py"
+    previous = sys.modules.get("agent_model_matrix_for_drift")
     try:
         loader = importlib.machinery.SourceFileLoader("agent_model_matrix_for_drift", str(module_path))
         spec = __import__("importlib.util").util.spec_from_loader(loader.name, loader)
@@ -219,8 +269,13 @@ def load_validated_matrix(root):
         if errors:
             raise InputError("matrix validation failed")
         return module.load_matrix(root)
-    except (OSError, ValueError, InputError) as error:
+    except Exception as error:
         raise InputError("matrix validation failed") from error
+    finally:
+        if previous is None:
+            sys.modules.pop("agent_model_matrix_for_drift", None)
+        else:
+            sys.modules["agent_model_matrix_for_drift"] = previous
 
 
 def validate_baseline(value, matrix, matrix_digest):
@@ -238,9 +293,10 @@ def validate_baseline(value, matrix, matrix_digest):
     if (not isinstance(value["harness_versions"], dict) or not value["harness_versions"]
             or not isinstance(value["model_catalog_version"], str) or not value["model_catalog_version"]
             or not isinstance(value["escalation_reason_codes"], list)
-            or value["escalation_reason_codes"] != sorted(set(value["escalation_reason_codes"]))
             or any(not isinstance(code, str) or not code for code in value["escalation_reason_codes"])):
         raise InputError("baseline identity invalid")
+    if value["escalation_reason_codes"] != sorted(set(value["escalation_reason_codes"])):
+        raise InputError("baseline escalation codes invalid")
     for versions in value["harness_versions"].values():
         if (not isinstance(versions, list) or versions != sorted(set(versions))
                 or any(not isinstance(item, str) or not item for item in versions)):
@@ -264,6 +320,10 @@ def validate_baseline(value, matrix, matrix_digest):
                 item = catalog[key][tier]
                 _closed(item, ("allowed", "prohibited"), "/baseline/catalog")
                 allowed, prohibited = item["allowed"], item["prohibited"]
-                if any(not isinstance(x, str) or not x for x in allowed + prohibited) or allowed != sorted(set(allowed)) or prohibited != sorted(set(prohibited)) or set(allowed) & set(prohibited):
+                if (not isinstance(allowed, list) or not isinstance(prohibited, list)
+                        or any(not isinstance(x, str) or not x for x in allowed)
+                        or any(not isinstance(x, str) or not x for x in prohibited)):
+                    raise InputError("baseline classification invalid")
+                if allowed != sorted(set(allowed)) or prohibited != sorted(set(prohibited)) or set(allowed) & set(prohibited):
                     raise InputError("baseline classification invalid")
     return value
