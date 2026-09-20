@@ -12,6 +12,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,8 +34,9 @@ def record(rec):
 
 def assistant(msg_id, usage=None, content=None, model="claude-opus-5",
               effort="xhigh", stop_reason="tool_use", cwd="/Users/me/repo",
-              agent_id=None, attribution_skill=None, sidechain=False):
-    return record({
+              agent_id=None, attribution_skill=None, sidechain=False, *,
+              timestamp=None, version=None):
+    value = {
         "type": "assistant",
         "cwd": cwd,
         "effort": effort,
@@ -48,6 +50,22 @@ def assistant(msg_id, usage=None, content=None, model="claude-opus-5",
             "usage": usage,
             "content": content or [],
         },
+    }
+    if timestamp is not None:
+        value["timestamp"] = timestamp
+    if version is not None:
+        value["version"] = version
+    return record(value)
+
+
+def agent_result(tool_id, agent_id, *, timestamp, status="completed"):
+    return record({
+        "type": "user", "timestamp": timestamp,
+        "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": tool_id, "content": "done",
+        }]},
+        "toolUseResult": {"agentId": agent_id, "agentType": "reviewer",
+                          "status": status, "content": "done"},
     })
 
 
@@ -1021,6 +1039,87 @@ def run_main(*argv):
         except SystemExit as exit_error:
             code = exit_error.code
     return buf.getvalue(), code
+
+
+class ExecutionTelemetryRoutingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    REQUEST_HOST_ABSENT = object()
+
+    def claude_pair(self, *, request_at="2026-09-20T10:05:00Z",
+                    execution_at="2026-09-20T10:06:00Z",
+                    request_host=REQUEST_HOST_ABSENT):
+        project = self.root / "-Users-me-repo-issue-120-x"
+        child_dir = project / "s1" / "subagents"
+        child_dir.mkdir(parents=True, exist_ok=True)
+        launch_input = {"subagent_type": "reviewer", "role": "reviewer",
+                        "model": "opus", "effort": "high", "prompt": "review"}
+        if request_host is not self.REQUEST_HOST_ABSENT:
+            launch_input["host"] = request_host
+        launch = {"type": "tool_use", "id": "toolu-route-1", "name": "Agent",
+                  "input": launch_input}
+        root_file = project / "s1.jsonl"
+        root_file.write_text(assistant("launch", usage=USAGE_1, content=[launch],
+                                       timestamp=request_at, version="2.1.0")
+                             + agent_result("toolu-route-1", "agent-child-1",
+                                            timestamp="2026-09-20T10:05:30Z"), encoding="utf-8")
+        (child_dir / "child.jsonl").write_text(
+            assistant("child", usage=USAGE_2, model="claude-opus-5-20260901", effort="high",
+                      agent_id="agent-child-1", sidechain=True, timestamp=execution_at,
+                      version="2.1.0"), encoding="utf-8")
+        return root_file
+
+    def json_record(self, *extra):
+        raw, code = run_main("--projects-dir", str(self.root), "--days", "1", "--format", "json",
+                             "--events-since", "2026-09-20T10:00:00Z",
+                             "--events-before", "2026-09-20T11:00:00Z", *extra)
+        self.assertIsNone(code)
+        return json.loads(raw)
+
+    def test_exact_claude_request_result_child_pair_is_observed(self):
+        old_file = self.claude_pair()
+        os.utime(old_file, (1, 1))
+        telemetry = self.json_record()["execution_telemetry"]
+        self.assertEqual(telemetry["event_window"], {"start": "2026-09-20T10:00:00Z",
+                                                      "end": "2026-09-20T11:00:00Z"})
+        self.assertEqual(telemetry["producer"], {"name": "agent-costs", "version": 1,
+                         "harness_versions": {"claude": ["2.1.0"]}})
+        self.assertEqual(telemetry["source_coverage"]["routing"],
+                         {"state": "full", "eligible_events": 1, "paired_events": 1, "reasons": []})
+        observation = telemetry["runs"][0]["routing"]["observations"][0]
+        self.assertEqual(observation["requested"], {"host": "claude", "model": "opus", "effort": "high"})
+        self.assertEqual(observation["observed"], {"host": "claude", "model": "claude-opus-5-20260901",
+                                                     "effort": "high", "authority": "assistant-execution"})
+
+    def test_requested_host_missing_or_conflicting_is_null_with_reason(self):
+        for host, reason in ((None, "request_host_missing"), ("codex", "request_host_conflict")):
+            with self.subTest(host=host):
+                self.claude_pair(request_host=host)
+                telemetry = self.json_record()["execution_telemetry"]
+                self.assertIsNone(telemetry["runs"][0]["routing"]["observations"][0]["requested"]["host"])
+                self.assertIn({"code": reason, "count": 1}, telemetry["source_coverage"]["routing"]["reasons"])
+
+    def test_event_window_uses_event_time_while_accounting_keeps_file_mtime(self):
+        old_file = self.claude_pair(); os.utime(old_file, (1, 1))
+        os.utime(old_file.parent / "s1" / "subagents" / "child.jsonl", (1, 1))
+        record_value = self.json_record()
+        self.assertEqual(record_value["strata"]["claude"]["runs"], [])
+        self.assertEqual(record_value["execution_telemetry"]["runs"][0]["routing"]["observations"][0]["count"], 1)
+
+    def test_missing_execution_timestamp_is_inconclusive_not_outside(self):
+        self.claude_pair(execution_at=None)
+        routing = self.json_record()["execution_telemetry"]["source_coverage"]["routing"]
+        self.assertEqual(routing["state"], "none")
+        self.assertIn({"code": "timestamp_missing", "count": 1}, routing["reasons"])
+
+    def test_unpaired_event_flags_and_invalid_range_are_usage_errors(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            out, code = run_main("--projects-dir", str(self.root), "--format", "json",
+                                 "--events-since", "2026-09-20T10:00:00Z")
+        self.assertEqual((out, code), ("", 2))
 
 
 class BuildRecordTest(unittest.TestCase):
