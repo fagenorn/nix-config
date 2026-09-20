@@ -172,6 +172,22 @@ class SchedulingProjectionTest(DriftCliCase):
                                          "denominator": denominator,
                                          "coverage": "unavailable"})
 
+    def test_cache_ratio_projects_absent_fleet_total_members(self):
+        cases = (("totals", None, None), ("cache_read", None, 0),
+                 ("input_total", 0, None))
+        for member, numerator, denominator in cases:
+            with self.subTest(member=member):
+                value = record_value()
+                if member == "totals":
+                    del value["fleet"][member]
+                else:
+                    del value["fleet"]["totals"][member]
+                code, out, err = self.run(record=seal_record(value))
+                self.assertEqual((code, err), (0, ""))
+                self.assertEqual(json.loads(out)["context"]["cache_read_ratio"], {
+                    "value": None, "numerator": numerator,
+                    "denominator": denominator, "coverage": "unavailable"})
+
     def test_invalid_cache_totals_are_malformed_without_report(self):
         cases = [record_with_components(*components) for components in ((0, 0, -1), (0, 0, True))]
         above_total = record_with_components(0, 0, 10)
@@ -197,6 +213,46 @@ class SchedulingProjectionTest(DriftCliCase):
         metric = json.loads(out)["scheduling"]["metrics"]["spawn_attempts"]
         self.assertIsNone(metric["value"])
         self.assertEqual(metric["coverage"], unavailable)
+
+    def test_multi_run_and_full_zero_source_only_aggregate_deterministically(self):
+        names = ("spawn_attempts", "capacity_rejections", "waits", "follow_ups",
+                 "wait_input_tokens", "covered_input_tokens",
+                 "slot_capacity_seconds", "claimed_slot_seconds")
+        source_only = {"codex": {"routing": coverage(),
+                       "scheduling": {name: coverage() for name in names}}}
+        value = record_value(selected=("claude", "codex"), source_only=source_only)
+        first = value["execution_telemetry"]["runs"][0]
+        second = copy.deepcopy(first)
+        first["run_id"], second["run_id"] = "claude:repo:z", "claude:repo:a"
+        window = value["execution_telemetry"]["event_window"]
+        cohorts = {"spawn_attempts": (digest(["z"]), digest(["a"])),
+                   "capacity_rejections": (digest(["rz"]), digest(["ra"])),
+                   "waits": (digest(["wz"]), digest(["wa"])),
+                   "follow_ups": (digest(["fz"]), digest(["fa"])),
+                   "wait_input_tokens": (digest(["tz"]), digest(["ta"])),
+                   "covered_input_tokens": (digest(["tz"]), digest(["ta"])),
+                   "slot_capacity_seconds": (digest(window), digest(window)),
+                   "claimed_slot_seconds": (digest(window), digest(window))}
+        values = {"spawn_attempts": (2, 3), "capacity_rejections": (4, 5),
+                  "waits": (6, 7), "follow_ups": (8, 9),
+                  "wait_input_tokens": (20, 30), "covered_input_tokens": (100, 150),
+                  "slot_capacity_seconds": (60, 40), "claimed_slot_seconds": (30, 10)}
+        for name in names:
+            first["scheduling"][name] = full_metric(values[name][0], cohorts[name][0])
+            second["scheduling"][name] = full_metric(values[name][1], cohorts[name][1])
+            value["execution_telemetry"]["source_coverage"]["scheduling"][name] = coverage()
+        value["execution_telemetry"]["runs"] = [first, second]
+        code, out, err = self.run(record=seal_record(value))
+        self.assertEqual((code, err), (3, ""))
+        scheduling = json.loads(out)["scheduling"]
+        self.assertEqual(scheduling["state"], "measured")
+        self.assertEqual(set(scheduling["metrics"]), set(names))
+        for name in names:
+            self.assertEqual(scheduling["metrics"][name], {
+                "value": sum(values[name]), "coverage": coverage(),
+                "cohort_digest": digest(sorted(cohorts[name]))})
+        self.assertEqual(scheduling["wait_token_share"], 0.2)
+        self.assertEqual(scheduling["occupancy"], 0.4)
 
 
 class RepositoryWiringTest(unittest.TestCase):

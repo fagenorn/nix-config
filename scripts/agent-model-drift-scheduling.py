@@ -4,12 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-
-METRICS = (
-    "spawn_attempts", "capacity_rejections", "waits", "follow_ups",
-    "wait_input_tokens", "covered_input_tokens", "slot_capacity_seconds",
-    "claimed_slot_seconds",
-)
+from agent_model_drift_schema import SCHEDULING_METRICS
 
 
 def _digest(value):
@@ -88,7 +83,8 @@ def project_scheduling(runs: list[dict], source_coverage: dict,
                        event_window: dict) -> dict:
     """Aggregate producer scheduling telemetry without inspecting source data."""
     _validate_pairs(runs, event_window)
-    metrics = {name: _aggregate_metric(name, runs, source_coverage) for name in METRICS}
+    metrics = {name: _aggregate_metric(name, runs, source_coverage)
+               for name in SCHEDULING_METRICS}
     states = {metric["coverage"]["state"] for metric in metrics.values()}
     state = ("measured" if states == {"full"} else "partial"
              if states & {"full", "partial"} else "unmeasured")
@@ -99,11 +95,12 @@ def project_scheduling(runs: list[dict], source_coverage: dict,
 
 def project_context(fleet: dict) -> dict:
     """Project the descriptive cache-read ratio from already-structured totals."""
-    try:
-        totals = fleet["totals"]
-        numerator, denominator = totals["cache_read"], totals["input_total"]
-    except (KeyError, TypeError) as error:
-        raise ValueError("fleet totals missing") from error
+    if not isinstance(fleet, dict):
+        raise ValueError("fleet is invalid")
+    totals = fleet.get("totals", {})
+    if not isinstance(totals, dict):
+        raise ValueError("fleet totals invalid")
+    numerator, denominator = totals.get("cache_read"), totals.get("input_total")
     for value in (numerator, denominator):
         if value is not None and (isinstance(value, bool) or not isinstance(value, int)
                                   or value < 0):

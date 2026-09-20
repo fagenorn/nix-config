@@ -83,7 +83,8 @@ def evaluate(record, baseline, matrix, matrix_digest, now):
         metrics = {name: {"value": None, "coverage": {"state": "none",
                    "eligible_events": 0, "paired_events": 0,
                    "reasons": [{"code": "source_unsupported", "count": 1}]},
-                   "cohort_digest": None} for name in scheduling_logic.METRICS}
+                   "cohort_digest": None}
+                   for name in schema.SCHEDULING_METRICS}
         scheduling = {"state": "unmeasured", "metrics": metrics,
                       "wait_token_share": None, "occupancy": None}
     else:

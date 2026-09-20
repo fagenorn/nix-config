@@ -10,9 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_METRICS = ("spawn_attempts", "capacity_rejections", "waits", "follow_ups",
-            "wait_input_tokens", "covered_input_tokens", "slot_capacity_seconds",
-            "claimed_slot_seconds")
+SCHEDULING_METRICS = (
+    "spawn_attempts", "capacity_rejections", "waits", "follow_ups",
+    "wait_input_tokens", "covered_input_tokens", "slot_capacity_seconds",
+    "claimed_slot_seconds",
+)
 _REASONS = {"timestamp_missing", "request_missing", "request_host_missing",
             "request_host_conflict", "result_missing", "child_missing",
             "dispatch_missing", "role_ambiguous", "execution_model_missing",
@@ -109,8 +111,8 @@ def _merged(values):
 
 
 def _scheduling(value, pointer):
-    _closed(value, _METRICS, pointer)
-    for name in _METRICS:
+    _closed(value, SCHEDULING_METRICS, pointer)
+    for name in SCHEDULING_METRICS:
         _coverage(value[name], pointer + "/" + name)
 
 
@@ -189,7 +191,7 @@ def _telemetry(value, selected):
         raise InputError("runs invalid")
     seen_sources = set()
     routing = []
-    scheduling = {name: [] for name in _METRICS}
+    scheduling = {name: [] for name in SCHEDULING_METRICS}
     for run in value["runs"]:
         _closed(run, ("run_id", "routing", "scheduling"), "/execution_telemetry/runs")
         if not isinstance(run["run_id"], str) or ":" not in run["run_id"]:
@@ -209,9 +211,9 @@ def _telemetry(value, selected):
             raise InputError("routing observation counts do not match coverage")
         if observed != sorted(observed, key=lambda item: json.dumps({key: item[key] for key in ("declaration", "requested", "configured", "observed", "escalation")}, sort_keys=True, separators=(",", ":"))):
             raise InputError("routing observations must be canonical order")
-        _closed(run["scheduling"], _METRICS, "/execution_telemetry/runs/scheduling")
+        _closed(run["scheduling"], SCHEDULING_METRICS, "/execution_telemetry/runs/scheduling")
         routing.append(run["routing"]["coverage"])
-        for name in _METRICS:
+        for name in SCHEDULING_METRICS:
             _metric(run["scheduling"][name], "/execution_telemetry/runs/scheduling/" + name)
             scheduling[name].append(run["scheduling"][name]["coverage"])
     for name, item in source["source_only"].items():
@@ -221,13 +223,13 @@ def _telemetry(value, selected):
             raise InputError("source-only routing cannot have paired observations")
         _scheduling(item["scheduling"], "source-only scheduling")
         routing.append(item["routing"])
-        for metric in _METRICS:
+        for metric in SCHEDULING_METRICS:
             scheduling[metric].append(item["scheduling"][metric])
     if set(selected) != seen_sources | set(source["source_only"]):
         raise InputError("selected source lacks a contribution")
     if source["routing"] != _merged(routing):
         raise InputError("routing aggregate does not match contributions")
-    for name in _METRICS:
+    for name in SCHEDULING_METRICS:
         if source["scheduling"][name] != _merged(scheduling[name]):
             raise InputError("scheduling aggregate does not match contributions")
 
