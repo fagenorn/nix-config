@@ -1104,7 +1104,8 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
         self.assertIsNone(observation["escalation"])
         self.assertEqual((observation["count"], observation["first_event_at"], observation["last_event_at"]),
                          (1, "2026-09-20T10:06:00Z", "2026-09-20T10:06:00Z"))
-        self.assertEqual(telemetry["runs"][0]["scheduling"], {})
+        self.assertEqual(tuple(telemetry["runs"][0]["scheduling"]),
+                         agent_costs.SCHEDULING_METRICS)
 
     def test_requested_host_missing_or_conflicting_is_null_with_reason(self):
         for host, reason in ((None, "request_host_missing"), ("codex", "request_host_conflict")):
@@ -1176,6 +1177,99 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
                              "--events-since", "2026-08-04T00:00:00Z", "--events-before", "2026-08-05T00:00:00Z")
         self.assertIsNone(code)
         self.assertEqual(json.loads(raw)["execution_telemetry"]["source_coverage"]["source_only"], {})
+
+
+class ExecutionTelemetrySchedulingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.projects = self.root / "claude"
+        self.projects.mkdir()
+
+    def run_record(self, *, bounded=True, strata="claude"):
+        args = ["--projects-dir", str(self.projects), "--days", "0", "--format", "json"]
+        if strata != "claude":
+            codex_root = self.root / "codex"
+            codex_root.mkdir(exist_ok=True)
+            args += ["--strata", strata, "--codex-sessions", str(codex_root)]
+        if bounded:
+            args += ["--events-since", "2026-09-20T10:00:00Z",
+                     "--events-before", "2026-09-20T11:00:00Z"]
+        raw, code = run_main(*args)
+        self.assertIsNone(code)
+        return json.loads(raw)
+
+    def write_root(self, *lines):
+        project = self.projects / "-Users-me-repo-issue-120-x"
+        project.mkdir(parents=True, exist_ok=True)
+        (project / "s1.jsonl").write_text("".join(lines), encoding="utf-8")
+
+    def test_complete_bounded_source_distinguishes_measured_zero_from_null(self):
+        self.write_root(assistant("ordinary", usage=USAGE_1, timestamp="2026-09-20T10:05:00Z",
+                                  version="2.1.0", stop_reason="end_turn"))
+        telemetry = self.run_record()["execution_telemetry"]
+        scheduling = telemetry["runs"][0]["scheduling"]
+        self.assertEqual(tuple(scheduling), agent_costs.SCHEDULING_METRICS)
+        self.assertEqual(scheduling["spawn_attempts"], {
+            "value": 0, "coverage": {"state": "full", "eligible_events": 0,
+            "paired_events": 0, "reasons": []}, "cohort_digest": agent_costs.cohort_digest([])})
+        for name in agent_costs.SCHEDULING_METRICS[1:]:
+            self.assertIsNone(scheduling[name]["value"], name)
+            self.assertEqual(scheduling[name]["coverage"]["state"], "none", name)
+            self.assertIn({"code": "source_unsupported", "count": 1},
+                          scheduling[name]["coverage"]["reasons"], name)
+            self.assertIsNone(scheduling[name]["cohort_digest"], name)
+        self.assertEqual(telemetry["source_coverage"]["scheduling"]["spawn_attempts"],
+                         scheduling["spawn_attempts"]["coverage"])
+
+    def test_spawn_attempts_are_event_time_selected_and_tool_id_deduped(self):
+        launch = {"type": "tool_use", "id": "toolu-spawn", "name": "Agent",
+                  "input": {"subagent_type": "reviewer", "prompt": "review"}}
+        outside = {"type": "tool_use", "id": "toolu-outside", "name": "Agent",
+                   "input": {"subagent_type": "reviewer", "prompt": "old"}}
+        self.write_root(
+            assistant("outside", usage=USAGE_1, content=[outside], timestamp="2026-09-20T09:59:59Z", version="2.1.0"),
+            assistant("inside", usage=USAGE_1, content=[launch], timestamp="2026-09-20T10:05:00Z", version="2.1.0"),
+            assistant("inside", usage=USAGE_1, content=[launch], timestamp="2026-09-20T10:05:00Z", version="2.1.0"))
+        metric = self.run_record()["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertEqual(metric["value"], 1)
+        self.assertEqual(metric["coverage"]["state"], "full")
+        self.assertEqual(metric["coverage"]["eligible_events"], 1)
+        self.assertEqual(metric["coverage"]["paired_events"], 1)
+
+    def test_missing_timestamp_and_unbounded_cohort_do_not_project_a_zero(self):
+        launch = {"type": "tool_use", "id": "toolu-no-time", "name": "Agent",
+                  "input": {"subagent_type": "reviewer", "prompt": "review"}}
+        self.write_root(assistant("launch", usage=USAGE_1, content=[launch], timestamp=None, version="2.1.0"))
+        bounded = self.run_record()["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertIsNone(bounded["value"])
+        self.assertIn({"code": "timestamp_missing", "count": 1}, bounded["coverage"]["reasons"])
+        unbounded = self.run_record(bounded=False)["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertIsNone(unbounded["value"])
+        self.assertIn({"code": "cohort_incomplete", "count": 1}, unbounded["coverage"]["reasons"])
+
+    def test_telemetry_contains_no_scheduling_verdict_vocabulary(self):
+        self.write_root(assistant("ordinary", usage=USAGE_1, timestamp="2026-09-20T10:05:00Z",
+                                  version="2.1.0", stop_reason="end_turn"))
+        encoded = json.dumps(self.run_record()["execution_telemetry"], sort_keys=True).lower()
+        for forbidden in ("waste", "cheap", "useful", "savings", "billing", "utilization"):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_selected_empty_codex_contributes_without_a_run(self):
+        self.write_root(assistant("ordinary", usage=USAGE_1, timestamp="2026-09-20T10:05:00Z",
+                                  version="2.1.0", stop_reason="end_turn"))
+        telemetry = self.run_record(strata="both")["execution_telemetry"]
+        self.assertFalse(any(run["run_id"].startswith("codex:") for run in telemetry["runs"]))
+        codex = telemetry["source_coverage"]["source_only"]["codex"]
+        self.assertEqual(codex["routing"], {"state": "none", "eligible_events": 0, "paired_events": 0,
+                         "reasons": [{"code": "runtime_version_missing", "count": 1}]})
+        for name in agent_costs.SCHEDULING_METRICS:
+            self.assertEqual(codex["scheduling"][name], {"state": "none", "eligible_events": 0,
+                             "paired_events": 0, "reasons": [{"code": "source_unsupported", "count": 1}]})
+        self.assertEqual(telemetry["source_coverage"]["routing"]["reasons"], codex["routing"]["reasons"])
+        self.assertEqual(telemetry["source_coverage"]["scheduling"]["spawn_attempts"],
+                         codex["scheduling"]["spawn_attempts"])
 
 
 class BuildRecordTest(unittest.TestCase):
