@@ -12,6 +12,7 @@ import json
 import re
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
@@ -25,7 +26,9 @@ JOB_NAME_RE = re.compile(
     r"^    name:\s*(?:\"([^\"]*)\"|'([^']*)'|(\S.*?))\s*$"
 )
 JOB_IF_RE = re.compile(r"^    if:\s*(\S.*?)\s*$")
-JOB_PERMISSIONS_RE = re.compile(r"^    permissions:(?:\s|$)")
+JOB_PERMISSIONS_RE = re.compile(
+    r'''^    (?:"permissions"|'permissions'|permissions)\s*:(?:\s|$)'''
+)
 RENAMING_KEY_RE = re.compile(r"^    (strategy|uses):")
 # Keys that let a required job report success without its steps having run. A
 # step-level `if:` sits at six or eight spaces (`      - if:` as a step's first key,
@@ -98,13 +101,59 @@ def job_blocks():
     return blocks
 
 
+def _mapping_entry(line, indentation, scope):
+    """Return one constrained YAML mapping entry or reject an unknown one.
+
+    The workflow shape makes a full YAML parser unnecessary, but silently
+    ignoring a valid alternative spelling would turn this assertion into a
+    bypass.  This accepts the spellings used for permission and job keys, then
+    fails loudly when a non-comment entry at the guarded indentation falls
+    outside that constrained grammar.
+    """
+    prefix = " " * indentation
+    if not line.startswith(prefix) or line.startswith(prefix + " "):
+        return None
+    entry = line[indentation:]
+    if not entry or entry.startswith("#"):
+        return None
+    match = re.fullmatch(
+        r'''(?:"(?P<double>[^"]+)"|'(?P<single>[^']+)'|(?P<bare>[A-Za-z0-9_-]+))
+            \s*:\s*(?P<value>.*?)''',
+        entry,
+        re.VERBOSE,
+    )
+    if not match:
+        raise AssertionError(
+            f"cannot classify {scope} entry {line!r}; refusing to ignore it"
+        )
+    key = next(value for value in match.group("double", "single", "bare") if value)
+    return key, match.group("value")
+
+
 def workflow_permissions():
     """Return the two-space token permissions declared at workflow scope."""
     permissions = {}
     for line in _top_level_block("permissions"):
-        match = re.match(r"^  ([A-Za-z0-9_-]+):\s*(\S.*?)\s*$", line)
-        if match:
-            permissions[match.group(1)] = match.group(2)
+        entry = _mapping_entry(line, 2, "workflow permission")
+        if entry is not None:
+            key, value = entry
+            permissions[key] = value
+    return permissions
+
+
+def job_permission_lines(block):
+    """Return job-level permission entries after validating job attributes."""
+    permissions = []
+    for line in block:
+        entry = _mapping_entry(line, 4, "job attribute")
+        if entry is not None and entry[0] == "permissions":
+            # Keep the spelling pin close to the parser so the assertion is
+            # explicit about the job-level override it rejects.
+            if not JOB_PERMISSIONS_RE.match(line):
+                raise AssertionError(
+                    f"cannot classify job permission entry {line!r}; refusing to ignore it"
+                )
+            permissions.append(line.strip())
     return permissions
 
 
@@ -197,10 +246,42 @@ class WorkflowShape(unittest.TestCase):
 
     def test_jobs_do_not_override_workflow_permissions(self):
         offenders = {
-            key: [line.strip() for line in block if JOB_PERMISSIONS_RE.match(line)]
+            key: job_permission_lines(block)
             for key, block in job_blocks().items()
         }
         self.assertEqual({}, {key: lines for key, lines in offenders.items() if lines})
+
+    def test_permission_guards_recognize_quoted_keys_and_space_before_colons(self):
+        for source in ('  "issues": write', "  issues : write"):
+            with self.subTest(source=source):
+                with mock.patch(f"{__name__}.workflow_lines", return_value=[
+                    "permissions:",
+                    "  contents: read",
+                    source,
+                    "jobs:",
+                ]):
+                    self.assertEqual(
+                        {"contents": "read", "issues": "write"},
+                        workflow_permissions(),
+                    )
+
+        for source in ('    "permissions": write-all', "    permissions : write-all"):
+            with self.subTest(source=source):
+                self.assertEqual([source.strip()], job_permission_lines([source]))
+
+    def test_permission_guards_reject_unclassified_entries(self):
+        with mock.patch(f"{__name__}.workflow_lines", return_value=[
+            "permissions:",
+            "  contents: read",
+            "  [issues]: write",
+            "jobs:",
+        ]):
+            with self.assertRaisesRegex(
+                AssertionError, "cannot classify workflow permission"
+            ):
+                workflow_permissions()
+        with self.assertRaisesRegex(AssertionError, "cannot classify job attribute"):
+            job_permission_lines(["    [permissions]: write-all"])
 
     def test_job_name_extraction_removes_yaml_quotes(self):
         for source in (
