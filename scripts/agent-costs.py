@@ -60,7 +60,7 @@ RECORD_KIND = "agent-cost-record"
 EXECUTION_TELEMETRY_SCHEMA_VERSION = 1
 EXECUTION_TELEMETRY_PRODUCER_VERSION = 1
 TELEMETRY_REASON_CODES: tuple[str, ...] = (
-    "timestamp_missing", "timestamp_conflict", "request_missing", "request_host_missing",
+    "timestamp_missing", "request_missing", "request_host_missing",
     "request_host_conflict", "result_missing", "child_missing",
     "dispatch_missing", "role_ambiguous", "execution_model_missing",
     "execution_effort_missing", "runtime_version_missing",
@@ -1199,7 +1199,9 @@ def _spawn_metric(source, launches, start, end):
         if None in selected:
             reasons["timestamp_missing"] += 1
         elif len({format_rfc3339_utc(parse_rfc3339_utc(timestamp)) for timestamp in timestamps}) != 1:
-            reasons["timestamp_conflict"] += 1
+            # Replayed launch records must identify one event instant. Conflicting
+            # timestamps leave that instant unavailable to the bounded cohort.
+            reasons["timestamp_missing"] += 1
         else:
             paired += 1
             identities.append((tool_id,))

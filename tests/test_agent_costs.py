@@ -1238,6 +1238,22 @@ class ExecutionTelemetrySchedulingTest(unittest.TestCase):
         self.assertEqual(metric["coverage"]["eligible_events"], 1)
         self.assertEqual(metric["coverage"]["paired_events"], 1)
 
+    def test_conflicting_replayed_launch_timestamps_leave_spawn_attempts_unavailable(self):
+        launch = {"type": "tool_use", "id": "toolu-conflicting-time", "name": "Agent",
+                  "input": {"subagent_type": "reviewer", "prompt": "review"}}
+        self.write_root(
+            assistant("first", usage=USAGE_1, content=[launch],
+                      timestamp="2026-09-20T10:05:00Z", version="2.1.0"),
+            assistant("replayed", usage=USAGE_1, content=[launch],
+                      timestamp="2026-09-20T10:06:00Z", version="2.1.0"))
+        metric = self.run_record()["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertIsNone(metric["value"])
+        self.assertEqual(metric["coverage"], {
+            "state": "none", "eligible_events": 1, "paired_events": 0,
+            "reasons": [{"code": "timestamp_missing", "count": 1}],
+        })
+        self.assertIsNone(metric["cohort_digest"])
+
     def test_missing_timestamp_and_unbounded_cohort_do_not_project_a_zero(self):
         launch = {"type": "tool_use", "id": "toolu-no-time", "name": "Agent",
                   "input": {"subagent_type": "reviewer", "prompt": "review"}}
