@@ -1089,10 +1089,19 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
                          "harness_versions": {"claude": ["2.1.0"]}})
         self.assertEqual(telemetry["source_coverage"]["routing"],
                          {"state": "full", "eligible_events": 1, "paired_events": 1, "reasons": []})
+        self.assertEqual(telemetry["source_coverage"]["source_only"], {})
+        self.assertEqual(telemetry["runs"][0]["run_id"], "claude:repo:120")
         observation = telemetry["runs"][0]["routing"]["observations"][0]
+        self.assertEqual(observation["declaration"], {"dispatch_id": None, "role": "reviewer",
+                                                        "authority": "runtime-agent-type"})
         self.assertEqual(observation["requested"], {"host": "claude", "model": "opus", "effort": "high"})
+        self.assertEqual(observation["configured"], {"host": None, "model": None, "effort": None})
         self.assertEqual(observation["observed"], {"host": "claude", "model": "claude-opus-5-20260901",
                                                      "effort": "high", "authority": "assistant-execution"})
+        self.assertIsNone(observation["escalation"])
+        self.assertEqual((observation["count"], observation["first_event_at"], observation["last_event_at"]),
+                         (1, "2026-09-20T10:06:00Z", "2026-09-20T10:06:00Z"))
+        self.assertEqual(telemetry["runs"][0]["scheduling"], {})
 
     def test_requested_host_missing_or_conflicting_is_null_with_reason(self):
         for host, reason in ((None, "request_host_missing"), ("codex", "request_host_conflict")):

@@ -1218,24 +1218,23 @@ def _add_observation(bucket, observation, event_at):
     current["last_event_at"] = max(current["last_event_at"], event_at)
 
 
-def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
-                                project_filter, executor_factory):
+def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | None,
+                                codex_root: Path | None, start: datetime | None,
+                                end: datetime | None, project_filter: str | None,
+                                executor_factory) -> dict:
     """Independently correlate routing evidence from every selected source file."""
     del executor_factory  # correlation requires a deterministic global index
     source_versions = {source: set() for source in selected}
     runs = defaultdict(lambda: {"events": [], "observations": {}, "reasons": Counter()})
     source_events = defaultdict(list)
     source_reasons = defaultdict(Counter)
+    unassigned_events = defaultdict(list)
 
     if "claude" in selected and claude_root and claude_root.is_dir():
         children = defaultdict(list)
         roots = []
         for path in sorted(claude_root.rglob("*.jsonl")):
             records = list(_read_jsonl(path))
-            for rec in records:
-                version = rec.get("version")
-                if isinstance(version, str) and version:
-                    source_versions["claude"].add(version)
             if "subagents" in path.parts:
                 for rec in records:
                     if rec.get("type") == "assistant" and rec.get("agentId"):
@@ -1252,7 +1251,7 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
                 continue
             run_id = "claude:%s:%s" % (project, "none" if issue_key(path.parent.name, root_cwds) is None
                                         else issue_key(path.parent.name, root_cwds))
-            requests, results = {}, {}
+            requests, results = {}, defaultdict(list)
             for rec in records:
                 if rec.get("type") == "assistant":
                     for block in ((rec.get("message") or {}).get("content") or []):
@@ -1266,12 +1265,12 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
                     if isinstance(tur, dict) and isinstance(content, list):
                         for block in content:
                             if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
-                                if block["tool_use_id"] not in results:
-                                    results[block["tool_use_id"]] = tur.get("agentId")
+                                results[block["tool_use_id"]].append(tur.get("agentId"))
             used_agents = set()
             for tool_id, (request, _request_at) in requests.items():
                 reasons = Counter()
-                agent_id = results.get(tool_id)
+                candidates = results.get(tool_id, [])
+                agent_id = candidates[0] if len(candidates) == 1 else None
                 if agent_id:
                     used_agents.add(str(agent_id))
                 if not agent_id:
@@ -1304,6 +1303,9 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
                     if not model: local["execution_model_missing"] += 1
                     if not effort: local["execution_effort_missing"] += 1
                     paired = bool(model) and bool(effort)
+                    version = execution.get("version")
+                    if isinstance(version, str) and version:
+                        source_versions["claude"].add(version)
                     event = {"paired": paired, "reasons": local}
                     source_events["claude"].append(event); runs[run_id]["events"].append(event)
                     obs = {"declaration": declaration,
@@ -1326,22 +1328,40 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
                         source_events["claude"].append(event); runs[run_id]["events"].append(event)
 
     if "codex" in selected and codex_root and codex_root.is_dir():
+        # Mirror collect_codex_groups: a thread's root rollout CWD owns its
+        # project/issue identity, with all-CWD fallback only when no root exists.
+        thread_cwds = defaultdict(lambda: (Counter(), Counter()))
+        for candidate in sorted(codex_root.rglob("*.jsonl")):
+            for candidate_rec in _read_jsonl(candidate):
+                if candidate_rec.get("type") != "session_meta":
+                    continue
+                candidate_payload = candidate_rec.get("payload") or {}
+                session_id = candidate_payload.get("session_id") or candidate_payload.get("id")
+                cwd = candidate_payload.get("cwd") or ""
+                if session_id and cwd:
+                    all_cwds, root_cwds = thread_cwds[session_id]
+                    all_cwds[cwd] += 1
+                    if codex_is_root(candidate_payload):
+                        root_cwds[cwd] += 1
+                break
         for path in sorted(codex_root.rglob("*.jsonl")):
             records = list(_read_jsonl(path)); meta = next((r for r in records if r.get("type") == "session_meta"), None)
             if not meta: continue
             payload = meta.get("payload") or {}; version = payload.get("cli_version")
-            if isinstance(version, str) and version: source_versions["codex"].add(version)
             spawn = ((payload.get("source") or {}).get("subagent") or {}).get("thread_spawn") if isinstance(payload.get("source"), dict) else None
             if not isinstance(spawn, dict):
                 # A subagent rollout is execution-side evidence even when its
                 # structured launch was lost; do not manufacture full zero coverage.
                 if payload.get("thread_source") == "subagent" or payload.get("source"):
-                    source_events["codex"].append({"paired": False,
+                    unassigned_events["codex"].append({"paired": False,
                                                    "reasons": Counter({"request_missing": 1})})
                 continue
-            project = project_name("codex", Counter([payload.get("cwd") or ""]))
+            session_id = payload.get("session_id") or payload.get("id")
+            all_cwds, root_cwds = thread_cwds.get(session_id, (Counter(), Counter()))
+            canonical_cwds = root_cwds or all_cwds
+            project = project_name("codex", canonical_cwds)
             if project_filter and project_filter.lower() not in project.lower(): continue
-            issue = issue_key("codex", Counter([payload.get("cwd") or ""]))
+            issue = issue_key("codex", canonical_cwds)
             run_id = "codex:%s:%s" % (project, "none" if issue is None else issue)
             contexts = [r for r in records if r.get("type") == "turn_context"] or [meta]
             for context in contexts[:1]:
@@ -1351,6 +1371,8 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
                 if verdict is None:
                     local["timestamp_missing"] += 1; paired = False
                 else: paired = True
+                if isinstance(version, str) and version:
+                    source_versions["codex"].add(version)
                 requested_host = _request_host(spawn, "codex", local)
                 declaration = _declaration({"role": spawn.get("agent_role"), "dispatch_id": spawn.get("dispatch_id")}, local)
                 configured = (context.get("payload") or {})
@@ -1382,8 +1404,10 @@ def collect_execution_telemetry(selected, claude_root, codex_root, start, end,
         projected_runs.append({"run_id": run_id, "routing": {"coverage": routing,
                               "observations": sorted(item["observations"].values(), key=lambda x: json.dumps(x, sort_keys=True))}, "scheduling": {}})
     for source in selected:
-        if source not in run_sources:
-            source_only[source] = {"routing": _routing_coverage(source_events[source], source_reasons[source]), "scheduling": {}}
+        if source not in run_sources or unassigned_events[source]:
+            source_only[source] = {"routing": _routing_coverage(
+                unassigned_events[source] if source in run_sources else source_events[source],
+                source_reasons[source]), "scheduling": {}}
     top = _merge_coverage([run["routing"]["coverage"] for run in projected_runs] +
                           [item["routing"] for item in source_only.values()])
     return {"schema_version": EXECUTION_TELEMETRY_SCHEMA_VERSION,
