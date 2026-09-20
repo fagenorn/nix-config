@@ -6,13 +6,13 @@ This is the requested decision record as well as this issue's design. It is prod
 
 The native permission guard and the proposed release core both describe publication authority. The guard currently owns repository-owner and integration-branch tables, exact command grammar and some live merge checks. The core owns grants, immutable subjects, fenced execution and inspected outcomes. Without an explicit composition rule, either layer can mistake the other's acceptance for sufficient authority, and policy prose can drift from the actual owner set.
 
-The current implementation also has two exceptions to the required-status-check floor: feature merges into a distinct integration branch skip protection inspection, and integration-to-default release merges use a check rollup without requiring branch protection. These are existing gaps, not evidence that the core may weaken the floor.
+The current implementation also has two exceptions to the required-status-check floor: feature merges into a distinct integration branch skip protection inspection, and integration-to-default release merges use a check rollup without requiring branch protection. A third gap allows the delete-branch spelling to reach an integration-to-default PR without rejecting its permanent integration head. These are existing gaps, not evidence that core admission may preserve them.
 
 ## Solution
 
 Keep the guard as the terminal enforcement module. A core-issued grant is necessary for a core mutation and cannot override that module, host approval or provider enforcement. The native hook and the forge adapter must use one enforcement implementation at the provider mutation seam. An adapter subprocess must not bypass enforcement simply because no native tool hook observes it.
 
-For adopted GitHub projects, compile the guard's repository policy from existing authored tracker and VCS declarations selected through the authorized adoption set. Derive owner summaries and documentation from the same compiled projection. A declaration establishes identity; it does not authorize a repository, expand an owner roster or issue an action grant.
+For adopted GitHub projects, compile the guard's repository policy from verified fleet membership, the explicit release-profile forge target and the current authored tracker/VCS facts, with exact identity agreement. Derive owner summaries and documentation from the same compiled projection. A declaration establishes identity; it does not authorize a repository, expand an owner roster or issue an action grant.
 
 This decision delivery records that contract and repairs living owner prose. Runtime extraction, compilation, certification and cutover belong to the downstream release-adapter and adoption work. A new core operation remains inadmissible until those obligations are implemented and verified. Neither this record nor a passing legacy guard test certifies that operation.
 
@@ -40,22 +40,31 @@ The shared interface accepts the checked action identity, resolved repository po
 
 Both a direct native command and an adapter-subprocess invocation cross this seam. The adapter must not call the provider first and check the guard afterward. Enforcement failure is retained as a typed observation; raw credentials and provider payloads do not enter durable core state.
 
-### D3 — Exact authored inputs and authorized selection
+### D3 — Exact authored inputs, forge identity and adoption authority
 
-The current GitHub project class uses these authored fields, accessed through the resolver rather than by workflow reads of the project file:
+A tracker repository is not automatically a forge destination. The initial supported class is deliberately restricted to a GitHub tracker and the same GitHub forge repository, explicitly selected by the release profile. The resolver/compiler must prove agreement among the declared tracker slug, the selected forge operation's external target handle, and fresh provider/origin identity. Compare canonical provider repository identity as well as the exact normalized slug; redirects, aliases or a directory name do not silently rebind a target. A mismatch refuses admission. A project with different tracker and forge repositories is unsupported by this derivation.
 
-| Authored field | Derived guard fact |
+| Authored field | Derived fact and constraint |
 |---|---|
-| `bindings.tracker.kind` | Must equal `github` for this supported identity derivation. |
-| `bindings.tracker.repo_slug` | Exact repository membership key; its first component yields the owner summary. |
-| `bindings.vcs.integration_branch` | Declared integration base for that repository. |
+| `bindings.tracker.kind` | Must equal `github` for this initial class. It selects tracker semantics, not mutation authority. |
+| `bindings.tracker.repo_slug` | Candidate repository key and owner summary, usable only after the same-repository proof above. |
+| `bindings.vcs.integration_branch` | Declared integration base for that proven repository. |
 | `bindings.vcs.default_branch` | Declared default base; a distinct release arm exists only when integration differs. |
+| `release.profiles.<profile-id>.bindings` | The closed adapter-binding registry from #85 owns the selected operation's explicit external forge target handle; the tracker field cannot substitute for it. |
+| `release.profiles.<profile-id>.profile_version` | Explicit positive version bound with the canonical profile digest and selected adapter/config identities. |
 
-The resolver schema already names these fields. There is no additional authored `authorizedOwners` or `integrationBases` contract. A non-GitHub tracker cannot acquire a forge identity from a directory name, `project.id`, a guessed remote or the tracker slug; that class remains unsupported until a reviewed schema change supplies an explicit forge identity.
+The current resolver implements the first four fields. The latter two are the accepted #85 profile contract, not fields claimed as implemented today. #124 must deliver the closed forge binding sub-schema and same-repository proof with the release-profile resolver before core compilation is available. This decision does not invent a provider field spelling within that future sub-schema. A non-GitHub tracker or different tracker/forge target requires a reviewed explicit forge-identity contract; neither `project.id`, a guessed remote nor filesystem discovery supplies it.
 
-Compilation consumes only the explicitly adopted and authorized project set. It retains exact repository membership as well as the owner summary: admitting one repository must not admit every repository with the same owner. A newly edited declaration, filesystem discovery or a successful resolver call cannot expand that authorized set. Adding a new owner/destination requires authority for that change through adoption.
+There is no authored `authorizedOwners`, `integrationBases` or new combined “authorized adoption set.” Two existing owners provide separate necessary inputs:
 
-The derived projection binds schema/version, source and adoption-set digests, exact repository/default/integration facts and implementation identity. Unknown, duplicate, conflicting or stale input refuses compilation or invocation. Live origin/default identity disagreement is a refusal, not a reason to silently prefer the live or declared value. No projection may contain secrets or become another authored policy store.
+- **Adoption membership:** the adoption module owns the user-scope fleet registry accepted in [#67](https://github.com/fagenorn/nix-config/issues/67#issuecomment-5359370612). Only explicit post-integration `adopt verify --register`, after tracked-state conformance and resolution, activates membership. The retained #121 design/implementation specifies registry schema 1 as exactly `schema_version` and `projects`, with each project exactly `project_id` and `root`. This is retained implementation evidence, not a claim that #121 has shipped. The compiler reads it through that module, resolves current project identity and revalidates adoption/conformance evidence; no serialized resolver snapshot or permission fields are added to registry entries.
+- **Mutation authority:** the release core owns #84's scoped authorization and revocation semantics. Its verified authorization reference binds the concrete repository/destination, selected profile, principal, action/effect and current fence. Registration alone grants no push or merge permission; adoption-plan approval authorizes that adoption transaction, not later publication. A declaration edit or a matching owner summary cannot supply authority.
+
+Compilation uses verified membership, explicit profile/forge identity and current declared repository facts, retaining exact repository membership as well as its owner summary. Admitting one repository never admits its owner's other repositories. The reusable derived projection binds schema/implementation identity, registry content digest, verified adoption evidence identity, source/profile version and digests, and exact repository/default/integration facts. It contains no action grant, authorization reference, fence, secret or source-policy body. It is a derived policy cache, not an authority store.
+
+Fresh invocation rechecks the projection's bound inputs. Missing/removed registry membership, failed conformance or profile/source/target changes make that projection unusable. Separately, the core validates the current #84 grant and fence for the mutation and carries the unchanged #85 correlation envelope through D2, including release/profile/candidate, adapter/operation, action/attempt, target/expected subject, current fencing epoch and applicable authorization/credential-reference identifiers; expiration, revocation or a stale fence refuses the invocation through D1 without turning the static projection into a grant artifact. The live adapter/enforcement evidence binds those identifiers to the invocation; neither compiler nor guard re-evaluates the grant or stores those dynamic identifiers in the reusable projection. Preserve the core and guard verdicts as independent evidence. Re-registration cannot revive a revoked grant. The adoption module owns membership lifecycle, the profile resolver owns version/digest validation, and the core owns authority revocation. Schema changes use the platform's reviewed migration lifecycle, never an implicit default. This decision neither invents an unregister command nor alters the registry schema.
+
+The compiler capability remains unsupported until #124 and the adoption implementation consumed by #126/#129 provide the reviewed module contracts and conformance proof for this intersection. After implementation exists, absent live membership, authority or certification blocks the affected invocation. No caller may fill a missing contract with a local list or treat resolution/discovery as admission.
 
 ### D4 — Bridge truth and authorization prose
 
@@ -74,7 +83,11 @@ gh pr merge <positive-pr-number> --repo <detected-slug> --merge [--subject "<saf
 gh pr merge <positive-pr-number> --repo <detected-slug> --merge [--subject "<safe-subject>"]
 ```
 
-Brackets describe optional syntax; they are not literal argv. The first arm is a feature merge into the declared default or distinct integration branch. The second is exclusively the declared integration head into the default base and preserves the permanent integration branch. A single-branch profile has no distinct release-merge arm, as required by #90.
+Brackets describe optional syntax; they are not literal argv. For core admission, the first arm is a feature merge into the declared default or distinct integration branch: the inspected head must be present and different from every declared permanent default/integration branch. The second is exclusively the declared integration head into the default base and preserves the permanent integration branch. These are the required semantic shapes, not a claim that today's delete-branch arm enforces them. A single-branch profile has no distinct release-merge arm, as required by #90.
+
+The current no-delete arm enforces its release shape, but the delete-branch arm does not reject a permanent integration head. For example, a `dev → main` PR with passing default protection can currently be admitted with `--delete-branch`. #124 owns the native/shared-guard repair and exact negative fixture; the legacy native path remains affected until that repair lands. The new core operation remains inadmissible meanwhile.
+
+A supplied subject must be nonempty and satisfy the current `free_text_problem(subject, False)` predicate: no double quote, dollar sign, backtick, backslash, NUL, carriage return, newline or unpaired Unicode surrogate. The raw double-quoted spelling and parsed argv must agree. “Safe” never delegates this predicate to an adapter-specific approximation.
 
 Grant possession does not admit reordered flags, `--admin`, force/refspec/tag variants, arbitrary extra shell segments, an omitted repository, or another provider verb. The adapter renders and validates both raw spelling and argv consistently. Where a token must be omitted from lookup credentials, the adapter owns that credential handling; no secret value is serialized into a command contract.
 
@@ -119,11 +132,12 @@ The runtime implementation must cover each row below, with exact expected typed 
 | Nodo-like distinct integration and path-filtered CI | Both arms satisfy mandatory validation; an unreported required gate refuses even if optional jobs pass. |
 | Arcwave-like protection-inaccessible class | An otherwise valid grant still refuses when the mandatory floor cannot be established. |
 | Other owner or same-owner unadopted repository | Refuse before mutation; no owner-summary scope expansion. |
-| Unknown/malformed declaration, stale projection or changed authorized input set | Refuse; no default table or discovered-checkout fallback. |
-| Declared/live origin or default/integration disagreement | Refuse for the exact target; no silent rebinding. |
+| Unknown/malformed declaration, stale projection, absent registration/conformance, changed profile or revoked authorization | Refuse; no default table or discovered-checkout fallback. |
+| Tracker/selected forge target/live origin disagreement, or default/integration disagreement | Refuse for the exact target; no silent rebinding or tracker-derived mutation authority. |
 | Exact feature/release argv, unsafe subject, reordered flags, extra command or `--admin` | Only the declared grammar and shape can advance; all near misses refuse. |
 | Empty/missing required policy, failed/pending required check, passing optional rollup, lookup timeout/failure | Refuse despite otherwise valid grant and local verification. |
 | Wrong PR head, wrong base or closed PR | Refuse; earlier evidence cannot describe the changed candidate. |
+| Integration → default with `--delete-branch`, including passing default protection; default → integration with deletion; missing head identity | Refuse the delete spelling for either permanent head before mutation; the no-delete integration → default form remains subject to every other gate. |
 | Expired/consumed grant, stale fence, changed principal or missing spend authority | Refuse even if the final guard would otherwise allow. |
 | Valid grant plus final guard denial or host denial | No provider mutation; retain the separate denial without spending it as success. |
 | Adapter subprocess rather than native tool call | The same enforcement verdict applies at the mutation seam; no bypass by entry path. |
@@ -137,7 +151,7 @@ Static grammar tests use the existing native guard public CLI seam. Core composi
 
 This issue's delivered decision consists of this record and corrected living authorization prose. The decision fixes the required fixture corpus and refuses premature core admission; it does not deliver or certify the future core implementation. Review must judge the actual current source, exact declarations, both command arms, grant composition and every class above.
 
-#124 consumes D1–D8 for the forge adapter, shared enforcement extraction, exact grammar/provider mechanics, mandatory-check floor and target/head atomicity proof. #126 and #129 consume the authorized-set, declaration and conformance rules when adopting Nodo and Argus; adoption cannot make an unsupported adapter available. #117/#123 retain core lifecycle and envelope ownership. #130's eventual candidate-specific irreversible confirmation is separate and cannot be supplied by this architecture decision.
+#124 consumes D1–D8 for the forge adapter, shared enforcement extraction, closed profile forge binding and same-repository proof, permanent-head deletion refusal, mandatory-check floor and target/head atomicity proof. #126 and #129 consume the verified-membership, declaration and conformance rules when adopting Nodo and Argus; adoption cannot make an unsupported adapter available. #124 owns profile/forge identity and guard enforcement, while #117/#123 retain core lifecycle, envelope and per-invocation authorization ownership. #130's eventual candidate-specific irreversible confirmation is separate and cannot be supplied by this architecture decision.
 
 If runtime obligations cannot be completed in a downstream delivery, its affected operation stays explicitly unsupported or blocked with retained evidence. Closing this decision must not close those implementation obligations, mark an unadopted repository adopted, or claim protection gaps fixed. Update downstream references as part of authorized tracker reconciliation after the reviewed decision lands.
 
@@ -158,9 +172,9 @@ Implementing the release core or grant schema; adding a second ledger; extractin
 |---|---|---|---|
 | D1 | Compose core authority, final guard and host/provider enforcement as necessary conditions. | #84/#85, defense in depth, the issue's frontrunner. | A grant overrides denial or a guard allow creates authority; each removes an independent constraint. |
 | D2 | Share one final enforcement implementation across native hook and adapter mutation paths. | #64 neutral/native ownership; subprocesses need not trigger tool hooks. | Hook-only enforcement or duplicated adapter policy; either permits bypass/drift. |
-| D3 | Derive GitHub repository/owner/base facts from the exact existing tracker/VCS fields over the authorized adopted set. | Closed resolver schema and declared-policy ownership. | A new authored owner/base table, inferred forge identity or automatic owner-wide adoption. |
+| D3 | Compile verified membership/profile/repository policy; separately compose it with core invocation authority after exact tracker/forge identity proof. | Exact current tracker/VCS fields; #85 profile binding authority; #67 registration; #84 grant ownership. | An unbound authorized-set store, tracker-derived mutation authority or registration treated as a grant. |
 | D4 | Keep legacy behavior explicit while deriving living prose from its authoritative source and later compiled projection. | Single truth and immutable historical evidence. | Claiming future compilation already exists or editing past decisions to manufacture consistency. |
-| D5 | Preserve both exact ordered merge arms and require separately certified extensions for other mechanics. | Current parser, permanent integration branch, #90. | An unrestricted shell/provider escape justified by a grant. |
+| D5 | Preserve both exact ordered spellings and the exact subject predicate; forbid deletion of either permanent head, documenting the current gap. | Current parser and missing head check; permanent branches; #90. | Calling the current delete arm safe or allowing a provider/shell escape justified by a grant. |
 | D6 | Require provider-enforced mandatory PR validation for both arms and all repository classes. | The rejection KB is non-negotiable; optional rollup is not required validation. | Integration/private-plan exemptions or privileged bypasses. |
 | D7 | Preserve target-tip CAS and candidate-head identity; correct the head-precheck explanation and withhold admission pending proof. | #90's actual precondition, inspected GitHub interfaces and race reasoning. | Pretending a source-head condition, local lock or post-check is target CAS. |
 | D8 | Require the real grant/enforcement/provider seams and the complete denial/race fixture matrix. | Behavior-based conformance and #64 native certification. | A mock-only allow/deny table or a simulated test presented as native proof. |
