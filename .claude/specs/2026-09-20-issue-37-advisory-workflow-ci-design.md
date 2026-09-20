@@ -35,12 +35,16 @@ surface makes a narrow path list a weak observation sample, while the required
 
 The initial implementation records raw setup and suite outcomes, elapsed time,
 and Nix package-resolution/flake output in the Actions summary and logs. A
-tracked observation record defines a window of three completed, non-scheduled
-Ubuntu jobs, the fields to copy from those runs, and a follow-up decision
-template. The initial follow-up may only keep the job advisory: it records every
-setup failure, suite failure, cancellation, or timeout and extends the sample
-when fewer than three raw suite outcomes exist. Promotion is a separate future
-decision requiring stronger evidence and an updated protection fixture/test.
+tracked observation record defines a fixed cohort of the original three
+completed, non-scheduled Ubuntu manual runs, the fields to copy from those
+runs, and a follow-up decision template. A complete valid V1 record counts as
+an observation even when its suite raw outcome is `failure`; its non-passing
+result remains explicit. The initial follow-up may only keep the job advisory,
+and it must preserve every setup failure, suite failure, cancellation, timeout,
+or unavailable/malformed record without replacing an attempt to seek a green
+sample. Promotion is a separate future decision requiring stronger evidence, an
+updated protection fixture/test, and disposition of the tracked observed
+failure in issue #160.
 
 ## Decisions
 
@@ -77,9 +81,9 @@ decision requiring stronger evidence and an updated protection fixture/test.
 
 - Applying or changing live branch protection, adding a required context, or
   altering the sole `Nix Eval` context, app ID, job behavior, or permissions.
-- Prematurely declaring the observation window complete, promoting the job, or
-  treating absent Linux evidence as evidence of reliability. Recording a real,
-  qualified completed window is the follow-up task's allowed keep-advisory outcome.
+- Promoting the job or treating absent Linux evidence as evidence of reliability.
+  Recording the original finite cohort truthfully, including non-passing valid
+  observations, is the follow-up task's only allowed keep-advisory outcome.
 - Changing the workflow-suite recipe, adding a Python dependency, activating a
   NixOS or Darwin host, or incorporating unmerged issues 98 or 100.
 
@@ -95,6 +99,7 @@ decision requiring stronger evidence and an updated protection fixture/test.
 | D6 | Report the advisory job as `Agent Workflow Tests (advisory)` and pin that name offline. | The job name is the human-facing check interface distinguishing a completed observation from the required `Nix Eval` gate. | Reuse or leave an unspecified check name, which obscures advisory status in CI output. |
 | D7 | After Task 1 passes locally, is signed committed, and receives independent task review, the issue owner verifies the current lifecycle launch and publishes only the feature branch; Task 2 then dispatches and records evidence while the issue stays open. | The accepted Phase-5 review found shipping-after-SDD circular; lifecycle writes require the owner to re-check the active launch. | Have an unowned worker dispatch from an unpublished revision, or wait for PR/merge/closure before evidence can exist. |
 | D8 | Make one labeled V1 JSON record the raw-outcome source in both logs and summary; parse it exactly and use GitHub metadata only as a labelled fallback for missing-summary cancellation/timeout status and duration. | The accepted review found that summary-only data was not deterministically retrievable and continued-step conclusions lose raw outcomes. | Infer raw outcomes from job/step conclusions or use an unstructured log scrape. |
+| D9 | Supersede D4: evaluate the original finite cohort of three completed non-scheduled Ubuntu manual runs at the pinned published head as observations when each has one complete valid V1 raw record, including a raw `suite: failure`; retain non-passing counts and make only a keep-advisory decision. Never replace a failed attempt to obtain a green sample. Setup failure, cancellation, timeout, missing, malformed, or fallback-only records remain separately classified and cannot become passing outcomes. Cite observed publication failure follow-up #160 before any future promotion decision. | Run `35513790832` at `d1094c968ea16818de8073889d25ea9f99bd8deb` is a completed Ubuntu V1 record with successful checkout/Nix/just, `suite: failure`, and 111 seconds; excluding it would bias the required measured evidence and leave the D4 window unbounded. The existing `directory-before-first` failure is tracked by #160. | Count only successful suites, extend/retry the cohort for green samples, treat incomplete/fallback data as a passing record, or promote without the tracked-failure follow-up. |
 
 ## Planning revision provenance
 

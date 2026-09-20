@@ -5,7 +5,7 @@
 
 **Goal:** Run the workflow-suite recipe on Ubuntu as measured advisory CI without altering the required `Nix Eval` contract.
 
-**Architecture:** Task 1 adds the advisory job, its deterministic log-and-summary record, the empty evidence ledger, and local CI guidance. Once that slice locally passes, is signed committed, and independently task-reviewed, the issue owner checks the current lifecycle launch and publishes the feature branch under the existing grant; Task 2 alone owns bounded manual dispatch, foreground observation, and record updates while the issue remains open.
+**Architecture:** Task 1 adds the advisory job, its deterministic log-and-summary record, the empty evidence ledger, and local CI guidance. Once that slice locally passes, is signed committed, and independently task-reviewed, the issue owner checks the current lifecycle launch and publishes the feature branch under the existing grant; Task 2 alone owns the original bounded manual cohort, foreground observation, and record updates while the issue remains open.
 
 **Tech stack:** GitHub Actions YAML, Nix flakes, just, Python unittest, GitHub Actions summaries, GitHub REST Actions API, gh CLI.
 
@@ -15,17 +15,17 @@
 - Use `nix shell --inputs-from . nixpkgs#just`; add no dependency, activation, protection write, PR, merge, closure, or cleanup (D2, D7).
 - Report `Agent Workflow Tests (advisory)`, set a ten-minute timeout, run for PR/main-push/manual dispatch, skip schedules, and add no path filter (D2, D6).
 - Emit one compact, stable `AGENT_WORKFLOW_OBSERVATION_V1=` JSON line identically to logs and `$GITHUB_STEP_SUMMARY`; raw step outcomes are never inferred from continued-step conclusions (D3, D8).
-- Three qualifying real non-scheduled Ubuntu outcomes permit only keep-advisory. Failed, missing, cancelled, timed-out, or setup-failed attempts are retained and do not qualify (D4).
+- Evaluate all three original completed non-scheduled Ubuntu manual runs. A valid V1 raw record, including `suite: failure`, counts as an observation; preserve non-passing counts and permit only keep-advisory. Setup failure, missing, malformed, cancelled, timed-out, and fallback-only records are separately classified and never become passing outcomes; cite follow-up #160 before any future promotion decision (D9).
 
 ## Test seams
 
 - `tests/test_branch_protection.py` pins every named workflow step, raw outcome reference, summary schema/trigger, and the exact unchanged required-check payload.
 - `just agent-workflow-tests` is the executed behavioral suite.
-- The log-and-summary JSON record plus GitHub workflow/job metadata are the evidence seam.
+- The log-and-summary JSON record is the raw-outcome evidence seam; GitHub workflow/job metadata is labelled fallback only for incomplete records.
 
 ## Delivery estimate and boundaries
 
-Estimate: four product/documentation files and 170–250 changed lines for Task 1. Task 2 has one owner-controlled publication/dispatch handoff, at most three initial manual dispatches, and a 15-minute foreground watch per accepted run; failed evidence is recorded without retrying for success. It remains incomplete until evidence exists and must never be fabricated from local execution.
+Estimate: four product/documentation files and 170–250 changed lines for Task 1. Task 2 has one owner-controlled publication/dispatch handoff, exactly three original serial manual attempts, and a 15-minute foreground watch per accepted run; non-passing evidence is recorded without replacement. It remains incomplete until the cohort is truthfully recorded and must never be fabricated from local execution.
 
 ## Task index
 
@@ -35,7 +35,7 @@ Task 2 — Publish, dispatch, and record bounded Ubuntu evidence — `.github/ag
 
 ## Decisions
 
-The specification owns the decision ledger. This plan applies D1–D8 and introduces no new decision.
+The specification owns the decision ledger. This plan applies D1–D9; D9 supersedes D4's qualification rule and introduces no plan-local decision.
 
 ## Accepted review provenance
 
