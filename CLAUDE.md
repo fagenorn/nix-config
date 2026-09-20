@@ -43,6 +43,8 @@ Two repo-specific helpers in `lib/helpers.nix` drive almost everything — under
 
 `myvars` (`vars/default.nix`: `username`, sops paths) and `libx` are threaded through `specialArgs`/`extraSpecialArgs`, so every module receives them as function args. Change the username in one place (`vars/default.nix`) and it propagates.
 
+The [#117 attempt-lifecycle decision](.claude/specs/2026-09-20-issue-117-attempt-lifecycle-first-consumer-design.md) selects attempts as the transaction core's first consumer and ship-release second. It governs the planned single-store migration, immutable subject/identity, fenced custody and terminal evidence. This is an architecture decision; runtime delivery belongs to #123/#125 and their #150/#151 dependencies. Current lifecycle paths and behavior below remain the shipped implementation until that cutover.
+
 ## Key conventions & gotchas
 
 **zsh rc is assembled from fragments.** `home/{darwin,linux}-common.nix` set `programs.zsh.initContent` to `mergeFilesOrdered [ ../data/zshrc/<platform> ../data/zshrc/common ]`. `initContent` is a `lines`-typed option, so this is **merged with** (not replacing) the base `programs.zsh.initContent` in `home/default.nix` (which sources zsh-vi-mode). Fragments are ordered by numeric filename prefix **per directory**, platform dir first then common: `<platform>/00-*` → `common/50-*` → `common/51-*`. Edit shell behavior in `data/zshrc/`, not in the `.nix` files.
