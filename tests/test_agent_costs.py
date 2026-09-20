@@ -1051,12 +1051,18 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
 
     def claude_pair(self, *, request_at="2026-09-20T10:05:00Z",
                     execution_at="2026-09-20T10:06:00Z",
-                    request_host=REQUEST_HOST_ABSENT):
+                    request_host=REQUEST_HOST_ABSENT, request_model="opus",
+                    request_effort="high", execution_model="claude-opus-5-20260901",
+                    execution_effort="high", child_prefix=""):
         project = self.root / "-Users-me-repo-issue-120-x"
         child_dir = project / "s1" / "subagents"
         child_dir.mkdir(parents=True, exist_ok=True)
         launch_input = {"subagent_type": "reviewer", "role": "reviewer",
-                        "model": "opus", "effort": "high", "prompt": "review"}
+                        "prompt": "review"}
+        if request_model is not None:
+            launch_input["model"] = request_model
+        if request_effort is not None:
+            launch_input["effort"] = request_effort
         if request_host is not self.REQUEST_HOST_ABSENT:
             launch_input["host"] = request_host
         launch = {"type": "tool_use", "id": "toolu-route-1", "name": "Agent",
@@ -1066,8 +1072,8 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
                                        timestamp=request_at, version="2.1.0")
                              + agent_result("toolu-route-1", "agent-child-1",
                                             timestamp="2026-09-20T10:05:30Z"), encoding="utf-8")
-        (child_dir / "child.jsonl").write_text(
-            assistant("child", usage=USAGE_2, model="claude-opus-5-20260901", effort="high",
+        (child_dir / "child.jsonl").write_text(child_prefix +
+            assistant("child", usage=USAGE_2, model=execution_model, effort=execution_effort,
                       agent_id="agent-child-1", sidechain=True, timestamp=execution_at,
                       version="2.1.0"), encoding="utf-8")
         return root_file
@@ -1127,6 +1133,34 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
         routing = self.json_record()["execution_telemetry"]["source_coverage"]["routing"]
         self.assertEqual(routing["state"], "none")
         self.assertIn({"code": "timestamp_missing", "count": 1}, routing["reasons"])
+
+    def test_multi_turn_child_selects_final_execution_once(self):
+        earlier = assistant("child-turn-1", usage=USAGE_2,
+                            model="claude-opus-5-20260901", effort="high",
+                            agent_id="agent-child-1", sidechain=True,
+                            timestamp="2026-09-20T10:05:45Z", version="2.1.0")
+        self.claude_pair(child_prefix=earlier)
+        routing = self.json_record()["execution_telemetry"]["runs"][0]["routing"]
+        self.assertEqual(routing["coverage"],
+                         {"state": "full", "eligible_events": 1,
+                          "paired_events": 1, "reasons": []})
+        self.assertEqual(routing["observations"][0]["count"], 1)
+        self.assertEqual(routing["observations"][0]["last_event_at"],
+                         "2026-09-20T10:06:00Z")
+
+    def test_missing_request_or_execution_tiers_are_paired_with_reasons(self):
+        self.claude_pair(request_model=None, request_effort=None)
+        routing = self.json_record()["execution_telemetry"]["runs"][0]["routing"]
+        self.assertEqual(routing["coverage"]["paired_events"], 1)
+        self.assertIn({"code": "request_missing", "count": 1},
+                      routing["coverage"]["reasons"])
+        self.claude_pair(execution_model=None, execution_effort=None)
+        routing = self.json_record()["execution_telemetry"]["runs"][0]["routing"]
+        self.assertEqual(routing["coverage"]["paired_events"], 1)
+        self.assertIn({"code": "execution_model_missing", "count": 1},
+                      routing["coverage"]["reasons"])
+        self.assertIn({"code": "execution_effort_missing", "count": 1},
+                      routing["coverage"]["reasons"])
 
     def test_unpaired_event_flags_and_invalid_range_are_usage_errors(self):
         with contextlib.redirect_stderr(io.StringIO()):

@@ -57,7 +57,10 @@ def canonical_time(value):
         raise InputError("timestamp must be RFC3339 UTC") from error
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise InputError("timestamp must be RFC3339 UTC")
-    canonical = parsed.isoformat(timespec="seconds").replace("+00:00", "Z")
+    # Keep the producer's canonical fractional precision intact.  ``isoformat``
+    # omits fractions for whole seconds and otherwise emits the six-digit form
+    # used by agent-costs.format_rfc3339_utc.
+    canonical = parsed.isoformat().replace("+00:00", "Z")
     if value != canonical:
         raise InputError("timestamp must be canonical RFC3339 UTC")
     return parsed

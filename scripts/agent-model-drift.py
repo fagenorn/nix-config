@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate strict agent-cost records against a signed baseline."""
+"""Evaluate strict agent-cost records against a canonical-digest baseline."""
 from __future__ import annotations
 import argparse
 import importlib.machinery
@@ -111,7 +111,7 @@ def main(argv=None):
         baseline = schema.validate_baseline(schema.load_json(args.baseline), matrix, matrix_digest)
         report = evaluate(record, baseline, matrix, matrix_digest, args.now)
     except (schema.InputError, ValueError) as error:
-        print("invalid drift input", file=sys.stderr)
+        print(str(error), file=sys.stderr)
         return 2
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0 if report["state"] == "conforming" else 3

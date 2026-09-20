@@ -81,6 +81,46 @@ class RoutingEvaluationTest(DriftCliCase):
         self.assertEqual(report["routing"]["comparisons"][0]["requested"]["model"],
                          "sonnet")
 
+    def test_carried_unknown_dispatch_or_role_disagreement_is_drift(self):
+        for dispatch_id, role in (("unknown-dispatch", "reviewer"),
+                                  ("sdd-first-pass-task-review", "implementer")):
+            with self.subTest(dispatch_id=dispatch_id, role=role):
+                item = observation(self.matrix, role=role)
+                item["declaration"]["dispatch_id"] = dispatch_id
+                code, out, _ = self.run_observations([item])
+                self.assertEqual(code, 3)
+                report = json.loads(out)
+                self.assertEqual(report["state"], "drifted")
+                self.assertIn("REQUEST_DECLARATION_MISMATCH",
+                              self.finding_codes(report))
+
+    def test_missing_requested_tiers_are_coverage_inconclusive(self):
+        item = observation(self.matrix)
+        item["requested"].update(model=None, effort=None)
+        route_coverage = coverage("partial", 1, 1,
+                                  [{"code": "request_missing", "count": 1}])
+        code, out, _ = self.run_observations([item],
+                                             routing_coverage=route_coverage)
+        self.assertEqual(code, 3)
+        report = json.loads(out)
+        self.assertEqual(report["state"], "inconclusive")
+        self.assertIn("ROUTING_COVERAGE_MISSING", self.finding_codes(report))
+
+    def test_missing_execution_tiers_are_counted_paired_observations(self):
+        item = observation(self.matrix)
+        item["observed"].update(model=None, effort=None)
+        route_coverage = coverage("partial", 1, 1, [
+            {"code": "execution_effort_missing", "count": 1},
+            {"code": "execution_model_missing", "count": 1},
+        ])
+        code, out, _ = self.run_observations([item],
+                                             routing_coverage=route_coverage)
+        self.assertEqual(code, 3)
+        report = json.loads(out)
+        self.assertEqual(report["state"], "inconclusive")
+        self.assertIn("EXECUTION_MODEL_MISSING", self.finding_codes(report))
+        self.assertIn("EXECUTION_EFFORT_MISSING", self.finding_codes(report))
+
     def test_requested_host_mismatch_is_drift_and_remains_visible(self):
         item = observation(self.matrix)
         item["requested"]["host"] = "codex"

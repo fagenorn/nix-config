@@ -80,6 +80,26 @@ class BaselineLifecycleTest(DriftCliCase):
         record=record_value(start="2026-09-20T11:00:00Z",end="2026-09-20T10:00:00Z")
         code,out,err=self.run(record=record); self.assertEqual(code,2); self.assertEqual(out,"")
 
+    def test_producer_fractional_timestamps_and_now_are_canonical(self):
+        record = record_value(start="2026-09-20T10:00:00.499000Z",
+                              end="2026-09-20T11:00:00.499000Z")
+        record["generated_at"] = "2026-09-20T11:01:00.499000Z"
+        code, out, err = self.run(record=seal_record(record),
+                                  now="2026-09-20T12:00:00.499000Z")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out)["evaluated_at"],
+                         "2026-09-20T12:00:00.499000Z")
+
+    def test_noncanonical_fractional_timestamp_and_now_keep_pointer_error(self):
+        record = record_value()
+        record["generated_at"] = "2026-09-20T11:01:00.1Z"
+        code, out, err = self.run(record=seal_record(record))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("timestamp must be canonical RFC3339 UTC", err)
+        code, out, err = self.run(now="2026-09-20T12:00:00.1Z")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("timestamp must be canonical RFC3339 UTC", err)
+
     def test_malformed_record_and_rejected_matrix_exit_two(self):
         bad_type=record_value(); bad_type["execution_telemetry"]=[]
         bad_version=record_value(); bad_version["schema_version"]=2

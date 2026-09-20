@@ -1134,12 +1134,6 @@ def cohort_digest(identities: list[tuple[str, ...]]) -> str:
     return canonical_digest(sorted([list(identity) for identity in identities]))
 
 
-def canonical_digest(value) -> str:
-    """Return a SHA-256 digest of one canonical JSON value."""
-    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
-
-
 def merge_metric_coverage(metrics: list[dict]) -> dict:
     """Merge scheduling coverage without treating unavailable cohorts as full."""
     return _merge_coverage(metrics)
@@ -1385,7 +1379,7 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
                 if not agent_id:
                     reasons["result_missing"] += 1
                 executions = children.get((path.stem, str(agent_id)), []) if agent_id else []
-                if len(executions) != 1:
+                if not executions:
                     reasons["child_missing"] += 1
                     request_window = event_in_window(_request_at, start, end)
                     if request_window is not False:
@@ -1395,7 +1389,15 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
                         event = {"paired": False, "reasons": local}
                         source_events["claude"].append(event); runs[run_id]["events"].append(event)
                     continue
-                for execution in executions[:1]:
+                # A child transcript normally contains several assistant turns.
+                # The final timestamped assistant record is the deterministic
+                # execution-side evidence for this completed launch; selecting
+                # one avoids turning a multi-turn child into duplicate events.
+                execution = max(enumerate(executions), key=lambda item: (
+                    parse_rfc3339_utc(item[1].get("timestamp"))
+                    if event_in_window(item[1].get("timestamp"), None, None) is not None
+                    else datetime.min.replace(tzinfo=timezone.utc), item[0]))[1]
+                for execution in (execution,):
                     in_window = event_in_window(execution.get("timestamp"), start, end)
                     if in_window is False:
                         continue
@@ -1407,11 +1409,16 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
                         continue
                     requested_host = _request_host(request, "claude", local)
                     declaration = _declaration(request, local)
+                    if not request.get("model") or not request.get("effort"):
+                        local["request_missing"] += 1
                     msg = execution.get("message") or {}
                     model, effort = msg.get("model"), execution.get("effort")
                     if not model: local["execution_model_missing"] += 1
                     if not effort: local["execution_effort_missing"] += 1
-                    paired = bool(model) and bool(effort)
+                    # Pairing proves request-to-child correlation.  Missing
+                    # execution tiers remain paired observations so the
+                    # consumer can report their explicit inconclusive state.
+                    paired = True
                     version = execution.get("version")
                     if isinstance(version, str) and version:
                         source_versions["claude"].add(version)
@@ -1489,6 +1496,8 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
                     source_versions["codex"].add(version)
                 requested_host = _request_host(spawn, "codex", local)
                 declaration = _declaration({"role": spawn.get("agent_role"), "dispatch_id": spawn.get("dispatch_id")}, local)
+                if not spawn.get("model") or not spawn.get("effort"):
+                    local["request_missing"] += 1
                 configured = (context.get("payload") or {})
                 local["execution_model_missing"] += 1; local["execution_effort_missing"] += 1
                 event = {"paired": paired, "reasons": local}

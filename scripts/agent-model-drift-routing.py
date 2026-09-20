@@ -50,7 +50,9 @@ def declaration_for(observation: dict, matrix: dict) -> tuple[dict | None, list[
     if dispatch_id is not None:
         site = dispatches.get(dispatch_id)
         if site is None or role != site["role"]:
-            findings.append("ROLE_AMBIGUOUS")
+            # A carried dispatch is authoritative request evidence.  An unknown
+            # ID or disagreement with its carried role proves declaration drift.
+            findings.append("REQUEST_DECLARATION_MISMATCH")
             return None, findings
         host = hosts.get(dispatch_id)
         if host is None:
