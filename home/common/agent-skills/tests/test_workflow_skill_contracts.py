@@ -420,25 +420,60 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                     with self.assertRaisesRegex(AssertionError, "managed shared skill root is absent"):
                         self.test_installed_policy_surface_matches_source_contract()
 
+    def _install_policy_surface_fixture(self, home):
+        agents_root = home / ".agents/skills"
+        claude_root = home / ".claude/skills"
+        shared_source = REPO_ROOT / "home/common/agent-skills/skills"
+        claude_source = REPO_ROOT / "home/common/claude-code/skills"
+        shutil.copytree(shared_source, agents_root)
+        shutil.copytree(shared_source, claude_root)
+        shutil.copytree(claude_source, claude_root, dirs_exist_ok=True)
+        helpers = {
+            "resolve-project": home / ".agents/bin/resolve-project",
+            "context-map-lint": home / ".agents/bin/context-map-lint",
+        }
+        helpers["context-map-lint"].parent.mkdir(parents=True)
+        shutil.copy2(
+            REPO_ROOT / "home/common/agent-skills/scripts/resolve-project.py",
+            helpers["resolve-project"],
+        )
+        shutil.copyfile(REPO_ROOT / "scripts/context-map-lint.py",
+                        helpers["context-map-lint"])
+        for helper in helpers.values():
+            helper.chmod(0o755)
+        return helpers
+
+    def _assert_installed_policy_surface(self, home):
+        with mock.patch.dict(os.environ, {"WORKFLOW_POLICY_SURFACE": ""}, clear=False):
+            with mock.patch("pathlib.Path.home", return_value=home):
+                self.test_installed_policy_surface_matches_source_contract()
+
     def test_installed_policy_surface_applies_both_support_matrices(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            agents_root = home / ".agents/skills"
-            claude_root = home / ".claude/skills"
-            shared_source = REPO_ROOT / "home/common/agent-skills/skills"
-            claude_source = REPO_ROOT / "home/common/claude-code/skills"
-            shutil.copytree(shared_source, agents_root)
-            shutil.copytree(shared_source, claude_root)
-            shutil.copytree(claude_source, claude_root, dirs_exist_ok=True)
-            linter = home / ".agents/bin/context-map-lint"
-            linter.parent.mkdir(parents=True)
-            resolver = home / ".agents/bin/resolve-project"
-            shutil.copy2(REPO_ROOT / "home/common/agent-skills/scripts/resolve-project.py", resolver)
-            shutil.copyfile(REPO_ROOT / "scripts/context-map-lint.py", linter)
-            linter.chmod(0o755)
-            with mock.patch.dict(os.environ, {"WORKFLOW_POLICY_SURFACE": ""}, clear=False):
-                with mock.patch("pathlib.Path.home", return_value=home):
-                    self.test_installed_policy_surface_matches_source_contract()
+            self._install_policy_surface_fixture(home)
+            self._assert_installed_policy_surface(home)
+
+    def test_installed_policy_surface_rejects_missing_and_nonexecutable_helpers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            helpers = self._install_policy_surface_fixture(home)
+            self._assert_installed_policy_surface(home)
+            for name, helper in helpers.items():
+                contents = helper.read_bytes()
+                mode = helper.stat().st_mode
+                with self.subTest(helper=name, case="missing"):
+                    helper.unlink()
+                    with self.assertRaisesRegex(AssertionError, "False is not true"):
+                        self._assert_installed_policy_surface(home)
+                    helper.write_bytes(contents)
+                    helper.chmod(mode)
+                with self.subTest(helper=name, case="non-executable"):
+                    helper.chmod(mode & ~0o111)
+                    with self.assertRaisesRegex(AssertionError, "False is not true"):
+                        self._assert_installed_policy_surface(home)
+                    helper.chmod(mode)
+                self._assert_installed_policy_surface(home)
 
     def test_eval_runner_reports_a_resolver_refusal_without_a_second_resolution(self):
         runner = (REPO_ROOT / "home/common/agent-skills/evals/run-eval.sh").read_text(
