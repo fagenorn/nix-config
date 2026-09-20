@@ -53,6 +53,7 @@ def evaluate(record, baseline, matrix, matrix_digest, now):
         missing_identity = any(value is None for value in producer["harness_versions"].values())
         if missing_identity:
             findings.append(_finding("IDENTITY_MISSING"))
+            baseline_usable = False
         if (baseline["matrix_digest"] != matrix_digest or baseline["producer"] != {"name": producer["name"], "version": producer["version"], "telemetry_schema_version": telemetry["schema_version"]} or (not missing_identity and baseline["harness_versions"] != producer["harness_versions"])):
             findings.append(_finding("IDENTITY_MISMATCH"))
             baseline_usable = False

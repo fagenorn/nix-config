@@ -79,14 +79,19 @@ def declaration_for(observation: dict, matrix: dict) -> tuple[dict | None, list[
             "authority": declaration["authority"]}, findings
 
 
-def validate_escalation(observation: dict, matrix: dict, baseline: dict) -> bool:
+def _valid_escalation_lineage(observation: dict, matrix: dict) -> bool:
     escalation = observation["escalation"]
     target = observation["declaration"]["dispatch_id"]
     source = None if escalation is None else escalation["source_dispatch_id"]
-    reason = None if escalation is None else escalation["reason_code"]
     dispatches, _ = _indexes(matrix)
-    return (target in dispatches and source in dispatches and source != target
-            and reason in baseline["escalation_reason_codes"])
+    return target in dispatches and source in dispatches and source != target
+
+
+def validate_escalation(observation: dict, matrix: dict, baseline: dict) -> bool:
+    escalation = observation["escalation"]
+    return (_valid_escalation_lineage(observation, matrix)
+            and escalation is not None
+            and escalation["reason_code"] in baseline["escalation_reason_codes"])
 
 
 def evaluate_observation(observation: dict, matrix: dict, baseline: dict,
@@ -110,17 +115,31 @@ def evaluate_observation(observation: dict, matrix: dict, baseline: dict,
         public_escalation = {"source_dispatch_id": escalation["source_dispatch_id"],
                              "target_dispatch_id": dispatch,
                              "reason_code": escalation["reason_code"]}
-        if baseline_usable and not validate_escalation(observation, matrix, baseline):
+        if (not _valid_escalation_lineage(observation, matrix)
+                or (baseline_usable
+                    and not validate_escalation(observation, matrix, baseline))):
             findings.append(_finding("ESCALATION_INVALID", run_id, dispatch, role, count))
 
+    if observed["model"] is None:
+        findings.append(_finding("EXECUTION_MODEL_MISSING", run_id, dispatch,
+                                 role, count))
+    if observed["effort"] is None:
+        findings.append(_finding("EXECUTION_EFFORT_MISSING", run_id, dispatch,
+                                 role, count))
+
     if resolved is not None:
-        for key in ("host", "model", "effort"):
+        for key in ("model", "effort"):
             if requested[key] is not None and requested[key] != resolved[key]:
                 findings.append(_finding("REQUEST_DECLARATION_MISMATCH", run_id,
                                          dispatch, role, count))
                 break
+        if (baseline_usable and requested["host"] is not None
+                and requested["host"] != resolved["host"]):
+            findings.append(_finding("REQUEST_DECLARATION_MISMATCH", run_id,
+                                     dispatch, role, count))
 
-        if observed["host"] is not None and observed["host"] != resolved["host"]:
+        if (baseline_usable and observed["host"] is not None
+                and observed["host"] != resolved["host"]):
             findings.append(_finding("OBSERVED_HOST_PROHIBITED", run_id, dispatch,
                                      role, count))
 
@@ -129,8 +148,7 @@ def evaluate_observation(observation: dict, matrix: dict, baseline: dict,
         if not baseline_usable:
             pass
         elif observed["model"] is None:
-            findings.append(_finding("EXECUTION_MODEL_MISSING", run_id, dispatch,
-                                     role, count))
+            pass
         elif observed["host"] is None:
             findings.append(_finding("MODEL_UNCLASSIFIED", run_id, dispatch, role, count))
         else:
@@ -149,8 +167,7 @@ def evaluate_observation(observation: dict, matrix: dict, baseline: dict,
         if not baseline_usable:
             pass
         elif observed["effort"] is None:
-            findings.append(_finding("EXECUTION_EFFORT_MISSING", run_id, dispatch,
-                                     role, count))
+            pass
         elif observed["host"] is None:
             findings.append(_finding("EFFORT_UNCLASSIFIED", run_id, dispatch, role, count))
         else:

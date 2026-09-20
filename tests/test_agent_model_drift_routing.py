@@ -4,7 +4,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_model_drift_test_support import (
-    DriftCliCase, baseline_value, coverage, record_value, seal_baseline)
+    DriftCliCase, baseline_value, coverage, record_value, seal_baseline,
+    seal_record)
 
 
 def observation(matrix, dispatch_id="sdd-first-pass-task-review", *,
@@ -216,3 +217,85 @@ class RoutingEvaluationTest(DriftCliCase):
         mismatch = next(item for item in findings
                         if item["code"] == "REQUEST_DECLARATION_MISMATCH")
         self.assertEqual(mismatch["count"], 2)
+
+    def test_inconsistent_observation_counts_are_malformed(self):
+        cases = [
+            (coverage("full", 3, 3), []),
+            (coverage("full", 1, 1), [observation(self.matrix, count=10)]),
+        ]
+        for route_coverage, observations in cases:
+            with self.subTest(observations=observations):
+                record = record_value(routing_coverage=route_coverage,
+                                      observations=observations)
+                code, out, err = self.run(record=seal_record(record))
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertTrue(err)
+
+    def test_source_only_cannot_claim_paired_observations(self):
+        unavailable = coverage(
+            "none", reasons=[{"code": "source_unsupported", "count": 1}])
+        source_only = {
+            "codex": {
+                "routing": coverage("full", 1, 1),
+                "scheduling": {
+                    name: unavailable for name in (
+                        "spawn_attempts", "capacity_rejections", "waits", "follow_ups",
+                        "wait_input_tokens", "covered_input_tokens", "slot_capacity_seconds",
+                        "claimed_slot_seconds")},
+            },
+        }
+        record = record_value(selected=("claude", "codex"), source_only=source_only)
+        code, out, err = self.run(record=seal_record(record))
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertTrue(err)
+
+    def test_missing_identity_gates_prohibited_catalog_classification(self):
+        baseline = baseline_value(self.matrix, self.matrix_digest)
+        baseline["catalog"]["claude"]["models"]["opus"]["prohibited"] = [
+            "claude-opus-4-retired"]
+        item = observation(self.matrix, observed_model="claude-opus-4-retired")
+        record = record_value(harness={"claude": None},
+                              routing_coverage=coverage("full", 1, 1),
+                              observations=[item])
+        code, out, _ = self.run(record=record, baseline=seal_baseline(baseline))
+        self.assertEqual(code, 3)
+        report = json.loads(out)
+        self.assertEqual(report["state"], "inconclusive")
+        self.assertIn("IDENTITY_MISSING", self.finding_codes(report))
+        self.assertNotIn("OBSERVED_MODEL_PROHIBITED", self.finding_codes(report))
+
+    def test_stale_baseline_gates_hosts_but_not_matrix_request_tiers(self):
+        baseline = baseline_value(self.matrix, self.matrix_digest,
+                                  valid_before="2026-09-20T12:00:00Z")
+        item = observation(self.matrix, observed_host="codex")
+        item["requested"]["host"] = "codex"
+        item["requested"]["model"] = "sonnet"
+        code, out, _ = self.run_observations([item], baseline=baseline)
+        self.assertEqual(code, 3)
+        report = json.loads(out)
+        codes = self.finding_codes(report)
+        self.assertEqual(report["state"], "drifted")
+        self.assertIn("REQUEST_DECLARATION_MISMATCH", codes)
+        self.assertIn("BASELINE_STALE", codes)
+        self.assertNotIn("OBSERVED_HOST_PROHIBITED", codes)
+
+    def test_stale_baseline_keeps_structural_and_missing_evidence(self):
+        baseline = baseline_value(self.matrix, self.matrix_digest,
+                                  valid_before="2026-09-20T12:00:00Z")
+        dispatch_id = "sdd-task-rereview-escalation"
+        item = observation(
+            self.matrix, dispatch_id, observed_model="placeholder",
+            observed_effort="placeholder",
+            escalation={"source_dispatch_id": dispatch_id, "reason_code": "capacity"})
+        item["observed"]["model"] = None
+        item["observed"]["effort"] = None
+        code, out, _ = self.run_observations([item], baseline=baseline)
+        self.assertEqual(code, 3)
+        report = json.loads(out)
+        codes = self.finding_codes(report)
+        self.assertEqual(report["state"], "drifted")
+        self.assertIn("ESCALATION_INVALID", codes)
+        self.assertIn("EXECUTION_MODEL_MISSING", codes)
+        self.assertIn("EXECUTION_EFFORT_MISSING", codes)

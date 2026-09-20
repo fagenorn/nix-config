@@ -205,6 +205,8 @@ def _telemetry(value, selected):
         observed = run["routing"]["observations"]
         for index, observation in enumerate(observed):
             _observation(observation, "/execution_telemetry/runs/routing/observations/" + str(index))
+        if sum(item["count"] for item in observed) != run["routing"]["coverage"]["paired_events"]:
+            raise InputError("routing observation counts do not match coverage")
         if observed != sorted(observed, key=lambda item: json.dumps({key: item[key] for key in ("declaration", "requested", "configured", "observed", "escalation")}, sort_keys=True, separators=(",", ":"))):
             raise InputError("routing observations must be canonical order")
         _closed(run["scheduling"], _METRICS, "/execution_telemetry/runs/scheduling")
@@ -215,6 +217,8 @@ def _telemetry(value, selected):
     for name, item in source["source_only"].items():
         _closed(item, ("routing", "scheduling"), "/execution_telemetry/source_coverage/source_only/" + name)
         _coverage(item["routing"], "source-only routing")
+        if item["routing"]["paired_events"] != 0:
+            raise InputError("source-only routing cannot have paired observations")
         _scheduling(item["scheduling"], "source-only scheduling")
         routing.append(item["routing"])
         for metric in _METRICS:
