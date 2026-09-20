@@ -34,6 +34,35 @@ class BaselineLifecycleTest(DriftCliCase):
             value=record_value(); mutate(value); cases.append(seal_record(value))
         for value in cases:
             code,out,err=self.run(record=value); self.assertEqual((code,out),(2,"")); self.assertTrue(err)
+    def test_nested_cost_and_malformed_metric_exit_two_with_empty_stdout(self):
+        record = record_value()
+        record["strata"]["claude"]["runs"][0]["cost_usd"] = "invalid-cost"
+        code, out, err = self.run(record=seal_record(record))
+        self.assertEqual((code, out), (2, "")); self.assertTrue(err)
+        record = record_value()
+        record["execution_telemetry"]["runs"][0]["scheduling"]["wait_input_tokens"] = {}
+        code, out, err = self.run(record=seal_record(record))
+        self.assertEqual((code, out), (2, "")); self.assertTrue(err)
+    def test_codex_rollout_accepts_only_host_as_observed_evidence(self):
+        def record_with(observed):
+            record = record_value()
+            coverage = {"state":"full","eligible_events":1,"paired_events":1,"reasons":[]}
+            observation = {"declaration":{"dispatch_id":None,"role":"reviewer","authority":"runtime-agent-type"},
+                           "requested":{"host":"claude","model":"opus","effort":"high"},
+                           "configured":{"host":"codex","model":"gpt","effort":"high"},
+                           "observed":observed,"escalation":None,"count":1,
+                           "first_event_at":"2026-09-20T10:00:00Z","last_event_at":"2026-09-20T10:00:00Z"}
+            telemetry = record["execution_telemetry"]
+            telemetry["runs"][0]["routing"] = {"coverage":coverage,"observations":[observation]}
+            telemetry["source_coverage"]["routing"] = coverage
+            return seal_record(record)
+        valid = record_with({"host":"codex","model":None,"effort":None,"authority":"codex-rollout"})
+        self.assertEqual(self.run(record=valid)[0], 3)
+        for field in ("model", "effort"):
+            observed = {"host":"codex","model":None,"effort":None,"authority":"codex-rollout"}
+            observed[field] = "concrete"
+            code, out, err = self.run(record=record_with(observed))
+            self.assertEqual((code, out), (2, "")); self.assertTrue(err)
     def test_baseline_lifecycle_and_identity_are_inconclusive(self):
         baseline=baseline_value(self.matrix,self.matrix_digest,valid_before="2026-09-20T12:00:00Z"); code,out,err=self.run(baseline=baseline); self.assertEqual((code,err),(3,"")); self.assertIn("BASELINE_STALE",[x["code"] for x in json.loads(out)["routing"]["findings"]])
     def test_malformed_inputs_exit_two(self):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import importlib.machinery
 import json
+import math
 import re
 import sys
 from datetime import datetime, timezone
@@ -227,11 +228,11 @@ def _telemetry(value, selected):
         if observed != sorted(observed, key=lambda item: json.dumps({key: item[key] for key in ("declaration", "requested", "configured", "observed", "escalation")}, sort_keys=True, separators=(",", ":"))):
             raise InputError("routing observations must be canonical order")
         _closed(run["scheduling"], SCHEDULING_METRICS, "/execution_telemetry/runs/scheduling")
-        _paired_metrics(run["scheduling"], "/execution_telemetry/runs/scheduling")
         routing.append(run["routing"]["coverage"])
         for name in SCHEDULING_METRICS:
             _metric(run["scheduling"][name], "/execution_telemetry/runs/scheduling/" + name)
             scheduling[name].append(run["scheduling"][name]["coverage"])
+        _paired_metrics(run["scheduling"], "/execution_telemetry/runs/scheduling")
     for name, item in source["source_only"].items():
         _closed(item, ("routing", "scheduling"), "/execution_telemetry/source_coverage/source_only/" + name)
         _coverage(item["routing"], "source-only routing")
@@ -278,6 +279,13 @@ def _nullable_nonnegative(value, pointer):
         _nonnegative(value, pointer)
 
 
+def _nullable_cost(value, pointer):
+    if (value is not None and (isinstance(value, bool) or
+                               not isinstance(value, (int, float)) or
+                               not math.isfinite(value) or value < 0)):
+        raise InputError(pointer + " must be a finite non-negative number or null")
+
+
 def _record_body(value):
     _closed(value["window"], _WINDOW_FIELDS, "/window")
     window = value["window"]
@@ -301,16 +309,18 @@ def _record_body(value):
         _closed(stratum["totals"], ("runs",) + _TOKEN_FIELDS + ("cost_usd", "cost_by_family"), "/strata/totals")
         _nonnegative(stratum["totals"]["runs"], "/strata/totals/runs")
         for field in _TOKEN_FIELDS: _nullable_nonnegative(stratum["totals"][field], "/strata/totals/" + field)
-        if stratum["totals"]["cost_usd"] is not None and (isinstance(stratum["totals"]["cost_usd"], bool) or not isinstance(stratum["totals"]["cost_usd"], (int, float))): raise InputError("cost invalid")
+        _nullable_cost(stratum["totals"]["cost_usd"], "/strata/totals/cost_usd")
         families = stratum["totals"]["cost_by_family"]
         if (families is not None and (not isinstance(families, dict) or any(
                 not isinstance(key, str) or not key or isinstance(cost, bool) or
-                not isinstance(cost, (int, float)) for key, cost in families.items()))) or not isinstance(stratum["runs"], list) or len(stratum["runs"]) != stratum["totals"]["runs"]: raise InputError("stratum projection invalid")
+                not isinstance(cost, (int, float)) or not math.isfinite(cost) or
+                cost < 0 for key, cost in families.items()))) or not isinstance(stratum["runs"], list) or len(stratum["runs"]) != stratum["totals"]["runs"]: raise InputError("stratum projection invalid")
         for run in stratum["runs"]:
             _closed(run, _RUN_FIELDS, "/strata/runs")
             if run["stratum"] != name or not all(isinstance(run[key], str) and run[key] for key in ("run_id", "project")) or run["issue"] is not None and not isinstance(run["issue"], str): raise InputError("run identity invalid")
             if run["outcome"] is not None and run["outcome"] not in ("completed", "interrupted", "blocked", "abandoned", "-"): raise InputError("run outcome invalid")
             _closed(run["tokens"], _TOKEN_FIELDS, "/strata/runs/tokens")
+            _nullable_cost(run["cost_usd"], "/strata/runs/cost_usd")
             for field in _TOKEN_FIELDS: _nullable_nonnegative(run["tokens"][field], "/strata/runs/tokens/" + field)
             for field in _SCALAR_FIELDS: _nullable_nonnegative(run[field], "/strata/runs/" + field)
             for field in _COUNTER_FIELDS:
@@ -323,7 +333,8 @@ def _record_body(value):
             families = run["cost_by_family"]
             if (families is not None and (not isinstance(families, dict) or any(
                     not isinstance(key, str) or not key or isinstance(cost, bool) or
-                    not isinstance(cost, (int, float)) for key, cost in families.items()))): raise InputError("run cost families invalid")
+                    not isinstance(cost, (int, float)) or not math.isfinite(cost) or
+                    cost < 0 for key, cost in families.items()))): raise InputError("run cost families invalid")
             if run["measurement"] is not None:
                 _closed(run["measurement"], _MEASUREMENT_FIELDS, "/strata/runs/measurement")
                 counts = run["measurement"]["selected_source_counts"]
