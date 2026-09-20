@@ -73,6 +73,10 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_conformance_registry.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_costs.py \
+    tests/test_agent_model_drift_schema.py \
+    tests/test_agent_model_drift_routing.py \
+    tests/test_agent_model_drift_scheduling.py \
+    tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
     tests/test_branch_protection.py
 
@@ -132,6 +136,9 @@ install IP:
 # Report agent token spend per issue from the local Claude Code and Codex sessions
 agent-costs *args:
   python3 scripts/agent-costs.py {{args}}
+
+agent-model-drift *args:
+  python3 scripts/agent-model-drift.py {{args}}
 
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:
