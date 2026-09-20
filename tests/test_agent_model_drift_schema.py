@@ -36,7 +36,6 @@ class BaselineLifecycleTest(DriftCliCase):
                  "future": (None, baseline_value(self.matrix, self.matrix_digest, captured_at="2026-09-20T13:00:00Z"), "BASELINE_FUTURE"),
                  "outside": (record_value(start="2026-09-19T23:00:00Z"), None, "WINDOW_OUTSIDE_BASELINE"),
                  "identity-missing": (record_value(harness={"claude":None}), None, "IDENTITY_MISSING"),
-                 "producer-mismatch": (None, baseline_value(self.matrix,self.matrix_digest,producer={"name":"agent-costs","version":2,"telemetry_schema_version":1}), "IDENTITY_MISMATCH"),
                  "harness-mismatch": (None, baseline_value(self.matrix,self.matrix_digest,harness_versions={"claude":["2.0.0"]}), "IDENTITY_MISMATCH"),
                  "matrix-mismatch": (None, baseline_value(self.matrix,"sha256:" + "0"*64), "IDENTITY_MISMATCH")}
         for name,(record,baseline,expected) in cases.items():
@@ -45,7 +44,7 @@ class BaselineLifecycleTest(DriftCliCase):
 
     def test_malformed_baseline_boundaries_exit_two_with_empty_stdout(self):
         valid=baseline_value(self.matrix,self.matrix_digest); cases=[]
-        for name in ("wrong-type","bad-time","missing-dispatch","extra-dispatch","missing-model-tier","extra-effort-tier","overlap","unsupported-version","unknown-member","bad-classification"):
+        for name in ("wrong-type","bad-time","missing-dispatch","extra-dispatch","missing-model-tier","extra-effort-tier","overlap","unsupported-version","unknown-member","bad-classification","bad-producer"):
             candidate=copy.deepcopy(valid)
             if name=="wrong-type": candidate["dispatch_hosts"]=[]
             elif name=="bad-time": candidate["captured_at"]="not-a-time"
@@ -56,6 +55,7 @@ class BaselineLifecycleTest(DriftCliCase):
             elif name=="overlap": candidate["catalog"]["claude"]["models"]["opus"]["prohibited"]=list(candidate["catalog"]["claude"]["models"]["opus"]["allowed"])
             elif name=="unsupported-version": candidate["schema_version"]=2
             elif name=="bad-classification": candidate["catalog"]["claude"]["models"]["opus"]["allowed"]=1
+            elif name=="bad-producer": candidate["producer"]={"name":[],"version":{},"telemetry_schema_version":None}
             else: candidate["extra"]=True
             cases.append(seal_baseline(candidate))
         for candidate in cases:
