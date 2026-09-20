@@ -666,45 +666,107 @@ class ReviewPackageCliTest(unittest.TestCase):
                     self.assertEqual({p.name for p in final_members.iterdir()},
                                      {competed_path.name})
 
+    def publication_fixture(
+        self,
+        directory: Path,
+        members: tuple[bytes, ...] = (b"staged-one", b"staged-two"),
+    ) -> tuple[Path, Path, Path]:
+        stage = directory / "stage"
+        stage_members = stage / "review.shards"
+        stage_members.mkdir(parents=True)
+        stage_root = stage / "review.json"
+        stage_root.write_bytes(b"staged-manifest")
+        for number, raw in enumerate(members, 1):
+            (stage_members / f"shard-{number:03d}.diff").write_bytes(raw)
+        final_root = directory / "review.json"
+        return stage_root, final_root, directory / "review.shards"
+
+    def test_publication_cleanup_stays_with_retained_member_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            stage_root, final_root, final_members = self.publication_fixture(directory)
+            stage_members = stage_root.with_suffix(".shards")
+            original_members = directory / "review-original"
+            competitor = final_members / "shard-001.diff"
+            sentinel = final_members / "competitor"
+
+            def replace_at_manifest(label: str, _path: Path):
+                if label != "manifest":
+                    return
+                final_members.rename(original_members)
+                final_members.mkdir()
+                os.link(stage_members / "shard-001.diff", competitor,
+                        follow_symlinks=False)
+                sentinel.write_bytes(b"competitor-bytes")
+
+            with self.assertRaises(review_package_module.PublicationError):
+                review_package_module.publish_package(
+                    stage_root, final_root, replace_at_manifest
+                )
+
+            self.assertFalse(final_root.exists())
+            self.assertTrue(competitor.exists())
+            self.assertEqual(competitor.read_bytes(), b"staged-one")
+            self.assertEqual(sentinel.read_bytes(), b"competitor-bytes")
+            self.assertEqual(list(original_members.iterdir()), [])
+
     def test_publication_rejects_changed_directory_and_link_identities(self):
         for mutation in ("directory-before-first", "member-before-second",
                          "directory-before-manifest"):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw:
-                directory = Path(raw)
-                stage = directory / "stage"
-                stage_members = stage / "review.shards"
-                stage_members.mkdir(parents=True)
-                stage_root = stage / "review.json"
-                stage_root.write_bytes(b"staged-manifest")
-                (stage_members / "shard-001.diff").write_bytes(b"staged-one")
-                (stage_members / "shard-002.diff").write_bytes(b"staged-two")
-                final_root = directory / "review.json"
-                final_members = directory / "review.shards"
-                competitor = b"competitor-bytes"
-                competed_path = final_members / "competitor"
+            attempts = 128 if mutation == "directory-before-first" else 1
+            for attempt in range(attempts):
+                with (self.subTest(mutation=mutation, attempt=attempt + 1),
+                      tempfile.TemporaryDirectory() as raw):
+                    directory = Path(raw)
+                    stage_root, final_root, final_members = self.publication_fixture(
+                        directory
+                    )
+                    competitor = b"competitor-bytes"
+                    competed_path = final_members / "competitor"
+                    observed: dict[str, tuple[int, int]] = {}
 
-                def inject(label: str, path: Path):
-                    if mutation == "directory-before-first" and label == "member:shard-001.diff":
-                        final_members.rmdir()
-                        final_members.mkdir()
-                        competed_path.write_bytes(competitor)
-                    elif mutation == "member-before-second" and label == "member:shard-002.diff":
-                        prior = final_members / "shard-001.diff"
-                        prior.unlink()
-                        prior.write_bytes(competitor)
-                    elif mutation == "directory-before-manifest" and label == "manifest":
+                    def replace_directory():
+                        before = final_members.lstat()
+                        observed["before"] = (before.st_dev, before.st_ino)
                         for member in final_members.iterdir():
                             member.unlink()
                         final_members.rmdir()
                         final_members.mkdir()
+                        after = final_members.lstat()
+                        observed["after"] = (after.st_dev, after.st_ino)
                         competed_path.write_bytes(competitor)
 
-                with self.assertRaises(review_package_module.PublicationError):
-                    review_package_module.publish_package(stage_root, final_root, inject)
-                self.assertFalse(final_root.exists())
-                if mutation == "member-before-second":
-                    competed_path = final_members / "shard-001.diff"
-                self.assertEqual(competed_path.read_bytes(), competitor)
+                    def inject(label: str, _path: Path):
+                        if (mutation == "directory-before-first"
+                                and label == "member:shard-001.diff"):
+                            replace_directory()
+                        elif (mutation == "member-before-second"
+                              and label == "member:shard-002.diff"):
+                            prior = final_members / "shard-001.diff"
+                            prior.unlink()
+                            prior.write_bytes(competitor)
+                        elif (mutation == "directory-before-manifest"
+                              and label == "manifest"):
+                            replace_directory()
+
+                    try:
+                        review_package_module.publish_package(
+                            stage_root, final_root, inject
+                        )
+                    except review_package_module.PublicationError:
+                        pass
+                    else:
+                        self.fail(
+                            "publication accepted replacement: "
+                            f"mutation={mutation} attempt={attempt + 1}/{attempts} "
+                            f"platform={sys.platform} before={observed.get('before')} "
+                            f"after={observed.get('after')}"
+                        )
+
+                    self.assertFalse(final_root.exists())
+                    if mutation == "member-before-second":
+                        competed_path = final_members / "shard-001.diff"
+                    self.assertEqual(competed_path.read_bytes(), competitor)
 
     def test_parent_swap_cannot_redirect_publication_outside_root(self):
         with tempfile.TemporaryDirectory() as raw:
