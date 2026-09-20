@@ -14,38 +14,63 @@ schema = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = schema
 _loader.exec_module(schema)
 
+_routing_loader = importlib.machinery.SourceFileLoader(
+    "agent_model_drift_routing", str(Path(__file__).with_name("agent-model-drift-routing.py")))
+_routing_spec = importlib.util.spec_from_loader(_routing_loader.name, _routing_loader)
+routing_logic = importlib.util.module_from_spec(_routing_spec)
+sys.modules[_routing_spec.name] = routing_logic
+_routing_loader.exec_module(routing_logic)
+
 
 def _finding(code):
-    return {"code": code, "run": None, "dispatch": None, "role": None, "count": 1}
+    return {"code": code, "run_id": None, "dispatch": None, "role": None, "count": 1}
 
 
 def evaluate(record, baseline, matrix, matrix_digest, now):
     now_time = schema.canonical_time(now)
     telemetry = record["telemetry"]
     findings = []
+    comparisons = []
+    evaluated_events = 0
     if telemetry is None:
         findings = [_finding("IDENTITY_MISSING"), _finding("ROUTING_COVERAGE_MISSING")]
     else:
         window = telemetry["event_window"]
+        baseline_usable = True
         if window["start"] is None or window["end"] is None:
             findings.append(_finding("WINDOW_UNBOUNDED"))
+            baseline_usable = False
         elif not (schema.canonical_time(window["start"]) >= schema.canonical_time(baseline["valid_from"]) and schema.canonical_time(window["end"]) <= schema.canonical_time(baseline["valid_before"])):
             findings.append(_finding("WINDOW_OUTSIDE_BASELINE"))
+            baseline_usable = False
         if schema.canonical_time(baseline["captured_at"]) > now_time:
             findings.append(_finding("BASELINE_FUTURE"))
+            baseline_usable = False
         if now_time >= schema.canonical_time(baseline["valid_before"]):
             findings.append(_finding("BASELINE_STALE"))
+            baseline_usable = False
         producer = telemetry["producer"]
         missing_identity = any(value is None for value in producer["harness_versions"].values())
         if missing_identity:
             findings.append(_finding("IDENTITY_MISSING"))
         if (baseline["matrix_digest"] != matrix_digest or baseline["producer"] != {"name": producer["name"], "version": producer["version"], "telemetry_schema_version": telemetry["schema_version"]} or (not missing_identity and baseline["harness_versions"] != producer["harness_versions"])):
             findings.append(_finding("IDENTITY_MISMATCH"))
+            baseline_usable = False
         if telemetry["source_coverage"]["routing"]["state"] != "full":
             findings.append(_finding("ROUTING_COVERAGE_MISSING"))
-    findings.sort(key=lambda item: (item["code"], item["run"] or "", item["dispatch"] or "", item["role"] or ""))
-    state = "conforming" if not findings else "inconclusive"
-    routing = {"state": state, "eligible_events": 0 if telemetry is None else telemetry["source_coverage"]["routing"]["eligible_events"], "evaluated_events": 0, "comparisons": [], "findings": findings}
+        for run in telemetry["runs"]:
+            for observation in run["routing"]["observations"]:
+                comparison, observation_findings, evaluated = routing_logic.evaluate_observation(
+                    observation, matrix, baseline, run["run_id"], run["routing"]["coverage"],
+                    baseline_usable=baseline_usable)
+                comparisons.append(comparison)
+                findings.extend(observation_findings)
+                evaluated_events += evaluated
+    findings = routing_logic.aggregate_findings(findings)
+    comparisons.sort(key=routing_logic.comparison_key)
+    state = ("drifted" if any(item["code"] in routing_logic.DRIFT_CODES for item in findings)
+             else "conforming" if not findings else "inconclusive")
+    routing = {"state": state, "eligible_events": 0 if telemetry is None else telemetry["source_coverage"]["routing"]["eligible_events"], "evaluated_events": evaluated_events, "comparisons": comparisons, "findings": findings}
     unavailable = {"value": None, "coverage": {"state": "unavailable"}}
     metrics = {name: dict(unavailable) for name in (
         "spawn_attempts", "capacity_rejections", "waits", "follow_ups",
