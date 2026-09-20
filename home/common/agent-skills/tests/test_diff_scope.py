@@ -717,11 +717,18 @@ class DiffScopeCommandTest(unittest.TestCase):
         self.assertIn(b"work tree", completed.stderr)
 
     def test_an_absolute_or_escaping_artifact_path_exits_one(self):
-        for bad in ("/etc/passwd", ".//x", "../outside.md", "a/../../b.md"):
+        for bad in ("/etc/passwd", "../outside.md", "a/../../b.md"):
             with self.subTest(value=bad):
                 completed = run_helper(self.root, self.range, "--artifact-path", bad)
                 self.assertEqual(completed.returncode, 1, completed.stdout)
                 self.assertIn(b"diff-scope:", completed.stderr)
+
+        completed = run_helper(self.root, self.range, "--artifact-path", ".//x")
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertEqual(
+            completed.stderr,
+            b"diff-scope: --artifact-path must be repository-relative: .//x\n",
+        )
 
 
 class DiffScopeAllExcludedRangeTest(unittest.TestCase):

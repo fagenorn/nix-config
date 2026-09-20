@@ -14,11 +14,15 @@
 
 - Leading `./` prefixes are stripped before absolute-path validation, per D1.
 - `./x` remains a repository-relative artifact path.
-- `.//x` exits 1 and writes a `diff-scope:` diagnostic to stderr.
+- `.//x` exits 1 and writes exactly
+  `b"diff-scope: --artifact-path must be repository-relative: .//x\\n"` to
+  stderr.
 
 - [ ] **Step 1: Write the failing test**
 
-Add `.//x` to the existing invalid artifact-path CLI table and assert exit 1 plus the diagnostic prefix.
+Add `.//x` as an invalid artifact-path CLI regression and assert exit 1 plus
+exact stderr `b"diff-scope: --artifact-path must be repository-relative: .//x\\n"`.
+Keep the existing diagnostic-prefix coverage for the other invalid paths.
 
 - [ ] **Step 2: Run the targeted test and observe failure**
 
