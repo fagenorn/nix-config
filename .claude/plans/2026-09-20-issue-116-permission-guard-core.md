@@ -37,4 +37,6 @@ Task 1 — Align living guard authorization prose — `CLAUDE.md` — full — [
 
 This plan introduces no new design choice. Task 1 implements D4 and D9 while preserving D1, D5, D6, D7 and D8.
 
+Plan review provenance: Sol/high reviewer `/root/issue117` reviewed head `94dc216f59c870305b0db5c2f3e3377f52742e45` with no fallback. Its 0 Blocking / 1 Should-fix / 0 Discussion verdict is accepted; SF-1 is disposed by Task 1's executable whole-worktree/index inventory and accepted-spec hash/tracking checks.
+
 ---

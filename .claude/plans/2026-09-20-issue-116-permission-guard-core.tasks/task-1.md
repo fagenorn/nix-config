@@ -88,12 +88,30 @@ Expected: exit 0 with the nix-darwin configuration built. These results do not c
 
 - [ ] **Step 5: Verify scope and commit**
 
-Run: `git diff --check -- CLAUDE.md && test "$(git diff --name-only -- CLAUDE.md)" = "CLAUDE.md"`
+```bash
+python3 - <<'PY'
+import subprocess
 
-Expected: exit 0. The accepted decision spec still hashes to `8f9b341897b59d85a3f6f5883db56b4df384f35c29947af942c4592e2e4171a8` and no guard, test, generated projection or historical record is staged.
+status = subprocess.run(
+    ["git", "status", "--porcelain=v1", "-z"],
+    check=True,
+    capture_output=True,
+).stdout
+assert status == b" M CLAUDE.md\0", repr(status)
+PY
+spec=.claude/specs/2026-09-20-issue-116-permission-guard-core-design.md
+git ls-files --error-unmatch -- "$spec" >/dev/null
+test "$(shasum -a 256 "$spec" | awk '{print $1}')" = \
+  8f9b341897b59d85a3f6f5883db56b4df384f35c29947af942c4592e2e4171a8
+git diff --check -- CLAUDE.md
+```
+
+Expected: exit 0. The NUL-delimited whole-worktree inventory proves the index and untracked set are empty and `CLAUDE.md` is the only changed path. The accepted decision spec is tracked and still hashes to `8f9b341897b59d85a3f6f5883db56b4df384f35c29947af942c4592e2e4171a8`.
 
 ```bash
 git add CLAUDE.md
+test -z "$(git diff --name-only)"
+test "$(git diff --cached --name-only)" = "CLAUDE.md"
 git commit -S -m "docs: align guard authorization truth" \
   -m "Co-Authored-By: Codex <noreply@openai.com>"
 ```
