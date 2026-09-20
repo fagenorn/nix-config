@@ -1090,7 +1090,10 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
         self.assertEqual(telemetry["source_coverage"]["routing"],
                          {"state": "full", "eligible_events": 1, "paired_events": 1, "reasons": []})
         self.assertEqual(telemetry["source_coverage"]["source_only"], {})
+        self.assertEqual(len(telemetry["runs"]), 1)
         self.assertEqual(telemetry["runs"][0]["run_id"], "claude:repo:120")
+        self.assertEqual(telemetry["runs"][0]["routing"]["coverage"],
+                         telemetry["source_coverage"]["routing"])
         observation = telemetry["runs"][0]["routing"]["observations"][0]
         self.assertEqual(observation["declaration"], {"dispatch_id": None, "role": "reviewer",
                                                         "authority": "runtime-agent-type"})
@@ -1159,6 +1162,20 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
         reasons = agent_costs.Counter()
         self.assertEqual(agent_costs._declaration({"subagent_type": "reviewer"}, reasons)["authority"], "unknown")
         self.assertEqual(reasons["role_ambiguous"], 1)
+
+    def test_unspawned_codex_evidence_respects_the_event_window(self):
+        codex = self.root / "codex" / "2026"; codex.mkdir(parents=True)
+        spawned = codex_meta("thread-1", thread_source="subagent", source={"subagent": {"thread_spawn": {
+            "agent_role": "reviewer", "model": "gpt", "effort": "high"}}}) + codex_turn_context()
+        outside = codex_meta("thread-2", thread_source="subagent", source={"subagent": {}}).replace(
+            "2026-08-04T14:08:50.499Z", "2026-08-05T14:08:50.499Z")
+        (codex / "spawned.jsonl").write_text(spawned, encoding="utf-8")
+        (codex / "outside.jsonl").write_text(outside, encoding="utf-8")
+        raw, code = run_main("--projects-dir", "/missing", "--codex-sessions", str(self.root / "codex"),
+                             "--strata", "codex", "--format", "json", "--days", "0",
+                             "--events-since", "2026-08-04T00:00:00Z", "--events-before", "2026-08-05T00:00:00Z")
+        self.assertIsNone(code)
+        self.assertEqual(json.loads(raw)["execution_telemetry"]["source_coverage"]["source_only"], {})
 
 
 class BuildRecordTest(unittest.TestCase):

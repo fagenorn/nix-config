@@ -1348,19 +1348,24 @@ def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | N
             records = list(_read_jsonl(path)); meta = next((r for r in records if r.get("type") == "session_meta"), None)
             if not meta: continue
             payload = meta.get("payload") or {}; version = payload.get("cli_version")
+            session_id = payload.get("session_id") or payload.get("id")
+            all_cwds, root_cwds = thread_cwds.get(session_id, (Counter(), Counter()))
+            canonical_cwds = root_cwds or all_cwds
+            project = project_name("codex", canonical_cwds)
+            if project_filter and project_filter.lower() not in project.lower():
+                continue
             spawn = ((payload.get("source") or {}).get("subagent") or {}).get("thread_spawn") if isinstance(payload.get("source"), dict) else None
             if not isinstance(spawn, dict):
                 # A subagent rollout is execution-side evidence even when its
                 # structured launch was lost; do not manufacture full zero coverage.
                 if payload.get("thread_source") == "subagent" or payload.get("source"):
-                    unassigned_events["codex"].append({"paired": False,
-                                                   "reasons": Counter({"request_missing": 1})})
+                    verdict = event_in_window(meta.get("timestamp"), start, end)
+                    if verdict is not False:
+                        reasons = Counter({"request_missing": 1})
+                        if verdict is None:
+                            reasons["timestamp_missing"] += 1
+                        unassigned_events["codex"].append({"paired": False, "reasons": reasons})
                 continue
-            session_id = payload.get("session_id") or payload.get("id")
-            all_cwds, root_cwds = thread_cwds.get(session_id, (Counter(), Counter()))
-            canonical_cwds = root_cwds or all_cwds
-            project = project_name("codex", canonical_cwds)
-            if project_filter and project_filter.lower() not in project.lower(): continue
             issue = issue_key("codex", canonical_cwds)
             run_id = "codex:%s:%s" % (project, "none" if issue is None else issue)
             contexts = [r for r in records if r.get("type") == "turn_context"] or [meta]
