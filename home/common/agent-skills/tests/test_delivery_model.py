@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import runpy
 
 from ._delivery_model_fixtures import (
     seal,
@@ -38,6 +39,8 @@ from ._delivery_model_fixtures import (
     renewal_case,
     ship_handoff,
     ship_checkpoint,
+    direct_delivery_request,
+    issue_with_attempt,
 )
 
 ROOT = Path(__file__).parents[4]
@@ -78,6 +81,40 @@ class DeliveryModelTest(unittest.TestCase):
     def assert_invalid(self, value, kind):
         with self.assertRaises(self.model.DeliveryModelError):
             self.validate(value, kind)
+
+    def test_runtime_historical_merge_folds_facts_before_terminal_replay(self):
+        runtime = runpy.run_path(str(SOURCE.parent.parent / "workflow_delivery.py"))[
+            "DeliveryRuntime"](notes_max_characters=10_000)
+        contract, delivery, _ = contract_and_delivery_for_stage(
+            runtime.model, "select")
+        forge = {"state": "merged", "url": "https://example.test/pull/17",
+                 "merge_sha": "a" * 40}
+        request = direct_delivery_request(
+            contract, intents=delivery["authorization_intents"])
+        request["forge"] = forge
+        for retained in (delivery, runtime.empty_delivery()):
+            issue = issue_with_attempt(retained, state="merged")
+            result = {"state": "merged", "pr_url": forge["url"],
+                      "merge_sha": forge["merge_sha"]}
+            issue["attempts"][0]["result"] = copy.deepcopy(result)
+            issue["outcome"] = copy.deepcopy(result)
+            candidates = (request, {**request, "new_run": True},
+                {**request, "forge": {**forge, "merge_sha": "b" * 40}})
+            self.assertEqual(
+                [runtime.historical_direct_requested(issue, value)
+                 for value in candidates], [True, False, False])
+            policy = runtime.delivery_policy(
+                issue, issue=151, request=request, source_kind="direct",
+                now="2026-09-21T00:01:00Z", dispatch_permitted=True,
+                remainder_deadline="2026-09-21T03:01:00Z",
+                owner_unavailable=False, tracker_halted=False,
+                recorded_worktree={"path": "/worktree",
+                                   "state": "matching_issue_branch"})
+            self.assertEqual(
+                (policy["operation"], issue["attempts"][0]["state"],
+                 issue["delivery_remainders"][0]["owner"],
+                 policy["reduction"]["pending_stage_ids"][0]),
+                ("resume", "merged", "151:r1", "select"))
 
     def test_import_is_pure_and_interface_is_exact(self):
         with tempfile.TemporaryDirectory() as raw:
