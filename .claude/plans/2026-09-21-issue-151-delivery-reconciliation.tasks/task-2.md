@@ -23,13 +23,13 @@
 - Modify: `justfile`
 
 **Interfaces:**
-- Retain Task 1's eight-name `MODEL_INTERFACE_VERSION == 1` facade. Private
-  `_objects`/`_reconcile`/`_wire` own D19 stage relationships, reduction and
-  envelopes; workflow-state supplies normalized facts without policy copies.
+- Retain Task 1's eight-name v1 facade. Private `_objects`/`_reconcile`/`_wire`
+  own D19 stage relationships/reduction/envelopes; workflow-state supplies facts,
+  not policy copies.
 - Workflow-state writes schema 3. `upgrade_state(value, *, run_id,
-  migration_contracts)` composes valid 1→2→3 in memory, calls
-  `validate_state(candidate, *, run_id)`, and writes at most once. Current-launch
-  validates legacy reads without lock, upgrade or write.
+  migration_contracts)` composes 1→2→3 in memory, validates the candidate with
+  keyword `run_id`, and writes once at most. Current-launch validates legacy
+  reads without lock, upgrade or write.
 - Control v2 keeps v1 top-level keys, replaces `owners`, and adds issue-keyed
   `forge`, `delivery_contracts`, `authorization_intents`,
   `authority_observations`, `reevaluation_evidence`, `delivery_observations`,
@@ -40,19 +40,18 @@
   those four fact arrays and required nullable `requested_scope`. Owner facts are
   exact event_id/issue/custody/state=unavailable; duplicate event/custody,
   historical-as-current, hybrid, unknown or mismatch refuses.
-- Control output keeps v1 outer keys. Summary replaces attempt with nullable
-  custody and adds contract digest, ordered pending stages and sorted requirements;
-  delta is exact issue/custody/kind/state. Wait/finalize stay exact. Spawn/resume/
-  retry/direct owner add strict custody, contract/digest, stages, requirements,
-  nullable evaluation/scope. Direct observe admits all four acquisition and four
-  delivery requirements; terminal stays v1. Remainder adds evaluation/scope. Finish-created
+- Control output keeps v1 outer keys. Summary has custody|null instead of attempt,
+  contract digest|null, ordered stages and sorted requirements; delta is exact
+  issue/custody/kind/state. Wait/finalize stay exact. Spawn/resume/retry/direct
+  owner add strict custody, contract/digest, stages, requirements and nullable
+  evaluation/scope. Direct observe admits all eight typed requirements; terminal
+  stays v1. Remainder adds evaluation/scope. Finish-created
   remainder uses null scope and the ready-stage requirement, or an observation
   requirement keyed by a missing postcondition when no stage is ready. It invents
   no effect stage. Every nested member validates through the model.
-- `ship-checkpoint/v2` adds required nullable scope for the ready stage computed
-  after its observations fold. Ordinary `delivery_checkpointed` echoes it and is
-  active|suspended; count-3 `delivery_stalled` has no action, requirements,
-  evaluation, block or scope. Finish is exactly
+- `ship-checkpoint/v2` requires nullable post-fold ready-stage scope. Ordinary
+  `delivery_checkpointed` echoes it and is active|suspended; count-3
+  `delivery_stalled` has no action/requirements/evaluation/block/scope. Finish is
   `finish --repo-root ROOT --run-id RUN --now UTC --summary-file FILE`: complete
   has no pending stage; genuine owner failure has the accepted reason/source;
   eligible retry returns remainder; partial progress/requirements never fail.
@@ -60,28 +59,26 @@
   validates v2 reports plus raw workflow responses before decode. Bootstrap picks
   active custody, else latest remainder, else implementation; callers normalize
   requirements before control. Legacy v1 summary stays read-only.
-- Handoff preserves prior requested scope as history only; summaries/stalled
-  outputs add none. Production callers bind actual invocation to validated echo,
-  fence before effect and observation, and never derive stages from tracker/forge.
+- Handoff preserves prior scope as history; summaries/stalled outputs add none.
+  Callers bind invocation to echo, fence before effect/observation, and never
+  derive stages from tracker/forge.
 
 **Invariants:**
-- Per D8/D14/D17, migrations preserve attempts, outcomes, result bytes/details
-  and initialize no delivery truth. Context is request-derived contract|null;
-  candidate facts/remainder require one repository-matching contract. Malformed,
-  ambiguous or mismatched input writes nothing. Legacy current-launch returns the
-  exact four-key result and leaves ledger/filesystem byte-identical.
+- Per D8/D14/D17, migrations preserve attempts/outcomes/result bytes/details and
+  initialize no delivery truth. Request-derived contract|null context must match
+  candidate facts/remainder. Malformed, ambiguous or mismatched input writes
+  nothing. Legacy current-launch returns four exact keys, changing no bytes.
 - Per D3/D18, every effect and observation uses the exact current launch. Late
   direct/control facts retain original launch; old allow grants nothing and old
   rejection remains. A post-rejection action appears only with its first durably
   persisted consumption; replay/transfer/crash cannot reissue it. Successor
   intent and reevaluation evidence are independent bases.
-- Per D19, callers build actual scope without copying intent. After folding facts,
-  the model binds it to the ordered ready stage/target. Null with a ready stage
-  yields its `scope_tuple_required`; null with no ready stage preserves dependency
-  or postcondition observation requirements. Wrong/dependency/completed-stage
-  scope refuses without write; valid uncovered scope is the human gate. Covered
-  ordinary scope retains native evaluation without prior allow. Next stage,
-  transfer and resume require fresh proposals.
+- Per D19, callers build scope without copying intent; after folding, the model
+  binds it to the ordered ready stage/target. Null yields the ready-stage local
+  requirement or preserves dependency/postcondition requirements when none is
+  ready. Wrong/dependency/completed scope refuses without write; valid uncovered
+  scope human-gates; covered ordinary scope native-evaluates without prior allow.
+  Next stage, transfer and resume require fresh proposals.
 - Selected-output ingestion verifies acceptance/review/test categories; ids imply
   none. Checkpoint deduplicates; blockers suspend. Merge folds before expiry.
   Same-token suspensions store 0/1/2/3; three resumes are allowed, 3 stalls, and
@@ -284,9 +281,10 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
                          ("suspended", "human_gate", scope))
         evidence = self.fx.reevaluation(denial)
         resumed = self.h.direct(self.fx.resume_request(
-            checkpoint, requested_scope=scope), now=self.fx.tick())
-        self.assertEqual((resumed["custody"]["attempt"], resumed["deadline_at"], resumed["requested_scope"]),
-                         (custody["attempt"], owner["deadline_at"], scope))
+            checkpoint, requested_scope=None), now=self.fx.tick())
+        self.assertIsNone(resumed["requested_scope"])
+        self.assertEqual((resumed["custody"]["attempt"], resumed["deadline_at"]),
+                         (custody["attempt"], owner["deadline_at"]))
         evaluated = self.h.checkpoint(self.fx.checkpoint(
             resumed["custody"], reevaluation=[evidence], requested_scope=scope),
             now=self.fx.tick())
@@ -363,14 +361,17 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
             now=self.fx.tick())
         self.assertEqual(current["requirements"][0]["reason_code"],
                          "native_evaluation_required")
-        self.h.direct(self.fx.direct_request(
+        blocked = self.h.direct(self.fx.direct_request(
             custody=successor["custody"], requested_scope=scope,
             authority=[rejected]), now=self.fx.tick())
         stored = self.h.state()["issues"]["151"]["delivery"]["authority_observations"]
         self.assertTrue({allowed["id"], rejected["id"]} <= {x["id"] for x in stored})
         self.assertEqual(self.fx.blocked_on(self.h.state(), 151), "human_gate")
+        collector = self.h.direct(self.fx.resume_request(
+            blocked, requested_scope=None), now=self.fx.tick())
+        self.assertIsNone(collector["requested_scope"])
         accepted = self.h.checkpoint(self.fx.checkpoint(
-            successor["custody"], delivery=[returned], requested_scope=None),
+            collector["custody"], delivery=[returned], requested_scope=None),
             now=self.fx.tick())
         self.assertEqual(accepted["accepted_observation_ids"], [returned["id"]])
         self.assertEqual(self.fx.current_authorized_effects(self.h.state(), 151), [])
@@ -410,7 +411,8 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         self.h.assert_refused_without_write(
             "direct", argus.selected_output_conflict_request, now=self.fx.tick())
         self.assertEqual(provider.calls, [])
-        completed = self.h.checkpoint(argus.human_completion(exact), now=self.fx.tick())
+        current = self.h.direct(argus.exact_private_request, now=self.fx.tick())
+        completed = self.h.checkpoint(argus.human_completion(current), now=self.fx.tick())
         self.assertIn(argus.rejection_id, json.dumps(self.h.state()))
         self.assertNotIn("agent_authorized", json.dumps(completed))
 
