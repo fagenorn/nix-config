@@ -54,6 +54,59 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 "authority_evaluation_consumptions": [], "delivery_observations": [],
                 "selected_outputs": [], "stage_facts": [], "postconditions": {}}
 
+    @staticmethod
+    def _as_legacy(state, version, *, keep_delivery=False):
+        state = copy.deepcopy(state)
+        state["schema_version"] = version
+        if not keep_delivery:
+            for issue in state["issues"].values():
+                issue.pop("delivery", None)
+                issue.pop("delivery_remainders", None)
+        if version == 1:
+            state.pop("prior_run")
+            for issue in state["issues"].values():
+                for attempt in issue["attempts"]:
+                    for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
+                        attempt.pop(field)
+        return state
+
+    def _assert_current_launch_refuses_unchanged(self, state):
+        self.write_state(state)
+        before = self.state_path.read_bytes()
+        inventory = sorted(path.relative_to(self.root) for path in self.root.rglob("*"))
+        result = self.run_cli(
+            "current-launch", "--repo-root", self.root, "--run-id", self.run_id,
+            "--action-id", "151:1:1", ok=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(
+            sorted(path.relative_to(self.root) for path in self.root.rglob("*")),
+            inventory,
+        )
+
+    def _spawn_151(self):
+        self.init_run()
+        self.spawn(issue=151, worktree=str(self.root / "wt-151"), budget_minutes=10)
+
+    @staticmethod
+    def _changed(value, path, replacement):
+        value = copy.deepcopy(value)
+        target = value
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = replacement
+        return value
+
+    def _restore_deliveries(self, prior):
+        migrated = self.read_state()
+        for key, issue in migrated["issues"].items():
+            previous = prior["issues"].get(key)
+            if previous is not None and "delivery" in previous:
+                issue["delivery"] = previous["delivery"]
+                issue["delivery_remainders"] = previous["delivery_remainders"]
+        self.write_state(migrated)
+
     @property
     def workflows_dir(self):
         return self.root / ".superpowers" / "workflows"
@@ -225,18 +278,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         return root
 
     def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, ok=True):
-        # The public compatibility transport accepts only an on-disk legacy
-        # generation; these pre-v2 lifecycle tests exercise that exact path.
         current_bytes = self.state_path.read_bytes()
-        state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        state["schema_version"] = 2
-        for issue_state in state["issues"].values():
-            issue_state.pop("delivery", None)
-            issue_state.pop("delivery_remainders", None)
-        self.state_path.write_text(
-            json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
+        self.write_state(self._as_legacy(json.loads(current_bytes), 2))
         result_path = self.root / f"result-{issue}-{attempt}.json"
         result_path.write_text(json.dumps(result), encoding="utf-8")
         completed = self.run_cli(
@@ -256,20 +299,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             ok=ok,
         )
         if ok:
-            migrated = json.loads(self.state_path.read_text(encoding="utf-8"))
-            current = json.loads(current_bytes)
-            for key, issue_state in migrated["issues"].items():
-                prior = current["issues"].get(key)
-                if prior is not None and "delivery" in prior:
-                    issue_state["delivery"] = prior["delivery"]
-                    issue_state["delivery_remainders"] = prior["delivery_remainders"]
-            self.state_path.write_text(
-                json.dumps(migrated, sort_keys=True, separators=(",", ":")) + "\n",
-                encoding="utf-8",
-            )
+            self._restore_deliveries(json.loads(current_bytes))
         else:
-            # Failed compatibility input is observational: restore the current
-            # generation that the fixture projected to legacy for this call.
             self.state_path.write_bytes(current_bytes)
         return json.loads(completed.stdout) if ok else completed
 
@@ -744,16 +775,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         }
 
     def concurrent_finish(self, results, *, now):
-        current = json.loads(self.state_path.read_text(encoding="utf-8"))
-        state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        state["schema_version"] = 2
-        for issue_state in state["issues"].values():
-            issue_state.pop("delivery", None)
-            issue_state.pop("delivery_remainders", None)
-        self.state_path.write_text(
-            json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
+        current = self.read_state()
+        self.write_state(self._as_legacy(current, 2))
         wrapper = (
             "import os,sys; fd=int(sys.argv[1]); script=sys.argv[2]; "
             "args=sys.argv[3:]; os.read(fd,1); "
@@ -787,22 +810,10 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             if process.returncode != 0:
                 self.assertIn("legacy finish is read-only for schema 3 runs", stderr)
         self.assertEqual(sum(process.returncode == 0 for *_, process in processes), 1)
-        # The first successful compatibility write atomically installs schema 3;
-        # each losing historical transport must be explicitly re-presented from
-        # a legacy generation. This is the expected cutover race boundary.
         for issue, attempt, result, process in processes:
             if process.returncode != 0:
                 self.finish(attempt, result, issue=issue, now=now)
-        migrated = json.loads(self.state_path.read_text(encoding="utf-8"))
-        for key, issue_state in migrated["issues"].items():
-            prior = current["issues"].get(key)
-            if prior is not None and "delivery" in prior:
-                issue_state["delivery"] = prior["delivery"]
-                issue_state["delivery_remainders"] = prior["delivery_remainders"]
-        self.state_path.write_text(
-            json.dumps(migrated, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
+        self._restore_deliveries(current)
         return [process for *_, process in processes]
 
     def copy_ledger_root(self, state_bytes):
@@ -4991,24 +5002,11 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(latest["blocked_on"], "external")
 
     def test_schema_one_migrates_through_two_to_three_with_one_atomic_write(self):
-        self.init_run()
-        self.spawn(issue=151, worktree=str(self.root / "wt-151"), budget_minutes=10)
-        schema_one = self.read_state()
-        schema_one["schema_version"] = 1
-        schema_one.pop("prior_run")
-        for issue in schema_one["issues"].values():
-            issue.pop("delivery")
-            issue.pop("delivery_remainders")
-        for attempt in schema_one["issues"]["151"]["attempts"]:
-            for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
-                attempt.pop(field)
+        self._spawn_151()
+        schema_one = self._as_legacy(self.read_state(), 1)
         original = copy.deepcopy(schema_one)
-
         workflow = load_source_module(SCRIPT, "workflow_state_schema_three_test")
-        model = load_source_module(MODEL, "delivery_model_schema_three_test", package=True)
-        fixtures = load_source_module(MODEL_FIXTURES, "delivery_model_fixture_schema_three_test")
-        contract, _ = fixtures.contract_and_delivery(model)
-
+        contract, _ = self.delivery_fixtures.contract_and_delivery(self.delivery_model)
         migrated = workflow.upgrade_state(
             schema_one, run_id=self.run_id, migration_contracts={151: contract}
         )
@@ -5017,40 +5015,23 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
         issue = migrated["issues"]["151"]
         self.assertEqual(issue["delivery_remainders"], [])
-        self.assertIsNone(issue["delivery"]["contract"])
-        self.assertTrue(all(
-            issue["delivery"][name] == []
-            for name in (
-                "authorization_intents", "authority_observations",
-                "reevaluation_evidence", "authority_evaluation_consumptions",
-                "delivery_observations", "selected_outputs", "stage_facts",
-            )
-        ))
+        empty = self.empty_delivery()
+        empty["postconditions"] = issue["delivery"]["postconditions"]
+        self.assertEqual(issue["delivery"], empty)
 
     def test_schema_one_and_two_mutations_write_only_final_schema_three_once(self):
-        self.init_run()
-        self.spawn(issue=151, worktree=str(self.root / "wt-151"), budget_minutes=10)
+        self._spawn_151()
         workflow = load_source_module(SCRIPT, "workflow_state_atomic_migration")
         baseline = self.read_state()
         for version in (1, 2):
-            state = copy.deepcopy(baseline)
-            state["schema_version"] = version
-            for issue in state["issues"].values():
-                issue.pop("delivery")
-                issue.pop("delivery_remainders")
-            if version == 1:
-                state.pop("prior_run")
-                for attempt in state["issues"]["151"]["attempts"]:
-                    for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
-                        attempt.pop(field)
-            original = copy.deepcopy(state)
+            state = self._as_legacy(baseline, version)
             self.write_state(state)
             with mock.patch.object(workflow, "atomic_write_state") as write:
                 value = workflow.transact(
                     str(self.root), self.run_id,
                     lambda current: (current, False), migration_contracts={},
                 )
-            self.assertEqual(state, original)
+            self.assertEqual(state, self._as_legacy(baseline, version))
             self.assertEqual(value["schema_version"], 3)
             write.assert_called_once()
             self.assertEqual(write.call_args.args[2]["schema_version"], 3)
@@ -5062,8 +5043,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             workflow.read_locked_state(self.state_path, self.run_id, {})
 
     def test_legacy_terminal_and_active_rows_migrate_byte_exact(self):
-        self.init_run()
-        self.spawn(issue=151, worktree=str(self.root / "wt-151"), budget_minutes=10)
+        self._spawn_151()
         self.finish(1, self.merged_result(151), issue=151,
                     now="2026-08-13T20:02:00Z")
         self.spawn(issue=152, worktree=str(self.root / "wt-152"), budget_minutes=10,
@@ -5074,10 +5054,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         terminal["attempts"][0]["result"]["report_path"] = "/tmp/legacy-detail.md"
         terminal["outcome"]["detail_state"] = "present"
         terminal["outcome"]["report_path"] = "/tmp/legacy-detail.md"
-        legacy["schema_version"] = 2
-        for issue in legacy["issues"].values():
-            issue.pop("delivery")
-            issue.pop("delivery_remainders")
+        legacy = self._as_legacy(legacy, 2)
         legacy_rows = copy.deepcopy(legacy["issues"])
         workflow = load_source_module(SCRIPT, "workflow_state_legacy_rows")
         migrated = workflow.upgrade_state(legacy, run_id=self.run_id,
@@ -5085,127 +5062,67 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(migrated["schema_version"], 3)
         for key, legacy_issue in legacy_rows.items():
             migrated_issue = migrated["issues"][key]
-            self.assertEqual(migrated_issue["issue"], legacy_issue["issue"])
-            self.assertEqual(migrated_issue["attempts"], legacy_issue["attempts"])
-            self.assertEqual(migrated_issue["outcome"], legacy_issue["outcome"])
+            self.assertEqual(
+                {name: migrated_issue[name] for name in ("issue", "attempts", "outcome")},
+                legacy_issue,
+            )
         self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
 
     def test_malformed_legacy_current_launch_refuses_without_write(self):
-        self.init_run()
-        self.spawn(issue=151, worktree=str(self.root / "wt-151"), budget_minutes=10)
+        self._spawn_151()
         schema_three = self.read_state()
-        valid = copy.deepcopy(schema_three)
-        valid["schema_version"] = 1
-        valid.pop("prior_run")
-        for issue in valid["issues"].values():
-            issue.pop("delivery")
-            issue.pop("delivery_remainders")
-        for attempt in valid["issues"]["151"]["attempts"]:
-            for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
-                attempt.pop(field)
-        cases = []
-        broken = copy.deepcopy(valid); broken["schema_version"] = True; cases.append(broken)
-        broken = copy.deepcopy(valid); broken["issues"]["151"]["issue"] = 152; cases.append(broken)
-        broken = copy.deepcopy(valid); broken["issues"]["151"]["attempts"][0]["owner"] = 123; cases.append(broken)
-        broken = copy.deepcopy(valid); broken["issues"]["151"]["attempts"][0]["launches"] = []; cases.append(broken)
-        for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
-            broken = copy.deepcopy(valid)
-            broken["issues"]["151"]["attempts"][0][field] = None
-            cases.append(broken)
-        broken = copy.deepcopy(valid); broken["issues"]["151"]["attempts"][0] = []; cases.append(broken)
-        for broken in cases:
-            self.write_state(broken)
-            before = self.state_path.read_bytes()
-            inventory = sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*"))
-            refused = self.run_cli(
-                "current-launch", "--repo-root", self.root, "--run-id", self.run_id,
-                "--action-id", "151:1:1", ok=False,
+        valid = self._as_legacy(schema_three, 1)
+        attempt = ("issues", "151", "attempts", 0)
+        changes = [
+            (("schema_version",), True), (("issues", "151", "issue"), 152),
+            (attempt + ("owner",), 123), (attempt + ("launches",), []),
+            (attempt + ("blocked_on",), None), (attempt + ("suspend_phase",), None),
+            (attempt + ("stalled_resumes",), None),
+            (("issues", "151", "attempts", 0), []),
+        ]
+        for path, replacement in changes:
+            self._assert_current_launch_refuses_unchanged(
+                self._changed(valid, path, replacement)
             )
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertEqual(self.state_path.read_bytes(), before)
-            self.assertEqual(sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*")), inventory)
-
-        schema_three_float = copy.deepcopy(schema_three)
-        schema_three_float["schema_version"] = 3.0
-        self.write_state(schema_three_float)
-        before = self.state_path.read_bytes()
-        refused = self.run_cli(
-            "current-launch", "--repo-root", self.root, "--run-id", self.run_id,
-            "--action-id", "151:1:1", ok=False,
+        self._assert_current_launch_refuses_unchanged(
+            self._changed(schema_three, ("schema_version",), 3.0)
         )
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_schema_one_current_launch_is_read_only_for_attempt_and_remainder(self):
-        self.init_run()
-        self.spawn(issue=151, worktree=str(self.root / "wt-151"), budget_minutes=10)
-        state = self.read_state()
-        state["schema_version"] = 1
-        state.pop("prior_run")
-        for issue in state["issues"].values():
-            issue.pop("delivery")
-            issue.pop("delivery_remainders")
-        for attempt in state["issues"]["151"]["attempts"]:
-            for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
-                attempt.pop(field)
+        self._spawn_151()
+        state = self._as_legacy(self.read_state(), 1)
         self.write_state(state)
         before = self.state_path.read_bytes()
-        inventory = sorted(
-            str(path.relative_to(self.root)) for path in self.root.rglob("*")
+        inventory = sorted(path.relative_to(self.root) for path in self.root.rglob("*"))
+        expected = (
+            ("151:1:1", True, "151:1:1", "current"),
+            ("151:r1:1", False, None, "unknown_attempt"),
         )
-
-        attempt = self.run_cli(
-            "current-launch", "--repo-root", self.root, "--run-id", self.run_id,
-            "--action-id", "151:1:1",
-        )
-        self.assertEqual(json.loads(attempt.stdout), {
-            "action_id": "151:1:1", "current": True,
-            "current_action_id": "151:1:1", "reason": "current",
-        })
-        remainder = self.run_cli(
-            "current-launch", "--repo-root", self.root, "--run-id", self.run_id,
-            "--action-id", "151:r1:1",
-        )
-        self.assertEqual(json.loads(remainder.stdout), {
-            "action_id": "151:r1:1", "current": False,
-            "current_action_id": None, "reason": "unknown_attempt",
-        })
+        for action_id, current, current_id, reason in expected:
+            result = self.run_cli(
+                "current-launch", "--repo-root", self.root, "--run-id", self.run_id,
+                "--action-id", action_id,
+            )
+            self.assertEqual(json.loads(result.stdout), {
+                "action_id": action_id, "current": current,
+                "current_action_id": current_id, "reason": reason,
+            })
         self.assertEqual(self.state_path.read_bytes(), before)
         self.assertEqual(
-            sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*")),
+            sorted(path.relative_to(self.root) for path in self.root.rglob("*")),
             inventory,
         )
 
-    def test_schema_one_hybrid_delivery_fields_refuse_current_launch_without_write(self):
-        self.init_run()
-        self.spawn(issue=151, worktree=str(self.root / "wt-151"), budget_minutes=10)
-        state = self.read_state()
-        state["schema_version"] = 1
-        state.pop("prior_run")
-        for attempt in state["issues"]["151"]["attempts"]:
-            for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
-                attempt.pop(field)
-        self.write_state(state)
-        before = self.state_path.read_bytes()
-        refused = self.run_cli("current-launch", "--repo-root", self.root,
-                               "--run-id", self.run_id, "--action-id", "151:1:1", ok=False)
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertEqual(self.state_path.read_bytes(), before)
-
-    def test_schema_two_hybrid_delivery_fields_refuse_current_launch_and_migration(self):
-        self.init_run()
-        self.spawn(issue=151, worktree=str(self.root / "wt-151"), budget_minutes=10)
-        state = self.read_state()
-        state["schema_version"] = 2
-        self.write_state(state)
-        before = self.state_path.read_bytes()
-        refused = self.run_cli("current-launch", "--repo-root", self.root,
-                               "--run-id", self.run_id, "--action-id", "151:1:1", ok=False)
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertEqual(self.state_path.read_bytes(), before)
+    def test_legacy_hybrid_delivery_fields_refuse_without_write_or_migration(self):
+        self._spawn_151()
         workflow = load_source_module(SCRIPT, "workflow_state_schema_two_hybrid")
-        with self.assertRaises(workflow.WorkflowError):
-            workflow.upgrade_state(state, run_id=self.run_id, migration_contracts={})
+        baseline = self.read_state()
+        for version in (1, 2):
+            state = self._as_legacy(baseline, version, keep_delivery=True)
+            self._assert_current_launch_refuses_unchanged(state)
+            with self.assertRaises(workflow.WorkflowError):
+                workflow.upgrade_state(state, run_id=self.run_id,
+                                       migration_contracts={})
 
     def test_future_schema_ledger_is_rejected_without_changes(self):
         self.init_run()
