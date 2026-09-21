@@ -178,7 +178,7 @@ class DeliveryRuntime:
                 and issue_state["attempts"]
                 and issue_state["attempts"][-1]["state"]
                 in {"merged", "completed", "stopped", "failed"}
-                and self.historical_direct_requested(issue_state, request)):
+                and self._projection.historical_direct_requested(issue_state, request)):
             before = copy.deepcopy(issue_state["delivery"])
             reduction = self.apply_transition(
                 issue_state, issue=issue, request=request,
@@ -279,11 +279,6 @@ class DeliveryRuntime:
 
     def delivery_complete(self, issue_state: dict[str, Any]) -> bool:
         return self._projection.delivery_complete(issue_state)
-
-    def historical_direct_requested(
-        self, issue_state: dict[str, Any], request: dict[str, Any]
-    ) -> bool:
-        return self._projection.historical_direct_requested(issue_state, request)
 
 
     def remainder_policy(
@@ -548,28 +543,11 @@ class DeliveryRuntime:
                 values.append(record["deadline_at"])
         return min(values, key=self._time) if values else None
 
-    @staticmethod
     def request_values(
-        request: dict[str, Any], issue: int, *, control: bool
+        self, request: dict[str, Any], issue: int, *, control: bool
     ) -> dict[str, Any]:
-        if not control:
-            names = ("delivery_contract", "authorization_intents",
-                     "authority_observations", "reevaluation_evidence",
-                     "delivery_observations", "requested_scope")
-            values = {name: request[name] for name in names}
-            values["contract"] = values.pop("delivery_contract")
-            values["recovery"] = request.get("recovery")
-            return values
-        key = str(issue)
-        return {
-            "contract": request["delivery_contracts"][key],
-            "authorization_intents": request["authorization_intents"][key],
-            "authority_observations": request["authority_observations"][key],
-            "reevaluation_evidence": request["reevaluation_evidence"][key],
-            "delivery_observations": request["delivery_observations"][key],
-            "requested_scope": request["requested_scopes"][key],
-            "recovery": request.get("recoveries", {}).get(key),
-        }
+        return self._projection.request_values(
+            request, issue, control=control)
 
     def apply_transition(
         self, issue_state: dict[str, Any], *, issue: int,
@@ -739,6 +717,22 @@ class DeliveryRuntime:
                     record["finished_at"] = now
         return {"before": before, "record": record, "reduction": reduction,
                 "accepted": accepted, "blocking": blocking, "stalled": stalled}
+
+    def checkpoint_state(
+        self, issue_state: dict[str, Any], report: dict[str, Any], *, now: str,
+        suspend_attempt: Any, ledger_repo_root: str, run_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        context = self.checkpoint_begin(issue_state, report, now=now)
+        stalled = context["stalled"]
+        if (context["blocking"] is not None
+                and report["custody"]["kind"] == "implementation"):
+            stalled = not suspend_attempt(
+                context["record"], blocked_on=context["blocking"]["blocked_on"], now=now)
+            if stalled:
+                issue_state["outcome"] = copy.deepcopy(context["record"]["result"])
+        return self.complete_checkpoint(
+            context, ledger_repo_root=ledger_repo_root, run_id=run_id,
+            issue_state=issue_state, report=report, stalled=stalled)
 
     def complete_checkpoint(
         self, context: dict[str, Any], *, ledger_repo_root: str, run_id: str,

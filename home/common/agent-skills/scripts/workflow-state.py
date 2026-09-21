@@ -223,23 +223,20 @@ class WorkflowError(Exception):
 
 
 def _delivery():
-    script = Path(__file__)
-    entry = (script.parent / "workflow_delivery.py" if script.parent.name == "scripts"
+    root = Path(__file__).parent
+    entry = (root / "workflow_delivery.py" if root.name == "scripts"
              else Path.home() / ".agents/lib/python/workflow_delivery.py")
-    if not entry.is_file():
-        raise WorkflowError("delivery runtime unavailable")
     try:
-        namespace = runpy.run_path(str(entry), run_name="_workflow_state_delivery_runtime")
-        if namespace.get("WORKFLOW_DELIVERY_INTERFACE_VERSION") != 1:
-            raise WorkflowError("unsupported interface")
-        return namespace["DeliveryRuntime"](notes_max_characters=phase_notes_maximum())
+        if not entry.is_file():
+            raise FileNotFoundError(entry)
+        module = runpy.run_path(str(entry), run_name="_delivery")
+        if module.get("WORKFLOW_DELIVERY_INTERFACE_VERSION") != 1:
+            raise ValueError("unsupported interface")
+        return module["DeliveryRuntime"](notes_max_characters=phase_notes_maximum())
     except Exception as error:
-        if isinstance(error, WorkflowError):
-            raise
-        message = str(error)
-        if "interface" not in message and "delivery model" not in message:
-            message = "delivery model unavailable"
-        raise WorkflowError(message) from error
+        text = str(error)
+        raise WorkflowError(text if "interface" in text or "model" in text
+                            else "delivery runtime unavailable") from error
 
 
 def _call(message, function, *args, **kwargs):
@@ -2567,8 +2564,8 @@ def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
 def command_checkpoint_delivery(args):
     runtime = _delivery()
     now = format_utc(parse_utc(args.now, "--now"))
-    report = artifact_budget_validate(
-        "validate-report", Path(args.checkpoint_file), boundary="ship-checkpoint")
+    report = artifact_budget_validate("validate-report", Path(args.checkpoint_file),
+                                      boundary="ship-checkpoint")
     issue = report["issue"]
 
     def checkpoint(state):
@@ -2576,20 +2573,11 @@ def command_checkpoint_delivery(args):
         issue_state = state["issues"].get(str(issue))
         if issue_state is None:
             raise WorkflowError("unknown checkpoint issue")
-        context = _call(
-            "checkpoint transition refused", runtime.checkpoint_begin,
-            issue_state, report, now=now)
-        stalled = context["stalled"]
-        if context["blocking"] is not None and report["custody"]["kind"] == "implementation":
-            stalled = not suspend_attempt(
-                context["record"], blocked_on=context["blocking"]["blocked_on"], now=now)
-            if stalled:
-                issue_state["outcome"] = copy.deepcopy(context["record"]["result"])
         state["updated_at"] = now
-        return runtime.complete_checkpoint(
-            context, ledger_repo_root=str(resolve_repo_root(args.repo_root)),
-            run_id=args.run_id, issue_state=issue_state, report=report,
-            stalled=stalled)
+        return _call(
+            "checkpoint transition refused", runtime.checkpoint_state,
+            issue_state, report, now=now, suspend_attempt=suspend_attempt,
+            ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id)
 
     response = transact(args.repo_root, args.run_id, checkpoint)
     print_json(response)

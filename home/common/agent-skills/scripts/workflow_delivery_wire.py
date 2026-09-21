@@ -31,6 +31,28 @@ class DeliveryProjection:
                        for name in names for item in request[name]))
 
     @staticmethod
+    def request_values(request: dict[str, Any], issue: int, *, control: bool
+                       ) -> dict[str, Any]:
+        if not control:
+            names = ("delivery_contract", "authorization_intents",
+                     "authority_observations", "reevaluation_evidence",
+                     "delivery_observations", "requested_scope")
+            values = {name: request[name] for name in names}
+            values["contract"] = values.pop("delivery_contract")
+            values["recovery"] = request.get("recovery")
+            return values
+        key = str(issue)
+        return {
+            "contract": request["delivery_contracts"][key],
+            "authorization_intents": request["authorization_intents"][key],
+            "authority_observations": request["authority_observations"][key],
+            "reevaluation_evidence": request["reevaluation_evidence"][key],
+            "delivery_observations": request["delivery_observations"][key],
+            "requested_scope": request["requested_scopes"][key],
+            "recovery": request.get("recoveries", {}).get(key),
+        }
+
+    @staticmethod
     def custody_for_record(issue: int, kind: str, record: dict[str, Any]) -> dict[str, Any]:
         ordinal_name = "attempt" if kind == "implementation" else "remainder"
         ordinal = record[ordinal_name]
