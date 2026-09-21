@@ -221,35 +221,16 @@ for skill in home/common/agent-skills/skills/{from-issue,ship-issue} home/common
 ```
 Use the existing PyYAML devenv.
 
-D21 recovery closes direct/control/remainder wire shapes: direct/v2 has required
-nullable `recovery`; control/v2 has the exact canonical issue-keyed `recoveries`
-map (including explicit nulls); no summary, handoff or checkpoint has recovery;
-and every remainder has nullable recovery plus `finished_at` (null live; actual
-failed/stalled terminal time). A recovery is exactly the design's version-1
-`delivery-recovery` object with derived id, exact transient failure and verified
-absence objects, and one exact changed-evidence/new-authorization/
-human-transient-retry basis. It binds actual scope/stage, does not grant
-authority, folds null-first with successor intent, and D18 unresolved
-denial/unknown still parks. Only trusted direct/control input can atomically mint
-r2 after the latest failed/stalled r1, with retryable ready work and no active or
-existing r2; it emits no evaluation/effect/consumption, gives r2 null requested
-scope and fresh post-fold requirements, and never lets finish/stale owner output
-mint r2. Add public valid recovery plus absence, denial, replay, third, active
-and stale-proof no-write tests. Preserve the finite-custody invariant: disjoint
-attempt/remainder ordinals and budgets, canonical creation key, current guard
-before every effect/observation, fixed-deadline parking, 0/1/2 resume then fourth
-suspension records three stalls, progress reset, and terminal-remainder-first
-selection; identical direct/control replay returns existing/completed without a
-write. Retain raw receipts and do not activate, install a generation or mutate a
-live ledger.
+D21 in the spec and root plan Global Constraints binds this task's exact recovery
+wire, proof chronology/types, authority/denial behavior, replay, custody and stall
+rules. Public tests cover valid recovery plus absence, denial, replay, third
+allocation, active custody and stale-proof no-write outcomes. Raw receipts and
+the no-activation/live-ledger boundary remain mandatory.
 
-D22 factors state/response projection and v2 owner/worktree request grammar into
-adjacent private `workflow_delivery_wire.py`; `DeliveryRuntime` absorbs pure v2
-state/request correlations. CLI, custody orchestration, locks, persistence and
-effects stay in workflow-state. Keep the existing runtime interface 1/model
-8-name facade, concrete lexical source/installed loading and fail-closed missing
-or incompatible helper behavior before decode/mutation. No callbacks, cycles,
-fallbacks, duplicate policy or model-private calls. Add only this source helper
-to the product roster (24 paths, 27 with Task2 artifacts); publish via existing
-`default.nix` and cover helper/loading/error behavior in existing
-`test_workflow_delivery.py`. The six-module verification command is unchanged.
+D22 in the spec and root plan binds the private
+`workflow_delivery_wire.py`/`DeliveryRuntime` split, unchanged runtime interface
+1 and model eight-name facade, lexical source/installed fail-closed loading, and
+the no-callback/fallback/policy-copy boundary. The roster is 24 product paths (27
+with Task-2 artifacts); `default.nix` publishes the helper and existing
+`test_workflow_delivery.py` covers its loading/errors. The six-module command is
+unchanged.
