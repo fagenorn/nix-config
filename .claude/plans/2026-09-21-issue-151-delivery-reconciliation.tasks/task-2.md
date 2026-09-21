@@ -215,7 +215,7 @@ Run and retain real argv/stdout/stderr/exit receipts for:
 python3 -m unittest home/common/agent-skills/tests/test_delivery_model.py home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_workflow_delivery.py home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_artifact_budget.py home/common/agent-skills/tests/test_workflow_skill_contracts.py -v
 just agent-workflow-tests
 just build
-cd /private/tmp/issue-151-skill-validation-env
-for skill in home/common/agent-skills/skills/{from-issue,ship-issue} home/common/claude-code/skills/orchestrate-issues; do devenv shell -- python3 /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py "$PWD/<repo>/$skill"; done
+task_root=$PWD; cd /private/tmp/issue-151-skill-validation-env
+for skill in home/common/agent-skills/skills/{from-issue,ship-issue} home/common/claude-code/skills/orchestrate-issues; do devenv shell -- python3 /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py "$task_root/$skill"; done
 ```
-Use the existing PyYAML devenv and immutable repository root for `<repo>`.
+Use the existing PyYAML devenv.
