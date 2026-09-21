@@ -7,6 +7,13 @@ The shift is *what you do at a decision point*, not *what work gets done*. Every
 produces the same artifact at the same quality bar. Brainstorm still happens. Grill still happens.
 Standards review still happens. You don't get to skip thinking — you only stop waiting for the user.
 
+**And nobody is watching this one.** `SKILL.md`'s "Waiting is an act, not a
+state" is load-bearing here in a way it is not interactively: a stall in front of
+a user is noticed within a turn or two, while an unattended one silently burns
+the whole attempt budget and surfaces only when a human next looks. Carry that
+rule into every dispatch you make and every prompt you write, and prefer a gate
+your own turn blocks on over a wake-up you hand to something else.
+
 Direct autonomous acquisition always includes both `new_run` and
 `owner_unavailable` in every strict request, and both fields are `false` unless
 the current user instruction explicitly authorizes that exact transition.
@@ -113,7 +120,8 @@ beyond the exceptions named below):
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
 - the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
   filter, pasted verbatim from `decision-ledger.md`,
-- the fixed return schema, with "details live in the committed files, not in your report".
+- the fixed return schema, with "details live in the committed files, not in your report",
+- `SKILL.md`'s waiting rule in one line — no wake-up it cannot confirm is live, and no silent stop.
 
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally
 installed skills its phase names — `grill-with-docs` and `doc-grounded-questions` for the design

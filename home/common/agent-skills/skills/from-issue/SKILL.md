@@ -189,6 +189,33 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 **Structured report-backs.** A subagent's final message is re-read by its caller on every later turn, so every `Agent` dispatch states the applicable fixed JSON return schema; details live in budgeted worktree files. Prefer the tiered agent types over `general-purpose`.
 
+**Waiting is an act, not a state.** Ending your turn is how you yield; you resume
+only when something wakes you, so arranging the work and arranging your own
+wake-up are two separate acts — and the second is the one that gets skipped. Each
+wake path this flow leans on has a hole: a subagent's **completion** notification
+fires when it completes, so a child that goes idle awaiting input it will never
+get emits nothing; a **detached or backgrounded** process wakes nobody when it
+exits unless someone is blocked on it; a **watcher** fires only while its
+condition can still occur, so one armed over a process that already died, or
+never started, can never fire at all.
+
+Prefer the wait your own turn blocks on — run the gate in the foreground, or run
+it in the background and read its exit status yourself. Where you must yield to
+an external signal, keep a bounded self-check behind it rather than trusting it
+alone. Before yielding, name what will wake you and confirm something live is
+behind it: a process `ps` would show, an agent a listing reports as running. If
+nothing is, you are not waiting — you are stopped, and only a human noticing will
+restart you.
+
+Read a child the same way: **silence is not progress.** An agent that has gone
+idle without returning a result looks exactly like one still working, and no
+notification announces the difference, so treat idle-without-result as its own
+outcome and re-check liveness on a bound rather than waiting indefinitely for a
+report that is no longer coming. When you stop — blocked, out of budget, unable
+to discharge a finding — say so in your final message and name the next action;
+an absent final message hands your caller silence, the one signal they cannot
+act on.
+
 **Artifact report boundary (D5, D6, D11, D14).** At every producer boundary,
 preserve the received stdout bytes and pipe them unchanged through
 `artifact-budget validate-report --boundary producer --input -`; only after that
