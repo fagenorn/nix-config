@@ -12,7 +12,8 @@ owns delivery validation, canonical identity, exact scope narrowing, and pure
 stage/postcondition reduction without selecting a workflow schema. Task 2 adopts
 that reviewed seam in one source cutover: workflow schema 3, control/direct
 interface 2, checkpoint/handoff/summary v2, every production caller, and their
-public executable tests move together. The two task commits form one delivery;
+public executable tests move together. It also adds D19's independent actual
+scope proposal while the pure model remains the sole stage-policy owner. The two task commits form one delivery;
 Task 1 alone is preparatory and does not activate or ship a partial wire.
 
 **Tech stack:** Python 3 standard library, JSON CLI protocols, Nix/Home Manager
@@ -69,6 +70,13 @@ Git, and repository `just` commands.
   has one append-only consumption use key persisted before its evaluation action
   is emitted. A resulting allow binds that use key, time, scope and current
   custody, still requires current user intent, and loses to a new rejection.
+- Per D19, direct/checkpoint carry nullable `requested_scope` and control carries
+  exact issue-keyed `requested_scopes`. The trusted caller builds actual tuples;
+  the model binds them to the post-fold ordered stage. Missing scope is local,
+  wrong-stage refuses without write, uncovered scope is a human gate, and
+  ordinary covered scope may run native evaluation without a prior allow. With
+  no ready stage, null preserves dependency/postcondition observation requirements
+  and no effect stage is invented.
 - Every ordinary source file remains below the review packer's 65,536-byte
   per-file diff limit. Do not depend on an unpublished projector or raise any
   root, member, count or aggregate cap.
@@ -104,9 +112,9 @@ Git, and repository `just` commands.
   including `historical_owner_result`, uses the existing legacy validator plus
   the model's exact envelope check; the model does not duplicate that schema.
 - A controlled fake provider consumes only the typed direct response, records
-  effects, and returns strict observations. It proves exact authorized effects,
-  zero-effect refusals, double launch fencing, partial progress, denial,
-  suspension and same-custody resume.
+  effects, and returns strict observations. It proves exact scope/action echo,
+  ordinary evaluation, null/mismatch zero-effect refusals, double fencing,
+  post-fold partial progress, denial, suspension, transfer and fresh proposals.
 - Caller/eval tests supplement the executable round trips by pinning that
   from-issue, AUTO, ship-issue and orchestration validate before decode, carry
   exact objects, act only on the returned closed stage and persist before report.
@@ -116,7 +124,7 @@ Git, and repository `just` commands.
 
 ## Delivery estimate and boundaries
 
-Estimate: 16–21 product/test/caller files plus this three-file plan package and
+Estimate: 20–26 product/test/caller files plus this three-file plan package and
 the amended one-file design spec. The complete source diff is likely 350–525 KiB
 before review fixes; `workflow-state.py`, its existing test, and the new
 end-to-end test are the largest likely contributors and each must remain below
@@ -136,7 +144,7 @@ reviews; an accepted Task 1 is not a separately activated product.
 
 Task 1 — Build and publish the pure delivery model — `home/common/agent-skills/scripts/delivery_model/{__init__,_canonical,_objects,_wire,_reconcile}.py`, `home/common/agent-skills/tests/{_delivery_model_fixtures,test_delivery_model}.py`, `home/common/agent-skills/default.nix`, `justfile` — full — [task-1.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-1.md)
 
-Task 2 — Atomically adopt schema 3 and delivery transports — workflow state, artifact validation, production caller skills/evals, and their tests — full — [task-2.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-2.md)
+Task 2 — Atomically adopt schema 3 and delivery transports — delivery model, workflow state, artifact validation, production caller skills/evals, and tests — full — [task-2.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-2.md)
 
 ## Decisions
 
@@ -189,5 +197,11 @@ The independent Sol/high round-five review of head
 `b0aa4d76db40f1e09702d4f15ce552b0fa38ed08` reported 1 Blocking / 0 Should-fix
 in `/private/tmp/issue-151-plan-review-round5.md`. Root verified it; exact control
 map/direct key names and envelope-key negative fixtures are restored.
+
+The D19 amendment follows the accepted root-controller proposal and independent
+Sol/high critique: the pure reducer owns post-fold stage/scope correlation;
+requests and effect-bearing responses carry exact proposed scope; handoff echo is
+historical; finish remainder is custody-only; and ordinary authorization does
+not acquire a preflight/prior-allow ceremony.
 
 ---
