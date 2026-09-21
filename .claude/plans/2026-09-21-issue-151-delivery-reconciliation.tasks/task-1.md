@@ -7,6 +7,7 @@
 - Create: `home/common/agent-skills/scripts/delivery_model/_objects.py`
 - Create: `home/common/agent-skills/scripts/delivery_model/_wire.py`
 - Create: `home/common/agent-skills/scripts/delivery_model/_reconcile.py`
+- Create: `home/common/agent-skills/tests/_delivery_model_fixtures.py`
 - Create: `home/common/agent-skills/tests/test_delivery_model.py`
 - Modify: `home/common/agent-skills/default.nix`
 - Modify: `justfile`
@@ -44,8 +45,15 @@
 
 - [ ] **Step 1: Write the complete pure-model and publication tests**
 
-Create `test_delivery_model.py` with fixture builders that return strict complete
-objects (no `**kwargs` are copied into wire objects):
+Create `_delivery_model_fixtures.py` for reusable synthetic object/graph builders
+and `test_delivery_model.py` for test classes and behavior assertions. Builders
+receive the model explicitly and return strict complete objects; no `**kwargs`
+are copied into wire objects. Import every used helper by name with an ordinary
+explicit relative import. The helper has no production policy, filesystem,
+provider, clock or ledger access; no entry point, wildcard/sys.path import,
+fallback loader, compatibility path, registration or managed publication:
+Controller-only direct-load probes adapt externally; product tests do not
+depend on those probes.
 
 ```python
 from __future__ import annotations
@@ -448,8 +456,8 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-In the same test file define these complete fixture helpers immediately above
-the test class: `strict_contract_and_delivery(model)` builds a normal repository
+In the private helper define these complete fixtures, imported explicitly by the
+test: `strict_contract_and_delivery(model)` builds a normal repository
 contract with the exact `select_reviewed_output`, `publish_branch`, `open_pr`,
 and `merge_pr` stages, pending delivery/merge postconditions and explicit
 not-applicable tracker/cleanup postconditions from the normative appendix. Its
@@ -474,7 +482,7 @@ semantically cross-bound identities. Deliberately structural-invalid
 helpers, including `with_conflicting_observation_ids`, return the one named
 mutation without validating that final invalid object; the test's
 `assertRaises` is the first rejection. Keep each literal local to this test
-module rather than adding fixture JSON or a second model implementation.
+module pair rather than adding fixture JSON or a second model implementation.
 Add one positive and table-driven negative case for each exact
 `implementation_delivered` and `cleanup_complete` subject shape: every required
 reference must bind the contract, selected/integrated subject and declared
@@ -624,6 +632,7 @@ git diff --check -- \
   home/common/agent-skills/scripts/delivery_model/_objects.py \
   home/common/agent-skills/scripts/delivery_model/_wire.py \
   home/common/agent-skills/scripts/delivery_model/_reconcile.py \
+  home/common/agent-skills/tests/_delivery_model_fixtures.py \
   home/common/agent-skills/tests/test_delivery_model.py \
   home/common/agent-skills/default.nix justfile
 test -z "$(git diff --cached --name-only)"
@@ -637,6 +646,7 @@ allowed = {
     "home/common/agent-skills/scripts/delivery_model/_objects.py",
     "home/common/agent-skills/scripts/delivery_model/_wire.py",
     "home/common/agent-skills/scripts/delivery_model/_reconcile.py",
+    "home/common/agent-skills/tests/_delivery_model_fixtures.py",
     "home/common/agent-skills/tests/test_delivery_model.py",
     "home/common/agent-skills/default.nix",
     "justfile",
@@ -659,6 +669,7 @@ GIT_INDEX_FILE="$candidate_index" git add -A -- \
   home/common/agent-skills/scripts/delivery_model/_objects.py \
   home/common/agent-skills/scripts/delivery_model/_wire.py \
   home/common/agent-skills/scripts/delivery_model/_reconcile.py \
+  home/common/agent-skills/tests/_delivery_model_fixtures.py \
   home/common/agent-skills/tests/test_delivery_model.py \
   home/common/agent-skills/default.nix justfile
 GIT_INDEX_FILE="$candidate_index" git diff --cached --check
@@ -673,6 +684,7 @@ allowed = {
     "home/common/agent-skills/scripts/delivery_model/_objects.py",
     "home/common/agent-skills/scripts/delivery_model/_wire.py",
     "home/common/agent-skills/scripts/delivery_model/_reconcile.py",
+    "home/common/agent-skills/tests/_delivery_model_fixtures.py",
     "home/common/agent-skills/tests/test_delivery_model.py",
     "home/common/agent-skills/default.nix",
     "justfile",
@@ -695,10 +707,10 @@ test -z "$(git diff --cached --name-only)"
 ```
 
 Expected: all commands exit 0 and no whitespace error appears. The correction
-allows nine paths: mandatory standalone deletion, five package files, focused
-test and publication, plus `justfile` only if registration changes. The temporary
+allows ten paths: mandatory standalone deletion, five package files, focused
+test plus its private helper, publication, and `justfile` only if registration changes. The temporary
 index measures deletions/new files without touching the real index. The complete
-immutable-Task-1-base package has eight net paths because the standalone file
+immutable-Task-1-base package has nine net paths because the standalone file
 was created and removed within that range. Require full changed-path/line
 coverage and unchanged limits before review. If a split is needed, first amend
 the Files roster, allowlist and root task index.
@@ -714,6 +726,7 @@ git add -A -- \
   home/common/agent-skills/scripts/delivery_model/_objects.py \
   home/common/agent-skills/scripts/delivery_model/_wire.py \
   home/common/agent-skills/scripts/delivery_model/_reconcile.py \
+  home/common/agent-skills/tests/_delivery_model_fixtures.py \
   home/common/agent-skills/tests/test_delivery_model.py \
   home/common/agent-skills/default.nix justfile
 test -z "$(git diff --name-only)"
@@ -727,6 +740,7 @@ allowed = {
     "home/common/agent-skills/scripts/delivery_model/_objects.py",
     "home/common/agent-skills/scripts/delivery_model/_reconcile.py",
     "home/common/agent-skills/scripts/delivery_model/_wire.py",
+    "home/common/agent-skills/tests/_delivery_model_fixtures.py",
     "home/common/agent-skills/tests/test_delivery_model.py",
     "justfile",
 }

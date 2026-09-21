@@ -81,8 +81,9 @@ Git, and repository `just` commands.
 ## Test seams
 
 - Pure model tests call the public functions directly and load both source and
-  generated installed module paths, proving canonical bytes/digests, strict
-  objects, slot-bound narrowing, refusal preservation and ordered reduction.
+  generated installed module paths. One private `_delivery_model_fixtures.py`
+  supplies synthetic builders by explicit relative import with the model passed
+  explicitly; it is not an entry point, production loader or I/O seam.
 - Workflow CLI tests invoke real `init-run`, `control`, `direct-owner`,
   `current-launch`, `checkpoint-delivery`, and `finish` subprocesses against
   temporary ledgers. Every successful stdout validates before decode; init's
@@ -131,7 +132,7 @@ reviews; an accepted Task 1 is not a separately activated product.
 
 ## Task index
 
-Task 1 — Build and publish the pure delivery model — `home/common/agent-skills/scripts/delivery_model/{__init__,_canonical,_objects,_wire,_reconcile}.py`, `home/common/agent-skills/tests/test_delivery_model.py`, `home/common/agent-skills/default.nix`, `justfile` — full — [task-1.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-1.md)
+Task 1 — Build and publish the pure delivery model — `home/common/agent-skills/scripts/delivery_model/{__init__,_canonical,_objects,_wire,_reconcile}.py`, `home/common/agent-skills/tests/{_delivery_model_fixtures,test_delivery_model}.py`, `home/common/agent-skills/default.nix`, `justfile` — full — [task-1.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-1.md)
 
 Task 2 — Atomically adopt schema 3 and delivery transports — workflow state, artifact validation, production caller skills/evals, and their tests — full — [task-2.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-2.md)
 
