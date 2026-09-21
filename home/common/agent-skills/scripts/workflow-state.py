@@ -124,6 +124,7 @@ CONTROL_REQUEST_FIELDS = frozenset(
         "reevaluation_evidence",
         "delivery_observations",
         "requested_scopes",
+        "recoveries",
     }
 )
 DIRECT_OWNER_REQUEST_FIELDS = frozenset(
@@ -143,6 +144,7 @@ DIRECT_OWNER_REQUEST_FIELDS = frozenset(
         "reevaluation_evidence",
         "delivery_observations",
         "requested_scope",
+        "recovery",
     }
 )
 FORGE_OBSERVATION_FIELDS = frozenset({"state", "url", "merge_sha"})
@@ -219,7 +221,7 @@ CONTROL_DISPATCH_FIELDS = frozenset(
         "deadline_at",
     }
 )
-CONTROL_DISPATCH_KINDS = frozenset({"spawn", "resume", "retry"})
+CONTROL_DISPATCH_KINDS = frozenset({"spawn", "resume", "retry", "recover"})
 CONTROL_WAIT_FIELDS = frozenset({"id", "kind", "wake_on", "deadline_at"})
 CONTROL_WAKE_EVENTS = frozenset(
     {"owner_notification", "tracker_change", "deadline"}
@@ -933,6 +935,7 @@ def upgrade_state(value: Any, *, run_id: str,
 
 def read_locked_state(
     state_path: Path, run_id: str, *, migration_contracts: dict[int, Any],
+    allowed_source_schema_versions: frozenset[int] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     require_regular_path(state_path, "workflow state", allow_missing=False)
     try:
@@ -941,6 +944,10 @@ def read_locked_state(
             value = json.load(source)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid workflow state JSON: {error}") from error
+    if allowed_source_schema_versions is not None:
+        version = value.get("schema_version") if isinstance(value, dict) else None
+        if type(version) is not int or version not in allowed_source_schema_versions:
+            raise WorkflowError("legacy finish is read-only for schema 3 runs")
     migrated = isinstance(value, dict) and value.get("schema_version") != SCHEMA_VERSION
     return upgrade_state(value, run_id=run_id,
                          migration_contracts=migration_contracts), migrated
@@ -997,6 +1004,7 @@ def transact(
     *,
     allow_missing: bool = False,
     migration_contracts: dict[int, Any],
+    allowed_source_schema_versions: frozenset[int] | None = None,
 ) -> Any:
     load_delivery_runtime()
     run_dir, state_path, lock_path = workflow_paths(repo_root, run_id)
@@ -1012,6 +1020,7 @@ def transact(
         if state_exists:
             current, migrated = read_locked_state(
                 state_path, run_id, migration_contracts=migration_contracts,
+                allowed_source_schema_versions=allowed_source_schema_versions,
             )
             state = copy.deepcopy(current)
         elif allow_missing:
@@ -1751,6 +1760,8 @@ def _apply_one_issue_policy(
     human_directed: bool = False,
     forge: dict[str, Any] | None = None,
     require_forge: bool = False,
+    delivery_request: dict[str, Any] | None = None,
+    delivery_source_kind: str | None = None,
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
 
@@ -1825,6 +1836,16 @@ def _apply_one_issue_policy(
         }
 
     now_value = parse_utc(now, "policy now")
+    if delivery_request is not None:
+        recovery = delivery_call(
+            "delivery recovery refused", load_delivery_runtime().recovery_policy,
+            ledger_issue, issue=issue, request=delivery_request,
+            source_kind=delivery_source_kind, now=now,
+            dispatch_permitted=dispatch_permitted,
+            remainder_deadline=attempt_deadline(now, attempt_budget_minutes),
+        )
+        if recovery is not None:
+            return recovery
     plan = delivery_call(
         "remainder policy refused",
         load_delivery_runtime().remainder_policy, ledger_issue, now=now,
@@ -2165,6 +2186,7 @@ def command_control(args: argparse.Namespace) -> int:
                 dispatch_permitted=False,
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
+                delivery_request=request, delivery_source_kind="control",
             )
 
         occupied = runtime.occupied_count(state, at_time=now, unavailable=unavailable)
@@ -2185,9 +2207,20 @@ def command_control(args: argparse.Namespace) -> int:
                 dispatch_permitted=dispatch_permitted,
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
+                delivery_request=request, delivery_source_kind="control",
             )
             planned[issue] = result
             return result
+
+        for issue in request["issues"]:
+            if analysis[issue]["desired"] != "recover":
+                continue
+            if analysis[issue]["changed"] and capacity <= 0:
+                continue
+            apply_policy(issue, True)
+            proposal_order.append(issue)
+            if analysis[issue]["changed"]:
+                capacity -= 1
 
         for issue in request["issues"]:
             if capacity <= 0 or analysis[issue]["desired"] != "resume":
@@ -2332,6 +2365,9 @@ def command_control(args: argparse.Namespace) -> int:
             result = planned[issue]
             operation = result["operation"]
             attempt = result["attempt"]
+            if operation == "recover":
+                actions.append({"kind": "recover", "issue": issue})
+                continue
             if operation == "refuse":
                 deltas.append({
                     "issue": issue, "attempt": attempt["attempt"],
@@ -2647,6 +2683,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     human_directed=True,
                     forge=request["forge"],
                     require_forge=True,
+                    delivery_request=request, delivery_source_kind="direct",
                 )
                 operation = policy["operation"]
                 if operation == "idle":
@@ -2702,7 +2739,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         reason="merged", blockers=[],
                         result=policy["issue_state"]["outcome"],
                     )
-                elif operation in {"spawn", "resume", "retry", "refuse"}:
+                elif operation in {"spawn", "resume", "retry", "refuse", "recover"}:
                     if state is None:
                         ensure_gitignore(workflows_dir)
                         try:
@@ -2725,13 +2762,21 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         )
                     else:
                         state["issues"][str(issue)] = policy["issue_state"]
+                    before_delivery = copy.deepcopy(
+                        state["issues"][str(issue)]["delivery"])
+                    reduction = policy.get("reduction")
+                    if reduction is None:
+                        reduction = delivery_call(
+                            "delivery transition refused", runtime.apply_transition,
+                            state["issues"][str(issue)], issue=issue, request=request,
+                            source_kind="direct", at_time=request["now"])
+                    changed = (policy["changed"] or
+                               state["issues"][str(issue)]["delivery"] != before_delivery)
+                    if changed:
                         state["updated_at"] = request["now"]
-                    reduction = delivery_call(
-                        "delivery transition refused", runtime.apply_transition,
-                        state["issues"][str(issue)], issue=issue, request=request,
-                        source_kind="direct", at_time=request["now"])
                     validate_state(state, run_id=run_id)
-                    atomic_write_state(run_dir, state_path, state)
+                    if changed:
+                        atomic_write_state(run_dir, state_path, state)
                     if operation == "refuse":
                         response = direct_terminal(
                             issue=issue, run_id=run_id, source="lifecycle",
@@ -3021,7 +3066,10 @@ def command_finish_legacy(args: argparse.Namespace) -> int:
         state["updated_at"] = now
         return result, True
 
-    persisted = transact(args.repo_root, args.run_id, finish, migration_contracts={})
+    persisted = transact(
+        args.repo_root, args.run_id, finish, migration_contracts={},
+        allowed_source_schema_versions=frozenset({1, 2}),
+    )
     print_json(persisted)
     return 0
 

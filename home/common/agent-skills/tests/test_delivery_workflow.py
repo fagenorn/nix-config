@@ -23,7 +23,18 @@ SCRIPTS = ROOT / "home/common/agent-skills/scripts"
 WORKFLOW = SCRIPTS / "workflow-state.py"
 MODEL = SCRIPTS / "delivery_model/__init__.py"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
+ARTIFACT_BUDGET = SCRIPTS / "artifact_budget.py"
 NOW = "2026-09-21T00:00:00Z"
+
+
+class FakeProvider:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def execute(self, scope):
+        self.calls.append(copy.deepcopy(scope))
+        return copy.deepcopy(self.result)
 
 
 def load(path, name, *, package=False):
@@ -52,7 +63,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             "authority_observations": copy.deepcopy(empty),
             "reevaluation_evidence": copy.deepcopy(empty),
             "delivery_observations": copy.deepcopy(empty),
-            "requested_scopes": scope}
+            "requested_scopes": scope,
+            "recoveries": {"151": None}}
 
     def direct_request(self, contract=None):
         return {"interface_version": 2, "issue": 151, "now": NOW,
@@ -61,7 +73,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             "forge": None, "delivery_contract": contract,
             "authorization_intents": [], "authority_observations": [],
             "reevaluation_evidence": [], "delivery_observations": [],
-            "requested_scope": None}
+            "requested_scope": None, "recovery": None}
 
     def all_stage_contract(self):
         contract, delivery = contract_and_delivery(self.model)
@@ -174,6 +186,30 @@ class DeliveryAdmissionTest(unittest.TestCase):
                                                    "delivery_remainder"}
                                  for item in response["actions"]))
 
+    def test_schema_three_refuses_the_legacy_finish_transport_without_a_write(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            initialized = subprocess.run(
+                [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
+                 "--run-id", "legacy-refusal", "--now", NOW],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            state_path = root / ".superpowers/workflows/legacy-refusal/state.json"
+            before = state_path.read_bytes()
+            result = {"issue": 151, "state": "failed", "pr_url": None,
+                "merge_sha": None, "issue_closed": False, "discussion_items": [],
+                "detail_state": "none", "report_path": None, "notes": "failed"}
+            result_path = root / "legacy-result.json"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            refused = subprocess.run(
+                [sys.executable, str(WORKFLOW), "finish", "--repo-root", str(root),
+                 "--run-id", "legacy-refusal", "--issue", "151", "--attempt", "1",
+                 "--result-file", str(result_path), "--now", NOW],
+                capture_output=True, text=True, check=False)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("legacy finish is read-only", refused.stderr)
+            self.assertEqual(state_path.read_bytes(), before)
+
     def test_adjacent_migration_is_detached_and_writes_only_schema_three(self):
         contract, _ = contract_and_delivery(self.model)
         for version in (1, 2):
@@ -228,7 +264,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                           "worktree": "/worktree", "at": NOW}],
             "deadline_at": "2026-09-21T01:00:00Z", "progress_token": "initial",
             "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
-            "result": None, "result_source": None}]
+            "result": None, "result_source": None, "recovery": None,
+            "finished_at": None}]
         state["updated_at"] = NOW
         self.workflow.validate_state(state, run_id="admission")
         requirement = self.workflow.bootstrap_response(state)["requirements"][0]
@@ -386,6 +423,106 @@ class DeliveryAdmissionTest(unittest.TestCase):
             remainder = json.loads(finished.stdout)
             self.assertEqual(remainder["kind"], "delivery_remainder")
             self.assertEqual(remainder["custody"]["action_id"], "151:r1:1")
+
+    def test_typed_effect_uses_raw_validation_and_both_launch_fences(self):
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
+        digest = self.model.canonical_digest(contract)
+        selected = selection(self.model, digest)
+        effect_observation = observation(
+            self.model, contract, "selected_output", {"selected_output": selected})
+
+        def validated(boundary, raw):
+            result = subprocess.run(
+                [sys.executable, str(ARTIFACT_BUDGET), "validate-report",
+                 "--boundary", boundary, "--input", "-", "--policy", str(POLICY)],
+                input=raw, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, (result.stderr, raw))
+            return json.loads(result.stdout)
+
+        for case in ("success", "scope_mismatch", "stale_after_effect"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw); worktree = str(root / "worktree")
+
+                def invoke(*args):
+                    return subprocess.run(
+                        [sys.executable, str(WORKFLOW), *map(str, args)],
+                        capture_output=True, check=False)
+
+                def store(name, value):
+                    path = root / name
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                    return path
+
+                request = self.direct_request(contract)
+                request.update(
+                    tracker={"issue": 151, "state": "open", "open_blockers": [],
+                             "decision_blockers": []},
+                    worktree={"issue": 151, "recorded": None,
+                              "candidate": {"path": worktree, "state": "absent"}},
+                    forge={"state": "none", "url": None, "merge_sha": None},
+                    authorization_intents=delivery["authorization_intents"],
+                    requested_scope=actual,
+                )
+                owner_raw = invoke("direct-owner", "--repo-root", root,
+                                   "--request-file", store("direct.json", request))
+                self.assertEqual(owner_raw.returncode, 0, owner_raw.stderr.decode())
+                action = validated("workflow-response", owner_raw.stdout)
+                provider = FakeProvider(effect_observation)
+                supplied_scope = copy.deepcopy(actual)
+                if case == "scope_mismatch":
+                    supplied_scope["endpoint"] = {"kind": "literal", "value": "foreign"}
+                before = (root / ".superpowers/workflows" / action["run_id"] /
+                          "state.json").read_bytes()
+                if action["requested_scope"] != supplied_scope:
+                    self.assertEqual(provider.calls, [])
+                    self.assertEqual((root / ".superpowers/workflows" /
+                                      action["run_id"] / "state.json").read_bytes(), before)
+                    continue
+
+                first_raw = invoke("current-launch", "--repo-root", root,
+                                   "--run-id", action["run_id"], "--action-id",
+                                   action["custody"]["action_id"])
+                first = validated("workflow-response", first_raw.stdout)
+                self.assertTrue(first["current"])
+                observed = provider.execute(supplied_scope)
+                if case == "stale_after_effect":
+                    suspended = invoke(
+                        "suspend", "--repo-root", root, "--run-id", action["run_id"],
+                        "--issue", 151, "--attempt", 1, "--blocked-on", "external",
+                        "--now", "2026-09-21T00:00:01Z")
+                    self.assertEqual(suspended.returncode, 0, suspended.stderr.decode())
+                before_observation = (root / ".superpowers/workflows" /
+                                      action["run_id"] / "state.json").read_bytes()
+                second_raw = invoke("current-launch", "--repo-root", root,
+                                    "--run-id", action["run_id"], "--action-id",
+                                    action["custody"]["action_id"])
+                second = validated("workflow-response", second_raw.stdout)
+                if case == "stale_after_effect":
+                    self.assertFalse(second["current"])
+                    self.assertEqual(len(provider.calls), 1)
+                    self.assertEqual((root / ".superpowers/workflows" /
+                                      action["run_id"] / "state.json").read_bytes(),
+                                     before_observation)
+                    continue
+
+                self.assertTrue(second["current"])
+                allowed = authority(self.model, contract, actual, action["custody"],
+                                    verdict="allowed")
+                report = self.report_common(action["custody"], digest)
+                report.update(delivery_observations=[observed],
+                              authority_observations=[allowed],
+                              requested_scope=None)
+                canonical_report = validated(
+                    "ship-checkpoint", json.dumps(report).encode("utf-8"))
+                checkpoint = invoke(
+                    "checkpoint-delivery", "--repo-root", root, "--run-id",
+                    action["run_id"], "--checkpoint-file",
+                    store("checkpoint.json", canonical_report), "--now",
+                    "2026-09-21T00:00:01Z")
+                self.assertEqual(checkpoint.returncode, 0, checkpoint.stderr.decode())
+                response = validated("workflow-response", checkpoint.stdout)
+                self.assertIn(observed["id"], response["accepted_observation_ids"])
+                self.assertEqual(provider.calls, [actual])
 
     def test_all_stages_fold_before_delivery_completion(self):
         contract, initial_intent = self.all_stage_contract()
@@ -553,6 +690,128 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     "--request-file", store(f"resume-{ordinal}.json", resume)).stdout)
                 self.assertEqual(value["custody"]["launch"], ordinal + 2)
 
+    def test_remainder_two_requires_closed_recovery_proof_and_replays(self):
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
+        digest = self.model.canonical_digest(contract)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); worktree = str(root / "worktree"); serial = 0
+            def store(value):
+                nonlocal serial; serial += 1
+                path = root / f"recovery-{serial}.json"
+                path.write_text(json.dumps(value)); return path
+            def call(*args, ok=True):
+                completed = subprocess.run([sys.executable, str(WORKFLOW), *map(str, args)],
+                    capture_output=True, text=True, check=False)
+                if ok: self.assertEqual(completed.returncode, 0, completed.stderr)
+                return completed
+            request = self.direct_request(contract)
+            request.update(now=NOW,
+                tracker={"issue": 151, "state": "open", "open_blockers": [],
+                         "decision_blockers": []},
+                worktree={"issue": 151, "recorded": None,
+                          "candidate": {"path": worktree, "state": "absent"}},
+                forge={"state": "none", "url": None, "merge_sha": None},
+                authorization_intents=delivery["authorization_intents"],
+                requested_scope=actual)
+            owner = json.loads(call("direct-owner", "--repo-root", root,
+                "--request-file", store(request)).stdout)
+            historical = {"issue": 151, "state": "failed", "pr_url": None,
+                "merge_sha": None, "issue_closed": False, "discussion_items": [],
+                "detail_state": "none", "report_path": None, "notes": "transient"}
+            def failed(custody):
+                return {"interface_version": 2, "issue": 151,
+                    "state": "terminal_failed", "custody": custody,
+                    "historical_owner_result": historical,
+                    "delivery_contract_digest": digest, "delivery_observations": [],
+                    "authority_observations": [], "reevaluation_evidence": [],
+                    "detail_state": "none", "report_path": None, "notes": "transient"}
+            first = json.loads(call("finish", "--repo-root", root, "--run-id",
+                owner["run_id"], "--summary-file", store(failed(owner["custody"])),
+                "--now", "2026-09-21T00:00:01Z").stdout)
+
+            proof = {"schema_version": 1, "kind": "delivery-recovery", "id": "",
+                "contract_digest": digest, "stage_id": "select",
+                "requested_scope": actual,
+                "failure": {"kind": "effect_failure", "effect_attempted": True,
+                    "classification": "transient", "source_kind": "provider",
+                    "reference": "provider:attempt-1", "observed_at": "2026-09-21T00:00:02Z",
+                    "evidence_digest": "sha256:" + "1" * 64},
+                "effect_absence": {"kind": "effect_absence", "absent": True,
+                    "probe_succeeded": True, "source_kind": "repository",
+                    "reference": "repo:absence-1", "observed_at": "2026-09-21T00:00:03Z",
+                    "evidence_digest": "sha256:" + "2" * 64},
+                "basis": {"kind": "changed_relevant_evidence", "scope_id": actual["id"],
+                    "source_kind": "provider", "reference": "provider:new-input",
+                    "observed_at": "2026-09-21T00:00:03Z",
+                    "evidence_digest": "sha256:" + "3" * 64}}
+            proof["id"] = self.model.canonical_digest(proof, omit_derived="id")
+            recovery_request = self.direct_request(contract)
+            recovery_request.update(now="2026-09-21T00:00:04Z",
+                authorization_intents=delivery["authorization_intents"], recovery=proof)
+
+            before = (root / f".superpowers/workflows/{owner['run_id']}/state.json").read_bytes()
+            active = call("direct-owner", "--repo-root", root,
+                "--request-file", store(recovery_request), ok=False)
+            self.assertIn("delivery recovery refused", active.stderr)
+            self.assertEqual((root / f".superpowers/workflows/{owner['run_id']}/state.json").read_bytes(), before)
+
+            terminal = json.loads(call("finish", "--repo-root", root, "--run-id",
+                owner["run_id"], "--summary-file", store(failed(first["custody"])),
+                "--now", "2026-09-21T00:00:02Z").stdout)
+            self.assertEqual(terminal["kind"], "terminal_failed")
+            state_path = root / f".superpowers/workflows/{owner['run_id']}/state.json"
+            terminal_bytes = state_path.read_bytes()
+
+            stale = copy.deepcopy(recovery_request)
+            stale["recovery"]["failure"]["observed_at"] = "2026-09-20T23:59:59Z"
+            stale["recovery"]["id"] = self.model.canonical_digest(
+                stale["recovery"], omit_derived="id")
+            refused = call("direct-owner", "--repo-root", root,
+                "--request-file", store(stale), ok=False)
+            self.assertIn("delivery recovery refused", refused.stderr)
+            self.assertEqual(state_path.read_bytes(), terminal_bytes)
+
+            unknown_absence = copy.deepcopy(recovery_request)
+            unknown_absence["recovery"]["effect_absence"]["probe_succeeded"] = False
+            unknown_absence["recovery"]["id"] = self.model.canonical_digest(
+                unknown_absence["recovery"], omit_derived="id")
+            refused = call("direct-owner", "--repo-root", root,
+                "--request-file", store(unknown_absence), ok=False)
+            self.assertIn("invalid delivery inputs", refused.stderr)
+            self.assertEqual(state_path.read_bytes(), terminal_bytes)
+
+            denied_request = copy.deepcopy(recovery_request)
+            denied = authority(self.model, contract, actual, first["custody"])
+            denied["observed_at"] = "2026-09-21T00:00:03Z"; seal(self.model, denied)
+            denied_request["authority_observations"] = [denied]
+            rejected = call("direct-owner", "--repo-root", root,
+                "--request-file", store(denied_request), ok=False)
+            self.assertIn("delivery recovery refused", rejected.stderr)
+            self.assertEqual(state_path.read_bytes(), terminal_bytes)
+
+            second = json.loads(call("direct-owner", "--repo-root", root,
+                "--request-file", store(recovery_request)).stdout)
+            self.assertEqual((second["kind"], second["custody"]["remainder"],
+                              second["requested_scope"]),
+                             ("delivery_remainder", 2, None))
+            persisted = json.loads(state_path.read_text())
+            self.assertEqual(persisted["issues"]["151"]["delivery_remainders"][1]
+                             ["recovery"], proof)
+            replay_bytes = state_path.read_bytes()
+            replay = json.loads(call("direct-owner", "--repo-root", root,
+                "--request-file", store(recovery_request)).stdout)
+            self.assertEqual(replay, second)
+            self.assertEqual(state_path.read_bytes(), replay_bytes)
+
+            other = copy.deepcopy(recovery_request)
+            other["recovery"]["basis"]["reference"] = "provider:different"
+            other["recovery"]["id"] = self.model.canonical_digest(
+                other["recovery"], omit_derived="id")
+            third = call("direct-owner", "--repo-root", root,
+                "--request-file", store(other), ok=False)
+            self.assertIn("delivery recovery refused", third.stderr)
+            self.assertEqual(state_path.read_bytes(), replay_bytes)
+
     def test_control_resumes_remainder_without_spending_implementation_attempt(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
         digest = self.model.canonical_digest(contract)
@@ -610,6 +869,81 @@ class DeliveryAdmissionTest(unittest.TestCase):
                              (1, 2, remainder["deadline_at"]))
             state = json.loads((root / ".superpowers/workflows/orchestrated/state.json").read_text())
             self.assertEqual(len(state["issues"]["151"]["attempts"]), 1)
+
+    def test_control_allocates_only_one_proven_second_remainder(self):
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
+        digest = self.model.canonical_digest(contract)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); run_id = "recovery-control"; serial = 0
+            def store(value):
+                nonlocal serial; serial += 1
+                path = root / f"control-recovery-{serial}.json"
+                path.write_text(json.dumps(value)); return path
+            def invoke(*args):
+                completed = subprocess.run([sys.executable, str(WORKFLOW), *map(str, args)],
+                    capture_output=True, text=True, check=False)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                return json.loads(completed.stdout)
+            invoke("init-run", "--repo-root", root, "--run-id", run_id, "--now", NOW)
+            request = self.control_request(contract)
+            request.update(tracker=[{"issue": 151, "state": "open", "open_blockers": [],
+                "decision_blockers": []}], worktrees=[{"issue": 151, "recorded": None,
+                "candidate": {"path": str(root / "worktree"), "state": "absent"}}])
+            request["authorization_intents"]["151"] = delivery["authorization_intents"]
+            request["requested_scopes"]["151"] = actual
+            owner = invoke("control", "--repo-root", root, "--run-id", run_id,
+                           "--request-file", store(request))["actions"][0]
+            historical = {"issue": 151, "state": "failed", "pr_url": None,
+                "merge_sha": None, "issue_closed": False, "discussion_items": [],
+                "detail_state": "none", "report_path": None, "notes": "transient"}
+            def failed(custody):
+                return {"interface_version": 2, "issue": 151,
+                    "state": "terminal_failed", "custody": custody,
+                    "historical_owner_result": historical,
+                    "delivery_contract_digest": digest, "delivery_observations": [],
+                    "authority_observations": [], "reevaluation_evidence": [],
+                    "detail_state": "none", "report_path": None, "notes": "transient"}
+            first = invoke("finish", "--repo-root", root, "--run-id", run_id,
+                "--summary-file", store(failed(owner["custody"])), "--now",
+                "2026-09-21T00:00:01Z")
+            invoke("finish", "--repo-root", root, "--run-id", run_id,
+                "--summary-file", store(failed(first["custody"])), "--now",
+                "2026-09-21T00:00:02Z")
+            recovery = {"schema_version": 1, "kind": "delivery-recovery", "id": "",
+                "contract_digest": digest, "stage_id": "select", "requested_scope": actual,
+                "failure": {"kind": "effect_failure", "effect_attempted": True,
+                    "classification": "transient", "source_kind": "host",
+                    "reference": "host:failed", "observed_at": "2026-09-21T00:00:02Z",
+                    "evidence_digest": "sha256:" + "4" * 64},
+                "effect_absence": {"kind": "effect_absence", "absent": True,
+                    "probe_succeeded": True, "source_kind": "filesystem",
+                    "reference": "fs:absent", "observed_at": "2026-09-21T00:00:03Z",
+                    "evidence_digest": "sha256:" + "5" * 64},
+                "basis": {"kind": "changed_relevant_evidence", "scope_id": actual["id"],
+                    "source_kind": "tracker", "reference": "tracker:changed",
+                    "observed_at": "2026-09-21T00:00:03Z",
+                    "evidence_digest": "sha256:" + "6" * 64}}
+            recovery["id"] = self.model.canonical_digest(recovery, omit_derived="id")
+            recover = self.control_request(contract)
+            recover.update(now="2026-09-21T00:00:04Z", tracker=request["tracker"])
+            recover["authorization_intents"]["151"] = delivery["authorization_intents"]
+            recover["recoveries"]["151"] = recovery
+            response = invoke("control", "--repo-root", root, "--run-id", run_id,
+                              "--request-file", store(recover))
+            second = next(item for item in response["actions"]
+                          if item["kind"] == "delivery_remainder")
+            self.assertEqual((second["custody"]["remainder"],
+                              second["requested_scope"]), (2, None))
+            state = json.loads((root / f".superpowers/workflows/{run_id}/state.json").read_text())
+            self.assertEqual([item["remainder"] for item in
+                              state["issues"]["151"]["delivery_remainders"]], [1, 2])
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            before = state_path.read_bytes()
+            replay = invoke("control", "--repo-root", root, "--run-id", run_id,
+                            "--request-file", store(recover))
+            self.assertEqual(next(item for item in replay["actions"]
+                                  if item["kind"] == "delivery_remainder"), second)
+            self.assertEqual(state_path.read_bytes(), before)
 
 
 if __name__ == "__main__":

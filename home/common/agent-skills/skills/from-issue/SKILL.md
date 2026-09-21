@@ -281,19 +281,23 @@ Without lifecycle identity, apply the same action order locally with the
 
 ## Terminal return procedure
 
-Use this one procedure for Phase-0 content stops, attempt budget stops, execution failure,
-and Phase-7 success whenever lifecycle identity exists. Assemble a new absolute
-temporary result file beneath `${TMPDIR:-/tmp}`, removed under an unconditional
-cleanup that runs on every outcome, including validation rejection and failure:
-a shell `trap` on `EXIT HUP INT TERM`, or the equivalent `finally`. Its JSON
-holds exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`,
-`discussion_items`, `detail_state`, `report_path`, and `notes`. Validate the
-candidate with `artifact-budget validate-report --boundary ship-summary`; use
-only its canonical stdout as the `--result-file` bytes. The policy's
-`phase_reports.notes_max_characters` is authoritative. Pass it with
-`--result-file <path>` to `workflow-state finish` using the exact run, issue,
-attempt, and current time. Capture stdout; only after that durable write succeeds,
-send the exact JSON from stdout unchanged to the caller.
+Use this one procedure for Phase-0 content stops, attempt budget stops, execution
+failure, and Phase-7 success whenever lifecycle identity exists. Assemble a new
+absolute temporary `ship-summary/v2` file beneath `${TMPDIR:-/tmp}`, removed
+under an unconditional cleanup that runs on every outcome, including validation
+rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, or the equivalent
+`finally`. Bind the exact current custody and contract digest; include a
+validated legacy owner result only as `historical_owner_result`, and include the
+fresh delivery, authority, and reevaluation observations that establish the
+reported delivery state. Validate the raw candidate with `artifact-budget
+validate-report --boundary ship-summary` before decoding, and use only its
+canonical stdout as the summary-file bytes. The policy's
+`phase_reports.notes_max_characters` is authoritative. After the current-launch
+fence, pass it with `--summary-file <path>` to `workflow-state finish` using the
+exact run and current time. Validate the raw workflow response before decoding;
+only after that durable write succeeds, send those canonical bytes unchanged to
+the caller. The legacy `--issue/--attempt/--result-file` transport is historical
+input only and must not be used for a schema-3 run.
 
 The earlier direct-autonomous controller that delegated at the mandatory
 Phase-5 rollover does not run this procedure after receiving the fresh owner's
@@ -461,9 +465,9 @@ with this owner's own `action_id`: the ship owner and this parent share one
 launch identity, so a ship report from a superseded launch means this launch is
 superseded too. On `current: false` or any helper failure, write nothing, print
 the canonical re-entry line `/from-issue <num> --auto` on its own line, and
-stop. Then call `workflow-state finish` and send the exact JSON printed on
-stdout unchanged. A fresh ship agent never writes the owner's final ledger
-result. Apply the same procedure to any Phase-6 execution
+stop. Then call `workflow-state finish --summary-file <canonical-path>` and
+validate its raw response before sending the canonical JSON unchanged. A fresh
+ship agent never writes the owner's final ledger result. Apply the same procedure to any Phase-6 execution
 failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating so the two sequences stay distinguishable.
 
 ## Notes

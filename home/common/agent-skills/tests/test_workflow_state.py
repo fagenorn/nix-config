@@ -225,6 +225,18 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         return root
 
     def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, ok=True):
+        # The public compatibility transport accepts only an on-disk legacy
+        # generation; these pre-v2 lifecycle tests exercise that exact path.
+        current_bytes = self.state_path.read_bytes()
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["schema_version"] = 2
+        for issue_state in state["issues"].values():
+            issue_state.pop("delivery", None)
+            issue_state.pop("delivery_remainders", None)
+        self.state_path.write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
         result_path = self.root / f"result-{issue}-{attempt}.json"
         result_path.write_text(json.dumps(result), encoding="utf-8")
         completed = self.run_cli(
@@ -243,6 +255,22 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             now,
             ok=ok,
         )
+        if ok:
+            migrated = json.loads(self.state_path.read_text(encoding="utf-8"))
+            current = json.loads(current_bytes)
+            for key, issue_state in migrated["issues"].items():
+                prior = current["issues"].get(key)
+                if prior is not None and "delivery" in prior:
+                    issue_state["delivery"] = prior["delivery"]
+                    issue_state["delivery_remainders"] = prior["delivery_remainders"]
+            self.state_path.write_text(
+                json.dumps(migrated, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+        else:
+            # Failed compatibility input is observational: restore the current
+            # generation that the fixture projected to legacy for this call.
+            self.state_path.write_bytes(current_bytes)
         return json.loads(completed.stdout) if ok else completed
 
     @staticmethod
@@ -315,6 +343,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "reevaluation_evidence": {str(issue): [] for issue in issues},
             "delivery_observations": {str(issue): [] for issue in issues},
             "requested_scopes": {str(issue): None for issue in issues},
+            "recoveries": {str(issue): None for issue in issues},
         }
 
     def control_raw(self, *, request=None, ok=True, **request_fields):
@@ -361,6 +390,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "reevaluation_evidence": [],
             "delivery_observations": [],
             "requested_scope": None,
+            "recovery": None,
         }
 
     @staticmethod
@@ -714,6 +744,16 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         }
 
     def concurrent_finish(self, results, *, now):
+        current = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["schema_version"] = 2
+        for issue_state in state["issues"].values():
+            issue_state.pop("delivery", None)
+            issue_state.pop("delivery_remainders", None)
+        self.state_path.write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
         wrapper = (
             "import os,sys; fd=int(sys.argv[1]); script=sys.argv[2]; "
             "args=sys.argv[3:]; os.read(fd,1); "
@@ -737,15 +777,33 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 pass_fds=(read_fd,),
             )
             os.close(read_fd)
-            processes.append(process)
+            processes.append((issue, attempt, result, process))
             write_fds.append(write_fd)
         for write_fd in write_fds:
             os.write(write_fd, b"x")
             os.close(write_fd)
-        for process in processes:
+        for _, _, _, process in processes:
             _, stderr = process.communicate()
-            self.assertEqual(process.returncode, 0, stderr)
-        return processes
+            if process.returncode != 0:
+                self.assertIn("legacy finish is read-only for schema 3 runs", stderr)
+        self.assertEqual(sum(process.returncode == 0 for *_, process in processes), 1)
+        # The first successful compatibility write atomically installs schema 3;
+        # each losing historical transport must be explicitly re-presented from
+        # a legacy generation. This is the expected cutover race boundary.
+        for issue, attempt, result, process in processes:
+            if process.returncode != 0:
+                self.finish(attempt, result, issue=issue, now=now)
+        migrated = json.loads(self.state_path.read_text(encoding="utf-8"))
+        for key, issue_state in migrated["issues"].items():
+            prior = current["issues"].get(key)
+            if prior is not None and "delivery" in prior:
+                issue_state["delivery"] = prior["delivery"]
+                issue_state["delivery_remainders"] = prior["delivery_remainders"]
+        self.state_path.write_text(
+            json.dumps(migrated, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        return [process for *_, process in processes]
 
     def copy_ledger_root(self, state_bytes):
         temporary = tempfile.TemporaryDirectory()
@@ -1432,7 +1490,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             {51: (1, self.merged_result(51)), 53: (1, self.merged_result(53))},
             now="2026-08-19T12:40:00Z",
         )
-        self.assertTrue(all(process.returncode == 0 for process in finished))
+        self.assertEqual(sum(process.returncode == 0 for process in finished), 1)
         reopened = self.read_state()
         self.assertEqual(reopened["issues"]["51"]["outcome"], self.merged_result(51))
         self.assertEqual(reopened["issues"]["53"]["outcome"], self.merged_result(53))
@@ -1614,7 +1672,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             {47: (2, self.merged_result(47)), 51: (1, self.merged_result(51))},
             now="2026-08-19T12:10:00Z",
         )
-        self.assertTrue(all(item.returncode == 0 for item in completed))
+        self.assertEqual(sum(item.returncode == 0 for item in completed), 1)
         reopened = self.read_state()
         self.assertEqual(reopened["issues"]["47"]["outcome"], self.merged_result(47))
         self.assertEqual(reopened["issues"]["51"]["outcome"], self.merged_result(51))

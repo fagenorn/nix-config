@@ -6,6 +6,7 @@ import copy
 from datetime import datetime
 import importlib.util
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -143,6 +144,180 @@ class DeliveryRuntime:
         remainder["state"], remainder["blocked_on"] = "active", None
         return result("resume", changed=True)
 
+    def recovery_policy(
+        self, issue_state: dict[str, Any] | None, *, issue: int,
+        request: dict[str, Any],
+        source_kind: str, now: str, dispatch_permitted: bool,
+        remainder_deadline: str,
+    ) -> dict[str, Any] | None:
+        """Validate an explicit D21 proof and allocate only remainder two."""
+        if issue_state is None:
+            if self.request_values(request, issue,
+                                   control=source_kind == "control").get("recovery") is not None:
+                raise ValueError("recovery has no retained delivery")
+            return None
+        if issue_state["issue"] != issue:
+            raise ValueError("recovery issue mismatch")
+        values = self.request_values(request, issue, control=source_kind == "control")
+        recovery = values["recovery"]
+        remainders = issue_state["delivery_remainders"]
+        if recovery is None:
+            if len(remainders) == 1 and remainders[0]["state"] in {"failed", "stopped"}:
+                record = remainders[0]
+                return {"operation": "terminal", "changed": False,
+                        "issue_state": issue_state,
+                        "attempt": self._remainder_facade(issue_state, record),
+                        "requirements": [], "uses_candidate": False,
+                        "desired": "terminal", "custody_kind": "remainder",
+                        "expired": False}
+            return None
+        recovery = self.validate_recovery(
+            recovery, issue=issue, contract=values["contract"])
+        assert recovery is not None
+        if len(remainders) == 2:
+            existing = remainders[1]
+            if existing["recovery"] != recovery:
+                raise ValueError("recovery proof was already consumed")
+            reduction = self.transition(
+                issue_state["delivery"], contract=values["contract"], at_time=now,
+                custody=None, current_launch=None, requested_scope=None,
+                source_kind=source_kind, authorization_intents=[],
+                authority_observations=[], reevaluation_evidence=[],
+                delivery_observations=[])
+            operation = ("recover" if existing["state"] in
+                         {"active", "handed_off", "suspended"} else "terminal")
+            return {"operation": operation,
+                    "changed": False, "issue_state": issue_state,
+                    "attempt": self._remainder_facade(issue_state, existing),
+                    "requirements": copy.deepcopy(reduction["requirements"]),
+                    "uses_candidate": False, "desired": operation,
+                    "custody_kind": "remainder", "expired": False,
+                    "reduction": reduction}
+        if len(remainders) != 1:
+            raise ValueError("recovery requires exactly one prior remainder")
+        prior = remainders[0]
+        authentic = ((prior["state"] == "failed" and prior["result_source"] == "owner")
+                     or (prior["state"] == "failed" and prior["result_source"] == "stalled"))
+        if not authentic or prior["finished_at"] is None:
+            raise ValueError("recovery requires a terminal failed first remainder")
+        if self.current_custody(issue, issue_state) != (None, None):
+            raise ValueError("recovery cannot replace active custody")
+
+        null_request = copy.deepcopy(request)
+        if source_kind == "control":
+            null_request["requested_scopes"][str(issue)] = None
+        else:
+            null_request["requested_scope"] = None
+        reduction = self.apply_transition(
+            issue_state, issue=issue, request=null_request,
+            source_kind=source_kind, at_time=now)
+        stage_id = reduction["next_stage_id"]
+        if stage_id is None or recovery["stage_id"] != stage_id:
+            raise ValueError("recovery does not name the ready stage")
+        contract = issue_state["delivery"]["contract"]
+        stage = next(item for item in contract["stages"] if item["id"] == stage_id)
+        if not stage["retryable"]:
+            raise ValueError("recovery stage is not retryable")
+        scope_probe = self.transition(
+            issue_state["delivery"], contract=contract, at_time=now,
+            custody=None, current_launch=None,
+            requested_scope=recovery["requested_scope"], source_kind=source_kind,
+            authorization_intents=[], authority_observations=[],
+            reevaluation_evidence=[], delivery_observations=[])
+        if scope_probe["next_stage_id"] != stage_id:
+            raise ValueError("recovery scope does not match the ready stage")
+
+        intents = issue_state["delivery"]["authorization_intents"]
+        observations = issue_state["delivery"]["authority_observations"]
+        matches = [(intent, self._model.match_scope(
+            contract, intent, recovery["requested_scope"],
+            selected_outputs=issue_state["delivery"]["selected_outputs"],
+            at_time=now, revocation_observations=observations)) for intent in intents]
+        covering = [(intent, match) for intent, match in matches if match["matched"]]
+        if not covering:
+            raise ValueError("recovery scope has no current authorization")
+        declared_ids = {match["scope_id"] for _, match in covering}
+        scope_ids = declared_ids | {recovery["requested_scope"]["id"]}
+        verdicts = [item for item in observations
+                    if item["authority_kind"] != "intent_revocation"
+                    and item["scope_id"] in scope_ids]
+        latest_by_scope = {}
+        for item in verdicts:
+            key = item["scope_id"]
+            current = latest_by_scope.get(key)
+            if current is None or (item["observed_at"], item["id"]) > \
+                    (current["observed_at"], current["id"]):
+                latest_by_scope[key] = item
+        if any(item["verdict"] in {"rejected", "unknown"}
+               for item in latest_by_scope.values()):
+            raise ValueError("recovery is blocked by unresolved authority")
+
+        failure = recovery["failure"]
+        absence = recovery["effect_absence"]
+        launched = self._time(prior["launches"][-1]["at"])
+        failed_at = self._time(failure["observed_at"])
+        finished = self._time(prior["finished_at"])
+        absent_at = self._time(absence["observed_at"])
+        current = self._time(now)
+        if not (launched <= failed_at <= finished <= absent_at <= current):
+            raise ValueError("invalid recovery proof chronology")
+        basis = recovery["basis"]
+        if basis["kind"] == "changed_relevant_evidence":
+            if not (failed_at < self._time(basis["observed_at"]) <= current):
+                raise ValueError("recovery evidence is not newer than failure")
+        else:
+            candidates = [intent for intent, match in covering
+                          if intent["id"] == basis["id"]]
+            if (len(candidates) != 1
+                    or self._time(candidates[0]["issued_at"]) <= failed_at):
+                raise ValueError("recovery authorization is not newer than failure")
+            if (basis["kind"] == "human_transient_retry"
+                    and candidates[0]["source"]["kind"] != "explicit_user"):
+                raise ValueError("human retry requires explicit user intent")
+        if not dispatch_permitted:
+            return {"operation": "idle", "changed": True,
+                    "issue_state": issue_state,
+                    "attempt": self._remainder_facade(issue_state, prior),
+                    "requirements": [], "uses_candidate": False,
+                    "desired": "recover", "custody_kind": "remainder",
+                    "expired": False, "reduction": reduction}
+
+        progress = self._model.canonical_digest({
+            "pending": reduction["pending_stage_ids"],
+            "postconditions": issue_state["delivery"]["postconditions"],
+        })
+        owner = f"{issue}:r2"
+        remainder = {
+            "remainder": 2, "contract_digest": recovery["contract_digest"],
+            "source_attempt": prior["source_attempt"], "prior_remainder": 1,
+            "pending_stage_ids": copy.deepcopy(reduction["pending_stage_ids"]),
+            "owner": owner, "worktree": prior["worktree"], "state": "active",
+            "launches": [{"kind": "fresh", "owner": owner,
+                          "worktree": prior["worktree"], "at": now}],
+            "deadline_at": remainder_deadline, "progress_token": progress,
+            "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
+            "result": None, "result_source": None,
+            "recovery": copy.deepcopy(recovery), "finished_at": None,
+        }
+        issue_state["delivery_remainders"].append(remainder)
+        return {"operation": "recover", "changed": True,
+                "issue_state": issue_state,
+                "attempt": self._remainder_facade(issue_state, remainder),
+                "requirements": copy.deepcopy(reduction["requirements"]),
+                "uses_candidate": False, "desired": "recover",
+                "custody_kind": "remainder", "expired": False,
+                "reduction": reduction}
+
+    @staticmethod
+    def _remainder_facade(
+        issue_state: dict[str, Any], remainder: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {"issue": issue_state["issue"],
+                "attempt": remainder["source_attempt"], "state": remainder["state"],
+                "owner": remainder["owner"], "worktree": remainder["worktree"],
+                "handoff_path": None, "deadline_at": remainder["deadline_at"],
+                "launches": remainder["launches"], "result": remainder["result"]}
+
     def occupied_count(
         self, state: dict[str, Any], *, at_time: str,
         unavailable: set[tuple[int, str, int, int]],
@@ -179,6 +354,7 @@ class DeliveryRuntime:
                      "delivery_observations", "requested_scope")
             values = {name: request[name] for name in names}
             values["contract"] = values.pop("delivery_contract")
+            values["recovery"] = request.get("recovery")
             return values
         key = str(issue)
         return {
@@ -188,6 +364,7 @@ class DeliveryRuntime:
             "reevaluation_evidence": request["reevaluation_evidence"][key],
             "delivery_observations": request["delivery_observations"][key],
             "requested_scope": request["requested_scopes"][key],
+            "recovery": request.get("recoveries", {}).get(key),
         }
 
     def apply_transition(
@@ -275,6 +452,7 @@ class DeliveryRuntime:
         if delivery["contract_digest"] != report_digest:
             raise ValueError(f"{source_kind} contract mismatch")
         requested_scope = report.get("requested_scope") if source_kind == "checkpoint" else None
+        self._validate_recorded_worktree(record, delivery, report, requested_scope)
         reduced = self.apply_transition(
             issue_state, issue=issue_state["issue"], source_kind=source_kind,
             at_time=at_time,
@@ -291,6 +469,41 @@ class DeliveryRuntime:
                            ("authority_observations", "reevaluation_evidence",
                             "delivery_observations") for item in report[name]})
         return record, reduced, accepted
+
+    @staticmethod
+    def _validate_recorded_worktree(
+        record: dict[str, Any], delivery: dict[str, Any], report: dict[str, Any],
+        requested_scope: dict[str, Any] | None,
+    ) -> None:
+        """Bind worktree cleanup facts/actions to the custody record under lock."""
+        observations = [
+            item for item in (
+                delivery["delivery_observations"] + report["delivery_observations"]
+            ) if item["observation_kind"] == "worktree_absent"
+        ]
+        requests_cleanup = (
+            requested_scope is not None
+            and requested_scope["action"] == "remove_worktree"
+        )
+        if not observations and not requests_cleanup:
+            return
+        stages = [stage for stage in delivery["contract"]["stages"]
+                  if stage["kind"] == "remove_worktree"]
+        if len(stages) != 1 or stages[0]["target_ref"] != {
+            "kind": "literal", "value": record["worktree"]
+        }:
+            raise ValueError("cleanup worktree does not match recorded custody")
+        if requests_cleanup and requested_scope["endpoint"] != {
+            "kind": "literal", "value": record["worktree"]
+        }:
+            raise ValueError("cleanup scope does not match recorded custody")
+        for item in observations:
+            subject = item["subject"]
+            if (subject["path"] != record["worktree"]
+                    or subject["recorded_worktree_identity"] != record["worktree"]
+                    or subject["probe_mode"] != "no_follow"
+                    or subject["absent"] is not True):
+                raise ValueError("cleanup observation does not match recorded custody")
 
     def remainder_response(
         self, *, ledger_repo_root: str, run_id: str,
@@ -387,6 +600,7 @@ class DeliveryRuntime:
                         "notes": "Delivery remainder stalled without progress.",
                     }
                     record["result_source"] = "stalled"
+                    record["finished_at"] = now
         return {"before": before, "record": record, "reduction": reduction,
                 "accepted": accepted, "blocking": blocking, "stalled": stalled}
 
@@ -443,12 +657,14 @@ class DeliveryRuntime:
         if report["custody"]["kind"] == "implementation":
             record["finished_at"] = now
             issue_state["outcome"] = copy.deepcopy(historical)
+        else:
+            record["finished_at"] = now
         terminal = {**common, "kind": "terminal_failed", "state": "terminal_failed",
                     "result_source": "owner", "reason_code": "owner_reported_failure"}
         if (not reduction["pending_stage_ids"] and not reduction["requirements"]
-                or len(issue_state["delivery_remainders"]) >= 2):
+                or issue_state["delivery_remainders"]):
             return terminal
-        number = len(issue_state["delivery_remainders"]) + 1
+        number = 1
         contract = issue_state["delivery"]["contract"]
         next_stage = reduction["next_stage_id"]
         if next_stage is not None and not next(
@@ -459,8 +675,6 @@ class DeliveryRuntime:
             "pending": reduction["pending_stage_ids"],
             "postconditions": issue_state["delivery"]["postconditions"],
         })
-        if number == 2 and issue_state["delivery_remainders"][-1]["progress_token"] == progress_token:
-            return terminal
         owner = f"{issue_state['issue']}:r{number}"
         remainder = {
             "remainder": number,
@@ -475,7 +689,8 @@ class DeliveryRuntime:
             "deadline_at": remainder_deadline,
             "progress_token": progress_token,
             "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
-            "result": None, "result_source": None,
+            "result": None, "result_source": None, "recovery": None,
+            "finished_at": None,
         }
         issue_state["delivery_remainders"].append(remainder)
         return self.remainder_response(
@@ -639,6 +854,87 @@ class DeliveryRuntime:
             raise ValueError("invalid delivery integer")
         return value
 
+    @staticmethod
+    def _recovery_proof(value: object, *, kind: str) -> dict[str, Any]:
+        common = {"kind", "source_kind", "reference", "observed_at",
+                  "evidence_digest"}
+        extra = ({"effect_attempted", "classification"} if kind == "effect_failure"
+                 else {"absent", "probe_succeeded"})
+        if not isinstance(value, dict) or set(value) != common | extra:
+            raise ValueError(f"invalid {kind} proof")
+        if value["kind"] != kind or value["source_kind"] not in {
+            "provider", "host", "tracker", "repository", "filesystem"
+        }:
+            raise ValueError(f"invalid {kind} proof")
+        if not isinstance(value["reference"], str) or not value["reference"]:
+            raise ValueError(f"invalid {kind} reference")
+        DeliveryRuntime._time(value["observed_at"])
+        digest = value["evidence_digest"]
+        if (not isinstance(digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None):
+            raise ValueError(f"invalid {kind} digest")
+        if kind == "effect_failure":
+            if value["effect_attempted"] is not True or value["classification"] != "transient":
+                raise ValueError("invalid effect failure")
+        elif value["absent"] is not True or value["probe_succeeded"] is not True:
+            raise ValueError("invalid effect absence")
+        return value
+
+    def validate_recovery(
+        self, value: object, *, issue: int, contract: object,
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if contract is None:
+            raise ValueError("recovery requires a delivery contract")
+        keys = {"schema_version", "kind", "id", "contract_digest", "stage_id",
+                "requested_scope", "failure", "effect_absence", "basis"}
+        if not isinstance(value, dict) or set(value) != keys:
+            raise ValueError("invalid delivery recovery")
+        value = copy.deepcopy(value)
+        if type(value["schema_version"]) is not int or value["schema_version"] != 1 \
+                or value["kind"] != "delivery-recovery":
+            raise ValueError("invalid delivery recovery")
+        for name in ("id", "contract_digest"):
+            if (not isinstance(value[name], str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", value[name]) is None):
+                raise ValueError(f"invalid recovery {name}")
+        if not isinstance(value["stage_id"], str) or not value["stage_id"]:
+            raise ValueError("invalid recovery stage")
+        scope = self.validate(value["requested_scope"], "scope-tuple")
+        if scope["target"]["issue"] != issue:
+            raise ValueError("recovery scope issue mismatch")
+        contract_value = self.validate(contract, "delivery-contract")
+        digest = self._model.canonical_digest(contract_value)
+        if value["contract_digest"] != digest:
+            raise ValueError("recovery contract mismatch")
+        self._recovery_proof(value["failure"], kind="effect_failure")
+        self._recovery_proof(value["effect_absence"], kind="effect_absence")
+        basis = value["basis"]
+        if not isinstance(basis, dict) or "kind" not in basis:
+            raise ValueError("invalid recovery basis")
+        if basis["kind"] == "changed_relevant_evidence":
+            if set(basis) != {"kind", "scope_id", "source_kind", "reference",
+                              "observed_at", "evidence_digest"}:
+                raise ValueError("invalid recovery basis")
+            self._recovery_proof(
+                {"kind": "effect_absence", "absent": True,
+                 "probe_succeeded": True,
+                 **{name: basis[name] for name in
+                    ("source_kind", "reference", "observed_at", "evidence_digest")}},
+                kind="effect_absence")
+            if basis["scope_id"] != scope["id"]:
+                raise ValueError("recovery evidence scope mismatch")
+        elif basis["kind"] in {"new_authorization", "human_transient_retry"}:
+            if set(basis) != {"kind", "id"} or not isinstance(basis["id"], str) \
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", basis["id"]) is None:
+                raise ValueError("invalid recovery basis")
+        else:
+            raise ValueError("invalid recovery basis")
+        if value["id"] != self._model.canonical_digest(value, omit_derived="id"):
+            raise ValueError("invalid recovery id")
+        return value
+
     def validate_delivery_inputs(
         self, *, issue: int, contract: object, intents: object,
         authority: object, reevaluation: object, observations: object,
@@ -704,7 +1000,8 @@ class DeliveryRuntime:
         if any(value is not None for value in contracts.values()) and tracker_issues != issues:
             raise ValueError("tracker observations must match requested issues")
         names = ("authorization_intents", "authority_observations",
-                 "reevaluation_evidence", "delivery_observations", "requested_scopes")
+                 "reevaluation_evidence", "delivery_observations", "requested_scopes",
+                 "recoveries")
         maps = {name: self.validate_issue_map(request[name], issues, name) for name in names}
         result = {}
         for issue in issues:
@@ -715,6 +1012,11 @@ class DeliveryRuntime:
                 reevaluation=maps["reevaluation_evidence"][key],
                 observations=maps["delivery_observations"][key],
                 requested_scope=maps["requested_scopes"][key])
+            self.validate_recovery(maps["recoveries"][key], issue=issue,
+                                   contract=contracts[key])
+            if maps["recoveries"][key] is not None \
+                    and maps["requested_scopes"][key] is not None:
+                raise ValueError("recovery request scope must be null")
         return copy.deepcopy(result)
 
     def validate_direct_delivery(
@@ -727,6 +1029,10 @@ class DeliveryRuntime:
             reevaluation=request["reevaluation_evidence"],
             observations=request["delivery_observations"],
             requested_scope=request["requested_scope"])
+        self.validate_recovery(request["recovery"], issue=issue,
+                               contract=request["delivery_contract"])
+        if request["recovery"] is not None and request["requested_scope"] is not None:
+            raise ValueError("recovery request scope must be null")
         return {issue: copy.deepcopy(contract)}
 
     def validate_issue_delivery(
@@ -754,7 +1060,8 @@ class DeliveryRuntime:
                 "remainder", "contract_digest", "source_attempt", "prior_remainder",
                 "pending_stage_ids", "owner", "worktree", "state", "launches",
                 "deadline_at", "progress_token", "blocked_on", "suspend_phase",
-                "stalled_resumes", "result", "result_source",
+                "stalled_resumes", "result", "result_source", "recovery",
+                "finished_at",
             }
             if not isinstance(value, dict) or set(value) != required:
                 raise ValueError("invalid delivery remainder")
@@ -800,6 +1107,18 @@ class DeliveryRuntime:
             nonterminal = value["state"] in {"active", "handed_off", "suspended"}
             if nonterminal != (value["result"] is None):
                 raise ValueError("invalid remainder terminal state")
+            if nonterminal != (value["finished_at"] is None):
+                raise ValueError("invalid remainder finish time")
+            if value["finished_at"] is not None:
+                finished = self._time(value["finished_at"])
+                if finished < self._time(launches[-1]["at"]) or finished > updated:
+                    raise ValueError("invalid remainder finish time")
+            if index == 1:
+                if value["recovery"] is not None:
+                    raise ValueError("first remainder cannot carry recovery")
+            elif self.validate_recovery(value["recovery"], issue=issue,
+                                        contract=delivery["contract"]) is None:
+                raise ValueError("second remainder requires recovery")
             if value["state"] == "suspended":
                 if value["blocked_on"] is None:
                     raise ValueError("suspended remainder requires blocker")

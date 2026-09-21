@@ -9,8 +9,11 @@ import tempfile
 import unittest
 
 from ._delivery_model_fixtures import (
+    cleanup_contract_and_delivery,
     contract_and_delivery_for_stage,
     custody,
+    observation,
+    rebind_contract,
 )
 
 
@@ -62,6 +65,45 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
             broken = load(root / "workflow_delivery.py", "workflow_delivery_broken_test")
             with self.assertRaises(ValueError):
                 broken.DeliveryRuntime(notes_max_characters=100)
+
+    def test_cleanup_facts_bind_the_exact_recorded_worktree(self):
+        module = load(ENTRY, "workflow_delivery_worktree_binding_test")
+        runtime = module.DeliveryRuntime(notes_max_characters=10_000)
+        contract, delivery = cleanup_contract_and_delivery(runtime.model)
+        worktree = "/owned/worktree"
+        next(stage for stage in contract["stages"]
+             if stage["kind"] == "remove_worktree")["target_ref"]["value"] = worktree
+        delivery = rebind_contract(runtime.model, contract, delivery)
+        record = {"attempt": 1, "launches": [{"kind": "fresh"}],
+                  "state": "active", "worktree": worktree}
+        issue_state = {"issue": 151, "attempts": [record],
+                       "delivery_remainders": [], "delivery": delivery}
+        report = {"custody": custody(),
+                  "contract_digest": runtime.model.canonical_digest(contract),
+                  "authority_observations": [], "reevaluation_evidence": [],
+                  "requested_scope": None}
+
+        def absent(path, identity):
+            return observation(runtime.model, contract, "worktree_absent", {
+                "path": path, "recorded_worktree_identity": identity,
+                "probe_mode": "no_follow", "absent": True,
+            })
+
+        for path, identity in (("/foreign", "/foreign"),
+                               (worktree, "foreign-identity")):
+            candidate = copy.deepcopy(issue_state)
+            rejected = {**report, "delivery_observations": [absent(path, identity)]}
+            with self.subTest(path=path, identity=identity), self.assertRaises(ValueError):
+                runtime.prepare_report_transition(
+                    candidate, rejected, source_kind="checkpoint",
+                    at_time="2026-09-21T00:00:00Z")
+            self.assertEqual(candidate, issue_state)
+
+        accepted = {**report,
+                    "delivery_observations": [absent(worktree, worktree)]}
+        runtime.prepare_report_transition(
+            issue_state, accepted, source_kind="checkpoint",
+            at_time="2026-09-21T00:00:00Z")
 
 
 if __name__ == "__main__":

@@ -110,6 +110,51 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             refused = self.run_validate(boundary, value, use_stdin=True)
             self.assertNotEqual(refused.returncode, 0)
             self.assertEqual(refused.stdout, b"")
+
+    def test_v2_boundaries_compose_legacy_result_validation(self):
+        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
+                                 if key == "_artifact_budget_delivery_model"
+                                 or key.startswith("_artifact_budget_delivery_model.")])
+        model = artifact_budget._delivery_model()
+        contract, _ = contract_and_delivery(model)
+        digest = model.canonical_digest(contract)
+        active = custody()
+        historical = {"issue": 151, "state": "failed", "pr_url": None,
+            "merge_sha": None, "issue_closed": False, "discussion_items": [],
+            "detail_state": "none", "report_path": None, "notes": "failed"}
+        summary = {"interface_version": 2, "issue": 151,
+            "state": "terminal_failed", "custody": active,
+            "historical_owner_result": historical,
+            "delivery_contract_digest": digest, "delivery_observations": [],
+            "authority_observations": [], "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": "failed"}
+        responses = workflow_responses(model)
+        responses["terminal"]["result"] = deepcopy(historical)
+        responses["control"]["summaries"][0]["result"] = deepcopy(historical)
+        specimens = [
+            ("ship-summary", summary, ("historical_owner_result",)),
+            ("workflow-response", responses["terminal"], ("result",)),
+            ("workflow-response", responses["control"], ("summaries", 0, "result")),
+        ]
+        for boundary, specimen, path in specimens:
+            accepted = self.run_validate(boundary, specimen, use_stdin=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            malformed = deepcopy(specimen)
+            target = malformed
+            for part in path[:-1]:
+                target = target[part]
+            target[path[-1]] = {"bogus": 1}
+            refused = self.run_validate(boundary, malformed, use_stdin=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(refused.stdout, b"")
+            mismatched = deepcopy(specimen)
+            target = mismatched
+            for part in path[:-1]:
+                target = target[part]
+            target[path[-1]]["issue"] = 152
+            refused = self.run_validate(boundary, mismatched, use_stdin=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(refused.stdout, b"")
         for raw in (b'{"interface_version":2,"kind":"workflow_bootstrap",'
                     b'"run_id":"x","requirements":[],"requirements":[]}',
                     b'{"interface_version":2,"kind":"workflow_bootstrap",'

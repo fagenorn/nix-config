@@ -96,7 +96,8 @@ def _owner_action(value: Any, notes_max: int, *, control: bool = False) -> dict[
     if custody["kind"] != "implementation" or custody["attempt"] != attempt: _reject()
     if control and value["id"] != custody["action_id"]: _reject()
     if not control and (value["action_id"] != custody["action_id"] or value["launch_kind"] not in {"spawn", "resume", "retry"}): _reject()
-    for name in (("owner", "worktree", "handoff_path", "deadline_at") if control else ("ledger_repo_root", "run_id", "owner", "worktree", "handoff_path", "deadline_at")): _string(value[name], name)
+    for name in (("owner", "worktree", "deadline_at") if control else ("ledger_repo_root", "run_id", "owner", "worktree", "deadline_at")): _string(value[name], name)
+    if value["handoff_path"] is not None: _string(value["handoff_path"], "handoff_path")
     _utc(value["deadline_at"], "owner deadline"); _delivery_block(value, issue=issue, notes_max=notes_max)
     return value
 

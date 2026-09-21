@@ -824,6 +824,13 @@ def validate_workflow_response_report(value: object, notes_max_characters: int) 
         model.validate_delivery_object(
             value, expected_kind="workflow-response", notes_max_characters=notes_max_characters
         )
+        if isinstance(value, dict) and value.get("kind") == "terminal":
+            _validate_legacy_result_slot(value["result"], value["issue"], notes_max_characters)
+        elif isinstance(value, dict) and "summaries" in value:
+            for summary in value["summaries"]:
+                _validate_legacy_result_slot(
+                    summary["result"], summary["issue"], notes_max_characters
+                )
     except Exception as exc:
         raise ArtifactBudgetError("invalid workflow response") from exc
 
@@ -836,8 +843,25 @@ def validate_delivery_model_report(
         model.validate_delivery_object(
             value, expected_kind=boundary, notes_max_characters=notes_max_characters
         )
+        if boundary == "ship-summary" and isinstance(value, dict):
+            _validate_legacy_result_slot(
+                value["historical_owner_result"], value["issue"], notes_max_characters
+            )
     except Exception as exc:
         raise ArtifactBudgetError(f"invalid {boundary}") from exc
+
+
+def _validate_legacy_result_slot(
+    value: object, issue: object, notes_max_characters: int
+) -> None:
+    """Compose the legacy result validator into every nullable v2 result slot."""
+    if value is None:
+        return
+    if not isinstance(issue, int) or isinstance(issue, bool):
+        raise ArtifactBudgetError("invalid legacy result issue")
+    validate_ship_summary_report(value, notes_max_characters)
+    if value["issue"] != issue:
+        raise ArtifactBudgetError("legacy result issue mismatch")
 
 
 def _input_bytes(path: str, wire_max: int) -> bytes:
