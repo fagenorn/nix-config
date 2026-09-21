@@ -24,8 +24,13 @@
 - `workflow-state.py` writes schema 3. Its issue row has exactly legacy `issue`,
   `attempts`, `outcome` plus `delivery` and `delivery_remainders`; both custody
   arrays remain independently capped at two ordinals. Reads accept schema 3 or
-  valid schema 2, and per D14 valid schema 1 through an in-memory adjacent
-  1→2→3 chain; one complete validation precedes at most one atomic persistence.
+  valid schema 2, and per D14/D17 valid schema 1 through an in-memory adjacent
+  1→2→3 chain. Mutation commands call
+  `upgrade_state(value, *, run_id: str, migration_contracts: dict[int, dict | None]) -> dict`
+  under lock after whole-request validation; it finishes with
+  `validate_state(candidate, *, run_id: str)` and at most one atomic persistence
+  with the command transition. `current-launch` uses a separate legacy read
+  validator and never upgrades, locks or writes.
 - Control request interface 2 is the exact interface-1 request plus issue-keyed,
   sorted `forge`, `delivery_contracts`, `authorization_intents`,
   `authority_observations`, `reevaluation_evidence`, and
@@ -53,17 +58,19 @@
   is absent. Under lock it rechecks the same action, persists final facts/result,
   then emits `delivery_complete`, a genuine `terminal_failed`, or an eligible
   next remainder. Requirements and partial progress are never terminal failure.
-- `artifact_budget.py` adds `ship-checkpoint` to the closed boundary set and
+- `artifact_budget.py` adds `ship-checkpoint` and `workflow-response` to the closed boundary set and
   validates `ship-handoff/v2`, `ship-checkpoint/v2`, and `ship-summary/v2` by
-  loading Task 1's model. It may still read the exact legacy v1 summary shape for
-  retained evidence, but no schema-3 producer emits it and workflow-state's v2
-  finish rejects it.
+  loading Task 1's model. `workflow-response` structurally validates raw
+  control/direct actions, the exact four-key current-launch object, checkpoint
+  responses and finish outcomes before caller/test decode. It may still read the
+  exact legacy v1 summary shape for retained evidence, but no schema-3 producer
+  emits it and workflow-state's v2 finish rejects it.
 - Production caller prose/evals consume only interface 2 and the closed typed
   action. They copy contract/intents/digests exactly, validate raw stdout before
   decode, run `current-launch` immediately before each effect, checkpoint the
   returned observation before advancing, and never invent implementation,
   delivery, authority or terminal failure.
-- Runtime schemas remain centralized in `delivery_model.py`; the operational
+- Runtime/report/response schemas remain centralized in `delivery_model.py`; the operational
   transport sequence is stated once in `from-issue/ship-handoff.md` and linked
   where a caller needs it. Do not paste field tables into every `SKILL.md`.
 
@@ -75,6 +82,12 @@
 - Migration is idempotent and fail-closed. Unknown fields, partial schema-3
   objects, invalid legacy rows, ambiguous repository identity, model-load error
   or version mismatch leave the original ledger byte-identical.
+- `migration_contracts` comes only from structurally validated interface-2
+  delivery contracts in the request. Empty legacy delivery may use null; any
+  candidate delivery/authority fact or remainder dispatch requires one matching
+  contract. Missing, conflicting or repository-mismatched context refuses with
+  no write. A read-only launch query over schema 1/2 returns its exact four-key
+  result and leaves bytes and filesystem inventory unchanged.
 - Per D3, every effect path performs current-launch before the effect and again
   before writing its observation. A stale caller cannot write even if its effect
   returned; only a current trusted controller may later ingest exact source-bound
@@ -95,6 +108,11 @@
 - The Task 2 commit is one atomic source protocol cutover. No committed midpoint
   may expose schema 3 with v1 callers, v2 reports with schema 2, or duplicated
   model validation.
+- Artifact/report validation proves canonical structure and internal ids only.
+  Structurally valid stale custody passes that layer and is refused under the
+  workflow lock with zero writes; a well-shaped opaque host reference carries no
+  authority by itself. Audience/payload/contract matching is a reducer semantic
+  check against accepted ledger truth.
 
 - [ ] **Step 1: Write migration and public delivery-round-trip tests**
 
@@ -112,7 +130,9 @@ def test_schema_one_migrates_through_two_to_three_with_one_atomic_write(self):
         for issue in legacy["issues"].values()
         for attempt in issue["attempts"]
     ])
-    request = self.interface_two_control_request()
+    request = self.interface_two_control_request(
+        delivery_contracts={151: self.strict_contract(issue=151)}
+    )
     response = self.control(request=request, now=DEFAULT_NOW)
     migrated = json.loads(self.state_path.read_text(encoding="utf-8"))
     self.assertEqual(migrated["schema_version"], 3)
@@ -130,12 +150,23 @@ def test_schema_one_migrates_through_two_to_three_with_one_atomic_write(self):
 ```
 
 Beside that public regression, add a pure migration test that loads the source
-module, calls `upgrade_state` on the same detached schema-1 value, and asserts
-the returned value is schema 3 while the input remains byte-for-byte unchanged.
-Patch `atomic_write_state` only in a focused transaction test and assert it is
-called once with a schema-3 value; there must be no call whose value is schema 2.
-This unit assertion supplements the public CLI migration rather than replacing
-it.
+module, calls
+`upgrade_state(value, run_id=self.run_id, migration_contracts={151: contract})`
+on the same detached schema-1 value, and asserts the returned value is schema 3
+while the input remains byte-for-byte unchanged. Call
+`validate_state(result, run_id=self.run_id)` explicitly. Patch
+`atomic_write_state` only in a focused transaction test and assert it is called
+once with a schema-3 value; there must be no call whose value is schema 2.
+
+Add two public no-write regressions. A schema-2 request that carries candidate
+delivery/authority facts without a contract, and one whose contract repository
+does not match those facts, both exit nonzero and preserve exact ledger bytes.
+Separately, write a valid schema-1 active attempt, call `current-launch` with its
+implementation action id, and assert exit 0, the exact four-key current result,
+byte-identical ledger and unchanged whole temporary-root inventory. A remainder
+id against that legacy ledger likewise returns exit 0/current false without a
+write. These public assertions supplement the pure migration unit; neither is
+replaced by mocking.
 
 Create `test_delivery_workflow.py`. Its fixture factory writes complete strict
 contract, intent, selected output, authority and delivery observations using the
@@ -146,8 +177,12 @@ Its exact methods are `init(*, schema_fixture=None)`,
 `current(custody, *, ok=True)`, `checkpoint(report, *, now, ok=True)`,
 `finish(report, *, now, ok=True)`, `state_bytes()`, and `state()`. Each command
 writes its request/report as canonical bytes under the harness temporary root,
-invokes `workflow-state.py` in a subprocess, and returns decoded stdout only
-after the corresponding artifact validator succeeds.
+invokes `workflow-state.py` in a subprocess, feeds raw successful stdout through
+`artifact-budget validate-report --boundary workflow-response --input -`, and
+returns decoded stdout only after that exact validator succeeds. Handoff,
+checkpoint and summary input files use their named report boundaries before
+workflow-state reads them; malformed command errors are not decoded as
+responses.
 
 ```python
 class DeliveryWorkflowRoundTripTest(unittest.TestCase):
@@ -163,8 +198,15 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         custody = owner["custody"]
         effects = FakeProvider()
         for stage in ("select", "publish", "open", "merge"):
-            self.assertTrue(self.h.current(custody)["current"])
+            before_effect = self.h.current(custody)
+            self.assertEqual(set(before_effect), {
+                "action_id", "current", "current_action_id", "reason"
+            })
+            self.assertTrue(before_effect["current"])
             observation = effects.perform(owner, stage)
+            before_write = self.h.current(custody)
+            self.assertTrue(before_write["current"])
+            self.assertEqual(before_write["action_id"], custody["action_id"])
             checkpoint = self.h.checkpoint(
                 self.fx.checkpoint(custody, delivery=[observation]), now=self.fx.tick()
             )
@@ -222,7 +264,12 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         self.h.control(self.fx.transfer_request(stale), now=self.fx.tick())
         before = self.h.state_bytes()
         provider = FakeProvider()
-        self.assertFalse(self.h.current(stale, ok=False).returncode == 0)
+        stale_result = self.h.current(stale)
+        self.assertEqual(stale_result, {
+            "action_id": stale["action_id"], "current": False,
+            "current_action_id": self.fx.current_action_id(),
+            "reason": "superseded_launch",
+        })
         provider.perform_only_if_current(self.h, stale, "merge")
         self.assertEqual(provider.calls, [])
         refused = self.h.checkpoint(
@@ -238,11 +285,13 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         returned = self.fx.provider_result_for("publish", custody=old)
         successor = self.h.control(self.fx.transfer_request(old), now=self.fx.tick())["actions"][0]
         before = self.h.state_bytes()
+        self.assertFalse(self.h.current(old)["current"])
         old_write = self.h.checkpoint(
             self.fx.checkpoint(old, delivery=[returned]), now=self.fx.tick(), ok=False
         )
         self.assertNotEqual(old_write.returncode, 0)
         self.assertEqual(self.h.state_bytes(), before)
+        self.assertTrue(self.h.current(successor["custody"])["current"])
         accepted = self.h.checkpoint(
             self.fx.checkpoint(successor["custody"], delivery=[returned]), now=self.fx.tick()
         )
@@ -261,7 +310,9 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         self.assertEqual(action["pending_stage_ids"][0], "record")
         missing = self.h.checkpoint(arc.without_live_head(action), now=self.fx.tick())
         self.assertEqual(missing["requirements"][0]["reason_code"], "live_pr_head_required")
-        self.assertFalse(missing["terminal"])
+        self.assertEqual(missing["state"], "active")
+        self.assertIsNone(missing["blocked_on"])
+        self.assertIsNone(missing["next_action"])
 
         argus = self.fx.argus_case()
         exact = self.h.direct(argus.exact_private_request, now=self.fx.tick())
@@ -274,25 +325,69 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         self.assertTrue(argus.rejection_id in json.dumps(self.h.state()))
         self.assertNotIn("agent_authorized", json.dumps(completed))
 
-    def test_remainder_cap_resume_stall_expiry_and_merge_order(self):
-        first = self.h.direct(self.fx.failed_delivery_request(effect_absent=True), now=self.fx.t0)
-        self.assertEqual(first["custody"]["remainder"], 1)
-        resumed = first
-        for _ in range(2):
-            resumed = self.h.direct(self.fx.resume_request(resumed), now=self.fx.tick())
-            self.assertEqual(resumed["custody"]["remainder"], 1)
-        stalled = self.h.direct(self.fx.resume_request(resumed), now=self.fx.tick())
-        self.assertEqual(stalled["state"], "suspended")
-        self.assertEqual(stalled["suspend_phase"], "stall")
+    def test_four_no_progress_suspensions_allow_exactly_three_resumes(self):
+        action = self.h.direct(
+            self.fx.failed_delivery_request(effect_absent=True), now=self.fx.t0
+        )
+        self.assertEqual(action["custody"]["remainder"], 1)
+        seen = [action["custody"]["action_id"]]
+        for suspension_number in range(1, 5):
+            custody = action["custody"]
+            self.assertTrue(self.h.current(custody)["current"])
+            suspended = self.h.checkpoint(
+                self.fx.transport_suspension(custody), now=self.fx.tick()
+            )
+            self.assertEqual(suspended["state"], "suspended")
+            if suspension_number < 4:
+                action = self.h.direct(
+                    self.fx.resume_request(suspended), now=self.fx.tick()
+                )
+                self.assertEqual(action["custody"]["remainder"], 1)
+                seen.append(action["custody"]["action_id"])
+            else:
+                self.assertEqual(self.fx.suspend_phase(self.h.state(), 151), "stall")
+                refused = self.h.direct(
+                    self.fx.resume_request(suspended), now=self.fx.tick()
+                )
+                self.assertNotEqual(refused["kind"], "delivery_remainder")
+        self.assertEqual(seen, ["151:r1:1", "151:r1:2", "151:r1:3", "151:r1:4"])
+        self.assertEqual(self.fx.remainder_count(self.h.state(), 151), 1)
 
-        merge = self.fx.merge_observation(first["custody"])
+    def test_progress_resets_stall_streak(self):
+        action = self.h.direct(self.fx.pending_remainder_request(), now=self.fx.t0)
+        for _ in range(2):
+            suspended = self.h.checkpoint(
+                self.fx.transport_suspension(action["custody"]), now=self.fx.tick()
+            )
+            action = self.h.direct(self.fx.resume_request(suspended), now=self.fx.tick())
+        observation = self.fx.observed_stage("close", custody=action["custody"])
+        progressed = self.h.checkpoint(
+            self.fx.checkpoint(action["custody"], delivery=[observation]),
+            now=self.fx.tick(),
+        )
+        suspended = self.h.checkpoint(
+            self.fx.transport_suspension(progressed["custody"]), now=self.fx.tick()
+        )
+        resumed = self.h.direct(self.fx.resume_request(suspended), now=self.fx.tick())
+        self.assertEqual(resumed["custody"]["remainder"], 1)
+        self.assertEqual(self.fx.stalled_resumes(self.h.state(), 151), 1)
+
+    def test_merge_is_persisted_before_independent_deadline_reaping(self):
+        action = self.h.direct(self.fx.pending_merge_at_deadline(), now=self.fx.t0)
+        custody = action["custody"]
+        merge = self.fx.merge_observation(custody)
+        self.assertTrue(self.h.current(custody)["current"])
         at_deadline = self.h.checkpoint(
-            self.fx.checkpoint(first["custody"], delivery=[merge]),
-            now=first["deadline_at"],
+            self.fx.checkpoint(custody, delivery=[merge]),
+            now=action["deadline_at"],
         )
         self.assertIn(merge["id"], at_deadline["accepted_observation_ids"])
+        self.assertTrue(self.fx.contains_observation(self.h.state()["issues"]["151"], merge["id"]))
         self.assertEqual(self.fx.remainder_count(self.h.state(), 151), 1)
-        second = self.h.direct(self.fx.retry_request(at_deadline), now=self.fx.tick())
+
+    def test_remainder_retry_cap_is_independent(self):
+        first = self.h.direct(self.fx.failed_delivery_request(effect_absent=True), now=self.fx.t0)
+        second = self.h.direct(self.fx.retry_request(first), now=self.fx.tick())
         self.assertEqual(second["custody"]["remainder"], 2)
         capped = self.h.finish(self.fx.failed_summary(second), now=self.fx.tick())
         self.assertEqual(capped["state"], "terminal_failed")
@@ -314,7 +409,12 @@ stdout has validated before `json.loads`. `DeliveryFixtures` contains
 the full strict literal constructors used by these tests and validates each
 object through `delivery_model.validate_delivery_object`; `FakeProvider` has one
 `calls` list and no network path. Do not replace these public CLI tests with
-monkeypatches of workflow-state internals.
+monkeypatches of workflow-state internals. `round_trip_with_layout("installed")`
+uses an explicit temporary HOME and creates lexical `.agents/bin` wrapper and
+`.agents/lib/python/delivery_model.py` symlinks to regular files in a fake
+temporary store, matching Home Manager topology. It never reads the process's
+real HOME and its negative variants replace only the model leaf with
+missing/directory/wrong-interface cases.
 
 - [ ] **Step 2: Write report-boundary and production-caller tests**
 
@@ -328,12 +428,17 @@ def test_delivery_v2_boundaries_accept_exact_shapes_and_reject_hybrids(self):
             accepted = self.run_validate(boundary, valid[boundary], use_stdin=True)
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
             self.assertEqual(accepted.stdout, canonical_bytes(valid[boundary]))
+    for response in workflow_response_fixtures():
+        accepted = self.run_validate("workflow-response", response, use_stdin=True)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(accepted.stdout, canonical_bytes(response))
     mutations = delivery_boundary_mutations(valid)
     self.assertEqual(set(mutations), {
         "unknown_key", "legacy_new_hybrid", "changed_contract_digest",
-        "stale_action", "missing_postcondition_evidence", "public_audience",
-        "changed_data_digest", "fabricated_host_reference",
+        "action_id_mismatch", "missing_postcondition_evidence",
+        "invalid_host_reference_type",
         "unsuccessful_absence_probe", "bool_ordinal", "duplicate_observation",
+        "duplicate_json_key", "invalid_utf8",
     })
     for name, boundary, raw in mutations.values():
         with self.subTest(name=name):
@@ -346,8 +451,22 @@ def test_delivery_v2_boundaries_accept_exact_shapes_and_reject_hybrids(self):
 contract/custody. `delivery_boundary_mutations()` recomputes enclosing hashes
 after each semantic mutation so every case reaches the intended validator;
 duplicate-key and invalid-UTF-8 cases mutate raw bytes and remain raw through the
-validator. Also assert a strict v1 legacy summary remains readable only by its
-legacy validator path, while adding any v2 member to it fails.
+validator. `action_id_mismatch` is an internally inconsistent custody object,
+not a once-current action that later became stale. `invalid_host_reference_type`
+is a shape error; a well-shaped opaque string passes structural validation and
+does not create an allowed verdict. Also assert a strict v1 legacy summary
+remains readable only by its legacy validator path, while adding any v2 member
+to it fails.
+
+Add semantic-layer cases to `test_delivery_workflow.py`: a structurally valid
+old-custody checkpoint first passes the `ship-checkpoint` boundary, then
+`checkpoint-delivery` refuses it under lock with byte-identical state;
+structurally valid public-audience and changed-payload direct requests pass
+request-shape validation, then the reducer returns `scope_tuple_required`
+against the accepted private contract; and an otherwise non-allowed authority
+observation carrying a well-shaped invented opaque host reference passes report
+shape validation but leaves native evaluation required. These are distinct from
+malformed raw-byte cases and must not be moved back into artifact-budget.
 
 Extend `test_workflow_skill_contracts.py` and orchestration evals with:
 
@@ -362,7 +481,7 @@ def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
     required = (
         "interface_version 2", "ship-checkpoint/v2", "ship-summary/v2",
         "custody", "current-launch", "validate before decoding",
-        "checkpoint-delivery", "delivery_remainder",
+        "workflow-response", "checkpoint-delivery", "delivery_remainder",
     )
     for name, text in documents.items():
         with self.subTest(name=name):
@@ -400,8 +519,8 @@ python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts
 ```
 
 Expected: exit nonzero because workflow state is schema 2/interface 1,
-`ship-checkpoint` is not a report boundary, and production callers do not carry
-the v2 protocol. Preserve the terminal output. Fix test construction errors
+`ship-checkpoint`/`workflow-response` are not report boundaries, and production
+callers do not carry the v2 protocol. Preserve the terminal output. Fix test construction errors
 before implementation; do not accept a RED caused by malformed fixtures.
 
 - [ ] **Step 4: Implement schema 3 and the atomic runtime cutover**
@@ -409,8 +528,10 @@ before implementation; do not accept a RED caused by malformed fixtures.
 Load the model before reading a request or ledger. Follow the existing
 `conformance.py` `SourceFileLoader` pattern: source uses the regular sibling,
 installed mode uses exactly lexical `~/.agents/lib/python/delivery_model.py`;
-register the module before execution, remove it after a failed load, require a
-regular file and interface version 1, and never search `sys.path`.
+register the module before execution, remove it after a failed load, require
+`Path.is_file()` and interface version 1, and never search `sys.path`. The
+installed lexical leaf may be Home Manager's symlink to a regular Nix-store
+file; missing paths and directories still refuse before decode/mutation.
 
 Replace the one-step `PRIOR_SCHEMA_VERSION` assumption with explicit adjacent
 migrators:
@@ -418,23 +539,35 @@ migrators:
 ```python
 MIGRATORS = {1: migrate_1_to_2, 2: migrate_2_to_3}
 
-def upgrade_state(value):
+def upgrade_state(value, *, run_id, migration_contracts):
     candidate = copy.deepcopy(value)
     seen = set()
     while isinstance(candidate, dict) and candidate.get("schema_version") != 3:
         version = candidate.get("schema_version")
         if type(version) is not int or version in seen or version not in MIGRATORS:
-            return value
+            raise WorkflowError("unsupported workflow state schema version")
         seen.add(version)
-        candidate = MIGRATORS[version](candidate)
-    return validate_state(candidate)
+        candidate = MIGRATORS[version](candidate, migration_contracts)
+    return validate_state(candidate, run_id=run_id)
 ```
 
 `migrate_1_to_2` retains the current suspension defaults and `prior_run`
 behavior. `migrate_2_to_3` adds only the exact empty delivery and empty remainder
-shape after deriving unambiguous project/repository identity from strict request
-input. Migration occurs on a detached copy; the caller validates the final v3
-state before `atomic_write_state` and never writes schema 2 as an intermediate.
+shape. The issue-keyed `migration_contracts` map comes only from the already
+validated request; it is null for an issue with empty delivery and mandatory for
+candidate facts/remainder selection. It never derives identity from URLs, branch
+names or legacy booleans. Migration occurs on a detached copy inside the
+transaction; the command performs at most one `atomic_write_state` containing
+the final validated v3 transition and never writes schema 2 as an intermediate.
+Missing/ambiguous/mismatched context refuses with original bytes unchanged.
+
+Split the reader paths. Mutation transactions use the function above under
+lock. `current-launch` reads raw bytes without a lock and dispatches schema 1/2
+to `validate_legacy_state(value, run_id=run_id)` or schema 3 to
+`validate_state(value, run_id=run_id)`; it projects current implementation
+custody from legacy rows and never upgrades/persists them. The exact function
+signatures retain keyword-only `run_id` everywhere so no call silently skips
+run identity.
 
 Make control/direct normalize their differently shaped envelopes into one
 issue-keyed transition input before locking. Validate all delivery objects and
@@ -458,18 +591,22 @@ Keep implementation retry and capacity behavior covered by existing tests.
 
 - [ ] **Step 5: Implement report validation and all production callers**
 
-Add the `ship-checkpoint` boundary and v2 dispatch in `artifact_budget.py`.
+Add the `ship-checkpoint` and `workflow-response` boundaries and v2 dispatch in `artifact_budget.py`.
 Capture raw bytes before decode, preserve duplicate-key and invalid-UTF-8
 refusal, load the pure model, validate the outer boundary's exact keys and every
 nested delivery object, then emit the accepted canonical bytes. Do not copy a
 second object schema into artifact-budget. Keep strict legacy v1 summary reading
 only for historical files; reject hybrids and do not let schema-3 finish consume
-v1.
+v1. The response union covers control/direct actions, the exact four-key
+current-launch result, checkpoint responses and finish outcomes. It performs no
+ledger lookup and authenticates no host/source reference.
 
 Update from-issue, AUTO, its ship handoff, ship-issue, REVIEW, HUMAN-GATE, and
 orchestration together. Their normative sequence is:
 
-1. validate raw direct/control/handoff/checkpoint/summary bytes before decoding;
+1. validate raw direct/control/current/checkpoint/finish responses through
+   `workflow-response`, and handoff/checkpoint/summary reports through their
+   named boundaries, before decoding;
 2. copy the exact contract, intent chain, digests, custody and pending stages;
 3. execute only the returned closed action after `current-launch` returns the
    exact four-key current result for that custody;
@@ -496,10 +633,10 @@ run_with_receipt() {
   shift 2
   set +e
   "$@" >"$log" 2>&1
-  status=$?
+  receipt_exit=$?
   set -e
-  printf '%s\n' "$status" >"$receipt"
-  return "$status"
+  printf '%s\n' "$receipt_exit" >"$receipt"
+  return "$receipt_exit"
 }
 run_with_receipt /private/tmp/issue-151-task2-focused.exit \
   /private/tmp/issue-151-task2-focused.log \
@@ -513,15 +650,34 @@ run_with_receipt /private/tmp/issue-151-task2-full.exit \
   /private/tmp/issue-151-task2-full.log just agent-workflow-tests
 run_with_receipt /private/tmp/issue-151-task2-build.exit \
   /private/tmp/issue-151-task2-build.log just build
-devenv -O packages:pkgs "python3Packages.pyyaml" shell -- \
-  python3 /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
-  home/common/agent-skills/skills/from-issue
-devenv -O packages:pkgs "python3Packages.pyyaml" shell -- \
-  python3 /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
-  home/common/agent-skills/skills/ship-issue
-devenv -O packages:pkgs "python3Packages.pyyaml" shell -- \
-  python3 /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
-  home/common/claude-code/skills/orchestrate-issues
+python3 - <<'PY'
+from pathlib import Path
+root = Path("/private/tmp/issue-151-skill-validation-env")
+config = root / "devenv.nix"
+expected = """{ pkgs, ... }:
+{
+  packages = [ pkgs.python3Packages.pyyaml ];
+}
+"""
+root.mkdir(parents=True, exist_ok=True)
+if config.exists():
+    assert config.read_text(encoding="utf-8") == expected
+else:
+    config.write_text(expected, encoding="utf-8")
+PY
+task_root=$PWD
+(
+  cd /private/tmp/issue-151-skill-validation-env
+  devenv shell -- python3 \
+    /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
+    "$task_root/home/common/agent-skills/skills/from-issue"
+  devenv shell -- python3 \
+    /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
+    "$task_root/home/common/agent-skills/skills/ship-issue"
+  devenv shell -- python3 \
+    /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
+    "$task_root/home/common/claude-code/skills/orchestrate-issues"
+)
 ```
 
 Expected: the three test/build commands exit 0 and each receipt contains `0`.
@@ -542,9 +698,10 @@ git diff --check -- \
   home/common/agent-skills/skills/from-issue \
   home/common/agent-skills/skills/ship-issue \
   home/common/claude-code/skills/orchestrate-issues justfile
+test -z "$(git diff --cached --name-only)"
 python3 - <<'PY'
 import subprocess
-paths = subprocess.check_output(["git", "diff", "--name-only", "--"]).decode().splitlines()
+
 allowed = {
     "home/common/agent-skills/scripts/workflow-state.py",
     "home/common/agent-skills/scripts/artifact_budget.py",
@@ -562,18 +719,78 @@ allowed = {
     "home/common/claude-code/skills/orchestrate-issues/evals/evals.json",
     "justfile",
 }
-assert set(paths) == allowed, (set(paths), allowed)
-for path in paths:
-    diff = subprocess.check_output(["git", "diff", "--unified=10", "--", path])
-    assert len(diff) <= 65_536, (path, len(diff))
+records = subprocess.check_output(
+    ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"]
+).split(b"\0")
+changed = {record[3:].decode("utf-8") for record in records if record}
+assert changed == allowed, (changed, allowed)
 PY
+candidate_index=$(mktemp "${TMPDIR:-/tmp}/issue-151-task2-index-XXXXXX")
+rm "$candidate_index"
+trap 'rm -f "$candidate_index"' EXIT HUP INT TERM
+GIT_INDEX_FILE="$candidate_index" git read-tree HEAD
+GIT_INDEX_FILE="$candidate_index" git add -- \
+  home/common/agent-skills/scripts/workflow-state.py \
+  home/common/agent-skills/scripts/artifact_budget.py \
+  home/common/agent-skills/tests/test_workflow_state.py \
+  home/common/agent-skills/tests/test_artifact_budget.py \
+  home/common/agent-skills/tests/test_delivery_workflow.py \
+  home/common/agent-skills/tests/test_workflow_skill_contracts.py \
+  home/common/agent-skills/skills/from-issue/SKILL.md \
+  home/common/agent-skills/skills/from-issue/AUTO.md \
+  home/common/agent-skills/skills/from-issue/ship-handoff.md \
+  home/common/agent-skills/skills/ship-issue/SKILL.md \
+  home/common/agent-skills/skills/ship-issue/REVIEW.md \
+  home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md \
+  home/common/claude-code/skills/orchestrate-issues/SKILL.md \
+  home/common/claude-code/skills/orchestrate-issues/evals/evals.json \
+  justfile
+GIT_INDEX_FILE="$candidate_index" git diff --cached --check
+GIT_INDEX_FILE="$candidate_index" python3 - <<'PY'
+import os
+import subprocess
+
+allowed = {
+    "home/common/agent-skills/scripts/workflow-state.py",
+    "home/common/agent-skills/scripts/artifact_budget.py",
+    "home/common/agent-skills/tests/test_workflow_state.py",
+    "home/common/agent-skills/tests/test_artifact_budget.py",
+    "home/common/agent-skills/tests/test_delivery_workflow.py",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py",
+    "home/common/agent-skills/skills/from-issue/SKILL.md",
+    "home/common/agent-skills/skills/from-issue/AUTO.md",
+    "home/common/agent-skills/skills/from-issue/ship-handoff.md",
+    "home/common/agent-skills/skills/ship-issue/SKILL.md",
+    "home/common/agent-skills/skills/ship-issue/REVIEW.md",
+    "home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md",
+    "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
+    "home/common/claude-code/skills/orchestrate-issues/evals/evals.json",
+    "justfile",
+}
+env = {**os.environ, "GIT_INDEX_FILE": os.environ["GIT_INDEX_FILE"]}
+candidate = set(subprocess.check_output(
+    ["git", "diff", "--cached", "--name-only", "--"], env=env,
+).decode().splitlines())
+assert candidate == allowed, (candidate, allowed)
+for path in sorted(allowed):
+    diff = subprocess.check_output(
+        ["git", "diff", "--cached", "--unified=10", "--", path], env=env,
+    )
+    assert 0 < len(diff) <= 65_536, (path, len(diff))
+PY
+rm -f "$candidate_index"
+trap - EXIT HUP INT TERM
+test -z "$(git diff --cached --name-only)"
 ```
 
-Expected: exit 0; exactly the 15 Task 2 paths differ from its accepted base and
-each ordinary per-file U10 diff is within 65,536 bytes. If any file exceeds the
-limit, split test responsibility into a new focused test module and register it;
-do not omit lines, reduce assertions, split one file's patch synthetically, or
-raise a cap.
+Expected: exit 0; the temporary index includes all 15 Task 2 paths, including the
+new untracked test, and each ordinary per-file U10 candidate diff is within
+65,536 bytes without changing the real index. If a file requires a bounded test
+split, stop and amend this member's Files roster, root task index, temporary-index
+allowlist and `justfile` registration before adding it; do not omit lines, reduce
+assertions, split one file's patch synthetically, or raise a cap. After the
+signed commit, the actual package from the immutable Task 2 base through its
+head remains the acceptance gate.
 
 - [ ] **Step 7: Commit the atomic adoption and produce complete review evidence**
 

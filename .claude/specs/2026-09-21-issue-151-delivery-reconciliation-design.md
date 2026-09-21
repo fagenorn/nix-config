@@ -484,11 +484,31 @@ or workflow schema selector.
 That surface is exactly `MODEL_INTERFACE_VERSION = 1`,
 `DeliveryModelError`, `canonical_bytes`, `canonical_digest`,
 `validate_delivery_object`, `validate_custody_ref`, `match_scope`, and
-`reduce_delivery`. Validation returns detached normalized objects; scope matching
-returns only matched/scope/reason; reduction returns normalized stage facts and
-postconditions, ordered pending stages, nullable next stage, sorted requirements,
-completion state and nullable typed blocking. This keeps transport callers thin
-without exposing ledger or provider operations through the model.
+`reduce_delivery`. `match_scope` receives the validated contract, one validated
+intent, the requested scope tuple, selected outputs, explicit evaluation time,
+and matching revocation observations; it never reads a clock or ledger.
+`reduce_delivery` receives the validated contract and delivery value plus one
+strict evaluation context containing explicit time, nullable custody/current
+launch, nullable requested scope, a closed trusted-source kind and candidate
+intent, authority, reevaluation and delivery observations. The source kind says
+which already validated workflow boundary supplied the normalized facts; it is
+not authentication evidence and cannot replace guard, host or provider verdicts.
+Validation returns detached normalized objects; scope matching returns only
+matched/scope/reason; reduction validates the complete intent chain and
+contract/slot/launch/effect bindings, consumes one-shot reevaluation only for its
+bound rejection, preserves historical rejection, and returns normalized stage
+facts and postconditions, ordered pending stages, nullable next stage, sorted
+requirements, completion state and nullable typed blocking. This keeps transport
+callers thin without exposing ledger or provider operations through the model.
+
+`validate_delivery_object` is structural and canonical: it cannot know current
+ledger custody or authenticate a normalized source/opaque host reference.
+Workflow-state supplies trusted normalized inputs, then performs semantic
+contract and freshness checks under its lock through `reduce_delivery`.
+Artifact-budget invokes the structural validator only. A structurally valid but
+stale custody or unverified host claim therefore passes the byte boundary and is
+refused or left non-authoritative at the transaction/trust layer rather than
+being rejected by invented hash authentication.
 
 Source callers use an explicit-by-path loader, following the existing
 `conformance.py` sibling-library pattern, to load the regular source sibling.
@@ -496,8 +516,11 @@ Installed workflow-state and artifact-budget use that same loader contract
 against the one lexical `~/.agents/lib/python/delivery_model.py` publication;
 they never rely on `sys.path`, a bare import or siblings behind independently
 resolved Nix-store file targets. Both require model interface version 1;
-absence, non-regular resolution or a version mismatch fails before
-decode/mutation. Neither caller keeps a duplicate validator or narrowing table.
+absence, a directory/non-file resolution or a version mismatch fails before
+decode/mutation. `Path.is_file()` deliberately accepts Home Manager's lexical
+library symlink to its regular Nix-store target; loaders do not bypass that
+public topology by resolving a different sibling. Neither caller keeps a
+duplicate validator or narrowing table.
 Focused module tests exercise the canonical model and reduction directly,
 including source and generated installed import layouts.
 Workflow-state remains the sole state/transition writer; artifact-budget owns
@@ -529,12 +552,27 @@ same state/id relationship as stage facts. A remainder record has exactly
 `owner`, `worktree`, `state`, `launches`, `deadline_at`, `progress_token`,
 `blocked_on`, `suspend_phase`, `stalled_resumes`, `result`, and `result_source`.
 
-Migration is adjacent, atomic and idempotent. A valid schema-1 ledger follows
-the already supported 1→2 migration and the new 2→3 migration in memory, then
-the complete schema-3 value is validated before one replacement; no intermediate
-schema-2 write is exposed. Unknown fields, partial v3 shapes, ambiguous
-repository identity, malformed legacy rows or invalid input refuse before
-replacement. Older installed helpers reject v3 without mutation. Later
+Migration is adjacent, atomic and idempotent. Mutation commands first validate
+the complete interface-2 request, then under the ledger lock call
+`upgrade_state(value, run_id=..., migration_contracts=...)`. The issue-keyed
+migration contracts are the request's already structurally validated canonical
+contracts or null; they are context, not inferred authority. A valid schema-1
+ledger follows the already supported 1→2 migration and the new 2→3 migration
+in memory, then `validate_state(candidate, run_id=run_id)` validates the complete
+schema-3 value before at most one replacement with the command's actual
+transition; no intermediate schema-2 write is exposed. Empty legacy delivery may
+initialize with a null contract. Candidate delivery facts, remainder dispatch or
+a nonempty authority chain require one unambiguous matching contract in that
+context; missing, conflicting or repository-mismatched context refuses with no
+write. Unknown fields, partial v3 shapes, malformed legacy rows or invalid input
+likewise refuse before replacement.
+
+Read-only `current-launch` never calls `upgrade_state`: it validates schema 1/2
+through the retained legacy validator and projects only implementation custody,
+or validates schema 3 normally. It returns the same exact four-key current result
+at exit 0 for every well-formed negative and never locks, creates or persists.
+A remainder id against legacy state is a well-formed negative. Older installed
+helpers reject v3 without mutation. Later
 #152 C must migrate from the then integrated schema and merge its concerns rather
 than creating parallel state.
 
@@ -664,6 +702,15 @@ validators keep the legacy row readable for old result files, while v3 writers
 emit only v2 handoff/checkpoint/summary shapes. No validator-first or prose-only
 cutover is allowed.
 
+Artifact-budget also exposes one structural raw-byte `workflow-response`
+boundary for control/direct actions, the exact legacy-shaped four-key
+current-launch result, checkpoint responses and finish outcomes. It loads the
+shared model and validates the closed response union before callers or tests
+decode stdout. This boundary proves shape, canonical bytes and internal
+custody/action-id consistency only. Current-ledger freshness,
+accepted-contract audience/data matching and normalized-source authenticity
+remain workflow-state semantic checks under lock or native trust-boundary facts.
+
 ### Deterministic simulated acceptance cases
 
 Fixtures use reserved `sim.invalid` identities, fixed synthetic 40-hex object
@@ -706,15 +753,17 @@ tests. Plan-only or prose-only evidence is insufficient.
    including an ordinary source-v3 implementation owner. Assert the typed
    next stage, no implementation dispatch/attempt consumption, persisted
    historical result and observations, deduplicated replay, two-ordinal cap,
-   exact three-resume stall behavior, merge-before-expiry, capacity ordering and
+   exact four-suspension/three-resume stall behavior plus progress reset,
+   merge-before-expiry, capacity ordering and
    no filesystem mutation from current-launch.
-2. **Artifact/report CLI boundary.** Validate canonical v2
-   handoff/checkpoint/summary bytes
-   and rejection of legacy/new hybrids, changed contract digest, stale action,
-   missing postcondition evidence, audience/data mismatch, fabricated host ref,
-   unsuccessful absence probes and unknown fields. Then pass the validated
-   checkpoint and summary into workflow-state and assert the stored facts/result,
-   not helper calls.
+2. **Artifact/report/response CLI boundary.** Validate canonical v2
+   handoff/checkpoint/summary and workflow-response bytes and reject legacy/new
+   hybrids, internally inconsistent contract/custody ids, missing postcondition
+   evidence, invalid host-reference types, unsuccessful absence probes and
+   unknown fields. Then prove structurally valid stale custody, audience/data
+   mismatch and a well-shaped opaque host reference reach workflow-state's
+   locked semantic/trust checks, where freshness refuses byte-identically and a
+   reference alone grants nothing. Assert stored facts/results, not helper calls.
 3. **Controlled provider-effect replay.** A fake provider records effects and
    returns typed observations. Drive from the public direct response through
    checkpoint and terminal summary paths into the ledger. Prove one exact
@@ -783,4 +832,6 @@ architecture authority. They are not recorded human answers.
 | D12 | Finish issue 151 through its run-specific retained v2/v1 operational bridge; keep exact-old-generation conformance/topology/runtime receipts with the root controller, test only new-source product interfaces in shipped suites, and activate v3 only through separate managed scope. | #66 bridge/activation separation; dynamic validator/module/policy resolution; worktree cleanup removes source. | Hardcoded machine hashes, committed historical runtime fixtures, a generic bridge runtime, migrating the live run or depending on its deleted worktree would mix product behavior with one delivery's operations. |
 | D13 | Put canonical delivery validation, narrowing and pure reduction in one import-safe `delivery_model.py` published as a library and consumed by workflow-state and artifact-budget; adopt every wire atomically after the pure seam is reviewed. | DRY; review-package feasibility; current source/installed Python layouts. | Duplicate validators drift, while a generic framework or early schema cutover would exceed this issue and violate D9. |
 | D14 | Keep valid schema-1 ledgers readable by applying the existing 1→2 migration and the new 2→3 migration as an adjacent in-memory chain, validating the complete schema-3 result, and performing at most one atomic write. | Current source already supports schema 1→2; D8 requires immutable legacy history; an interface cutover must not strand an older valid ledger. | Setting the sole prior version to 2 would reject supported schema-1 history, while persisting an intermediate schema-2 ledger would expose a partial cutover. |
-| D15 | Give the pure model one closed eight-name public surface and make checkpoint output a closed custody-bound response carrying accepted facts, pending stages, next action/requirements and suspension state. | D9 atomic wire cutover; D11 executable round trips; D13 one contract owner. | Caller-specific reduction dictionaries or an open-ended checkpoint response would recreate duplicate policy and let callers infer stage or terminal truth. |
+| D15 | Give the pure model one closed eight-name public surface, with explicit validated contract/intent/evaluation-time/custody/candidate-fact inputs, and make checkpoint output a closed custody-bound response carrying accepted facts, pending stages, next action/requirements and suspension state. | D2/D3 require facts the pure function cannot read itself; D9 atomic wire cutover; D13 one contract owner. | Caller-specific reduction dictionaries, ambient clocks/ledger reads or an open-ended checkpoint response would recreate duplicate policy and let callers infer authority or terminal truth. |
+| D16 | Keep artifact/model validation structural, add one raw `workflow-response` union boundary, and reserve ledger freshness plus normalized-source/host authenticity for workflow-state under lock and the existing trust boundary. | Defense in depth; D3 launch fence; normalized controller facts are not authenticated by digests or opaque references. | Asking the stateless artifact validator to reject a once-valid stale action or fabricated but well-shaped source claim would invent authority and make public tests impossible. |
+| D17 | Upgrade schema 1/2 only inside a mutation transaction with explicit request-derived contract context and final `validate_state(..., run_id=...)`; keep current-launch on a no-write legacy read path. | D8/D14 immutable history and atomic migration; current no-lock/no-create launch guard. | Value-only migration cannot resolve new contract context, while upgrading during current-launch would make a read-only fence mutate or strand legacy runs. |

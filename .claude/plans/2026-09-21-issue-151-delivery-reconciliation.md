@@ -56,12 +56,20 @@ Git, and repository `just` commands.
 - Per D13/D15, `delivery_model.py` is pure and import-safe, has interface version 1,
   and is the sole owner of new delivery validators, canonicalization, narrowing,
   reduction, and nested checkpoint/summary shapes. Callers load it explicitly by
-  path and fail before decode or mutation when absent, non-regular or mismatched.
+  path and fail before decode or mutation when absent, a directory or mismatched;
+  installed loading permits the managed lexical symlink to its regular store file.
+- Per D16, model/artifact checks prove canonical structure, while workflow-state
+  owns locked freshness/semantic checks and native boundaries own source/host
+  authenticity. Raw control/direct/current/checkpoint/finish responses pass the
+  closed `workflow-response` boundary before caller decode.
+- Per D17, schema 1/2 upgrades receive request-derived contract context only in a
+  mutation transaction and finish with `validate_state(candidate, run_id=run_id)` before
+  one write. Read-only current-launch validates legacy state without upgrading.
 - Every ordinary source file remains below the review packer's 65,536-byte
   per-file diff limit. Do not depend on an unpublished projector or raise any
   root, member, count or aggregate cap.
 - Product tests use temporary ledgers, fake providers, source and generated
-  installed layouts only. They never read HOME, `/private/tmp`, the live
+  installed layouts with an explicit temporary HOME only. They never read the real HOME, `/private/tmp`, the live
   issue-151 ledger, or controller operational evidence.
 - Implementation commits are signed and include
   `Co-Authored-By: Codex <noreply@openai.com>`.
@@ -74,9 +82,12 @@ Git, and repository `just` commands.
 - Workflow CLI tests invoke real `init-run`, `control`, `direct-owner`,
   `current-launch`, `checkpoint-delivery`, and `finish` subprocesses against
   temporary ledgers; internal helper calls are not acceptance evidence.
-- Artifact boundary tests feed exact raw v2 handoff/checkpoint/summary bytes to
+- Artifact boundary tests feed exact raw v2 handoff/checkpoint/summary and
+  workflow-response bytes to
   `artifact-budget validate-report` before any workflow decode and exercise
-  unknown keys, hybrids, mismatched digests/custody and unsuccessful probes.
+  unknown keys, hybrids, internally mismatched digests/custody and unsuccessful
+  probes. Valid stale custody and well-shaped host/source claims advance to the
+  locked semantic/trust-layer tests instead of being misclassified structurally.
 - A controlled fake provider consumes only the typed direct response, records
   effects, and returns strict observations. It proves exact authorized effects,
   zero-effect refusals, double launch fencing, partial progress, denial,
@@ -91,7 +102,7 @@ Git, and repository `just` commands.
 ## Delivery estimate and boundaries
 
 Estimate: 16–21 product/test/caller files plus this three-file plan package and
-the amended one-file design spec. The complete source diff is likely 340–520 KiB
+the amended one-file design spec. The complete source diff is likely 350–525 KiB
 before review fixes; `workflow-state.py`, its existing test, and the new
 end-to-end test are the largest likely contributors and each must remain below
 65,536 diff bytes. Task 1 is an independently reviewable pure-library gate of
@@ -119,6 +130,18 @@ runtime already supports schema 1→2: the new writer must compose that migratio
 with 2→3 in memory and preserve one atomic write rather than strand valid older
 history or expose an intermediate schema. It added D15 to close the intermodule
 model surface and the public checkpoint response instead of leaving caller-owned
-reduction dictionaries or an open output envelope.
+reduction dictionaries or an open output envelope. Round-one review adds D16's
+structural-versus-semantic boundary plus public response validator and D17's
+explicit migration/read-only split.
+
+Plan review provenance: an independent Sol/high review of head
+`d1c9c47ea94daa8d4f97e127d72021f8e3896baf` reported 3 Blocking / 3 Should-fix /
+0 Discussion in `/private/tmp/issue-151-plan-review-round1.md`; the root
+Astra critical pass reported 3 Blocking / 2 Should-fix in
+`/private/tmp/issue-151-root-plan-critical-round1.md`. All findings are accepted.
+The corrected members bind PR/output evidence separately, supply complete pure
+evaluation and migration context, add the actual raw response route, separate
+structural/trust/ledger checks, make double fencing and stall/deadline scenarios
+executable, and use temporary-index candidate inventories that include new files.
 
 ---
