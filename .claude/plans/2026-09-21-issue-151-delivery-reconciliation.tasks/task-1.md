@@ -567,7 +567,8 @@ subject/presence spellings in the design. For successful `cleanup_complete`,
 require exactly `{remote_branch_observation_ids,local_branch_observation_ids,
 worktree_observation_ids,durable_detail}` with the design's strict durable-detail
 shape. Reject renamed, omitted, extra, unbound, failed, empty or wrong-target
-subjects and references.
+subjects and missing required references. A cleanup target-class array is empty
+only when the contract declares no target of that class.
 
 Add the Home Manager publication beside the existing Python library targets.
 Publish one managed directory symlink to the regular Nix-store package. Source
