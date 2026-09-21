@@ -86,10 +86,16 @@ from tracker labels/body, a branch prefix, repository administration, a raw
 transcript or an observed merge. Direct/control instead return a bounded
 `delivery_contract` requirement. A legitimate current owner supplies the strict
 object from an explicit user grant, standing repository authorization or an
-already persisted parent handoff. The common validator authenticates that source
-and predecessor before accepting the object; an arbitrary caller assertion is
-not a source. The source reference is evidence of intent, not proof that a
-mutation is presently allowed.
+already persisted parent handoff. The reducer structurally validates the closed
+source kind/reference/digest, predecessor link, scope and canonical identity;
+it does not authenticate a user statement or approval transcript. The existing
+trusted controller supplies the normalized source fact under the current caller
+trust boundary, while the native host remains the independent effect authority;
+owner summaries cannot append intent. Thus an
+arbitrary caller-created successor is not accepted and cannot clear a refusal.
+The source reference is evidence of intent, not proof that a mutation is
+presently allowed. Its digest supplies canonical identity/integrity only and is
+never authority.
 
 ### Closed authorization scope and runtime authority
 
@@ -102,14 +108,19 @@ exactly:
 - project/provider/repository identity, issue, branch/base and either a literal
   PR identity or a declared selected-output slot;
 - discriminated endpoint identity (`none | literal`);
-- discriminated data identity (`none | literal`), with digest, classification
-  and audience (`private`, `public`, or a named-audience digest);
+- discriminated data identity (`none | literal | selected_output_slot`), with
+  fixed classification and audience (`private`, `public`, or a named-audience
+  digest); literal carries its exact digest, while the slot form carries the
+  contract slot id whose reviewed binding supplies the digest;
 - risk class and discriminated spend (`none | ceiling`) with unit/ceiling.
 
 Canonical comparison uses all members and the closed narrowing grammar below.
 There is no generic string subset rule. Expired intent or an observed revocation
 is unusable. A selected PR/output binding must resolve before its effect; moving
-branch state is not a binding.
+branch state is not a binding. Resolving a slot-bound data digest from that same
+reviewed output is the declared narrowing, so it needs no new permission merely
+because the bytes are now known. A different slot/target, classification,
+audience, action or effect still refuses.
 
 This makes the recorded private/public case explicit: the same repository URL
 with a public audience or different payload/data digest does not match a private
@@ -144,9 +155,9 @@ under its ledger lock; it validates the original launch/result binding and
 current state and never acts through the stale owner process. If the second
 check succeeds, the observation is persisted before the caller stops or
 advances. The same rule covers a provider effect that completed while its caller
-lost custody: the stale caller cannot
-write, while authenticated provider evidence remains ingestible. An `allowed`
-event describes only that launch and effect and is never a future grant. A host
+lost custody: the stale caller cannot write, while validated source-bound
+provider evidence remains ingestible through the trusted controller boundary.
+An `allowed` event describes only that launch and effect and is never a future grant. A host
 rejection remains operative across handoffs until actual new authorization or
 permitted material evidence allows a fresh evaluation. New spelling, context,
 owner or host is not such evidence.
@@ -187,8 +198,12 @@ A `target_ref` is one of `{"kind":"none"}`,
 where `subject_kind` is exactly one of
 `commit | tree | record | pull_request`. Slot constraints contain exactly
 `project_id`, `provider`, `repository_id`, `repository_slug`, `branch`, `base`,
-`deliverable_class`, and `data_ref`; the last uses a closed `none | literal`
-discriminator whose literal contains digest, classification and audience.
+`deliverable_class`, and `data_ref`; the last uses a closed
+`none | literal | selected_output_slot` discriminator. Literal contains digest,
+classification and audience. Slot-bound data contains the same slot id plus
+fixed classification and audience; its digest is absent until that slot is
+immutably selected. The validator requires that data slot id to equal the
+containing target slot id.
 Values not relevant to the subject use their
 explicit `none` discriminator rather than null. A stage may refer only to a slot
 declared in the same contract. Stage `kind` is one of the nine stage names above;
@@ -203,8 +218,10 @@ The exact `authorization-intent/v1` members are `schema_version` 1, literal
 UTC `issued_at`, nullable `expires_at`, string `revocation_key`, and nonempty
 sorted unique `scopes`. `source` contains exactly `kind`
 `explicit_user | standing_repository | parent_handoff`, stable `reference` and
-`evidence_digest`. A successor must name the accepted predecessor and carry newly
-validated source evidence. Appending it never deletes or changes an authority
+`evidence_digest`. A successor must name the accepted predecessor and carry a new
+normalized source fact from the trusted controller boundary. The reducer checks
+shape, identity and linkage, not whether a human actually spoke. Appending it
+never deletes or changes an authority
 observation. In particular, it can make a rejected tuple eligible for a fresh
 evaluation only when the new source postdates the rejection and explicitly
 covers that exact tuple, or when an accepted `reevaluation-evidence/v1` permits
@@ -215,24 +232,26 @@ Each `scope-tuple/v1` has exactly `schema_version` 1, literal `kind`
 `stable_id`; strings `action` and `effect`; strict `target` containing exactly
 `project_id`, `provider`, `repository_id`, `repository_slug`, `issue`, `branch`,
 `base`, `pr_ref`, and `output_ref`; discriminated `endpoint` (`none | literal`);
-discriminated `data`
-(`none | literal`, with digest, classification and audience); string `risk`;
+discriminated `data` (`none | literal | selected_output_slot`, with the fields
+defined above); string `risk`;
 and discriminated `spend` (`none | ceiling`, with unit and nonnegative integer
 ceiling). A literal ref is equality-only. A slot ref narrows exactly once through
 a `selected-output/v1` containing exactly `schema_version` 1, literal `kind`
 `selected-output`, derived `id`, `contract_digest`, `slot_id`, `subject_kind`,
-`subject_value`, `repository_id`, `branch`, `base`, `evidence_digest`, and sorted
-unique `review_evidence_ids`. The selected subject must satisfy every declared
-slot constraint; the binding is immutable and a second value conflicts before
-mutation.
+`subject_value`, `data_identity_digest`, `repository_id`, `branch`, `base`,
+`evidence_digest`, and sorted unique `review_evidence_ids`. The data identity is
+the canonical digest of the reviewed output payload manifest. The selected
+subject must satisfy every declared slot constraint; the binding is immutable
+and a second value conflicts before mutation.
 
 Scope matching permits only these narrowings:
 
 | Declared member | Permitted request |
 |---|---|
-| principal, action, effect, repository/project/issue, endpoint, data digest/classification/audience, risk | exact equality |
+| principal, action, effect, repository/project/issue, endpoint, literal data digest, data classification/audience, risk | exact equality |
 | literal PR/output/branch/base | exact equality |
 | slot PR/output | the one immutable selected value for the same slot satisfying every declared constraint |
+| slot-bound data | the selected output's exact data-identity digest for the same slot; declared classification and audience remain equal |
 | spend `none` | exact `none` |
 | spend ceiling | same unit and requested integer less than or equal to the ceiling |
 | intent time/revocation | request time within the closed validity interval and no matching revocation observation |
@@ -240,8 +259,10 @@ Scope matching permits only these narrowings:
 `reevaluation-evidence/v1` has exactly `schema_version` 1, literal `kind`
 `reevaluation-evidence`, derived `id`, `contract_digest`, `scope_id`,
 `rejected_observation_id`, `source_kind` (`host | provider`), `reason_code`, UTC
-`observed_at` and `evidence_digest`. It is
-accepted only through the same trusted adapter that owns that source. It permits
+`observed_at` and `evidence_digest`. The reducer accepts it only as a normalized
+source-bound fact from the existing trusted controller/adapter boundary and
+structurally binds it to the rejection; it provides no new authentication
+service. It permits
 one fresh evaluation of the same tuple; it neither authorizes the effect nor
 predicts the result, and neither deletes nor changes the old rejection.
 
@@ -298,7 +319,7 @@ observed stage refuses before mutation. The closed advancement map is:
 | Stage | Exact action / effect | Required observation kind |
 |---|---|---|
 | `select_reviewed_output` | `select_output` / `ledger_write` | `selected_output`, including the immutable slot binding and its review evidence |
-| `deliver_repository_record` | `write_record` / `repository_write` | `repository_record_present`, binding selected record digest and reachable integration subject |
+| `deliver_repository_record` | `write_record` / `repository_write` | `repository_record_proposed`, binding the exact selected record digest to the declared branch/live PR head without claiming integration |
 | `publish_branch` | `push_branch` / `repository_write` | `branch_published`, binding repository, branch and exact selected head |
 | `open_pr` | `open_pull_request` / `provider_write` | `pr_opened`, binding provider PR, head, base and selected output |
 | `merge_pr` | `merge_pull_request` / `provider_write` | `pr_merged`, binding provider PR/head/base/merge SHA |
@@ -308,9 +329,9 @@ observed stage refuses before mutation. The closed advancement map is:
 | `delete_local_branch` | `delete_local_branch` / `repository_write` | `local_branch_absent`, from a successful exact-identity probe |
 
 Observation subjects are exact: `selected_output` contains the strict
-`selected-output/v1`; record presence contains repository id, record digest,
-integration subject, reachability result and sorted acceptance/review evidence
-ids; branch publication contains repository id, branch and selected head; PR
+`selected-output/v1`; record proposal contains repository id, selected record
+digest, branch and live PR head plus sorted review evidence ids, but no integration
+claim; branch publication contains repository id, branch and selected head; PR
 open/merge contains provider repository id, PR number/URL, expected head and
 base, with merge SHA and merged state required only for merge; tracker closure
 contains tracker repository/issue, closed state, nullable close reason and
@@ -318,15 +339,20 @@ tracker observation identity; remote/local absence contains repository id,
 exact branch and successful absence result; worktree absence contains canonical
 path, recorded worktree identity, no-follow probe mode and successful absence
 result. `implementation_delivered` uses the record/commit selected subject,
-integration subject, reachability result and sorted acceptance/review/test
-evidence ids. No failure, unknown or mismatched probe has a positive subject
+integration subject, fresh reachability or record-presence result,
+merged/integrated subject evidence when merge applies, and sorted
+acceptance/review/test evidence
+ids. No failure, unknown or mismatched probe has a positive subject
 shape.
 
 The contract's `depends_on` graph is acyclic and may refer only to earlier stage
-ids. Selection precedes every stage that uses the slot; publish precedes open;
-open and the required implementation-delivered acceptance observation precede
-merge; the contract declares whether closure depends on merge; cleanup depends
-on the last applicable delivery effect and durable-detail reachability. The
+ids. Selection precedes every stage that uses the slot; publish precedes open.
+Merge requires the selected output plus its pre-merge acceptance, review and test
+evidence and an open PR; it does not require the implementation-delivered
+postcondition. After merge, a fresh integration reachability/record-presence
+observation establishes implementation delivered. The contract declares whether
+closure depends on merge; cleanup depends on the last applicable delivery effect
+and durable-detail reachability. The
 ordered pending stages are a pure projection: scan contract order, omit observed
 or not-applicable facts, and return a stage only after every dependency is
 observed or not applicable. If the first pending fact has unmet dependencies,
@@ -334,6 +360,16 @@ the response is a typed requirement naming those observations rather than a
 different action. Postconditions are likewise pure projections from accepted
 observations and stage facts; provider/tracker state never advances an unrelated
 stage.
+
+For a normal unmerged PR, the sequence is selected reviewed output and
+acceptance/test evidence, branch/PR observation, merge, then a fresh integration
+reachability observation that establishes implementation delivered. For a
+repository record, `deliver_repository_record` writes only the exact predeclared
+reviewed record to the bound branch/PR head; it neither treats that head as
+integrated nor reopens substantive implementation. Its integration-subject
+presence is observed only after merge. For an already-delivered Nodo-style case,
+fresh exact integration and merge observations may establish both postconditions
+at intake, leaving only tracker/cleanup stages for remainder custody.
 
 Independent human completion advances the same fact only through its exact
 typed observation. It neither creates authority nor bypasses dependencies. A
@@ -434,6 +470,32 @@ different object at the path/name, stale positive observation or lookup failure
 refuses. After an accepted delete, a fresh exact absence probe is required before
 the stage advances; the effect result alone is not proof.
 
+### Shared delivery model seam
+
+One import-safe Python module at
+`home/common/agent-skills/scripts/delivery_model.py`, published as
+`~/.agents/lib/python/delivery_model.py`, owns only this issue's canonical JSON
+bytes/digests, strict delivery object validators, scope narrowing, stage and
+postcondition reduction, and custody/checkpoint/summary nested-shape validation.
+Its public surface is a small set of pure functions plus model interface version
+1. It has no CLI, ledger I/O, clock, provider, project policy, activation logic
+or workflow schema selector.
+
+Source callers use an explicit-by-path loader, following the existing
+`conformance.py` sibling-library pattern, to load the regular source sibling.
+Installed workflow-state and artifact-budget use that same loader contract
+against the one lexical `~/.agents/lib/python/delivery_model.py` publication;
+they never rely on `sys.path`, a bare import or siblings behind independently
+resolved Nix-store file targets. Both require model interface version 1;
+absence, non-regular resolution or a version mismatch fails before
+decode/mutation. Neither caller keeps a duplicate validator or narrowing table.
+Focused module tests exercise the canonical model and reduction directly,
+including source and generated installed import layouts.
+Workflow-state remains the sole state/transition writer; artifact-budget owns
+only report boundary validation. Introducing the pure module and its tests does
+not select schema 3 or interface 2, so it may be prepared and reviewed before the
+single atomic adoption that moves every producer/consumer together.
+
 ### Versioned state and transports
 
 State schema 3 adds the immutable contract/digest, append-only intent and
@@ -478,8 +540,8 @@ patch or worktree-path helper is a bridge.
 The own-delivery bridge is a run-specific root-controller operational protocol,
 not new product runtime. Its retained `bridge-generation/v1` evidence names the
 public entry topology and records resolved identity/digest/version for the
-workflow-state module, artifact-budget wrapper and dynamically loaded module, shared budget
-policy, selected interpreter/runtime closure, and environment inputs that affect
+workflow-state module, artifact-budget wrapper and dynamically loaded module,
+shared budget policy, selected interpreter/runtime closure, and environment inputs that affect
 HOME/PATH/shebang and policy resolution. The exact identities for this run live
 only in retained controller evidence; production defaults and this design do not
 hardcode machine hashes. Before finishing the old run, the controller re-resolves
@@ -487,14 +549,16 @@ the declared topology and compares the complete evidence set, then uses only the
 retained compatible v2/v1 path. Drift fails closed without modifying the ledger,
 installing a patch or asking a routine new permission question.
 
-No shipped verifier owns or opens the live issue-151 ledger. Portable product
-tests copy reviewed old-generation workflow/artifact modules and policy into an
-isolated source-layout fixture, choose a controlled interpreter/environment,
-and use a temporary ledger plus simulated removed
-worktree. The actual public-link/hash/runtime inventory, its pre-finish recheck
-and proof that the real ledger stayed unchanged are controller evidence outside
-the product suite. The source delivery adds no bridge runtime and imposes no
-activation requirement.
+No shipped verifier owns or opens the live issue-151 ledger, and the product
+does not commit copies of the historical runtime. The root controller retains
+the exact old toolchain outside the product and owns isolated conformance for
+legacy-summary finish after simulated worktree removal, old-helper schema-3
+refusal, manifest/runtime drift refusal, the public-link pre-finish recheck and
+proof that the real ledger stayed unchanged. Those complete receipts are primary
+operational evidence for this run. Product tests instead exercise the new source
+migration/report/caller interfaces with temporary ledgers in their normal source
+and generated installed layouts. The source delivery adds no bridge runtime and
+imposes no activation requirement.
 
 Control interface 2 has exactly the existing interface-1 request keys plus
 issue-keyed sorted `forge`, `delivery_contracts`, `authorization_intents`,
@@ -507,39 +571,79 @@ input objects; control closes the current direct-only forge gap. Both validate
 the whole request before locking/mutation and derive policy through the same
 function.
 
-Their closed action union adds `delivery_remainder`. That response has exactly
+Their closed action union adds `delivery_remainder`; every owner action carries
+the custody union defined below. A remainder response has exactly
 `interface_version` 2, literal `kind` `delivery_remainder`, `ledger_repo_root`,
-`run_id`, `issue`, `remainder`, `source_attempt`, `owner`, `action_id`,
-`worktree`, `contract`,
+`run_id`, `issue`, `source_attempt`, `owner`, `custody`, `worktree`, `contract`,
 `contract_digest`, ordered `pending_stage_ids`, `deadline_at`, and
 `requirements`. Each requirement has exactly `kind`
 `delivery_contract | scope_tuple | observation | worktree_fact`, `subject_id`,
 `reason_code`, and nullable durable `detail_pointer`. Callers never infer a
 stage from tracker/forge state.
 
-`ship-handoff/v2` has exactly the current handoff keys plus `interface_version`,
-`delivery_contract`, `delivery_contract_digest`, `authorization_intents`,
+Every v2 owner/checkpoint/report uses one closed `custody-ref/v1` union:
+implementation has exactly `kind: implementation`, positive `attempt`, positive
+`launch`, and `action_id` matching `issue:attempt:launch`; remainder has exactly
+`kind: remainder`, positive `remainder`, positive `launch`, and `action_id`
+matching `issue:r<remainder>:launch`. Contract digest, issue and run id sit in
+the enclosing envelope. No nullable remainder ordinal or action-id guessing is
+allowed, so ordinary implementation and remainder owners share the wire without
+being conflated.
+
+Partial progress uses `ship-checkpoint/v2`, not the terminal summary. It has
+exactly `interface_version` 2, `issue`, `custody`, `contract_digest`, sorted
+`delivery_observations`, sorted `authority_observations`, sorted
+`reevaluation_evidence`, `detail_state`, nullable `report_path`, and bounded
+`notes`. The new public `workflow-state checkpoint-delivery` command validates
+this boundary through
+`artifact-budget validate-report --boundary ship-checkpoint` before decode,
+takes run id/now plus the canonical checkpoint, then locks the ledger and
+rechecks that exact custody action before any mutation. A
+stale/malformed custody returns a refusal with no write. A current checkpoint
+atomically deduplicates and persists valid observations, recomputes stage facts
+and postconditions, and returns the next stage or exact requirement without
+terminalizing custody or spending either retry budget.
+
+When the accepted facts produce a true blocking requirement, the reducer—not a
+shipping caller—maps its closed reason to `human_gate`, `external`, or
+`transport` and atomically suspends that same custody in the checkpoint
+transaction: missing/new user authority or an operative host denial maps to
+`human_gate`, a provider/forge wait to `external`, and an actual tool transport
+failure to `transport`. Locally obtainable evidence leaves custody active with a
+typed requirement, and `unknown` remains reaper-only. A later direct/control resume retains the same ordinal/deadline and
+historical denial. Thus an effect that succeeded before a later host denial is
+durable progress rather than a fabricated `failed` delivery.
+
+`ship-handoff/v2` has exactly `interface_version`, `state`, `ledger_repo_root`,
+`run_id`, `owner`, `owner_worktree`, `custody`, `issue_number`, `branch`,
+`worktree_path`, `spec_artifact`, `plan_artifact`, `head_sha`, `review_state`,
+`auto`, `report_path`, `notes`, `delivery_contract`,
+`delivery_contract_digest`, `authorization_intents`,
 `authorization_chain_digest`, `authority_observation_ids`,
-`reevaluation_evidence_ids`, `remainder_identity`, `pending_stage_ids`, and
-`selected_outputs`; existing lifecycle root/run/action and detail keys remain
-mandatory. `ship-summary/v2` has exactly `interface_version` 2, `issue`, `state`
-(`delivery_complete | failed`), nullable `historical_owner_result` in the exact
-legacy result shape, `delivery_contract_digest`,
-`remainder_action_id`, sorted `delivery_observations`, sorted
+`reevaluation_evidence_ids`, `pending_stage_ids`, and `selected_outputs`. The v1
+attempt/action lifecycle group is replaced by the closed custody object rather
+than retained beside it. `ship-summary/v2` has exactly `interface_version` 2, `issue`, `state`
+(`delivery_complete | terminal_failed`), `custody`, nullable
+`historical_owner_result` in the exact legacy result shape,
+`delivery_contract_digest`, sorted `delivery_observations`, sorted
 `authority_observations`, sorted `reevaluation_evidence`, `detail_state`,
 nullable `report_path`, and bounded `notes`. It separates the historical owner
-verdict from new delivery and authority observations. Artifact-budget validates
-canonical stdout before from-issue or workflow-state decodes it. Workflow-state's
-finish entry accepts the exact remainder action id, persists valid observations/result
-before output, advances only declared stages and emits the next requirement,
-remainder dispatch or completed delivery summary.
+verdict from new delivery and authority observations and is valid for either
+custody kind. It is terminal only when every required postcondition is observed
+or a genuine owner failure terminates that custody; a requirement or partial
+success cannot be encoded as terminal failure. Artifact-budget validates
+canonical stdout before from-issue or workflow-state decodes it.
+Workflow-state's finish entry accepts the exact custody union, repeats the
+under-lock current-action check, persists valid final observations/result before
+output, and emits a completed delivery or eligible next remainder. It never
+turns an unfinished closure/cleanup requirement into failure.
 
 From-issue, AUTO, ship-issue and orchestration move with these interfaces and
 consume only the typed action. Wayfind/prototype cases enter this path through a
 validated delivery contract; they do not become lifecycle writers. Report
 validators keep the legacy row readable for old result files, while v3 writers
-emit only v2 handoff/summary shapes. No validator-first or prose-only cutover is
-allowed.
+emit only v2 handoff/checkpoint/summary shapes. No validator-first or prose-only
+cutover is allowed.
 
 ### Deterministic simulated acceptance cases
 
@@ -549,22 +653,28 @@ payload, raw transcript or asserted historical grant.
 
 - **Nodo 1314 behavior:** a simulated six-criterion acceptance map and five-test
   evidence set bind the selected subject. Fake repository and forge observations
-  establish implementation delivery and merge; tracker and cleanup remain
-  pending. Direct-owner returns `delivery_remainder(close_tracker, cleanup)`,
+  establish implementation delivery and merge at intake; tracker and cleanup
+  remain pending. Direct-owner returns `delivery_remainder(close_tracker, cleanup)`,
   never implementation. Fake closure and absence observations persist all four
   postconditions and complete the delivery.
 - **Arcwave 113/record PR 116 behavior:** tracker closure is already observed,
   while the exact simulated decision-record digest and live PR/head remain
   pending. With matching intent/worktree/PR evidence, the same run dispatches
-  `deliver_repository_record`; without any one of them it returns the exact
-  requirement. It never reopens the substantive decision or treats closure as
-  cancellation/grant.
+  `deliver_repository_record`; that stage proposes only the selected reviewed
+  record. Review/acceptance evidence then permits merge, and a fresh integration
+  record-presence observation establishes delivery. Without any required fact it
+  returns the exact requirement. It never reopens the substantive decision or
+  treats closure as cancellation/grant.
 - **Argus iteration behavior:** an identical principal, endpoint, data identity,
   private audience, risk and spend tuple reuses the recorded intent. A different
   endpoint, transfer identity or public audience returns the missing tuple before
   effect. A simulated host rejection persists and cannot be retried through new
   spelling/context/host. A later fake human-completion observation may satisfy
   the effect while leaving that rejection historical and granting no agent right.
+- **Normal v3 owner behavior:** a simulated implementation owner selects reviewed
+  output with acceptance/test evidence, publishes and opens a PR, merges it, then
+  records fresh integration reachability. Merge precedes implementation-delivered
+  truth; neither fact is fabricated from the other.
 
 ## Test seams
 
@@ -572,38 +682,46 @@ Acceptance uses a small set of public executable seams plus caller contract
 tests. Plan-only or prose-only evidence is insufficient.
 
 1. **Workflow-state CLI round trip.** Temporary real ledgers invoke init,
-   direct-owner/control, current-launch and finish through subprocesses. Feed
-   strict fake-adapter observations for the three simulations. Assert the typed
+   direct-owner/control, current-launch, checkpoint-delivery and finish through
+   subprocesses. Feed strict fake-adapter observations for all simulations,
+   including an ordinary source-v3 implementation owner. Assert the typed
    next stage, no implementation dispatch/attempt consumption, persisted
    historical result and observations, deduplicated replay, two-ordinal cap,
    exact three-resume stall behavior, merge-before-expiry, capacity ordering and
    no filesystem mutation from current-launch.
-2. **Artifact/report CLI boundary.** Validate canonical v2 handoff/summary bytes
+2. **Artifact/report CLI boundary.** Validate canonical v2
+   handoff/checkpoint/summary bytes
    and rejection of legacy/new hybrids, changed contract digest, stale action,
    missing postcondition evidence, audience/data mismatch, fabricated host ref,
    unsuccessful absence probes and unknown fields. Then pass the validated
-   summary into workflow-state and assert the stored result, not helper calls.
+   checkpoint and summary into workflow-state and assert the stored facts/result,
+   not helper calls.
 3. **Controlled provider-effect replay.** A fake provider records effects and
-   returns typed observations. Drive from the public direct response through the
-   shipping summary into the ledger. Prove one exact authorized effect occurs,
+   returns typed observations. Drive from the public direct response through
+   checkpoint and terminal summary paths into the ledger. Prove one exact
+   authorized effect occurs,
    rejected/missing scope causes zero effects, and a stale launch causes both zero
    effects and a byte-identical ledger. Prove a denial produced after custody
    changes cannot be written by the old owner but can be ingested by the current
-   successor, independently completed effects need no agent mutation, and
-   Nodo/Arcwave terminate with the four truthful postconditions.
+   successor. Prove an authorized partial effect checkpoints durably, a later
+   host denial atomically suspends the same custody, resume does not spend a
+   retry, independently completed effects need no agent mutation, and
+   Nodo/Arcwave/normal delivery terminate with the four truthful postconditions.
 4. **Production caller contracts and orchestration eval.** Pin that from-issue,
    AUTO, ship-issue and orchestration validate before decode, copy the contract
-   exactly, execute only the closed `delivery_remainder` stages, persist before
-   reporting, preserve denial and never synthesize implementation/new authority.
+   exactly, execute only the closed action/stage for the returned custody,
+   persist before reporting, preserve denial and never synthesize
+   implementation/new authority.
    These tests supplement, not replace, the executable round trips above.
 
-All v3 runtime replays use isolated temporary ledgers and the complete reviewed
-source toolchain. Portable old-generation fixtures prove legacy-summary finish
-after a simulated feature-worktree removal, manifest drift refusal before
-mutation, and old-helper rejection of an isolated v3 ledger. They never inspect
-the real issue-151 ledger, HOME configuration, repository root or `/private/tmp`.
-The controller separately retains the actual whole-generation recheck and
-live-ledger byte-preservation evidence for this run.
+All product v3 runtime replays use isolated temporary ledgers and the complete
+reviewed new-source toolchain. They cover migration, checkpoint/summary
+validation, caller interfaces and new installed layout without reading HOME, the
+real issue-151 ledger, repository operational evidence or `/private/tmp`. The
+controller separately runs and retains the exact-old-generation compatibility,
+removed-worktree, schema refusal, drift, whole-generation recheck and live-ledger
+byte-preservation receipts described above; none is replaced by a prose claim or
+a shipped historical-code fixture.
 
 Run the ordinary workflow suite and managed build for integration. The design
 baseline already passed at the original integrated commit; implementation and
@@ -633,14 +751,15 @@ architecture authority. They are not recorded human answers.
 | ID | Choice | Grounding | Rejected alternative |
 |---|---|---|---|
 | D1 | Store one immutable delivery contract in the sole lifecycle ledger and carry exact canonical bytes through every handoff. | Issue 151 criterion 1; the-bar DRY; current durable handoff seam. | Handoff-only prose or raw conversation replay creates competing truth and cannot be validated. |
-| D2 | Keep authorization intent append-only and secret-free; match its exact canonical tuple with the closed per-field narrowing grammar, including immutable future-output slots, then evaluate current guard/host/provider authority at each effect. | #116 D1; retained #117 intent semantics; private/public denial case. | URL/action string subsets, null wildcards or durable `authorized` omit payload/audience/risk and turn intent into a grant. |
+| D2 | Keep authorization intent append-only and secret-free; match its exact canonical tuple with the closed per-field narrowing grammar, including target and data identities bound to the same immutable future-output slot, then evaluate current guard/host/provider authority at each effect. | #116 D1; retained #117 intent semantics; private/public denial case. | Requiring an unknowable initial payload digest repeats permission after review, while URL/action subsets or null wildcards omit payload/audience/risk. |
 | D3 | Record host/guard/provider outcomes as launch-bound observations with derived non-secret ids and optional real host references only after a second current-launch check; a stale owner has zero effect and zero write. | Current read-only guard semantics; host may expose no stable id; issue 151 criterion 6. | Persisting a late denial from a stale owner weakens the same fence that protects effects. |
-| D4 | Track exact stage facts plus delivered, merged, closed and cleanup as independent typed observations with positive evidence, dependencies and fail-closed probes. | Issue 151 criterion 2; truthful-terminal standard; retained #117 D7. | Four aggregate booleans cannot prove intermediate delivery stages or their prerequisites. |
+| D4 | Track exact stage facts plus delivered, merged, closed and cleanup as independent typed observations; pre-merge review/acceptance permits merge, while fresh post-merge integration reachability establishes implementation delivered. | Issue 151 criterion 2; truthful-terminal standard; retained #117 D7. | Requiring delivered-before-merge is circular, while deriving delivery from merge fabricates acceptance/reachability. |
 | D5 | Add a separate capped remainder lineage with disjoint ordinals/action ids; in-place resumes do not spend implementation or remainder retry counts. | Nodo/Arcwave cases; #132/#133; root critical custody constraint. | Reopen implementation or append unbounded generic retries. |
 | D6 | Permit one retry remainder only after authentic failure plus absent effect and a valid recovery basis; otherwise park while accepting independent completion evidence. | Current two-attempt cap; no-blind-retry and stall rules. | Unlimited successor churn or treating environment suspension as a failed attempt. |
 | D7 | Make worktree absence positive only for a predeclared cleanup target; require exact matching worktree/subject/PR for record delivery. | Current phase-zero/misbinding rules; cleanup semantics. | Branch-prefix discovery or absence-as-general-success weakens fencing. |
 | D8 | Preserve old result bytes/detail and migrate schema 2→3 without inventing contracts, grants or successful observations. | One ledger; immutable history; current schema baseline. | Rewrite a terminal result or promote legacy booleans into fresh evidence. |
-| D9 | Cut over state, direct/control, artifact reports, from-issue, shipping and orchestration as one versioned interface delivery. | Defense in depth; all production producers/consumers must agree. | Validator-first or prose-only rollout strands callers and admits mixed shapes. |
+| D9 | Cut over state, direct/control, checkpoint/terminal artifact reports, from-issue, shipping and orchestration as one versioned interface delivery using the closed implementation/remainder custody union. | Defense in depth; all production producers/consumers must agree. | A remainder-only terminal summary misrepresents ordinary owners and partial progress; validator-first rollout admits mixed shapes. |
 | D10 | Accept the three audited behaviors only through deterministic simulated identities, intent and provider state. | Audit cases 2–4 lack safe exact live metadata and authorize no external mutation. | Copy transcripts/private payloads or present invented SHAs/grants as history. |
-| D11 | Prove acceptance through public CLI/provider-effect round trips, with text/eval contracts only as supplementary caller coverage. | The-bar tests that can fail; issue 151 runtime gap. | Plan-only tests can pass while no caller persists or executes the typed remainder. |
-| D12 | Finish issue 151 through its run-specific retained v2/v1 operational bridge; keep actual topology/runtime identities in controller evidence, prove portable behavior with isolated fixtures, and activate v3 only through separate managed scope. | #66 bridge/activation separation; dynamic validator/module/policy resolution; worktree cleanup removes source. | Hardcoded machine hashes, a generic bridge runtime, migrating the live run or depending on its deleted worktree would mix product behavior with one delivery's operations. |
+| D11 | Prove acceptance through public CLI/provider-effect round trips, including ordinary v3 delivery and partial-effect checkpoint/denial/resume, with text/eval contracts only as supplementary caller coverage. | The-bar tests that can fail; issue 151 runtime gap. | Terminal-only and plan-only tests can pass while partial facts are lost or a requirement is mislabeled failure. |
+| D12 | Finish issue 151 through its run-specific retained v2/v1 operational bridge; keep exact-old-generation conformance/topology/runtime receipts with the root controller, test only new-source product interfaces in shipped suites, and activate v3 only through separate managed scope. | #66 bridge/activation separation; dynamic validator/module/policy resolution; worktree cleanup removes source. | Hardcoded machine hashes, committed historical runtime fixtures, a generic bridge runtime, migrating the live run or depending on its deleted worktree would mix product behavior with one delivery's operations. |
+| D13 | Put canonical delivery validation, narrowing and pure reduction in one import-safe `delivery_model.py` published as a library and consumed by workflow-state and artifact-budget; adopt every wire atomically after the pure seam is reviewed. | DRY; review-package feasibility; current source/installed Python layouts. | Duplicate validators drift, while a generic framework or early schema cutover would exceed this issue and violate D9. |
