@@ -21,40 +21,32 @@
 - Consumes the accepted Task 1 module by explicit path, requires
   `MODEL_INTERFACE_VERSION == 1`, and calls its validators/reducer rather than
   retaining parallel delivery tables.
-- `workflow-state.py` writes schema 3. Its issue row has exactly legacy `issue`,
-  `attempts`, `outcome` plus `delivery` and `delivery_remainders`; both custody
-  arrays remain independently capped at two ordinals. Reads accept schema 3 or
-  valid schema 2, and per D14/D17 valid schema 1 through an in-memory adjacent
-  1→2→3 chain. Mutation commands call
-  `upgrade_state(value, *, run_id: str, migration_contracts: dict[int, dict | None]) -> dict`
-  under lock after whole-request validation; it finishes with
-  `validate_state(candidate, *, run_id: str)` and at most one atomic persistence
-  with the command transition. `current-launch` uses a separate legacy read
-  validator and never upgrades, locks or writes.
-- Control v2 retains interface-1 top-level keys plus the new sorted maps/arrays,
-  but replaces each `owners` member with exact `event_id`, `issue`, `custody`,
-  and state `unavailable`. Event id is nonempty; duplicate event id or identity
-  `(issue, kind, ordinal, launch)` refuses, even if identical. Custody validates
-  against issue and a known launch. Only exact current active custody drives
-  unavailability; known historical facts are accepted without that effect.
-  Unknown/hybrid/issue-action mismatch refuses; remainder never fabricates an
-  attempt. Direct v2 retains old keys plus its nullable contract/four arrays.
+- Workflow-state writes schema 3: legacy issue/attempts/outcome plus delivery and
+  independently capped remainders. Mutation-only `upgrade_state(value, *,
+  run_id, migration_contracts)` composes valid 1→2→3 in memory, calls
+  `validate_state(candidate, *, run_id)`, then writes at most once. Current-launch
+  validates legacy reads separately without lock/upgrade/write.
+- Control v2 retains all v1 top-level keys, replaces only nested `owners`, and
+  adds issue-keyed maps `forge`, `delivery_contracts`, `authorization_intents`,
+  `authority_observations`, `reevaluation_evidence`, `delivery_observations`.
+  Each map has exactly canonical decimal keys for requested issues. Forge values
+  are existing forge objects; contracts are strict object|null; other values are
+  explicit sorted unique named-object arrays (`[]` when empty). Missing/extra/`01`, or null contract
+  with candidate facts, refuses before lock. Direct retains v1 keys plus nullable
+  `delivery_contract` and sorted unique `authorization_intents`,
+  `authority_observations`, `reevaluation_evidence`, `delivery_observations`.
+  Owner value is exact event_id/issue/custody/state=`unavailable`;
+  duplicate event or `(issue,kind,ordinal,launch)` refuses. Known historical
+  custody has no current effect; hybrid/unknown/mismatch refuses and remainder
+  never fabricates attempt.
 - The action union adds `delivery_remainder`. A remainder response has exactly
   the fields specified in the design and returns ordered `pending_stage_ids` and
   strict requirements; callers never derive a stage from tracker/forge state.
-- Adds CLI
-  `checkpoint-delivery --repo-root ROOT --run-id RUN --now UTC --checkpoint-file FILE`.
-  It validates raw bytes through
-  `artifact-budget validate-report --boundary ship-checkpoint` before decode,
-  locks, rechecks exact custody, folds observations atomically, reduces, and
-  either returns the next typed action/requirement or suspends the same custody.
-  Ordinary response `delivery_checkpointed` has the exact design fields and
-  state `active | suspended`; partial/blocking progress never terminalizes.
-  Fourth unchanged-progress suspension instead atomically stores count 3,
-  terminalizes, and returns exact `delivery_stalled`: common identity,
-  observation and pending fields plus state `terminal_failed`, count 3, source
-  `stalled` and closed reason, with no next action/requirements/evaluation/block.
-  Control/direct/checkpoint evaluation actions appear only after consumption.
+- `checkpoint-delivery` validates ship-checkpoint bytes before decode/lock.
+  Ordinary `delivery_checkpointed` is active|suspended and nonterminal. Fourth
+  unchanged suspension stores 3 and returns exact terminal `delivery_stalled`
+  without next action/requirements/evaluation/block. Evaluation actions appear
+  only after consumption.
 - Replaces the source finish entry with
   `finish --repo-root ROOT --run-id RUN --now UTC --summary-file FILE`.
   `ship-summary/v2` carries issue and custody, so separate issue/attempt guessing
@@ -204,9 +196,11 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
             self.assertTrue(request["worktrees"])
             h.control(request, now=self.fx.t0)
 
-    def test_owner_observation_custody_validation_and_dedup(self):
-        for variant in ("hybrid", "unknown_custody", "issue_action_mismatch",
-                        "duplicate_event_conflict", "duplicate_custody"):
+    def test_control_envelope_and_owner_observation_refusals(self):
+        for variant in ("missing_map_issue", "extra_map_issue", "noncanonical_01",
+                        "null_contract_with_facts", "hybrid", "unknown_custody",
+                        "issue_action_mismatch", "duplicate_event_conflict",
+                        "duplicate_custody"):
             with self.subTest(variant=variant):
                 before = self.h.state_bytes()
                 refused = self.h.control(self.fx.owner_observation_case(variant),

@@ -8,21 +8,12 @@ about live external state, exact historical grants or provider identities.
 
 ## Problem
 
-The workflow carries ownership and a handoff path, but it does not durably carry
-the concrete deliverable or the user's authorization intent. Its terminal result
-also compresses implementation delivery, pull-request merge, tracker closure and
-cleanup into one verdict. When a forge observation finds a merge, the lifecycle
-truthfully records `issue_closed: false` but terminal replay leaves no owner for
-the authorized closure and cleanup remainder. Conversely, a closed tracker can
-hide an undelivered repository record.
-
-This produces two bad outcomes: already delivered work may be rebuilt, and later
-bookkeeping may require a fresh session or repeated permission ceremony. Adding
-durable intent carelessly would create the opposite defect by treating a prior
-grant, repository URL, admin role or old host allow as current executable
-authority. The design must preserve historical claims and operative refusals,
-observe each effect independently, and give only the exact authorized remainder
-finite fenced custody.
+The ledger carries custody but not a durable deliverable or authorization intent,
+and one terminal verdict conflates implementation, merge, tracker closure and
+cleanup. Merge/closure replay can therefore leave delivered work rebuilt or an
+authorized remainder ownerless. The design must preserve all historical claims
+and operative refusals, observe each effect independently, and give only the
+exact pending authorized remainder finite launch-fenced custody.
 
 ## Solution
 
@@ -644,20 +635,27 @@ migration/report/caller interfaces with temporary ledgers in their normal source
 and generated installed layouts. The source delivery adds no bridge runtime and
 imposes no activation requirement.
 
-Control interface 2 retains interface-1 top-level keys and adds issue-keyed
-sorted `forge`, contracts, intents and observation arrays, but replaces each
-`owners` member with exactly `event_id`, `issue`, `custody`, and state literal
-`unavailable`. Event id stays a nonempty caller fact; duplicate event ids or
-custody identities refuse the whole request. Custody validates against the
-observation issue, references an existing implementation attempt or remainder
-launch/action id; hybrid, unknown or issue/action-mismatched refs refuse. A known
-historical launch is accepted but cannot mark current custody unavailable; only
-the exact current active identity affects transition. No remainder is an attempt. A bootstrap
-requirement requests probing only: callers emit an owner observation solely when
-unavailability is actually known, otherwise `owners` remains empty; worktree
-facts use their separate member. Direct interface 2 retains its old keys plus
-nullable contract and sorted intent/observation arrays. Both validate wholly
-before lock and share one transition.
+Control interface 2 retains every interface-1 top-level key, replaces only each
+`owners` member as defined below, and adds six issue-keyed maps: `forge`,
+`delivery_contracts`, `authorization_intents`, `authority_observations`,
+`reevaluation_evidence`, and `delivery_observations`. Every map has exactly one
+canonical decimal key (no leading zero) per requested issue. Missing, extra or
+unknown keys refuse. Forge values are exact existing forge objects;
+`delivery_contracts` values are strict contracts or null; the other four values
+are explicit sorted unique arrays of their named objects, using `[]` when empty. Null contract plus any
+candidate fact refuses. Direct interface 2 retains every interface-1 key and adds
+nullable `delivery_contract` plus sorted unique `authorization_intents`,
+`authority_observations`, `reevaluation_evidence`, and `delivery_observations`.
+Both envelopes validate wholly before lock.
+
+A control `owners` member has exactly `event_id`, `issue`, `custody`, and state
+literal `unavailable`. Event id is nonempty; duplicate event ids or identities
+`(issue, kind, ordinal, launch)` refuse. Custody must be a known issue-bound
+implementation/remainder launch/action ref; hybrid, unknown or issue/action
+mismatch refuses. A known historical launch is accepted without affecting
+current custody; only the exact current active identity marks unavailable. No
+remainder is an attempt. Bootstrap only requests probes: absent known
+unavailability, `owners` is empty; worktree facts remain separate.
 
 Their closed action union adds `delivery_remainder`; every owner action carries
 the custody union defined below. A remainder response has exactly

@@ -142,7 +142,8 @@ history/current-effect split and persisted stall arithmetic. Round-three review
 closes the count-3 stalled checkpoint response and restores strict bootstrap
 requirements consumption for both custody kinds. Round four replaces only the
 nested control owner observation with the custody union, preserving its existing
-unavailable/event/dedup semantics and historical no-effect behavior.
+unavailable/event/dedup semantics and historical no-effect behavior. Round five
+restores the exact six control maps and five direct additions after compaction.
 
 Plan review provenance: an independent Sol/high review of head
 `d1c9c47ea94daa8d4f97e127d72021f8e3896baf` reported 3 Blocking / 3 Should-fix /
@@ -172,5 +173,10 @@ The independent Sol/high round-four review of head
 in `/private/tmp/issue-151-plan-review-round4.md`. Root verified both; this
 correction closes the nested owner observation and qualifies ordinary checkpoint
 language only.
+
+The independent Sol/high round-five review of head
+`b0aa4d76db40f1e09702d4f15ce552b0fa38ed08` reported 1 Blocking / 0 Should-fix
+in `/private/tmp/issue-151-plan-review-round5.md`. Root verified it; exact control
+map/direct key names and envelope-key negative fixtures are restored.
 
 ---
