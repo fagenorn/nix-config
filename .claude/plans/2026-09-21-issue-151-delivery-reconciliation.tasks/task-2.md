@@ -74,8 +74,8 @@
   the nonterminal custody, else latest remainder, else latest implementation.
   Callers consume every requirement into normalized owner/worktree observations
   before control. Legacy v1 summary remains historical-read-only.
-- Callers consume only validated v2 actions, copy canonical facts, and fence
-  every effect/write; linked model and handoff docs own the shared contracts.
+- Callers consume validated v2 actions and fence effects; linked model/handoff
+  docs own shared contracts.
 
 **Invariants:**
 - Per D8/D14, schema-1 and schema-2 migrations preserve every legacy attempt,
@@ -517,6 +517,7 @@ def test_delivery_v2_boundaries_accept_exact_shapes_and_reject_hybrids(self):
         "control_summary_attempt_hybrid", "control_delta_attempt_hybrid",
         "nested_action_extra_key", "observe_requirement_hybrid",
         "control_summary_invalid_legacy_result", "terminal_invalid_legacy_result",
+        "ship_summary_invalid_historical_owner_result",
         "remainder_missing_evaluation", "checkpoint_nested_requirement",
         "complete_with_pending_stage", "failed_wrong_reason",
         "stalled_response_extra_action", "duplicate_json_key", "invalid_utf8",
@@ -652,9 +653,9 @@ refusal, load the pure model, validate the outer boundary's exact keys and every
 nested delivery object, then emit the accepted canonical bytes. Do not copy a
 second object schema into artifact-budget. Keep strict legacy v1 summary reading
 only for historical files; reject hybrids and do not let schema-3 finish consume
-v1. For each nonnull legacy `result` slot in a control summary or direct terminal,
-run the existing legacy validator before the shared model validator; both must
-accept the same raw envelope before decode. The response union covers control/direct, current-launch,
+v1. Run the existing legacy validator before the shared model validator for
+every nonnull control/direct `result` and `ship-summary/v2.historical_owner_result`;
+both must accept before decode. The response union covers control/direct, current-launch,
 `workflow_bootstrap`, ordinary/stalled checkpoint and finish outcomes. Validate
 bootstrap before decode, consume all custody requirements into observations, then
 construct control. The structural validator performs no ledger/authentication.

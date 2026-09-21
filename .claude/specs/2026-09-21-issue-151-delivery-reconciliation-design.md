@@ -1,39 +1,27 @@
 # Delivery reconciliation and authorization continuity — issue 151
 
 Decision for [#151](https://github.com/fagenorn/nix-config/issues/151), 2026-09-21.
-Status: design under delegated architecture authority; implementation, planning,
-publication and activation remain later phases. The recorded Nodo, Arcwave and
-Argus cases below are deterministic simulations of audited behavior, not claims
-about live external state, exact historical grants or provider identities.
+Status: delegated design. Nodo, Arcwave and Argus below are deterministic
+simulations, not claims about live state, grants or provider identities.
 
 ## Problem
 
-The ledger carries custody but not a durable deliverable or authorization intent,
-and one terminal verdict conflates implementation, merge, tracker closure and
-cleanup. Merge/closure replay can therefore leave delivered work rebuilt or an
-authorized remainder ownerless. The design must preserve all historical claims
-and operative refusals, observe each effect independently, and give only the
-exact pending authorized remainder finite launch-fenced custody.
+The ledger lacks durable deliverable and intent records, while one terminal
+verdict conflates implementation, merge, closure and cleanup. Reconciliation
+must preserve history/refusals, observe each effect independently and fence only
+the exact authorized remainder.
 
 ## Solution
 
-Extend the one workflow-state ledger with an immutable delivery contract,
-append-only authorization and authority observations, four independent delivery
-postconditions, and a separate bounded `delivery_remainder` custody lineage.
-Implementation attempts and their retry budget remain unchanged. A remainder
-has its own ordinal and launch identity, can execute only predeclared pending
-stages, and cannot enter implementation phases.
-
-Move the strict state migration and every direct, control, handoff and shipping
-wire together. Current helpers validate all input before mutation. The lifecycle
-persists observations before returning a next-stage action. Artifact validation
-precedes decoding at report boundaries. Existing launch fencing, expiry, stalls,
-capacity ordering, merge-before-expiry and retained detail remain authoritative.
-
-This design targets integrated state schema 2 and control/direct interface 1.
-The next versions are state schema 3 and control/direct interface 2. Unpublished
-#152 C contributes no assumed fields; if another schema lands first, the owner
-must reconcile and renumber rather than maintain parallel maps.
+Add one immutable contract, append-only intent/authority facts, four independent
+postconditions and capped `delivery_remainder` custody to the sole ledger.
+Implementation retries stay unchanged; remainder has disjoint ordinal/launch
+identity and executes only declared pending stages. Schema 3 and interface 2
+move state, direct/control, reports and callers together: validate before
+mutation/decode and persist before returning action. Existing fences, expiry,
+stalls, capacity, merge ordering and detail retention remain. The baseline is
+schema 2/interface 1; an intervening schema must be reconciled and renumbered,
+with no unpublished #152 C fields assumed.
 
 ## Decisions
 
@@ -653,7 +641,8 @@ reevaluation_evidence,delivery_observations}`; its contract is strict or null
 and its four fact arrays are sorted and unique.
 
 A control `owners` member is exactly `{event_id, issue, custody, state:
-unavailable}`. Duplicate event or `(issue,kind,ordinal,launch)` refuses. Custody
+unavailable}` with nonempty `event_id`. Duplicate event or
+`(issue,kind,ordinal,launch)` refuses. Custody
 must name a known issue-bound action; hybrid, unknown and mismatch refuse. A
 known historical fact is retained but affects no current custody; bootstrap
 requests a probe and is not itself an unavailable fact.
@@ -717,7 +706,8 @@ correlated nullable members. Count-3 unchanged progress instead returns exact
 `delivery_stalled`: the common identity/observation/contract-ordered unique
 pending fields plus state
 `terminal_failed`, `stalled_resumes:3`, `result_source:stalled`, and reason
-`suspension_stalled_without_progress`, with no action/requirements/evaluation.
+key `reason_code:suspension_stalled_without_progress`, with no
+action/requirements/evaluation.
 The reducer maps missing/new authority and operative denial to `human_gate`,
 provider/forge wait to `external`, and actual tool transport failure to
 `transport`; locally obtainable evidence remains a typed requirement and
@@ -740,8 +730,8 @@ decode, rechecks custody under lock and persists before output. Its common
 response is exactly `{interface_version,kind,ledger_repo_root,run_id,issue,owner,
 custody,contract_digest,accepted_observation_ids,pending_stage_ids,state}`.
 Complete requires kind/state `delivery_complete` and no pending stages. Failure
-adds `result_source:owner` and reason `owner_reported_failure`, with kind/state
-`terminal_failed`; count-3 stall uses `delivery_stalled`. An eligible retry emits
+adds exact keys `result_source:owner` and `reason_code:owner_reported_failure`,
+with kind/state `terminal_failed`; count-3 stall uses `delivery_stalled`. An eligible retry emits
 `delivery_remainder`. Requirements or partial success never become failure.
 
 `authority_evaluation` is null or exactly `{kind:native_authority_evaluation,
@@ -758,7 +748,10 @@ The workflow-response union is exactly current-launch; `workflow_bootstrap`;
 control; direct `observe | owner | terminal | delivery_remainder`; ordinary or
 stalled checkpoint; and complete, failed or remainder finish. Bootstrap is exact
 `{interface_version,kind,run_id,requirements}`; each sorted requirement is exact
-`{issue,owner,custody,recorded_worktree}`. Every nested member validates before
+`{issue,owner,custody,recorded_worktree}`. For each issue it selects the sole
+nonterminal custody, else latest remainder, else latest implementation; callers
+consume every requirement into normalized owner/worktree observations before
+control. Every nested member validates before
 decode. Unknown kinds, missing/extra keys and legacy/new hybrids refuse. The
 validator proves structure and internal identity only; ledger freshness and
 source authenticity remain locked/trusted checks. All callers cut over together.
@@ -767,7 +760,8 @@ reason `unknown_run | unknown_issue | unknown_attempt | superseded_attempt |
 inactive_attempt | superseded_launch | current` and source-defined null/id
 correlations; inactive custody may name itself as current action. Remainder
 custody uses the same closed reasons. Nullable legacy `result` members in control
-summary and direct terminal are compositional slots: the pure model validates
+summary, direct terminal and `ship-summary/v2.historical_owner_result` are
+compositional slots: the pure model validates
 the exact containing envelope and null/object position but does not copy the
 legacy row schema. Artifact-budget/workflow-state must run the existing legacy
 result validator on each nonnull slot before accepting raw workflow-response
@@ -779,30 +773,22 @@ Fixtures use reserved `sim.invalid` identities, fixed synthetic 40-hex object
 ids and canonical fake-provider state. They contain no external repository
 payload, raw transcript or asserted historical grant.
 
-- **Nodo 1314 behavior:** a simulated six-criterion acceptance map and five-test
-  evidence set bind the selected subject. Fake repository and forge observations
-  establish implementation delivery and merge at intake; tracker and cleanup
-  remain pending. Direct-owner returns `delivery_remainder(close_tracker, cleanup)`,
-  never implementation. Fake closure and absence observations persist all four
-  postconditions and complete the delivery.
-- **Arcwave 113/record PR 116 behavior:** tracker closure is already observed,
-  while the exact simulated decision-record digest and live PR/head remain
-  pending. With matching intent/worktree/PR evidence, the same run dispatches
-  `deliver_repository_record`; that stage proposes only the selected reviewed
-  record. Review/acceptance evidence then permits merge, and a fresh integration
-  record-presence observation establishes delivery. Without any required fact it
-  returns the exact requirement. It never reopens the substantive decision or
-  treats closure as cancellation/grant.
-- **Argus iteration behavior:** an identical principal, endpoint, data identity,
-  private audience, risk and spend tuple reuses the recorded intent. A different
-  endpoint, transfer identity or public audience returns the missing tuple before
-  effect. A simulated host rejection persists and cannot be retried through new
-  spelling/context/host. A later fake human-completion observation may satisfy
-  the effect while leaving that rejection historical and granting no agent right.
-- **Normal v3 owner behavior:** a simulated implementation owner selects reviewed
-  output with acceptance/test evidence, publishes and opens a PR, merges it, then
-  records fresh integration reachability. Merge precedes implementation-delivered
-  truth; neither fact is fabricated from the other.
+- **Nodo 1314:** simulated six-criterion/five-test evidence binds the selected
+  subject. Intake observes delivery+merge; tracker+cleanup remain. Direct-owner
+  returns `delivery_remainder(close_tracker, cleanup)`, and closure/absence facts
+  complete all four postconditions.
+- **Arcwave 113/record PR 116:** closure is observed; the reviewed decision-record
+  digest and live PR/head remain. Matching intent/worktree/PR dispatches only
+  `deliver_repository_record`; review/acceptance then permits merge and fresh
+  integration presence proves delivery. Missing facts return requirements;
+  closure is neither cancellation nor grant.
+- **Argus iteration:** an identical principal/endpoint/data/private-audience/
+  risk/spend tuple reuses intent; changed endpoint, transfer or public audience
+  requires scope before effect. Host rejection survives spelling/context/host
+  changes. Human-completion evidence may satisfy effect without granting rights.
+- **Normal v3 owner:** reviewed output plus acceptance/tests permits publish, PR
+  and merge; fresh integration reachability then proves delivery. Neither fact
+  implies the other.
 
 ## Test seams
 
@@ -859,19 +845,13 @@ final verification must run again after source changes.
 
 ## Out of scope
 
-Implementing or activating the transaction/release core, #117/#123/#125 schemas,
-#152 shared verification blockers, host capacity scheduling, permission-guard or
-provider enforcement changes, new provider commands, live external-project
-mutation, publication, host activation, raw transcript/payload fixtures, or
-policy snapshots. The separate clean-review plus failed-verification report row
-is not required by these six criteria and remains a separate design disposition.
-
-This design does not resolve the pending #152 publication denial, assert a real
-Nodo/Arcwave/Argus SHA or grant, infer authority from repository ownership, or
-add a universal approval ceremony. It records and carries existing intent while
-leaving actual native/host/provider enforcement authoritative.
-It does not activate schema 3 or migrate the live issue-151 ledger; source
-integration and installed activation are reported as separate facts.
+Excluded: transaction/release core activation; #117/#123/#125 schemas; #152
+blockers or denial; capacity, guard or provider changes; new provider commands;
+external mutation/publication/activation; raw payload/transcript or policy
+snapshots; and the separate clean-review/failed-verification row. Simulations
+assert no real SHA/grant. Repository ownership grants nothing, native enforcement
+remains authoritative, and source integration neither activates schema 3 nor
+migrates the live issue-151 ledger.
 
 ## Decision ledger
 

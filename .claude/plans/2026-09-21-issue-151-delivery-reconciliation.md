@@ -97,9 +97,9 @@ Git, and repository `just` commands.
   delta and action; direct observe/owner/terminal/remainder; bootstrap/current;
   checkpoint/stall; and complete/failed outcome. No placeholder dictionary is
   accepted for a producer that Task 2 has not connected yet.
-- Pending stages stay unique in contract order. Nullable legacy result slots use
-  the existing legacy validator composed with the model's exact envelope check;
-  the pure model does not duplicate the legacy result schema.
+- Pending stages stay unique in contract order. Every nonnull legacy result slot,
+  including `historical_owner_result`, uses the existing legacy validator plus
+  the model's exact envelope check; the model does not duplicate that schema.
 - A controlled fake provider consumes only the typed direct response, records
   effects, and returns strict observations. It proves exact authorized effects,
   zero-effect refusals, double launch fencing, partial progress, denial,
