@@ -36,7 +36,7 @@
   `authority_observations`, `reevaluation_evidence`, `delivery_observations`.
   Owner is exact event_id/issue/custody/state=`unavailable`; duplicate event or
   `(issue,kind,ordinal,launch)` refuses. Historical custody
-  has no effect; hybrid/unknown/mismatch refuses; remainder never fabricates attempt.
+  has no current effect; hybrid/unknown/mismatch refuses; remainder never fabricates attempt.
 - Control outer output retains exact v1 keys and no ledger root. Summary replaces
   `attempt` with nullable custody, retains all other v1 fields, and adds nullable
   contract digest, ordered pending stages and sorted requirements; it therefore

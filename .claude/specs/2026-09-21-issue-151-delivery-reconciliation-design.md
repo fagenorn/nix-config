@@ -19,6 +19,7 @@ remainder has disjoint identity and executes pending stages. Schema 3/interface 
 moves state, reports and callers together: validate before mutation/decode and
 persist before action. Fences, expiry, stalls, capacity, merge order and detail
 retention remain. Baseline schema 2/interface 1 assumes no unpublished #152 C.
+Intervening schemas require reconciliation/renumbering.
 
 ## Decisions
 
