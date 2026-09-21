@@ -125,6 +125,9 @@ in
     };
 
     ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
+    ".agents/lib/python/delivery_model.py" = {
+      source = ./scripts/delivery_model.py;
+    };
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
 
     # Claude accepts Home Manager's recursive file links, so its generated
