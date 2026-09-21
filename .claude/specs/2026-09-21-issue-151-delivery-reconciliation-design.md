@@ -6,42 +6,17 @@ claims about live state, grants or provider identities.
 
 ## Problem
 
-The ledger lacks durable deliverable/intent records, and one verdict conflates
-implementation, merge, closure and cleanup. Reconciliation must preserve
-history/refusals, observe effects independently and fence the exact remainder.
+Reviewed source can coexist with pending merge, closure or cleanup; one terminal
+attempt result cannot truthfully express delivery, authority and finite custody.
 
 ## Solution
 
-Add one contract, append-only intent/authority facts, four postconditions and
-capped disjoint remainder custody. Schema 3/interface 2 moves state, reports and
-callers together: validate before mutation/decode and persist before action.
-Existing retry, fence, expiry, stall, capacity, merge and detail rules remain.
-Baseline schema 2/interface 1 assumes no unpublished #152 C; an intervening
-schema requires reconciliation/renumbering.
+Persist the canonical contract/facts below and atomically adopt the pure model,
+schema 3, interface 2, finite remainders and every caller. D1–D22 bind.
 
 ## Decisions
 
 ### One immutable delivery contract
-
-Each new or reconciled issue may own one canonical `delivery-contract/v1`.
-Workflow-state stores the object and its SHA-256 digest under the issue record.
-Every lifecycle handoff carries the identical object/digest, the complete
-append-only authorization-intent chain and its digest, and the operative
-authority-observation ids. Progress and handoff ingestion compare canonical
-bytes with ledger truth before persisting the handoff path. The ledger is
-authoritative. Handoff documents may add prose/detail references but cannot
-override or omit intent/refusal state.
-
-The contract has this closed semantic shape; the wire appendix below is
-normative when names or optionality matter:
-
-| Member | Required content |
-|---|---|
-| identity | schema/kind, project id, provider repository identity, normalized repository slug, issue, deliverable id and bounded summary |
-| obligations | exactly four applicability values for `implementation_delivered`, `pr_merged`, `tracker_closed`, `cleanup_complete` |
-| stages | ordered closed stage ids and each stage's action, effect, output slot and worktree requirement |
-| initial intent | one immutable `authorization-intent/v1` id/digest and its exact scope tuples |
-| provenance | bounded legitimate source kind/reference and creation time; no raw message, policy snapshot or credential |
 
 Applicability is `required | not_applicable` and is immutable. Missing evidence
 never creates `not_applicable`. The first pass stage vocabulary is exactly
@@ -54,23 +29,11 @@ target: binding its exact value narrows the contract and does not demand a new
 grant merely because the reviewed SHA is now known. It cannot add a stage,
 target, audience or effect.
 
-The contract contains no executable grant. New actual authorization is appended
-as another immutable intent linked to its predecessor; neither the contract nor
-an earlier intent is rewritten. A legacy issue with no contract cannot infer one
-from tracker labels/body, a branch prefix, repository administration, a raw
-transcript or an observed merge. Direct/control instead return a bounded
-`delivery_contract` requirement. A legitimate current owner supplies the strict
-object from an explicit user grant, standing repository authorization or an
-already persisted parent handoff. The reducer structurally validates the closed
-source kind/reference/digest, predecessor link, scope and canonical identity;
-it does not authenticate a user statement or approval transcript. The existing
-trusted controller supplies the normalized source fact under the current caller
-trust boundary, while the native host remains the independent effect authority;
-owner summaries cannot append intent. Thus an
-arbitrary caller-created successor is not accepted and cannot clear a refusal.
-The source reference is evidence of intent, not proof that a mutation is
-presently allowed. Its digest supplies canonical identity/integrity only and is
-never authority.
+The contract contains no executable grant. Authorization intent is append-only;
+contract, intent and canonical digests prove identity only. A contractless legacy
+issue returns a typed `delivery_contract` requirement; only the existing trusted
+controller supplies normalized provenance, while native effect authority remains
+independent.
 
 ### Closed authorization scope and runtime authority
 
@@ -133,36 +96,24 @@ observation may satisfy the deliverable while the old denial remains historical.
 That fact grants the agent no mutation authority and does not mark the denial
 allowed.
 
-The actual proposed effect is a strict nullable `scope-tuple/v1` transaction
-input, never copied from an intent. The trusted caller normalizes it from the
-actual command, provider, audience, endpoint, selected data, principal, risk and
-spend. After folding observations, `reduce_delivery` alone correlates a nonnull
-tuple with the contract-ordered ready stage's action/effect, target/slot and
-selected-output constraints; workflow-state owns freshness but copies no model
-policy. A tuple for another, dependency-blocked or completed stage refuses the
-transaction with zero writes. For a ready stage, null returns exactly
+The actual proposed effect is an independently built nullable
+`scope-tuple/v1`, never copied from intent. After folding facts the model alone
+binds it to the ordered ready stage/action/effect/target/selection. Wrong,
+dependency-blocked, completed or contractless scope refuses with zero writes.
+For a ready stage, null returns exactly
 `{kind:scope_tuple,subject_id:<stage-id>,reason_code:scope_tuple_required,
-detail_pointer:null}`, active custody and no effect/evaluation. A stage-matching
-tuple without current covering intent yields the existing
-`authorization_intent_required` human gate. A covered ordinary effect retains
-`native_evaluation_required`: the host may evaluate and execute in the same
-invocation after the launch fence, with no prior allow, preflight API or repeated
-permission. D18 alone requires durable consumption before post-rejection
-evaluation.
+detail_pointer:null}`; uncovered scope returns the
+`authorization_intent_required` human gate; covered ordinary scope may
+native-evaluate after the fence without prior allow. D18 alone requires durable
+post-rejection consumption.
 
-Each later stage, transfer or resume supplies a fresh proposal. Effect-bearing
-responses echo the exact canonical tuple; callers validate it, bind the actual
-invocation, fence immediately before effect and observation, and refuse mismatch
-with zero effects/writes. Null may persist folded facts/custody but permits no
-effect or evaluation. A checkpoint proposal applies only to the ready stage
-computed after its submitted observations are folded and persisted; it never
-retroactively authorizes them. Completion requires null. A finish-created
-remainder carries null and establishes custody only. If a stage is ready its
-requirement is stage-keyed; if no stage is ready but a postcondition remains,
-the exact requirement is `{kind:observation,subject_id:<postcondition>,
-reason_code:postcondition_observation_required,detail_pointer:null}`. No effect
-stage is invented for observation-only proof. Handoff retains the prior tuple as history, never permission; terminal
-summaries and stalled responses introduce no proposal.
+Each later stage/transfer/resume proposes fresh scope and effect output echoes
+it. Null may persist facts/custody but permits no effect/evaluation. Checkpoint
+scope applies only to the post-fold stage; completion/remainder is null. With no
+ready stage, missing postconditions return exact
+`{kind:observation,subject_id:<postcondition>,
+reason_code:postcondition_observation_required,detail_pointer:null}`. Handoff
+scope is history; terminal/stalled output has none.
 
 ### Canonical wire and narrowing appendix
 
@@ -277,19 +228,6 @@ excludes custody and time. The full object id covers all members except `id`.
 The delivery array is unique by both id and use key. Thus a transfer, retry,
 crash or later timestamp cannot mint a second use of the same basis.
 
-For an otherwise eligible unconsumed basis, `reduce_delivery` returns a complete
-next delivery containing the new consumption and one nullable
-`authority_evaluation` action. That action has exactly literal kind
-`native_authority_evaluation`, contract digest, scope id, custody, rejected
-observation id, `basis_kind`, `basis_id`, and `use_key`. Workflow-state rechecks custody under
-lock and atomically persists the returned next delivery before it emits a
-response containing that action. The caller may run the external evaluation
-only after validating that response. A persistence failure emits no action. A
-replay after persistence returns `reevaluation_consumed` with no action; a crash
-after persistence but before evaluation consumes the basis fail-closed rather
-than silently resetting it. The returned provider/host fact follows the normal
-second current-launch check and observation path.
-
 `authority-observation/v1` has exactly `schema_version` 1, literal `kind`
 `authority-observation`, derived `id`, `contract_digest`, `scope_id`, nullable
 `launch_id`, closed `authority_kind` and `verdict`, `reason_code`, UTC
@@ -320,18 +258,6 @@ time and evidence digest. The kind-specific evidence is:
 | PR merged | provider repository id; PR number/URL; expected head; base; merge SHA; provider-observed merged state |
 | tracker closed | tracker repository/issue; observed closed state; close reason when available; tracker observation identity |
 | cleanup complete | declared remote branch, local branch and worktree probes; all required objects absent; required durable detail/evidence pointer successfully re-read |
-
-A provider merge does not establish the implementation acceptance map. Tracker
-closure does not establish merge, delivery, cancellation, authorization or
-cleanup. Cleanup needs successful absence probes; lookup failure is `unknown`, a
-present object remains pending, and an identity/path mismatch is a refusal.
-Observation objects are deduplicated by canonical id; conflicting evidence for
-one identity fails before mutation and is not resolved by last-write wins.
-
-Verbose proof remains behind an existing durable detail pointer. Cleanup cannot
-remove the only retained evidence. All owner results, synthetic dispositions,
-superseding facts, authority denials and observation events remain readable even
-after later completion.
 
 The ledger also stores one `delivery-stage-fact/v1` for every contract stage.
 It has exactly `schema_version` 1, literal `kind` `delivery-stage-fact`, derived
@@ -384,79 +310,65 @@ review and test references in the corresponding arrays; another category cannot
 substitute. Failure, unknown, mismatched probe or unreadable detail has no
 positive shape.
 
-The contract's `depends_on` graph is acyclic and may refer only to earlier stage
-ids. Selection precedes every stage that uses the slot; publish precedes open.
-Merge requires all three nonempty selected-output evidence categories and an
-open PR; it does not require the implementation-delivered
-postcondition. After merge, a fresh integration reachability/record-presence
-observation establishes implementation delivered. The contract declares whether
-closure depends on merge; cleanup depends on the last applicable delivery effect
-and durable-detail reachability. The
-ordered pending stages are a pure projection: scan contract order, omit observed
-or not-applicable facts, and return a stage only after every dependency is
-observed or not applicable. If the first pending fact has unmet dependencies,
-the response is a typed requirement naming those observations rather than a
-different action. Postconditions are likewise pure projections from accepted
-observations and stage facts; provider/tracker state never advances an unrelated
-stage.
-
-For a normal unmerged PR, the sequence is selected reviewed output and
-acceptance/test evidence, branch/PR observation, merge, then a fresh integration
-reachability observation that establishes implementation delivered. For a
-repository record, `deliver_repository_record` writes only the exact predeclared
-reviewed record to the bound branch/PR head; it neither treats that head as
-integrated nor reopens substantive implementation. Its integration-subject
-presence is observed only after merge. For an already-delivered Nodo-style case,
-fresh exact integration and merge observations may establish both postconditions
-at intake, leaving only tracker/cleanup stages for remainder custody.
-
-Independent human completion advances the same fact only through its exact
-typed observation. It neither creates authority nor bypasses dependencies. A
-changed observation head while a nonterminal remainder exists is folded into
-that record, and its pending-stage projection is recomputed; it never mints a
-second active custody record. If no stages remain, that same remainder finishes.
-
-For a legacy failed or merged implementation claim, migration first preserves
-the claim and result bytes unchanged. Remainder 1 becomes eligible only after a
-validated new contract, a fresh selected-output binding with acceptance, review
-and test evidence, and fresh exact external observations have been ingested. Its source
-points at the historical implementation attempt, but no legacy boolean is
-promoted into a stage fact or postcondition.
+Dependencies are acyclic and earlier-only; selection precedes slot use and
+publish precedes open. Pending stages scan contract order; unmet dependencies
+return typed observation requirements. Merge needs all three evidence categories
+and an open PR; fresh reachability/record presence proves delivery. Human
+completion advances only its exact fact and grants no authority. Migration
+promotes no legacy claim into stage/postcondition truth.
 
 ### Separate finite remainder custody
 
-Schema 3 adds `delivery_remainders` beside `attempts`. Ordinals/retry budgets
-are independent; the two-attempt cap and historical implementation results stay
-unchanged. Each remainder has exactly `remainder,contract_digest,source_attempt,
-prior_remainder,pending_stage_ids,owner,worktree,state,launches,deadline_at,
-progress_token,blocked_on,suspend_phase,stalled_resumes,result,result_source,
-recovery,finished_at`. D21 defines the last two fields. Implementation ids remain
-`issue:attempt:launch`; remainder ids are `issue:r<remainder>:launch`.
-Current-launch accepts that union without clock, lock, creation or write. Use the
-received id verbatim before effects and observations; false/malformed/missing
-results permit no effect, ledger write or cleanup, including post-merge actions.
+State schema 3 adds `delivery_remainders` beside existing implementation
+`attempts`. The two arrays have independent ordinals and retry counts. Existing
+attempt ordinals, the two-attempt implementation cap and historical results do
+not change. A remainder record has exactly contract digest, remainder ordinal,
+source implementation attempt, nullable prior remainder, pending stage ids,
+owner/worktree, state, launches, fixed deadline, progress token, suspension
+fields, result and result source.
 
-Only one nonterminal custody exists across both lineages. R1 requires a valid
-contract, no active implementation owner and a pending stage or required pending
-postcondition. Its creation key digests contract, source attempt, sorted pending
-stages and current postcondition/authorization heads. Identical direct/control
-replay returns existing custody or completed replay without writing.
+Implementation launch ids retain `issue:attempt:launch`. Remainder launches use
+the disjoint `issue:r<remainder>:launch` form. The read-only current-launch query
+accepts this closed union and otherwise keeps its no-clock, no-lock, no-create,
+no-write behavior. Every protected effect uses the received id verbatim. Every
+remainder mutation of tracker, provider, branch or worktree is protected: the
+caller invokes current-launch immediately before the effect, and false, missing
+or malformed output permits no effect, ledger write or cleanup. This retains the
+implementation path's existing pre-merge guard while fencing the new
+successor-owned post-merge path.
 
-Unavailability, handoff, expiry and environmental suspension resume the same
-ordinal with a new launch, spending no retry. In-window handoff/dead-owner resume
-keeps its deadline; expiry parks before in-place resume gets a fresh full window.
-Suspension counts 0, 1 and 2 may resume; the fourth stores 3, terminalizes stalled
-and cannot resume. Real stage/postcondition progress clears remembered phase and
-resets the counter before the next suspension epoch.
+There is at most one nonterminal custody record across implementation and
+remainder lineages. Creating remainder 1 requires a validated contract, at least
+one pending predeclared stage or required pending postcondition, and no active
+implementation owner. Its creation
+key is the canonical digest of contract, source attempt, sorted pending stages
+and current postcondition/authorization heads. Repeating the same direct/control
+request returns the existing record or completed replay without a write.
 
-Remainders are capped at two independently of attempts. R2 requires authentic
-failed/stalled R1, retryable pending work and D21's absence/recovery proof;
-rejection/unknown is no transient-failure basis. Independent human/provider
-completion may still be recorded without new custody. Fold merge/observations,
-then pending stages, before custody selection under capacity/deadline rules.
-Never overwrite terminal owner results; only a result-less active implementation
-may receive truthful forge-reconciled closeout. Delivery truth stays separate.
-Terminal replay checks an eligible remainder before the historical envelope.
+Owner unavailability, ordinary handoff, expiry and environmental suspension
+resume the same remainder ordinal with a new launch. They never spend either
+retry budget. Preserve the fixed wall-clock deadline: handoff/dead-owner resume
+inside the window retains it; expiry suspends/parks before in-place resume gets a
+fresh full window. The persisted no-progress counter is 0 on the first
+suspension at a new progress token, then 1 and 2 on the next two suspensions; those three suspensions
+may resume. The fourth stores 3 before terminalizing as stalled and cannot
+resume. Meaningful persisted stage/postcondition progress clears the remembered
+phase and resets the counter to 0 before the next suspension starts a new epoch.
+
+The remainder lineage is independently capped at two ordinals, matching the
+current implementation-attempt ceiling without consuming it. Remainder 2 is allowed only under D21's exact terminal failure, successful
+absence, retryable-stage and recovery-basis contract. A guard, host or provider rejection/unknown is not a
+transient-failure basis and requires the authority/material-evidence rules above.
+No third remainder is minted. A successor may still record
+independent human/provider completion evidence without new custody.
+
+Merge observation remains ahead of expiry/reaping. Persist observations first,
+derive pending stages second, and only then select or resume custody under
+capacity and deadline rules. An old terminal owner result is never overwritten;
+an active result-less implementation attempt may receive the existing truthful
+forge-reconciled closeout, while delivery truth stays in the independent record.
+Terminal replay checks an eligible remainder before returning the historical
+terminal envelope.
 
 ### Worktree and subject requirements
 
@@ -482,46 +394,53 @@ Cleanup becomes observed only when every contract-required remote/local branch
 and worktree absence is established and retained detail remains readable.
 Failed probes and branch-prefix absence are not proof.
 
-Immediately before a destructive cleanup effect, the caller rechecks the current
-launch, contract/selected-subject binding, durable-detail reachability and the
-exact target's current identity. An already absent exact target records the
-positive absence observation without issuing a delete. A recreated target,
-different object at the path/name, stale positive observation or lookup failure
-refuses. After an accepted delete, a fresh exact absence probe is required before
-the stage advances; the effect result alone is not proof.
-
 ### Shared delivery model seam
 
-Private source/installed `delivery_model/` has one `__init__.py` facade. Its
-acyclic `_canonical`, `_objects`, `_wire` and `_reconcile` leaves own primitives,
-objects/stage relationships, envelopes and matching/reduction. It has no CLI, I/O, clock, provider or schema choice.
-
-The unchanged interface-1 surface is exactly `MODEL_INTERFACE_VERSION`,
+That surface is exactly `MODEL_INTERFACE_VERSION = 1`,
 `DeliveryModelError`, `canonical_bytes`, `canonical_digest`,
 `validate_delivery_object`, `validate_custody_ref`, `match_scope`, and
-`reduce_delivery`. Reduction receives validated contract/delivery and explicit
-time, custody/current launch/requested scope, trusted-source kind, intent and
-candidate fact chains. It validates bindings and returns persistable delivery,
-ordered pending/next stage, requirements, completion, blocking/evaluation and
-the canonical scope echo. Late facts retain their launch; only current-custody
-allow can authorize. Checkpoint/summary cannot add allow. Consumption/action
-return together. Structural validation cannot prove freshness/source authority;
-workflow-state performs those locked checks and artifact-budget stays structural.
+`reduce_delivery`. `match_scope` receives the validated contract, one validated
+intent, the requested scope tuple, selected outputs, explicit evaluation time,
+and matching revocation observations; it never reads a clock or ledger.
+`reduce_delivery` receives the validated contract and delivery value plus one
+strict evaluation context containing explicit time, nullable custody/current
+launch, nullable requested scope, a closed trusted-source kind and candidate
+intent, authority, reevaluation and delivery observations. The source kind says
+which validated workflow boundary supplied normalized facts; it is not proof of
+authority. Reduction validates the intent chain and all bindings and returns a
+complete normalized `next_delivery` for persistence, ordered pending stages,
+nullable next stage, sorted requirements, completion state, nullable typed
+blocking, and nullable `authority_evaluation`. Direct/control may persist a
+well-formed trusted candidate authority fact bound to its original old launch;
+only an allowed fact bound to the evaluation custody is eligible for the current
+effect. Checkpoint/summary cannot introduce such a late fact. This preserves old
+allowed/rejected history without turning an old allow into a new grant. The
+one-shot consumption and action are returned together as above, so no caller
+must infer persistence from free text.
 
-Load only the respective lexical `__init__.py` as a package, clean partial loads
-and never search/edit `sys.path`, fall back or load leaves separately. Missing,
-non-file or wrong-interface input refuses before decode/mutation; a managed
-package-directory symlink is valid. Schema/interface selection waits for the
-atomic adoption.
+Source loads `scripts/delivery_model/__init__.py`; installed loads lexical
+`~/.agents/lib/python/delivery_model/__init__.py`. The loader creates that
+package namespace/search location for relative imports and removes partial
+members on failure. It never edits/searches `sys.path`, falls back or loads
+private files independently. Missing entry/private files, non-file entry or
+wrong interface refuses before decode/mutation. The managed directory symlink to
+one store package is valid. Neither caller duplicates model policy.
+Focused module tests exercise the canonical model and reduction directly,
+including source and generated installed import layouts.
+Workflow-state remains the sole state/transition writer; artifact-budget owns
+only report boundary validation. Introducing the pure module and its tests does
+not select schema 3 or interface 2, so it may be prepared and reviewed before the
+single atomic adoption that moves every producer/consumer together.
 
-Private source/installed `workflow_delivery.py` is workflow-state's deep boundary.
-Its interface-1 surface is exactly `WORKFLOW_DELIVERY_INTERFACE_VERSION` and
-`DeliveryRuntime`. Construction loads the adjacent model before decode. The
-runtime validates v2 admission/schema-3 delivery envelopes and computes the pure
-shared transition from normalized facts/state, returning detached next state and
-closed response. Workflow-state retains CLI, legacy lifecycle/custody, locking,
-one write and effects. The runtime has no I/O, clock, callbacks, copied policy,
-fallback or parallel v1 effect path.
+Private source/installed `workflow_delivery.py` exposes exactly
+`WORKFLOW_DELIVERY_INTERFACE_VERSION = 1` and `DeliveryRuntime`. It owns v2
+admission, schema-3 delivery validation and the pure shared transition;
+workflow-state owns CLI, custody, locks, one write and effects. Adjacent private
+`workflow_delivery_wire.py` owns pure state/response projection and v2
+owner/worktree grammar; runtime absorbs pure request/state correlations. Both
+load lexically in source/managed-installed layouts and refuse missing/wrong
+members before decode/mutation. No callbacks, fallback, `sys.path` edits,
+policy copies, model-private calls or parallel v1 effect path.
 
 ### Versioned state and transports
 
@@ -572,39 +491,11 @@ helpers reject v3 without mutation. Later
 #152 C must migrate from the then integrated schema and merge its concerns rather
 than creating parallel state.
 
-The already-started issue-151 run is a deliberate bridge exception, not the
-first v3 run. It remains owned and finished by its retained installed schema-2,
-interface-1 generation and the current ship-summary shape. New source writers
-must never open or migrate that live ledger, including during tests. Its feature
-worktree may be removed after merge without stranding finish on source files.
-Complete isolated source replays prove v3/interface 2. Source integration is not
-installed activation; using v3 for real runs waits for a separately authorized
-managed activation/cutover that makes one immutable helper generation available
-to all producers and consumers for each upgraded run. No improvised installed
-patch or worktree-path helper is a bridge.
-
-The own-delivery bridge is a run-specific root-controller operational protocol,
-not new product runtime. Its retained `bridge-generation/v1` evidence names the
-public entry topology and records resolved identity/digest/version for the
-workflow-state module, artifact-budget wrapper and dynamically loaded module,
-shared budget policy, selected interpreter/runtime closure, and environment inputs that affect
-HOME/PATH/shebang and policy resolution. The exact identities for this run live
-only in retained controller evidence; production defaults and this design do not
-hardcode machine hashes. Before finishing the old run, the controller re-resolves
-the declared topology and compares the complete evidence set, then uses only the
-retained compatible v2/v1 path. Drift fails closed without modifying the ledger,
-installing a patch or asking a routine new permission question.
-
-No shipped verifier owns or opens the live issue-151 ledger, and the product
-does not commit copies of the historical runtime. The root controller retains
-the exact old toolchain outside the product and owns isolated conformance for
-legacy-summary finish after simulated worktree removal, old-helper schema-3
-refusal, manifest/runtime drift refusal, the public-link pre-finish recheck and
-proof that the real ledger stayed unchanged. Those complete receipts are primary
-operational evidence for this run. Product tests instead exercise the new source
-migration/report/caller interfaces with temporary ledgers in their normal source
-and generated installed layouts. The source delivery adds no bridge runtime and
-imposes no activation requirement.
+Issue 151's active run finishes only through root's retained old-generation
+operational bridge. Shipped source never opens/migrates that ledger, hardcodes
+machine identities, installs a bridge or treats integration as activation.
+Product tests use synthetic source/generated-installed layouts; root separately
+retains topology, drift and legacy-finish evidence.
 
 Control interface 2 is exactly `{interface_version,now,max_parallel,
 attempt_budget_minutes,human_directed,issues,tracker,owners,worktrees,forge,
@@ -729,139 +620,31 @@ over together.
 
 ### Deterministic simulated acceptance cases
 
-Fixtures use reserved `sim.invalid` identities, fixed synthetic 40-hex ids and
-fake-provider state, never external payload/transcript/grant.
-
-- **Nodo 1314:** six-criterion/five-test evidence binds the subject. Intake has
-  delivery+merge; remainder closes tracker and removes exact remote/worktree/local
-  targets, completing all postconditions without another implementation attempt.
-- **Arcwave 113/record PR 116:** closure is observed while reviewed record digest
-  and live PR/head remain. Exact intent/worktree/PR permits record then merge;
-  fresh record presence proves delivery. Missing facts are requirements; closure
-  is neither cancellation nor grant.
-- **Argus:** independently normalized exact private scope uses covering intent and
-  ordinary native evaluation. Null yields the ready-stage local requirement;
-  wrong stage/target or selected-output slot conflict refuses byte-identically.
-  Stage/slot-valid endpoint, audience, payload, principal, risk or spend outside
-  intent is human-gated; every changed proposal has zero effects. Transfer needs a fresh proposal. Rejection
-  persists; independent completion evidence grants nothing.
-- **Normal v3:** accepted/reviewed/tested selection permits publish/PR/merge;
-  fresh integration reachability separately proves delivery.
-
+Synthetic `sim.invalid` cases cover Nodo delivery/cleanup, Arcwave partial
+effect/denial/resume or human completion, Argus changed-audience/payload refusal,
+and ordinary v3 evaluation/checkpoint/completion.
 
 ### D21 — proof required for remainder retry
 
-Direct/v2 has required nullable `recovery`; control/v2 has exact canonical
-issue-keyed `recoveries` (explicit nulls). Remainders have required nullable
-`recovery` (null r1, exact object r2) and `finished_at` (null nonterminal,
-actual failed/stalled terminal event). No summary, handoff or checkpoint recovery field. Recovery is
-`{schema_version:1,kind:delivery-recovery,id,contract_digest,stage_id,requested_scope,failure,effect_absence,basis}`; id covers all other members.
-For the following exact objects, P expands to keys `source_kind,reference,
-observed_at,evidence_digest`: independently chosen source enum
-`provider|host|tracker|repository|filesystem`, nonempty string reference,
-RFC3339 UTC time and canonical SHA-256 digest. P is notation, not a wire member.
-Failure is `{kind:effect_failure,effect_attempted:true,classification:transient,P}`;
-absence is `{kind:effect_absence,absent:true,probe_succeeded:true,P}`. Both bind
-actual scope/stage. Basis is `{kind:changed_relevant_evidence,scope_id,P}` with
-scope_id equal to the actual scope id and time after failure;
-`{kind:new_authorization,id}` names unrevoked covering intent issued after failure;
-`{kind:human_transient_retry,id}` additionally requires explicit-user source.
-Successor intent may arrive atomically; proof structure authenticates no source.
+Direct has nullable `recovery`, control issue-keyed `recoveries`, and
+remainders nullable recovery plus `finished_at` (null live, terminal time
+otherwise); checkpoint/handoff/summary have none. Recovery is exactly
+`{schema_version:1,kind:delivery-recovery,id,contract_digest,stage_id,
+requested_scope,failure,effect_absence,basis}`.
 
-Under lock only latest terminal authentic failed(owner)/stalled r1, no other
-nonterminal/r2, and a pending ready retryable stage qualify. Fold facts/intents
-with null scope first; model binds recovery scope to that stage/selected target.
-Failure is at/after latest effect-capable launch and by r1 `finished_at`; absence is
-at/after finish and failure and by request now. Independent completion/history
-semantics stay unchanged. Any latest unresolved rejected/unknown
-verdict for actual or matched declared scope parks; ordinary proof never
-overrides D18. Persist r2+recovery atomically with no effect/evaluation/
-consumption; return null r2 scope and fresh requirements. Contractless, active,
-wrong target/time/basis, stale-owner or proof-reuse/third-allocation requests
-refuse unchanged. Identical recovery replay returns existing r2 or completed
-replay without writing; it never allocates again.
-Finish mints r1 only. Test valid recovery plus absence, denial, replay, third,
-active and stale-proof negatives.
+Failure is exact `{kind:effect_failure,effect_attempted:true,
+classification:transient,source_kind,reference,observed_at,evidence_digest}`;
+absence is exact
+`{kind:effect_absence,absent:true,probe_succeeded:true}` plus those fields;
+source kind is `provider|host|tracker|repository|filesystem`. Basis is exact
+`{kind:changed_relevant_evidence,scope_id,source_kind,reference,observed_at,
+evidence_digest}`, `{kind:new_authorization,id}`, or explicit-user
+`{kind:human_transient_retry,id}`.
 
-## Test seams
-
-Acceptance uses public executable seams; prose alone is insufficient.
-
-1. **Workflow-state CLI.** Temporary ledgers invoke init, direct/control,
-   current-launch, checkpoint and finish. Strict synthetic facts cover all four
-   cases and an ordinary owner. Assert next stage; null/wrong/uncovered/ordinary
-   scope outcomes; exact action/checkpoint echo; post-fold proposal and no-stage
-   postcondition requirement; immutable history, deduplication, two remainder
-   ordinals, four suspensions/three resumes/reset, merge-before-expiry, capacity,
-   and read-only current-launch.
-2. **Artifact/report/response boundary.** Validate raw canonical v2 handoff,
-   checkpoint, summary and workflow responses. Reject hybrids, unknown keys,
-   inconsistent contract/custody/scope echoes, missing/miscategorized evidence,
-   invalid host-reference types and unsuccessful absence. Structurally valid
-   stale custody, audience/data mismatch and opaque references reach locked trust
-   checks, which refuse byte-identically and grant nothing. Assert stored facts,
-   not helper calls.
-3. **Controlled provider replay.** Starting from validated direct output, record
-   provider effects and typed observations through checkpoint/finish. Prove an
-   ordinary covered effect without prior allow; null permits folded-fact/custody
-   writes but no effect/evaluation; wrong, invocation-echo mismatch or stale launch
-   writes nothing; custody-only finish remainder
-   until fresh proposal; no D18 reissue after transfer; and current collector
-   ingestion after a stale caller. Prove durable partial progress, later denial,
-   same-custody resume without retry, independent human completion, and truthful
-   Nodo/Arcwave/normal terminal postconditions.
-4. **Caller contracts/eval.** Pin that from-issue, AUTO, ship-issue and
-   orchestration validate before decode, copy exact contract/scope/custody, bind
-   actual invocation to echo, double-fence, persist before reporting, preserve
-   denial and never synthesize delivery, implementation or authority. These
-   supplement executable round trips.
-
-All v3 product replays use isolated temporary ledgers and the complete source or
-generated-installed toolchain, never real HOME, live issue-151 state, controller
-evidence or `/private/tmp`. Root separately retains old-generation finish,
-removed-worktree, schema-refusal, drift, topology and live-ledger byte receipts;
-product tests contain no historical runtime copy.
-
-Run the ordinary workflow suite and managed build for integration. The design
-baseline already passed at the original integrated commit; implementation and
-final verification must run again after source changes.
-
-## Out of scope
-
-Excluded: transaction/release core activation; #117/#123/#125 schemas; #152
-blockers or denial; capacity, guard or provider changes; new provider commands;
-external mutation/publication/activation; raw payload/transcript or policy
-snapshots; and the separate clean-review/failed-verification row. Simulations
-assert no real SHA/grant. Repository ownership grants nothing, native enforcement
-remains authoritative, and source integration neither activates schema 3 nor
-migrates the live issue-151 ledger.
-
-## Decision ledger
-
-All choices are agent judgments under the user's delegated reversible
-architecture authority. They are not recorded human answers.
-
-| ID | Choice | Grounding | Rejected alternative |
-|---|---|---|---|
-| D1 | Store one immutable delivery contract in the sole lifecycle ledger and carry exact canonical bytes through every handoff. | Issue 151 criterion 1; the-bar DRY; current durable handoff seam. | Handoff-only prose or raw conversation replay creates competing truth and cannot be validated. |
-| D2 | Keep authorization intent append-only and secret-free; match its exact canonical tuple with the closed per-field narrowing grammar, including target and data identities bound to the same immutable future-output slot, then evaluate current guard/host/provider authority at each effect. | #116 D1; retained #117 intent semantics; private/public denial case. | Requiring an unknowable initial payload digest repeats permission after review, while URL/action subsets or null wildcards omit payload/audience/risk. |
-| D3 | Record host/guard/provider outcomes as launch-bound observations with derived non-secret ids and optional real host references only after a second current-launch check; a stale owner has zero effect and zero write. | Current read-only guard semantics; host may expose no stable id; issue 151 criterion 6. | Persisting a late denial from a stale owner weakens the same fence that protects effects. |
-| D4 | Track exact stage facts plus delivered, merged, closed and cleanup independently; selected output carries explicit acceptance/review/test proof for merge, and delivery repeats each category plus fresh post-merge integration reachability. | Issue 151 criterion 2; truthful-terminal standard; retained #117 D7. | Category inference, delivered-before-merge or delivery-from-merge loses proof or fabricates acceptance/reachability. |
-| D5 | Add a separate capped remainder lineage with disjoint ordinals/action ids; in-place resumes do not spend implementation or remainder retry counts. | Nodo/Arcwave cases; #132/#133; root critical custody constraint. | Reopen implementation or append unbounded generic retries. |
-| D6 | Permit one retry remainder only after authentic failure plus absent effect and a valid recovery basis; otherwise park while accepting independent completion evidence. | Current two-attempt cap; no-blind-retry and stall rules. | Unlimited successor churn or treating environment suspension as a failed attempt. |
-| D7 | Make worktree absence positive only for a predeclared cleanup target; require exact matching worktree/subject/PR for record delivery. | Current phase-zero/misbinding rules; cleanup semantics. | Branch-prefix discovery or absence-as-general-success weakens fencing. |
-| D8 | Preserve old result bytes/detail and migrate schema 2→3 without inventing contracts, grants or successful observations. | One ledger; immutable history; current schema baseline. | Rewrite a terminal result or promote legacy booleans into fresh evidence. |
-| D9 | Cut over state, direct/control, checkpoint/terminal artifact reports, from-issue, shipping and orchestration as one versioned interface delivery using the closed implementation/remainder custody union. | Defense in depth; all production producers/consumers must agree. | A remainder-only terminal summary misrepresents ordinary owners and partial progress; validator-first rollout admits mixed shapes. |
-| D10 | Accept the three audited behaviors only through deterministic simulated identities, intent and provider state. | Audit cases 2–4 lack safe exact live metadata and authorize no external mutation. | Copy transcripts/private payloads or present invented SHAs/grants as history. |
-| D11 | Prove acceptance through public CLI/provider-effect round trips, including ordinary v3 delivery and partial-effect checkpoint/denial/resume, with text/eval contracts only as supplementary caller coverage. | The-bar tests that can fail; issue 151 runtime gap. | Terminal-only and plan-only tests can pass while partial facts are lost or a requirement is mislabeled failure. |
-| D12 | Finish issue 151 through its run-specific retained v2/v1 operational bridge; keep exact-old-generation conformance/topology/runtime receipts with the root controller, test only new-source product interfaces in shipped suites, and activate v3 only through separate managed scope. | #66 bridge/activation separation; dynamic validator/module/policy resolution; worktree cleanup removes source. | Hardcoded machine hashes, committed historical runtime fixtures, a generic bridge runtime, migrating the live run or depending on its deleted worktree would mix product behavior with one delivery's operations. |
-| D13 | Put the exact eight-name facade over one import-safe private `delivery_model` package split into canonical, object, wire and reconciliation modules; workflow-state and artifact-budget load its `__init__.py` explicitly and adopt every wire atomically after review. | DRY; per-file review feasibility; current source/installed package layouts. | One oversized file, duplicate validators, a compatibility wrapper, registry or early schema cutover. |
-| D14 | Keep valid schema-1 ledgers readable by applying the existing 1→2 migration and the new 2→3 migration as an adjacent in-memory chain, validating the complete schema-3 result, and performing at most one atomic write. | Current source already supports schema 1→2; D8 requires immutable legacy history; an interface cutover must not strand an older valid ledger. | Setting the sole prior version to 2 would reject supported schema-1 history, while persisting an intermediate schema-2 ledger would expose a partial cutover. |
-| D15 | Give the pure model one closed eight-name public surface with explicit contract/intent/time/custody/candidate inputs and a complete persistable next-delivery result; checkpoint/owner/bootstrap output is closed; only durable one-shot consumption may expose an authority-evaluation action, and only the fourth unchanged suspension returns the stalled terminal variant. | D2/D3 require explicit facts; D9 atomic cutover; D13 one contract owner. | Caller-specific reduction dictionaries, ambient reads, free-text consumption, or an open response would duplicate policy and permit replay. |
-| D16 | Keep artifact/model validation structural, add one raw `workflow-response` union boundary, and reserve ledger freshness plus normalized-source/host authenticity for workflow-state under lock and the existing trust boundary. | Defense in depth; D3 launch fence; normalized controller facts are not authenticated by digests or opaque references. | Asking the stateless artifact validator to reject a once-valid stale action or fabricated but well-shaped source claim would invent authority and make public tests impossible. |
-| D17 | Upgrade schema 1/2 only inside a mutation transaction with explicit request-derived contract context and final `validate_state(..., run_id=...)`; keep current-launch on a no-write legacy read path. | D8/D14 immutable history and atomic migration; current no-lock/no-create launch guard. | Value-only migration cannot resolve new contract context, while upgrading during current-launch would make a read-only fence mutate or strand legacy runs. |
-| D18 | Bind each fresh post-rejection evaluation to one append-only consumption keyed by rejection and its independent successor-intent or reevaluation-evidence basis; persist before action, bind the returned fact by use key/time/scope/custody, require current intent, and let a new rejection win while retaining all history. | Operative-denial and late-collector requirements; response-closure review. | Replayable evidence, crash-reset permission, cosmetic-basis authority, or old-launch allow reuse. |
-| D19 | Independently proposed nullable scope binds the post-fold ordered stage and is echoed; handoff is historical and transfer/remainder needs a fresh proposal. | The wire lacked actual endpoint, audience, principal, risk and spend; independent Sol critique accepted. | Intent-derived actual scope, copied stage policy, mismatch as permission or prior-allow prerequisites. |
-| D20 | Private `workflow_delivery` owns v2 admission, schema-3 delivery validation and transition; workflow-state owns CLI, locks, writes and effects. | Its fixed-base monolith diff was 62,664/65,536 bytes. | Callbacks, copied policy, public framework, `sys.path`, fallback imports or live v1 effects. |
-| D21 | Permit only exact proof-gated r2 recovery after failed/stalled r1; it grants no authority and D18 denial remains controlling. | I2 recovery correction. | Blind retry, stale minting or a third remainder. |
-| D22 | Private adjacent `workflow_delivery_wire.py` owns state/response projection and v2 owner/worktree grammar; runtime absorbs pure v2 correlations. Closed source/installed loading, unchanged interfaces; CLI/custody/locks/writes/effects stay in workflow-state. | Measured per-file review bound. | No callbacks, copied policy or model backdoors. |
+Only latest terminal owner-failed/stalled R1, no live custody/R2, and ready
+retryable work qualify. Failure follows the latest effect launch and precedes
+finish; successful absence follows both and precedes request now; basis is newer
+and same contract/scope. Rejected/unknown actual or declared scope parks.
+Persist R2/proof atomically with no effect/evaluation/consumption and null scope.
+Wrong/stale/reused/active/third refuses; replay returns existing/completed
+without write; finish mints R1 only.

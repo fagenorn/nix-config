@@ -182,6 +182,8 @@ producer bytes before decode, then fresh checker and complete review-package
 ranges for immutable Task base `980abb67c443d02c35babbface505e1d580a6008` and
 Delivery base `4cd9408c4e538d6c9f0b9941e43d05d43a77c9a8`; never change a cap,
 base, roster, activation state or live ledger to make a gate pass.
+The complete Task-2 range has 28 paths: those 24 product paths plus root plan,
+Task-1 member, Task-2 member and design spec process artifacts.
 
 ## Preservation and review constraints
 
@@ -230,7 +232,7 @@ the no-activation/live-ledger boundary remain mandatory.
 D22 in the spec and root plan binds the private
 `workflow_delivery_wire.py`/`DeliveryRuntime` split, unchanged runtime interface
 1 and model eight-name facade, lexical source/installed fail-closed loading, and
-the no-callback/fallback/policy-copy boundary. The roster is 24 product paths (27
-with Task-2 artifacts); `default.nix` publishes the helper and existing
+the no-callback/fallback/policy-copy boundary. The roster is 24 product paths (28
+with the four Task-2 process artifacts); `default.nix` publishes the helper and existing
 `test_workflow_delivery.py` covers its loading/errors. The six-module command is
 unchanged.
