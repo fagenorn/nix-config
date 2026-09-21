@@ -69,3 +69,13 @@ issue, and publish every non-empty review detail beneath the primary worktree's
 `.superpowers/issue-delivery/` home before cleanup. Publication failure must keep
 the worktree and report `unpublished`. With `issueTracker.kind=none`, merge
 locally and clean up under the same detail rule.
+
+## Delivery handoff v2
+
+Validate `ship-handoff/v2` and every returned `workflow-response` before
+decoding. A handoff records historical custody, contract, pending stages, and
+requested_scope; it grants no current-stage authority. A successor constructs
+fresh actual scope, requires the response echo to match, and passes the exact
+four-key current-launch fence before effect and observation. Report partial work
+with `ship-checkpoint/v2`/`checkpoint-delivery`, and finish only with a validated
+`ship-summary/v2`. Follow a returned delivery_remainder without inventing state.

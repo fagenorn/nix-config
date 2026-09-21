@@ -235,6 +235,34 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertGreater(next_position, position, f"out-of-order anchor: {anchor!r}")
             position = next_position
 
+    def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
+        documents = {
+            str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
+            for path in (FROM_ISSUE, AUTO, FROM_ISSUE.parent / "ship-handoff.md",
+                         SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE,
+                         ORCHESTRATE)
+        }
+        corpus = " ".join(documents.values())
+        for phrase in ("workflow-response", "validate before decoding", "custody",
+                       "current-launch", "requested_scope", "bind the actual invocation",
+                       "ship-checkpoint/v2", "ship-summary/v2", "delivery_remainder"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, corpus)
+        self.assertIn("workflow_bootstrap", normalized(self.orchestrate))
+        self.assertIn("bootstrap requirement", normalized(self.orchestrate))
+        self.assertIn("checkpoint-delivery", corpus)
+        self.assertNotIn("infer the next stage from tracker", corpus.lower())
+        self.assertNotIn("unfinished delivery as failed", corpus.lower())
+
+    def test_orchestration_eval_covers_denial_partial_progress_and_remainder(self):
+        text = json.dumps(self.orchestrate_evals, sort_keys=True)
+        for phrase in ("partial effect", "host rejection", "same custody",
+                       "delivery_remainder", "zero external effect",
+                       "implementation_delivered", "pr_merged", "actual scope",
+                       "fresh proposal"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
     def section(self, text, heading, next_heading):
         start = text.index(heading)
         end = text.index(next_heading, start + len(heading))

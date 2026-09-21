@@ -24,6 +24,27 @@
       "mode": "plan-only",
       "prompt": "Plan-only: the host explicitly reports that it cannot keep an issue owner alive while also launching the required independent reviewer. Explain how orchestrate-issues responds without pretending the runtime scheduler has new features.",
       "expected_output": "Treat the report as a host capability boundary without calculating available slots or altering workflow-state control policy or max_parallel. Do not create competing owners, nested relays, or repeat rejected spawn attempts. Use a documented direct or sequential route only if the host supports it while preserving the returned lifecycle identity; otherwise report the required independent-review capability as unsupported. Do not claim reservations, notification scheduling, or issue #150's runtime work exists."
+    },
+    {
+      "id": 4,
+      "name": "ordinary-v2-delivery",
+      "mode": "plan-only",
+      "prompt": "Plan an ordinary authorized delivery through interface version 2, including the actual provider call.",
+      "expected_output": "Validate the raw workflow-response before decoding, consume workflow_bootstrap custody, and dispatch only the returned action. Construct actual scope from the provider invocation rather than intent, require the echoed requested_scope, and pass the exact current-launch fence before the external effect and before its observation. A covered ordinary action may evaluate and execute in the same invocation. Persist partial effect through ship-checkpoint/v2; use ship-summary/v2 only after implementation_delivered and pr_merged evidence."
+    },
+    {
+      "id": 5,
+      "name": "partial-effect-denial-same-custody",
+      "mode": "plan-only",
+      "prompt": "A provider records partial effect and then returns host rejection. Explain the exact continuation.",
+      "expected_output": "Submit the partial effect and host rejection in ship-checkpoint/v2, validate the response, and preserve the same custody while suspended. A later successor intent or reevaluation is a fresh proposal; it does not erase accepted observations. Resume only returned custody, reconstruct actual scope, fence current-launch before effect and observation, and follow any delivery_remainder without treating unfinished delivery as failed."
+    },
+    {
+      "id": 6,
+      "name": "stale-launch-zero-write",
+      "mode": "plan-only",
+      "prompt": "The launch becomes stale immediately before a provider action. Explain the required behavior.",
+      "expected_output": "The exact four-key current-launch result is false, so perform zero external effect and zero observation write. Do not reuse historical requested_scope or authority. Return to the validated workflow response, obtain current custody and a fresh proposal, and never infer delivery state from tracker data."
     }
   ]
 }

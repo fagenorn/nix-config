@@ -38,6 +38,30 @@ def _pending(values: Any, contract: dict[str, Any] | None) -> list[Any]:
     return values
 
 
+def _local_requirements(values: list[Any], pending: list[str],
+                        contract: dict[str, Any] | None = None) -> None:
+    if pending:
+        stage_requirement = [{"kind": "scope_tuple", "subject_id": pending[0],
+                              "reason_code": "scope_tuple_required",
+                              "detail_pointer": None}]
+        if values == stage_requirement: return
+        dependency_requirements = bool(values) and all(
+            item["kind"] == "observation"
+            and item["reason_code"] == "dependency_observation_required"
+            and item["subject_id"] in pending and item["detail_pointer"] is None
+            for item in values)
+        if not dependency_requirements: _reject()
+        if contract is not None:
+            stage = next(item for item in contract["stages"] if item["id"] == pending[0])
+            missing = sorted(item for item in stage["depends_on"] if item in pending)
+            if [item["subject_id"] for item in values] != missing: _reject()
+        return
+    if any(item["kind"] != "observation"
+           or item["reason_code"] != "postcondition_observation_required"
+           or item["subject_id"] not in _POSTCONDITIONS
+           or item["detail_pointer"] is not None for item in values): _reject()
+
+
 def _evaluation(value: Any, *, issue: int, contract_digest: str, custody: dict[str, Any]) -> None:
     if value is None: return
     value = _object(value, _members("kind contract_digest scope_id custody rejected_observation_id basis_kind basis_id use_key"))
@@ -51,12 +75,21 @@ def _delivery_block(value: dict[str, Any], *, issue: int, notes_max: int) -> dic
     if contract["issue"] != issue or value["contract_digest"] != digest: _reject()
     _pending(value["pending_stage_ids"], contract); _requirements(value["requirements"], sorted_values=True)
     _evaluation(value["authority_evaluation"], issue=issue, contract_digest=digest, custody=value["custody"])
+    scope = value["requested_scope"]
+    if scope is None:
+        if value["authority_evaluation"] is not None: _reject()
+        _local_requirements(value["requirements"], value["pending_stage_ids"], contract)
+    else:
+        _scope(scope)
+        if not value["pending_stage_ids"]: _reject()
+        target = scope["target"]
+        if target["issue"] != issue or (target["project_id"], target["provider"], target["repository_id"], target["repository_slug"]) != tuple(contract["project"][key] for key in ("project_id", "provider", "repository_id", "repository_slug")): _reject()
     return contract
 
 
 def _owner_action(value: Any, notes_max: int, *, control: bool = False) -> dict[str, Any]:
     base = {"id", "kind", "issue", "attempt", "owner", "worktree", "handoff_path", "deadline_at"} if control else {"interface_version", "kind", "ledger_repo_root", "run_id", "issue", "attempt", "owner", "action_id", "launch_kind", "worktree", "handoff_path", "deadline_at"}
-    value = _object(value, base | {"custody", "contract", "contract_digest", "pending_stage_ids", "requirements", "authority_evaluation"}, "owner action")
+    value = _object(value, base | {"custody", "contract", "contract_digest", "pending_stage_ids", "requirements", "authority_evaluation", "requested_scope"}, "owner action")
     if not control: _v2(value)
     if value["kind"] not in ({"spawn", "resume", "retry"} if control else {"owner"}): _reject()
     issue = _integer(value["issue"], "owner issue", minimum=1); attempt = _integer(value["attempt"], "owner attempt", minimum=1); custody = validate_custody_ref(value["custody"], issue=issue)
@@ -69,7 +102,7 @@ def _owner_action(value: Any, notes_max: int, *, control: bool = False) -> dict[
 
 
 def _remainder(value: Any, notes_max: int) -> dict[str, Any]:
-    value = _object(value, _members("interface_version kind ledger_repo_root run_id issue source_attempt owner custody worktree contract contract_digest pending_stage_ids deadline_at requirements authority_evaluation")); _v2(value)
+    value = _object(value, _members("interface_version kind ledger_repo_root run_id issue source_attempt owner custody worktree contract contract_digest pending_stage_ids deadline_at requirements authority_evaluation requested_scope")); _v2(value)
     if value["kind"] != "delivery_remainder": _reject()
     issue = _integer(value["issue"], "remainder issue", minimum=1); _integer(value["source_attempt"], "source attempt", minimum=1)
     custody = validate_custody_ref(value["custody"], issue=issue)
@@ -102,13 +135,25 @@ def _checkpoint_response(value: Any, notes_max: int) -> dict[str, Any]:
         _object(value, common | {"state", "stalled_resumes", "result_source", "reason_code"}, "stalled response"); _response_common(value)
         if (value["state"], value["stalled_resumes"], value["result_source"], value["reason_code"]) != ("terminal_failed", 3, "stalled", "suspension_stalled_without_progress"): _reject()
         return value
-    _object(value, common | {"next_action", "requirements", "authority_evaluation", "state", "blocked_on"}, "checkpoint response"); issue, custody = _response_common(value)
+    _object(value, common | {"next_action", "requirements", "authority_evaluation", "requested_scope", "state", "blocked_on"}, "checkpoint response"); issue, custody = _response_common(value)
     if value["state"] not in {"active", "suspended"} or value["blocked_on"] not in {None, "human_gate", "external", "transport"}: _reject()
     _requirements(value["requirements"], sorted_values=True); _evaluation(value["authority_evaluation"], issue=issue, contract_digest=value["contract_digest"], custody=custody)
+    if value["requested_scope"] is None:
+        if value["authority_evaluation"] is not None: _reject()
+        _local_requirements(value["requirements"], value["pending_stage_ids"])
+    else:
+        _scope(value["requested_scope"])
+        if not value["pending_stage_ids"]: _reject()
+        if value["requested_scope"]["target"]["issue"] != issue: _reject()
     if value["state"] == "active" and value["blocked_on"] is not None: _reject()
     if value["next_action"] is not None:
         if not isinstance(value["next_action"], dict): _reject()
         (_owner_action if value["next_action"].get("kind") == "owner" else _remainder)(value["next_action"], notes_max)
+        if value["next_action"]["requested_scope"] != value["requested_scope"]: _reject()
+        nested = value["next_action"]
+        for name in ("issue", "custody", "contract_digest", "pending_stage_ids", "requirements", "authority_evaluation"):
+            if nested[name] != value[name]: _reject()
+        if nested["ledger_repo_root"] != value["ledger_repo_root"] or nested["run_id"] != value["run_id"] or nested["owner"] != value["owner"]: _reject()
     return value
 
 
@@ -215,11 +260,14 @@ def _report_arrays(value: dict[str, Any], names: tuple[str, ...], notes_max: int
 
 
 def _ship_checkpoint(value: Any, notes_max: int) -> dict[str, Any]:
-    keys = {"interface_version", "issue", "custody", "contract_digest", "delivery_observations", "authority_observations", "reevaluation_evidence", "detail_state", "report_path", "notes"}
+    keys = {"interface_version", "issue", "custody", "contract_digest", "delivery_observations", "authority_observations", "reevaluation_evidence", "requested_scope", "detail_state", "report_path", "notes"}
     value = _object(value, keys, "ship checkpoint")
     if type(value["interface_version"]) is not int or value["interface_version"] != 2: _reject()
     issue = _integer(value["issue"], "checkpoint issue", minimum=1); validate_custody_ref(value["custody"], issue=issue); _digest(value["contract_digest"], "checkpoint contract")
     _report_arrays(value, ("delivery_observations", "authority_observations", "reevaluation_evidence"), notes_max); _report_detail(value); _bounded_notes(value["notes"], notes_max)
+    if value["requested_scope"] is not None:
+        _scope(value["requested_scope"])
+        if value["requested_scope"]["target"]["issue"] != issue: _reject()
     return value
 
 
@@ -243,7 +291,7 @@ def _artifact(value: Any, label: str) -> dict[str, Any]:
 
 
 def _ship_handoff(value: Any, notes_max: int) -> dict[str, Any]:
-    keys = {"interface_version", "state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path", "spec_artifact", "plan_artifact", "head_sha", "review_state", "auto", "report_path", "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents", "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids", "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs"}
+    keys = {"interface_version", "state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path", "spec_artifact", "plan_artifact", "head_sha", "review_state", "auto", "report_path", "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents", "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids", "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs", "requested_scope"}
     value = _object(value, keys, "ship handoff")
     if type(value["interface_version"]) is not int or value["interface_version"] != 2: _reject()
     issue = _integer(value["issue_number"], "handoff issue", minimum=1); validate_custody_ref(value["custody"], issue=issue)
@@ -264,6 +312,10 @@ def _ship_handoff(value: Any, notes_max: int) -> dict[str, Any]:
         _sorted_unique(value[name], f"handoff {name}")
         for item in value[name]: _digest(item, f"handoff {name} member")
     _pending(value["pending_stage_ids"], contract)
+    if value["requested_scope"] is not None:
+        _scope(value["requested_scope"])
+        target, project = value["requested_scope"]["target"], contract["project"]
+        if target["issue"] != issue or any(target[name] != project[name] for name in ("project_id", "provider", "repository_id", "repository_slug")): _reject()
     _sorted_unique(value["selected_outputs"], "handoff selections", key=lambda item: item.get("id", ""))
     for item in value["selected_outputs"]:
         _selected(item)

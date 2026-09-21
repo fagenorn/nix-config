@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,37 @@ import re
 import stat
 import sys
 from typing import Mapping, Sequence
+
+
+def _delivery_model() -> object:
+    """Load source or lexical HOME package without a sys.path fallback."""
+    source_layout = Path(__file__).parent.name == "scripts"
+    source_entry = Path(__file__).parent / "delivery_model" / "__init__.py"
+    installed_entry = Path.home() / ".agents/lib/python/delivery_model/__init__.py"
+    entry = source_entry if source_layout else installed_entry
+    if not entry.is_file():
+        raise ArtifactBudgetError("delivery model is unavailable")
+    name = "_artifact_budget_delivery_model"
+    spec = importlib.util.spec_from_file_location(
+        name, entry, submodule_search_locations=[str(entry.parent)]
+    )
+    if spec is None or spec.loader is None:
+        raise ArtifactBudgetError("delivery model is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    for key in tuple(sys.modules):
+        if key == name or key.startswith(name + "."):
+            sys.modules.pop(key, None)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+        if getattr(module, "MODEL_INTERFACE_VERSION", None) != 1:
+            raise ArtifactBudgetError("unsupported delivery model interface")
+        return module
+    except Exception as exc:
+        for key in tuple(sys.modules):
+            if key == name or key.startswith(name + "."):
+                sys.modules.pop(key, None)
+        raise ArtifactBudgetError("delivery model is unavailable") from exc
 
 
 KINDS = ("design-spec", "implementation-plan", "handoff", "review-package")
@@ -785,6 +817,29 @@ def _canonical(value: object) -> bytes:
         raise ArtifactBudgetError("invalid Unicode string") from exc
 
 
+def validate_workflow_response_report(value: object, notes_max_characters: int) -> None:
+    """Delegate the closed v2 transport shape to the single delivery model."""
+    model = _delivery_model()
+    try:
+        model.validate_delivery_object(
+            value, expected_kind="workflow-response", notes_max_characters=notes_max_characters
+        )
+    except Exception as exc:
+        raise ArtifactBudgetError("invalid workflow response") from exc
+
+
+def validate_delivery_model_report(
+    value: object, notes_max_characters: int, boundary: str
+) -> None:
+    model = _delivery_model()
+    try:
+        model.validate_delivery_object(
+            value, expected_kind=boundary, notes_max_characters=notes_max_characters
+        )
+    except Exception as exc:
+        raise ArtifactBudgetError(f"invalid {boundary}") from exc
+
+
 def _input_bytes(path: str, wire_max: int) -> bytes:
     if path == "-":
         raw = sys.stdin.buffer.read(wire_max + 1)
@@ -808,7 +863,7 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--policy")
     check.add_argument("--format", choices=("json",), required=True)
     report = subparsers.add_parser("validate-report")
-    report.add_argument("--boundary", choices=("producer", "sdd", "ship-handoff", "ship-summary"), required=True)
+    report.add_argument("--boundary", choices=("producer", "sdd", "ship-handoff", "ship-checkpoint", "ship-summary", "workflow-response"), required=True)
     report.add_argument("--input", required=True)
     report.add_argument("--policy")
     detail = subparsers.add_parser("validate-detail-input")
@@ -841,16 +896,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stderr.write(f"artifact-budget: invalid {label}\n")
             return 2
         try:
+            if args.command == "validate-report" and args.boundary in {
+                "ship-handoff", "ship-checkpoint", "ship-summary", "workflow-response"
+            }:
+                _delivery_model()
             value = _decode_json(raw)
             if not isinstance(value, dict):
                 raise ArtifactBudgetError("JSON root is not an object")
             if args.command == "validate-detail-input":
                 validate_detail_input(value)
             else:
-                validators = {"producer": validate_producer_report, "sdd": validate_sdd_report,
-                              "ship-handoff": validate_ship_handoff_report,
-                              "ship-summary": validate_ship_summary_report}
-                validators[args.boundary](value, notes_max)
+                if args.boundary == "ship-handoff" and value.get("interface_version") == 2:
+                    validate_delivery_model_report(value, notes_max, "ship-handoff")
+                elif args.boundary == "ship-checkpoint":
+                    validate_delivery_model_report(value, notes_max, "ship-checkpoint")
+                elif args.boundary == "ship-summary" and value.get("interface_version") == 2:
+                    validate_delivery_model_report(value, notes_max, "ship-summary")
+                else:
+                    validators = {"producer": validate_producer_report,
+                                  "sdd": validate_sdd_report,
+                                  "ship-handoff": validate_ship_handoff_report,
+                                  "ship-summary": validate_ship_summary_report,
+                                  "workflow-response": validate_workflow_response_report}
+                    validators[args.boundary](value, notes_max)
             output = _canonical(value)
             if len(output) > wire_max:
                 raise ArtifactBudgetError("canonical wire object exceeds bound")

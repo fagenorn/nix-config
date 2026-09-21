@@ -9,7 +9,7 @@ from ._canonical import (canonical_bytes, canonical_digest, _boolean, _members,
     _object, _reject, _sorted_unique, _utc)
 from ._objects import (_POSTCONDITIONS, _STAGE_ACTIONS, _authority, _contract,
     _delivery_observation, _intent, _postcondition_observation_matches,
-    _reevaluation, _scope, _selected, _stage_observation_matches,
+    _reevaluation, _scope, _selected, _stage_observation_matches, _stage_scope_matches,
     validate_custody_ref)
 from ._wire import validate_delivery_object
 
@@ -174,10 +174,25 @@ def reduce_delivery(contract: object, delivery: object, *, evaluation: object) -
             requirements = [{"kind": "observation", "subject_id": dep, "reason_code": "dependency_observation_required", "detail_pointer": None} for dep in missing]
         else: next_stage = stage["id"]
         break
+    if next_stage is None and not requirements:
+        requirements = [
+            {"kind": "observation", "subject_id": name,
+             "reason_code": "postcondition_observation_required", "detail_pointer": None}
+            for name in sorted(_POSTCONDITIONS)
+            if c["deliverable"]["obligations"][name] != "not_applicable"
+            and post[name]["state"] == "pending"
+        ]
     blocking = None
     authority_evaluation = None
     requested = e["requested_scope"]
+    if requested is None and next_stage is not None and not requirements:
+        requirements = [{"kind": "scope_tuple", "subject_id": next_stage,
+                         "reason_code": "scope_tuple_required", "detail_pointer": None}]
     if requested is not None:
+        if next_stage is None or requirements:
+            _reject()
+        stage = next(item for item in c["stages"] if item["id"] == next_stage)
+        _stage_scope_matches(c, next_delivery, stage, requested)
         if e["custody"] is None or e["current_launch"] is not True:
             requirements = [{"kind": "observation", "subject_id": requested["id"], "reason_code": "current_launch_required", "detail_pointer": None}]
         else:
@@ -218,12 +233,11 @@ def reduce_delivery(contract: object, delivery: object, *, evaluation: object) -
                         consumption["id"] = canonical_digest(consumption, omit_derived="id")
                         next_delivery["authority_evaluation_consumptions"] = sorted(next_delivery["authority_evaluation_consumptions"] + [consumption], key=lambda item: item["id"])
                         authority_evaluation = {"kind": "native_authority_evaluation", "contract_digest": d["contract_digest"], "scope_id": scope_id, "custody": copy.deepcopy(e["custody"]), "rejected_observation_id": rejection["id"], "basis_kind": basis["kind"], "basis_id": basis["id"], "use_key": use_key}
-            elif covering and allowed and not any(item["launch_id"] == e["custody"]["action_id"] for item in allowed):
-                requirements = [{"kind": "observation", "subject_id": scope_id, "reason_code": "authority_launch_mismatch", "detail_pointer": None}]
-            elif covering and not allowed:
+            elif covering and not any(item["launch_id"] == e["custody"]["action_id"] for item in allowed):
                 requirements = [{"kind": "observation", "subject_id": scope_id, "reason_code": "native_evaluation_required", "detail_pointer": None}]
     completion = "delivery_complete" if all(item["state"] in {"observed", "not_applicable"} for item in post.values()) else "pending"
     result = {"next_delivery": next_delivery, "pending_stage_ids": pending, "next_stage_id": next_stage,
+              "requested_scope": copy.deepcopy(requested),
               "requirements": sorted(requirements, key=lambda item: (item["kind"], item["subject_id"], item["reason_code"])),
               "completion_state": completion, "blocking": blocking, "authority_evaluation": authority_evaluation}
     validate_delivery_object(next_delivery, expected_kind="delivery", notes_max_characters=1_000_000)

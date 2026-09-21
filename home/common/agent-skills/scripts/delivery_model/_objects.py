@@ -318,6 +318,44 @@ def _selection_for_stage(contract: dict[str, Any], delivery: dict[str, Any],
     return matches[0] if matches else None
 
 
+def _stage_scope_matches(contract: dict[str, Any], delivery: dict[str, Any],
+                         stage: dict[str, Any], requested: dict[str, Any]) -> None:
+    """Reject a proposed actual scope that is not this contract's ready stage."""
+    _scope(requested)
+    project = contract["project"]
+    target = requested["target"]
+    if (target["project_id"], target["provider"], target["repository_id"],
+            target["repository_slug"], target["issue"]) != (
+            project["project_id"], project["provider"], project["repository_id"],
+            project["repository_slug"], contract["issue"]): _reject()
+    if (requested["action"], requested["effect"]) != (stage["action"], stage["effect"]): _reject()
+    stage_target = stage["target_ref"]
+    if stage_target.get("kind") == "slot":
+        constraints = stage_target["constraints"]
+        if any(target[key] != constraints[key] for key in ("branch", "base")): _reject()
+        declared_data = constraints["data_ref"]
+        selected = _selection_for_stage(contract, delivery, stage)
+        output, data = target["output_ref"], requested["data"]
+        if selected is None:
+            if output != {"kind": "slot", "slot_id": stage_target["slot_id"]} or data != declared_data: _reject()
+        else:
+            expected = {"kind": "literal", "digest": selected["data_identity_digest"],
+                        "classification": declared_data["classification"],
+                        "audience": declared_data["audience"]}
+            if not ((output == {"kind": "slot", "slot_id": stage_target["slot_id"]} and data == declared_data)
+                    or (output == {"kind": "literal", "value": selected["subject_value"]} and data == expected)):
+                _reject()
+    else:
+        literal = stage_target["value"]
+        if stage["kind"] == "close_tracker":
+            if str(target["issue"]) != literal: _reject()
+        elif stage["kind"] in {"delete_remote_branch", "delete_local_branch"}:
+            if target["branch"] != literal: _reject()
+        elif stage["kind"] == "remove_worktree":
+            if requested["endpoint"] != {"kind": "literal", "value": literal}: _reject()
+        else: _reject()
+
+
 def _pr_numbers(contract: dict[str, Any], delivery: dict[str, Any],
                 stage: dict[str, Any], selected: dict[str, Any]) -> set[int]:
     values: set[int] = set()

@@ -145,6 +145,51 @@ def requested_scope(model, declared, selected):
     return seal(model, value)
 
 
+def stage_scope(model, contract, stage_id):
+    """Build an actual proposed tuple from the contract stage, never an intent."""
+    stage = next(item for item in contract["stages"] if item["id"] == stage_id)
+    value = scope(model)
+    value["action"], value["effect"] = stage["action"], stage["effect"]
+    target = stage["target_ref"]
+    if target["kind"] == "slot":
+        constraints = target["constraints"]
+        for key in ("project_id", "provider", "repository_id", "repository_slug", "branch", "base"):
+            value["target"][key] = constraints[key]
+        value["target"]["output_ref"] = {"kind": "slot", "slot_id": target["slot_id"]}
+        value["data"] = copy.deepcopy(constraints["data_ref"])
+    else:
+        value["target"]["output_ref"] = {"kind": "none"}
+        value["data"] = {"kind": "none"}
+        if stage["kind"] == "close_tracker":
+            value["target"]["issue"] = int(target["value"])
+        elif stage["kind"] in {"delete_remote_branch", "delete_local_branch"}:
+            value["target"]["branch"] = target["value"]
+        elif stage["kind"] == "remove_worktree":
+            value["endpoint"] = {"kind": "literal", "value": target["value"]}
+    return seal(model, value)
+
+
+def contract_and_delivery_for_stage(model, stage_id):
+    contract, delivery = contract_and_delivery(model)
+    proposed = stage_scope(model, contract, stage_id)
+    first = copy.deepcopy(delivery["authorization_intents"][0])
+    if proposed["id"] not in {item["id"] for item in first["scopes"]}:
+        first["scopes"].append(proposed)
+    first["scopes"].sort(key=lambda item: item["id"])
+    seal(model, first)
+    contract["initial_authorization_intent_id"] = first["id"]
+    contract["initial_authorization_intent_digest"] = model.canonical_digest(first)
+    digest = model.canonical_digest(contract)
+    delivery["contract"] = copy.deepcopy(contract)
+    delivery["contract_digest"] = digest
+    delivery["authorization_intents"] = [first]
+    delivery["authorization_chain_digest"] = model.canonical_digest({"intent_ids": [first["id"]]})
+    for fact in delivery["stage_facts"]:
+        fact["contract_digest"] = digest
+        seal(model, fact)
+    return contract, delivery, proposed
+
+
 def authority(model, contract, declared, launch, verdict="rejected"):
     return seal(model, {
         "schema_version": 1, "kind": "authority-observation", "id": "",
@@ -190,6 +235,16 @@ def evaluation(**changes):
     return value
 
 
+def native_evaluation(contract_digest, active, scope_id):
+    return {
+        "kind": "native_authority_evaluation", "contract_digest": contract_digest,
+        "scope_id": scope_id, "custody": copy.deepcopy(active),
+        "rejected_observation_id": "sha256:" + "9" * 64,
+        "basis_kind": "reevaluation_evidence", "basis_id": "sha256:" + "8" * 64,
+        "use_key": "sha256:" + "7" * 64,
+    }
+
+
 def stage_state(result, stage_id):
     return next(fact["state"] for fact in result["next_delivery"]["stage_facts"]
                 if fact["stage_id"] == stage_id)
@@ -203,7 +258,8 @@ def workflow_responses(model):
     contract, _ = contract_and_delivery(model); digest = model.canonical_digest(contract)
     active = custody(); pending = [stage["id"] for stage in contract["stages"]]
     block = {"custody": active, "contract": contract, "contract_digest": digest,
-             "pending_stage_ids": pending, "requirements": [], "authority_evaluation": None}
+             "pending_stage_ids": pending, "requirements": [{"kind": "scope_tuple", "subject_id": "select", "reason_code": "scope_tuple_required", "detail_pointer": None}], "authority_evaluation": None,
+             "requested_scope": None}
     owner = {"interface_version": 2, "kind": "owner", "ledger_repo_root": "/repo",
              "run_id": "run-1", "issue": 151, "attempt": 1, "owner": "151:1",
              "action_id": "151:1:1", "launch_kind": "spawn", "worktree": "/worktree",
@@ -218,7 +274,7 @@ def workflow_responses(model):
                  "source_attempt": 1, "owner": "151:r1", "custody": remainder_custody,
                  "worktree": "/worktree", "contract": contract, "contract_digest": digest,
                  "pending_stage_ids": pending, "deadline_at": "2026-09-21T01:00:00Z",
-                 "requirements": [], "authority_evaluation": None}
+                 "requirements": [{"kind": "scope_tuple", "subject_id": "select", "reason_code": "scope_tuple_required", "detail_pointer": None}], "authority_evaluation": None, "requested_scope": None}
     common = {"interface_version": 2, "ledger_repo_root": "/repo", "run_id": "run-1",
               "issue": 151, "owner": "151:1", "custody": active,
               "contract_digest": digest, "accepted_observation_ids": [],
@@ -243,7 +299,7 @@ def workflow_responses(model):
                      "blockers": [], "result": None, "reentry": "resume"},
         "remainder": remainder,
         "checkpointed": {**common, "kind": "delivery_checkpointed", "next_action": None,
-                         "requirements": [], "authority_evaluation": None, "state": "active", "blocked_on": None},
+                         "requirements": [{"kind": "scope_tuple", "subject_id": "select", "reason_code": "scope_tuple_required", "detail_pointer": None}], "authority_evaluation": None, "requested_scope": None, "state": "active", "blocked_on": None},
         "stalled": {**common, "kind": "delivery_stalled", "state": "terminal_failed",
                     "stalled_resumes": 3, "result_source": "stalled",
                     "reason_code": "suspension_stalled_without_progress"},
@@ -383,14 +439,13 @@ def record_case(model, *, with_merge, integrated=None):
 
 
 def renewal_case(model, allow_at, revoke_at=None):
-    contract, delivery = contract_and_delivery(model)
+    contract, delivery, declared = contract_and_delivery_for_stage(model, "select")
     first = delivery["authorization_intents"][0]
     first["expires_at"] = "2026-09-20T02:00:00Z"; seal(model, first)
     contract["initial_authorization_intent_id"] = first["id"]
     contract["initial_authorization_intent_digest"] = model.canonical_digest(first)
     delivery["authorization_chain_digest"] = model.canonical_digest({"intent_ids": [first["id"]]})
     delivery = rebind_contract(model, contract, delivery)
-    declared = first["scopes"][0]
     successor = intent(model, declared, predecessor=first["id"],
                        issued="2026-09-20T03:00:00Z", key="renewal")
     allowed = authority(model, contract, declared, custody(), verdict="allowed")
@@ -425,4 +480,14 @@ def ship_handoff(model, contract, delivery):
             "authority_observation_ids": [], "reevaluation_evidence_ids": [],
             "authority_evaluation_consumption_ids": [],
             "pending_stage_ids": [stage["id"] for stage in contract["stages"]],
-            "selected_outputs": delivery["selected_outputs"]}
+            "selected_outputs": delivery["selected_outputs"], "requested_scope": None}
+
+
+def ship_checkpoint(model, contract, requested=None):
+    return {
+        "interface_version": 2, "issue": contract["issue"], "custody": custody(),
+        "contract_digest": model.canonical_digest(contract),
+        "delivery_observations": [], "authority_observations": [],
+        "reevaluation_evidence": [], "requested_scope": copy.deepcopy(requested),
+        "detail_state": "none", "report_path": None, "notes": "simulated",
+    }

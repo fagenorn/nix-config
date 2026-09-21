@@ -18,11 +18,14 @@ from ._delivery_model_fixtures import (
     intent,
     selection,
     contract_and_delivery,
+    contract_and_delivery_for_stage,
+    stage_scope,
     requested_scope,
     authority,
     revocation,
     reevaluation,
     evaluation,
+    native_evaluation,
     stage_state,
     post_state,
     workflow_responses,
@@ -34,6 +37,7 @@ from ._delivery_model_fixtures import (
     record_case,
     renewal_case,
     ship_handoff,
+    ship_checkpoint,
 )
 
 ROOT = Path(__file__).parents[4]
@@ -196,10 +200,222 @@ class DeliveryModelTest(unittest.TestCase):
         self.assertEqual(post_state(done, "implementation_delivered"), "pending")
         self.assertEqual(delivery, before)
 
-    def test_rejection_bases_are_independent_and_one_shot(self):
+    def test_requested_scope_is_bound_to_postfold_contract_stage(self):
         contract, delivery = contract_and_delivery(self.model); active = custody()
+        def reduce(candidate_contract, candidate_delivery, candidate_scope):
+            return self.model.reduce_delivery(candidate_contract, candidate_delivery,
+                evaluation=evaluation(custody=active, current_launch=True,
+                                      requested_scope=candidate_scope))
+        with self.assertRaises(self.model.DeliveryModelError):
+            reduce(contract, delivery, delivery["authorization_intents"][0]["scopes"][0])
+        missing = reduce(contract, delivery, None)
+        self.assertIsNone(missing["requested_scope"])
+        self.assertEqual(missing["requirements"], [{"kind": "scope_tuple", "subject_id": "select", "reason_code": "scope_tuple_required", "detail_pointer": None}])
+        uncovered = reduce(contract, delivery, stage_scope(self.model, contract, "select"))
+        self.assertEqual((uncovered["blocking"]["blocked_on"], uncovered["requirements"][0]["reason_code"]), ("human_gate", "authorization_intent_required"))
+        covered_contract, covered_delivery, covered_scope = contract_and_delivery_for_stage(self.model, "select")
+        ordinary = reduce(covered_contract, covered_delivery, covered_scope)
+        self.assertEqual((ordinary["requested_scope"], ordinary["requirements"][0]["reason_code"], ordinary["blocking"]), (covered_scope, "native_evaluation_required", None))
+
+    def test_d19_slot_scope_binds_selected_identity_and_data(self):
+        contract, delivery, declared = contract_and_delivery_for_stage(self.model, "publish")
+        delivery = with_observed(self.model, contract, delivery, ["select"])
+        delivery = self.model.reduce_delivery(contract, delivery, evaluation=evaluation())["next_delivery"]
+        selected = delivery["selected_outputs"][0]
+        literal = requested_scope(self.model, declared, selected)
+        reduced = self.model.reduce_delivery(contract, delivery, evaluation=evaluation(
+            custody=custody(), current_launch=True, requested_scope=literal))
+        self.assertEqual(reduced["requested_scope"], literal)
+        for path, replacement in (
+            (("target", "output_ref", "value"), "b" * 40),
+            (("target", "issue"), 152),
+            (("target", "repository_id"), "other-repo"),
+            (("target", "base"), "other-base"),
+            (("data", "digest"), "sha256:" + "f" * 64),
+            (("data", "classification"), "binary"),
+            (("data", "audience"), "public"),
+        ):
+            bad = copy.deepcopy(literal); cursor = bad
+            for key in path[:-1]: cursor = cursor[key]
+            cursor[path[-1]] = replacement; seal(self.model, bad)
+            with self.subTest(path=path):
+                with self.assertRaises(self.model.DeliveryModelError):
+                    self.model.reduce_delivery(contract, delivery, evaluation=evaluation(
+                        custody=custody(), current_launch=True, requested_scope=bad))
+
+    def test_d19_completion_requires_postcondition_observation_and_null_scope(self):
+        contract, delivery, declared = contract_and_delivery_for_stage(self.model, "merge")
+        delivery = with_observed(self.model, contract, delivery, ["select", "publish", "open", "merge"])
+        reduced = self.model.reduce_delivery(contract, delivery, evaluation=evaluation())
+        self.assertEqual(reduced["requirements"], [{"kind": "observation",
+            "subject_id": "implementation_delivered", "reason_code": "postcondition_observation_required",
+            "detail_pointer": None}])
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.reduce_delivery(contract, delivery, evaluation=evaluation(
+                custody=custody(), current_launch=True, requested_scope=declared))
+
+    def test_d19_literal_cleanup_scopes_bind_exact_targets(self):
+        contract, delivery = cleanup_contract_and_delivery(self.model)
+        current = with_observed(self.model, contract, delivery,
+                                ["select", "publish", "open", "merge"])
+        cases = (
+            ("close", "tracker_closed", {
+                "tracker_repository_id": "sim-repo", "issue": 151,
+                "state": "closed", "close_reason": "completed",
+                "observation_identity": "tracker:151:closed"},
+             ("target", "issue", 152)),
+            ("remote", "remote_branch_absent",
+             {"repository_id": "sim-repo", "branch": "feature", "absent": True},
+             ("target", "branch", "other")),
+            ("worktree", "worktree_absent",
+             {"path": "/worktree", "recorded_worktree_identity": "wt-151",
+              "probe_mode": "no_follow", "absent": True},
+             ("endpoint", "value", "/other")),
+            ("local", "local_branch_absent",
+             {"repository_id": "sim-repo", "branch": "feature", "absent": True},
+             ("target", "branch", "other")),
+        )
+        for stage_id, observation_kind, subject, mutation in cases:
+            exact = stage_scope(self.model, contract, stage_id)
+            result = self.model.reduce_delivery(contract, current, evaluation=evaluation(
+                custody=custody(), current_launch=True, requested_scope=exact))
+            self.assertEqual(result["requested_scope"], exact)
+            bad = copy.deepcopy(exact)
+            bad[mutation[0]][mutation[1]] = mutation[2]; seal(self.model, bad)
+            with self.subTest(stage=stage_id, target="neighbor"):
+                with self.assertRaises(self.model.DeliveryModelError):
+                    self.model.reduce_delivery(contract, current, evaluation=evaluation(
+                        custody=custody(), current_launch=True, requested_scope=bad))
+            current = copy.deepcopy(current)
+            current["delivery_observations"].append(
+                observation(self.model, contract, observation_kind, subject))
+            current["delivery_observations"].sort(key=lambda item: item["id"])
+
+    def test_d19_wire_null_requirements_are_local(self):
+        fixtures = workflow_responses(self.model)
+        stage_requirement = {"kind": "scope_tuple", "subject_id": "select",
+                             "reason_code": "scope_tuple_required", "detail_pointer": None}
+        postcondition = {"kind": "observation", "subject_id": "implementation_delivered",
+                         "reason_code": "postcondition_observation_required",
+                         "detail_pointer": None}
+        for name in ("owner", "remainder", "checkpointed"):
+            value = copy.deepcopy(fixtures[name])
+            self.assertEqual(value["requirements"], [stage_requirement])
+            self.assertEqual(self.validate(value, "workflow-response"), value)
+            for requirements in (
+                [], [{"kind": "tracker"}],
+                [{**stage_requirement, "subject_id": "publish"}],
+                [{**stage_requirement, "subject_id": "bogus"}],
+                [postcondition], [{**stage_requirement, "detail_pointer": "derived"}],
+            ):
+                bad = copy.deepcopy(value); bad["requirements"] = requirements
+                with self.subTest(envelope=name, invalid=requirements):
+                    self.assert_invalid(bad, "workflow-response")
+            for requirements in ([], [postcondition]):
+                complete = copy.deepcopy(value)
+                complete["pending_stage_ids"] = []; complete["requirements"] = requirements
+                with self.subTest(envelope=name, complete=requirements):
+                    self.assertEqual(self.validate(complete, "workflow-response"), complete)
+            for malformed in (
+                {**postcondition, "subject_id": "unknown_postcondition"},
+                {**postcondition, "reason_code": "dependency_observation_required"},
+                {**postcondition, "detail_pointer": "derived"},
+            ):
+                bad = copy.deepcopy(value)
+                bad["pending_stage_ids"] = []; bad["requirements"] = [malformed]
+                with self.subTest(envelope=name, malformed_postcondition=malformed):
+                    self.assert_invalid(bad, "workflow-response")
+            bad = copy.deepcopy(value)
+            bad["pending_stage_ids"] = []; bad["requirements"] = []
+            bad["requested_scope"] = stage_scope(self.model, fixtures["owner"]["contract"], "select")
+            with self.subTest(envelope=name, nonnull_scope_without_pending=True):
+                self.assert_invalid(bad, "workflow-response")
+        dependency = copy.deepcopy(fixtures["checkpointed"])
+        dependency["requirements"] = [{"kind": "observation", "subject_id": "publish",
+            "reason_code": "dependency_observation_required", "detail_pointer": None}]
+        self.assertEqual(self.validate(dependency, "workflow-response"), dependency)
+
+    def test_d19_wire_permit_and_nested_correlations_are_closed(self):
+        fixtures = workflow_responses(self.model); owner = fixtures["owner"]
+        _, delivery = contract_and_delivery(self.model)
+        declared = delivery["authorization_intents"][0]["scopes"][0]
+        actual = requested_scope(
+            self.model, declared, selection(self.model, owner["contract_digest"]))
+        declared_id = declared["id"]
+        self.assertNotEqual(actual["id"], declared_id)
+        permit = native_evaluation(owner["contract_digest"], owner["custody"], declared_id)
+        for name in ("owner", "remainder", "checkpointed"):
+            bad = copy.deepcopy(fixtures[name]); bad["authority_evaluation"] = copy.deepcopy(permit)
+            if name == "remainder":
+                bad["authority_evaluation"] = native_evaluation(
+                    bad["contract_digest"], bad["custody"], declared_id)
+            with self.subTest(valid_permit_with_null_scope=name):
+                self.assert_invalid(bad, "workflow-response")
+        checkpoint = copy.deepcopy(fixtures["checkpointed"])
+        checkpoint["pending_stage_ids"] = ["merge"]
+        checkpoint.update(requested_scope=actual, requirements=[{
+            "kind": "observation", "subject_id": declared_id,
+            "reason_code": "native_evaluation_required", "detail_pointer": None}],
+            authority_evaluation=permit)
+        self.assertIsNone(checkpoint["next_action"])
+        self.assertEqual(self.validate(checkpoint, "workflow-response"), checkpoint)
+        checkpoint["authority_evaluation"] = None
+        checkpoint["next_action"] = copy.deepcopy(owner)
+        checkpoint["next_action"]["pending_stage_ids"] = ["merge"]
+        checkpoint["next_action"].update(
+            requested_scope=copy.deepcopy(actual),
+            requirements=copy.deepcopy(checkpoint["requirements"]))
+        self.assertEqual(self.validate(checkpoint, "workflow-response"), checkpoint)
+        mutations = {
+            "scope": lambda outer: outer["next_action"].update(
+                requested_scope=stage_scope(self.model, owner["contract"], "publish")),
+            "custody": lambda outer: outer.update(custody=next_launch(outer["custody"])),
+            "contract_digest": lambda outer: outer.update(contract_digest="sha256:" + "f" * 64),
+            "pending_stage_ids": lambda outer: outer.update(pending_stage_ids=["select"]),
+            "requirements": lambda outer: outer.update(requirements=[{
+                "kind": "scope_tuple", "subject_id": "select",
+                "reason_code": "scope_tuple_required", "detail_pointer": None}]),
+            "authority_evaluation": lambda outer: outer.update(authority_evaluation=
+                native_evaluation(outer["contract_digest"], outer["custody"], declared_id)),
+            "ledger_repo_root": lambda outer: outer.update(ledger_repo_root="/other"),
+            "run_id": lambda outer: outer.update(run_id="other-run"),
+            "owner": lambda outer: outer.update(owner="151:other"),
+        }
+        for field, mutate in mutations.items():
+            bad = copy.deepcopy(checkpoint); mutate(bad)
+            with self.subTest(nested_common_field=field):
+                self.assert_invalid(bad, "workflow-response")
+        issue_mismatch = copy.deepcopy(checkpoint)
+        issue_mismatch.update(issue=152, custody={"kind": "implementation", "attempt": 1,
+            "launch": 1, "action_id": "152:1:1"})
+        issue_mismatch["requested_scope"]["target"]["issue"] = 152
+        seal(self.model, issue_mismatch["requested_scope"])
+        self.assert_invalid(issue_mismatch, "workflow-response")
+
+    def test_d19_report_scope_identities_are_closed(self):
+        contract, delivery = contract_and_delivery(self.model)
+        historical = stage_scope(self.model, contract, "select")
+        checkpoint = ship_checkpoint(self.model, contract, historical)
+        self.assertEqual(self.validate(checkpoint, "ship-checkpoint"), checkpoint)
+        bad = copy.deepcopy(checkpoint); bad["requested_scope"]["target"]["issue"] = 152
+        seal(self.model, bad["requested_scope"]); self.assert_invalid(bad, "ship-checkpoint")
+        handoff = ship_handoff(self.model, contract, delivery)
+        handoff["requested_scope"] = copy.deepcopy(historical)
+        self.assertEqual(self.validate(handoff, "ship-handoff"), handoff)
+        for field, replacement in (("issue", 152), ("project_id", "other-project"),
+                                   ("provider", "other-provider"),
+                                   ("repository_id", "other-repo"),
+                                   ("repository_slug", "other/repo")):
+            foreign = copy.deepcopy(handoff)
+            foreign["requested_scope"]["target"][field] = replacement
+            seal(self.model, foreign["requested_scope"])
+            with self.subTest(handoff_target=field):
+                self.assert_invalid(foreign, "ship-handoff")
+
+    def test_rejection_bases_are_independent_and_one_shot(self):
+        contract, delivery, requested = contract_and_delivery_for_stage(self.model, "merge")
+        delivery = with_observed(self.model, contract, delivery, ["select", "publish", "open"]); active = custody()
         denied, rejection = with_host_rejection(self.model, contract, delivery, active)
-        requested = denied["authorization_intents"][0]["scopes"][0]
         successor = intent(self.model, requested, predecessor=denied["authorization_intents"][0]["id"],
                            issued="2026-09-20T02:00:00Z", key="key-2")
         other_scope = copy.deepcopy(requested)
@@ -226,7 +442,8 @@ class DeliveryModelTest(unittest.TestCase):
                 self.assertEqual(replay["blocking"]["reason_code"], "reevaluation_consumed")
 
     def test_conflicting_observation_identity_and_operational_denial_refuse(self):
-        contract, delivery = contract_and_delivery(self.model)
+        contract, delivery, requested = contract_and_delivery_for_stage(self.model, "merge")
+        delivery = with_observed(self.model, contract, delivery, ["select", "publish", "open"])
         first = observation(self.model, contract, "branch_published",
             {"repository_id": "sim-repo", "branch": "feature", "selected_head": "a" * 40})
         conflict = copy.deepcopy(first)
@@ -239,19 +456,19 @@ class DeliveryModelTest(unittest.TestCase):
         denied, rejection = with_host_rejection(self.model, contract, delivery, custody())
         result = self.model.reduce_delivery(contract, denied, evaluation=evaluation(
             custody=custody(), current_launch=True,
-            requested_scope=denied["authorization_intents"][0]["scopes"][0]))
+            requested_scope=requested))
         self.assertEqual(result["blocking"], {"blocked_on": "human_gate",
             "reason_code": "host_rejected", "subject_id": rejection["id"]})
 
     def test_late_old_launch_facts_are_history_not_current_authority(self):
-        contract, delivery = contract_and_delivery(self.model); old = custody(); current = next_launch(old)
-        declared = delivery["authorization_intents"][0]["scopes"][0]
+        contract, delivery, declared = contract_and_delivery_for_stage(self.model, "merge")
+        delivery = with_observed(self.model, contract, delivery, ["select", "publish", "open"]); old = custody(); current = next_launch(old)
         allowed = authority(self.model, contract, declared, old, verdict="allowed")
         reduced = self.model.reduce_delivery(contract, delivery, evaluation=evaluation(
             custody=current, current_launch=True, requested_scope=declared,
             authority_observations=[allowed], source_kind="direct"))
         self.assertIn(allowed["id"], {x["id"] for x in reduced["next_delivery"]["authority_observations"]})
-        self.assertEqual(reduced["requirements"][0]["reason_code"], "authority_launch_mismatch")
+        self.assertEqual(reduced["requirements"][0]["reason_code"], "native_evaluation_required")
         for allow_at, revoke_at, operative in (
             ("2026-09-20T01:00:00Z", None, True),
             ("2026-09-20T02:00:00Z", None, True),
@@ -342,9 +559,10 @@ class DeliveryModelTest(unittest.TestCase):
         self.assertEqual(next(item["state"] for item in compatible["next_delivery"]["stage_facts"] if item["stage_id"] == "publish"), "observed")
 
     def test_consumed_rejection_allows_one_fresh_current_result(self):
-        contract, delivery = contract_and_delivery(self.model); active = custody()
+        contract, delivery, requested = contract_and_delivery_for_stage(self.model, "merge")
+        delivery = with_observed(self.model, contract, delivery, ["select", "publish", "open"]); active = custody()
         denied, rejection = with_host_rejection(self.model, contract, delivery, active)
-        requested = denied["authorization_intents"][0]["scopes"][0]; basis = reevaluation(self.model, contract, rejection)
+        basis = reevaluation(self.model, contract, rejection)
         permit = self.model.reduce_delivery(contract, denied, evaluation=evaluation(custody=active, current_launch=True, requested_scope=requested, reevaluation_evidence=[basis]))
         allowed = authority(self.model, contract, requested, active, verdict="allowed"); allowed["observed_at"] = "2026-09-21T00:00:01Z"; allowed["evaluation_use_key"] = permit["authority_evaluation"]["use_key"]; seal(self.model, allowed)
         after = self.model.reduce_delivery(contract, permit["next_delivery"], evaluation=evaluation(at_time="2026-09-21T00:00:02Z", custody=active, current_launch=True, requested_scope=requested, authority_observations=[allowed]))
