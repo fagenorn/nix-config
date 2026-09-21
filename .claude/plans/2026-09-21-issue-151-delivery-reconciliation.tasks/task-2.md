@@ -31,13 +31,14 @@
   `validate_state(candidate, *, run_id: str)` and at most one atomic persistence
   with the command transition. `current-launch` uses a separate legacy read
   validator and never upgrades, locks or writes.
-- Control request interface 2 is the exact interface-1 request plus issue-keyed,
-  sorted `forge`, `delivery_contracts`, `authorization_intents`,
-  `authority_observations`, `reevaluation_evidence`, and
-  `delivery_observations`. Direct request interface 2 has the exact interface-1
-  keys plus nullable `delivery_contract` and the four sorted arrays for its issue.
-  Both validate the complete request before lock/mutation and use one transition
-  function.
+- Control v2 retains interface-1 top-level keys plus the new sorted maps/arrays,
+  but replaces each `owners` member with exact `event_id`, `issue`, `custody`,
+  and state `unavailable`. Event id is nonempty; duplicate event id or identity
+  `(issue, kind, ordinal, launch)` refuses, even if identical. Custody validates
+  against issue and a known launch. Only exact current active custody drives
+  unavailability; known historical facts are accepted without that effect.
+  Unknown/hybrid/issue-action mismatch refuses; remainder never fabricates an
+  attempt. Direct v2 retains old keys plus its nullable contract/four arrays.
 - The action union adds `delivery_remainder`. A remainder response has exactly
   the fields specified in the design and returns ordered `pending_stage_ids` and
   strict requirements; callers never derive a stage from tracker/forge state.
@@ -69,14 +70,10 @@
   the nonterminal custody, else latest remainder, else latest implementation.
   Callers consume every requirement into normalized owner/worktree observations
   before control. Legacy v1 summary remains historical-read-only.
-- Production caller prose/evals consume only interface 2 and the closed typed
-  action. They copy contract/intents/digests exactly, validate raw stdout before
-  decode, run `current-launch` immediately before each effect, checkpoint the
-  returned observation before advancing, and never invent implementation,
-  delivery, authority or terminal failure.
-- Runtime/report/response schemas remain centralized in `delivery_model.py`; the operational
-  transport sequence is stated once in `from-issue/ship-handoff.md` and linked
-  where a caller needs it. Do not paste field tables into every `SKILL.md`.
+- Callers consume only v2 typed actions: validate before decode, copy canonical
+  facts, fence each effect/write, checkpoint progress, and invent no truth.
+- Centralize schemas in `delivery_model.py` and transport sequence in
+  `from-issue/ship-handoff.md`; callers link rather than duplicate tables.
 
 **Invariants:**
 - Per D8/D14, schema-1 and schema-2 migrations preserve every legacy attempt,
@@ -176,10 +173,10 @@ id against that legacy ledger likewise returns exit 0/current false without a
 write. These public assertions supplement the pure migration unit; neither is
 replaced by mocking.
 
-Create `test_delivery_workflow.py`. Its fixture factory writes complete strict
-contract, intent, selected output, authority and delivery observations using the
-Task 1 public model; it creates only `sim.invalid` identities, fixed 40-hex
-subjects and temporary ledgers. Put all CLI invocation in `DeliveryHarness`.
+Create `test_delivery_workflow.py` with strict synthetic fixtures and one CLI
+`DeliveryHarness`. `known_unavailability` emits a fact only from an explicit
+fixture fact, never from bootstrap presence; its event ids are nonempty/stable.
+`owner_observation_case` constructs exact malformed/duplicate/historical cases.
 Its methods are `init(*, schema_fixture=None)`, `control`, `direct`, `current`,
 `checkpoint`, `finish`, `state_bytes`, and `state`, with the argument signatures
 shown by their calls below. Every successful stdout, including `init`, passes raw
@@ -196,14 +193,29 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
 
     def test_bootstrap_requirements_cover_both_custody_kinds(self):
         for kind in ("implementation", "remainder"):
-            harness = DeliveryHarness(self)
-            bootstrap = harness.init(schema_fixture=self.fx.active_custody_state(kind))
-            requirement = bootstrap["requirements"][0]
-            self.assertEqual(requirement["custody"]["kind"], kind)
-            request = self.fx.control_from_bootstrap(bootstrap)
-            self.assertEqual(request["owners"][0]["action_id"],
+            h = DeliveryHarness(self)
+            boot = h.init(schema_fixture=self.fx.active_custody_state(kind))
+            requirement = boot["requirements"][0]
+            self.assertEqual(self.fx.control_from_bootstrap(boot, unavailable=[])["owners"], [])
+            fact = self.fx.known_unavailability(requirement)
+            request = self.fx.control_from_bootstrap(boot, unavailable=[fact])
+            self.assertEqual(request["owners"][0]["custody"]["action_id"],
                              requirement["custody"]["action_id"])
-            harness.control(request, now=self.fx.t0)
+            self.assertTrue(request["worktrees"])
+            h.control(request, now=self.fx.t0)
+
+    def test_owner_observation_custody_validation_and_dedup(self):
+        for variant in ("hybrid", "unknown_custody", "issue_action_mismatch",
+                        "duplicate_event_conflict", "duplicate_custody"):
+            with self.subTest(variant=variant):
+                before = self.h.state_bytes()
+                refused = self.h.control(self.fx.owner_observation_case(variant),
+                                         now=self.fx.t0, ok=False)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertEqual(self.h.state_bytes(), before)
+        historical = self.h.control(self.fx.owner_observation_case("known_historical"),
+                                    now=self.fx.t0)
+        self.assertTrue(self.fx.current_custody_remains_active(historical))
 
     def test_normal_v3_owner_merge_precedes_delivered_truth(self):
         owner = self.h.direct(self.fx.direct_request(), now=self.fx.t0)
@@ -538,10 +550,8 @@ duplicate-key/UTF-8 remain raw. Action mismatch is internally inconsistent, host
 reference type is structural, and a shaped string grants nothing. Legacy v1
 summary is readable only on its historical path and rejects v2 members.
 
-Add semantic-layer cases where valid old custody passes report validation then
-fails under lock without a write; valid public-audience/changed-payload requests
-yield `scope_tuple_required`; and a shaped opaque host reference remains
-non-authoritative. Keep these out of artifact-budget's malformed-byte cases.
+Semantic tests send valid stale custody, audience/payload mismatch and shaped
+host references past structure into locked refusal/no-authority behavior.
 
 Extend `test_workflow_skill_contracts.py` and orchestration evals with:
 
@@ -577,8 +587,7 @@ def test_orchestration_eval_covers_denial_partial_progress_and_remainder(self):
         self.assertIn(phrase, text)
 ```
 
-Define `required_for_document` as a closed role-specific mapping covering every
-phrase. The eval carries complete simulated input and expected typed response.
+Use a closed role mapping; evals carry complete input and typed response.
 
 - [ ] **Step 3: Run the new tests and observe RED**
 
@@ -636,12 +645,9 @@ schema 1/2 to `validate_legacy_state(value, run_id=run_id)` and schema 3 to
 `validate_state(value, run_id=run_id)`, projects legacy implementation custody,
 and never writes. Keep `run_id` keyword-only on every validation call.
 
-Make control/direct normalize their differently shaped envelopes into one
-issue-keyed transition input before locking. Validate all delivery objects and
-cross-digests before lock. Under lock, reload state, revalidate custody/current
-launch, fold request facts canonically, run the Task 1 reducer, then either
-return implementation/remainder custody or a typed requirement. Only the trusted
-control/direct boundary may append normalized intent; owner summaries cannot.
+Normalize control/direct to one issue-keyed transition. Validate objects/digests
+before lock; under lock reload, validate custody, fold facts, reduce, and return
+typed custody/requirement. Only trusted control/direct appends intent.
 
 Implement `checkpoint-delivery` and the v2 finish entry exactly as **Interfaces**
 states. Capture the report as regular raw bytes, invoke artifact-budget on those
@@ -650,11 +656,9 @@ ledger truth. Persist facts and suspension in one atomic replacement. Emit
 canonical JSON only after persistence. Checkpoint terminalizes only count-3 anti-zombie stall via the exact
 `delivery_stalled` response; finish never maps a requirement or partial success to `terminal_failed`.
 
-Reduce stage facts in contract order. Observe merge before expiry/reaping;
-calculate deadline/stall/retry only after accepted observations update the
-progress token. Resume the same remainder in place; allocate remainder 2 only
-after genuine failure, absent effect and valid recovery basis; refuse a third.
-Keep implementation retry and capacity behavior covered by existing tests.
+Reduce in contract order: observations/progress precede deadline/stall/retry.
+Resume in place; remainder 2 needs genuine failure, absent effect and recovery;
+refuse a third. Retain implementation retry/capacity tests.
 
 - [ ] **Step 5: Implement report validation and all production callers**
 

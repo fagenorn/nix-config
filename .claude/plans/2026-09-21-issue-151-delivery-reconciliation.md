@@ -140,7 +140,9 @@ explicit migration/read-only split. Round-two review adds D18's durable
 post-rejection consumption/action rule, exact revocation subject, late-fact
 history/current-effect split and persisted stall arithmetic. Round-three review
 closes the count-3 stalled checkpoint response and restores strict bootstrap
-requirements consumption for both custody kinds.
+requirements consumption for both custody kinds. Round four replaces only the
+nested control owner observation with the custody union, preserving its existing
+unavailable/event/dedup semantics and historical no-effect behavior.
 
 Plan review provenance: an independent Sol/high review of head
 `d1c9c47ea94daa8d4f97e127d72021f8e3896baf` reported 3 Blocking / 3 Should-fix /
@@ -164,5 +166,11 @@ The independent Sol/high round-three review of head
 0 Discussion in `/private/tmp/issue-151-plan-review-round3.md`. Root verified all
 four; the bounded corrections close the terminal stall/bootstrap wires and fix
 the two executable model assertions without reopening prior dispositions.
+
+The independent Sol/high round-four review of head
+`c99759a3c493dc59c1db844078e30fad70af7b8e` reported 1 Blocking / 1 Should-fix
+in `/private/tmp/issue-151-plan-review-round4.md`. Root verified both; this
+correction closes the nested owner observation and qualifies ordinary checkpoint
+language only.
 
 ---

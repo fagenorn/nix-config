@@ -644,16 +644,20 @@ migration/report/caller interfaces with temporary ledgers in their normal source
 and generated installed layouts. The source delivery adds no bridge runtime and
 imposes no activation requirement.
 
-Control interface 2 has exactly the existing interface-1 request keys plus
-issue-keyed sorted `forge`, `delivery_contracts`, `authorization_intents`,
-`authority_observations`, `reevaluation_evidence`, and
-`delivery_observations`. Direct-owner interface 2 has exactly its interface-1
-keys plus nullable `delivery_contract` and sorted `authorization_intents`,
-`authority_observations`, `reevaluation_evidence`, and
-`delivery_observations` for its one issue. Thus both accept the same versioned
-input objects; control closes the current direct-only forge gap. Both validate
-the whole request before locking/mutation and derive policy through the same
-function.
+Control interface 2 retains interface-1 top-level keys and adds issue-keyed
+sorted `forge`, contracts, intents and observation arrays, but replaces each
+`owners` member with exactly `event_id`, `issue`, `custody`, and state literal
+`unavailable`. Event id stays a nonempty caller fact; duplicate event ids or
+custody identities refuse the whole request. Custody validates against the
+observation issue, references an existing implementation attempt or remainder
+launch/action id; hybrid, unknown or issue/action-mismatched refs refuse. A known
+historical launch is accepted but cannot mark current custody unavailable; only
+the exact current active identity affects transition. No remainder is an attempt. A bootstrap
+requirement requests probing only: callers emit an owner observation solely when
+unavailability is actually known, otherwise `owners` remains empty; worktree
+facts use their separate member. Direct interface 2 retains its old keys plus
+nullable contract and sorted intent/observation arrays. Both validate wholly
+before lock and share one transition.
 
 Their closed action union adds `delivery_remainder`; every owner action carries
 the custody union defined below. A remainder response has exactly
@@ -683,7 +687,7 @@ this boundary through
 `artifact-budget validate-report --boundary ship-checkpoint` before decode,
 takes run id/now plus the canonical checkpoint, then locks the ledger and
 rechecks that exact custody action before any mutation. A
-stale/malformed custody returns a refusal with no write. A current checkpoint
+stale/malformed custody returns a refusal with no write. A current ordinary/non-stalled checkpoint
 atomically deduplicates and persists valid observations, recomputes stage facts
 and postconditions, and returns the next stage or exact requirement without
 terminalizing custody or spending either retry budget.
