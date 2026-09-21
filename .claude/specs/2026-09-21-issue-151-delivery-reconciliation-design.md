@@ -166,7 +166,8 @@ evaluation.
 Each later stage, transfer or resume supplies a fresh proposal. Effect-bearing
 responses echo the exact canonical tuple; callers validate it, bind the actual
 invocation, fence immediately before effect and observation, and refuse mismatch
-with zero effects/writes. A checkpoint proposal applies only to the ready stage
+with zero effects/writes. Null may persist folded facts/custody but permits no
+effect or evaluation. A checkpoint proposal applies only to the ready stage
 computed after its submitted observations are folded and persisted; it never
 retroactively authorizes them. Completion requires null. A finish-created
 remainder carries null and establishes custody only. If a stage is ready its
@@ -785,8 +786,9 @@ fake-provider state, never external payload/transcript/grant.
   is neither cancellation nor grant.
 - **Argus:** independently normalized exact private scope uses covering intent and
   ordinary native evaluation. Null yields the ready-stage local requirement;
-  wrong stage/target refuses; changed endpoint/audience/payload is uncovered and
-  human-gated, all with zero effects. Transfer needs a fresh proposal. Rejection
+  wrong stage/target or selected-output slot conflict refuses byte-identically.
+  Stage/slot-valid endpoint, audience, payload, principal, risk or spend outside
+  intent is human-gated; every changed proposal has zero effects. Transfer needs a fresh proposal. Rejection
   persists; independent completion evidence grants nothing.
 - **Normal v3:** accepted/reviewed/tested selection permits publish/PR/merge;
   fresh integration reachability separately proves delivery.
@@ -811,8 +813,9 @@ Acceptance uses public executable seams; prose alone is insufficient.
    not helper calls.
 3. **Controlled provider replay.** Starting from validated direct output, record
    provider effects and typed observations through checkpoint/finish. Prove an
-   ordinary covered effect without prior allow; zero effects/writes for null,
-   wrong, invocation-echo mismatch or stale launch; custody-only finish remainder
+   ordinary covered effect without prior allow; null permits folded-fact/custody
+   writes but no effect/evaluation; wrong, invocation-echo mismatch or stale launch
+   writes nothing; custody-only finish remainder
    until fresh proposal; no D18 reissue after transfer; and current collector
    ingestion after a stale caller. Prove durable partial progress, later denial,
    same-custody resume without retry, independent human completion, and truthful

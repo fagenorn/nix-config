@@ -73,7 +73,8 @@ Git, and repository `just` commands.
 - Per D19, direct/checkpoint carry nullable `requested_scope` and control carries
   exact issue-keyed `requested_scopes`. The trusted caller builds actual tuples;
   the model binds them to the post-fold ordered stage. Missing scope is local,
-  wrong-stage refuses without write, uncovered scope is a human gate, and
+  permits fact/custody persistence but no effect/evaluation; wrong-stage or
+  slot-conflicting scope refuses without write, stage-valid uncovered scope is a human gate, and
   ordinary covered scope may run native evaluation without a prior allow. With
   no ready stage, null preserves dependency/postcondition observation requirements
   and no effect stage is invented.
@@ -202,6 +203,8 @@ The D19 amendment follows the accepted root-controller proposal and independent
 Sol/high critique: the pure reducer owns post-fold stage/scope correlation;
 requests and effect-bearing responses carry exact proposed scope; handoff echo is
 historical; finish remainder is custody-only; and ordinary authorization does
-not acquire a preflight/prior-allow ceremony.
+not acquire a preflight/prior-allow ceremony. Root's review of `e2b2cae` retained
+those rules while requiring stage-independent fixtures, null-scope persistence,
+slot-conflict refusal and explicit tuple-field/echo/provider-call coverage.
 
 ---

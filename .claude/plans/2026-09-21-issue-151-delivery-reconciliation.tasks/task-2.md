@@ -30,23 +30,22 @@
   migration_contracts)` composes valid 1→2→3 in memory, calls
   `validate_state(candidate, *, run_id)`, and writes at most once. Current-launch
   validates legacy reads without lock, upgrade or write.
-- Control v2 retains v1 top-level keys, replaces nested `owners`, and adds exact
-  issue-keyed maps `forge`, `delivery_contracts`, `authorization_intents`,
+- Control v2 keeps v1 top-level keys, replaces `owners`, and adds issue-keyed
+  `forge`, `delivery_contracts`, `authorization_intents`,
   `authority_observations`, `reevaluation_evidence`, `delivery_observations`,
-  `requested_scopes`. Every map has the requested canonical decimal keys; values
-  are existing forge objects, strict contract|null, sorted unique fact arrays, or
-  strict scope|null. Missing/extra/`01`, or null contract with facts/non-null
-  scope, refuses before lock. Direct retains v1 keys plus singular contract,
+  `requested_scopes`. Each map has exactly the requested canonical decimal keys;
+  values are forge objects, strict contract|null, sorted unique fact arrays, or
+  strict scope|null. Missing/extra/`01`, or null contract with facts/scope,
+  refuses before lock. Direct keeps v1 keys plus singular contract,
   those four fact arrays and required nullable `requested_scope`. Owner facts are
   exact event_id/issue/custody/state=unavailable; duplicate event/custody,
   historical-as-current, hybrid, unknown or mismatch refuses.
-- Control output retains v1 outer keys. Summary replaces attempt with nullable
-  custody and adds nullable contract digest, ordered pending stages and sorted
-  requirements; delta is exact issue/custody/kind/state. Wait/finalize stay exact.
-  Spawn/resume/retry and direct owner add strict custody, contract/digest, pending
-  stages, requirements, nullable evaluation and requested scope. Direct observe
-  admits the four acquisition and four delivery requirements; terminal retains
-  v1. `delivery_remainder` adds nullable evaluation/scope. Finish-created
+- Control output keeps v1 outer keys. Summary replaces attempt with nullable
+  custody and adds contract digest, ordered pending stages and sorted requirements;
+  delta is exact issue/custody/kind/state. Wait/finalize stay exact. Spawn/resume/
+  retry/direct owner add strict custody, contract/digest, stages, requirements,
+  nullable evaluation/scope. Direct observe admits all four acquisition and four
+  delivery requirements; terminal stays v1. Remainder adds evaluation/scope. Finish-created
   remainder uses null scope and the ready-stage requirement, or an observation
   requirement keyed by a missing postcondition when no stage is ready. It invents
   no effect stage. Every nested member validates through the model.
@@ -57,18 +56,16 @@
   `finish --repo-root ROOT --run-id RUN --now UTC --summary-file FILE`: complete
   has no pending stage; genuine owner failure has the accepted reason/source;
   eligible retry returns remainder; partial progress/requirements never fail.
-- Artifact-budget adds `ship-checkpoint` and `workflow-response`, loads the model,
-  and validates v2 handoff/checkpoint/summary plus all raw control/direct/current/
-  bootstrap/checkpoint/finish responses before decode. Bootstrap requirements
-  select active custody, else latest remainder, else implementation, and callers
-  turn each into normalized observations before control. Legacy v1 summary stays
-  historical-read-only.
+- Artifact-budget adds `ship-checkpoint`/`workflow-response`, loads the model and
+  validates v2 reports plus raw workflow responses before decode. Bootstrap picks
+  active custody, else latest remainder, else implementation; callers normalize
+  requirements before control. Legacy v1 summary stays read-only.
 - Handoff preserves prior requested scope as history only; summaries/stalled
   outputs add none. Production callers bind actual invocation to validated echo,
   fence before effect and observation, and never derive stages from tracker/forge.
 
 **Invariants:**
-- Per D8/D14/D17, migrations preserve every attempt, outcome, result byte/detail
+- Per D8/D14/D17, migrations preserve attempts, outcomes, result bytes/details
   and initialize no delivery truth. Context is request-derived contract|null;
   candidate facts/remainder require one repository-matching contract. Malformed,
   ambiguous or mismatched input writes nothing. Legacy current-launch returns the
@@ -85,17 +82,16 @@
   scope refuses without write; valid uncovered scope is the human gate. Covered
   ordinary scope retains native evaluation without prior allow. Next stage,
   transfer and resume require fresh proposals.
-- Selected-output ingestion verifies explicit acceptance/review/test categories;
-  ids never imply category. Checkpoint deduplicates facts; ordinary blockers
-  suspend nonterminally. Merge folds before expiry. Same-token suspensions store
-  0/1/2/3, three resumes are allowed, and 3 stalls; real progress resets 0.
-- Implementation/remainder identities remain disjoint. Resume preserves ordinal/
-  deadline and spends no retry; only genuine failure+absent effect+recovery may
-  allocate remainder 2, never 3. Existing implementation retry/capacity remains.
-- This is one source-only atomic cutover: no activation, external effect, mixed
-  generation or duplicate validation. Structural validation grants no authority;
-  locked workflow checks freshness. Product tests use synthetic temporary ledgers
-  and layouts only.
+- Selected-output ingestion verifies acceptance/review/test categories; ids imply
+  none. Checkpoint deduplicates; blockers suspend. Merge folds before expiry.
+  Same-token suspensions store 0/1/2/3; three resumes are allowed, 3 stalls, and
+  real progress resets 0.
+- Implementation/remainder identities stay disjoint. Resume keeps ordinal/deadline
+  and spends no retry; only failure+absent effect+recovery allocates remainder 2,
+  never 3. Implementation retry/capacity remains.
+- One source-only atomic cutover has no activation/effect/mixed generation.
+  Structure grants no authority; workflow checks freshness under lock.
+  Tests use synthetic ledgers/layouts.
 
 - [ ] **Step 1: Write migration and public delivery-round-trip tests**
 
@@ -239,13 +235,17 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         self.assertNotIn("allowed", self.h.state_path.read_text(encoding="utf-8"))
 
     def test_actual_scope_outcomes_echo_and_ordinary_execution(self):
+        premature = DeliveryHarness(self); premature.init()
+        premature.assert_refused_without_write("direct", self.fx.direct_request(
+            requested_scope=self.fx.requested_scope("publish")), now=self.fx.t0)
+        owner = self.h.owner_after_completed_stage(self.fx, "select")
+        provider = FakeProvider()
         scope = self.fx.requested_scope("publish")
-        owner = self.h.direct(self.fx.direct_request(requested_scope=scope), now=self.fx.t0)
         self.assertEqual(owner["requested_scope"], scope)
         self.assertEqual(owner["requirements"][0]["reason_code"],
                          "native_evaluation_required")
         self.assertNotIn("allowed", json.dumps(self.h.state()))
-        provider = FakeProvider(); before = self.h.state_bytes()
+        before = self.h.state_bytes()
         provider.perform_only_if_scope(self.h, owner, self.fx.requested_scope("open"))
         self.assertEqual((provider.calls, self.h.state_bytes()), ([], before))
         allowed, effect = provider.evaluate_and_perform(self.h, owner, "publish")
@@ -264,44 +264,35 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         self.assertEqual(missing["requirements"][0], {
             "kind": "scope_tuple", "subject_id": "open",
             "reason_code": "scope_tuple_required", "detail_pointer": None})
-        uncovered = self.h.direct(self.fx.direct_request(
-            requested_scope=self.fx.requested_scope("open", audience="public")),
-            now=self.fx.tick())
-        self.assertEqual(uncovered["requirements"][0]["reason_code"],
-                         "authorization_intent_required")
-        self.assertEqual(self.fx.blocked_on(self.h.state(), 151), "human_gate")
         for invalid in (self.fx.requested_scope("merge"),
                         self.fx.requested_scope("open", target="other")):
-            before = self.h.state_bytes()
-            refused = self.h.direct(self.fx.direct_request(requested_scope=invalid),
-                                    now=self.fx.tick(), ok=False)
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertEqual(self.h.state_bytes(), before)
+            self.h.assert_refused_without_write("direct", self.fx.direct_request(
+                requested_scope=invalid), now=self.fx.tick())
 
-    # Also assert contractless control/direct return only the strict contract
-    # requirement, with null custody/digest, empty pending stages and no action.
+    # Assert requirement-only contractless outputs.
 
     def test_denial_consumption_resume_and_transfer_replay(self):
-        owner = self.h.direct(self.fx.direct_request(), now=self.fx.t0)
+        owner = self.h.owner_after_completed_stage(self.fx, "select")
         custody = owner["custody"]
-        effect = self.fx.observed_stage("publish", custody=custody)
-        denial = self.fx.host_rejection("open", custody=custody)
-        scope = self.fx.requested_scope("open")
+        denial = self.fx.host_rejection("publish", custody=custody)
+        scope = self.fx.requested_scope("publish")
         checkpoint = self.h.checkpoint(self.fx.checkpoint(
-            custody, delivery=[effect], authority=[denial], requested_scope=scope),
+            custody, authority=[denial], requested_scope=scope),
             now=self.fx.tick())
         self.assertEqual((checkpoint["state"], checkpoint["blocked_on"],
                           checkpoint["requested_scope"]),
                          ("suspended", "human_gate", scope))
-        self.assertTrue(self.fx.contains_observation(
-            self.h.state()["issues"]["151"], effect["id"]))
         evidence = self.fx.reevaluation(denial)
-        resumed = self.h.direct(self.fx.direct_request(
-            reevaluation=[evidence]), now=self.fx.tick())
-        self.assertEqual((resumed["custody"]["attempt"], resumed["deadline_at"],
-                          resumed["requested_scope"]),
+        resumed = self.h.direct(self.fx.resume_request(
+            checkpoint, requested_scope=scope), now=self.fx.tick())
+        self.assertEqual((resumed["custody"]["attempt"], resumed["deadline_at"], resumed["requested_scope"]),
                          (custody["attempt"], owner["deadline_at"], scope))
-        permit = resumed["authority_evaluation"]
+        evaluated = self.h.checkpoint(self.fx.checkpoint(
+            resumed["custody"], reevaluation=[evidence], requested_scope=scope),
+            now=self.fx.tick())
+        self.assertEqual((evaluated["requested_scope"], evaluated["next_action"]),
+                         (scope, None))
+        permit = evaluated["authority_evaluation"]
         self.assertEqual((permit["basis_id"], [x["use_key"] for x in
             self.h.state()["issues"]["151"]["delivery"]
               ["authority_evaluation_consumptions"]]),
@@ -317,10 +308,10 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
             now=self.fx.tick())
         self.assertEqual((stopped["state"], stopped["blocked_on"]),
                          ("suspended", "human_gate"))
-        replay = self.h.direct(self.fx.direct_request(
-            reevaluation=[evidence]), now=self.fx.tick())
+        replay = self.h.direct(self.fx.resume_request(
+            stopped, requested_scope=scope, reevaluation=[evidence]), now=self.fx.tick())
         self.assertIsNone(replay["authority_evaluation"])
-        successor = self.h.control(self.fx.transfer_request(custody),
+        successor = self.h.control(self.fx.transfer_request(replay["custody"]),
                                    now=self.fx.tick())["actions"][0]
         transferred = self.h.direct(self.fx.direct_request(
             custody=successor["custody"], requested_scope=scope,
@@ -353,11 +344,12 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         self.assertEqual(self.h.state_bytes(), before)
 
     def test_successor_collects_late_effect_and_authority_without_old_grant(self):
-        owner = self.h.direct(self.fx.direct_request(), now=self.fx.t0)
+        scope = self.fx.requested_scope("select")
+        owner = self.h.direct(self.fx.direct_request(requested_scope=scope), now=self.fx.t0)
         old = owner["custody"]
-        returned = self.fx.provider_result_for("publish", custody=old)
-        allowed = self.fx.host_allowed("publish", custody=old)
-        rejected = self.fx.host_rejection("open", custody=old)
+        returned = self.fx.provider_result_for("select", custody=old)
+        allowed = self.fx.host_allowed("select", custody=old)
+        rejected = self.fx.host_rejection("select", custody=old)
         successor = self.h.control(self.fx.transfer_request(old),
                                    now=self.fx.tick())["actions"][0]
         before = self.h.state_bytes()
@@ -366,14 +358,21 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         self.assertNotEqual(old_write.returncode, 0)
         self.assertEqual(self.h.state_bytes(), before)
         current = self.h.direct(self.fx.direct_request(
-            custody=successor["custody"], authority=[allowed, rejected]),
+            custody=successor["custody"], requested_scope=scope,
+            authority=[allowed]),
             now=self.fx.tick())
+        self.assertEqual(current["requirements"][0]["reason_code"],
+                         "native_evaluation_required")
+        self.h.direct(self.fx.direct_request(
+            custody=successor["custody"], requested_scope=scope,
+            authority=[rejected]), now=self.fx.tick())
         stored = self.h.state()["issues"]["151"]["delivery"]["authority_observations"]
         self.assertTrue({allowed["id"], rejected["id"]} <= {x["id"] for x in stored})
         self.assertEqual(self.fx.blocked_on(self.h.state(), 151), "human_gate")
         accepted = self.h.checkpoint(self.fx.checkpoint(
-            successor["custody"], delivery=[returned]), now=self.fx.tick())
-        self.assertEqual(accepted["accepted_observation_ids"], [returned["id"])
+            successor["custody"], delivery=[returned], requested_scope=None),
+            now=self.fx.tick())
+        self.assertEqual(accepted["accepted_observation_ids"], [returned["id"]])
         self.assertEqual(self.fx.current_authorized_effects(self.h.state(), 151), [])
 
     def test_nodo_arcwave_and_argus_simulations(self):
@@ -397,12 +396,20 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         self.assertEqual((exact["requested_scope"],
                           exact["requirements"][0]["reason_code"]),
                          (argus.private_scope, "native_evaluation_required"))
-        for request in (argus.public_request, argus.other_endpoint_request,
-                        argus.other_payload_request):
+        provider = FakeProvider()
+        for field in ("endpoint", "audience", "payload", "principal", "risk", "spend"):
+            request = argus.stage_valid_uncovered_request(field)
+            self.assertNotEqual(canonical_bytes(request),
+                                canonical_bytes(argus.exact_private_request))
             refused = self.h.direct(request, now=self.fx.tick())
             self.assertEqual(refused["requirements"][0]["reason_code"],
                              "authorization_intent_required")
             self.assertEqual(self.fx.blocked_on(self.h.state(), 151), "human_gate")
+            provider.perform_only_if_scope(
+                self.h, refused, request["requested_scope"])
+        self.h.assert_refused_without_write(
+            "direct", argus.selected_output_conflict_request, now=self.fx.tick())
+        self.assertEqual(provider.calls, [])
         completed = self.h.checkpoint(argus.human_completion(exact), now=self.fx.tick())
         self.assertIn(argus.rejection_id, json.dumps(self.h.state()))
         self.assertNotIn("agent_authorized", json.dumps(completed))
@@ -481,10 +488,16 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
                          ("delivery_remainder", None))
         self.assertEqual(custody_only["requirements"][0]["reason_code"],
                          "scope_tuple_required")
+        provider = FakeProvider(); provider.perform_only_if_scope(
+            self.h, custody_only, requested_scope=None)
+        self.assertEqual(provider.calls, [])
+        next_scope = self.fx.requested_scope(custody_only["pending_stage_ids"][0])
         admitted = self.h.direct(self.fx.retry_request(
-            custody_only, requested_scope=self.fx.requested_scope("recovery")),
+            custody_only, requested_scope=next_scope),
             now=self.fx.tick())
-        self.assertIsNotNone(admitted["requested_scope"])
+        self.assertEqual(admitted["requested_scope"], next_scope)
+        provider.perform_only_if_scope(self.h, admitted, next_scope)
+        self.assertEqual(provider.calls, [custody_only["pending_stage_ids"][0]])
 
         for issue, variant in ((152, "missing_recovery_basis"),
                                (153, "nonretryable")):
@@ -521,16 +534,13 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
             self.assertEqual(run.ledger_after, run.ledger_before)
 ```
 
-Implement every named harness method in this test file before the class using
-`subprocess.run`, canonical temporary report files, and assertions that raw
-stdout has validated before `json.loads`. `DeliveryFixtures` contains
-the full strict literal constructors used by these tests and validates each
-object through `delivery_model.validate_delivery_object`; `FakeProvider` has one
-`calls` list and no network path. Do not replace these public CLI tests with
-monkeypatches of workflow-state internals. `round_trip_with_layout("installed")`
-uses an explicit temporary HOME with lexical wrapper/library symlinks to regular fake
-store files. It never reads real HOME; negatives replace only the model leaf with
-missing/directory/wrong-interface cases.
+Implement named harness methods before the class with `subprocess.run`, temp
+reports and raw validation before decode. `DeliveryFixtures` holds strict,
+model-validated literals; `FakeProvider` has one
+`calls` list. Do not replace CLI tests with
+monkeypatches of workflow-state internals. Installed round trips use temp HOME and
+lexical wrapper/library symlinks to fake-store files; negatives
+replace only the model leaf with missing/directory/wrong-interface cases.
 Clone the after-merge/pending-integration fixture through genuine failure: finish
 returns custody-only remainder with null scope and exact
 `implementation_delivered/postcondition_observation_required`; any nonnull fresh
