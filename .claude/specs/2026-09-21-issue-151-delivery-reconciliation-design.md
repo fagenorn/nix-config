@@ -527,51 +527,36 @@ the stage advances; the effect result alone is not proof.
 
 ### Shared delivery model seam
 
-The private source/installed package `scripts/delivery_model/` /
-`~/.agents/lib/python/delivery_model/` has one `__init__.py` facade.
-`_canonical.py` owns primitives, `_objects.py` objects/stage relationships,
-`_wire.py` envelopes, and `_reconcile.py` matching/reduction; dependencies flow
-canonical → objects → wire/reconcile without cycles, registries or injection.
-It has no CLI, I/O, clock, provider, policy, activation or schema choice.
+Private source/installed `delivery_model/` has one `__init__.py` facade. Its
+acyclic `_canonical`, `_objects`, `_wire` and `_reconcile` leaves own primitives,
+objects/stage relationships, envelopes and matching/reduction. It has no CLI, I/O, clock, provider or schema choice.
 
-Its unchanged interface-1 surface is exactly `MODEL_INTERFACE_VERSION`,
+The unchanged interface-1 surface is exactly `MODEL_INTERFACE_VERSION`,
 `DeliveryModelError`, `canonical_bytes`, `canonical_digest`,
 `validate_delivery_object`, `validate_custody_ref`, `match_scope`, and
-`reduce_delivery`. `match_scope` takes validated contract/intent/requested tuple,
-selected outputs, explicit time and revocations. `reduce_delivery` takes contract,
-delivery and one strict context: time, nullable custody/current launch/requested
-scope, trusted-source kind, and candidate intent/authority/reevaluation/delivery
-facts. It owns post-fold ordered-stage and proposed-effect correlation, validates
-all bindings, and returns persistable `next_delivery`, ordered pending/nullable
-next stage, sorted requirements, completion, nullable blocking/evaluation, and
-the nullable canonical `requested_scope` it evaluated for response echo.
-Source kind names the normalized boundary, not authority. Direct/control may
-retain late facts under their original launch; only a current-custody allow is
-effect-eligible. Checkpoint/summary cannot introduce one. Consumption and action
-return together, so callers infer no persistence from prose.
+`reduce_delivery`. Reduction receives validated contract/delivery and explicit
+time, custody/current launch/requested scope, trusted-source kind, intent and
+candidate fact chains. It validates bindings and returns persistable delivery,
+ordered pending/next stage, requirements, completion, blocking/evaluation and
+the canonical scope echo. Late facts retain their launch; only current-custody
+allow can authorize. Checkpoint/summary cannot add allow. Consumption/action
+return together. Structural validation cannot prove freshness/source authority;
+workflow-state performs those locked checks and artifact-budget stays structural.
 
-`validate_delivery_object` is structural/canonical; it cannot know current
-custody or authenticate normalized source/host references. Workflow-state passes
-trusted normalized input and performs locked semantic/freshness checks through
-`reduce_delivery`; artifact-budget uses structural validation only. Well-shaped
-stale or unverified claims reach the transaction/trust layer and grant nothing.
-
-Source/installed load the respective lexical `__init__.py` as a package for
-relative imports and remove partial members on failure. They never search/edit
-`sys.path`, fall back or load private files separately. Missing/private/non-file
-or wrong-interface input refuses before decode/mutation; a managed directory
-symlink to one store package is valid. Module tests cover both layouts.
-Workflow-state alone writes transitions; artifact-budget only validates reports.
-Schema/interface selection waits for the atomic producer/consumer adoption.
+Load only the respective lexical `__init__.py` as a package, clean partial loads
+and never search/edit `sys.path`, fall back or load leaves separately. Missing,
+non-file or wrong-interface input refuses before decode/mutation; a managed
+package-directory symlink is valid. Schema/interface selection waits for the
+atomic adoption.
 
 Private source/installed `workflow_delivery.py` is workflow-state's deep boundary.
 Its interface-1 surface is exactly `WORKFLOW_DELIVERY_INTERFACE_VERSION` and
 `DeliveryRuntime`. Construction loads the adjacent model before decode. The
-runtime validates v2 admission and schema-3 delivery envelopes and computes the
+runtime validates v2 admission/schema-3 delivery envelopes and computes the pure
 shared transition from normalized facts/state, returning detached next state and
 closed response. Workflow-state retains CLI, legacy lifecycle/custody, locking,
-one write and effects. The runtime has no I/O, clock, callbacks, policy copies,
-fallback path or parallel v1 effect path.
+one write and effects. The runtime has no I/O, clock, callbacks, copied policy,
+fallback or parallel v1 effect path.
 
 ### Versioned state and transports
 
