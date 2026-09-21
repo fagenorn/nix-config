@@ -17,6 +17,22 @@ def _time(value: str) -> datetime:
     _utc(value, "time"); return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
 
 
+def _allow_had_intent(delivery: dict[str, Any], allowed: dict[str, Any]) -> bool:
+    observed = _time(allowed["observed_at"])
+    for intent in delivery["authorization_intents"]:
+        if allowed["scope_id"] not in {scope["id"] for scope in intent["scopes"]} \
+                or observed < _time(intent["issued_at"]) \
+                or (intent["expires_at"] is not None and observed > _time(intent["expires_at"])):
+            continue
+        revoked = any(item["authority_kind"] == "intent_revocation"
+            and item["revocation_subject"] == {"intent_id": intent["id"],
+                                               "revocation_key": intent["revocation_key"]}
+            and _time(item["observed_at"]) <= observed
+            for item in delivery["authority_observations"])
+        if not revoked: return True
+    return False
+
+
 def _scope_mismatch(declared: dict[str, Any], requested: dict[str, Any], selected: list[dict[str, Any]]) -> str | None:
     for key in ("principal", "action", "effect", "endpoint", "risk"):
         if requested[key] != declared[key]: return "scope_target_mismatch"
@@ -173,7 +189,9 @@ def reduce_delivery(contract: object, delivery: object, *, evaluation: object) -
                 covering = []
             scope_id = covering[-1][1]["scope_id"] if covering else requested["id"]
             rejections = [item for item in next_delivery["authority_observations"] if item["scope_id"] == scope_id and item["verdict"] == "rejected"]
-            allowed = [item for item in next_delivery["authority_observations"] if item["scope_id"] == scope_id and item["verdict"] == "allowed"]
+            allowed = [item for item in next_delivery["authority_observations"]
+                       if item["scope_id"] == scope_id and item["verdict"] == "allowed"
+                       and _allow_had_intent(next_delivery, item)]
             if covering and rejections:
                 rejection = sorted(rejections, key=lambda item: item["observed_at"])[-1]
                 fresh_allowed = [item for item in allowed if item["launch_id"] == e["custody"]["action_id"] and any(item["evaluation_use_key"] == use["use_key"] and use["rejected_observation_id"] == rejection["id"] and use["contract_digest"] == item["contract_digest"] and use["scope_id"] == item["scope_id"] and use["custody"] == e["custody"] and _time(item["observed_at"]) >= _time(use["consumed_at"]) for use in next_delivery["authority_evaluation_consumptions"])]

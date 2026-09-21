@@ -380,6 +380,10 @@ def _stage_observation_matches(contract: dict[str, Any], delivery: dict[str, Any
                 and observation["subject"].get("pr_number") == subject["pr_number"]
                 and observation["subject"].get("expected_head") == subject["expected_head"]
                 and observation["subject"].get("base") == subject["base"]
+                and any(open_stage["kind"] == "open_pr"
+                        and _stage_observation_matches(
+                            contract, delivery, open_stage, observation)
+                        for open_stage in contract["stages"])
                 for observation in delivery["delivery_observations"])
         return valid
     target = stage["target_ref"].get("value")
@@ -407,6 +411,9 @@ def _postcondition_observation_matches(contract: dict[str, Any], delivery: dict[
         if len(selected) != 1: return False
         for name in ("acceptance_evidence_ids", "review_evidence_ids", "test_evidence_ids"):
             if not set(selected[0][name]) <= set(subject[name]): return False
+        if selected[0]["subject_kind"] == "record" \
+                and subject["integration_subject"]["value"] != selected[0]["subject_value"]:
+            return False
         merge_id = subject["merge_observation_id"]
         if any(stage["kind"] == "merge_pr" for stage in contract["stages"]):
             if merge_id is None: return False
@@ -418,8 +425,7 @@ def _postcondition_observation_matches(contract: dict[str, Any], delivery: dict[
                           and _stage_observation_matches(contract, delivery, stage, merge)]
             if len(applicable) != 1: return False
             if selected[0]["subject_kind"] == "record":
-                if subject["integration_subject"]["value"] != selected[0]["subject_value"] \
-                        or merge["subject"]["expected_head"] != _selected_head(delivery, selected[0]): return False
+                if merge["subject"]["expected_head"] != _selected_head(delivery, selected[0]): return False
             elif merge["subject"]["merge_sha"] != subject["integration_subject"]["value"]: return False
         elif merge_id is not None: return False
         return subject["presence"]["succeeded"] is True

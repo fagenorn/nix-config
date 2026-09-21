@@ -10,6 +10,32 @@ import sys
 import tempfile
 import unittest
 
+from ._delivery_model_fixtures import (
+    seal,
+    custody,
+    next_launch,
+    scope,
+    intent,
+    selection,
+    contract_and_delivery,
+    requested_scope,
+    authority,
+    revocation,
+    reevaluation,
+    evaluation,
+    stage_state,
+    post_state,
+    workflow_responses,
+    with_host_rejection,
+    observation,
+    with_observed,
+    rebind_contract,
+    cleanup_contract_and_delivery,
+    record_case,
+    renewal_case,
+    ship_handoff,
+)
+
 ROOT = Path(__file__).parents[4]
 SOURCE = ROOT / "home/common/agent-skills/scripts/delivery_model/__init__.py"
 DEFAULT_NIX = ROOT / "home/common/agent-skills/default.nix"
@@ -34,330 +60,6 @@ def load_model(path: Path, name: str):
     return module
 
 
-def seal(model, value, field="id"):
-    value[field] = model.canonical_digest(value, omit_derived=field)
-    return value
-
-
-def custody(kind="implementation", ordinal=1, launch=1):
-    if kind == "implementation":
-        return {"kind": kind, "attempt": ordinal, "launch": launch,
-                "action_id": f"151:{ordinal}:{launch}"}
-    return {"kind": kind, "remainder": ordinal, "launch": launch,
-            "action_id": f"151:r{ordinal}:{launch}"}
-
-
-def next_launch(value):
-    result = copy.deepcopy(value)
-    result["launch"] += 1
-    if result["kind"] == "implementation":
-        result["action_id"] = f"151:{result['attempt']}:{result['launch']}"
-    else:
-        result["action_id"] = f"151:r{result['remainder']}:{result['launch']}"
-    return result
-
-
-def scope(model, *, audience="private", pr="17"):
-    return seal(model, {
-        "schema_version": 1, "kind": "scope-tuple", "id": "",
-        "principal": {"kind": "agent", "stable_id": "worker-1"},
-        "action": "merge_pull_request", "effect": "provider_write",
-        "target": {
-            "project_id": "sim-project", "provider": "github",
-            "repository_id": "sim-repo", "repository_slug": "sim.invalid/repo",
-            "issue": 151, "branch": "feature", "base": "main",
-            "pr_ref": {"kind": "literal", "value": pr},
-            "output_ref": {"kind": "slot", "slot_id": "reviewed"},
-        },
-        "endpoint": {"kind": "literal", "value": "provider:merge"},
-        "data": {"kind": "selected_output_slot", "slot_id": "reviewed",
-                 "classification": "source", "audience": audience},
-        "risk": "repository_write", "spend": {"kind": "none"},
-    })
-
-
-def intent(model, declared, *, predecessor=None, issued="2026-09-20T00:00:00Z",
-           key="key-1", source="explicit_user"):
-    return seal(model, {
-        "schema_version": 1, "kind": "authorization-intent", "id": "",
-        "predecessor_intent_id": predecessor,
-        "source": {"kind": source, "reference": f"ref:{key}",
-                   "evidence_digest": "sha256:" + "1" * 64},
-        "issued_at": issued, "expires_at": None, "revocation_key": key,
-        "scopes": [declared],
-    })
-
-
-def selection(model, contract_digest, *, subject_kind="commit", subject_value=None):
-    if subject_value is None:
-        subject_value = ("sha256:" + "a" * 64) if subject_kind == "record" else "a" * 40
-    return seal(model, {
-        "schema_version": 1, "kind": "selected-output", "id": "",
-        "contract_digest": contract_digest, "slot_id": "reviewed",
-        "subject_kind": subject_kind, "subject_value": subject_value,
-        "data_identity_digest": "sha256:" + "2" * 64,
-        "repository_id": "sim-repo", "branch": "feature", "base": "main",
-        "evidence_digest": "sha256:" + "3" * 64,
-        "acceptance_evidence_ids": ["accept-1"],
-        "review_evidence_ids": ["review-1"],
-        "test_evidence_ids": ["test-1"],
-    })
-
-
-def contract_and_delivery(model):
-    declared = scope(model)
-    first = intent(model, declared)
-    stage_specs = [
-        ("select", "select_reviewed_output", "select_output", "ledger_write"),
-        ("publish", "publish_branch", "push_branch", "repository_write"),
-        ("open", "open_pr", "open_pull_request", "provider_write"),
-        ("merge", "merge_pr", "merge_pull_request", "provider_write"),
-    ]
-    target_ref = {
-        "kind": "slot", "slot_id": "reviewed", "subject_kind": "commit",
-        "constraints": {
-            "project_id": "sim-project", "provider": "github",
-            "repository_id": "sim-repo", "repository_slug": "sim.invalid/repo",
-            "branch": "feature", "base": "main", "deliverable_class": "source",
-            "data_ref": {"kind": "selected_output_slot", "slot_id": "reviewed",
-                         "classification": "source", "audience": "private"},
-        },
-    }
-    stages = []
-    for index, (stage_id, kind, action, effect) in enumerate(stage_specs):
-        stages.append({
-            "id": stage_id, "kind": kind, "action": action, "effect": effect,
-            "target_ref": copy.deepcopy(target_ref),
-            "worktree_requirement": "matching_required",
-            "depends_on": [] if index == 0 else [stages[index - 1]["id"]],
-            "retryable": True,
-        })
-    contract = {
-        "schema_version": 1, "kind": "delivery-contract",
-        "project": {"project_id": "sim-project", "provider": "github",
-                    "repository_id": "sim-repo", "repository_slug": "sim.invalid/repo"},
-        "issue": 151,
-        "deliverable": {"id": "delivery-151", "summary": "Deliver model",
-                        "obligations": {"implementation_delivered": "required",
-                                        "pr_merged": "required",
-                                        "tracker_closed": "not_applicable",
-                                        "cleanup_complete": "not_applicable"}},
-        "stages": stages, "initial_authorization_intent_id": first["id"],
-        "initial_authorization_intent_digest": model.canonical_digest(first),
-        "provenance": {"kind": "issue", "reference": "issue:151",
-                       "digest": "sha256:" + "4" * 64,
-                       "created_at": "2026-09-20T00:00:00Z"},
-    }
-    digest = model.canonical_digest(contract)
-    facts = [seal(model, {"schema_version": 1, "kind": "delivery-stage-fact", "id": "",
-                               "contract_digest": digest, "stage_id": item["id"],
-                               "state": "pending", "observation_id": None}) for item in stages]
-    delivery = {
-        "contract": contract, "contract_digest": digest,
-        "authorization_intents": [first],
-        "authorization_chain_digest": model.canonical_digest({"intent_ids": [first["id"]]}),
-        "authority_observations": [], "reevaluation_evidence": [],
-        "authority_evaluation_consumptions": [], "delivery_observations": [],
-        "selected_outputs": [], "stage_facts": facts,
-        "postconditions": {
-            "implementation_delivered": {"state": "pending", "observation_id": None},
-            "pr_merged": {"state": "pending", "observation_id": None},
-            "tracker_closed": {"state": "not_applicable", "observation_id": None},
-            "cleanup_complete": {"state": "not_applicable", "observation_id": None},
-        },
-    }
-    return contract, delivery
-
-
-def requested_scope(model, declared, selected):
-    value = copy.deepcopy(declared)
-    value["target"]["output_ref"] = {"kind": "literal", "value": selected["subject_value"]}
-    value["data"] = {"kind": "literal", "digest": selected["data_identity_digest"],
-                     "classification": "source", "audience": "private"}
-    return seal(model, value)
-
-
-def authority(model, contract, declared, launch, verdict="rejected"):
-    return seal(model, {
-        "schema_version": 1, "kind": "authority-observation", "id": "",
-        "contract_digest": model.canonical_digest(contract), "scope_id": declared["id"],
-        "launch_id": launch["action_id"], "authority_kind": "host", "verdict": verdict,
-        "reason_code": "host_result", "observed_at": "2026-09-20T01:00:00Z",
-        "evidence_digest": "sha256:" + "5" * 64,
-        "opaque_host_reference": None, "revocation_subject": None,
-        "evaluation_use_key": None,
-    })
-
-
-def reevaluation(model, contract, denial):
-    return seal(model, {
-        "schema_version": 1, "kind": "reevaluation-evidence", "id": "",
-        "contract_digest": model.canonical_digest(contract), "scope_id": denial["scope_id"],
-        "rejected_observation_id": denial["id"], "source_kind": "host",
-        "reason_code": "material_change", "observed_at": "2026-09-20T02:00:00Z",
-        "evidence_digest": "sha256:" + "6" * 64,
-    })
-
-
-def evaluation(**changes):
-    value = {"at_time": "2026-09-21T00:00:00Z", "custody": None,
-             "current_launch": None, "requested_scope": None, "source_kind": "direct",
-             "authorization_intents": [], "authority_observations": [],
-             "reevaluation_evidence": [], "delivery_observations": []}
-    value.update(changes)
-    return value
-
-
-def workflow_responses(model):
-    contract, _ = contract_and_delivery(model); digest = model.canonical_digest(contract)
-    active = custody(); pending = [stage["id"] for stage in contract["stages"]]
-    block = {"custody": active, "contract": contract, "contract_digest": digest,
-             "pending_stage_ids": pending, "requirements": [], "authority_evaluation": None}
-    owner = {"interface_version": 2, "kind": "owner", "ledger_repo_root": "/repo",
-             "run_id": "run-1", "issue": 151, "attempt": 1, "owner": "151:1",
-             "action_id": "151:1:1", "launch_kind": "spawn", "worktree": "/worktree",
-             "handoff_path": "/handoff", "deadline_at": "2026-09-21T01:00:00Z", **block}
-    control_owner = {"id": "151:1:1", "kind": "spawn", "issue": 151, "attempt": 1,
-                     "owner": "151:1", "worktree": "/worktree", "handoff_path": "/handoff",
-                     "deadline_at": "2026-09-21T01:00:00Z", **block}
-    remainder_custody = {"kind": "remainder", "remainder": 1, "launch": 1,
-                         "action_id": "151:r1:1"}
-    remainder = {"interface_version": 2, "kind": "delivery_remainder",
-                 "ledger_repo_root": "/repo", "run_id": "run-1", "issue": 151,
-                 "source_attempt": 1, "owner": "151:r1", "custody": remainder_custody,
-                 "worktree": "/worktree", "contract": contract, "contract_digest": digest,
-                 "pending_stage_ids": pending, "deadline_at": "2026-09-21T01:00:00Z",
-                 "requirements": [], "authority_evaluation": None}
-    common = {"interface_version": 2, "ledger_repo_root": "/repo", "run_id": "run-1",
-              "issue": 151, "owner": "151:1", "custody": active,
-              "contract_digest": digest, "accepted_observation_ids": [],
-              "pending_stage_ids": pending}
-    return {
-        "current": {"action_id": "151:1:1", "current": True,
-                    "current_action_id": "151:1:1", "reason": "current"},
-        "bootstrap": {"interface_version": 2, "kind": "workflow_bootstrap",
-                      "run_id": "run-1", "requirements": []},
-        "control": {"interface_version": 2, "run_id": "run-1", "now": "2026-09-21T00:00:00Z",
-                    "summaries": [{"issue": 151, "state": "active", "custody": active,
-                        "owner": "151:1", "worktree": "/worktree", "deadline_at": "2026-09-21T01:00:00Z",
-                        "blocked_on": None, "blockers": [], "result": None,
-                        "contract_digest": digest, "pending_stage_ids": pending, "requirements": []}],
-                    "deltas": [{"issue": 151, "custody": active, "kind": "spawned", "state": "active"}],
-                    "actions": [control_owner], "next_deadline": "2026-09-21T01:00:00Z"},
-        "observe": {"interface_version": 2, "kind": "observe", "issue": 151,
-                    "run_id": "run-1", "requirements": [{"kind": "tracker"}]},
-        "owner": owner,
-        "terminal": {"interface_version": 2, "kind": "terminal", "issue": 151,
-                     "run_id": "run-1", "source": "ledger", "reason": "closed",
-                     "blockers": [], "result": None, "reentry": "resume"},
-        "remainder": remainder,
-        "checkpointed": {**common, "kind": "delivery_checkpointed", "next_action": None,
-                         "requirements": [], "authority_evaluation": None, "state": "active", "blocked_on": None},
-        "stalled": {**common, "kind": "delivery_stalled", "state": "terminal_failed",
-                    "stalled_resumes": 3, "result_source": "stalled",
-                    "reason_code": "suspension_stalled_without_progress"},
-        "complete": {**common, "kind": "delivery_complete", "pending_stage_ids": [],
-                     "state": "delivery_complete"},
-        "failed": {**common, "kind": "terminal_failed", "state": "terminal_failed",
-                   "result_source": "owner", "reason_code": "owner_reported_failure"},
-    }
-
-
-def with_host_rejection(model, contract, delivery, active):
-    result = copy.deepcopy(delivery)
-    denial = authority(model, contract, result["authorization_intents"][-1]["scopes"][0], active)
-    result["authority_observations"] = [denial]
-    return result, denial
-
-
-def observation(model, contract, kind, subject):
-    return seal(model, {
-        "schema_version": 1, "kind": "delivery-observation", "id": "",
-        "contract_digest": model.canonical_digest(contract),
-        "project": copy.deepcopy(contract["project"]), "observation_kind": kind,
-        "subject": copy.deepcopy(subject),
-        "source": {"kind": "provider", "reference": f"sim:{kind}"},
-        "observed_at": "2026-09-20T03:00:00Z",
-        "evidence_digest": "sha256:" + "7" * 64,
-    })
-
-
-def with_observed(model, contract, delivery, stage_ids):
-    result = copy.deepcopy(delivery)
-    mapping = {
-        "select": ("selected_output", {"selected_output": selection(model, model.canonical_digest(contract))}),
-        "publish": ("branch_published", {"repository_id": "sim-repo", "branch": "feature", "selected_head": "a" * 40}),
-        "open": ("pr_opened", {"provider_repository_id": "sim-repo", "pr_number": 17,
-                                    "pr_url": "https://sim.invalid/pr/17", "expected_head": "a" * 40, "base": "main"}),
-        "merge": ("pr_merged", {"provider_repository_id": "sim-repo", "pr_number": 17,
-                                     "pr_url": "https://sim.invalid/pr/17", "expected_head": "a" * 40,
-                                     "base": "main", "merge_sha": "b" * 40, "merged": True}),
-    }
-    for stage_id in stage_ids:
-        kind, subject = mapping[stage_id]
-        item = observation(model, contract, kind, subject)
-        result["delivery_observations"].append(item)
-    result["delivery_observations"].sort(key=lambda item: item["id"])
-    return result
-
-
-def rebind_contract(model, contract, delivery):
-    result = copy.deepcopy(delivery)
-    result["contract"] = copy.deepcopy(contract)
-    result["contract_digest"] = model.canonical_digest(contract)
-    result["stage_facts"] = [seal(model, {
-        "schema_version": 1, "kind": "delivery-stage-fact", "id": "",
-        "contract_digest": result["contract_digest"], "stage_id": stage["id"],
-        "state": "pending", "observation_id": None,
-    }) for stage in contract["stages"]]
-    return result
-
-
-def cleanup_contract_and_delivery(model):
-    contract, delivery = contract_and_delivery(model)
-    stages = (
-        ("close", "close_tracker", "close_issue", "tracker_write", "151", "not_required"),
-        ("remote", "delete_remote_branch", "delete_remote_branch", "repository_write", "feature", "cleanup_target"),
-        ("worktree", "remove_worktree", "remove_worktree", "filesystem_write", "/worktree", "cleanup_target"),
-        ("local", "delete_local_branch", "delete_local_branch", "repository_write", "feature", "cleanup_target"),
-    )
-    dependency = "merge"
-    for stage_id, kind, action, effect, target, requirement in stages:
-        contract["stages"].append({
-            "id": stage_id, "kind": kind, "action": action, "effect": effect,
-            "target_ref": {"kind": "literal", "value": target},
-            "worktree_requirement": requirement, "depends_on": [dependency],
-            "retryable": True,
-        })
-        dependency = stage_id
-    contract["deliverable"]["obligations"].update(
-        tracker_closed="required", cleanup_complete="required")
-    delivery = rebind_contract(model, contract, delivery)
-    delivery["postconditions"]["tracker_closed"] = {"state": "pending", "observation_id": None}
-    delivery["postconditions"]["cleanup_complete"] = {"state": "pending", "observation_id": None}
-    return contract, delivery
-
-
-def ship_handoff(model, contract, delivery):
-    artifact = {"budget_status": "within_budget", "kind": "design-spec",
-                "metrics": {"root_bytes": 1, "total_bytes": 1, "file_count": 1,
-                            "largest_member_bytes": 0},
-                "path": ".claude/specs/sim.md"}
-    return {"interface_version": 2, "state": "complete", "ledger_repo_root": "/repo",
-            "run_id": "run-1", "owner": "151:1", "owner_worktree": "/worktree",
-            "custody": custody(), "issue_number": 151, "branch": "feature",
-            "worktree_path": "/worktree", "spec_artifact": artifact,
-            "plan_artifact": {**artifact, "kind": "implementation-plan",
-                              "path": ".claude/plans/sim.md"},
-            "head_sha": "a" * 40, "review_state": "clean", "auto": True,
-            "report_path": None, "notes": "simulated", "delivery_contract": contract,
-            "delivery_contract_digest": model.canonical_digest(contract),
-            "authorization_intents": delivery["authorization_intents"],
-            "authorization_chain_digest": delivery["authorization_chain_digest"],
-            "authority_observation_ids": [], "reevaluation_evidence_ids": [],
-            "authority_evaluation_consumption_ids": [],
-            "pending_stage_ids": [stage["id"] for stage in contract["stages"]],
-            "selected_outputs": delivery["selected_outputs"]}
 
 
 class DeliveryModelTest(unittest.TestCase):
@@ -442,7 +144,7 @@ class DeliveryModelTest(unittest.TestCase):
             candidate["delivery_observations"].sort(key=lambda item: item["id"])
             reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
             with self.subTest(pr=pr):
-                self.assertEqual(reduced["next_delivery"]["postconditions"]["pr_merged"]["state"], expected)
+                self.assertEqual(post_state(reduced, "pr_merged"), expected)
 
     def test_matcher_expiry_contract_and_slot_constraints(self):
         contract, delivery = contract_and_delivery(self.model)
@@ -476,13 +178,7 @@ class DeliveryModelTest(unittest.TestCase):
     def test_revocation_binds_intent_and_key(self):
         contract, delivery = contract_and_delivery(self.model)
         first = delivery["authorization_intents"][0]; second = intent(self.model, first["scopes"][0], predecessor=first["id"], key="key-2")
-        revoked = seal(self.model, {"schema_version": 1, "kind": "authority-observation", "id": "",
-            "contract_digest": self.model.canonical_digest(contract), "scope_id": first["scopes"][0]["id"],
-            "launch_id": None, "authority_kind": "intent_revocation", "verdict": "revoked",
-            "reason_code": "revoked", "observed_at": "2026-09-20T02:00:00Z",
-            "evidence_digest": "sha256:" + "8" * 64, "opaque_host_reference": None,
-            "revocation_subject": {"intent_id": first["id"], "revocation_key": "key-1"},
-            "evaluation_use_key": None})
+        revoked = revocation(self.model, contract, first)
         self.assertEqual(self.model.match_scope(contract, first, first["scopes"][0], selected_outputs=[],
             at_time="2026-09-21T00:00:00Z", revocation_observations=[revoked])["reason_code"], "intent_revoked")
         self.assertTrue(self.model.match_scope(contract, second, second["scopes"][0], selected_outputs=[],
@@ -496,8 +192,8 @@ class DeliveryModelTest(unittest.TestCase):
         self.assertEqual(reduced["next_stage_id"], "merge")
         merged = with_observed(self.model, contract, opened, ["merge"])
         done = self.model.reduce_delivery(contract, merged, evaluation=evaluation())
-        self.assertEqual(done["next_delivery"]["postconditions"]["pr_merged"]["state"], "observed")
-        self.assertEqual(done["next_delivery"]["postconditions"]["implementation_delivered"]["state"], "pending")
+        self.assertEqual(post_state(done, "pr_merged"), "observed")
+        self.assertEqual(post_state(done, "implementation_delivered"), "pending")
         self.assertEqual(delivery, before)
 
     def test_rejection_bases_are_independent_and_one_shot(self):
@@ -556,6 +252,20 @@ class DeliveryModelTest(unittest.TestCase):
             authority_observations=[allowed], source_kind="direct"))
         self.assertIn(allowed["id"], {x["id"] for x in reduced["next_delivery"]["authority_observations"]})
         self.assertEqual(reduced["requirements"][0]["reason_code"], "authority_launch_mismatch")
+        for allow_at, revoke_at, operative in (
+            ("2026-09-20T01:00:00Z", None, True),
+            ("2026-09-20T02:00:00Z", None, True),
+            ("2026-09-20T02:00:01Z", None, False),
+            ("2026-09-20T01:00:00Z", "2026-09-20T01:30:00Z", True),
+            ("2026-09-20T01:30:01Z", "2026-09-20T01:30:00Z", False),
+        ):
+            with self.subTest(allow_at=allow_at, revoke_at=revoke_at):
+                result, retained = renewal_case(self.model, allow_at, revoke_at)
+                self.assertIn(retained["id"], {item["id"] for item in
+                              result["next_delivery"]["authority_observations"]})
+                reason = None if operative else "native_evaluation_required"
+                self.assertEqual(result["requirements"][0]["reason_code"]
+                                 if result["requirements"] else None, reason)
 
     def test_workflow_response_validation_is_structural_only(self):
         fixtures = workflow_responses(self.model)
@@ -622,7 +332,7 @@ class DeliveryModelTest(unittest.TestCase):
 
         false_merge = observation(self.model, contract, "pr_merged", {"provider_repository_id": "sim-repo", "pr_number": 18, "pr_url": "https://sim.invalid/pr/18", "expected_head": "c" * 40, "base": "wrong-base", "merge_sha": "b" * 40, "merged": False})
         result = self.model.reduce_delivery(contract, delivery, evaluation=evaluation(delivery_observations=[false_merge]))
-        self.assertEqual(result["next_delivery"]["postconditions"]["pr_merged"]["state"], "pending")
+        self.assertEqual(post_state(result, "pr_merged"), "pending")
         self.assertEqual(next(item["state"] for item in result["next_delivery"]["stage_facts"] if item["stage_id"] == "merge"), "pending")
 
         repeated = with_observed(self.model, contract, delivery, ["select", "publish"])
@@ -683,9 +393,8 @@ class DeliveryModelTest(unittest.TestCase):
             "close_reason": "completed", "observation_identity": "foreign-152"})
         reduced = self.model.reduce_delivery(
             contract, delivery, evaluation=evaluation(delivery_observations=[foreign]))
-        self.assertEqual(reduced["next_delivery"]["postconditions"]["tracker_closed"]["state"], "pending")
-        self.assertEqual(next(f["state"] for f in reduced["next_delivery"]["stage_facts"]
-                             if f["stage_id"] == "close"), "pending")
+        self.assertEqual(post_state(reduced, "tracker_closed"), "pending")
+        self.assertEqual(stage_state(reduced, "close"), "pending")
 
     def test_all_stage_and_completion_families_bind_exact_subjects(self):
         contract, delivery = cleanup_contract_and_delivery(self.model)
@@ -732,6 +441,15 @@ class DeliveryModelTest(unittest.TestCase):
         self.assertTrue(all(item["state"] == "observed"
                             for item in result["next_delivery"]["postconditions"].values()))
 
+        foreign_open = copy.deepcopy(observed)
+        opened = next(item for item in foreign_open["delivery_observations"]
+                      if item["observation_kind"] == "pr_opened")
+        opened["subject"]["provider_repository_id"] = "foreign-repo"; seal(self.model, opened)
+        foreign_open["delivery_observations"].sort(key=lambda item: item["id"])
+        result = self.model.reduce_delivery(contract, foreign_open, evaluation=evaluation())
+        self.assertEqual({fact["stage_id"]: fact["state"] for fact in result["next_delivery"]["stage_facts"]}
+                         ["merge"], "pending")
+
         for mutation in ({"merged": False}, {"provider_repository_id": "other"},
                          {"pr_number": 999}, {"expected_head": "c" * 40},
                          {"base": "other"}):
@@ -745,8 +463,8 @@ class DeliveryModelTest(unittest.TestCase):
                 [item for item in candidate["delivery_observations"]
                  if item["observation_kind"] not in {"pr_merged", "implementation_delivered"}]
                 + [rejected_merge, rejected_delivery], key=lambda item: item["id"])
-            self.assertEqual(self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
-                ["next_delivery"]["postconditions"]["implementation_delivered"]["state"], "pending")
+            self.assertEqual(post_state(self.model.reduce_delivery(contract, candidate, evaluation=evaluation()),
+                           "implementation_delivered"), "pending")
 
         for label, kind, mutation in (
             ("publication branch", "branch_published", {"branch": "other"}),
@@ -769,8 +487,7 @@ class DeliveryModelTest(unittest.TestCase):
                               "remote_branch_absent": "remote", "local_branch_absent": "local",
                               "worktree_absent": "worktree"}[kind]
             with self.subTest(label=label):
-                self.assertEqual(next(f["state"] for f in reduced["next_delivery"]["stage_facts"]
-                                      if f["stage_id"] == expected_stage), "pending")
+                self.assertEqual(stage_state(reduced, expected_stage), "pending")
 
         for label, item in (
             ("implementation missing", copy.deepcopy(implementation)),
@@ -809,78 +526,33 @@ class DeliveryModelTest(unittest.TestCase):
             candidate["delivery_observations"].sort(key=lambda existing: existing["id"])
             reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
             with self.subTest(label=label):
-                self.assertEqual(reduced["next_delivery"]["postconditions"]
-                                 [item["observation_kind"]]["state"], "pending")
+                self.assertEqual(post_state(reduced, item["observation_kind"]), "pending")
 
     def test_repository_record_stage_binds_digest_branch_and_reviews(self):
-        contract, delivery = contract_and_delivery(self.model)
-        for stage in contract["stages"]:
-            stage["target_ref"]["subject_kind"] = "record"
-        record_stage = {
-            "id": "record", "kind": "deliver_repository_record", "action": "write_record",
-            "effect": "repository_write", "target_ref": copy.deepcopy(contract["stages"][0]["target_ref"]),
-            "worktree_requirement": "matching_required", "depends_on": ["select"],
-            "retryable": True}
-        open_stage = copy.deepcopy(contract["stages"][2]); open_stage["depends_on"] = ["record"]
-        merge_stage = copy.deepcopy(contract["stages"][3]); merge_stage["depends_on"] = ["open"]
-        contract["stages"] = [contract["stages"][0], record_stage, open_stage, merge_stage]
-        delivery = rebind_contract(self.model, contract, delivery)
-        chosen = selection(self.model, delivery["contract_digest"], subject_kind="record")
-        selected_observation = observation(
-            self.model, contract, "selected_output", {"selected_output": chosen})
-        record = observation(self.model, contract, "repository_record_proposed", {
-            "repository_id": "sim-repo", "selected_record_digest": chosen["subject_value"],
-            "branch": "feature", "live_pr_head": "c" * 40,
-            "review_evidence_ids": ["review-1", "test-1"]})
-        opened = observation(self.model, contract, "pr_opened", {
-            "provider_repository_id": "sim-repo", "pr_number": 17,
-            "pr_url": "https://sim.invalid/pr/17", "expected_head": "c" * 40,
-            "base": "main"})
-        merged = observation(self.model, contract, "pr_merged", {
-            "provider_repository_id": "sim-repo", "pr_number": 17,
-            "pr_url": "https://sim.invalid/pr/17", "expected_head": "c" * 40,
-            "base": "main", "merge_sha": "b" * 40, "merged": True})
-        delivered = observation(self.model, contract, "implementation_delivered", {
-            "selected_subject": {"kind": "record", "value": chosen["subject_value"]},
-            "integration_subject": {"kind": "record", "value": chosen["subject_value"]},
-            "presence": {"kind": "record_presence", "repository_id": "sim-repo",
-                         "selected_value": chosen["subject_value"],
-                         "integration_value": chosen["subject_value"],
-                         "integrated_ref": "refs/heads/main", "succeeded": True},
-            "merge_observation_id": merged["id"], "acceptance_evidence_ids": ["accept-1"],
-            "review_evidence_ids": ["review-1"], "test_evidence_ids": ["test-1"]})
-        candidate = copy.deepcopy(delivery)
-        candidate["delivery_observations"] = sorted(
-            [selected_observation, record, opened, merged, delivered],
-                                                     key=lambda item: item["id"])
-        result = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
-        self.assertEqual(next(f["state"] for f in result["next_delivery"]["stage_facts"]
-                              if f["stage_id"] == "record"), "observed")
-        self.assertEqual(next(f["state"] for f in result["next_delivery"]["stage_facts"]
-                              if f["stage_id"] == "merge"), "observed")
-        self.assertEqual(result["next_delivery"]["postconditions"]
-                         ["implementation_delivered"]["state"], "observed")
-        for field, replacement in (("selected_record_digest", "sha256:" + "f" * 64),
-                                   ("branch", "other"),
-                                   ("repository_id", "other")):
-            bad = copy.deepcopy(record); bad["subject"][field] = replacement; seal(self.model, bad)
-            candidate["delivery_observations"] = sorted([selected_observation, bad, opened, merged],
-                                                         key=lambda item: item["id"])
-            reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
-            with self.subTest(field=field):
-                self.assertEqual(next(f["state"] for f in reduced["next_delivery"]["stage_facts"]
-                                      if f["stage_id"] == "record"), "pending")
-
-        wrong_delivery = copy.deepcopy(delivered)
-        wrong_delivery["subject"]["integration_subject"]["value"] = "sha256:" + "d" * 64
-        wrong_delivery["subject"]["presence"]["integration_value"] = "sha256:" + "d" * 64
-        seal(self.model, wrong_delivery)
-        candidate["delivery_observations"] = sorted(
-            [selected_observation, record, opened, merged, wrong_delivery],
-            key=lambda item: item["id"])
-        reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
-        self.assertEqual(reduced["next_delivery"]["postconditions"]
-                         ["implementation_delivered"]["state"], "pending")
+        for with_merge in (True, False):
+            contract, delivery, items = record_case(self.model, with_merge=with_merge)
+            result = self.model.reduce_delivery(contract, delivery, evaluation=evaluation())
+            self.assertEqual(stage_state(result, "record"), "observed")
+            self.assertEqual(post_state(result, "implementation_delivered"), "observed")
+            wrong = record_case(self.model, with_merge=with_merge,
+                                integrated="sha256:" + "d" * 64)
+            reduced = self.model.reduce_delivery(wrong[0], wrong[1], evaluation=evaluation())
+            self.assertEqual(post_state(reduced, "implementation_delivered"), "pending")
+            if not with_merge:
+                continue
+            self.assertEqual(stage_state(result, "merge"), "observed")
+            for field, replacement in (("selected_record_digest", "sha256:" + "f" * 64),
+                                       ("branch", "other"), ("repository_id", "other")):
+                bad = copy.deepcopy(items["record"])
+                bad["subject"][field] = replacement; seal(self.model, bad)
+                candidate = copy.deepcopy(delivery)
+                candidate["delivery_observations"] = sorted(
+                    [item for item in candidate["delivery_observations"]
+                     if item["observation_kind"] != "repository_record_proposed"] + [bad],
+                    key=lambda item: item["id"])
+                reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+                with self.subTest(field=field):
+                    self.assertEqual(stage_state(reduced, "record"), "pending")
 
     def test_delivery_graph_binds_retained_contract_and_intent_identity(self):
         contract, delivery = contract_and_delivery(self.model)
@@ -913,15 +585,8 @@ class DeliveryModelTest(unittest.TestCase):
         bad = copy.deepcopy(denied); bad["reevaluation_evidence"] = [evidence]
         self.assert_invalid(bad, "delivery")
 
-        revoked = seal(self.model, {
-            "schema_version": 1, "kind": "authority-observation", "id": "",
-            "contract_digest": delivery["contract_digest"], "scope_id": requested["id"],
-            "launch_id": None, "authority_kind": "intent_revocation", "verdict": "revoked",
-            "reason_code": "revoked", "observed_at": "2026-09-20T02:00:00Z",
-            "evidence_digest": "sha256:" + "8" * 64, "opaque_host_reference": None,
-            "revocation_subject": {"intent_id": delivery["authorization_intents"][0]["id"],
-                                   "revocation_key": "wrong-key"},
-            "evaluation_use_key": None})
+        revoked = revocation(self.model, contract, delivery["authorization_intents"][0],
+                             key="wrong-key")
         bad = copy.deepcopy(delivery); bad["authority_observations"] = [revoked]
         self.assert_invalid(bad, "delivery")
 
