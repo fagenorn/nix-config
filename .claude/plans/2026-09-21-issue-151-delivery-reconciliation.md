@@ -81,7 +81,9 @@ Git, and repository `just` commands.
 ## Test seams
 
 - Pure model tests call the public functions directly and load both source and
-  generated installed module paths. One private `_delivery_model_fixtures.py`
+  generated installed module paths, proving canonical bytes/digests, strict
+  objects, slot-bound narrowing, refusal preservation and ordered reduction.
+  One private `_delivery_model_fixtures.py`
   supplies synthetic builders by explicit relative import with the model passed
   explicitly; it is not an entry point, production loader or I/O seam.
 - Workflow CLI tests invoke real `init-run`, `control`, `direct-owner`,

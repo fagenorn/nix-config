@@ -51,7 +51,7 @@ receive the model explicitly and return strict complete objects; no `**kwargs`
 are copied into wire objects. Import every used helper by name with an ordinary
 explicit relative import. The helper has no production policy, filesystem,
 provider, clock or ledger access; no entry point, wildcard/sys.path import,
-fallback loader, compatibility path, registration or managed publication:
+fallback loader, compatibility path, registration or managed publication.
 Controller-only direct-load probes adapt externally; product tests do not
 depend on those probes.
 
