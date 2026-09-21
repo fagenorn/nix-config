@@ -347,10 +347,102 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
         else:
             _object(value, common | {"state", "stalled_resumes", "result_source", "reason_code"}, "stalled response")
             if (value["state"], value["stalled_resumes"], value["result_source"], value["reason_code"]) != ("terminal_failed", 3, "stalled", "suspension_stalled_without_progress"): raise DeliveryModelError("invalid stalled response")
+        if value["interface_version"] != 2: raise DeliveryModelError("invalid checkpoint response version")
         issue = _integer(value["issue"], "response issue", minimum=1); validate_custody_ref(value["custody"], issue=issue); return value
-    if value.get("interface_version") == 2 and isinstance(value.get("kind"), str):
+    if value.get("kind") == "delivery_remainder":
+        _object(value, {"interface_version", "kind", "ledger_repo_root", "run_id", "issue", "source_attempt", "owner", "custody", "worktree", "contract", "contract_digest", "pending_stage_ids", "deadline_at", "requirements"}, "remainder response")
+        if value["interface_version"] != 2: raise DeliveryModelError("invalid remainder response version")
+        issue = _integer(value["issue"], "remainder issue", minimum=1); _integer(value["source_attempt"], "source attempt", minimum=1); validate_custody_ref(value["custody"], issue=issue)
+        contract = _contract(value["contract"], notes_max)
+        if canonical_digest(contract) != value["contract_digest"]: raise DeliveryModelError("remainder contract mismatch")
+        for name in ("ledger_repo_root", "run_id", "owner", "worktree", "deadline_at"): _string(value[name], f"remainder {name}")
+        _utc(value["deadline_at"], "remainder deadline"); _sorted_unique(value["pending_stage_ids"], "pending stages")
+        _sorted_unique(value["requirements"], "remainder requirements", key=lambda item: (item.get("kind", ""), item.get("subject_id", ""), item.get("reason_code", "")))
+        for item in value["requirements"]:
+            item = _object(item, {"kind", "subject_id", "reason_code", "detail_pointer"}, "requirement")
+            if item["kind"] not in {"delivery_contract", "scope_tuple", "observation", "worktree_fact"}: raise DeliveryModelError("invalid requirement kind")
+            _string(item["subject_id"], "requirement subject"); _string(item["reason_code"], "requirement reason")
+            if item["detail_pointer"] is not None: _string(item["detail_pointer"], "requirement detail")
+        return value
+    if value.get("interface_version") == 2 and value.get("kind") in {"delivery_complete", "terminal_failed"}:
+        return value
+    if value.get("interface_version") == 2 and "kind" not in value:
+        _object(value, {"interface_version", "run_id", "now", "summaries", "deltas", "actions", "next_deadline"}, "control response")
+        _string(value["run_id"], "control run"); _utc(value["now"], "control now")
+        for name in ("summaries", "deltas", "actions"):
+            if not isinstance(value[name], list): raise DeliveryModelError(f"invalid control {name}")
+        if value["next_deadline"] is not None: _utc(value["next_deadline"], "control deadline")
         return value
     raise DeliveryModelError("unknown workflow response")
+
+
+def _bounded_notes(value: Any, notes_max: int) -> str:
+    value = _string(value, "notes", nonempty=False)
+    if len(value) > notes_max: raise DeliveryModelError("notes too long")
+    return value
+
+
+def _report_detail(value: dict[str, Any]) -> None:
+    if value["detail_state"] not in {"none", "present", "unpublished"}: raise DeliveryModelError("invalid detail state")
+    if value["report_path"] is not None: _string(value["report_path"], "report path")
+    if value["detail_state"] == "present" and value["report_path"] is None: raise DeliveryModelError("missing report path")
+
+
+def _report_arrays(value: dict[str, Any], names: tuple[str, ...], notes_max: int) -> None:
+    validators = {"delivery_observations": lambda item: _delivery_observation(item, notes_max), "authority_observations": _authority, "reevaluation_evidence": _reevaluation}
+    for name in names:
+        _sorted_unique(value[name], name, key=lambda item: item.get("id", ""))
+        for item in value[name]: validators[name](item)
+
+
+def _ship_checkpoint(value: Any, notes_max: int) -> dict[str, Any]:
+    keys = {"interface_version", "issue", "custody", "contract_digest", "delivery_observations", "authority_observations", "reevaluation_evidence", "detail_state", "report_path", "notes"}
+    value = _object(value, keys, "ship checkpoint")
+    if value["interface_version"] != 2: raise DeliveryModelError("invalid checkpoint version")
+    issue = _integer(value["issue"], "checkpoint issue", minimum=1); validate_custody_ref(value["custody"], issue=issue); _digest(value["contract_digest"], "checkpoint contract")
+    _report_arrays(value, ("delivery_observations", "authority_observations", "reevaluation_evidence"), notes_max); _report_detail(value); _bounded_notes(value["notes"], notes_max)
+    return value
+
+
+def _ship_summary(value: Any, notes_max: int) -> dict[str, Any]:
+    keys = {"interface_version", "issue", "state", "custody", "historical_owner_result", "delivery_contract_digest", "delivery_observations", "authority_observations", "reevaluation_evidence", "detail_state", "report_path", "notes"}
+    value = _object(value, keys, "ship summary")
+    if value["interface_version"] != 2 or value["state"] not in {"delivery_complete", "terminal_failed"}: raise DeliveryModelError("invalid summary")
+    issue = _integer(value["issue"], "summary issue", minimum=1); validate_custody_ref(value["custody"], issue=issue); _digest(value["delivery_contract_digest"], "summary contract")
+    if value["historical_owner_result"] is not None and not isinstance(value["historical_owner_result"], dict): raise DeliveryModelError("invalid historical owner result")
+    _report_arrays(value, ("delivery_observations", "authority_observations", "reevaluation_evidence"), notes_max); _report_detail(value); _bounded_notes(value["notes"], notes_max)
+    return value
+
+
+def _artifact(value: Any, label: str) -> dict[str, Any]:
+    value = _object(value, {"budget_status", "kind", "metrics", "path"}, label)
+    if value["budget_status"] not in {"within_budget", "over_budget"}: raise DeliveryModelError(f"invalid {label} budget")
+    _string(value["kind"], f"{label} kind"); _string(value["path"], f"{label} path")
+    metrics = _object(value["metrics"], {"root_bytes", "total_bytes", "file_count", "largest_member_bytes"}, f"{label} metrics")
+    for name, metric in metrics.items(): _integer(metric, f"{label} {name}")
+    return value
+
+
+def _ship_handoff(value: Any, notes_max: int) -> dict[str, Any]:
+    keys = {"interface_version", "state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path", "spec_artifact", "plan_artifact", "head_sha", "review_state", "auto", "report_path", "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents", "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids", "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs"}
+    value = _object(value, keys, "ship handoff")
+    if value["interface_version"] != 2: raise DeliveryModelError("invalid handoff version")
+    issue = _integer(value["issue_number"], "handoff issue", minimum=1); validate_custody_ref(value["custody"], issue=issue)
+    for name in ("state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "branch", "worktree_path", "head_sha", "review_state"): _string(value[name], f"handoff {name}")
+    _bounded_notes(value["notes"], notes_max); _boolean(value["auto"], "handoff auto")
+    if value["report_path"] is not None: _string(value["report_path"], "handoff report path")
+    _artifact(value["spec_artifact"], "spec artifact"); _artifact(value["plan_artifact"], "plan artifact")
+    contract = _contract(value["delivery_contract"], notes_max); digest = canonical_digest(contract)
+    if value["delivery_contract_digest"] != digest: raise DeliveryModelError("handoff contract mismatch")
+    _digest(value["authorization_chain_digest"], "handoff chain")
+    _sorted_unique(value["authorization_intents"], "handoff intents", key=lambda item: item.get("id", ""))
+    for item in value["authorization_intents"]: _intent(item)
+    for name in ("authority_observation_ids", "reevaluation_evidence_ids", "authority_evaluation_consumption_ids", "pending_stage_ids"):
+        _sorted_unique(value[name], f"handoff {name}")
+        for item in value[name]: _string(item, f"handoff {name} member")
+    _sorted_unique(value["selected_outputs"], "handoff selections", key=lambda item: item.get("id", ""))
+    for item in value["selected_outputs"]: _selected(item)
+    return value
 
 
 def _delivery(value: Any, notes_max: int) -> dict[str, Any]:
@@ -400,6 +492,9 @@ def validate_delivery_object(value: object, *, expected_kind: str | None = None,
     _integer(notes_max_characters, "notes maximum", minimum=1)
     candidate = copy.deepcopy(value)
     if expected_kind == "workflow-response": _workflow_response(candidate, notes_max_characters)
+    elif expected_kind == "ship-checkpoint": _ship_checkpoint(candidate, notes_max_characters)
+    elif expected_kind == "ship-handoff": _ship_handoff(candidate, notes_max_characters)
+    elif expected_kind == "ship-summary": _ship_summary(candidate, notes_max_characters)
     elif expected_kind == "delivery" or (expected_kind is None and isinstance(candidate, dict) and set(candidate) == {"contract", "contract_digest", "authorization_intents", "authorization_chain_digest", "authority_observations", "reevaluation_evidence", "authority_evaluation_consumptions", "delivery_observations", "selected_outputs", "stage_facts", "postconditions"}): _delivery(candidate, notes_max_characters)
     else:
         if not isinstance(candidate, dict): raise DeliveryModelError("delivery object must be an object")
