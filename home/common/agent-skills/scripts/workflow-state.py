@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import stat
 import subprocess
 import sys
@@ -16,10 +17,9 @@ import tempfile
 from typing import Any, Callable
 
 
-SCHEMA_VERSION = 2
-PRIOR_SCHEMA_VERSION = SCHEMA_VERSION - 1
-CONTROL_INTERFACE_VERSION = 1
-DIRECT_OWNER_INTERFACE_VERSION = 1
+SCHEMA_VERSION = 3
+CONTROL_INTERFACE_VERSION = 2
+DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
     {"active", "handed_off", "suspended", "stopped", "failed", "merged"}
 )
@@ -50,7 +50,7 @@ RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # CPython's integer-string conversion limit -- an uncaught ValueError instead of
 # the controlled `invalid action_id` refusal every other malformed id gets.
 ACTION_ID_PATTERN = re.compile(
-    r"^([1-9][0-9]{0,17}):([1-9][0-9]{0,17}):([1-9][0-9]{0,17})$"
+    r"^([1-9][0-9]{0,17}):(r)?([1-9][0-9]{0,17}):([1-9][0-9]{0,17})$"
 )
 MERGE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 DIRECT_RUN_ID_PATTERN = re.compile(r"^direct-([1-9][0-9]*)-([0-9]{6})$")
@@ -69,7 +69,7 @@ PHASE_INPUT_FIELDS = (
 STATE_FIELDS = frozenset(
     {"schema_version", "run_id", "created_at", "updated_at", "prior_run", "issues"}
 )
-ISSUE_FIELDS = frozenset({"issue", "attempts", "outcome"})
+ISSUE_FIELDS = frozenset({"issue", "attempts", "outcome", "delivery", "delivery_remainders"})
 ATTEMPT_FIELDS = frozenset(
     {
         "issue",
@@ -104,7 +104,7 @@ LAUNCH_FIELDS = frozenset({"kind", "owner", "worktree", "at"})
 
 BOOTSTRAP_FIELDS = frozenset({"interface_version", "run_id", "requirements"})
 BOOTSTRAP_REQUIREMENT_FIELDS = frozenset(
-    {"issue", "attempt", "owner", "action_id", "recorded_worktree"}
+    {"issue", "owner", "custody", "recorded_worktree"}
 )
 CONTROL_REQUEST_FIELDS = frozenset(
     {
@@ -117,6 +117,14 @@ CONTROL_REQUEST_FIELDS = frozenset(
         "tracker",
         "owners",
         "worktrees",
+        "forge",
+        "delivery_contracts",
+        "authorization_intents",
+        "authority_observations",
+        "reevaluation_evidence",
+        "delivery_observations",
+        "requested_scopes",
+        "recoveries",
     }
 )
 DIRECT_OWNER_REQUEST_FIELDS = frozenset(
@@ -130,6 +138,13 @@ DIRECT_OWNER_REQUEST_FIELDS = frozenset(
         "tracker",
         "worktree",
         "forge",
+        "delivery_contract",
+        "authorization_intents",
+        "authority_observations",
+        "reevaluation_evidence",
+        "delivery_observations",
+        "requested_scope",
+        "recovery",
     }
 )
 FORGE_OBSERVATION_FIELDS = frozenset({"state", "url", "merge_sha"})
@@ -139,17 +154,6 @@ TRACKER_OBSERVATION_FIELDS = frozenset(
 )
 TRACKER_STATES = frozenset({"open", "closed"})
 DECISION_BLOCKER_FIELDS = frozenset({"issue", "url"})
-OWNER_OBSERVATION_FIELDS = frozenset(
-    {"event_id", "issue", "attempt", "launch", "state"}
-)
-OWNER_OBSERVATION_STATES = frozenset({"unavailable"})
-WORKTREE_OBSERVATION_FIELDS = frozenset({"issue", "recorded", "candidate"})
-RECORDED_WORKTREE_FIELDS = frozenset({"path", "state"})
-RECORDED_WORKTREE_STATES = frozenset(
-    {"matching_issue_branch", "absent", "mismatch"}
-)
-CANDIDATE_WORKTREE_FIELDS = frozenset({"path", "state"})
-CANDIDATE_WORKTREE_STATES = frozenset({"absent"})
 CONTROL_RESPONSE_FIELDS = frozenset(
     {
         "interface_version",
@@ -206,7 +210,7 @@ CONTROL_DISPATCH_FIELDS = frozenset(
         "deadline_at",
     }
 )
-CONTROL_DISPATCH_KINDS = frozenset({"spawn", "resume", "retry"})
+CONTROL_DISPATCH_KINDS = frozenset({"spawn", "resume", "retry", "recover"})
 CONTROL_WAIT_FIELDS = frozenset({"id", "kind", "wake_on", "deadline_at"})
 CONTROL_WAKE_EVENTS = frozenset(
     {"owner_notification", "tracker_change", "deadline"}
@@ -216,6 +220,25 @@ CONTROL_FINALIZE_FIELDS = frozenset({"id", "kind"})
 
 class WorkflowError(Exception):
     pass
+
+
+def _delivery():
+    src = Path(__file__).parent
+    entry = src / "workflow_delivery.py" if src.name == "scripts" else Path.home() / ".agents/lib/python/workflow_delivery.py"
+    try:
+        module = runpy.run_path(str(entry))
+        if module.get("WORKFLOW_DELIVERY_INTERFACE_VERSION") != 1:
+            raise ValueError("interface")
+        return module["DeliveryRuntime"](notes_max_characters=phase_notes_maximum())
+    except Exception as exc:
+        raise WorkflowError(f"delivery runtime: {exc}") from exc
+
+
+def _call(message, function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except Exception as exc:
+        raise WorkflowError(str(exc) if message is None else message) from exc
 
 
 def parse_utc(value: str, label: str = "time") -> datetime:
@@ -574,7 +597,7 @@ def validate_attempt(
 def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != STATE_FIELDS:
         raise WorkflowError("invalid workflow state schema")
-    if value["schema_version"] != SCHEMA_VERSION:
+    if type(value["schema_version"]) is not int or value["schema_version"] != SCHEMA_VERSION:
         raise WorkflowError(
             f"unsupported workflow state schema version: {value['schema_version']!r}"
         )
@@ -609,6 +632,10 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
         attempts = issue_value["attempts"]
         if not isinstance(attempts, list) or len(attempts) > 2:
             raise WorkflowError("invalid attempts list")
+        results = _call(None, _delivery().validate_issue_state, issue_value,
+            issue=issue, attempts=attempts, updated_at=value["updated_at"])
+        for result in results:
+            validate_result(result, expected_issue=issue)
         for number, attempt in enumerate(attempts, start=1):
             validate_attempt(
                 attempt, issue=issue, expected_number=number, run_id=run_id
@@ -838,41 +865,13 @@ def ensure_gitignore(workflows_dir: Path) -> None:
     fsync_directory(workflows_dir)
 
 
-def upgrade_state(value: Any) -> Any:
-    """Fill the suspension fields and the lineage link into a prior-version
-    ledger, in memory.
+def upgrade_state(value, *, run_id, migration_contracts):
+    candidate = _call(None, _delivery().migrate, value,
+                              migration_contracts=migration_contracts)
+    return validate_state(candidate, run_id=run_id)
 
-    Run and attempt records are validated against an exact field set, so a
-    ledger written before the suspension model would otherwise stop loading the
-    moment this helper is deployed — stranding every in-flight run. A
-    prior-version ledger is upgraded here with the documented defaults and
-    persists in the new shape on its next write; any other version is left for
-    ``validate_state`` to reject (per D15).
-    """
-    if (
-        not isinstance(value, dict)
-        or value.get("schema_version") != PRIOR_SCHEMA_VERSION
-    ):
-        return value
-    issues = value.get("issues")
-    if isinstance(issues, dict):
-        for issue_value in issues.values():
-            if not isinstance(issue_value, dict):
-                continue
-            attempts = issue_value.get("attempts")
-            if not isinstance(attempts, list):
-                continue
-            for attempt in attempts:
-                if not isinstance(attempt, dict):
-                    continue
-                for field, default in SUSPENSION_DEFAULTS.items():
-                    attempt.setdefault(field, default)
-    value.setdefault("prior_run", None)
-    value["schema_version"] = SCHEMA_VERSION
-    return value
-
-
-def read_locked_state(state_path: Path, run_id: str) -> dict[str, Any]:
+def read_locked_state(state_path, run_id, *, migration_contracts,
+                      allowed_source_schema_versions=None):
     require_regular_path(state_path, "workflow state", allow_missing=False)
     try:
         descriptor = open_existing_regular(state_path, "workflow state", os.O_RDONLY)
@@ -880,7 +879,13 @@ def read_locked_state(state_path: Path, run_id: str) -> dict[str, Any]:
             value = json.load(source)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid workflow state JSON: {error}") from error
-    return validate_state(upgrade_state(value), run_id=run_id)
+    if allowed_source_schema_versions is not None:
+        version = value.get("schema_version") if isinstance(value, dict) else None
+        if type(version) is not int or version not in allowed_source_schema_versions:
+            raise WorkflowError("legacy finish is read-only for schema 3 runs")
+    migrated = isinstance(value, dict) and value.get("schema_version") != SCHEMA_VERSION
+    return upgrade_state(value, run_id=run_id,
+                         migration_contracts=migration_contracts), migrated
 
 
 def fsync_directory(directory: Path) -> None:
@@ -928,8 +933,11 @@ Mutation = Callable[[dict[str, Any] | None], tuple[Any, bool]]
 
 
 def transact(
-    repo_root: str, run_id: str, mutation: Mutation, *, allow_missing: bool = False
+    repo_root: str, run_id: str, mutation: Mutation, *, allow_missing: bool = False,
+    migration_contracts: dict[int, Any] | None = None,
+    allowed_source_schema_versions: frozenset[int] | None = None,
 ) -> Any:
+    _delivery()
     run_dir, state_path, lock_path = workflow_paths(repo_root, run_id)
     require_regular_path(state_path, "workflow state", allow_missing=True)
     require_regular_path(lock_path, "state lock", allow_missing=True)
@@ -941,14 +949,18 @@ def transact(
             state_path, "workflow state", allow_missing=True
         )
         if state_exists:
-            current = read_locked_state(state_path, run_id)
+            current, migrated = read_locked_state(
+                state_path, run_id, migration_contracts=migration_contracts or {},
+                allowed_source_schema_versions=allowed_source_schema_versions,
+            )
             state = copy.deepcopy(current)
         elif allow_missing:
             state = None
+            migrated = False
         else:
             raise WorkflowError(f"workflow run {run_id!r} is not initialized")
         result, changed = mutation(state)
-        if changed:
+        if changed or migrated:
             if state is None:
                 if allow_missing and isinstance(result, dict):
                     state = result
@@ -1312,23 +1324,6 @@ def validate_tracker_observation(value: Any) -> dict[str, Any]:
     return observation
 
 
-def validate_owner_observation(value: Any) -> dict[str, Any]:
-    observation = require_exact_fields(
-        value, OWNER_OBSERVATION_FIELDS, "owner observation"
-    )
-    if not isinstance(observation["event_id"], str) or not observation["event_id"]:
-        raise WorkflowError("invalid owner event_id")
-    require_plain_int(observation["issue"], "owner issue", minimum=1)
-    require_plain_int(observation["attempt"], "owner attempt", minimum=1)
-    require_plain_int(observation["launch"], "owner launch", minimum=1)
-    if (
-        not isinstance(observation["state"], str)
-        or observation["state"] not in OWNER_OBSERVATION_STATES
-    ):
-        raise WorkflowError("invalid owner state")
-    return observation
-
-
 def issue_branch_prefix(issue: int) -> str:
     """The stable head of one issue's branch name under ``branchNaming``.
 
@@ -1372,38 +1367,9 @@ def validate_forge_observation(value: Any) -> dict[str, Any]:
     return observation
 
 
-def validate_worktree_observation(value: Any) -> dict[str, Any]:
-    observation = require_exact_fields(
-        value, WORKTREE_OBSERVATION_FIELDS, "worktree observation"
-    )
-    require_plain_int(observation["issue"], "worktree issue", minimum=1)
-    recorded = observation["recorded"]
-    if recorded is not None:
-        recorded = require_exact_fields(
-            recorded, RECORDED_WORKTREE_FIELDS, "recorded"
-        )
-        require_absolute_path(recorded["path"], "recorded")
-        if (
-            not isinstance(recorded["state"], str)
-            or recorded["state"] not in RECORDED_WORKTREE_STATES
-        ):
-            raise WorkflowError("invalid recorded state")
-    candidate = observation["candidate"]
-    if candidate is not None:
-        candidate = require_exact_fields(
-            candidate, CANDIDATE_WORKTREE_FIELDS, "candidate"
-        )
-        require_absolute_path(candidate["path"], "candidate")
-        if (
-            not isinstance(candidate["state"], str)
-            or candidate["state"] not in CANDIDATE_WORKTREE_STATES
-        ):
-            raise WorkflowError("invalid candidate state")
-    return observation
-
-
-def validate_control_request(value: Any) -> dict[str, Any]:
-    request = require_exact_fields(value, CONTROL_REQUEST_FIELDS, "control request")
+def validate_control_request(value):
+    request = require_exact_fields(
+        copy.deepcopy(value), CONTROL_REQUEST_FIELDS, "control request")
     if (
         type(request["interface_version"]) is not int
         or request["interface_version"] != CONTROL_INTERFACE_VERSION
@@ -1439,41 +1405,16 @@ def validate_control_request(value: Any) -> dict[str, Any]:
         if issue in tracker_issues:
             raise WorkflowError("duplicate tracker observation")
         tracker_issues.add(issue)
-    if tracker_issues != seen_issues:
-        raise WorkflowError("tracker observations must match requested issues")
+    if not tracker_issues <= seen_issues:
+        raise WorkflowError("tracker observation outside requested issues")
 
-    owners = request["owners"]
-    if not isinstance(owners, list):
-        raise WorkflowError("invalid owner observations")
-    owner_event_ids: set[str] = set()
-    owner_identities: set[tuple[int, int, int]] = set()
-    for raw_observation in owners:
-        observation = validate_owner_observation(raw_observation)
-        if observation["issue"] not in seen_issues:
-            raise WorkflowError("owner observation outside requested issues")
-        if observation["event_id"] in owner_event_ids:
-            raise WorkflowError("duplicate owner event_id")
-        owner_event_ids.add(observation["event_id"])
-        identity = (
-            observation["issue"], observation["attempt"], observation["launch"]
-        )
-        if identity in owner_identities:
-            raise WorkflowError("duplicate owner observation")
-        owner_identities.add(identity)
-
-    worktrees = request["worktrees"]
-    if not isinstance(worktrees, list):
-        raise WorkflowError("invalid worktree observations")
-    worktree_issues: set[int] = set()
-    for raw_observation in worktrees:
-        observation = validate_worktree_observation(raw_observation)
-        issue = observation["issue"]
-        if issue in worktree_issues:
-            raise WorkflowError("duplicate worktree observation")
-        worktree_issues.add(issue)
-        if issue not in seen_issues:
-            raise WorkflowError("worktree observation outside requested issues")
-    return request
+    runtime = _delivery()
+    forge, migration_contracts = _call(
+        None, runtime.validate_control_inputs,
+        request, seen_issues, tracker_issues)
+    for issue in seen_issues:
+        forge[str(issue)] = validate_forge_observation(forge[str(issue)])
+    return request, migration_contracts
 
 
 def load_json_request(path_value: str, label: str) -> Any:
@@ -1490,13 +1431,13 @@ def load_json_request(path_value: str, label: str) -> Any:
     return value
 
 
-def load_control_request(path_value: str) -> dict[str, Any]:
+def load_control_request(path_value):
     return validate_control_request(load_json_request(path_value, "control request"))
 
 
-def validate_direct_owner_request(value: Any) -> dict[str, Any]:
+def validate_direct_owner_request(value):
     request = require_exact_fields(
-        value, DIRECT_OWNER_REQUEST_FIELDS, "direct owner request"
+        copy.deepcopy(value), DIRECT_OWNER_REQUEST_FIELDS, "direct owner request"
     )
     if (
         type(request["interface_version"]) is not int
@@ -1523,19 +1464,15 @@ def validate_direct_owner_request(value: Any) -> dict[str, Any]:
         tracker = validate_tracker_observation(request["tracker"])
         if tracker["issue"] != issue:
             raise WorkflowError("tracker observation does not match requested issue")
-    if request["worktree"] is not None:
-        worktree = validate_worktree_observation(request["worktree"])
-        if worktree["issue"] != issue:
-            raise WorkflowError("worktree observation does not match requested issue")
     if request["forge"] is not None:
         request["forge"] = validate_forge_observation(request["forge"])
-    return request
+    context = _call("invalid delivery inputs",
+        _delivery().validate_direct_inputs, request, issue)
+    return request, context
 
 
-def load_direct_owner_request(path_value: str) -> dict[str, Any]:
-    return validate_direct_owner_request(
-        load_json_request(path_value, "direct owner request")
-    )
+def load_direct_owner_request(path_value):
+    return validate_direct_owner_request(load_json_request(path_value, "direct owner request"))
 
 
 def render_action_id(attempt: dict[str, Any]) -> str:
@@ -1552,30 +1489,11 @@ def parse_action_id(value: str) -> tuple[int, int, int]:
     matched = ACTION_ID_PATTERN.fullmatch(value)
     if matched is None:
         raise WorkflowError("invalid action_id")
-    return int(matched[1]), int(matched[2]), int(matched[3])
+    return int(matched[1]), int(matched[3]), int(matched[4])
 
 
 def bootstrap_response(state: dict[str, Any]) -> dict[str, Any]:
-    requirements = []
-    for issue_key in sorted(state["issues"], key=int):
-        issue_state = state["issues"][issue_key]
-        if not issue_state["attempts"]:
-            continue
-        attempt = issue_state["attempts"][-1]
-        requirements.append(
-            {
-                "issue": attempt["issue"],
-                "attempt": attempt["attempt"],
-                "owner": attempt["owner"],
-                "action_id": render_action_id(attempt),
-                "recorded_worktree": attempt["worktree"],
-            }
-        )
-    return {
-        "interface_version": CONTROL_INTERFACE_VERSION,
-        "run_id": state["run_id"],
-        "requirements": requirements,
-    }
+    return _delivery().bootstrap(state)
 
 
 def reject_reserved_direct_run_id(run_id: str) -> None:
@@ -1584,6 +1502,7 @@ def reject_reserved_direct_run_id(run_id: str) -> None:
 
 
 def command_init_run(args: argparse.Namespace) -> int:
+    _delivery()
     reject_reserved_direct_run_id(args.run_id)
     now = format_utc(parse_utc(args.now, "--now"))
 
@@ -1594,7 +1513,7 @@ def command_init_run(args: argparse.Namespace) -> int:
         return state, True
 
     state = transact(
-        args.repo_root, args.run_id, initialize, allow_missing=True
+        args.repo_root, args.run_id, initialize, allow_missing=True,
     )
     print_json(bootstrap_response(state))
     return 0
@@ -1660,38 +1579,11 @@ def control_summary(
     issue: int,
     tracker: dict[str, Any],
     issue_state: dict[str, Any] | None,
+    reduction=None,
 ) -> dict[str, Any]:
-    blockers = control_blockers(tracker)
-    latest = None
-    if issue_state is not None and issue_state["attempts"]:
-        latest = issue_state["attempts"][-1]
-    if tracker["state"] == "closed" and latest is None:
-        state_name = "closed"
-    elif tracker["decision_blockers"] and latest is None:
-        state_name = "fogged"
-    elif tracker["open_blockers"] and latest is None:
-        state_name = "blocked"
-    elif latest is None:
-        state_name = "queued"
-    else:
-        state_name = latest["state"]
-        blockers = []
-    result = None
-    if latest is not None and latest["result"] is not None:
-        result = {
-            field: copy.deepcopy(latest["result"][field]) for field in RESULT_FIELDS
-        }
-    return {
-        "issue": issue,
-        "state": state_name,
-        "attempt": None if latest is None else latest["attempt"],
-        "owner": None if latest is None else latest["owner"],
-        "worktree": None if latest is None else latest["worktree"],
-        "deadline_at": None if latest is None else latest["deadline_at"],
-        "blocked_on": None if latest is None else latest["blocked_on"],
-        "blockers": blockers,
-        "result": result,
-    }
+    return _delivery().control_summary(
+        issue=issue, tracker=tracker, issue_state=issue_state, reduction=reduction,
+        blockers=control_blockers(tracker), result_fields=RESULT_FIELDS)
 
 
 def _apply_one_issue_policy(
@@ -1708,6 +1600,8 @@ def _apply_one_issue_policy(
     human_directed: bool = False,
     forge: dict[str, Any] | None = None,
     require_forge: bool = False,
+    delivery_request=None,
+    delivery_source_kind=None,
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
 
@@ -1782,6 +1676,18 @@ def _apply_one_issue_policy(
         }
 
     now_value = parse_utc(now, "policy now")
+    if delivery_request is not None:
+        plan = _call(
+            None, _delivery().delivery_policy,
+            ledger_issue, issue=issue, request=delivery_request,
+            source_kind=delivery_source_kind, now=now,
+            dispatch_permitted=dispatch_permitted,
+            remainder_deadline=attempt_deadline(now, attempt_budget_minutes),
+            owner_unavailable=current_owner_unavailable,
+            tracker_halted=bool(tracker and tracker_halt_reason(tracker)),
+            recorded_worktree=None if worktree is None else worktree["recorded"])
+        if plan is not None:
+            return plan
     expired = bool(
         latest is not None
         and latest["state"] in {"active", "handed_off"}
@@ -2015,7 +1921,10 @@ def _apply_one_issue_policy(
         now=now, deadline_at=attempt_deadline(now, attempt_budget_minutes),
     )
     if ledger_issue is None:
-        ledger_issue = {"issue": issue, "attempts": [attempt], "outcome": None}
+        ledger_issue = {
+            "issue": issue, "attempts": [attempt], "outcome": None,
+            "delivery": _delivery().empty_delivery(), "delivery_remainders": [],
+        }
     elif retryable:
         ledger_issue["attempts"].append(attempt)
         ledger_issue["outcome"] = None
@@ -2028,8 +1937,9 @@ def _apply_one_issue_policy(
 
 
 def command_control(args: argparse.Namespace) -> int:
+    runtime = _delivery()
     reject_reserved_direct_run_id(args.run_id)
-    request = load_control_request(args.request_file)
+    request, migration_contracts = load_control_request(args.request_file)
     now = request["now"]
     now_value = parse_utc(now, "control now")
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
@@ -2040,42 +1950,10 @@ def command_control(args: argparse.Namespace) -> int:
         assert state is not None
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise WorkflowError("control time must not move backward")
+        if all(contract is None for contract in migration_contracts.values()):
+            return runtime.contractless_control(request, args.run_id), False
 
-        unavailable: set[tuple[int, int, int]] = set()
-        for observation in request["owners"]:
-            issue_state = state["issues"].get(str(observation["issue"]))
-            if issue_state is None or observation["attempt"] > len(
-                issue_state["attempts"]
-            ):
-                raise WorkflowError("unknown owner observation identity")
-            attempt = issue_state["attempts"][observation["attempt"] - 1]
-            if observation["launch"] > len(attempt["launches"]):
-                raise WorkflowError("unknown owner observation identity")
-            if (
-                observation["attempt"] == len(issue_state["attempts"])
-                and observation["launch"] == len(attempt["launches"])
-            ):
-                unavailable.add((
-                    observation["issue"], observation["attempt"],
-                    observation["launch"],
-                ))
-
-        def owner_is_unavailable(issue_state: dict[str, Any] | None) -> bool:
-            if issue_state is None or not issue_state["attempts"]:
-                return False
-            latest = issue_state["attempts"][-1]
-            identity = (latest["issue"], latest["attempt"], len(latest["launches"]))
-            return latest["state"] == "active" and identity in unavailable
-
-        for issue, observation in worktree_by_issue.items():
-            recorded = observation["recorded"]
-            if recorded is None:
-                continue
-            issue_state = state["issues"].get(str(issue))
-            if issue_state is None or not issue_state["attempts"]:
-                raise WorkflowError("recorded worktree has no ledger attempt")
-            if recorded["path"] != issue_state["attempts"][-1]["worktree"]:
-                raise WorkflowError("recorded worktree path does not match ledger")
+        unavailable = _call(None, runtime.validate_control_custody, state, request)
 
         analysis: dict[int, dict[str, Any]] = {}
         for issue in request["issues"]:
@@ -2086,24 +1964,14 @@ def command_control(args: argparse.Namespace) -> int:
                 worktree=worktree_by_issue.get(issue),
                 now=now,
                 attempt_budget_minutes=request["attempt_budget_minutes"],
-                current_owner_unavailable=owner_is_unavailable(issue_state),
+                current_owner_unavailable=runtime.owner_is_unavailable(issue_state, unavailable),
                 dispatch_permitted=False,
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
+                delivery_request=request, delivery_source_kind="control",
             )
 
-        occupied = 0
-        for issue_state in state["issues"].values():
-            if not issue_state["attempts"]:
-                continue
-            latest = issue_state["attempts"][-1]
-            identity = (latest["issue"], latest["attempt"], len(latest["launches"]))
-            if (
-                latest["state"] == "active"
-                and now_value < parse_utc(latest["deadline_at"], "attempt deadline")
-                and identity not in unavailable
-            ):
-                occupied += 1
+        occupied = runtime.occupied_count(state, at_time=now, unavailable=unavailable)
         capacity = max(0, request["max_parallel"] - occupied)
 
         planned: dict[int, dict[str, Any]] = {}
@@ -2117,13 +1985,24 @@ def command_control(args: argparse.Namespace) -> int:
                 worktree=worktree_by_issue.get(issue),
                 now=now,
                 attempt_budget_minutes=request["attempt_budget_minutes"],
-                current_owner_unavailable=owner_is_unavailable(issue_state),
+                current_owner_unavailable=runtime.owner_is_unavailable(issue_state, unavailable),
                 dispatch_permitted=dispatch_permitted,
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
+                delivery_request=request, delivery_source_kind="control",
             )
             planned[issue] = result
             return result
+
+        for issue in request["issues"]:
+            if analysis[issue]["desired"] != "recover":
+                continue
+            if analysis[issue]["changed"] and capacity <= 0:
+                continue
+            apply_policy(issue, True)
+            proposal_order.append(issue)
+            if analysis[issue]["changed"]:
+                capacity -= 1
 
         for issue in request["issues"]:
             if capacity <= 0 or analysis[issue]["desired"] != "resume":
@@ -2208,6 +2087,8 @@ def command_control(args: argparse.Namespace) -> int:
             issue_state = state["issues"].get(str(issue))
             if issue_state is None or not issue_state["attempts"]:
                 continue
+            if analysis[issue].get("custody_kind") == "remainder":
+                continue
             latest = issue_state["attempts"][-1]
             observation = worktree_by_issue.get(issue)
             candidate = None if observation is None else observation["candidate"]
@@ -2266,6 +2147,9 @@ def command_control(args: argparse.Namespace) -> int:
             result = planned[issue]
             operation = result["operation"]
             attempt = result["attempt"]
+            if operation == "recover":
+                actions.append({"kind": "recover", "issue": issue})
+                continue
             if operation == "refuse":
                 deltas.append({
                     "issue": issue, "attempt": attempt["attempt"],
@@ -2290,7 +2174,11 @@ def command_control(args: argparse.Namespace) -> int:
                 "deadline_at": attempt["deadline_at"],
             })
 
-        changed = any(result["changed"] for result in planned.values())
+        reductions, delivery_changed = _call(
+            "delivery transition refused", runtime.control_transitions, state, request)
+
+
+        changed = any(result["changed"] for result in planned.values()) or delivery_changed
         if changed:
             state["updated_at"] = now
 
@@ -2299,21 +2187,11 @@ def command_control(args: argparse.Namespace) -> int:
                 issue=issue,
                 tracker=tracker_by_issue[issue],
                 issue_state=state["issues"].get(str(issue)),
+                reduction=reductions.get(issue),
             )
             for issue in request["issues"]
         ]
-        deadlines = []
-        for issue in request["issues"]:
-            issue_state = state["issues"].get(str(issue))
-            if issue_state is None or not issue_state["attempts"]:
-                continue
-            latest = issue_state["attempts"][-1]
-            if latest["state"] in {"active", "handed_off"}:
-                deadlines.append(latest["deadline_at"])
-        next_deadline = (
-            min(deadlines, key=lambda value: parse_utc(value))
-            if deadlines else None
-        )
+        next_deadline=runtime.next_deadline(state,request["issues"])
 
         # A wait must name the instant it ends. With no deadline armed there is
         # nothing left for this sweep to wake up for, so control renders the
@@ -2327,6 +2205,9 @@ def command_control(args: argparse.Namespace) -> int:
                 "wake_on": ["owner_notification", "tracker_change", "deadline"],
                 "deadline_at": next_deadline,
             })
+        runtime.decorate_control(
+            state, deltas, actions, reductions, CONTROL_DISPATCH_KINDS,
+            ledger_repo_root=str(resolve_repo_root(args.repo_root)))
         return {
             "interface_version": CONTROL_INTERFACE_VERSION,
             "run_id": args.run_id,
@@ -2337,7 +2218,8 @@ def command_control(args: argparse.Namespace) -> int:
             "next_deadline": next_deadline,
         }, changed
 
-    response = transact(args.repo_root, args.run_id, control)
+    response = transact(args.repo_root, args.run_id, control,
+                        migration_contracts=migration_contracts)
     print_json(response)
     return 0
 
@@ -2392,31 +2274,18 @@ def direct_terminal(
     }
 
 
-def direct_owner_response(
-    repo_root: Path, run_id: str, attempt: dict[str, Any], operation: str
-) -> dict[str, Any]:
-    launch_kind = "resume" if operation == "resume" else operation
-    return {
-        "interface_version": DIRECT_OWNER_INTERFACE_VERSION,
-        "kind": "owner",
-        "ledger_repo_root": str(repo_root),
-        "run_id": run_id,
-        "issue": attempt["issue"],
-        "attempt": attempt["attempt"],
-        "owner": attempt["owner"],
-        "action_id": render_action_id(attempt),
-        "launch_kind": launch_kind,
-        "worktree": attempt["worktree"],
-        "handoff_path": attempt["handoff_path"],
-        "deadline_at": attempt["deadline_at"],
-    }
-
-
 def command_direct_owner(args: argparse.Namespace) -> int:
-    request = load_direct_owner_request(args.request_file)
+    runtime = _delivery()
+    request, migration_contracts = load_direct_owner_request(args.request_file)
     issue = request["issue"]
     if not Path(args.repo_root).is_absolute():
         raise WorkflowError("repository root path must be absolute")
+    if request["delivery_contract"] is None:
+        print_json(direct_observe(issue, None, [{
+            "kind": "delivery_contract", "subject_id": str(issue),
+            "reason_code": "delivery_contract_required", "detail_pointer": None,
+        }]))
+        return 0
     repo_root = resolve_repo_root(args.repo_root)
     workflows_dir = ensure_workflows_directory(repo_root)
     issue_lock_path = workflows_dir / f".direct-{issue}.lock"
@@ -2465,7 +2334,9 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     os.fdopen(lock_descriptor, "r+b")
                 )
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                state = read_locked_state(state_path, run_id)
+                state, _ = read_locked_state(
+                    state_path, run_id, migration_contracts=migration_contracts,
+                )
                 if set(state["issues"]) != {str(issue)}:
                     raise WorkflowError(
                         "direct run state must contain exactly the requested issue"
@@ -2492,6 +2363,11 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 selected is not None
                 and direct_run_is_terminal(selected[4]["issues"][str(issue)])
             )
+            if (selected_is_terminal
+                    and runtime.historical_direct_requested(
+                        selected[4]["issues"][str(issue)], request)
+                    and not runtime.delivery_complete(selected[4]["issues"][str(issue)])):
+                selected_is_terminal = False
 
             selected_attempts = (
                 [] if selected is None
@@ -2583,6 +2459,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     human_directed=True,
                     forge=request["forge"],
                     require_forge=True,
+                    delivery_request=request, delivery_source_kind="direct",
                 )
                 operation = policy["operation"]
                 if operation == "idle":
@@ -2638,7 +2515,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         reason="merged", blockers=[],
                         result=policy["issue_state"]["outcome"],
                     )
-                elif operation in {"spawn", "resume", "retry", "refuse"}:
+                elif operation in {"spawn", "resume", "retry", "refuse", "recover"}:
                     if state is None:
                         ensure_gitignore(workflows_dir)
                         try:
@@ -2661,19 +2538,14 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         )
                     else:
                         state["issues"][str(issue)] = policy["issue_state"]
-                        state["updated_at"] = request["now"]
+                    changed, response = _call(
+                        "delivery transition refused", runtime.complete_direct_policy,
+                        state, issue=issue, request=request, policy=policy,
+                        ledger_repo_root=str(repo_root), run_id=run_id,
+                        reentry=reentry_command(issue))
                     validate_state(state, run_id=run_id)
-                    atomic_write_state(run_dir, state_path, state)
-                    if operation == "refuse":
-                        response = direct_terminal(
-                            issue=issue, run_id=run_id, source="lifecycle",
-                            reason="failed", blockers=[],
-                            result=policy["issue_state"]["outcome"],
-                        )
-                    else:
-                        response = direct_owner_response(
-                            repo_root, run_id, policy["attempt"], operation
-                        )
+                    if changed:
+                        atomic_write_state(run_dir, state_path, state)
                 else:
                     raise WorkflowError("invalid one-issue policy operation")
 
@@ -2686,6 +2558,20 @@ def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
         "validate-report", Path(path_value), boundary="ship-summary"
     )
     return validate_result(value, expected_issue=issue)
+
+
+def command_checkpoint_delivery(args):
+    runtime = _delivery()
+    now = format_utc(parse_utc(args.now, "--now"))
+    report = artifact_budget_validate("validate-report", Path(args.checkpoint_file),
+                                      boundary="ship-checkpoint")
+
+    response = transact(args.repo_root, args.run_id, lambda state: _call(
+        "checkpoint transition refused", runtime.checkpoint_state,
+        state, report, now=now, suspend_attempt=suspend_attempt,
+        ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id))
+    print_json(response)
+    return 0
 
 
 def validate_retained_detail(worktree: str, report_path: str) -> None:
@@ -2842,6 +2728,10 @@ def command_finish(args: argparse.Namespace) -> int:
     Legacy ``expiry`` records only reach this ledger from a pre-suspension run
     (per D2, D15).
     """
+    if args.summary_file is not None:
+        return command_finish_delivery(args)
+    if args.issue is None or args.attempt is None or args.result_file is None:
+        raise WorkflowError("finish requires --summary-file")
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
     result = load_result_file(args.result_file, args.issue)
@@ -2903,8 +2793,30 @@ def command_finish(args: argparse.Namespace) -> int:
         state["updated_at"] = now
         return result, True
 
-    persisted = transact(args.repo_root, args.run_id, finish)
+    persisted = transact(
+        args.repo_root, args.run_id, finish,
+        allowed_source_schema_versions=frozenset({1, 2}),
+    )
     print_json(persisted)
+    return 0
+
+
+def command_finish_delivery(args):
+    runtime = _delivery()
+    now = format_utc(parse_utc(args.now, "--now"))
+    report = artifact_budget_validate(
+        "validate-report", Path(args.summary_file), boundary="ship-summary")
+
+    def finish_delivery(state):
+        assert state is not None
+        response = _call(
+            "delivery finish refused", runtime.finish_state, state, report, now=now,
+            remainder_deadline=format_utc(parse_utc(now) + timedelta(minutes=180)),
+            ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id)
+        return response, True
+
+    response = transact(args.repo_root, args.run_id, finish_delivery)
+    print_json(response)
     return 0
 
 
@@ -2920,10 +2832,12 @@ def command_check_launch(args: argparse.Namespace) -> int:
     a well-formed negative at exit 0; only an unreadable ledger or an argument
     that is not a well-formed question is an error (per D3).
     """
+    runtime = _delivery()
     repo_root = resolve_repo_root(args.repo_root)
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise WorkflowError("invalid run_id")
     issue, attempt_ordinal, launch_ordinal = parse_action_id(args.action_id)
+    remainder_query = ":r" in args.action_id
     state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
     if not require_regular_path(state_path, "workflow state", allow_missing=True):
         print_json({
@@ -2936,24 +2850,42 @@ def command_check_launch(args: argparse.Namespace) -> int:
     # No lock: `atomic_write_state` publishes by `os.replace`, so an unlocked
     # reader sees either the whole prior file or the whole new one, never a torn
     # one — and taking the lock would mean creating `state.lock`, which is a write.
-    state = read_locked_state(state_path, args.run_id)
+    try:
+        raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkflowError("invalid workflow state") from error
+    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2}:
+        candidate = _call("invalid legacy workflow state",
+            _delivery().migrate, raw_state, migration_contracts={})
+        validate_state(candidate, run_id=args.run_id)
+        state = raw_state
+    else:
+        state = validate_state(raw_state, run_id=args.run_id)
 
     issue_state = state["issues"].get(str(issue))
-    if issue_state is None or not issue_state["attempts"]:
+    records = None if issue_state is None else (
+        issue_state.get("delivery_remainders", []) if remainder_query
+        else issue_state["attempts"])
+    if issue_state is None:
         current_action_id, reason = None, "unknown_issue"
+    elif not records:
+        current_action_id = None
+        reason = "unknown_attempt" if remainder_query else "unknown_issue"
     else:
-        attempts = issue_state["attempts"]
-        latest = attempts[-1]
+        latest = records[-1]
         # Only an `active` latest attempt has a live launch; every other member
         # of ATTEMPT_STATES (handed_off, suspended, stopped, failed, merged)
         # entitles nobody, and `validate_state` has already closed that set, so
         # there is no default fall-through here (per D5).
         current_action_id = (
-            render_action_id(latest) if latest["state"] == "active" else None
+            (f"{issue}:r{latest['remainder']}:{len(latest['launches'])}"
+             if remainder_query else render_action_id(latest))
+            if latest["state"] == "active"
+            and not runtime.delivery_complete(issue_state) else None
         )
-        if attempt_ordinal > len(attempts):
+        if attempt_ordinal > len(records):
             reason = "unknown_attempt"
-        elif attempt_ordinal < len(attempts):
+        elif attempt_ordinal < len(records):
             reason = "superseded_attempt"
         elif current_action_id is None:
             reason = "inactive_attempt"
@@ -3002,10 +2934,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     finish = subparsers.add_parser("finish")
     add_run_arguments(finish)
-    finish.add_argument("--issue", required=True, type=positive_int)
-    finish.add_argument("--attempt", required=True, type=positive_int)
-    finish.add_argument("--result-file", required=True)
+    finish.add_argument("--issue", type=positive_int)
+    finish.add_argument("--attempt", type=positive_int)
+    finish.add_argument("--result-file")
+    finish.add_argument("--summary-file")
     finish.set_defaults(handler=command_finish)
+
+    checkpoint = subparsers.add_parser("checkpoint-delivery")
+    add_run_arguments(checkpoint)
+    checkpoint.add_argument("--checkpoint-file", required=True)
+    checkpoint.set_defaults(handler=command_checkpoint_delivery)
 
     suspend = subparsers.add_parser("suspend")
     add_run_arguments(suspend)
@@ -3040,6 +2978,12 @@ def build_parser() -> argparse.ArgumentParser:
     check_launch.add_argument("--run-id", required=True)
     check_launch.add_argument("--action-id", required=True)
     check_launch.set_defaults(handler=command_check_launch)
+
+    current_launch = subparsers.add_parser("current-launch")
+    current_launch.add_argument("--repo-root", required=True)
+    current_launch.add_argument("--run-id", required=True)
+    current_launch.add_argument("--action-id", required=True)
+    current_launch.set_defaults(handler=command_check_launch)
 
     return parser
 

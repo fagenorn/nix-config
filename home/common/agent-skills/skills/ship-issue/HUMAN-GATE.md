@@ -117,3 +117,12 @@ On this path the session must not:
 - re-attempt a denied command in a re-worded or re-quoted spelling;
 - ask a subagent, another skill, or another host to run the command on its
   behalf.
+
+## Delivery interface version 2
+
+A human gate is a typed `workflow-response` requirement. Validate before
+decoding and preserve its custody, contract, pending stages, and requested_scope.
+Do not synthesize authority. On successor intent or reevaluation evidence,
+submit a `ship-checkpoint/v2` through `checkpoint-delivery`, follow the returned
+same-custody or delivery_remainder action, and repeat the exact current-launch
+fence before any later effect and observation.

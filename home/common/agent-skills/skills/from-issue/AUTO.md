@@ -365,3 +365,13 @@ grants the action, follow `SKILL.md`'s suspension procedure with
 `blocked_on: human_gate` and the canonical re-entry line. This never bypasses
 `check-launch`: `current: false`, helper failure, or an actual permission denial
 stops the action and is never routed around.
+
+## Interface_version 2 delivery relay
+
+Validate every raw `workflow-response` before decoding. Preserve custody,
+contract digest, pending stages, and requested_scope across relays. Bind the
+actual invocation to the echoed scope and run the exact four-key current-launch
+fence before an effect and before reporting its observation. Send partial effect
+or authority/provider denial as `ship-checkpoint/v2` to `checkpoint-delivery`;
+send `ship-summary/v2` only for complete delivery or genuine custody failure.
+Resume the returned implementation or delivery_remainder identity unchanged.
