@@ -21,14 +21,17 @@ class DeliveryProjection:
     def historical_direct_requested(issue_state: dict[str, Any],
                                     request: dict[str, Any]) -> bool:
         delivery = issue_state["delivery"]
-        if delivery["contract"] is None:
-            return False
-        names = ("authorization_intents", "authority_observations",
-                 "reevaluation_evidence", "delivery_observations")
-        return (request["requested_scope"] is not None
-                or request.get("recovery") is not None
-                or any(item["id"] not in {old["id"] for old in delivery[name]}
-                       for name in names for item in request[name]))
+        attempt = issue_state["attempts"][-1]
+        result = attempt.get("result")
+        forge = request.get("forge")
+        return (request.get("new_run") is not True
+                and request["delivery_contract"] is not None
+                and attempt["state"] == "merged"
+                and isinstance(result, dict) and result.get("state") == "merged"
+                and isinstance(forge, dict) and forge.get("state") == "merged"
+                and forge.get("url") == result.get("pr_url")
+                and forge.get("merge_sha") == result.get("merge_sha")
+                and not DeliveryProjection.delivery_complete(issue_state))
 
     @staticmethod
     def request_values(request: dict[str, Any], issue: int, *, control: bool

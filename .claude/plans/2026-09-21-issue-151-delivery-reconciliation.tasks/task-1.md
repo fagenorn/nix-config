@@ -16,9 +16,17 @@
 - Export exactly eight names: `MODEL_INTERFACE_VERSION = 1`,
   `DeliveryModelError(ValueError)`, `canonical_bytes`, `canonical_digest`,
   `validate_delivery_object`, `validate_custody_ref`, `match_scope`, and
-  `reduce_delivery`. Their exact signatures, closed inputs/results and
-  canonicalization rules are the design's public API; Task 2 may not add a
-  ninth name.
+  `reduce_delivery`. The six callables have these exact APIs:
+  `canonical_bytes(value: object, *, omit_derived: str | None = None) -> bytes`;
+  `canonical_digest(value: object, *, omit_derived: str | None = None) -> str`;
+  `validate_delivery_object(value: object, *, expected_kind: str | None = None,
+  notes_max_characters: int) -> dict[str, object]`;
+  `validate_custody_ref(value: object, *, issue: int) -> dict[str, object]`;
+  `match_scope(contract: object, intent: object, requested: object, *,
+  selected_outputs: list[object], at_time: str, revocation_observations:
+  list[object]) -> dict[str, object]`; and `reduce_delivery(contract: object,
+  delivery: object, *, evaluation: object) -> dict[str, object]`. Task 2 may not
+  add a ninth name.
 - The private relative-import package owns canonical primitives,
   objects/evidence, wire envelopes and reconciliation once, and is published as
   `~/.agents/lib/python/delivery_model`. Callers load only its `__init__.py` as

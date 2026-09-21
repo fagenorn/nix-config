@@ -15,6 +15,42 @@ def custody(kind="implementation", ordinal=1, launch=1):
             "action_id": f"151:r{ordinal}:{launch}"}
 
 
+def suspended_remainder(delivery, *, now="2026-09-21T00:00:00Z"):
+    record = {"remainder": 1, "source_attempt": 1,
+        "owner": "151:r1", "worktree": "/worktree", "state": "suspended",
+        "launches": [{"kind": "fresh", "owner": "151:r1",
+                      "worktree": "/worktree", "at": now}],
+        "deadline_at": "2026-09-21T03:00:00Z",
+        "blocked_on": "external", "suspend_phase": 0, "stalled_resumes": 0,
+        "result": None}
+    return {"issue": 151, "attempts": [], "outcome": None,
+            "delivery": copy.deepcopy(delivery), "delivery_remainders": [record]}
+
+
+def direct_delivery_request(contract, facts=(), scope=None, intents=(), *,
+                            new_run=False, now="2026-09-21T00:00:00Z"):
+    return {"delivery_contract": contract, "authorization_intents": list(intents),
+        "authority_observations": [], "reevaluation_evidence": [],
+        "delivery_observations": list(facts), "requested_scope": scope,
+        "recovery": None, "new_run": new_run, "now": now}
+
+
+def control_delivery_request(value):
+    names = ("authorization_intents", "authority_observations",
+             "reevaluation_evidence", "delivery_observations")
+    return {"delivery_contracts": {"151": value["delivery_contract"]},
+        **{name: {"151": value[name]} for name in names},
+        "requested_scopes": {"151": value["requested_scope"]},
+        "recoveries": {"151": value["recovery"]}}
+
+
+def issue_with_attempt(delivery, *, state="active", worktree="/worktree"):
+    return {"issue": 151, "attempts": [{"attempt": 1, "state": state,
+        "worktree": worktree, "launches": [{"kind": "fresh"}]}],
+        "outcome": None, "delivery": copy.deepcopy(delivery),
+        "delivery_remainders": []}
+
+
 def next_launch(value):
     result = copy.deepcopy(value)
     result["launch"] += 1

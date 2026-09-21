@@ -388,6 +388,8 @@ def _stage_scope_matches(contract: dict[str, Any], delivery: dict[str, Any],
                             "audience": declared_data["audience"]}
             elif declared_data["kind"] == "none":
                 expected = {"kind": "none"}
+            elif declared_data["kind"] == "literal":
+                expected = declared_data
             else:
                 _reject()
             if not ((output == {"kind": "slot", "slot_id": stage_target["slot_id"]} and data == declared_data)

@@ -351,19 +351,33 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 self.assertEqual(json.loads(completed.stdout), {"interface_version": 2,
                     "kind": "workflow_bootstrap", "run_id": "admission", "requirements": []})
                 malformed = base / "bad.json"; malformed.write_text("{malformed")
+                def rejects_dependency(fragment):
+                    result = subprocess.run([sys.executable, str(cli), "direct-owner",
+                        "--repo-root", str(repo), "--request-file", str(malformed)],
+                        capture_output=True, text=True, env=env, check=False)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(fragment, result.stderr)
+                    self.assertNotIn("JSON", result.stderr)
                 entry = store / "delivery_model/__init__.py"; saved_entry = entry.read_bytes()
                 entry.write_text("MODEL_INTERFACE_VERSION = True\n")
-                wrong = subprocess.run([sys.executable, str(cli), "direct-owner",
-                    "--repo-root", str(repo), "--request-file", str(malformed)],
-                    capture_output=True, text=True, env=env, check=False)
-                self.assertEqual(wrong.returncode, 2); self.assertIn("interface", wrong.stderr)
-                self.assertNotIn("JSON", wrong.stderr); entry.write_bytes(saved_entry)
-                (store / "delivery_model/_wire.py").unlink()
-                refused = subprocess.run([sys.executable, str(cli), "direct-owner",
-                    "--repo-root", str(repo), "--request-file", str(malformed)],
-                    capture_output=True, text=True, env=env, check=False)
-                self.assertEqual(refused.returncode, 2); self.assertIn("model", refused.stderr)
-                self.assertNotIn("JSON", refused.stderr)
+                rejects_dependency("interface"); entry.write_bytes(saved_entry)
+                model_wire = store / "delivery_model/_wire.py"
+                saved_wire = model_wire.read_bytes(); model_wire.unlink()
+                rejects_dependency("model")
+                model_wire.write_bytes(saved_wire)
+                helper = store / "workflow_delivery_wire.py"
+                helper_bytes = helper.read_bytes()
+                before = {str(path.relative_to(repo)): path.read_bytes()
+                          for path in repo.rglob("*") if path.is_file()}
+                for replacement in (None,
+                        b"WORKFLOW_DELIVERY_WIRE_INTERFACE_VERSION = 2\n"
+                        b"class DeliveryProjection: pass\n"):
+                    if replacement is None: helper.unlink()
+                    else: helper.write_bytes(replacement)
+                    rejects_dependency("projection")
+                    self.assertEqual(before, {str(path.relative_to(repo)): path.read_bytes()
+                        for path in repo.rglob("*") if path.is_file()})
+                    helper.write_bytes(helper_bytes)
 
     def test_direct_checkpoint_and_failure_remainder_round_trip(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")

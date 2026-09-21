@@ -15,8 +15,6 @@ WORKFLOW_DELIVERY_INTERFACE_VERSION = 1
 
 
 class DeliveryRuntime:
-    """Load the lexical model and compute detached delivery transitions."""
-
     def __init__(self, *, notes_max_characters: int) -> None:
         if type(notes_max_characters) is not int or notes_max_characters < 1:
             raise ValueError("invalid delivery notes limit")
@@ -300,9 +298,9 @@ class DeliveryRuntime:
         remainder = issue_state["delivery_remainders"][-1]
         if remainder["state"] not in {"active", "suspended"}:
             return None
-        expired = (remainder["state"] == "active"
-                   and self._time(now) >= self._time(remainder["deadline_at"]))
-        if expired:
+        elapsed = self._time(now) >= self._time(remainder["deadline_at"])
+        reaped = remainder["state"] == "active" and elapsed
+        if reaped:
             self._projection.suspend_expired_remainder(
                 issue_state, remainder, now)
 
@@ -313,8 +311,8 @@ class DeliveryRuntime:
                     "issue_state": issue_state, "attempt": facade,
                     "requirements": [] if requirements is None else requirements,
                     "uses_candidate": False, "desired": "resume",
-                    "custody_kind": "remainder", "expired": expired,
-                    "reduction": preview}
+                    "custody_kind": "remainder", "expired": reaped,
+                    "reduction": None}
 
         if remainder["state"] == "failed":
             if preview is None:
@@ -324,8 +322,11 @@ class DeliveryRuntime:
             if issue is None or request is None or source_kind is None:
                 raise ValueError("remainder preview inputs are required")
             preview_state = copy.deepcopy(issue_state)
+            candidate = copy.deepcopy(request)
+            if source_kind == "control": candidate["requested_scopes"][str(issue)] = None
+            else: candidate["requested_scope"] = None
             preview = self.apply_transition(
-                preview_state, issue=issue, request=request,
+                preview_state, issue=issue, request=candidate,
                 source_kind=source_kind, at_time=now)
         if owner_unavailable and remainder["state"] != "active":
             raise ValueError("owner_unavailable is not applicable")
@@ -333,13 +334,13 @@ class DeliveryRuntime:
             return result("idle")
         _ = tracker_halted
         if not dispatch_permitted:
-            return result("idle", changed=expired)
+            return result("idle", changed=reaped)
         requirements = self._projection.remainder_worktree_requirements(
             issue_state["delivery"]["contract"], preview["next_stage_id"],
             recorded_worktree, remainder["worktree"])
         if requirements:
-            return result("observe", changed=expired, requirements=requirements)
-        if expired:
+            return result("observe", changed=reaped, requirements=requirements)
+        if elapsed:
             remainder["deadline_at"] = remainder_deadline
         remainder["launches"].append({"kind": "resume", "owner": remainder["owner"],
             "worktree": remainder["worktree"], "at": now})

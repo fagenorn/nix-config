@@ -558,41 +558,45 @@ class DeliveryModelTest(unittest.TestCase):
         compatible = self.model.reduce_delivery(contract, repeated, evaluation=evaluation(delivery_observations=[reprobe]))
         self.assertEqual(next(item["state"] for item in compatible["next_delivery"]["stage_facts"] if item["stage_id"] == "publish"), "observed")
 
-    def test_selected_slot_with_no_data_accepts_only_no_data_literal(self):
-        contract, delivery = contract_and_delivery(self.model)
-        for stage in contract["stages"]:
-            stage["target_ref"]["constraints"]["data_ref"] = {"kind": "none"}
-        declared = stage_scope(self.model, contract, "publish")
-        first = intent(self.model, declared)
-        contract["initial_authorization_intent_id"] = first["id"]
-        contract["initial_authorization_intent_digest"] = self.model.canonical_digest(first)
-        delivery = rebind_contract(self.model, contract, delivery)
-        delivery["authorization_intents"] = [first]
-        delivery["authorization_chain_digest"] = self.model.canonical_digest(
-            {"intent_ids": [first["id"]]})
-        chosen = selection(self.model, delivery["contract_digest"])
-        observed = observation(
-            self.model, contract, "selected_output", {"selected_output": chosen})
-        folded = self.model.reduce_delivery(
-            contract, delivery, evaluation=evaluation(delivery_observations=[observed]))
-        actual = copy.deepcopy(declared)
-        actual["target"]["output_ref"] = {
-            "kind": "literal", "value": chosen["subject_value"]}
-        seal(self.model, actual)
-        result = self.model.reduce_delivery(
-            contract, folded["next_delivery"], evaluation=evaluation(
-                custody=custody(), current_launch=True, requested_scope=actual))
-        self.assertEqual((result["next_stage_id"], result["requested_scope"]),
-                         ("publish", actual))
-        wrong = copy.deepcopy(actual)
-        wrong["data"] = {"kind": "literal", "digest": chosen["data_identity_digest"],
-                         "classification": "source", "audience": "private"}
-        seal(self.model, wrong)
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.reduce_delivery(
-                contract, folded["next_delivery"], evaluation=evaluation(
-                    custody=custody(), current_launch=True,
-                    requested_scope=wrong))
+    def test_selected_slot_preserves_exact_none_and_literal_data(self):
+        literal = {"kind": "literal", "digest": "sha256:" + "6" * 64,
+                   "classification": "source", "audience": "private"}
+        for declared_data in ({"kind": "none"}, literal):
+            contract, delivery = contract_and_delivery(self.model)
+            for stage in contract["stages"]:
+                stage["target_ref"]["constraints"]["data_ref"] = declared_data
+            declared = stage_scope(self.model, contract, "publish")
+            first = intent(self.model, declared)
+            contract["initial_authorization_intent_id"] = first["id"]
+            contract["initial_authorization_intent_digest"] = self.model.canonical_digest(first)
+            delivery = rebind_contract(self.model, contract, delivery)
+            delivery["authorization_intents"] = [first]
+            delivery["authorization_chain_digest"] = self.model.canonical_digest(
+                {"intent_ids": [first["id"]]})
+            chosen = selection(self.model, delivery["contract_digest"])
+            observed = observation(
+                self.model, contract, "selected_output", {"selected_output": chosen})
+            folded = self.model.reduce_delivery(
+                contract, delivery, evaluation=evaluation(delivery_observations=[observed]))
+            for actual in (declared, copy.deepcopy(declared)):
+                actual["target"]["output_ref"] = (
+                    actual["target"]["output_ref"] if actual is declared else
+                    {"kind": "literal", "value": chosen["subject_value"]})
+                seal(self.model, actual)
+                result = self.model.reduce_delivery(
+                    contract, folded["next_delivery"], evaluation=evaluation(
+                        custody=custody(), current_launch=True,
+                        requested_scope=actual))
+                self.assertEqual(result["requested_scope"], actual)
+            wrong = copy.deepcopy(actual)
+            wrong["data"] = (literal if declared_data["kind"] == "none" else
+                             {**literal, "digest": "sha256:" + "7" * 64})
+            seal(self.model, wrong)
+            with self.assertRaises(self.model.DeliveryModelError):
+                self.model.reduce_delivery(
+                    contract, folded["next_delivery"], evaluation=evaluation(
+                        custody=custody(), current_launch=True,
+                        requested_scope=wrong))
 
     def test_consumed_rejection_allows_one_fresh_current_result(self):
         contract, delivery, requested = contract_and_delivery_for_stage(self.model, "merge")
