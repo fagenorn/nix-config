@@ -53,11 +53,11 @@ Git, and repository `just` commands.
 - Per D12, this source delivery does not activate schema 3, migrate the live
   issue-151 ledger, install an ad hoc bridge, or commit old runtime copies. Root
   controller evidence alone covers the retained v2/v1 completion bridge.
-- Per D13/D15, `delivery_model.py` is pure and import-safe, has interface version 1,
-  and is the sole owner of new delivery validators, canonicalization, narrowing,
-  reduction, and nested checkpoint/summary shapes. Callers load it explicitly by
-  path and fail before decode or mutation when absent, a directory or mismatched;
-  installed loading permits the managed lexical symlink to its regular store file.
+- Per D13/D15, the pure import-safe `delivery_model` package exposes exactly
+  eight names at interface version 1. Its private canonical/object/wire/reconcile
+  modules own new policy once. Callers explicitly load `__init__.py` as a package
+  and fail before decode/mutation on missing private members or version mismatch;
+  the installed managed directory symlink to one store package is valid.
 - Per D16, model/artifact checks prove canonical structure, while workflow-state
   owns locked freshness/semantic checks and native boundaries own source/host
   authenticity. Raw init/control/direct/current/checkpoint/finish responses pass
@@ -131,7 +131,7 @@ reviews; an accepted Task 1 is not a separately activated product.
 
 ## Task index
 
-Task 1 — Build and publish the pure delivery model — `home/common/agent-skills/scripts/delivery_model.py`, `home/common/agent-skills/tests/test_delivery_model.py`, `home/common/agent-skills/default.nix`, `justfile` — full — [task-1.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-1.md)
+Task 1 — Build and publish the pure delivery model — `home/common/agent-skills/scripts/delivery_model/{__init__,_canonical,_objects,_wire,_reconcile}.py`, `home/common/agent-skills/tests/test_delivery_model.py`, `home/common/agent-skills/default.nix`, `justfile` — full — [task-1.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-1.md)
 
 Task 2 — Atomically adopt schema 3 and delivery transports — workflow state, artifact validation, production caller skills/evals, and their tests — full — [task-2.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-2.md)
 

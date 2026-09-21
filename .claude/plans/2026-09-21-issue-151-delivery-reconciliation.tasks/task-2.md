@@ -593,13 +593,14 @@ before implementation; do not accept a RED caused by malformed fixtures.
 
 - [ ] **Step 4: Implement schema 3 and the atomic runtime cutover**
 
-Load the model before reading a request or ledger. Follow the existing
-`conformance.py` `SourceFileLoader` pattern: source uses the regular sibling,
-installed mode uses exactly lexical `~/.agents/lib/python/delivery_model.py`;
-register the module before execution, remove it after a failed load, require
-`Path.is_file()` and interface version 1, and never search `sys.path`. The
-installed lexical leaf may be Home Manager's symlink to a regular Nix-store
-file; missing paths and directories still refuse before decode/mutation.
+Load the model before request or ledger. Select source
+`scripts/delivery_model/__init__.py` or exactly installed lexical
+`~/.agents/lib/python/delivery_model/__init__.py`. Build its package spec with
+the parent search location, insert it for relative imports and require v1; on
+failure remove it and loaded private members.
+Never alter/search `sys.path`, load private files separately or fall back. Any
+missing entry/private file, non-file entry or wrong version refuses before
+decode/mutation. A managed directory symlink is valid.
 
 Replace the one-step `PRIOR_SCHEMA_VERSION` assumption with explicit adjacent
 migrators:

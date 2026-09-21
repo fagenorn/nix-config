@@ -1,7 +1,11 @@
 # Task 1: Build and publish the pure delivery model
 
 **Files:**
-- Create: `home/common/agent-skills/scripts/delivery_model.py`
+- Create: `home/common/agent-skills/scripts/delivery_model/__init__.py`
+- Create: `home/common/agent-skills/scripts/delivery_model/_canonical.py`
+- Create: `home/common/agent-skills/scripts/delivery_model/_objects.py`
+- Create: `home/common/agent-skills/scripts/delivery_model/_wire.py`
+- Create: `home/common/agent-skills/scripts/delivery_model/_reconcile.py`
 - Create: `home/common/agent-skills/tests/test_delivery_model.py`
 - Modify: `home/common/agent-skills/default.nix`
 - Modify: `justfile`
@@ -13,10 +17,19 @@
 - Produces `validate_custody_ref(value: object, *, issue: int) -> dict[str, object]`, accepting only the implementation/remainder union and its exact derived action id.
 - Produces `match_scope(contract: object, intent: object, requested: object, *, selected_outputs: list[object], at_time: str, revocation_observations: list[object]) -> dict[str, object]`. The intent contains the declared scope, expiry and revocation key; the contract supplies the digest and complete slot constraints. The return has exactly `matched` (bool), nullable `scope_id`, and `reason_code` (closed string). It applies only the narrowing table and never reads time/ledger state.
 - Produces `reduce_delivery(contract: object, delivery: object, *, evaluation: object) -> dict[str, object]`. `evaluation` has exactly RFC3339 `at_time`, nullable `custody`, nullable boolean `current_launch` (null exactly when custody is null), nullable `requested_scope`, `source_kind` (`control | direct | checkpoint | summary`), and sorted candidate `authorization_intents`, `authority_observations`, `reevaluation_evidence`, and `delivery_observations`. The result has exactly complete normalized `next_delivery`, ordered `pending_stage_ids`, nullable `next_stage_id`, sorted `requirements`, `completion_state` (`pending | delivery_complete`), nullable typed `blocking`, and nullable strict `authority_evaluation`. Workflow-state can persist `next_delivery` without reconstructing accepted facts or consumption state.
-- Publishes the same regular source file as `~/.agents/lib/python/delivery_model.py`; later source and installed callers explicitly load that lexical path and require interface version 1.
+- `__init__.py` exports exactly these eight names and no other public names. The
+  four underscore modules are private, use normal relative imports, and own
+  canonical primitives, objects/evidence, wire envelopes and reconciliation,
+  respectively. Publish the whole directory at
+  `~/.agents/lib/python/delivery_model`; callers explicitly load its
+  `__init__.py` as interface version 1.
 
 **Invariants:**
-- Per D1–D4 and D13, this module is the only source of new delivery object validation, canonical identity, scope narrowing and delivery reduction. It has no CLI, filesystem access, clock read, provider call, ledger write, workflow-schema selector, activation behavior or import side effect.
+- Per D1–D4 and D13, this package is the sole owner of new delivery validation,
+  canonical identity, narrowing and reduction. `_canonical` → `_objects` →
+  `_wire`/`_reconcile`; the facade imports them without cycles, duplicate policy,
+  registries or caller injection. It has no CLI, I/O, clock, provider, ledger,
+  schema selection, activation or import side effect.
 - All strict objects reject unknown/missing keys, bool-as-int, invalid nulls, duplicate or unsorted set-like arrays, bad RFC 3339 UTC values, bad ids/digests, broken intent predecessors, stage graph cycles/forward references, slot mismatches and conflicting observation identities.
 - `stages`, `stage_facts`, and `pending_stage_ids` retain contract order. Other set-like arrays are sorted by scalar or member id and unique.
 - Selection precedes every slot use; publish precedes open; merge requires selected output, an open PR, and pre-merge acceptance/review/test evidence but not `implementation_delivered`. Fresh post-merge reachability or record presence independently observes delivery.
@@ -39,6 +52,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,12 +60,15 @@ import unittest
 
 
 ROOT = Path(__file__).parents[4]
-SOURCE = ROOT / "home/common/agent-skills/scripts/delivery_model.py"
+SOURCE = ROOT / "home/common/agent-skills/scripts/delivery_model/__init__.py"
 DEFAULT_NIX = ROOT / "home/common/agent-skills/default.nix"
 
 
 def load_model(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    spec = importlib.util.spec_from_file_location(
+        name, path, submodule_search_locations=[str(path.parent)])
     if spec is None or spec.loader is None:
         raise AssertionError("delivery model loader unavailable")
     module = importlib.util.module_from_spec(spec)
@@ -59,7 +76,9 @@ def load_model(path: Path, name: str):
     try:
         spec.loader.exec_module(module)
     except BaseException:
-        sys.modules.pop(name, None)
+        for key in tuple(sys.modules):
+            if key == name or key.startswith(name + "."):
+                sys.modules.pop(key, None)
         raise
     return module
 
@@ -120,6 +139,11 @@ class DeliveryModelTest(unittest.TestCase):
             finally:
                 os.chdir(prior)
             self.assertEqual(module.MODEL_INTERFACE_VERSION, 1)
+            self.assertEqual(set(module.__all__), {
+                "MODEL_INTERFACE_VERSION", "DeliveryModelError",
+                "canonical_bytes", "canonical_digest", "validate_delivery_object",
+                "validate_custody_ref", "match_scope", "reduce_delivery",
+            })
             self.assertEqual(set(Path(raw).iterdir()), before)
             self.assertFalse(hasattr(module, "main"))
 
@@ -388,21 +412,28 @@ class DeliveryModelTest(unittest.TestCase):
     def test_source_and_generated_installed_layout_load_same_model(self):
         source = load_model(SOURCE, "delivery_model_source_layout")
         with tempfile.TemporaryDirectory() as raw:
-            store = Path(raw) / "nix-store/delivery_model.py"
+            prior_path = list(sys.path)
+            store = Path(raw) / "nix-store/delivery_model"
             store.parent.mkdir(parents=True)
-            store.write_bytes(SOURCE.read_bytes())
-            installed = Path(raw) / ".agents/lib/python/delivery_model.py"
+            shutil.copytree(SOURCE.parent, store)
+            installed = Path(raw) / ".agents/lib/python/delivery_model"
             installed.parent.mkdir(parents=True)
-            installed.symlink_to(store)
-            target = load_model(installed, "delivery_model_installed_layout")
+            installed.symlink_to(store, target_is_directory=True)
+            target = load_model(installed / "__init__.py", "delivery_model_installed_layout")
             fixture = {"kind": "fixture", "items": [1, 2]}
             self.assertEqual(source.canonical_bytes(fixture), target.canonical_bytes(fixture))
             self.assertEqual(target.MODEL_INTERFACE_VERSION, 1)
+            self.assertEqual(sys.path, prior_path)
+            (store / "_wire.py").unlink()
+            with self.assertRaises((ImportError, FileNotFoundError)):
+                load_model(installed / "__init__.py", "delivery_model_missing_private")
+            self.assertNotIn("delivery_model_missing_private", sys.modules)
 
     def test_nix_publication_and_managed_test_registration(self):
         nix = DEFAULT_NIX.read_text(encoding="utf-8")
-        self.assertIn('".agents/lib/python/delivery_model.py"', nix)
-        self.assertIn("source = ./scripts/delivery_model.py;", nix)
+        self.assertIn('".agents/lib/python/delivery_model"', nix)
+        self.assertIn("source = ./scripts/delivery_model;", nix)
+        self.assertIn("recursive = true;", nix)
         just = (ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("test_delivery_model.py", just)
 
@@ -438,6 +469,11 @@ helpers, including `with_conflicting_observation_ids`, return the one named
 mutation without validating that final invalid object; the test's
 `assertRaises` is the first rejection. Keep each literal local to this test
 module rather than adding fixture JSON or a second model implementation.
+Add one positive and table-driven negative case for each exact
+`implementation_delivered` and `cleanup_complete` subject shape: every required
+reference must bind the contract, selected/integrated subject and declared
+cleanup target; renamed, missing, extra, empty, failed and wrong-target members
+must be rejected.
 
 - [ ] **Step 2: Run the focused test and observe RED**
 
@@ -447,7 +483,7 @@ Run:
 python3 -m unittest home/common/agent-skills/tests/test_delivery_model.py -v
 ```
 
-Expected: exit nonzero because `delivery_model.py` does not exist. Record this
+Expected: exit nonzero because the delivery-model package does not exist. Record this
 terminal result. If the failure instead comes from an existing unrelated import,
 fix the test invocation before implementation.
 
@@ -456,6 +492,13 @@ fix the test invocation before implementation.
 Implement the six public functions and two public symbols in **Interfaces**. Use exact-key helpers,
 `type(value) is int`, strict UTC `Z` parsing, digest regexes, and detached values
 produced through validation rather than caller-owned mutable references.
+
+Keep `__init__.py` a dispatch facade. Put canonical identity and the error in
+`_canonical.py`, object/contract/evidence grammar and stage dependencies in
+`_objects.py`, strict response/report envelopes and correlations in `_wire.py`,
+and scope matching/reduction in `_reconcile.py`. Private modules use only normal
+relative imports in the stated dependency direction; no registry, ambient
+lookup, compatibility shim, or caller-supplied implementation is permitted.
 
 Validation order is deterministic: outer exact keys/types; derived digest/id;
 member order/uniqueness; then cross-object references. For an object with a
@@ -517,16 +560,28 @@ allow, cosmetic basis, expired/revoked intent and missing consumption never
 authorize. A null custody/current launch is valid only for projection with no
 requested effect.
 
+For a successful `implementation_delivered`, require the exact subject value
+`{selected_subject,integration_subject,presence,merge_observation_id,
+acceptance_evidence_ids,review_evidence_ids,test_evidence_ids}` and the exact
+subject/presence spellings in the design. For successful `cleanup_complete`,
+require exactly `{remote_branch_observation_ids,local_branch_observation_ids,
+worktree_observation_ids,durable_detail}` with the design's strict durable-detail
+shape. Reject renamed, omitted, extra, unbound, failed, empty or wrong-target
+subjects and references.
+
 Add the Home Manager publication beside the existing Python library targets.
-The managed public leaf is a lexical symlink to a regular Nix-store file; source
-and installed loaders use `Path.is_file()` plus `SourceFileLoader`, allow that
-managed symlink topology, and reject missing paths, directories and a wrong
-interface. They do not require the public leaf itself to pass a no-follow
-regular-file test:
+Publish one managed directory symlink to the regular Nix-store package. Source
+and installed loaders select only its `__init__.py`, construct a package spec
+with that directory as `submodule_search_locations`, insert the package namespace
+for relative imports, and remove the package plus any partially loaded private
+members on failure. They never alter/search `sys.path`, load private files
+independently, or fall back to a standalone module. Missing entry/private files,
+a directory entry, or wrong interface fails before decode or mutation:
 
 ```nix
-".agents/lib/python/delivery_model.py" = {
-  source = ./scripts/delivery_model.py;
+".agents/lib/python/delivery_model" = {
+  source = ./scripts/delivery_model;
+  recursive = true;
 };
 ```
 
@@ -543,7 +598,11 @@ python3 -m unittest \
   home/common/agent-skills/tests/test_artifact_budget.py \
   home/common/agent-skills/tests/test_workflow_state.py -v
 git diff --check -- \
-  home/common/agent-skills/scripts/delivery_model.py \
+  home/common/agent-skills/scripts/delivery_model/__init__.py \
+  home/common/agent-skills/scripts/delivery_model/_canonical.py \
+  home/common/agent-skills/scripts/delivery_model/_objects.py \
+  home/common/agent-skills/scripts/delivery_model/_wire.py \
+  home/common/agent-skills/scripts/delivery_model/_reconcile.py \
   home/common/agent-skills/tests/test_delivery_model.py \
   home/common/agent-skills/default.nix justfile
 test -z "$(git diff --cached --name-only)"
@@ -551,7 +610,11 @@ python3 - <<'PY'
 import subprocess
 
 allowed = {
-    "home/common/agent-skills/scripts/delivery_model.py",
+    "home/common/agent-skills/scripts/delivery_model/__init__.py",
+    "home/common/agent-skills/scripts/delivery_model/_canonical.py",
+    "home/common/agent-skills/scripts/delivery_model/_objects.py",
+    "home/common/agent-skills/scripts/delivery_model/_wire.py",
+    "home/common/agent-skills/scripts/delivery_model/_reconcile.py",
     "home/common/agent-skills/tests/test_delivery_model.py",
     "home/common/agent-skills/default.nix",
     "justfile",
@@ -567,7 +630,11 @@ rm "$candidate_index"
 trap 'rm -f "$candidate_index"' EXIT HUP INT TERM
 GIT_INDEX_FILE="$candidate_index" git read-tree HEAD
 GIT_INDEX_FILE="$candidate_index" git add -- \
-  home/common/agent-skills/scripts/delivery_model.py \
+  home/common/agent-skills/scripts/delivery_model/__init__.py \
+  home/common/agent-skills/scripts/delivery_model/_canonical.py \
+  home/common/agent-skills/scripts/delivery_model/_objects.py \
+  home/common/agent-skills/scripts/delivery_model/_wire.py \
+  home/common/agent-skills/scripts/delivery_model/_reconcile.py \
   home/common/agent-skills/tests/test_delivery_model.py \
   home/common/agent-skills/default.nix justfile
 GIT_INDEX_FILE="$candidate_index" git diff --cached --check
@@ -576,7 +643,11 @@ import os
 import subprocess
 
 allowed = {
-    "home/common/agent-skills/scripts/delivery_model.py",
+    "home/common/agent-skills/scripts/delivery_model/__init__.py",
+    "home/common/agent-skills/scripts/delivery_model/_canonical.py",
+    "home/common/agent-skills/scripts/delivery_model/_objects.py",
+    "home/common/agent-skills/scripts/delivery_model/_wire.py",
+    "home/common/agent-skills/scripts/delivery_model/_reconcile.py",
     "home/common/agent-skills/tests/test_delivery_model.py",
     "home/common/agent-skills/default.nix",
     "justfile",
@@ -598,7 +669,7 @@ test -z "$(git diff --cached --name-only)"
 ```
 
 Expected: all commands exit 0; the new test passes, existing workflow/report
-tests remain green, exactly four Task 1 paths differ, and no whitespace error is
+tests remain green, exactly eight Task 1 paths differ, and no whitespace error is
 reported. The temporary index measures new files without touching the real
 index. If a file needs a bounded test split to stay under the per-file cap, stop
 and amend this member's Files roster, allowlist and root task index before adding
@@ -611,13 +682,21 @@ path/line coverage and unchanged package limits before review.
 ```bash
 set -euo pipefail
 git add \
-  home/common/agent-skills/scripts/delivery_model.py \
+  home/common/agent-skills/scripts/delivery_model/__init__.py \
+  home/common/agent-skills/scripts/delivery_model/_canonical.py \
+  home/common/agent-skills/scripts/delivery_model/_objects.py \
+  home/common/agent-skills/scripts/delivery_model/_wire.py \
+  home/common/agent-skills/scripts/delivery_model/_reconcile.py \
   home/common/agent-skills/tests/test_delivery_model.py \
   home/common/agent-skills/default.nix justfile
 test -z "$(git diff --name-only)"
 test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' \
   home/common/agent-skills/default.nix \
-  home/common/agent-skills/scripts/delivery_model.py \
+  home/common/agent-skills/scripts/delivery_model/__init__.py \
+  home/common/agent-skills/scripts/delivery_model/_canonical.py \
+  home/common/agent-skills/scripts/delivery_model/_objects.py \
+  home/common/agent-skills/scripts/delivery_model/_reconcile.py \
+  home/common/agent-skills/scripts/delivery_model/_wire.py \
   home/common/agent-skills/tests/test_delivery_model.py \
   justfile)"
 git commit -S -m "feat: add canonical delivery model" \

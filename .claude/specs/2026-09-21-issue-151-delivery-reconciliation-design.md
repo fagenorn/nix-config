@@ -343,17 +343,28 @@ Observation subjects are exact: `selected_output` contains the strict
 digest, branch and live PR head plus sorted review evidence ids, but no integration
 claim; branch publication contains repository id, branch and selected head; PR
 open/merge contains provider repository id, PR number/URL, expected head and
-base, with merge SHA and merged state required only for merge; tracker closure
-contains tracker repository/issue, closed state, nullable close reason and
-tracker observation identity; remote/local absence contains repository id,
-exact branch and successful absence result; worktree absence contains canonical
-path, recorded worktree identity, no-follow probe mode and successful absence
-result. `implementation_delivered` uses the record/commit selected subject,
-integration subject, fresh reachability or record-presence result,
-merged/integrated subject evidence when merge applies, and sorted
-acceptance/review/test evidence
-ids. No failure, unknown or mismatched probe has a positive subject
-shape.
+base, with merge SHA and merged state only for merge; tracker closure contains
+tracker repository/issue, closed state, nullable close reason and observation
+identity; remote/local absence contains repository id, exact branch and literal
+`absent:true`; worktree absence contains canonical path, recorded identity,
+`probe_mode:no_follow` and literal `absent:true`.
+
+`implementation_delivered` is exactly `{selected_subject,integration_subject,
+presence,merge_observation_id,acceptance_evidence_ids,review_evidence_ids,
+test_evidence_ids}`. Both subjects are exact `{kind,value}` with kind
+`commit | tree | record`; `presence` is exactly `{kind,repository_id,
+selected_value,integration_value,integrated_ref,succeeded}` with kind
+`reachability | record_presence` and literal `succeeded:true`.
+`merge_observation_id` is null only when merge is inapplicable; the three
+evidence-id arrays are sorted, unique and nonempty. `cleanup_complete` is exactly
+`{remote_branch_observation_ids,local_branch_observation_ids,
+worktree_observation_ids,durable_detail}`; the three sorted unique arrays contain
+the accepted exact-target absence observations required by the contract, and
+`durable_detail` is exactly `{detail_pointer,read_evidence_digest,succeeded}`
+with literal `succeeded:true`. Reducer matching binds every referenced
+observation to the same contract, selected/integrated subject and declared
+cleanup target. Failure, unknown, mismatched probe or unreadable detail has no
+positive shape.
 
 The contract's `depends_on` graph is acyclic and may refer only to earlier stage
 ids. Selection precedes every stage that uses the slot; publish precedes open.
@@ -484,14 +495,14 @@ the stage advances; the effect result alone is not proof.
 
 ### Shared delivery model seam
 
-One import-safe Python module at
-`home/common/agent-skills/scripts/delivery_model.py`, published as
-`~/.agents/lib/python/delivery_model.py`, owns only this issue's canonical JSON
-bytes/digests, strict delivery object validators, scope narrowing, stage and
-postcondition reduction, and custody/checkpoint/summary nested-shape validation.
-Its public surface is a small set of pure functions plus model interface version
-1. It has no CLI, ledger I/O, clock, provider, project policy, activation logic
-or workflow schema selector.
+The private package `scripts/delivery_model/`, published at
+`~/.agents/lib/python/delivery_model/`, owns canonical identity, object/wire
+validation, matching and reduction. Its sole public facade is `__init__.py`.
+`_canonical.py` owns errors/primitives, `_objects.py` contracts/evidence and
+nested references, `_wire.py` response/report envelopes, and `_reconcile.py`
+matching/reduction. Ordinary relative dependencies flow canonical → objects →
+wire/reconcile; no duplicate tables, cycles, registration or caller injection.
+The package has no CLI, I/O, clock, provider, policy, activation or schema choice.
 
 That surface is exactly `MODEL_INTERFACE_VERSION = 1`,
 `DeliveryModelError`, `canonical_bytes`, `canonical_digest`,
@@ -524,17 +535,13 @@ stale custody or unverified host claim therefore passes the byte boundary and is
 refused or left non-authoritative at the transaction/trust layer rather than
 being rejected by invented hash authentication.
 
-Source callers use an explicit-by-path loader, following the existing
-`conformance.py` sibling-library pattern, to load the regular source sibling.
-Installed workflow-state and artifact-budget use that same loader contract
-against the one lexical `~/.agents/lib/python/delivery_model.py` publication;
-they never rely on `sys.path`, a bare import or siblings behind independently
-resolved Nix-store file targets. Both require model interface version 1;
-absence, a directory/non-file resolution or a version mismatch fails before
-decode/mutation. `Path.is_file()` deliberately accepts Home Manager's lexical
-library symlink to its regular Nix-store target; loaders do not bypass that
-public topology by resolving a different sibling. Neither caller keeps a
-duplicate validator or narrowing table.
+Source loads `scripts/delivery_model/__init__.py`; installed loads lexical
+`~/.agents/lib/python/delivery_model/__init__.py`. The loader creates that
+package namespace/search location for relative imports and removes partial
+members on failure. It never edits/searches `sys.path`, falls back or loads
+private files independently. Missing entry/private files, non-file entry or
+wrong interface refuses before decode/mutation. The managed directory symlink to
+one store package is valid. Neither caller duplicates model policy.
 Focused module tests exercise the canonical model and reduction directly,
 including source and generated installed import layouts.
 Workflow-state remains the sole state/transition writer; artifact-budget owns
@@ -872,7 +879,7 @@ architecture authority. They are not recorded human answers.
 | D10 | Accept the three audited behaviors only through deterministic simulated identities, intent and provider state. | Audit cases 2–4 lack safe exact live metadata and authorize no external mutation. | Copy transcripts/private payloads or present invented SHAs/grants as history. |
 | D11 | Prove acceptance through public CLI/provider-effect round trips, including ordinary v3 delivery and partial-effect checkpoint/denial/resume, with text/eval contracts only as supplementary caller coverage. | The-bar tests that can fail; issue 151 runtime gap. | Terminal-only and plan-only tests can pass while partial facts are lost or a requirement is mislabeled failure. |
 | D12 | Finish issue 151 through its run-specific retained v2/v1 operational bridge; keep exact-old-generation conformance/topology/runtime receipts with the root controller, test only new-source product interfaces in shipped suites, and activate v3 only through separate managed scope. | #66 bridge/activation separation; dynamic validator/module/policy resolution; worktree cleanup removes source. | Hardcoded machine hashes, committed historical runtime fixtures, a generic bridge runtime, migrating the live run or depending on its deleted worktree would mix product behavior with one delivery's operations. |
-| D13 | Put canonical delivery validation, narrowing and pure reduction in one import-safe `delivery_model.py` published as a library and consumed by workflow-state and artifact-budget; adopt every wire atomically after the pure seam is reviewed. | DRY; review-package feasibility; current source/installed Python layouts. | Duplicate validators drift, while a generic framework or early schema cutover would exceed this issue and violate D9. |
+| D13 | Put the exact eight-name facade over one import-safe private `delivery_model` package split into canonical, object, wire and reconciliation modules; workflow-state and artifact-budget load its `__init__.py` explicitly and adopt every wire atomically after review. | DRY; per-file review feasibility; current source/installed package layouts. | One oversized file, duplicate validators, a compatibility wrapper, registry or early schema cutover. |
 | D14 | Keep valid schema-1 ledgers readable by applying the existing 1→2 migration and the new 2→3 migration as an adjacent in-memory chain, validating the complete schema-3 result, and performing at most one atomic write. | Current source already supports schema 1→2; D8 requires immutable legacy history; an interface cutover must not strand an older valid ledger. | Setting the sole prior version to 2 would reject supported schema-1 history, while persisting an intermediate schema-2 ledger would expose a partial cutover. |
 | D15 | Give the pure model one closed eight-name public surface with explicit contract/intent/time/custody/candidate inputs and a complete persistable next-delivery result; checkpoint/owner/bootstrap output is closed; only durable one-shot consumption may expose an authority-evaluation action, and only the fourth unchanged suspension returns the stalled terminal variant. | D2/D3 require explicit facts; D9 atomic cutover; D13 one contract owner. | Caller-specific reduction dictionaries, ambient reads, free-text consumption, or an open response would duplicate policy and permit replay. |
 | D16 | Keep artifact/model validation structural, add one raw `workflow-response` union boundary, and reserve ledger freshness plus normalized-source/host authenticity for workflow-state under lock and the existing trust boundary. | Defense in depth; D3 launch fence; normalized controller facts are not authenticated by digests or opaque references. | Asking the stateless artifact validator to reject a once-valid stale action or fabricated but well-shaped source claim would invent authority and make public tests impossible. |
