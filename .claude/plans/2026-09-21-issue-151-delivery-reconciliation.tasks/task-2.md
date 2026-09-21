@@ -193,9 +193,16 @@ persist one final v3 state, then render. Rejection writes nothing; retry cannot
 duplicate consumption. Runtime owns this transition; workflow-state owns CLI,
 locks and writes.
 
-Effects use exact returned scope/custody with current-launch fences; history never authorizes.
+Effects use only returned action, exact actual scope and custody, with current-
+launch fences immediately before effect and observation. Historical handoff/allow
+is never operative. Partial work checkpoints; finish requires complete required
+postconditions or a genuine custody failure. Resume preserves deadline/ordinal;
+remainder 2 requires failure, absent effect and recovery; identity spaces remain
+disjoint; suspension count 3 stalls and progress resets it.
 
-No step authorizes activation, forge/live-ledger writes, cap/base changes, reduced tests or partial review.
+No step authorizes activation, deployment, installed-generation change, forge
+write, live-ledger migration, cap increase, base repin, reduced test set, skipped
+raw receipt or partial-range review.
 
 ## Exact verification and boundary precision
 

@@ -74,20 +74,10 @@ never authority.
 
 ### Closed authorization scope and runtime authority
 
-An `authorization-intent/v1` contains an id, source, issued time, nullable
-expiry, revocation key and sorted unique scope tuples. Every tuple has
-exactly:
-
-- principal kind and stable principal identity;
-- action and external effect class;
-- project/provider/repository identity, issue, branch/base and either a literal
-  PR identity or a declared selected-output slot;
-- discriminated endpoint identity (`none | literal`);
-- discriminated data identity (`none | literal | selected_output_slot`), with
-  fixed classification and audience (`private`, `public`, or a named-audience
-  digest); literal carries its exact digest, while the slot form carries the
-  contract slot id whose reviewed binding supplies the digest;
-- risk class and discriminated spend (`none | ceiling`) with unit/ceiling.
+Intent and scope use the exact closed fields in the canonical wire appendix.
+Scope includes stable principal, effect, target, endpoint, data, risk and spend;
+audience is private, public or a named-audience digest. Slot data takes its digest
+only from that slot's reviewed binding.
 
 Canonical comparison uses all members and the closed narrowing grammar below.
 There is no generic string subset rule. Expired intent or an observed revocation
@@ -97,11 +87,10 @@ reviewed output is the declared narrowing, so it needs no new permission merely
 because the bytes are now known. A different slot/target, classification,
 audience, action or effect still refuses.
 
-This makes the recorded private/public case explicit: the same repository URL
-with a public audience or different payload/data digest does not match a private
-publication intent. Repository administration is not a grant. The pending live
-#152 denial is evidence about one concrete action, not universal policy and not
-permission to retry it.
+The same repository URL with public audience or another payload/data digest does
+not match private publication intent. Repository administration grants nothing.
+The live #152 denial concerns one concrete action, not universal policy or retry
+permission.
 
 `authority-observation/v1` is append-only and binds contract digest, scope-tuple
 id, nullable current launch, authority kind (`intent_revocation`, `native_guard`,
@@ -438,29 +427,38 @@ promoted into a stage fact or postcondition.
 
 ### Separate finite remainder custody
 
-Schema 3 `delivery_remainders` is one disjoint finite lineage with independent
-attempt/remainder ordinals, budgets and existing attempt-cap/result semantics.
-Each record has the canonical `issue:r<ordinal>:launch` custody id, source
-attempt, sorted pending stages, current postcondition/auth-heads, requested
-scope, recovery and `finished_at`; its creation key is exactly that canonical
-contract/source-attempt/sorted-pending/current-postcondition/auth-head tuple.
-Only one nonterminal custody exists across both lineages. R1 is idempotent,
-validated-contract custody for pending work and has no active implementation;
-repeated identical direct/control requests return the existing/completed result
-without writing. R2 requires latest authentic terminal failed/stalled R1,
-retryable ready work, verified absence and D21 proof; no third remainder exists.
-`finished_at` is null while live and is the actual failed/stalled terminal event;
-other independent completion/history behavior is unchanged.
+Schema 3 adds `delivery_remainders` beside `attempts`. Ordinals/retry budgets
+are independent; the two-attempt cap and historical implementation results stay
+unchanged. Each remainder has exactly `remainder,contract_digest,source_attempt,
+prior_remainder,pending_stage_ids,owner,worktree,state,launches,deadline_at,
+progress_token,blocked_on,suspend_phase,stalled_resumes,result,result_source,
+recovery,finished_at`. D21 defines the last two fields. Implementation ids remain
+`issue:attempt:launch`; remainder ids are `issue:r<remainder>:launch`.
+Current-launch accepts that union without clock, lock, creation or write. Use the
+received id verbatim before effects and observations; false/malformed/missing
+results permit no effect, ledger write or cleanup, including post-merge actions.
 
-Every effect and observation rechecks the current guard; false, missing or
-malformed guard causes zero effect, ledger write or cleanup. The fixed deadline
-is within its launch window; expiry parks before a fresh window. The counter is
-zero at first suspension, one/two resume, and the fourth suspension records
-three stalls. Real stage/postcondition progress resets it and remembered phase.
-Handoff, expiry and suspension resume in place without spending retry; human or
-provider completion is independent of new custody. Fold merge/facts before
-selection, preserve terminal history, and select an eligible terminal remainder
-before creating custody. Worktree rules below remain exact.
+Only one nonterminal custody exists across both lineages. R1 requires a valid
+contract, no active implementation owner and a pending stage or required pending
+postcondition. Its creation key digests contract, source attempt, sorted pending
+stages and current postcondition/authorization heads. Identical direct/control
+replay returns existing custody or completed replay without writing.
+
+Unavailability, handoff, expiry and environmental suspension resume the same
+ordinal with a new launch, spending no retry. In-window handoff/dead-owner resume
+keeps its deadline; expiry parks before in-place resume gets a fresh full window.
+Suspension counts 0, 1 and 2 may resume; the fourth stores 3, terminalizes stalled
+and cannot resume. Real stage/postcondition progress clears remembered phase and
+resets the counter before the next suspension epoch.
+
+Remainders are capped at two independently of attempts. R2 requires authentic
+failed/stalled R1, retryable pending work and D21's absence/recovery proof;
+rejection/unknown is no transient-failure basis. Independent human/provider
+completion may still be recorded without new custody. Fold merge/observations,
+then pending stages, before custody selection under capacity/deadline rules.
+Never overwrite terminal owner results; only a result-less active implementation
+may receive truthful forge-reconciled closeout. Delivery truth stays separate.
+Terminal replay checks an eligible remainder before the historical envelope.
 
 ### Worktree and subject requirements
 
@@ -710,14 +708,9 @@ kind/state `delivery_complete` and no pending stage; failure adds
 `terminal_failed`; stall uses its variant; eligible retry emits remainder.
 Requirement/partial success never becomes failure.
 
-`authority_evaluation` is null or exact `{kind:native_authority_evaluation,
-contract_digest,scope_id,custody,rejected_observation_id,basis_kind,basis_id,
-use_key}` and matches enclosing contract/custody. A returned allow is operative
-only when its evaluation key names the persisted consumption, contract/scope/
-custody match, observed time is at/after consumption, and current intent covers
-the exact tuple. A same-scope rejection at/after it wins; old-launch,
-unconsumed/cosmetic or intentless allow never authorizes. The ordinary checkpoint
-echoes the independently requested tuple even when only this evaluation is
+`authority_evaluation` uses D18's exact nullable action, consumption and
+operative-allow rules above, matching the enclosing contract/custody. The ordinary
+checkpoint echoes its independently requested tuple even when only evaluation is
 nonnull; declared scope/custody/use key remain the D18 permit bindings.
 
 The workflow-response union is exactly current-launch; `workflow_bootstrap`;
@@ -758,7 +751,7 @@ fake-provider state, never external payload/transcript/grant.
   fresh integration reachability separately proves delivery.
 
 
-### D21 — authenticated effect-failure recovery
+### D21 — proof required for remainder retry
 
 Direct/v2 has required nullable `recovery`; control/v2 has exact canonical
 issue-keyed `recoveries` (explicit nulls). Remainders have required nullable
@@ -770,9 +763,8 @@ Under lock only latest terminal authentic failed(owner)/stalled r1, no other
 nonterminal/r2, and a pending ready retryable stage qualify. Fold facts/intents
 with null scope first; model binds recovery scope to that stage/selected target.
 Failure is at/after latest effect-capable launch and by r1 `finished_at`; absence is
-at/after finish and failure and by request now. `finished_at` is null while live
-and the authentic failed/stalled terminal event; it changes no independent
-completion/history result. Any latest unresolved rejected/unknown
+at/after finish and failure and by request now. Independent completion/history
+semantics stay unchanged. Any latest unresolved rejected/unknown
 verdict for actual or matched declared scope parks; ordinary proof never
 overrides D18. Persist r2+recovery atomically with no effect/evaluation/
 consumption; return null r2 scope and fresh requirements. Contractless, active,
