@@ -481,6 +481,15 @@ Its public surface is a small set of pure functions plus model interface version
 1. It has no CLI, ledger I/O, clock, provider, project policy, activation logic
 or workflow schema selector.
 
+That surface is exactly `MODEL_INTERFACE_VERSION = 1`,
+`DeliveryModelError`, `canonical_bytes`, `canonical_digest`,
+`validate_delivery_object`, `validate_custody_ref`, `match_scope`, and
+`reduce_delivery`. Validation returns detached normalized objects; scope matching
+returns only matched/scope/reason; reduction returns normalized stage facts and
+postconditions, ordered pending stages, nullable next stage, sorted requirements,
+completion state and nullable typed blocking. This keeps transport callers thin
+without exposing ledger or provider operations through the model.
+
 Source callers use an explicit-by-path loader, following the existing
 `conformance.py` sibling-library pattern, to load the regular source sibling.
 Installed workflow-state and artifact-budget use that same loader contract
@@ -520,9 +529,12 @@ same state/id relationship as stage facts. A remainder record has exactly
 `owner`, `worktree`, `state`, `launches`, `deadline_at`, `progress_token`,
 `blocked_on`, `suspend_phase`, `stalled_resumes`, `result`, and `result_source`.
 
-Migration is adjacent, atomic and idempotent. Unknown fields, partial v3 shapes,
-ambiguous repository identity, malformed legacy rows or invalid input refuse
-before replacement. Older installed helpers reject v3 without mutation. Later
+Migration is adjacent, atomic and idempotent. A valid schema-1 ledger follows
+the already supported 1→2 migration and the new 2→3 migration in memory, then
+the complete schema-3 value is validated before one replacement; no intermediate
+schema-2 write is exposed. Unknown fields, partial v3 shapes, ambiguous
+repository identity, malformed legacy rows or invalid input refuse before
+replacement. Older installed helpers reject v3 without mutation. Later
 #152 C must migrate from the then integrated schema and merge its concerns rather
 than creating parallel state.
 
@@ -603,6 +615,13 @@ stale/malformed custody returns a refusal with no write. A current checkpoint
 atomically deduplicates and persists valid observations, recomputes stage facts
 and postconditions, and returns the next stage or exact requirement without
 terminalizing custody or spending either retry budget.
+
+The checkpoint response has exactly interface version 2, literal kind
+`delivery_checkpointed`, ledger root, run id, issue, owner, custody, contract
+digest, sorted accepted observation ids, ordered pending stage ids, nullable next
+action, sorted requirements, state `active | suspended`, and nullable
+`blocked_on`. It contains no guessed stage, terminal verdict or alternate
+authority field.
 
 When the accepted facts produce a true blocking requirement, the reducer—not a
 shipping caller—maps its closed reason to `human_gate`, `external`, or
@@ -763,3 +782,5 @@ architecture authority. They are not recorded human answers.
 | D11 | Prove acceptance through public CLI/provider-effect round trips, including ordinary v3 delivery and partial-effect checkpoint/denial/resume, with text/eval contracts only as supplementary caller coverage. | The-bar tests that can fail; issue 151 runtime gap. | Terminal-only and plan-only tests can pass while partial facts are lost or a requirement is mislabeled failure. |
 | D12 | Finish issue 151 through its run-specific retained v2/v1 operational bridge; keep exact-old-generation conformance/topology/runtime receipts with the root controller, test only new-source product interfaces in shipped suites, and activate v3 only through separate managed scope. | #66 bridge/activation separation; dynamic validator/module/policy resolution; worktree cleanup removes source. | Hardcoded machine hashes, committed historical runtime fixtures, a generic bridge runtime, migrating the live run or depending on its deleted worktree would mix product behavior with one delivery's operations. |
 | D13 | Put canonical delivery validation, narrowing and pure reduction in one import-safe `delivery_model.py` published as a library and consumed by workflow-state and artifact-budget; adopt every wire atomically after the pure seam is reviewed. | DRY; review-package feasibility; current source/installed Python layouts. | Duplicate validators drift, while a generic framework or early schema cutover would exceed this issue and violate D9. |
+| D14 | Keep valid schema-1 ledgers readable by applying the existing 1→2 migration and the new 2→3 migration as an adjacent in-memory chain, validating the complete schema-3 result, and performing at most one atomic write. | Current source already supports schema 1→2; D8 requires immutable legacy history; an interface cutover must not strand an older valid ledger. | Setting the sole prior version to 2 would reject supported schema-1 history, while persisting an intermediate schema-2 ledger would expose a partial cutover. |
+| D15 | Give the pure model one closed eight-name public surface and make checkpoint output a closed custody-bound response carrying accepted facts, pending stages, next action/requirements and suspension state. | D9 atomic wire cutover; D11 executable round trips; D13 one contract owner. | Caller-specific reduction dictionaries or an open-ended checkpoint response would recreate duplicate policy and let callers infer stage or terminal truth. |

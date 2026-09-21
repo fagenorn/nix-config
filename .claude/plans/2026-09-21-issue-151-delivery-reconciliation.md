@@ -1,0 +1,124 @@
+# Delivery Reconciliation Implementation Plan
+
+> **For agentic workers:** execute this plan with the `sdd` skill — one implementer
+> per task, reviewed between tasks. Steps use `- [ ]` checkboxes.
+
+**Goal:** Add one canonical delivery model and atomically move lifecycle state,
+reports, and production callers to truthful delivery reconciliation with finite
+remainder custody.
+
+**Architecture:** Task 1 introduces and publishes an import-safe pure model that
+owns delivery validation, canonical identity, exact scope narrowing, and pure
+stage/postcondition reduction without selecting a workflow schema. Task 2 adopts
+that reviewed seam in one source cutover: workflow schema 3, control/direct
+interface 2, checkpoint/handoff/summary v2, every production caller, and their
+public executable tests move together. The two task commits form one delivery;
+Task 1 alone is preparatory and does not activate or ship a partial wire.
+
+**Tech stack:** Python 3 standard library, JSON CLI protocols, Nix/Home Manager
+file publication, Markdown workflow skills, JSON orchestration evals, `unittest`,
+Git, and repository `just` commands.
+
+## Global Constraints
+
+- Per D1–D4, ledger truth is one immutable `delivery-contract/v1` plus append-only
+  intent, authority, reevaluation, selected-output and delivery observations;
+  canonical digests prove identity but grant no authority.
+- Per D2, exact scope matching includes principal, action/effect, project,
+  provider, repository, issue, branch/base, endpoint, payload digest,
+  classification, audience, risk and spend. Only the declared selected-output
+  slot and a same-unit spend ceiling narrow; null is never a wildcard.
+- Per D3, the exact custody launch is checked immediately before an effect and
+  again before its observation is written. A stale or malformed launch causes
+  zero external effects and a byte-identical ledger.
+- Per D4, `implementation_delivered`, `pr_merged`, `tracker_closed`, and
+  `cleanup_complete` remain independent. Merge needs reviewed acceptance/test
+  evidence and an open PR, then fresh reachability or record presence establishes
+  delivery; neither observation fabricates the other.
+- Per D5–D7, implementation attempts and `delivery_remainders` use disjoint finite
+  ordinals and custody ids. In-place resume keeps its ordinal/deadline, merge is
+  observed before expiry/reaping, and cleanup/record actions require exact
+  predeclared worktree and subject identities.
+- Per D8 and D14, preserve legacy attempts, outcomes, result bytes and detail
+  pointers. Accept valid schemas 1 and 2 through an adjacent in-memory
+  1→2→3 chain, validate schema 3, and perform no intermediate write; migration
+  creates no contract, authority, stage fact, postcondition or cleanup success.
+- Per D9, schema 3, control/direct interface 2, `ship-checkpoint/v2`,
+  `ship-handoff/v2`, `ship-summary/v2`, and all production callers cut over in
+  one Task 2 commit. No validator-first, caller-first, nullable-ordinal or hybrid
+  compatibility path is accepted.
+- Per D10, Nodo, Arcwave and Argus are deterministic `sim.invalid` simulations
+  with synthetic ids. No external payload, transcript, SHA, grant or mutation is
+  presented as historical fact.
+- Per D12, this source delivery does not activate schema 3, migrate the live
+  issue-151 ledger, install an ad hoc bridge, or commit old runtime copies. Root
+  controller evidence alone covers the retained v2/v1 completion bridge.
+- Per D13/D15, `delivery_model.py` is pure and import-safe, has interface version 1,
+  and is the sole owner of new delivery validators, canonicalization, narrowing,
+  reduction, and nested checkpoint/summary shapes. Callers load it explicitly by
+  path and fail before decode or mutation when absent, non-regular or mismatched.
+- Every ordinary source file remains below the review packer's 65,536-byte
+  per-file diff limit. Do not depend on an unpublished projector or raise any
+  root, member, count or aggregate cap.
+- Product tests use temporary ledgers, fake providers, source and generated
+  installed layouts only. They never read HOME, `/private/tmp`, the live
+  issue-151 ledger, or controller operational evidence.
+- Implementation commits are signed and include
+  `Co-Authored-By: Codex <noreply@openai.com>`.
+
+## Test seams
+
+- Pure model tests call the public functions directly and load both source and
+  generated installed module paths, proving canonical bytes/digests, strict
+  objects, slot-bound narrowing, refusal preservation and ordered reduction.
+- Workflow CLI tests invoke real `init-run`, `control`, `direct-owner`,
+  `current-launch`, `checkpoint-delivery`, and `finish` subprocesses against
+  temporary ledgers; internal helper calls are not acceptance evidence.
+- Artifact boundary tests feed exact raw v2 handoff/checkpoint/summary bytes to
+  `artifact-budget validate-report` before any workflow decode and exercise
+  unknown keys, hybrids, mismatched digests/custody and unsuccessful probes.
+- A controlled fake provider consumes only the typed direct response, records
+  effects, and returns strict observations. It proves exact authorized effects,
+  zero-effect refusals, double launch fencing, partial progress, denial,
+  suspension and same-custody resume.
+- Caller/eval tests supplement the executable round trips by pinning that
+  from-issue, AUTO, ship-issue and orchestration validate before decode, carry
+  exact objects, act only on the returned closed stage and persist before report.
+- `just agent-workflow-tests` and `just build` run once on the complete Task 2
+  state. They verify source integration and managed build, not activation or the
+  retained old-generation bridge.
+
+## Delivery estimate and boundaries
+
+Estimate: 16–21 product/test/caller files plus this three-file plan package and
+the amended one-file design spec. The complete source diff is likely 340–520 KiB
+before review fixes; `workflow-state.py`, its existing test, and the new
+end-to-end test are the largest likely contributors and each must remain below
+65,536 diff bytes. Task 1 is an independently reviewable pure-library gate of
+roughly 65–105 KiB across four product/test paths. Task 2 is an atomic adoption
+gate of roughly 275–415 KiB across the remaining runtime, report, caller and test
+paths. These are forecasts, not fit evidence: each task and the final cumulative
+range requires a complete actual producer package under unchanged limits.
+
+The split follows D13: a reviewer can accept the pure unused model before any
+wire changes, while no subset of Task 2 is independently shippable because a
+mixed schema/report/caller generation would violate D9. The final delivery must
+contain both accepted tasks and distinct final conformance and correctness
+reviews; an accepted Task 1 is not a separately activated product.
+
+## Task index
+
+Task 1 — Build and publish the pure delivery model — `home/common/agent-skills/scripts/delivery_model.py`, `home/common/agent-skills/tests/test_delivery_model.py`, `home/common/agent-skills/default.nix`, `justfile` — full — [task-1.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-1.md)
+
+Task 2 — Atomically adopt schema 3 and delivery transports — workflow state, artifact validation, production caller skills/evals, and their tests — full — [task-2.md](2026-09-21-issue-151-delivery-reconciliation.tasks/task-2.md)
+
+## Decisions
+
+The plan implements D1–D13 as accepted. Planning added D14 because the current
+runtime already supports schema 1→2: the new writer must compose that migration
+with 2→3 in memory and preserve one atomic write rather than strand valid older
+history or expose an intermediate schema. It added D15 to close the intermodule
+model surface and the public checkpoint response instead of leaving caller-owned
+reduction dictionaries or an open output envelope.
+
+---
