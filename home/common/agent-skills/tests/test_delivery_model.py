@@ -5,17 +5,21 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).parents[4]
-SOURCE = ROOT / "home/common/agent-skills/scripts/delivery_model.py"
+SOURCE = ROOT / "home/common/agent-skills/scripts/delivery_model/__init__.py"
 DEFAULT_NIX = ROOT / "home/common/agent-skills/default.nix"
 
 
 def load_model(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    spec = importlib.util.spec_from_file_location(
+        name, path, submodule_search_locations=[str(path.parent)])
     if spec is None or spec.loader is None:
         raise AssertionError("delivery model loader unavailable")
     module = importlib.util.module_from_spec(spec)
@@ -23,7 +27,9 @@ def load_model(path: Path, name: str):
     try:
         spec.loader.exec_module(module)
     except BaseException:
-        sys.modules.pop(name, None)
+        for key in tuple(sys.modules):
+            if key == name or key.startswith(name + "."):
+                sys.modules.pop(key, None)
         raise
     return module
 
@@ -82,11 +88,13 @@ def intent(model, declared, *, predecessor=None, issued="2026-09-20T00:00:00Z",
     })
 
 
-def selection(model, contract_digest):
+def selection(model, contract_digest, *, subject_kind="commit", subject_value=None):
+    if subject_value is None:
+        subject_value = ("sha256:" + "a" * 64) if subject_kind == "record" else "a" * 40
     return seal(model, {
         "schema_version": 1, "kind": "selected-output", "id": "",
         "contract_digest": contract_digest, "slot_id": "reviewed",
-        "subject_kind": "commit", "subject_value": "a" * 40,
+        "subject_kind": subject_kind, "subject_value": subject_value,
         "data_identity_digest": "sha256:" + "2" * 64,
         "repository_id": "sim-repo", "branch": "feature", "base": "main",
         "evidence_digest": "sha256:" + "3" * 64,
@@ -269,7 +277,8 @@ def observation(model, contract, kind, subject):
     return seal(model, {
         "schema_version": 1, "kind": "delivery-observation", "id": "",
         "contract_digest": model.canonical_digest(contract),
-        "project": contract["project"], "observation_kind": kind, "subject": subject,
+        "project": copy.deepcopy(contract["project"]), "observation_kind": kind,
+        "subject": copy.deepcopy(subject),
         "source": {"kind": "provider", "reference": f"sim:{kind}"},
         "observed_at": "2026-09-20T03:00:00Z",
         "evidence_digest": "sha256:" + "7" * 64,
@@ -295,6 +304,65 @@ def with_observed(model, contract, delivery, stage_ids):
     return result
 
 
+def rebind_contract(model, contract, delivery):
+    result = copy.deepcopy(delivery)
+    result["contract"] = copy.deepcopy(contract)
+    result["contract_digest"] = model.canonical_digest(contract)
+    result["stage_facts"] = [seal(model, {
+        "schema_version": 1, "kind": "delivery-stage-fact", "id": "",
+        "contract_digest": result["contract_digest"], "stage_id": stage["id"],
+        "state": "pending", "observation_id": None,
+    }) for stage in contract["stages"]]
+    return result
+
+
+def cleanup_contract_and_delivery(model):
+    contract, delivery = contract_and_delivery(model)
+    stages = (
+        ("close", "close_tracker", "close_issue", "tracker_write", "151", "not_required"),
+        ("remote", "delete_remote_branch", "delete_remote_branch", "repository_write", "feature", "cleanup_target"),
+        ("worktree", "remove_worktree", "remove_worktree", "filesystem_write", "/worktree", "cleanup_target"),
+        ("local", "delete_local_branch", "delete_local_branch", "repository_write", "feature", "cleanup_target"),
+    )
+    dependency = "merge"
+    for stage_id, kind, action, effect, target, requirement in stages:
+        contract["stages"].append({
+            "id": stage_id, "kind": kind, "action": action, "effect": effect,
+            "target_ref": {"kind": "literal", "value": target},
+            "worktree_requirement": requirement, "depends_on": [dependency],
+            "retryable": True,
+        })
+        dependency = stage_id
+    contract["deliverable"]["obligations"].update(
+        tracker_closed="required", cleanup_complete="required")
+    delivery = rebind_contract(model, contract, delivery)
+    delivery["postconditions"]["tracker_closed"] = {"state": "pending", "observation_id": None}
+    delivery["postconditions"]["cleanup_complete"] = {"state": "pending", "observation_id": None}
+    return contract, delivery
+
+
+def ship_handoff(model, contract, delivery):
+    artifact = {"budget_status": "within_budget", "kind": "design-spec",
+                "metrics": {"root_bytes": 1, "total_bytes": 1, "file_count": 1,
+                            "largest_member_bytes": 0},
+                "path": ".claude/specs/sim.md"}
+    return {"interface_version": 2, "state": "complete", "ledger_repo_root": "/repo",
+            "run_id": "run-1", "owner": "151:1", "owner_worktree": "/worktree",
+            "custody": custody(), "issue_number": 151, "branch": "feature",
+            "worktree_path": "/worktree", "spec_artifact": artifact,
+            "plan_artifact": {**artifact, "kind": "implementation-plan",
+                              "path": ".claude/plans/sim.md"},
+            "head_sha": "a" * 40, "review_state": "clean", "auto": True,
+            "report_path": None, "notes": "simulated", "delivery_contract": contract,
+            "delivery_contract_digest": model.canonical_digest(contract),
+            "authorization_intents": delivery["authorization_intents"],
+            "authorization_chain_digest": delivery["authorization_chain_digest"],
+            "authority_observation_ids": [], "reevaluation_evidence_ids": [],
+            "authority_evaluation_consumption_ids": [],
+            "pending_stage_ids": [stage["id"] for stage in contract["stages"]],
+            "selected_outputs": delivery["selected_outputs"]}
+
+
 class DeliveryModelTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -308,6 +376,11 @@ class DeliveryModelTest(unittest.TestCase):
             finally:
                 os.chdir(prior)
             self.assertEqual(module.MODEL_INTERFACE_VERSION, 1)
+            self.assertEqual(set(module.__all__), {
+                "MODEL_INTERFACE_VERSION", "DeliveryModelError", "canonical_bytes",
+                "canonical_digest", "validate_delivery_object", "validate_custody_ref",
+                "match_scope", "reduce_delivery",
+            })
             self.assertEqual(set(Path(raw).iterdir()), before)
             self.assertFalse(hasattr(module, "main"))
 
@@ -556,18 +629,353 @@ class DeliveryModelTest(unittest.TestCase):
             requested_scope=requested, authority_observations=sorted([allowed, later], key=lambda item: item["id"])))
         self.assertEqual(refused["blocking"]["reason_code"], "host_rejected")
 
+    def test_positive_evidence_shapes_and_targets_are_closed(self):
+        contract, delivery = contract_and_delivery(self.model)
+        for kind, subject in (
+            ("implementation_delivered", {"probe_succeeded": False}),
+            ("cleanup_complete", {"absent": False}),
+        ):
+            bad = observation(self.model, contract, kind, subject)
+            with self.subTest(kind=kind), self.assertRaises(self.model.DeliveryModelError):
+                self.model.validate_delivery_object(
+                    bad, expected_kind="delivery-observation", notes_max_characters=4096)
+
+        close = {"id": "close", "kind": "close_tracker", "action": "close_issue",
+                 "effect": "tracker_write", "target_ref": {"kind": "literal", "value": "151"},
+                 "worktree_requirement": "not_required", "depends_on": ["merge"],
+                 "retryable": True}
+        contract["stages"].append(close)
+        contract["deliverable"]["obligations"]["tracker_closed"] = "required"
+        delivery = rebind_contract(self.model, contract, delivery)
+        delivery["postconditions"]["tracker_closed"] = {"state": "pending", "observation_id": None}
+        foreign = observation(self.model, contract, "tracker_closed", {
+            "tracker_repository_id": "other", "issue": 152, "state": "closed",
+            "close_reason": "completed", "observation_identity": "foreign-152"})
+        reduced = self.model.reduce_delivery(
+            contract, delivery, evaluation=evaluation(delivery_observations=[foreign]))
+        self.assertEqual(reduced["next_delivery"]["postconditions"]["tracker_closed"]["state"], "pending")
+        self.assertEqual(next(f["state"] for f in reduced["next_delivery"]["stage_facts"]
+                             if f["stage_id"] == "close"), "pending")
+
+    def test_all_stage_and_completion_families_bind_exact_subjects(self):
+        contract, delivery = cleanup_contract_and_delivery(self.model)
+        observed = with_observed(self.model, contract, delivery,
+                                 ["select", "publish", "open", "merge"])
+        subjects = {
+            "tracker_closed": {"tracker_repository_id": "sim-repo", "issue": 151,
+                               "state": "closed", "close_reason": "completed",
+                               "observation_identity": "tracker:151:closed"},
+            "remote_branch_absent": {"repository_id": "sim-repo", "branch": "feature",
+                                     "absent": True},
+            "worktree_absent": {"path": "/worktree", "recorded_worktree_identity": "wt-151",
+                                "probe_mode": "no_follow", "absent": True},
+            "local_branch_absent": {"repository_id": "sim-repo", "branch": "feature",
+                                    "absent": True},
+        }
+        additions = {kind: observation(self.model, contract, kind, subject)
+                     for kind, subject in subjects.items()}
+        merge = next(item for item in observed["delivery_observations"]
+                     if item["observation_kind"] == "pr_merged")
+        implementation = observation(self.model, contract, "implementation_delivered", {
+            "selected_subject": {"kind": "commit", "value": "a" * 40},
+            "integration_subject": {"kind": "commit", "value": "b" * 40},
+            "presence": {"kind": "reachability", "repository_id": "sim-repo",
+                         "selected_value": "a" * 40, "integration_value": "b" * 40,
+                         "integrated_ref": "refs/heads/main", "succeeded": True},
+            "merge_observation_id": merge["id"], "acceptance_evidence_ids": ["accept-1"],
+            "review_evidence_ids": ["review-1"], "test_evidence_ids": ["test-1"],
+        })
+        cleanup = observation(self.model, contract, "cleanup_complete", {
+            "remote_branch_observation_ids": [additions["remote_branch_absent"]["id"]],
+            "local_branch_observation_ids": [additions["local_branch_absent"]["id"]],
+            "worktree_observation_ids": [additions["worktree_absent"]["id"]],
+            "durable_detail": {"detail_pointer": ".superpowers/review-evidence/151/detail.json",
+                               "read_evidence_digest": "sha256:" + "d" * 64,
+                               "succeeded": True},
+        })
+        observed["delivery_observations"] += list(additions.values()) + [implementation, cleanup]
+        observed["delivery_observations"].sort(key=lambda item: item["id"])
+        result = self.model.reduce_delivery(contract, observed, evaluation=evaluation())
+        self.assertEqual({fact["stage_id"] for fact in result["next_delivery"]["stage_facts"]
+                          if fact["state"] == "observed"},
+                         {stage["id"] for stage in contract["stages"]})
+        self.assertTrue(all(item["state"] == "observed"
+                            for item in result["next_delivery"]["postconditions"].values()))
+
+        for label, kind, mutation in (
+            ("publication branch", "branch_published", {"branch": "other"}),
+            ("PR head", "pr_opened", {"expected_head": "c" * 40}),
+            ("merge PR", "pr_merged", {"pr_number": 18}),
+            ("tracker issue", "tracker_closed", {"issue": 152}),
+            ("remote target", "remote_branch_absent", {"branch": "other"}),
+            ("local target", "local_branch_absent", {"branch": "other"}),
+            ("worktree target", "worktree_absent", {"path": "/other"}),
+        ):
+            bad = copy.deepcopy(additions.get(kind) or next(
+                item for item in observed["delivery_observations"]
+                if item["observation_kind"] == kind))
+            bad["subject"].update(mutation); seal(self.model, bad)
+            candidate = rebind_contract(self.model, contract, delivery)
+            candidate["delivery_observations"] = sorted([bad], key=lambda item: item["id"])
+            reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+            expected_stage = {"branch_published": "publish", "tracker_closed": "close",
+                              "pr_opened": "open", "pr_merged": "merge",
+                              "remote_branch_absent": "remote", "local_branch_absent": "local",
+                              "worktree_absent": "worktree"}[kind]
+            with self.subTest(label=label):
+                self.assertEqual(next(f["state"] for f in reduced["next_delivery"]["stage_facts"]
+                                      if f["stage_id"] == expected_stage), "pending")
+
+        for label, item in (
+            ("implementation missing", copy.deepcopy(implementation)),
+            ("implementation failed", copy.deepcopy(implementation)),
+            ("cleanup unreadable", copy.deepcopy(cleanup)),
+            ("cleanup extra", copy.deepcopy(cleanup)),
+        ):
+            if label == "implementation missing": item["subject"].pop("test_evidence_ids")
+            elif label == "implementation failed": item["subject"]["presence"]["succeeded"] = False
+            elif label == "cleanup unreadable": item["subject"]["durable_detail"]["succeeded"] = False
+            else: item["subject"]["extra"] = True
+            seal(self.model, item)
+            with self.subTest(label=label), self.assertRaises(self.model.DeliveryModelError):
+                self.model.validate_delivery_object(
+                    item, expected_kind="delivery-observation", notes_max_characters=4096)
+
+        for label, item in (
+            ("wrong selected subject", copy.deepcopy(implementation)),
+            ("unknown merge reference", copy.deepcopy(implementation)),
+            ("wrong cleanup reference", copy.deepcopy(cleanup)),
+        ):
+            if label == "wrong selected subject":
+                item["subject"]["selected_subject"]["value"] = "c" * 40
+                item["subject"]["presence"]["selected_value"] = "c" * 40
+            elif label == "unknown merge reference":
+                item["subject"]["merge_observation_id"] = "sha256:" + "f" * 64
+            else:
+                item["subject"]["remote_branch_observation_ids"] = ["sha256:" + "f" * 64]
+            seal(self.model, item)
+            candidate = copy.deepcopy(observed)
+            candidate["delivery_observations"] = [existing for existing in candidate["delivery_observations"]
+                                                   if existing["observation_kind"] != item["observation_kind"]]
+            candidate["delivery_observations"].append(item)
+            candidate["delivery_observations"].sort(key=lambda existing: existing["id"])
+            reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+            with self.subTest(label=label):
+                self.assertEqual(reduced["next_delivery"]["postconditions"]
+                                 [item["observation_kind"]]["state"], "pending")
+
+    def test_repository_record_stage_binds_digest_branch_and_reviews(self):
+        contract, delivery = contract_and_delivery(self.model)
+        for stage in contract["stages"]:
+            stage["target_ref"]["subject_kind"] = "record"
+        record_stage = {
+            "id": "record", "kind": "deliver_repository_record", "action": "write_record",
+            "effect": "repository_write", "target_ref": copy.deepcopy(contract["stages"][0]["target_ref"]),
+            "worktree_requirement": "matching_required", "depends_on": ["select"],
+            "retryable": True}
+        open_stage = copy.deepcopy(contract["stages"][2]); open_stage["depends_on"] = ["record"]
+        merge_stage = copy.deepcopy(contract["stages"][3]); merge_stage["depends_on"] = ["open"]
+        contract["stages"] = [contract["stages"][0], record_stage, open_stage, merge_stage]
+        delivery = rebind_contract(self.model, contract, delivery)
+        chosen = selection(self.model, delivery["contract_digest"], subject_kind="record")
+        selected_observation = observation(
+            self.model, contract, "selected_output", {"selected_output": chosen})
+        record = observation(self.model, contract, "repository_record_proposed", {
+            "repository_id": "sim-repo", "selected_record_digest": chosen["subject_value"],
+            "branch": "feature", "live_pr_head": "c" * 40,
+            "review_evidence_ids": ["review-1", "test-1"]})
+        opened = observation(self.model, contract, "pr_opened", {
+            "provider_repository_id": "sim-repo", "pr_number": 17,
+            "pr_url": "https://sim.invalid/pr/17", "expected_head": "c" * 40,
+            "base": "main"})
+        merged = observation(self.model, contract, "pr_merged", {
+            "provider_repository_id": "sim-repo", "pr_number": 17,
+            "pr_url": "https://sim.invalid/pr/17", "expected_head": "c" * 40,
+            "base": "main", "merge_sha": "b" * 40, "merged": True})
+        delivered = observation(self.model, contract, "implementation_delivered", {
+            "selected_subject": {"kind": "record", "value": chosen["subject_value"]},
+            "integration_subject": {"kind": "record", "value": chosen["subject_value"]},
+            "presence": {"kind": "record_presence", "repository_id": "sim-repo",
+                         "selected_value": chosen["subject_value"],
+                         "integration_value": chosen["subject_value"],
+                         "integrated_ref": "refs/heads/main", "succeeded": True},
+            "merge_observation_id": merged["id"], "acceptance_evidence_ids": ["accept-1"],
+            "review_evidence_ids": ["review-1"], "test_evidence_ids": ["test-1"]})
+        candidate = copy.deepcopy(delivery)
+        candidate["delivery_observations"] = sorted(
+            [selected_observation, record, opened, merged, delivered],
+                                                     key=lambda item: item["id"])
+        result = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+        self.assertEqual(next(f["state"] for f in result["next_delivery"]["stage_facts"]
+                              if f["stage_id"] == "record"), "observed")
+        self.assertEqual(next(f["state"] for f in result["next_delivery"]["stage_facts"]
+                              if f["stage_id"] == "merge"), "observed")
+        self.assertEqual(result["next_delivery"]["postconditions"]
+                         ["implementation_delivered"]["state"], "observed")
+        for field, replacement in (("selected_record_digest", "sha256:" + "f" * 64),
+                                   ("branch", "other"),
+                                   ("repository_id", "other")):
+            bad = copy.deepcopy(record); bad["subject"][field] = replacement; seal(self.model, bad)
+            candidate["delivery_observations"] = sorted([selected_observation, bad, opened, merged],
+                                                         key=lambda item: item["id"])
+            reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+            with self.subTest(field=field):
+                self.assertEqual(next(f["state"] for f in reduced["next_delivery"]["stage_facts"]
+                                      if f["stage_id"] == "record"), "pending")
+
+    def test_delivery_graph_binds_retained_contract_and_intent_identity(self):
+        contract, delivery = contract_and_delivery(self.model)
+        wrong = copy.deepcopy(delivery)
+        wrong["contract"]["initial_authorization_intent_digest"] = "sha256:" + "e" * 64
+        wrong["contract_digest"] = self.model.canonical_digest(wrong["contract"])
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(wrong, expected_kind="delivery",
+                                                notes_max_characters=4096)
+
+        active = custody(); requested = delivery["authorization_intents"][0]["scopes"][0]
+        allowed = authority(self.model, contract, requested, active, verdict="allowed")
+        allowed["contract_digest"] = "sha256:" + "f" * 64; seal(self.model, allowed)
+        foreign = copy.deepcopy(delivery); foreign["authority_observations"] = [allowed]
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.reduce_delivery(contract, foreign, evaluation=evaluation(
+                custody=active, current_launch=True, requested_scope=requested))
+
+        wrong_selection = selection(self.model, "sha256:" + "f" * 64)
+        bad = copy.deepcopy(delivery); bad["selected_outputs"] = [wrong_selection]
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(bad, expected_kind="delivery",
+                                                notes_max_characters=4096)
+
+        selected_observation = observation(self.model, contract, "selected_output", {
+            "selected_output": selection(self.model, delivery["contract_digest"])})
+        selected_observation["project"]["repository_id"] = "other"; seal(self.model, selected_observation)
+        bad = copy.deepcopy(delivery); bad["delivery_observations"] = [selected_observation]
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(bad, expected_kind="delivery",
+                                                notes_max_characters=4096)
+
+        denied, rejection = with_host_rejection(self.model, contract, delivery, active)
+        evidence = reevaluation(self.model, contract, rejection)
+        evidence["rejected_observation_id"] = "sha256:" + "9" * 64; seal(self.model, evidence)
+        bad = copy.deepcopy(denied); bad["reevaluation_evidence"] = [evidence]
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(bad, expected_kind="delivery",
+                                                notes_max_characters=4096)
+
+        revoked = seal(self.model, {
+            "schema_version": 1, "kind": "authority-observation", "id": "",
+            "contract_digest": delivery["contract_digest"], "scope_id": requested["id"],
+            "launch_id": None, "authority_kind": "intent_revocation", "verdict": "revoked",
+            "reason_code": "revoked", "observed_at": "2026-09-20T02:00:00Z",
+            "evidence_digest": "sha256:" + "8" * 64, "opaque_host_reference": None,
+            "revocation_subject": {"intent_id": delivery["authorization_intents"][0]["id"],
+                                   "revocation_key": "wrong-key"},
+            "evaluation_use_key": None})
+        bad = copy.deepcopy(delivery); bad["authority_observations"] = [revoked]
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(bad, expected_kind="delivery",
+                                                notes_max_characters=4096)
+
+    def test_contract_requires_normative_stage_dependencies(self):
+        contract, _ = contract_and_delivery(self.model)
+        for stage_id in ("publish", "open", "merge"):
+            bad = copy.deepcopy(contract)
+            next(stage for stage in bad["stages"] if stage["id"] == stage_id)["depends_on"] = []
+            with self.subTest(stage=stage_id), self.assertRaises(self.model.DeliveryModelError):
+                self.model.validate_delivery_object(
+                    bad, expected_kind="delivery-contract", notes_max_characters=4096)
+
+    def test_current_launch_and_null_contract_correlations_are_exact(self):
+        fixtures = workflow_responses(self.model)
+        malformed = copy.deepcopy(fixtures["current"])
+        malformed.update(current=False, current_action_id="151:9:9", reason="unknown_run")
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(
+                malformed, expected_kind="workflow-response", notes_max_characters=4096)
+        no_contract = copy.deepcopy(fixtures["control"])
+        summary = no_contract["summaries"][0]
+        summary.update(custody=None, owner=None, worktree=None, deadline_at=None,
+                       contract_digest=None, pending_stage_ids=[], requirements=[])
+        no_contract["actions"] = []
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(
+                no_contract, expected_kind="workflow-response", notes_max_characters=4096)
+        summary["requirements"] = [{"kind": "delivery_contract", "subject_id": "151",
+                                    "reason_code": "delivery_contract_required",
+                                    "detail_pointer": None}]
+        self.assertEqual(self.model.validate_delivery_object(
+            no_contract, expected_kind="workflow-response", notes_max_characters=4096),
+            no_contract)
+
+        valid_rows = (
+            ("unknown_run", None), ("unknown_issue", None),
+            ("inactive_attempt", None), ("inactive_attempt", "151:1:1"),
+            ("unknown_attempt", "151:1:2"), ("superseded_attempt", "151:2:1"),
+            ("superseded_launch", "151:1:2"),
+        )
+        for reason, current_action_id in valid_rows:
+            value = {"action_id": "151:1:1", "current": False,
+                     "current_action_id": current_action_id, "reason": reason}
+            with self.subTest(reason=reason, current_action_id=current_action_id):
+                self.assertEqual(self.model.validate_delivery_object(
+                    value, expected_kind="workflow-response", notes_max_characters=4096), value)
+        for reason, current_action_id in (
+            ("unknown_issue", "151:1:2"), ("inactive_attempt", "151:1:2"),
+            ("unknown_attempt", "151:1:1"), ("superseded_attempt", "151:1:1"),
+            ("superseded_launch", "151:1:1"),
+        ):
+            value = {"action_id": "151:1:1", "current": False,
+                     "current_action_id": current_action_id, "reason": reason}
+            with self.subTest(invalid_reason=reason), self.assertRaises(self.model.DeliveryModelError):
+                self.model.validate_delivery_object(
+                    value, expected_kind="workflow-response", notes_max_characters=4096)
+
+    def test_ship_handoff_cross_references_and_contract_order(self):
+        contract, delivery = contract_and_delivery(self.model)
+        handoff = ship_handoff(self.model, contract, delivery)
+        self.assertEqual(self.model.validate_delivery_object(
+            handoff, expected_kind="ship-handoff", notes_max_characters=4096), handoff)
+        for name, mutate in (
+            ("issue", lambda value: value.update(issue_number=152)),
+            ("chain", lambda value: value.update(authorization_chain_digest="sha256:" + "f" * 64)),
+            ("pending", lambda value: value.update(pending_stage_ids=sorted(value["pending_stage_ids"]))),
+        ):
+            bad = copy.deepcopy(handoff); mutate(bad)
+            with self.subTest(name=name), self.assertRaises(self.model.DeliveryModelError):
+                self.model.validate_delivery_object(
+                    bad, expected_kind="ship-handoff", notes_max_characters=4096)
+        selected = selection(self.model, handoff["delivery_contract_digest"])
+        selected["branch"] = "other"; seal(self.model, selected)
+        bad = copy.deepcopy(handoff); bad["selected_outputs"] = [selected]
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(
+                bad, expected_kind="ship-handoff", notes_max_characters=4096)
+        bad = copy.deepcopy(handoff); bad["branch"] = "other"
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(
+                bad, expected_kind="ship-handoff", notes_max_characters=4096)
     def test_source_and_generated_installed_layout_load_same_model(self):
         source = load_model(SOURCE, "delivery_model_source_layout")
         with tempfile.TemporaryDirectory() as raw:
-            store = Path(raw) / "nix-store/delivery_model.py"; store.parent.mkdir(parents=True); store.write_bytes(SOURCE.read_bytes())
-            installed = Path(raw) / ".agents/lib/python/delivery_model.py"; installed.parent.mkdir(parents=True); installed.symlink_to(store)
-            target = load_model(installed, "delivery_model_installed_layout")
+            prior_path = list(sys.path)
+            store = Path(raw) / "nix-store/delivery_model"
+            shutil.copytree(SOURCE.parent, store)
+            installed = Path(raw) / ".agents/lib/python/delivery_model"
+            installed.parent.mkdir(parents=True)
+            installed.symlink_to(store, target_is_directory=True)
+            target = load_model(installed / "__init__.py", "delivery_model_installed_layout")
             self.assertEqual(source.canonical_bytes({"x": 1}), target.canonical_bytes({"x": 1}))
+            self.assertEqual(sys.path, prior_path)
+            (store / "_wire.py").unlink()
+            with self.assertRaises((FileNotFoundError, ImportError)):
+                load_model(installed / "__init__.py", "delivery_model_missing_private")
+            self.assertNotIn("delivery_model_missing_private", sys.modules)
 
     def test_nix_publication_and_managed_test_registration(self):
         nix = DEFAULT_NIX.read_text(encoding="utf-8")
-        self.assertIn('".agents/lib/python/delivery_model.py"', nix)
-        self.assertIn("source = ./scripts/delivery_model.py;", nix)
+        self.assertIn('".agents/lib/python/delivery_model"', nix)
+        self.assertIn("source = ./scripts/delivery_model;", nix)
+        self.assertIn("recursive = false;", nix)
         self.assertIn("test_delivery_model.py", (ROOT / "justfile").read_text(encoding="utf-8"))
 
 
