@@ -182,127 +182,24 @@ ranges for immutable Task base `980abb67c443d02c35babbface505e1d580a6008` and
 Delivery base `4cd9408c4e538d6c9f0b9941e43d05d43a77c9a8`; never change a cap,
 base, roster, activation state or live ledger to make a gate pass.
 
-## Acceptance matrix and fixed roster
-
-The atomic source roster is exactly: model `_objects.py`, `_reconcile.py`,
-`_wire.py`; `workflow-state.py`, `workflow_delivery.py`, `artifact_budget.py`;
-fixtures and tests `_delivery_model_fixtures.py`, `test_delivery_model.py`,
-`test_workflow_state.py`, `test_artifact_budget.py`, `test_delivery_workflow.py`,
-`test_workflow_delivery.py`, `test_workflow_skill_contracts.py`; from-issue
-`SKILL.md`, `AUTO.md`, `ship-handoff.md`; ship-issue `SKILL.md`, `REVIEW.md`,
-`HUMAN-GATE.md`; orchestration `SKILL.md`, `evals/evals.json`; `default.nix` and
-`justfile`. No path may be omitted from the temporary-index and signed-commit
-roster. No product path may be split into another generation.
-
-Closed object requirements: every schema/interface discriminator is a plain
-integer; every canonical digest, project/repository identity, issue, custody,
-launch/action identity, ordered stage list, pending list, requirement and
-nullable member has its model-defined exact field set. Boolean ordinals/versions,
-extra members, unknown kinds, duplicate IDs/use keys, noncanonical decimal map
-keys, stale custody, hybrid legacy/v2 inputs and mismatched nested identities
-refuse before state mutation. Source/category structure remains evidence shape,
-not authentication.
-
-Control accepts only exact maps for forge, delivery contracts, authorization
-intents, authority observations, reevaluation evidence, delivery observations
-and requested scopes. Owner facts contain exact event, issue, custody and
-unavailability state; duplicate event/custody, historical-as-current, unknown
-or issue/action mismatch refuse. Outputs retain v1 outer control keys; summaries
-are custody-or-null and contain contract digest, ordered pending stages and
-requirements; deltas are issue/custody/kind/state; waits/finalize remain exact.
-Observe returns all typed requirement families. Direct terminal replay remains
-v1-shaped historical response. Current-launch always returns exactly action_id,
-current,current_action_id,reason.
-
-Report matrix: ship-checkpoint v2 contains issue, custody, contract digest,
-observations, authority/re-evaluation facts, nullable requested scope and detail;
-ship-summary v2 represents delivery complete or genuine owner terminal failure;
-ship-handoff carries a full contract and historical scope. Workflow response
-covers bootstrap, observe, owner, control, remainder, ordinary checkpoint,
-stall, completion, terminal failure and current-launch. A null scope is valid
-only with completion or the structurally valid ready/dependency/postcondition
-requirement; a nonnull scope is invalid where no effect stage is pending. A
-native evaluation binds the returned custody and contract but its declared scope
-ID is deliberately distinct from a narrowed actual scope ID.
-
-Test matrix details: mutate independently audience, endpoint, principal, risk,
-spend, output value, repository, base, issue, data digest and classification;
-all changed effects have zero execution. Test exact selected-slot and literal
-narrowing, cleanup close/remote/local/worktree targets and neighboring values,
-missing/null/mismatched scope, null contract with facts, all map key errors,
-owner observation variants, stale/old/current launches, allowed/rejected/
-revoked authority, successor and reevaluation consumption/replay, partial
-checkpoint, ordinary checkpoint with evaluation and no next action, terminal
-summary, custody-only remainder, integration postcondition, three suspensions,
-retry/recovery caps, loader source/installed/missing/directory/wrong interface,
-and caller raw-byte invalid UTF-8/duplicate-key failures. Preserve each legacy
-lifecycle test after fixture migration; do not replace public subprocess
-round-trips with internal mocks.
-
-Verification command identities are fixed: focused unittest names
-`test_delivery_model.py test_delivery_workflow.py test_workflow_delivery.py
-test_workflow_state.py test_artifact_budget.py test_workflow_skill_contracts.py`
-with `-v`; full `just agent-workflow-tests`; build `just build`; and
-quick_validate for the three stated skill roots. All receipt wrappers must retain
-real argv, stdout, stderr and exit before fail-fast propagation. Review producers
-must validate raw output before decoding, bind manifest range/head, use fresh
-checker metrics, and preserve each original failure under a unique label. The
-final full-range review covers all Task 1 and Task 2 member behavior, D14 and
-D19, committed receipts, and no live activation.
-
 ## Preservation and review constraints
 
-Migration preserves every historical attempt member, result, result source,
-finished timestamp, durable detail pointer, issue outcome and run lineage byte
-for byte except the documented adjacent default fields. Migration creates no
-intent, contract, authority observation, selected output, consumption, delivery
-observation, stage fact beyond the empty canonical schema-3 initialization, or
-remainder. A malformed legacy row, float/bool version, hybrid delivery member,
-nonobject attempt, wrong owner/launch/result/outcome, unknown run or action
-leaves ledger bytes and inventory unchanged. A valid legacy current query has no
-lock, no directory creation, no migration and no atomic replacement.
+Migration preserves attempts, results, result sources, timestamps, durable detail,
+outcomes and lineage byte-for-byte except adjacent default fields; it creates no
+authority or delivery truth. Invalid legacy/hybrid/version/attempt/result rows
+and legacy current queries leave bytes and inventory unchanged. Normalize before
+lock, validate/upgrade detached state, validate custody, reduce, atomically
+persist one final v3 state, then render. Rejection writes nothing; retry cannot
+duplicate consumption. Runtime owns this transition; workflow-state owns CLI,
+locks and writes.
 
-The transition is transactional: normalize a request before lock; acquire the
-stable lock; load and validate/upgrade detached state; validate current custody;
-fold observations and evaluate the model; persist exactly one final schema-3
-state before rendering the response. A rejected request has no response write;
-a crash/retry does not duplicate an authority-evaluation consumption. Direct,
-control, checkpoint and finish share the same reducer rather than copying stage
-or authorization policy. Direct/control source admission is trusted only for
-normalized facts; artifact/model hashes, a caller-built intent or a scope tuple
-never prove a host grant.
+Effects use only returned action, exact actual scope and custody, with current-
+launch fences immediately before effect and observation. Historical handoff/allow
+is never operative. Partial work checkpoints; finish requires complete required
+postconditions or a genuine custody failure. Resume preserves deadline/ordinal;
+remainder 2 requires failure, absent effect and recovery; identity spaces remain
+disjoint; suspension count 3 stalls and progress resets it.
 
-Caller execution is closed: returned action is the only permissible effect,
-with the exact normalized actual scope and custody. A host may native-evaluate
-and execute in one invocation only after the durable consumption transaction for
-a rejection recovery; there is no separate allowed-event ritual. A current launch
-is fenced immediately before provider/tracker/repository/filesystem effect and
-again before its observation is submitted. A stale, scope-mismatched or
-superseded response produces zero external effect and zero ledger write. Handoff
-scope is historical evidence and cannot authorize transfer, resume, checkpoint
-or remainder work.
-
-Delivery outcome rules remain closed. Observed select/publish/open/merge stages
-are ordered contract facts; completion waits for all required postconditions,
-including integration/implementation delivery. Partial success is checkpointed,
-not reported as failure. A genuine owner failure may allocate a remainder only
-with absent effect and a valid recovery basis; implementation and remainder
-identity spaces never overlap. Resume keeps its ordinal and deadline. Three
-same-token suspensions are recorded and stall at count three; genuine phase
-progress resets the counter. A terminal report never fabricates an unfinished
-stage, an authorization decision or a missing postcondition.
-
-Document/eval acceptance requires role boundaries: orchestration is a control
-adapter, not a second scheduler or policy ledger; from-issue owns content flow;
-ship-issue owns shipping effects; runtime owns persisted transition; artifact-
-budget validates byte boundaries. The docs must state raw validation before
-parsing, bootstrap requirement consumption, actual-scope construction, exact
-echo matching, current-launch fences, checkpoint delivery, typed remainder
-handling and source integration not activation. Evals cover ordinary delivery,
-partial provider effect, rejection/same-custody recovery, stale launch, null
-scope, actual scope mismatch and no fabricated approval.
-
-The fixed delivery remains source-only until all review gates accept committed
-bytes. No command in this plan authorizes activation, deployment, an installed
-generation change, forge mutation, live-ledger migration, cap increase, base
-repin, reduced test set, skipped raw receipt, or review of a partial range.
+No step authorizes activation, deployment, installed-generation change, forge
+write, live-ledger migration, cap increase, base repin, reduced test set, skipped
+raw receipt or partial-range review.
