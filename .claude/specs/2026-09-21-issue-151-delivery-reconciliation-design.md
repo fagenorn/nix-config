@@ -289,8 +289,10 @@ second current-launch check and observation path.
 `authority-observation/v1` has exactly `schema_version` 1, literal `kind`
 `authority-observation`, derived `id`, `contract_digest`, `scope_id`, nullable
 `launch_id`, closed `authority_kind` and `verdict`, `reason_code`, UTC
-`observed_at`, `evidence_digest`, nullable `opaque_host_reference`, and nullable
-strict `revocation_subject`, with the discriminator rules stated above.
+`observed_at`, `evidence_digest`, nullable `opaque_host_reference`, nullable
+strict `revocation_subject`, and nullable `evaluation_use_key`. The latter is
+nonnull only for the result of a D18 post-rejection evaluation and must name the
+persisted consumption that caused that evaluation.
 `delivery-observation/v1` has exactly `schema_version` 1, literal `kind`
 `delivery-observation`, derived `id`,
 `contract_digest`, strict `project`, closed `observation_kind`, strict
@@ -635,84 +637,92 @@ migration/report/caller interfaces with temporary ledgers in their normal source
 and generated installed layouts. The source delivery adds no bridge runtime and
 imposes no activation requirement.
 
-Control interface 2 retains every interface-1 top-level key, replaces only each
-`owners` member as defined below, and adds six issue-keyed maps: `forge`,
-`delivery_contracts`, `authorization_intents`, `authority_observations`,
-`reevaluation_evidence`, and `delivery_observations`. Every map has exactly one
-canonical decimal key (no leading zero) per requested issue. Missing, extra or
-unknown keys refuse. Forge values are exact existing forge objects;
-`delivery_contracts` values are strict contracts or null; the other four values
-are explicit sorted unique arrays of their named objects, using `[]` when empty. Null contract plus any
-candidate fact refuses. Direct interface 2 retains every interface-1 key and adds
-nullable `delivery_contract` plus sorted unique `authorization_intents`,
-`authority_observations`, `reevaluation_evidence`, and `delivery_observations`.
-Both envelopes validate wholly before lock.
+Control interface 2 is exactly `{interface_version,now,max_parallel,
+attempt_budget_minutes,human_directed,issues,tracker,owners,worktrees,forge,
+delivery_contracts,authorization_intents,authority_observations,
+reevaluation_evidence,delivery_observations}`. It replaces only each `owners`
+member below and adds the final six issue-keyed maps. `forge` values are exactly
+`{state,url,merge_sha}`; contracts are strict object or null; the other four
+values are sorted unique named-object arrays, including explicit `[]`.
+Every map has exactly the requested issues' canonical decimal keys.
+Missing/extra/noncanonical keys, or null contract with candidate facts, refuse
+before lock. Direct interface 2 is exactly `{interface_version,issue,now,
+attempt_budget_minutes,new_run,owner_unavailable,tracker,worktree,forge,
+delivery_contract,authorization_intents,authority_observations,
+reevaluation_evidence,delivery_observations}`; its contract is strict or null
+and its four fact arrays are sorted and unique.
 
-A control `owners` member has exactly `event_id`, `issue`, `custody`, and state
-literal `unavailable`. Event id is nonempty; duplicate event ids or identities
-`(issue, kind, ordinal, launch)` refuse. Custody must be a known issue-bound
-implementation/remainder launch/action ref; hybrid, unknown or issue/action
-mismatch refuses. A known historical launch is accepted without affecting
-current custody; only the exact current active identity marks unavailable. No
-remainder is an attempt. Bootstrap only requests probes: absent known
-unavailability, `owners` is empty; worktree facts remain separate.
+A control `owners` member is exactly `{event_id, issue, custody, state:
+unavailable}`. Duplicate event or `(issue,kind,ordinal,launch)` refuses. Custody
+must name a known issue-bound action; hybrid, unknown and mismatch refuse. A
+known historical fact is retained but affects no current custody; bootstrap
+requests a probe and is not itself an unavailable fact.
 
-Their closed action union adds `delivery_remainder`; every owner action carries
-the custody union defined below. A remainder response has exactly
-`interface_version` 2, literal `kind` `delivery_remainder`, `ledger_repo_root`,
-`run_id`, `issue`, `source_attempt`, `owner`, `custody`, `worktree`, `contract`,
-`contract_digest`, ordered `pending_stage_ids`, `deadline_at`, and
-`requirements`. Each requirement has exactly `kind`
-`delivery_contract | scope_tuple | observation | worktree_fact`, `subject_id`,
-`reason_code`, and nullable durable `detail_pointer`. Callers never infer a
-stage from tracker/forge state.
+Every v2 owner/checkpoint/report uses `custody-ref/v1`: implementation is exactly
+`{kind:implementation,attempt,launch,action_id}` with action id
+`issue:attempt:launch`; remainder is exactly
+`{kind:remainder,remainder,launch,action_id}` with action id
+`issue:r<remainder>:launch`. Ordinals and launches are positive integers.
 
-Every v2 owner/checkpoint/report uses one closed `custody-ref/v1` union:
-implementation has exactly `kind: implementation`, positive `attempt`, positive
-`launch`, and `action_id` matching `issue:attempt:launch`; remainder has exactly
-`kind: remainder`, positive `remainder`, positive `launch`, and `action_id`
-matching `issue:r<remainder>:launch`. Contract digest, issue and run id sit in
-the enclosing envelope. No nullable remainder ordinal or action-id guessing is
-allowed, so ordinary implementation and remainder owners share the wire without
-being conflated.
+The delivery requirement union is exact `{kind,subject_id,reason_code,
+detail_pointer}` with kind `delivery_contract | scope_tuple | observation |
+worktree_fact` and nullable durable detail pointer. A direct `observe` response
+retains exact v1 `{interface_version,kind,issue,run_id,requirements}` at version
+2; each ordered requirement is exactly `{kind:tracker}`,
+`{kind:recorded_worktree,path}`, `{kind:candidate_worktree}`, one
+`{kind:forge_pr,path}`, or one delivery requirement. Unknown/hybrid requirements
+refuse. Direct `terminal` retains exact
+v1 `{interface_version,kind,issue,run_id,source,reason,blockers,result,reentry}`
+at version 2; its nullable legacy result uses the compositional validation below.
+With no contract, direct returns `observe` containing the exact
+`delivery_contract` requirement and issues no owner/remainder action.
 
-Partial progress uses `ship-checkpoint/v2`, not the terminal summary. It has
-exactly `interface_version` 2, `issue`, `custody`, `contract_digest`, sorted
-`delivery_observations`, sorted `authority_observations`, sorted
-`reevaluation_evidence`, `detail_state`, nullable `report_path`, and bounded
-`notes`. The new public `workflow-state checkpoint-delivery` command validates
-this boundary through
-`artifact-budget validate-report --boundary ship-checkpoint` before decode,
-takes run id/now plus the canonical checkpoint, then locks the ledger and
-rechecks that exact custody action before any mutation. A
-stale/malformed custody returns a refusal with no write. A current ordinary/non-stalled checkpoint
-atomically deduplicates and persists valid observations, recomputes stage facts
-and postconditions, and returns the next stage or exact requirement without
-terminalizing custody or spending either retry budget.
+An implementation `owner` response is exactly `{interface_version,kind,
+ledger_repo_root,run_id,issue,attempt,owner,action_id,launch_kind,worktree,
+handoff_path,deadline_at,custody,contract,contract_digest,pending_stage_ids,
+requirements,authority_evaluation}`. Pending stages are contract ordered and
+unique; requirements are sorted. Attempt/action/owner/issue must agree with
+implementation custody. A control `spawn | resume | retry`
+action retains exact v1 `{id,kind,issue,attempt,owner,worktree,handoff_path,
+deadline_at}` and adds that same delivery block; outer control supplies run id
+and the caller already owns repository-root context. A `delivery_remainder`
+response is exactly `{interface_version,kind,ledger_repo_root,run_id,issue,
+source_attempt,owner,custody,worktree,contract,contract_digest,pending_stage_ids,
+deadline_at,requirements,authority_evaluation}`. It requires remainder custody,
+canonical contract digest and exact identity/timestamp correlations.
 
-Ordinary checkpoint response `delivery_checkpointed` has exactly interface
-version 2, kind, ledger root, run id, issue, owner, custody, contract digest,
-sorted accepted observation ids, ordered pending stage ids, nullable next
-action, sorted requirements, nullable `authority_evaluation`, state `active |
-suspended`, and nullable `blocked_on`. Ordinary partial/blocking checkpoints
-never terminalize. The fourth unchanged-progress suspension instead atomically
-stores count 3, terminalizes as stalled, and returns the separate exact variant
-`delivery_stalled`: the common identity/observation/pending fields above plus
-state `terminal_failed`, integer `stalled_resumes` 3, result source `stalled` and
-reason code `suspension_stalled_without_progress`; it has no next action,
-requirements, authority evaluation or blocked-on member. Control/direct actions
-carry the nullable evaluation field. It appears only after its consumption was
-durably appended; replay never re-emits it.
+Control response retains exact outer v1 `{interface_version,run_id,now,summaries,
+deltas,actions,next_deadline}` at version 2 and adds no ledger root. Each summary
+replaces `attempt` with nullable strict `custody`, retains `issue,state,owner,
+worktree,deadline_at,blocked_on,blockers,result`, and adds nullable
+`contract_digest`, contract-ordered unique `pending_stage_ids`, and sorted
+`requirements`. Thus a
+summary can return a `delivery_contract` requirement before an owner/action
+exists; null digest requires empty pending stages and no candidate-derived
+requirement. Each delta is exact `{issue,custody,kind,state}`, with nullable
+custody replacing attempt. `wait` is exactly `{id,kind,wake_on,deadline_at}` and
+`finalize` is exactly `{id,kind}`;
+actions use only the implementation or remainder shapes above. All nested
+members, null/state correlations, ordering and identities validate recursively.
 
-When the accepted facts produce a true blocking requirement, the reducer—not a
-shipping caller—maps its closed reason to `human_gate`, `external`, or
-`transport` and atomically suspends that same custody in the checkpoint
-transaction: missing/new user authority or an operative host denial maps to
-`human_gate`, a provider/forge wait to `external`, and an actual tool transport
-failure to `transport`. Locally obtainable evidence leaves custody active with a
-typed requirement, and `unknown` remains reaper-only. A later direct/control resume retains the same ordinal/deadline and
-historical denial. Thus an effect that succeeded before a later host denial is
-durable progress rather than a fabricated `failed` delivery.
+Partial progress `ship-checkpoint/v2` is exactly `{interface_version,issue,
+custody,contract_digest,delivery_observations,authority_observations,
+reevaluation_evidence,detail_state,report_path,notes}`. Workflow-state validates
+raw bytes before decode, locks, rechecks custody, folds facts and persists before
+responding. Ordinary `delivery_checkpointed` is exactly `{interface_version,
+kind,ledger_repo_root,run_id,issue,owner,custody,contract_digest,
+accepted_observation_ids,pending_stage_ids,next_action,requirements,
+authority_evaluation,state,blocked_on}` with state `active | suspended` and
+correlated nullable members. Count-3 unchanged progress instead returns exact
+`delivery_stalled`: the common identity/observation/contract-ordered unique
+pending fields plus state
+`terminal_failed`, `stalled_resumes:3`, `result_source:stalled`, and reason
+`suspension_stalled_without_progress`, with no action/requirements/evaluation.
+The reducer maps missing/new authority and operative denial to `human_gate`,
+provider/forge wait to `external`, and actual tool transport failure to
+`transport`; locally obtainable evidence remains a typed requirement and
+`unknown` remains reaper-only. Blocking suspends the same custody and preserves
+prior progress.
 
 `ship-handoff/v2` has exactly `interface_version`, `state`, `ledger_repo_root`,
 `run_id`, `owner`, `owner_worktree`, `custody`, `issue_number`, `branch`,
@@ -721,42 +731,47 @@ durable progress rather than a fabricated `failed` delivery.
 `delivery_contract_digest`, `authorization_intents`,
 `authorization_chain_digest`, `authority_observation_ids`,
 `reevaluation_evidence_ids`, `authority_evaluation_consumption_ids`,
-`pending_stage_ids`, and `selected_outputs`. The v1
-attempt/action lifecycle group is replaced by the closed custody object rather
-than retained beside it. `ship-summary/v2` has exactly `interface_version` 2, `issue`, `state`
-(`delivery_complete | terminal_failed`), `custody`, nullable
-`historical_owner_result` in the exact legacy result shape,
-`delivery_contract_digest`, sorted `delivery_observations`, sorted
-`authority_observations`, sorted `reevaluation_evidence`, `detail_state`,
-nullable `report_path`, and bounded `notes`. It separates the historical owner
-verdict from new delivery and authority observations and is valid for either
-custody kind. It is terminal only when every required postcondition is observed
-or a genuine owner failure terminates that custody; a requirement or partial
-success cannot be encoded as terminal failure. Artifact-budget validates
-canonical stdout before from-issue or workflow-state decodes it.
-Workflow-state's finish entry accepts the exact custody union, repeats the
-under-lock current-action check, persists valid final observations/result before
-output, and emits a completed delivery or eligible next remainder. It never
-turns an unfinished closure/cleanup requirement into failure.
+`pending_stage_ids`, and `selected_outputs`.
+`ship-summary/v2` is exactly `{interface_version,issue,state,custody,
+historical_owner_result,delivery_contract_digest,delivery_observations,
+authority_observations,reevaluation_evidence,detail_state,report_path,notes}`;
+state is `delivery_complete | terminal_failed`. Finish validates it before
+decode, rechecks custody under lock and persists before output. Its common
+response is exactly `{interface_version,kind,ledger_repo_root,run_id,issue,owner,
+custody,contract_digest,accepted_observation_ids,pending_stage_ids,state}`.
+Complete requires kind/state `delivery_complete` and no pending stages. Failure
+adds `result_source:owner` and reason `owner_reported_failure`, with kind/state
+`terminal_failed`; count-3 stall uses `delivery_stalled`. An eligible retry emits
+`delivery_remainder`. Requirements or partial success never become failure.
 
-From-issue, AUTO, ship-issue and orchestration move with these interfaces and
-consume only the typed action. Wayfind/prototype cases enter this path through a
-validated delivery contract; they do not become lifecycle writers. Report
-validators keep the legacy row readable for old result files, while v3 writers
-emit only v2 handoff/checkpoint/summary shapes. No validator-first or prose-only
-cutover is allowed.
+`authority_evaluation` is null or exactly `{kind:native_authority_evaluation,
+contract_digest,scope_id,custody,rejected_observation_id,basis_kind,basis_id,
+use_key}` and must match its enclosing contract/custody. After its persisted
+consumption, a returned allowed observation satisfies operational authority only
+when `evaluation_use_key` names that consumption, its contract/scope/custody
+match, `observed_at >= consumed_at`, and a currently valid user intent covers the
+exact tuple. The original denial remains historical. Any same-scope rejection at
+or after that allow wins. An old-launch allow, unconsumed/cosmetic basis, or
+allow lacking current intent never authorizes an effect.
 
-Artifact-budget exposes one structural raw-byte `workflow-response` boundary
-for control/direct actions, current-launch, both checkpoint variants, finish and
-`workflow_bootstrap`. Bootstrap v2 has exactly interface version 2, kind, run id
-and sorted `requirements`; each requirement has exactly issue, owner, custody and
-recorded worktree. For each issue with custody history it selects the sole
-nonterminal custody, otherwise the latest remainder, otherwise latest
-implementation. Callers validate/decode it, gather normalized owner/worktree
-observations for every requirement, and include them in control; implementation
-and remainder refs use the same closed custody union. The boundary proves shape,
-canonical bytes and internal ids only. Ledger freshness, contract matching and
-source authenticity remain locked/trusted semantic checks.
+The workflow-response union is exactly current-launch; `workflow_bootstrap`;
+control; direct `observe | owner | terminal | delivery_remainder`; ordinary or
+stalled checkpoint; and complete, failed or remainder finish. Bootstrap is exact
+`{interface_version,kind,run_id,requirements}`; each sorted requirement is exact
+`{issue,owner,custody,recorded_worktree}`. Every nested member validates before
+decode. Unknown kinds, missing/extra keys and legacy/new hybrids refuse. The
+validator proves structure and internal identity only; ledger freshness and
+source authenticity remain locked/trusted checks. All callers cut over together.
+Current-launch is exactly `{action_id,current,current_action_id,reason}` with
+reason `unknown_run | unknown_issue | unknown_attempt | superseded_attempt |
+inactive_attempt | superseded_launch | current` and source-defined null/id
+correlations; inactive custody may name itself as current action. Remainder
+custody uses the same closed reasons. Nullable legacy `result` members in control
+summary and direct terminal are compositional slots: the pure model validates
+the exact containing envelope and null/object position but does not copy the
+legacy row schema. Artifact-budget/workflow-state must run the existing legacy
+result validator on each nonnull slot before accepting raw workflow-response
+bytes, then run the model validator; neither validator alone is boundary success.
 
 ### Deterministic simulated acceptance cases
 
@@ -882,4 +897,4 @@ architecture authority. They are not recorded human answers.
 | D15 | Give the pure model one closed eight-name public surface with explicit contract/intent/time/custody/candidate inputs and a complete persistable next-delivery result; checkpoint/owner/bootstrap output is closed; only durable one-shot consumption may expose an authority-evaluation action, and only the fourth unchanged suspension returns the stalled terminal variant. | D2/D3 require explicit facts; D9 atomic cutover; D13 one contract owner. | Caller-specific reduction dictionaries, ambient reads, free-text consumption, or an open response would duplicate policy and permit replay. |
 | D16 | Keep artifact/model validation structural, add one raw `workflow-response` union boundary, and reserve ledger freshness plus normalized-source/host authenticity for workflow-state under lock and the existing trust boundary. | Defense in depth; D3 launch fence; normalized controller facts are not authenticated by digests or opaque references. | Asking the stateless artifact validator to reject a once-valid stale action or fabricated but well-shaped source claim would invent authority and make public tests impossible. |
 | D17 | Upgrade schema 1/2 only inside a mutation transaction with explicit request-derived contract context and final `validate_state(..., run_id=...)`; keep current-launch on a no-write legacy read path. | D8/D14 immutable history and atomic migration; current no-lock/no-create launch guard. | Value-only migration cannot resolve new contract context, while upgrading during current-launch would make a read-only fence mutate or strand legacy runs. |
-| D18 | Bind each fresh post-rejection evaluation to one append-only consumption keyed by rejection and its independent successor-intent or reevaluation-evidence basis; persist it before emitting the one-time evaluation action, and preserve original-launch facts separately from current-effect eligibility. | Operative-denial and late-collector requirements; round-two review. | Replayable evidence, crash-reset permission, or discarding/authorizing through old-launch history. |
+| D18 | Bind each fresh post-rejection evaluation to one append-only consumption keyed by rejection and its independent successor-intent or reevaluation-evidence basis; persist before action, bind the returned fact by use key/time/scope/custody, require current intent, and let a new rejection win while retaining all history. | Operative-denial and late-collector requirements; response-closure review. | Replayable evidence, crash-reset permission, cosmetic-basis authority, or old-launch allow reuse. |

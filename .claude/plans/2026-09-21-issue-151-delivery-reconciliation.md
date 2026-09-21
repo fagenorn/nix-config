@@ -67,7 +67,8 @@ Git, and repository `just` commands.
   one write. Read-only current-launch validates legacy state without upgrading.
 - Per D18, each post-rejection successor-intent or reevaluation-evidence basis
   has one append-only consumption use key persisted before its evaluation action
-  is emitted. Old-launch facts remain history; only current-launch allow applies.
+  is emitted. A resulting allow binds that use key, time, scope and current
+  custody, still requires current user intent, and loses to a new rejection.
 - Every ordinary source file remains below the review packer's 65,536-byte
   per-file diff limit. Do not depend on an unpublished projector or raise any
   root, member, count or aggregate cap.
@@ -92,6 +93,13 @@ Git, and repository `just` commands.
   unknown keys, hybrids, internally mismatched digests/custody and unsuccessful
   probes. Valid stale custody and well-shaped host/source claims advance to the
   locked semantic/trust-layer tests instead of being misclassified structurally.
+- The workflow-response union recursively validates every control summary,
+  delta and action; direct observe/owner/terminal/remainder; bootstrap/current;
+  checkpoint/stall; and complete/failed outcome. No placeholder dictionary is
+  accepted for a producer that Task 2 has not connected yet.
+- Pending stages stay unique in contract order. Nullable legacy result slots use
+  the existing legacy validator composed with the model's exact envelope check;
+  the pure model does not duplicate the legacy result schema.
 - A controlled fake provider consumes only the typed direct response, records
   effects, and returns strict observations. It proves exact authorized effects,
   zero-effect refusals, double launch fencing, partial progress, denial,

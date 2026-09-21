@@ -36,12 +36,21 @@
   `delivery_contract` and sorted unique `authorization_intents`,
   `authority_observations`, `reevaluation_evidence`, `delivery_observations`.
   Owner value is exact event_id/issue/custody/state=`unavailable`;
-  duplicate event or `(issue,kind,ordinal,launch)` refuses. Known historical
-  custody has no current effect; hybrid/unknown/mismatch refuses and remainder
-  never fabricates attempt.
-- The action union adds `delivery_remainder`. A remainder response has exactly
-  the fields specified in the design and returns ordered `pending_stage_ids` and
-  strict requirements; callers never derive a stage from tracker/forge state.
+  duplicate event or `(issue,kind,ordinal,launch)` refuses. Historical custody
+  has no current effect; hybrid/unknown/mismatch refuses; remainder never
+  fabricates attempt.
+- Control outer output retains exact v1 keys and no ledger root. Summary replaces
+  `attempt` with nullable custody, retains all other v1 fields, and adds nullable
+  contract digest, ordered pending stages and sorted requirements; it therefore
+  carries a `delivery_contract` requirement even when no action exists. Delta is
+  exact issue/custody/kind/state with nullable custody. Wait/finalize stay exact.
+  Spawn/resume/retry retain v1 fields and add custody, contract/digest, pending
+  stages, requirements and nullable evaluation. Direct owner retains v1 fields
+  and adds the same block. Direct observe admits the four exact acquisition
+  requirements and four strict delivery requirements. Terminal retains v1.
+- `delivery_remainder` has the design's exact fields plus nullable
+  `authority_evaluation`. All nested response members validate through Task 1;
+  callers never derive a stage from tracker/forge state.
 - `checkpoint-delivery` validates ship-checkpoint bytes before decode/lock.
   Ordinary `delivery_checkpointed` is active|suspended and nonterminal. Fourth
   unchanged suspension stores 3 and returns exact terminal `delivery_stalled`
@@ -51,8 +60,11 @@
   `finish --repo-root ROOT --run-id RUN --now UTC --summary-file FILE`.
   `ship-summary/v2` carries issue and custody, so separate issue/attempt guessing
   is absent. Under lock it rechecks the same action, persists final facts/result,
-  then emits `delivery_complete`, a genuine `terminal_failed`, or an eligible
-  next remainder. Requirements and partial progress are never terminal failure.
+  then emits the exact common identity/accepted/pending envelope. Complete has
+  kind/state `delivery_complete` and no pending stage. Genuine failure adds
+  `result_source: owner` and `reason_code: owner_reported_failure` with kind/state
+  `terminal_failed`; stall stays `delivery_stalled`; eligible retry returns
+  `delivery_remainder`. Requirements and partial progress are never failure.
 - `artifact_budget.py` adds `ship-checkpoint` and `workflow-response` to the closed boundary set and
   validates `ship-handoff/v2`, `ship-checkpoint/v2`, and `ship-summary/v2` by
   loading Task 1's model. `workflow-response` validates raw control/direct,
@@ -62,10 +74,8 @@
   the nonterminal custody, else latest remainder, else latest implementation.
   Callers consume every requirement into normalized owner/worktree observations
   before control. Legacy v1 summary remains historical-read-only.
-- Callers consume only v2 typed actions: validate before decode, copy canonical
-  facts, fence each effect/write, checkpoint progress, and invent no truth.
-- Centralize schemas in `delivery_model.py` and transport sequence in
-  `from-issue/ship-handoff.md`; callers link rather than duplicate tables.
+- Callers consume only validated v2 actions, copy canonical facts, and fence
+  every effect/write; linked model and handoff docs own the shared contracts.
 
 **Invariants:**
 - Per D8/D14, schema-1 and schema-2 migrations preserve every legacy attempt,
@@ -100,49 +110,17 @@
   persist counters 0, 1, 2, then 3; the first three may resume and 3 terminalizes
   as stalled. Accepted stage/postcondition progress clears phase and resets 0. Capacity ordering and
   existing implementation retry behavior remain intact.
-- No source command touches live issue 151; no activation, bridge or external effect.
-- Task 2 is one atomic source cutover; no mixed schema/caller/report midpoint
-  or duplicated model validation is allowed.
-- Artifact validation proves structure/ids only. Stale custody and shaped host
-  references reach locked semantic checks; neither grants authority.
+- This is one source-only atomic cutover: no activation, external effect,
+  mixed schema/caller/report midpoint or duplicate model validation. Artifact
+  validation proves structure/ids only; locked checks decide live authority.
 
 - [ ] **Step 1: Write migration and public delivery-round-trip tests**
 
-First update existing fixtures in `test_workflow_state.py` to construct valid
-interface-2 requests and exact custody refs. Retain every current lifecycle test;
-add this explicit legacy-chain regression:
-
-```python
-def test_schema_one_migrates_through_two_to_three_with_one_atomic_write(self):
-    self.init_run()
-    legacy = self.legacy_schema_one_state_with_terminal_and_active_results()
-    self.state_path.write_bytes(self.canonical_state_bytes(legacy))
-    before_results = copy.deepcopy([
-        attempt.get("result")
-        for issue in legacy["issues"].values()
-        for attempt in issue["attempts"]
-    ])
-    request = self.interface_two_control_request(
-        delivery_contracts={151: self.strict_contract(issue=151)}
-    )
-    response = self.control(request=request, now=DEFAULT_NOW)
-    migrated = json.loads(self.state_path.read_text(encoding="utf-8"))
-    self.assertEqual(migrated["schema_version"], 3)
-    self.assertEqual([
-        attempt.get("result")
-        for issue in migrated["issues"].values()
-        for attempt in issue["attempts"]
-    ], before_results)
-    self.assertEqual(self.delivery_success_claims(migrated), [])
-    self.assertEqual(
-        migrated["issues"]["151"]["delivery"]["authority_evaluation_consumptions"], []
-    )
-    self.assertEqual(response["interface_version"], 2)
-
-    stable = self.state_path.read_bytes()
-    self.control(request=request, now=DEFAULT_NOW)
-    self.assertEqual(self.state_path.read_bytes(), stable)
-```
+Update `test_workflow_state.py` fixtures for interface 2 and exact custody refs;
+retain every lifecycle test. Add a schema-1 terminal-plus-active fixture and
+exercise public control with a validated issue-151 migration contract. Assert
+schema 3, byte-equivalent legacy results, no invented delivery success or
+evaluation consumption, interface 2 output, and a byte-identical second call.
 
 Also add a pure migration test that calls
 `upgrade_state(value, run_id=self.run_id, migration_contracts={151: contract})`
@@ -255,6 +233,13 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
         refused = self.h.finish(forged, now=self.fx.tick(), ok=False)
         self.assertNotEqual(refused.returncode, 0)
         self.assertNotIn("allowed", self.h.state_path.read_text(encoding="utf-8"))
+
+    # Add one no-contract test: control summary has null custody/digest, empty
+    # pending stages, one delivery_contract requirement and no issue action;
+    # direct observe returns that same strict requirement.
+    # Add one D18 test: persist denial and consumption; a later matching allow
+    # with current intent advances the open stage, then a newer same-scope
+    # rejection suspends on human_gate while the original denial remains.
 
     def test_partial_effect_then_denial_suspends_and_resumes_same_custody(self):
         owner = self.h.direct(self.fx.direct_request(), now=self.fx.t0)
@@ -529,6 +514,11 @@ def test_delivery_v2_boundaries_accept_exact_shapes_and_reject_hybrids(self):
         "unsuccessful_absence_probe", "bool_ordinal", "duplicate_observation",
         "revocation_subject_mismatch", "duplicate_consumption_use_key",
         "permit_consumption_mismatch", "bootstrap_custody_mismatch",
+        "control_summary_attempt_hybrid", "control_delta_attempt_hybrid",
+        "nested_action_extra_key", "observe_requirement_hybrid",
+        "control_summary_invalid_legacy_result", "terminal_invalid_legacy_result",
+        "remainder_missing_evaluation", "checkpoint_nested_requirement",
+        "complete_with_pending_stage", "failed_wrong_reason",
         "stalled_response_extra_action", "duplicate_json_key", "invalid_utf8",
     })
     for name, boundary, raw in mutations.values():
@@ -662,7 +652,9 @@ refusal, load the pure model, validate the outer boundary's exact keys and every
 nested delivery object, then emit the accepted canonical bytes. Do not copy a
 second object schema into artifact-budget. Keep strict legacy v1 summary reading
 only for historical files; reject hybrids and do not let schema-3 finish consume
-v1. The response union covers control/direct, current-launch,
+v1. For each nonnull legacy `result` slot in a control summary or direct terminal,
+run the existing legacy validator before the shared model validator; both must
+accept the same raw envelope before decode. The response union covers control/direct, current-launch,
 `workflow_bootstrap`, ordinary/stalled checkpoint and finish outcomes. Validate
 bootstrap before decode, consume all custody requirements into observations, then
 construct control. The structural validator performs no ledger/authentication.

@@ -350,25 +350,40 @@ class DeliveryModelTest(unittest.TestCase):
         )
         self.assertEqual(rejected["blocking"]["reason_code"], "host_rejected")
 
-    def test_workflow_response_validation_is_structural_only(self):
-        stale_but_well_formed = {
-            "action_id": "151:1:1", "current": False,
-            "current_action_id": "151:1:2", "reason": "superseded_launch",
-        }
-        self.assertEqual(
-            self.model.validate_delivery_object(
-                stale_but_well_formed, expected_kind="workflow-response",
-                notes_max_characters=4096,
-            ),
-            stale_but_well_formed,
-        )
-        malformed = checkpoint_response_fixture(self.model)
-        malformed["custody"]["action_id"] = "151:r1:9"
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(
-                malformed, expected_kind="workflow-response",
-                notes_max_characters=4096,
-            )
+    def test_workflow_response_union_is_recursively_closed(self):
+        fixtures = exact_workflow_response_fixtures(self.model)
+        self.assertEqual(set(fixtures), {
+            "current", "bootstrap", "control", "observe", "owner", "terminal",
+            "remainder", "checkpointed", "stalled", "complete", "failed",
+        })
+        for name, value in fixtures.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.model.validate_delivery_object(
+                    value, expected_kind="workflow-response",
+                    notes_max_characters=4096), value)
+        for name, value in workflow_response_mutations(self.model, fixtures).items():
+            with self.subTest(name=name):
+                with self.assertRaises(self.model.DeliveryModelError):
+                    self.model.validate_delivery_object(
+                        value, expected_kind="workflow-response",
+                        notes_max_characters=4096)
+
+    def test_consumed_allow_requires_current_intent_and_loses_to_new_rejection(self):
+        contract, denied, current, requested = denied_delivery_fixture(self.model)
+        consumed, permit = consume_exact_successor(self.model, contract, denied,
+                                                   current, requested)
+        allowed = evaluation_result(self.model, permit, verdict="allowed")
+        authorized = self.model.reduce_delivery(contract, consumed,
+            evaluation=evaluation_context(custody=current, current_launch=True,
+                requested_scope=requested, authority_observations=[allowed]))
+        self.assertNotIn("host_rejected", json.dumps(authorized["blocking"]))
+        for mutation in ("old_launch", "missing_consumption", "cosmetic_basis",
+                         "expired_intent", "revoked_intent"):
+            self.assertFalse(operationally_authorized(self.model, mutation))
+        later_rejection = evaluation_result(self.model, permit, verdict="rejected",
+                                            observed_at="2026-09-21T00:00:02Z")
+        self.assertEqual(reduce_with(self.model, consumed, [allowed, later_rejection])
+                         ["blocking"]["reason_code"], "host_rejected")
 
     def test_source_and_generated_installed_layout_load_same_model(self):
         source = load_model(SOURCE, "delivery_model_source_layout")
@@ -448,6 +463,22 @@ derived member, omit that one top-level key, serialize by `canonical_bytes`, and
 compare the supplied value before returning. Reject two different canonical
 bodies that claim one id before reduction.
 
+Implement the spec's complete workflow-response union in this task. Validate
+current-launch, bootstrap, the control outer plus every summary/delta/action,
+direct observe/owner/terminal/remainder, both checkpoint variants and both finish
+outcomes recursively. Preserve every named v1 field, apply the exact custody and
+delivery extensions, and reject unknown kinds, extra/missing keys and hybrids.
+There is no permissive finish placeholder. `workflow_response_mutations` covers
+each discriminator plus malformed nested summary, nullable-custody delta,
+acquisition/delivery requirement, action, evaluation, digest, ordering, identity,
+complete-pending and failed-reason correlation. Its failed reason is exactly
+`owner_reported_failure`; stall remains `delivery_stalled`.
+Keep every `pending_stage_ids` array unique in contract order, never lexical
+order. The model validates exact envelope placement and null/object type for a
+legacy `result` slot but continues to exclude the legacy row schema. Task 2's raw
+boundary composes the existing legacy validator over every nonnull slot before
+the model validator; tests do not count model-only acceptance as boundary success.
+
 `match_scope` validates the supplied contract, intent, request, selections,
 explicit time and revocation observations, then evaluates the normative table
 member by member. Expiry and revocation come from the intent and bound
@@ -478,8 +509,13 @@ array to be empty and may carry only their specified observation/evidence arrays
 an owner report therefore cannot append authority intent. Checkpoint/summary runtime authority facts must bind the evaluation custody.
 Direct/control may accept a trusted late fact under its original launch into
 `next_delivery`; current-effect eligibility still requires its allowed verdict
-to bind the evaluation custody. A null custody/current launch is valid only for
-projection with no requested effect.
+to bind the evaluation custody. A post-rejection allow also requires its
+`evaluation_use_key` to bind a matching persisted consumption, observation time
+not before consumption, exact contract/scope/custody, and a currently valid
+covering user intent. A same-scope rejection at or after the allow wins; old
+allow, cosmetic basis, expired/revoked intent and missing consumption never
+authorize. A null custody/current launch is valid only for projection with no
+requested effect.
 
 Add the Home Manager publication beside the existing Python library targets.
 The managed public leaf is a lexical symlink to a regular Nix-store file; source
