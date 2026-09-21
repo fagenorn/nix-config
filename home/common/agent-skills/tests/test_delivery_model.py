@@ -98,7 +98,9 @@ def selection(model, contract_digest, *, subject_kind="commit", subject_value=No
         "data_identity_digest": "sha256:" + "2" * 64,
         "repository_id": "sim-repo", "branch": "feature", "base": "main",
         "evidence_digest": "sha256:" + "3" * 64,
-        "review_evidence_ids": ["review-1", "test-1"],
+        "acceptance_evidence_ids": ["accept-1"],
+        "review_evidence_ids": ["review-1"],
+        "test_evidence_ids": ["test-1"],
     })
 
 
@@ -111,26 +113,21 @@ def contract_and_delivery(model):
         ("open", "open_pr", "open_pull_request", "provider_write"),
         ("merge", "merge_pr", "merge_pull_request", "provider_write"),
     ]
+    target_ref = {
+        "kind": "slot", "slot_id": "reviewed", "subject_kind": "commit",
+        "constraints": {
+            "project_id": "sim-project", "provider": "github",
+            "repository_id": "sim-repo", "repository_slug": "sim.invalid/repo",
+            "branch": "feature", "base": "main", "deliverable_class": "source",
+            "data_ref": {"kind": "selected_output_slot", "slot_id": "reviewed",
+                         "classification": "source", "audience": "private"},
+        },
+    }
     stages = []
     for index, (stage_id, kind, action, effect) in enumerate(stage_specs):
         stages.append({
             "id": stage_id, "kind": kind, "action": action, "effect": effect,
-            "target_ref": ({
-                "kind": "slot", "slot_id": "reviewed", "subject_kind": "commit",
-                "constraints": {
-                    "project_id": "sim-project", "provider": "github",
-                    "repository_id": "sim-repo", "repository_slug": "sim.invalid/repo",
-                    "branch": "feature", "base": "main", "deliverable_class": "source",
-                    "data_ref": {"kind": "selected_output_slot", "slot_id": "reviewed",
-                                 "classification": "source", "audience": "private"},
-                },
-            } if index == 0 else {"kind": "slot", "slot_id": "reviewed",
-                                  "subject_kind": "commit", "constraints": {
-                    "project_id": "sim-project", "provider": "github",
-                    "repository_id": "sim-repo", "repository_slug": "sim.invalid/repo",
-                    "branch": "feature", "base": "main", "deliverable_class": "source",
-                    "data_ref": {"kind": "selected_output_slot", "slot_id": "reviewed",
-                                 "classification": "source", "audience": "private"}}}),
+            "target_ref": copy.deepcopy(target_ref),
             "worktree_requirement": "matching_required",
             "depends_on": [] if index == 0 else [stages[index - 1]["id"]],
             "retryable": True,
@@ -368,6 +365,14 @@ class DeliveryModelTest(unittest.TestCase):
     def setUpClass(cls):
         cls.model = load_model(SOURCE, "delivery_model_source_test")
 
+    def validate(self, value, kind):
+        return self.model.validate_delivery_object(
+            value, expected_kind=kind, notes_max_characters=4096)
+
+    def assert_invalid(self, value, kind):
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.validate(value, kind)
+
     def test_import_is_pure_and_interface_is_exact(self):
         with tempfile.TemporaryDirectory() as raw:
             before = set(Path(raw).iterdir()); prior = Path.cwd()
@@ -393,15 +398,14 @@ class DeliveryModelTest(unittest.TestCase):
 
     def test_strict_scope_and_custody_validation(self):
         valid = scope(self.model)
-        self.assertEqual(self.model.validate_delivery_object(valid, expected_kind="scope-tuple", notes_max_characters=4096), valid)
+        self.assertEqual(self.validate(valid, "scope-tuple"), valid)
         for mutation in ("unknown", "bool", "null", "id"):
             bad = copy.deepcopy(valid)
             if mutation == "unknown": bad["extra"] = 1
             if mutation == "bool": bad["target"]["issue"] = True
             if mutation == "null": bad["data"]["audience"] = None
             if mutation == "id": bad["id"] = "sha256:" + "f" * 64
-            with self.subTest(mutation=mutation), self.assertRaises(self.model.DeliveryModelError):
-                self.model.validate_delivery_object(bad, expected_kind="scope-tuple", notes_max_characters=4096)
+            with self.subTest(mutation=mutation): self.assert_invalid(bad, "scope-tuple")
         self.assertEqual(self.model.validate_custody_ref(custody(), issue=151), custody())
         with self.assertRaises(self.model.DeliveryModelError):
             self.model.validate_custody_ref({"kind": "remainder", "attempt": 1, "launch": 1, "action_id": "151:1:1"}, issue=151)
@@ -422,6 +426,23 @@ class DeliveryModelTest(unittest.TestCase):
         bad = copy.deepcopy(requested); bad["target"]["pr_ref"] = {"kind": "literal", "value": "18"}; seal(self.model, bad)
         self.assertEqual(self.model.match_scope(contract, delivery["authorization_intents"][0], bad,
             selected_outputs=[selected], at_time="2026-09-21T00:00:00Z", revocation_observations=[])["reason_code"], "scope_target_mismatch")
+
+        successor = intent(self.model, scope(self.model, pr="18"),
+                           predecessor=delivery["authorization_intents"][0]["id"], key="pr-18")
+        for pr, expected in ((18, "observed"), (999, "pending")):
+            candidate = with_observed(self.model, contract, delivery,
+                                      ["select", "publish", "open", "merge"])
+            candidate["authorization_intents"] = sorted(
+                delivery["authorization_intents"] + [successor], key=lambda item: item["id"])
+            candidate["authorization_chain_digest"] = self.model.canonical_digest({
+                "intent_ids": [item["id"] for item in candidate["authorization_intents"]]})
+            for item in candidate["delivery_observations"]:
+                if item["observation_kind"] in {"pr_opened", "pr_merged"}:
+                    item["subject"]["pr_number"] = pr; seal(self.model, item)
+            candidate["delivery_observations"].sort(key=lambda item: item["id"])
+            reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+            with self.subTest(pr=pr):
+                self.assertEqual(reduced["next_delivery"]["postconditions"]["pr_merged"]["state"], expected)
 
     def test_matcher_expiry_contract_and_slot_constraints(self):
         contract, delivery = contract_and_delivery(self.model)
@@ -542,8 +563,7 @@ class DeliveryModelTest(unittest.TestCase):
             "terminal", "remainder", "checkpointed", "stalled", "complete", "failed"})
         for name, value in fixtures.items():
             with self.subTest(name=name):
-                self.assertEqual(self.model.validate_delivery_object(value,
-                    expected_kind="workflow-response", notes_max_characters=4096), value)
+                self.assertEqual(self.validate(value, "workflow-response"), value)
         mutations = {}
         for name, value in fixtures.items():
             bad = copy.deepcopy(value); bad["unexpected"] = True; mutations[f"{name}_extra"] = bad
@@ -561,18 +581,23 @@ class DeliveryModelTest(unittest.TestCase):
         bad = copy.deepcopy(fixtures["current"]); bad["current"] = False; mutations["current_correlation"] = bad
         bad = copy.deepcopy(fixtures["checkpointed"]); bad["accepted_observation_ids"] = ["sha256:" + "a" * 64] * 2; mutations["duplicate_observation"] = bad
         for name, value in mutations.items():
-            with self.subTest(mutation=name), self.assertRaises(self.model.DeliveryModelError):
-                self.model.validate_delivery_object(value, expected_kind="workflow-response", notes_max_characters=4096)
+            with self.subTest(mutation=name): self.assert_invalid(value, "workflow-response")
 
     def test_critical_authority_lineage_and_evidence_invariants(self):
         contract, delivery = contract_and_delivery(self.model); active = custody()
         public = scope(self.model, audience="public")
         allowed = authority(self.model, contract, public, active, verdict="allowed")
-        refused = self.model.reduce_delivery(contract, delivery, evaluation=evaluation(
-            custody=active, current_launch=True, requested_scope=public,
-            authority_observations=[allowed]))
-        self.assertEqual(refused["requirements"][0]["reason_code"], "authorization_intent_required")
-        self.assertEqual(refused["blocking"]["blocked_on"], "human_gate")
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.reduce_delivery(contract, delivery, evaluation=evaluation(
+                custody=active, current_launch=True, requested_scope=public,
+                authority_observations=[allowed]))
+        successor = intent(self.model, public,
+                           predecessor=delivery["authorization_intents"][0]["id"],
+                           issued="2026-09-20T02:00:00Z", key="later")
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.reduce_delivery(contract, delivery, evaluation=evaluation(
+                custody=active, current_launch=True, requested_scope=public,
+                authorization_intents=[successor], authority_observations=[allowed]))
 
         declared = scope(self.model); declared["target"]["output_ref"] = {"kind": "none"}; declared["data"] = {"kind": "none"}; seal(self.model, declared)
         owner_intent = intent(self.model, declared); none_contract = copy.deepcopy(contract)
@@ -583,20 +608,17 @@ class DeliveryModelTest(unittest.TestCase):
             selected_outputs=[], at_time="2026-09-21T00:00:00Z", revocation_observations=[])["reason_code"], "scope_target_mismatch")
 
         bad_scope = scope(self.model); bad_scope["schema_version"] = True; seal(self.model, bad_scope)
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(bad_scope, expected_kind="scope-tuple", notes_max_characters=4096)
+        self.assert_invalid(bad_scope, "scope-tuple")
 
         first = delivery["authorization_intents"][0]; forked = copy.deepcopy(delivery)
         forked["authorization_intents"] += [intent(self.model, first["scopes"][0], predecessor=first["id"], key="fork-a"), intent(self.model, first["scopes"][0], predecessor=first["id"], key="fork-b")]
         forked["authorization_intents"].sort(key=lambda item: item["id"])
         forked["authorization_chain_digest"] = self.model.canonical_digest({"intent_ids": [item["id"] for item in forked["authorization_intents"]]})
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(forked, expected_kind="delivery", notes_max_characters=4096)
+        self.assert_invalid(forked, "delivery")
 
         fabricated = copy.deepcopy(delivery)
         fabricated["postconditions"]["implementation_delivered"] = {"state": "observed", "observation_id": "sha256:" + "0" * 64}
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(fabricated, expected_kind="delivery", notes_max_characters=4096)
+        self.assert_invalid(fabricated, "delivery")
 
         false_merge = observation(self.model, contract, "pr_merged", {"provider_repository_id": "sim-repo", "pr_number": 18, "pr_url": "https://sim.invalid/pr/18", "expected_head": "c" * 40, "base": "wrong-base", "merge_sha": "b" * 40, "merged": False})
         result = self.model.reduce_delivery(contract, delivery, evaluation=evaluation(delivery_observations=[false_merge]))
@@ -631,14 +653,22 @@ class DeliveryModelTest(unittest.TestCase):
 
     def test_positive_evidence_shapes_and_targets_are_closed(self):
         contract, delivery = contract_and_delivery(self.model)
+        selected = selection(self.model, delivery["contract_digest"])
+        for field, replacement in (("acceptance_evidence_ids", None),
+                                   ("review_evidence_ids", []),
+                                   ("test_evidence_ids", ["z", "a"]),
+                                   ("test_evidence_ids", ["test-1", "test-1"])):
+            bad = copy.deepcopy(selected)
+            if replacement is None: bad.pop(field)
+            else: bad[field] = replacement
+            seal(self.model, bad)
+            self.assert_invalid(bad, "selected-output")
         for kind, subject in (
             ("implementation_delivered", {"probe_succeeded": False}),
             ("cleanup_complete", {"absent": False}),
         ):
             bad = observation(self.model, contract, kind, subject)
-            with self.subTest(kind=kind), self.assertRaises(self.model.DeliveryModelError):
-                self.model.validate_delivery_object(
-                    bad, expected_kind="delivery-observation", notes_max_characters=4096)
+            with self.subTest(kind=kind): self.assert_invalid(bad, "delivery-observation")
 
         close = {"id": "close", "kind": "close_tracker", "action": "close_issue",
                  "effect": "tracker_write", "target_ref": {"kind": "literal", "value": "151"},
@@ -702,6 +732,22 @@ class DeliveryModelTest(unittest.TestCase):
         self.assertTrue(all(item["state"] == "observed"
                             for item in result["next_delivery"]["postconditions"].values()))
 
+        for mutation in ({"merged": False}, {"provider_repository_id": "other"},
+                         {"pr_number": 999}, {"expected_head": "c" * 40},
+                         {"base": "other"}):
+            rejected_merge = copy.deepcopy(merge)
+            rejected_merge["subject"].update(mutation); seal(self.model, rejected_merge)
+            rejected_delivery = copy.deepcopy(implementation)
+            rejected_delivery["subject"]["merge_observation_id"] = rejected_merge["id"]
+            seal(self.model, rejected_delivery)
+            candidate = copy.deepcopy(observed)
+            candidate["delivery_observations"] = sorted(
+                [item for item in candidate["delivery_observations"]
+                 if item["observation_kind"] not in {"pr_merged", "implementation_delivered"}]
+                + [rejected_merge, rejected_delivery], key=lambda item: item["id"])
+            self.assertEqual(self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+                ["next_delivery"]["postconditions"]["implementation_delivered"]["state"], "pending")
+
         for label, kind, mutation in (
             ("publication branch", "branch_published", {"branch": "other"}),
             ("PR head", "pr_opened", {"expected_head": "c" * 40}),
@@ -737,13 +783,13 @@ class DeliveryModelTest(unittest.TestCase):
             elif label == "cleanup unreadable": item["subject"]["durable_detail"]["succeeded"] = False
             else: item["subject"]["extra"] = True
             seal(self.model, item)
-            with self.subTest(label=label), self.assertRaises(self.model.DeliveryModelError):
-                self.model.validate_delivery_object(
-                    item, expected_kind="delivery-observation", notes_max_characters=4096)
+            with self.subTest(label=label):
+                self.assert_invalid(item, "delivery-observation")
 
         for label, item in (
             ("wrong selected subject", copy.deepcopy(implementation)),
             ("unknown merge reference", copy.deepcopy(implementation)),
+            ("misplaced acceptance proof", copy.deepcopy(implementation)),
             ("wrong cleanup reference", copy.deepcopy(cleanup)),
         ):
             if label == "wrong selected subject":
@@ -751,6 +797,8 @@ class DeliveryModelTest(unittest.TestCase):
                 item["subject"]["presence"]["selected_value"] = "c" * 40
             elif label == "unknown merge reference":
                 item["subject"]["merge_observation_id"] = "sha256:" + "f" * 64
+            elif label == "misplaced acceptance proof":
+                item["subject"]["acceptance_evidence_ids"] = ["review-1"]
             else:
                 item["subject"]["remote_branch_observation_ids"] = ["sha256:" + "f" * 64]
             seal(self.model, item)
@@ -823,14 +871,23 @@ class DeliveryModelTest(unittest.TestCase):
                 self.assertEqual(next(f["state"] for f in reduced["next_delivery"]["stage_facts"]
                                       if f["stage_id"] == "record"), "pending")
 
+        wrong_delivery = copy.deepcopy(delivered)
+        wrong_delivery["subject"]["integration_subject"]["value"] = "sha256:" + "d" * 64
+        wrong_delivery["subject"]["presence"]["integration_value"] = "sha256:" + "d" * 64
+        seal(self.model, wrong_delivery)
+        candidate["delivery_observations"] = sorted(
+            [selected_observation, record, opened, merged, wrong_delivery],
+            key=lambda item: item["id"])
+        reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+        self.assertEqual(reduced["next_delivery"]["postconditions"]
+                         ["implementation_delivered"]["state"], "pending")
+
     def test_delivery_graph_binds_retained_contract_and_intent_identity(self):
         contract, delivery = contract_and_delivery(self.model)
         wrong = copy.deepcopy(delivery)
         wrong["contract"]["initial_authorization_intent_digest"] = "sha256:" + "e" * 64
         wrong["contract_digest"] = self.model.canonical_digest(wrong["contract"])
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(wrong, expected_kind="delivery",
-                                                notes_max_characters=4096)
+        self.assert_invalid(wrong, "delivery")
 
         active = custody(); requested = delivery["authorization_intents"][0]["scopes"][0]
         allowed = authority(self.model, contract, requested, active, verdict="allowed")
@@ -842,25 +899,19 @@ class DeliveryModelTest(unittest.TestCase):
 
         wrong_selection = selection(self.model, "sha256:" + "f" * 64)
         bad = copy.deepcopy(delivery); bad["selected_outputs"] = [wrong_selection]
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(bad, expected_kind="delivery",
-                                                notes_max_characters=4096)
+        self.assert_invalid(bad, "delivery")
 
         selected_observation = observation(self.model, contract, "selected_output", {
             "selected_output": selection(self.model, delivery["contract_digest"])})
         selected_observation["project"]["repository_id"] = "other"; seal(self.model, selected_observation)
         bad = copy.deepcopy(delivery); bad["delivery_observations"] = [selected_observation]
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(bad, expected_kind="delivery",
-                                                notes_max_characters=4096)
+        self.assert_invalid(bad, "delivery")
 
         denied, rejection = with_host_rejection(self.model, contract, delivery, active)
         evidence = reevaluation(self.model, contract, rejection)
         evidence["rejected_observation_id"] = "sha256:" + "9" * 64; seal(self.model, evidence)
         bad = copy.deepcopy(denied); bad["reevaluation_evidence"] = [evidence]
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(bad, expected_kind="delivery",
-                                                notes_max_characters=4096)
+        self.assert_invalid(bad, "delivery")
 
         revoked = seal(self.model, {
             "schema_version": 1, "kind": "authority-observation", "id": "",
@@ -872,40 +923,38 @@ class DeliveryModelTest(unittest.TestCase):
                                    "revocation_key": "wrong-key"},
             "evaluation_use_key": None})
         bad = copy.deepcopy(delivery); bad["authority_observations"] = [revoked]
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(bad, expected_kind="delivery",
-                                                notes_max_characters=4096)
+        self.assert_invalid(bad, "delivery")
 
     def test_contract_requires_normative_stage_dependencies(self):
         contract, _ = contract_and_delivery(self.model)
         for stage_id in ("publish", "open", "merge"):
             bad = copy.deepcopy(contract)
             next(stage for stage in bad["stages"] if stage["id"] == stage_id)["depends_on"] = []
-            with self.subTest(stage=stage_id), self.assertRaises(self.model.DeliveryModelError):
-                self.model.validate_delivery_object(
-                    bad, expected_kind="delivery-contract", notes_max_characters=4096)
+            with self.subTest(stage=stage_id):
+                self.assert_invalid(bad, "delivery-contract")
+        cleanup, _ = cleanup_contract_and_delivery(self.model)
+        self.validate(cleanup, "delivery-contract")
+        for stage_id in ("remote", "worktree", "local"):
+            bad = copy.deepcopy(cleanup)
+            next(stage for stage in bad["stages"] if stage["id"] == stage_id)["depends_on"] = ["merge"]
+            with self.subTest(cleanup=stage_id):
+                self.assert_invalid(bad, "delivery-contract")
 
     def test_current_launch_and_null_contract_correlations_are_exact(self):
         fixtures = workflow_responses(self.model)
         malformed = copy.deepcopy(fixtures["current"])
         malformed.update(current=False, current_action_id="151:9:9", reason="unknown_run")
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(
-                malformed, expected_kind="workflow-response", notes_max_characters=4096)
+        self.assert_invalid(malformed, "workflow-response")
         no_contract = copy.deepcopy(fixtures["control"])
         summary = no_contract["summaries"][0]
         summary.update(custody=None, owner=None, worktree=None, deadline_at=None,
                        contract_digest=None, pending_stage_ids=[], requirements=[])
         no_contract["actions"] = []
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(
-                no_contract, expected_kind="workflow-response", notes_max_characters=4096)
+        self.assert_invalid(no_contract, "workflow-response")
         summary["requirements"] = [{"kind": "delivery_contract", "subject_id": "151",
                                     "reason_code": "delivery_contract_required",
                                     "detail_pointer": None}]
-        self.assertEqual(self.model.validate_delivery_object(
-            no_contract, expected_kind="workflow-response", notes_max_characters=4096),
-            no_contract)
+        self.assertEqual(self.validate(no_contract, "workflow-response"), no_contract)
 
         valid_rows = (
             ("unknown_run", None), ("unknown_issue", None),
@@ -917,8 +966,7 @@ class DeliveryModelTest(unittest.TestCase):
             value = {"action_id": "151:1:1", "current": False,
                      "current_action_id": current_action_id, "reason": reason}
             with self.subTest(reason=reason, current_action_id=current_action_id):
-                self.assertEqual(self.model.validate_delivery_object(
-                    value, expected_kind="workflow-response", notes_max_characters=4096), value)
+                self.assertEqual(self.validate(value, "workflow-response"), value)
         for reason, current_action_id in (
             ("unknown_issue", "151:1:2"), ("inactive_attempt", "151:1:2"),
             ("unknown_attempt", "151:1:1"), ("superseded_attempt", "151:1:1"),
@@ -926,34 +974,26 @@ class DeliveryModelTest(unittest.TestCase):
         ):
             value = {"action_id": "151:1:1", "current": False,
                      "current_action_id": current_action_id, "reason": reason}
-            with self.subTest(invalid_reason=reason), self.assertRaises(self.model.DeliveryModelError):
-                self.model.validate_delivery_object(
-                    value, expected_kind="workflow-response", notes_max_characters=4096)
+            with self.subTest(invalid_reason=reason):
+                self.assert_invalid(value, "workflow-response")
 
     def test_ship_handoff_cross_references_and_contract_order(self):
         contract, delivery = contract_and_delivery(self.model)
         handoff = ship_handoff(self.model, contract, delivery)
-        self.assertEqual(self.model.validate_delivery_object(
-            handoff, expected_kind="ship-handoff", notes_max_characters=4096), handoff)
+        self.assertEqual(self.validate(handoff, "ship-handoff"), handoff)
         for name, mutate in (
             ("issue", lambda value: value.update(issue_number=152)),
             ("chain", lambda value: value.update(authorization_chain_digest="sha256:" + "f" * 64)),
             ("pending", lambda value: value.update(pending_stage_ids=sorted(value["pending_stage_ids"]))),
         ):
             bad = copy.deepcopy(handoff); mutate(bad)
-            with self.subTest(name=name), self.assertRaises(self.model.DeliveryModelError):
-                self.model.validate_delivery_object(
-                    bad, expected_kind="ship-handoff", notes_max_characters=4096)
+            with self.subTest(name=name): self.assert_invalid(bad, "ship-handoff")
         selected = selection(self.model, handoff["delivery_contract_digest"])
         selected["branch"] = "other"; seal(self.model, selected)
         bad = copy.deepcopy(handoff); bad["selected_outputs"] = [selected]
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(
-                bad, expected_kind="ship-handoff", notes_max_characters=4096)
+        self.assert_invalid(bad, "ship-handoff")
         bad = copy.deepcopy(handoff); bad["branch"] = "other"
-        with self.assertRaises(self.model.DeliveryModelError):
-            self.model.validate_delivery_object(
-                bad, expected_kind="ship-handoff", notes_max_characters=4096)
+        self.assert_invalid(bad, "ship-handoff")
     def test_source_and_generated_installed_layout_load_same_model(self):
         source = load_model(SOURCE, "delivery_model_source_layout")
         with tempfile.TemporaryDirectory() as raw:

@@ -331,18 +331,35 @@ def _delivery(value: Any, notes_max: int) -> dict[str, Any]:
         bodies[item["id"]] = body
     scope_ids = {scope["id"] for intent in intents for scope in intent["scopes"]}
     intent_by_id = {intent["id"]: intent for intent in intents}
+    intents_by_scope = {
+        scope_id: [intent for intent in intents
+                   if scope_id in {scope["id"] for scope in intent["scopes"]}]
+        for scope_id in scope_ids
+    }
+
+    def scope_exists_at(scope_id: str, observed_at: str) -> bool:
+        return any(intent["issued_at"] <= observed_at
+                   for intent in intents_by_scope.get(scope_id, []))
+
     authority_by_id = {item["id"]: item for item in value["authority_observations"]}
     reevaluation_by_id = {item["id"]: item for item in value["reevaluation_evidence"]}
     for item in value["authority_observations"]:
-        if item["contract_digest"] != digest: _reject()
+        if item["contract_digest"] != digest or item["scope_id"] not in scope_ids: _reject()
         if item["authority_kind"] == "intent_revocation":
             revoked = intent_by_id.get(item["revocation_subject"]["intent_id"])
-            if revoked is None or revoked["revocation_key"] != item["revocation_subject"]["revocation_key"]: _reject()
+            if revoked is None or revoked["revocation_key"] != item["revocation_subject"]["revocation_key"] \
+                    or item["scope_id"] not in {scope["id"] for scope in revoked["scopes"]} \
+                    or item["observed_at"] < revoked["issued_at"]: _reject()
+        elif not scope_exists_at(item["scope_id"], item["observed_at"]):
+            _reject()
     for item in value["reevaluation_evidence"]:
         rejection = authority_by_id.get(item["rejected_observation_id"])
         if item["contract_digest"] != digest \
+                or item["scope_id"] not in scope_ids \
                 or rejection is None or rejection["verdict"] != "rejected" \
-                or rejection["scope_id"] != item["scope_id"]: _reject()
+                or rejection["scope_id"] != item["scope_id"] \
+                or item["observed_at"] < rejection["observed_at"] \
+                or not scope_exists_at(item["scope_id"], item["observed_at"]): _reject()
     for item in value["delivery_observations"]:
         if item["contract_digest"] != digest or item["project"] != contract["project"]: _reject()
     for item in value["selected_outputs"]:
@@ -363,14 +380,19 @@ def _delivery(value: Any, notes_max: int) -> dict[str, Any]:
         rejection = authority_by_id.get(item["rejected_observation_id"])
         basis = (intent_by_id if item["basis"]["kind"] == "successor_intent" else reevaluation_by_id).get(item["basis"]["id"])
         if item["contract_digest"] != digest \
+                or item["scope_id"] not in scope_ids \
                 or rejection is None or rejection["verdict"] != "rejected" \
-                or rejection["scope_id"] != item["scope_id"] or basis is None: _reject()
+                or rejection["scope_id"] != item["scope_id"] or basis is None \
+                or item["consumed_at"] < rejection["observed_at"]: _reject()
         if item["basis"]["kind"] == "successor_intent" and (
                 basis["predecessor_intent_id"] is None
-                or item["scope_id"] not in {scope["id"] for scope in basis["scopes"]}): _reject()
+                or item["scope_id"] not in {scope["id"] for scope in basis["scopes"]}
+                or basis["issued_at"] <= rejection["observed_at"]
+                or item["consumed_at"] < basis["issued_at"]): _reject()
         if item["basis"]["kind"] == "reevaluation_evidence" and (
                 basis["rejected_observation_id"] != item["rejected_observation_id"]
-                or basis["scope_id"] != item["scope_id"]): _reject()
+                or basis["scope_id"] != item["scope_id"]
+                or item["consumed_at"] < basis["observed_at"]): _reject()
         uses.add(item["use_key"])
     consumption_by_key = {item["use_key"]: item for item in value["authority_evaluation_consumptions"]}
     for item in value["authority_observations"]:
@@ -378,7 +400,8 @@ def _delivery(value: Any, notes_max: int) -> dict[str, Any]:
         consumption = consumption_by_key.get(item["evaluation_use_key"])
         if consumption is None or consumption["contract_digest"] != item["contract_digest"] \
                 or consumption["scope_id"] != item["scope_id"] \
-                or consumption["custody"]["action_id"] != item["launch_id"]: _reject()
+                or consumption["custody"]["action_id"] != item["launch_id"] \
+                or item["observed_at"] < consumption["consumed_at"]: _reject()
     if not isinstance(value["stage_facts"], list) or [x.get("stage_id") for x in value["stage_facts"]] != [x["id"] for x in contract["stages"]]: _reject()
     stages_by_id = {item["id"]: item for item in contract["stages"]}
     for fact in value["stage_facts"]:

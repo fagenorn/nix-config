@@ -82,13 +82,14 @@ def _intent(value: Any) -> dict[str, Any]:
 
 
 def _selected(value: Any) -> dict[str, Any]:
-    value = _object(value, _members("schema_version kind id contract_digest slot_id subject_kind subject_value data_identity_digest repository_id branch base evidence_digest review_evidence_ids"))
+    value = _object(value, _members("schema_version kind id contract_digest slot_id subject_kind subject_value data_identity_digest repository_id branch base evidence_digest acceptance_evidence_ids review_evidence_ids test_evidence_ids"))
     if type(value["schema_version"]) is not int or value["schema_version"] != 1 or value["kind"] != "selected-output": _reject()
     for key in ("contract_digest", "data_identity_digest", "evidence_digest"): _digest(value[key], key)
     for key in ("slot_id", "subject_kind", "subject_value", "repository_id", "branch", "base"): _string(value[key], key)
-    _sorted_unique(value["review_evidence_ids"], "review evidence")
-    if not value["review_evidence_ids"]: _reject()
-    for item in value["review_evidence_ids"]: _string(item, "review evidence id")
+    for name in ("acceptance_evidence_ids", "review_evidence_ids", "test_evidence_ids"):
+        _sorted_unique(value[name], name)
+        if not value[name]: _reject()
+        for item in value[name]: _string(item, name)
     _derived(value, "selected output")
     return value
 
@@ -121,13 +122,14 @@ def _contract(value: Any, notes_max: int) -> dict[str, Any]:
         _boolean(stage["retryable"], "retryable"); ids.append(stage["id"])
     stages = {stage["id"]: stage for stage in value["stages"]}
 
-    def precedes(stage: dict[str, Any], required_kind: str, *, slot: str | None = None) -> bool:
+    def precedes(stage: dict[str, Any], required_kind: str, *, slot: str | None = None,
+                 stage_id: str | None = None) -> bool:
         pending = list(stage["depends_on"]); seen = set()
         while pending:
             dependency = pending.pop()
             if dependency in seen: continue
             seen.add(dependency); candidate = stages[dependency]
-            if candidate["kind"] == required_kind:
+            if candidate["kind"] == required_kind and (stage_id is None or candidate["id"] == stage_id):
                 target = candidate["target_ref"]
                 if slot is None or (target.get("kind") == "slot" and target["slot_id"] == slot):
                     return True
@@ -149,6 +151,14 @@ def _contract(value: Any, notes_max: int) -> dict[str, Any]:
                 precedes(stage, "select_reviewed_output", slot=slot)
                 and precedes(stage, "open_pr", slot=slot)):
             _reject("merge must follow selection and open PR")
+    cleanup_kinds = {"delete_remote_branch", "remove_worktree", "delete_local_branch"}
+    non_cleanup = [stage for stage in value["stages"] if stage["kind"] not in cleanup_kinds]
+    if non_cleanup:
+        last_effect = non_cleanup[-1]
+        for stage in value["stages"]:
+            if stage["kind"] in cleanup_kinds and not precedes(
+                    stage, last_effect["kind"], slot=None, stage_id=last_effect["id"]):
+                _reject("cleanup must follow the last declared non-cleanup effect")
     _digest(value["initial_authorization_intent_id"], "initial intent id"); _digest(value["initial_authorization_intent_digest"], "initial intent digest")
     provenance = _object(value["provenance"], _members("kind reference digest created_at"))
     _string(provenance["kind"], "provenance kind"); _string(provenance["reference"], "provenance reference"); _digest(provenance["digest"], "provenance digest"); _utc(provenance["created_at"], "provenance time")
@@ -308,14 +318,25 @@ def _selection_for_stage(contract: dict[str, Any], delivery: dict[str, Any],
     return matches[0] if matches else None
 
 
-def _pr_number(delivery: dict[str, Any], stage: dict[str, Any]) -> int | None:
-    values = set()
+def _pr_numbers(contract: dict[str, Any], delivery: dict[str, Any],
+                stage: dict[str, Any], selected: dict[str, Any]) -> set[int]:
+    values: set[int] = set()
     for intent in delivery["authorization_intents"]:
         for declared in intent["scopes"]:
-            if declared["action"] != stage["action"]: continue
-            ref = declared["target"]["pr_ref"]
+            target = declared["target"]
+            if declared["action"] not in {"open_pull_request", "merge_pull_request"}: continue
+            if (target["project_id"], target["provider"], target["repository_id"],
+                    target["repository_slug"], target["issue"], target["branch"],
+                    target["base"]) != (
+                    contract["project"]["project_id"], contract["project"]["provider"],
+                    contract["project"]["repository_id"], contract["project"]["repository_slug"],
+                    contract["issue"], selected["branch"], selected["base"]): continue
+            output = target["output_ref"]
+            if output not in ({"kind": "slot", "slot_id": selected["slot_id"]},
+                              {"kind": "literal", "value": selected["subject_value"]}): continue
+            ref = target["pr_ref"]
             if ref["kind"] == "literal" and ref["value"].isdigit(): values.add(int(ref["value"]))
-    return next(iter(values)) if len(values) == 1 else None
+    return values
 
 
 def _selected_head(delivery: dict[str, Any], selected: dict[str, Any]) -> str | None:
@@ -351,8 +372,8 @@ def _stage_observation_matches(contract: dict[str, Any], delivery: dict[str, Any
         valid = selected is not None and subject["provider_repository_id"] == repo \
             and expected_head is not None and subject["expected_head"] == expected_head \
             and subject["base"] == selected["base"]
-        number = _pr_number(delivery, stage)
-        if number is not None: valid = valid and subject["pr_number"] == number
+        numbers = set() if selected is None else _pr_numbers(contract, delivery, stage, selected)
+        valid = valid and subject["pr_number"] in numbers
         if stage["kind"] == "merge_pr":
             valid = valid and subject["merged"] is True and any(
                 observation["observation_kind"] == "pr_opened"
@@ -384,16 +405,21 @@ def _postcondition_observation_matches(contract: dict[str, Any], delivery: dict[
                     and candidate["subject_value"] == subject["selected_subject"]["value"]
                     and candidate["repository_id"] == subject["presence"]["repository_id"]]
         if len(selected) != 1: return False
-        if not set(selected[0]["review_evidence_ids"]) <= set(
-                subject["review_evidence_ids"] + subject["test_evidence_ids"]): return False
+        for name in ("acceptance_evidence_ids", "review_evidence_ids", "test_evidence_ids"):
+            if not set(selected[0][name]) <= set(subject[name]): return False
         merge_id = subject["merge_observation_id"]
         if any(stage["kind"] == "merge_pr" for stage in contract["stages"]):
             if merge_id is None: return False
             merge = next((candidate for candidate in delivery["delivery_observations"]
                           if candidate["id"] == merge_id and candidate["observation_kind"] == "pr_merged"), None)
             if merge is None: return False
+            applicable = [stage for stage in contract["stages"]
+                          if stage["kind"] == "merge_pr"
+                          and _stage_observation_matches(contract, delivery, stage, merge)]
+            if len(applicable) != 1: return False
             if selected[0]["subject_kind"] == "record":
-                if merge["subject"]["expected_head"] != _selected_head(delivery, selected[0]): return False
+                if subject["integration_subject"]["value"] != selected[0]["subject_value"] \
+                        or merge["subject"]["expected_head"] != _selected_head(delivery, selected[0]): return False
             elif merge["subject"]["merge_sha"] != subject["integration_subject"]["value"]: return False
         elif merge_id is not None: return False
         return subject["presence"]["succeeded"] is True
