@@ -6,6 +6,7 @@
 - Modify: `home/common/agent-skills/scripts/delivery_model/_wire.py`
 - Modify: `home/common/agent-skills/scripts/workflow-state.py`
 - Create: `home/common/agent-skills/scripts/workflow_delivery.py`
+- Create: `home/common/agent-skills/scripts/workflow_delivery_wire.py`
 - Modify: `home/common/agent-skills/scripts/artifact_budget.py`
 - Modify: `home/common/agent-skills/tests/_delivery_model_fixtures.py`
 - Modify: `home/common/agent-skills/tests/test_delivery_model.py`
@@ -173,7 +174,7 @@ authority/retry/terminal state, or activate source integration.
 Run the exact focused six-module unittest command, `just agent-workflow-tests`,
 `just build`, and quick validation for from-issue, ship-issue and orchestrate-
 issues in the documented PyYAML devenv. Retain argv/stdout/stderr/exit receipts.
-Run `git diff --check`; temporary-index audit must contain exactly all 23 paths,
+Run `git diff --check`; temporary-index audit must contain exactly all 24 paths,
 with each U10 diff 1..65536 bytes and empty real index. Then sign one atomic
 commit:
 `feat: reconcile delivery lifecycle` with the stated Codex coauthor. Gate raw
@@ -241,3 +242,14 @@ suspension records three stalls, progress reset, and terminal-remainder-first
 selection; identical direct/control replay returns existing/completed without a
 write. Retain raw receipts and do not activate, install a generation or mutate a
 live ledger.
+
+D22 factors state/response projection and v2 owner/worktree request grammar into
+adjacent private `workflow_delivery_wire.py`; `DeliveryRuntime` absorbs pure v2
+state/request correlations. CLI, custody orchestration, locks, persistence and
+effects stay in workflow-state. Keep the existing runtime interface 1/model
+8-name facade, concrete lexical source/installed loading and fail-closed missing
+or incompatible helper behavior before decode/mutation. No callbacks, cycles,
+fallbacks, duplicate policy or model-private calls. Add only this source helper
+to the product roster (24 paths, 27 with Task2 artifacts); publish via existing
+`default.nix` and cover helper/loading/error behavior in existing
+`test_workflow_delivery.py`. The six-module verification command is unchanged.

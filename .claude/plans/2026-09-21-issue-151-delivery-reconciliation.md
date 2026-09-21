@@ -64,6 +64,14 @@ Git, and repository `just` commands.
   schema-3 delivery-envelope validation and the shared locked transition;
   workflow-state retains CLI parsing, locks, atomic persistence and effects.
   There are no callbacks, policy copies, fallback imports or live v1 effect path.
+- Per D22, the runtime's adjacent private `workflow_delivery_wire.py` owns
+  state/response projection and interface-2 owner/worktree grammar. Runtime
+  absorbs pure v2 state/request correlations; workflow-state keeps CLI, custody
+  orchestration, locks, persistence and effects. Concrete lexical source/installed
+  loading fails before decode/mutation when the helper is missing/incompatible.
+  Both existing interfaces stay unchanged; no callbacks, cycles, policy copies,
+  fallback imports or model-private access. Install the helper beside runtime;
+  extend existing runtime tests, with no new test module.
 - Per D21, only trusted direct/control recovery input may atomically allocate r2
   after a terminal failed/stalled r1: direct carries required nullable recovery,
   control carries the canonical issue-keyed recoveries map, and remainders carry

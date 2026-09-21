@@ -75,8 +75,7 @@ never authority.
 ### Closed authorization scope and runtime authority
 
 Intent and scope use the exact closed fields in the canonical wire appendix.
-Scope includes stable principal, effect, target, endpoint, data, risk and spend;
-audience is private, public or a named-audience digest. Slot data takes its digest
+Audience is private, public or a named-audience digest. Slot data takes its digest
 only from that slot's reviewed binding.
 
 Canonical comparison uses all members and the closed narrowing grammar below.
@@ -87,10 +86,9 @@ reviewed output is the declared narrowing, so it needs no new permission merely
 because the bytes are now known. A different slot/target, classification,
 audience, action or effect still refuses.
 
-The same repository URL with public audience or another payload/data digest does
-not match private publication intent. Repository administration grants nothing.
-The live #152 denial concerns one concrete action, not universal policy or retry
-permission.
+Public audience or changed payload/data never matches private publication intent,
+even at the same repository URL. Administration grants nothing; the live #152
+denial concerns one action and permits no retry.
 
 `authority-observation/v1` is append-only and binds contract digest, scope-tuple
 id, nullable current launch, authority kind (`intent_revocation`, `native_guard`,
@@ -866,3 +864,4 @@ architecture authority. They are not recorded human answers.
 | D19 | Independently proposed nullable scope binds the post-fold ordered stage and is echoed; handoff is historical and transfer/remainder needs a fresh proposal. | The wire lacked actual endpoint, audience, principal, risk and spend; independent Sol critique accepted. | Intent-derived actual scope, copied stage policy, mismatch as permission or prior-allow prerequisites. |
 | D20 | Private `workflow_delivery` owns v2 admission, schema-3 delivery validation and transition; workflow-state owns CLI, locks, writes and effects. | Its fixed-base monolith diff was 62,664/65,536 bytes. | Callbacks, copied policy, public framework, `sys.path`, fallback imports or live v1 effects. |
 | D21 | Permit only exact proof-gated r2 recovery after failed/stalled r1; it grants no authority and D18 denial remains controlling. | I2 recovery correction. | Blind retry, stale minting or a third remainder. |
+| D22 | Private adjacent `workflow_delivery_wire.py` owns state/response projection and v2 owner/worktree grammar; runtime absorbs pure v2 correlations. Closed source/installed loading, unchanged interfaces; CLI/custody/locks/writes/effects stay in workflow-state. | Measured per-file review bound. | No callbacks, copied policy or model backdoors. |
