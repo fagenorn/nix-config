@@ -1,6 +1,7 @@
 # Task 1: Build and publish the pure delivery model
 
 **Files:**
+- Delete: `home/common/agent-skills/scripts/delivery_model.py`
 - Create: `home/common/agent-skills/scripts/delivery_model/__init__.py`
 - Create: `home/common/agent-skills/scripts/delivery_model/_canonical.py`
 - Create: `home/common/agent-skills/scripts/delivery_model/_objects.py`
@@ -433,7 +434,7 @@ class DeliveryModelTest(unittest.TestCase):
         nix = DEFAULT_NIX.read_text(encoding="utf-8")
         self.assertIn('".agents/lib/python/delivery_model"', nix)
         self.assertIn("source = ./scripts/delivery_model;", nix)
-        self.assertIn("recursive = true;", nix)
+        self.assertIn("recursive = false;", nix)
         just = (ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("test_delivery_model.py", just)
 
@@ -582,7 +583,7 @@ a directory entry, or wrong interface fails before decode or mutation:
 ```nix
 ".agents/lib/python/delivery_model" = {
   source = ./scripts/delivery_model;
-  recursive = true;
+  recursive = false;
 };
 ```
 
@@ -599,6 +600,7 @@ python3 -m unittest \
   home/common/agent-skills/tests/test_artifact_budget.py \
   home/common/agent-skills/tests/test_workflow_state.py -v
 git diff --check -- \
+  home/common/agent-skills/scripts/delivery_model.py \
   home/common/agent-skills/scripts/delivery_model/__init__.py \
   home/common/agent-skills/scripts/delivery_model/_canonical.py \
   home/common/agent-skills/scripts/delivery_model/_objects.py \
@@ -611,6 +613,7 @@ python3 - <<'PY'
 import subprocess
 
 allowed = {
+    "home/common/agent-skills/scripts/delivery_model.py",
     "home/common/agent-skills/scripts/delivery_model/__init__.py",
     "home/common/agent-skills/scripts/delivery_model/_canonical.py",
     "home/common/agent-skills/scripts/delivery_model/_objects.py",
@@ -630,7 +633,8 @@ candidate_index=$(mktemp "${TMPDIR:-/tmp}/issue-151-task1-index-XXXXXX")
 rm "$candidate_index"
 trap 'rm -f "$candidate_index"' EXIT HUP INT TERM
 GIT_INDEX_FILE="$candidate_index" git read-tree HEAD
-GIT_INDEX_FILE="$candidate_index" git add -- \
+GIT_INDEX_FILE="$candidate_index" git add -A -- \
+  home/common/agent-skills/scripts/delivery_model.py \
   home/common/agent-skills/scripts/delivery_model/__init__.py \
   home/common/agent-skills/scripts/delivery_model/_canonical.py \
   home/common/agent-skills/scripts/delivery_model/_objects.py \
@@ -644,6 +648,7 @@ import os
 import subprocess
 
 allowed = {
+    "home/common/agent-skills/scripts/delivery_model.py",
     "home/common/agent-skills/scripts/delivery_model/__init__.py",
     "home/common/agent-skills/scripts/delivery_model/_canonical.py",
     "home/common/agent-skills/scripts/delivery_model/_objects.py",
@@ -669,20 +674,21 @@ trap - EXIT HUP INT TERM
 test -z "$(git diff --cached --name-only)"
 ```
 
-Expected: all commands exit 0; the new test passes, existing workflow/report
-tests remain green, exactly eight Task 1 paths differ, and no whitespace error is
-reported. The temporary index measures new files without touching the real
-index. If a file needs a bounded test split to stay under the per-file cap, stop
-and amend this member's Files roster, allowlist and root task index before adding
-it. Then, after the signed commit, build the actual complete Task-1-only review
-package from the immutable Task 1 base through that commit; require full changed
-path/line coverage and unchanged package limits before review.
+Expected: all commands exit 0; the tests pass, exactly nine correction paths
+differ (the standalone deletion, five package files and three existing paths),
+and no whitespace error appears. The temporary index measures deletions/new
+files without touching the real index. After the signed commit, the complete
+immutable-Task-1-base package has eight net paths because the standalone file
+was created and removed within that range. Require full changed-path/line
+coverage and unchanged limits before review. If a split is needed, first amend
+the Files roster, allowlist and root task index.
 
 - [ ] **Step 5: Commit the independently reviewable pure seam**
 
 ```bash
 set -euo pipefail
-git add \
+git add -A -- \
+  home/common/agent-skills/scripts/delivery_model.py \
   home/common/agent-skills/scripts/delivery_model/__init__.py \
   home/common/agent-skills/scripts/delivery_model/_canonical.py \
   home/common/agent-skills/scripts/delivery_model/_objects.py \
@@ -693,6 +699,7 @@ git add \
 test -z "$(git diff --name-only)"
 test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' \
   home/common/agent-skills/default.nix \
+  home/common/agent-skills/scripts/delivery_model.py \
   home/common/agent-skills/scripts/delivery_model/__init__.py \
   home/common/agent-skills/scripts/delivery_model/_canonical.py \
   home/common/agent-skills/scripts/delivery_model/_objects.py \
