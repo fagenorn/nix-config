@@ -457,8 +457,9 @@ implementation path's existing pre-merge guard while fencing the new
 successor-owned post-merge path.
 
 There is at most one nonterminal custody record across implementation and
-remainder lineages. Creating remainder 1 requires a validated contract, at least
-one pending predeclared stage and no active implementation owner. Its creation
+remainder lineages. Creating remainder 1 requires a validated contract, no active implementation
+owner, and either a pending predeclared stage or a required pending
+postcondition. Its creation
 key is the canonical digest of contract, source attempt, sorted pending stages
 and current postcondition/authorization heads. Repeating the same direct/control
 request returns the existing record or completed replay without a write.
@@ -562,6 +563,15 @@ or wrong-interface input refuses before decode/mutation; a managed directory
 symlink to one store package is valid. Module tests cover both layouts.
 Workflow-state alone writes transitions; artifact-budget only validates reports.
 Schema/interface selection waits for the atomic producer/consumer adoption.
+
+Private source/installed `workflow_delivery.py` is workflow-state's deep boundary.
+Its interface-1 surface is exactly `WORKFLOW_DELIVERY_INTERFACE_VERSION` and
+`DeliveryRuntime`. Construction loads the adjacent model before decode. The
+runtime validates v2 admission and schema-3 delivery envelopes and computes the
+shared transition from normalized facts/state, returning detached next state and
+closed response. Workflow-state retains CLI, legacy lifecycle/custody, locking,
+one write and effects. The runtime has no I/O, clock, callbacks, policy copies,
+fallback path or parallel v1 effect path.
 
 ### Versioned state and transports
 
@@ -872,3 +882,4 @@ architecture authority. They are not recorded human answers.
 | D17 | Upgrade schema 1/2 only inside a mutation transaction with explicit request-derived contract context and final `validate_state(..., run_id=...)`; keep current-launch on a no-write legacy read path. | D8/D14 immutable history and atomic migration; current no-lock/no-create launch guard. | Value-only migration cannot resolve new contract context, while upgrading during current-launch would make a read-only fence mutate or strand legacy runs. |
 | D18 | Bind each fresh post-rejection evaluation to one append-only consumption keyed by rejection and its independent successor-intent or reevaluation-evidence basis; persist before action, bind the returned fact by use key/time/scope/custody, require current intent, and let a new rejection win while retaining all history. | Operative-denial and late-collector requirements; response-closure review. | Replayable evidence, crash-reset permission, cosmetic-basis authority, or old-launch allow reuse. |
 | D19 | Carry an independently normalized nullable requested scope through direct/control/checkpoint; let the pure model bind it to the post-fold contract-ordered stage; echo it on effect-bearing responses while treating handoff as history and requiring a fresh proposal after transfer/remainder. | Actual endpoint/audience/principal/risk/spend are absent from the accepted request wire; independent Sol critique accepted by root. | Deriving actual scope from intent, duplicating stage policy in workflow-state, treating mismatch as new permission, or requiring a prior allow for ordinary effects. |
+| D20 | Put v2 admission, schema-3 delivery-envelope validation and the shared locked delivery transition behind one private `workflow_delivery` runtime installed beside workflow-state; keep CLI, locks, writes and effects in workflow-state. | The complete `workflow-state.py` fixed-base diff already uses 62,664 of 65,536 bytes before the remaining transition/caller work; a deep boundary preserves one model owner and reviewable files. | Growing the monolith, callback injection, another public framework, copied model policy, `sys.path` mutation or a surviving v1 effect path. |

@@ -59,6 +59,11 @@ Git, and repository `just` commands.
   modules own new policy once. Callers explicitly load `__init__.py` as a package
   and fail before decode/mutation on missing private members or version mismatch;
   the installed managed directory symlink to one store package is valid.
+- Per D20, private `workflow_delivery.py` (installed beside workflow-state)
+  exposes only interface version 1 and `DeliveryRuntime`. It owns v2 admission,
+  schema-3 delivery-envelope validation and the shared locked transition;
+  workflow-state retains CLI parsing, locks, atomic persistence and effects.
+  There are no callbacks, policy copies, fallback imports or live v1 effect path.
 - Per D16, model/artifact checks prove canonical structure, while workflow-state
   owns locked freshness/semantic checks and native boundaries own source/host
   authenticity. Raw init/control/direct/current/checkpoint/finish responses pass
@@ -99,6 +104,9 @@ Git, and repository `just` commands.
   `current-launch`, `checkpoint-delivery`, and `finish` subprocesses against
   temporary ledgers. Every successful stdout validates before decode; init's
   exact bootstrap requirements drive owner/worktree observations before control.
+- Private runtime tests load source and generated installed layouts, reject
+  missing/wrong adjacent model packages before decode, and prove detached
+  admission, delivery-envelope and transition results without filesystem I/O.
 - Artifact boundary tests feed exact raw v2 handoff/checkpoint/summary and
   workflow-response bytes to
   `artifact-budget validate-report` before any workflow decode and exercise
@@ -125,7 +133,7 @@ Git, and repository `just` commands.
 
 ## Delivery estimate and boundaries
 
-Estimate: 20–26 product/test/caller files plus this three-file plan package and
+Estimate: 22–28 product/test/caller files plus this three-file plan package and
 the amended one-file design spec. The complete source diff is likely 350–525 KiB
 before review fixes; `workflow-state.py`, its existing test, and the new
 end-to-end test are the largest likely contributors and each must remain below
@@ -164,6 +172,9 @@ requirements consumption for both custody kinds. Round four replaces only the
 nested control owner observation with the custody union, preserving its existing
 unavailable/event/dedup semantics and historical no-effect behavior. Round five
 restores the exact six control maps and five direct additions after compaction.
+The runtime-seam amendment adds D20 after the paused admission implementation
+measured `workflow-state.py` at 62,664 U10 bytes from the fixed delivery base;
+it changes structure only and preserves D1–D19 behavior and the atomic cutover.
 
 Plan review provenance: an independent Sol/high review of head
 `d1c9c47ea94daa8d4f97e127d72021f8e3896baf` reported 3 Blocking / 3 Should-fix /

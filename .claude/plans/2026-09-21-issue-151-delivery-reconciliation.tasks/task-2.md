@@ -5,12 +5,14 @@
 - Modify: `home/common/agent-skills/scripts/delivery_model/_reconcile.py`
 - Modify: `home/common/agent-skills/scripts/delivery_model/_wire.py`
 - Modify: `home/common/agent-skills/scripts/workflow-state.py`
+- Create: `home/common/agent-skills/scripts/workflow_delivery.py`
 - Modify: `home/common/agent-skills/scripts/artifact_budget.py`
 - Modify: `home/common/agent-skills/tests/_delivery_model_fixtures.py`
 - Modify: `home/common/agent-skills/tests/test_delivery_model.py`
 - Modify: `home/common/agent-skills/tests/test_workflow_state.py`
 - Modify: `home/common/agent-skills/tests/test_artifact_budget.py`
 - Create: `home/common/agent-skills/tests/test_delivery_workflow.py`
+- Create: `home/common/agent-skills/tests/test_workflow_delivery.py`
 - Modify: `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 - Modify: `home/common/agent-skills/skills/from-issue/SKILL.md`
 - Modify: `home/common/agent-skills/skills/from-issue/AUTO.md`
@@ -20,12 +22,16 @@
 - Modify: `home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md`
 - Modify: `home/common/claude-code/skills/orchestrate-issues/SKILL.md`
 - Modify: `home/common/claude-code/skills/orchestrate-issues/evals/evals.json`
+- Modify: `home/common/agent-skills/default.nix`
 - Modify: `justfile`
 
 **Interfaces:**
 - Retain Task 1's eight-name v1 facade. Private `_objects`/`_reconcile`/`_wire`
   own D19 stage relationships/reduction/envelopes; workflow-state supplies facts,
   not policy copies.
+- Private `workflow_delivery.py` exports only interface version 1 and
+  `DeliveryRuntime`; it owns v2 admission, schema-3 delivery validation and the
+  pure transition. Workflow-state retains CLI, custody, locks, writes/effects.
 - Workflow-state writes schema 3. `upgrade_state(value, *, run_id,
   migration_contracts)` composes 1→2→3 in memory, validates the candidate with
   keyword `run_id`, and writes once at most. Current-launch validates legacy
@@ -40,28 +46,24 @@
   those four fact arrays and required nullable `requested_scope`. Owner facts are
   exact event_id/issue/custody/state=unavailable; duplicate event/custody,
   historical-as-current, hybrid, unknown or mismatch refuses.
-- Control output keeps v1 outer keys. Summary has custody|null instead of attempt,
-  contract digest|null, ordered stages and sorted requirements; delta is exact
-  issue/custody/kind/state. Wait/finalize stay exact. Spawn/resume/retry/direct
-  owner add strict custody, contract/digest, stages, requirements and nullable
-  evaluation/scope. Direct observe admits all eight typed requirements; terminal
-  stays v1. Remainder adds evaluation/scope. Finish-created
-  remainder uses null scope and the ready-stage requirement, or an observation
-  requirement keyed by a missing postcondition when no stage is ready. It invents
-  no effect stage. Every nested member validates through the model.
+- Control output retains v1 outer keys. Summary replaces attempt with
+  custody|null and adds contract digest, ordered stages and sorted requirements;
+  delta remains issue/custody/kind/state. Spawn/resume/retry/direct owner add
+  custody, contract/digest, stages, requirements and nullable evaluation/scope;
+  observe admits all eight requirements and terminal stays v1. Remainder adds
+  evaluation/scope. A finish remainder uses null scope plus the ready-stage
+  requirement, or a missing-postcondition observation requirement when no stage
+  is ready; it invents no stage. Model validation covers every nested member.
 - `ship-checkpoint/v2` requires nullable post-fold ready-stage scope. Ordinary
   `delivery_checkpointed` echoes it and is active|suspended; count-3
   `delivery_stalled` has no action/requirements/evaluation/block/scope. Finish is
   `finish --repo-root ROOT --run-id RUN --now UTC --summary-file FILE`: complete
   has no pending stage; genuine owner failure has the accepted reason/source;
   eligible retry returns remainder; partial progress/requirements never fail.
-- Artifact-budget adds `ship-checkpoint`/`workflow-response`, loads the model and
-  validates v2 reports plus raw workflow responses before decode. Bootstrap picks
-  active custody, else latest remainder, else implementation; callers normalize
-  requirements before control. Legacy v1 summary stays read-only.
-- Handoff preserves prior scope as history; summaries/stalled outputs add none.
-  Callers bind invocation to echo, fence before effect/observation, and never
-  derive stages from tracker/forge.
+- Artifact-budget validates v2 checkpoint/response bytes before decode.
+  Bootstrap selects active, else latest remainder, else implementation custody;
+  callers normalize requirements. Legacy v1 summaries are read-only. Handoff
+  keeps scope as history; effect calls bind the echo and current-launch fence.
 
 **Invariants:**
 - Per D8/D14/D17, migrations preserve attempts/outcomes/result bytes/details and
@@ -73,12 +75,10 @@
   rejection remains. A post-rejection action appears only with its first durably
   persisted consumption; replay/transfer/crash cannot reissue it. Successor
   intent and reevaluation evidence are independent bases.
-- Per D19, callers build scope without copying intent; after folding, the model
-  binds it to the ordered ready stage/target. Null yields the ready-stage local
-  requirement or preserves dependency/postcondition requirements when none is
-  ready. Wrong/dependency/completed scope refuses without write; valid uncovered
-  scope human-gates; covered ordinary scope native-evaluates without prior allow.
-  Next stage, transfer and resume require fresh proposals.
+- Per D19, caller-built scope binds only to the post-fold ready stage. Null
+  returns its local or pending dependency/postcondition requirement; wrong scope
+  refuses, uncovered scope human-gates, and covered scope may native-evaluate.
+  Stage change, transfer and resume require fresh proposals.
 - Selected-output ingestion verifies acceptance/review/test categories; ids imply
   none. Checkpoint deduplicates; blockers suspend. Merge folds before expiry.
   Same-token suspensions store 0/1/2/3; three resumes are allowed, 3 stalls, and
@@ -86,9 +86,8 @@
 - Implementation/remainder identities stay disjoint. Resume keeps ordinal/deadline
   and spends no retry; only failure+absent effect+recovery allocates remainder 2,
   never 3. Implementation retry/capacity remains.
-- One source-only atomic cutover has no activation/effect/mixed generation.
-  Structure grants no authority; workflow checks freshness under lock.
-  Tests use synthetic ledgers/layouts.
+- One source-only atomic cutover has no activation or mixed generation.
+  Structure grants no authority; locked checks remain.
 
 - [ ] **Step 1: Write migration and public delivery-round-trip tests**
 
@@ -645,20 +644,22 @@ python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py \
 python3 -m unittest home/common/agent-skills/tests/test_artifact_budget.py \
   -k test_delivery_v2_boundaries_accept_exact_shapes_and_reject_hybrids -v
 python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py -v
+python3 -m unittest home/common/agent-skills/tests/test_workflow_delivery.py -v
 python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py \
   -k delivery_interface_two -v
 ```
 
-Expected: nonzero because D19, schema/interface v3/v2, new boundaries and callers
-are absent. Preserve output and fix malformed fixtures before implementation.
+Expected RED: nonzero for absent v3/v2 boundaries/callers; retain output and
+repair malformed fixtures before implementation.
 
 - [ ] **Step 4: Implement schema 3 and the atomic runtime cutover**
 
-Before request/ledger decode, load source `scripts/delivery_model/__init__.py` or
-installed lexical `~/.agents/lib/python/delivery_model/__init__.py` as a package
-with parent search location; require v1 and remove partial modules on failure.
-Never search/edit `sys.path`, load private leaves or fall back. Missing/non-file/
-wrong-version input refuses; a managed directory symlink is valid.
+Before decode, load source `scripts/workflow_delivery.py` or installed lexical
+`~/.agents/lib/python/workflow_delivery.py`, require interface 1 and construct
+`DeliveryRuntime`. It loads adjacent `delivery_model/__init__.py` as a package,
+requires model v1 and cleans partial loads. No `sys.path`, leaf loading or
+fallback is allowed. Missing/wrong modules refuse; managed symlinks are valid.
+Install both in `default.nix`.
 
 Replace the one-step `PRIOR_SCHEMA_VERSION` assumption with explicit adjacent
 migrators:
@@ -683,20 +684,16 @@ Request `migration_contracts` may be null only for empty delivery; candidate
 facts/remainder require one match, never legacy inference. Upgrade a detached
 copy and write only validated v3; bad context preserves bytes.
 
-Mutations upgrade under lock. Lock-free/no-write current-launch calls
+Move v2 admission, schema-3 issue/remainder delivery validation and response
+construction into `DeliveryRuntime`; remove workflow-state copies. Its
+transition accepts detached normalized request/state and returns detached next
+state/response, performs no I/O/locking and delegates policy to the eight-name
+model. Mutations upgrade under lock. Lock-free/no-write current-launch calls
 `validate_legacy_state(value, run_id=run_id)` for 1/2 or `validate_state(...,
 run_id=run_id)` for 3 and projects legacy implementation custody. Normalize
 control/direct to one issue-keyed transition: validate objects/digests before
 lock, then reload, validate custody, fold/reduce and return typed output. Only
 trusted control/direct appends intent.
-
-Without changing the facade, `_objects.py` keeps the sole stage/effect/target
-relationship; `_reconcile.py` folds, selects the ordered ready stage and applies
-D19 before existing intent/native/D18 reduction. Null-ready returns its local
-requirement; wrong/dependency/completed scope rejects before write. `_wire.py`
-requires/correlates request and effect-response scope, keeps handoff historical,
-and excludes terminal/stalled scope. Workflow-state renders only the reducer's
-canonical scope.
 
 For checkpoint/finish, capture regular raw report bytes, run artifact-budget
 before decode, then lock and compare issue/run/contract/custody. Atomically
@@ -762,6 +759,7 @@ run_with_receipt /private/tmp/issue-151-task2-focused.exit \
   python3 -m unittest \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
+    home/common/agent-skills/tests/test_workflow_delivery.py \
     home/common/agent-skills/tests/test_workflow_state.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py -v
@@ -804,11 +802,12 @@ Then prove exact scope and per-file diff size:
 set -euo pipefail
 task_paths=(
   home/common/agent-skills/scripts/delivery_model/{_objects,_reconcile,_wire}.py
-  home/common/agent-skills/scripts/{workflow-state,artifact_budget}.py
-  home/common/agent-skills/tests/{_delivery_model_fixtures,test_delivery_model,test_workflow_state,test_artifact_budget,test_delivery_workflow,test_workflow_skill_contracts}.py
+  home/common/agent-skills/scripts/{workflow-state,workflow_delivery,artifact_budget}.py
+  home/common/agent-skills/tests/{_delivery_model_fixtures,test_delivery_model,test_workflow_state,test_artifact_budget,test_delivery_workflow,test_workflow_delivery,test_workflow_skill_contracts}.py
   home/common/agent-skills/skills/from-issue/{SKILL.md,AUTO.md,ship-handoff.md}
   home/common/agent-skills/skills/ship-issue/{SKILL.md,REVIEW.md,HUMAN-GATE.md}
   home/common/claude-code/skills/orchestrate-issues/{SKILL.md,evals/evals.json}
+  home/common/agent-skills/default.nix
   justfile
 )
 git diff --check -- "${task_paths[@]}"
@@ -842,7 +841,7 @@ trap - EXIT HUP INT TERM
 test -z "$(git diff --cached --name-only)"
 ```
 
-Expected: exit 0; the temporary index includes all 20 Task 2 paths, each U10
+Expected: exit 0; the temporary index includes all 23 Task 2 paths, each U10
 diff is 1..65,536 bytes, and the real index remains empty. If a bounded test split
 is needed, amend Files, the root index, `task_paths`/commit roster and `justfile`
 registration; never omit lines/assertions, split a patch synthetically or raise a
@@ -854,11 +853,12 @@ cap. The signed-head package from immutable Task 2 base remains authoritative.
 set -euo pipefail
 task_paths=(
   home/common/agent-skills/scripts/delivery_model/{_objects,_reconcile,_wire}.py
-  home/common/agent-skills/scripts/{workflow-state,artifact_budget}.py
-  home/common/agent-skills/tests/{_delivery_model_fixtures,test_delivery_model,test_workflow_state,test_artifact_budget,test_delivery_workflow,test_workflow_skill_contracts}.py
+  home/common/agent-skills/scripts/{workflow-state,workflow_delivery,artifact_budget}.py
+  home/common/agent-skills/tests/{_delivery_model_fixtures,test_delivery_model,test_workflow_state,test_artifact_budget,test_delivery_workflow,test_workflow_delivery,test_workflow_skill_contracts}.py
   home/common/agent-skills/skills/from-issue/{SKILL.md,AUTO.md,ship-handoff.md}
   home/common/agent-skills/skills/ship-issue/{SKILL.md,REVIEW.md,HUMAN-GATE.md}
   home/common/claude-code/skills/orchestrate-issues/{SKILL.md,evals/evals.json}
+  home/common/agent-skills/default.nix
   justfile
 )
 git add -- "${task_paths[@]}"
