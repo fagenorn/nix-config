@@ -33,7 +33,10 @@
   schema selection, activation or import side effect.
 - All strict objects reject unknown/missing keys, bool-as-int, invalid nulls, duplicate or unsorted set-like arrays, bad RFC 3339 UTC values, bad ids/digests, broken intent predecessors, stage graph cycles/forward references, slot mismatches and conflicting observation identities.
 - `stages`, `stage_facts`, and `pending_stage_ids` retain contract order. Other set-like arrays are sorted by scalar or member id and unique.
-- Selection precedes every slot use; publish precedes open; merge requires selected output, an open PR, and pre-merge acceptance/review/test evidence but not `implementation_delivered`. Fresh post-merge reachability or record presence independently observes delivery.
+- Selection precedes every slot use; publish precedes open. Selected output has
+  explicit nonempty acceptance/review/test evidence arrays; merge requires all
+  three and an open PR, not `implementation_delivered`. Fresh post-merge
+  reachability or record presence independently observes delivery.
 - A host rejection remains operative until either a valid post-rejection intent covering the exact tuple or accepted reevaluation evidence independently permits one fresh evaluation. Before exposing that evaluation, the result appends one `authority-evaluation-consumption/v1` keyed by rejection and basis; workflow-state persists it first. Replay, transfer and crash never reissue the same basis. Human completion may satisfy an exact effect while preserving the rejection and granting no mutation right.
 - An intent-revocation observation carries the exact target intent id and revocation key. Direct/control may retain trusted late facts under their original old launch, but only a current-custody allowed fact authorizes the current effect.
 - `validate_delivery_object` checks structural/canonical truth only. `reduce_delivery` owns intent-chain, contract/slot, launch/effect, rejection and one-shot reevaluation semantics over caller-supplied facts. Workflow-state remains the transaction/trusted-source owner and supplies the current time/launch; neither the model nor artifact-budget authenticates an opaque host reference.
@@ -125,7 +128,9 @@ class DeliveryModelTest(unittest.TestCase):
             "data_identity_digest": "sha256:" + "2" * 64,
             "repository_id": "sim-repo", "branch": "feature", "base": "main",
             "evidence_digest": "sha256:" + "3" * 64,
-            "review_evidence_ids": ["review-1", "test-1"],
+            "acceptance_evidence_ids": ["acceptance-1"],
+            "review_evidence_ids": ["review-1"],
+            "test_evidence_ids": ["test-1"],
         }
         value["id"] = self.model.canonical_digest(value, omit_derived="id")
         return value
@@ -528,7 +533,11 @@ explicit time and revocation observations, then evaluates the normative table
 member by member. Expiry and revocation come from the intent and bound
 observations, never the tuple or ambient state. Resolve a slot only from one
 validated immutable `selected-output/v1` with the same contract, slot, subject
-constraints, repository, branch and base. A literal PR stays equality-only; a
+constraints, repository, branch and base. Its exact roster includes nonempty
+sorted-unique `acceptance_evidence_ids`, `review_evidence_ids`, and
+`test_evidence_ids` of nonempty strings. Id spelling never implies category;
+trusted ingestion verifies each category, and one report may support several.
+A literal PR stays equality-only; a
 selected commit never binds an unrelated PR. The payload digest may narrow only
 data declared with that same slot; classification/audience remain exact. Return
 a closed reason such as `scope_target_mismatch`, `scope_data_mismatch`,
@@ -568,8 +577,17 @@ subject/presence spellings in the design. For successful `cleanup_complete`,
 require exactly `{remote_branch_observation_ids,local_branch_observation_ids,
 worktree_observation_ids,durable_detail}` with the design's strict durable-detail
 shape. Reject renamed, omitted, extra, unbound, failed, empty or wrong-target
-subjects and missing required references. A cleanup target-class array is empty
+subjects and missing required references. Each delivered evidence array must
+contain its corresponding selected-output array; cross-category union is
+invalid. A cleanup target-class array is empty
 only when the contract declares no target of that class.
+
+Add selected-output table tests for missing, empty, unsorted, duplicate,
+misclassified and extra evidence members. Pre-merge reduction refuses when any
+category is absent and accepts one underlying report in several categories.
+Retained-graph/postcondition tests prove category-wise containment, including
+that review or test references cannot substitute for acceptance. Source and
+installed-package fixtures use the same exact three-field selection shape.
 
 Add the Home Manager publication beside the existing Python library targets.
 Publish one managed directory symlink to the regular Nix-store package. Source

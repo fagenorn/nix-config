@@ -1,27 +1,24 @@
 # Delivery reconciliation and authorization continuity — issue 151
 
 Decision for [#151](https://github.com/fagenorn/nix-config/issues/151), 2026-09-21.
-Status: delegated design. Nodo, Arcwave and Argus below are deterministic
-simulations, not claims about live state, grants or provider identities.
+Status: delegated. Nodo, Arcwave and Argus are deterministic simulations, not
+claims about live state, grants or provider identities.
 
 ## Problem
 
-The ledger lacks durable deliverable and intent records, while one terminal
+The ledger lacks durable deliverable and intent records, and one terminal
 verdict conflates implementation, merge, closure and cleanup. Reconciliation
-must preserve history/refusals, observe each effect independently and fence only
-the exact authorized remainder.
+must preserve history/refusals, observe effects independently and fence the
+exact authorized remainder.
 
 ## Solution
 
-Add one immutable contract, append-only intent/authority facts, four independent
-postconditions and capped `delivery_remainder` custody to the sole ledger.
-Implementation retries stay unchanged; remainder has disjoint ordinal/launch
-identity and executes only declared pending stages. Schema 3 and interface 2
-move state, direct/control, reports and callers together: validate before
-mutation/decode and persist before returning action. Existing fences, expiry,
-stalls, capacity, merge ordering and detail retention remain. The baseline is
-schema 2/interface 1; an intervening schema must be reconciled and renumbered,
-with no unpublished #152 C fields assumed.
+Add an immutable contract, append-only intent/authority facts, four postconditions
+and capped `delivery_remainder` custody. Implementation retries stay unchanged;
+remainder has disjoint identity and executes pending stages. Schema 3/interface 2
+moves state, reports and callers together: validate before mutation/decode and
+persist before action. Fences, expiry, stalls, capacity, merge order and detail
+retention remain. Baseline schema 2/interface 1 assumes no unpublished #152 C.
 
 ## Decisions
 
@@ -152,9 +149,8 @@ allowed.
 
 ### Canonical wire and narrowing appendix
 
-All new v1 objects are strict JSON objects: required keys are always present,
-unknown or duplicate keys are invalid, and JSON `null` is accepted only where a
-field below says nullable. Null means no value; it is never a wildcard. Canonical
+New v1 objects require every named key, reject unknown/duplicate keys, and admit
+JSON `null` only where nullable; null is never a wildcard. Canonical
 bytes are UTF-8 JSON with lexicographically sorted object keys, compact
 separators, shortest decimal integers and one trailing newline. Arrays keep
 contract order for `stages`, `stage_facts`, and `pending_stage_ids`; every other array named below is sorted by
@@ -222,9 +218,12 @@ ceiling). A literal ref is equality-only. A slot ref narrows exactly once throug
 a `selected-output/v1` containing exactly `schema_version` 1, literal `kind`
 `selected-output`, derived `id`, `contract_digest`, `slot_id`, `subject_kind`,
 `subject_value`, `data_identity_digest`, `repository_id`, `branch`, `base`,
-`evidence_digest`, and sorted unique `review_evidence_ids`. The data identity is
-the canonical digest of the reviewed output payload manifest. The selected
-subject must satisfy every declared slot constraint; the binding is immutable
+`evidence_digest`, and sorted unique nonempty `acceptance_evidence_ids`,
+`review_evidence_ids`, and `test_evidence_ids`. Each array contains nonempty
+evidence-id strings. The trusted collector verifies that every reference proves
+its declared category; ids/prefixes never imply category, and one report may
+support several categories. The data identity is the reviewed payload-manifest
+digest. The subject must satisfy every slot constraint; selection is immutable
 and a second value conflicts before mutation.
 
 Scope matching permits only these narrowings:
@@ -300,7 +299,7 @@ time and evidence digest. The kind-specific evidence is:
 
 | Postcondition | Exact positive evidence |
 |---|---|
-| implementation delivered | selected reviewed commit/tree/record digest; integration subject; typed reachability or record-presence result; retained acceptance map plus review/test evidence references |
+| implementation delivered | selected reviewed commit/tree/record digest; integration subject; typed reachability or record-presence result; category-matched acceptance/review/test evidence references |
 | PR merged | provider repository id; PR number/URL; expected head; base; merge SHA; provider-observed merged state |
 | tracker closed | tracker repository/issue; observed closed state; close reason when available; tracker observation identity |
 | cleanup complete | declared remote branch, local branch and worktree probes; all required objects absent; required durable detail/evidence pointer successfully re-read |
@@ -328,7 +327,7 @@ observed stage refuses before mutation. The closed advancement map is:
 
 | Stage | Exact action / effect | Required observation kind |
 |---|---|---|
-| `select_reviewed_output` | `select_output` / `ledger_write` | `selected_output`, including the immutable slot binding and its review evidence |
+| `select_reviewed_output` | `select_output` / `ledger_write` | `selected_output`, including the immutable slot binding and its acceptance, review and test evidence |
 | `deliver_repository_record` | `write_record` / `repository_write` | `repository_record_proposed`, binding the exact selected record digest to the declared branch/live PR head without claiming integration |
 | `publish_branch` | `push_branch` / `repository_write` | `branch_published`, binding repository, branch and exact selected head |
 | `open_pr` | `open_pull_request` / `provider_write` | `pr_opened`, binding provider PR, head, base and selected output |
@@ -341,7 +340,7 @@ observed stage refuses before mutation. The closed advancement map is:
 Observation subjects are exact: `selected_output` contains the strict
 `selected-output/v1`; record proposal contains repository id, selected record
 digest, branch and live PR head plus sorted review evidence ids, but no integration
-claim; branch publication contains repository id, branch and selected head; PR
+claim; its selection supplies acceptance/test proof. Branch publication contains repository id, branch and selected head; PR
 open/merge contains provider repository id, PR number/URL, expected head and
 base, with merge SHA and merged state only for merge; tracker closure contains
 tracker repository/issue, closed state, nullable close reason and observation
@@ -363,13 +362,15 @@ the accepted exact-target absence observations required by the contract, and
 `durable_detail` is exactly `{detail_pointer,read_evidence_digest,succeeded}`
 with literal `succeeded:true`. Reducer matching binds every referenced
 observation to the same contract, selected/integrated subject and declared
-cleanup target. Failure, unknown, mismatched probe or unreadable detail has no
+cleanup target. Successful delivery contains the selected output's acceptance,
+review and test references in the corresponding arrays; another category cannot
+substitute. Failure, unknown, mismatched probe or unreadable detail has no
 positive shape.
 
 The contract's `depends_on` graph is acyclic and may refer only to earlier stage
 ids. Selection precedes every stage that uses the slot; publish precedes open.
-Merge requires the selected output plus its pre-merge acceptance, review and test
-evidence and an open PR; it does not require the implementation-delivered
+Merge requires all three nonempty selected-output evidence categories and an
+open PR; it does not require the implementation-delivered
 postcondition. After merge, a fresh integration reachability/record-presence
 observation establishes implementation delivered. The contract declares whether
 closure depends on merge; cleanup depends on the last applicable delivery effect
@@ -400,8 +401,8 @@ second active custody record. If no stages remain, that same remainder finishes.
 
 For a legacy failed or merged implementation claim, migration first preserves
 the claim and result bytes unchanged. Remainder 1 becomes eligible only after a
-validated new contract, a fresh selected-output binding with review/acceptance
-evidence, and fresh exact external observations have been ingested. Its source
+validated new contract, a fresh selected-output binding with acceptance, review
+and test evidence, and fresh exact external observations have been ingested. Its source
 points at the historical implementation attempt, but no legacy boolean is
 promoted into a stage fact or postcondition.
 
@@ -813,8 +814,8 @@ tests. Plan-only or prose-only evidence is insufficient.
    no filesystem mutation from current-launch.
 2. **Artifact/report/response CLI boundary.** Validate canonical v2
    handoff/checkpoint/summary and workflow-response bytes and reject legacy/new
-   hybrids, internally inconsistent contract/custody ids, missing postcondition
-   evidence, invalid host-reference types, unsuccessful absence probes and
+   hybrids, inconsistent contract/custody ids, missing or miscategorized
+   selected-output/postcondition evidence, invalid host-reference types, unsuccessful absence probes and
    unknown fields. Then prove structurally valid stale custody, audience/data
    mismatch and a well-shaped opaque host reference reach workflow-state's
    locked semantic/trust checks, where freshness refuses byte-identically and a
@@ -870,7 +871,7 @@ architecture authority. They are not recorded human answers.
 | D1 | Store one immutable delivery contract in the sole lifecycle ledger and carry exact canonical bytes through every handoff. | Issue 151 criterion 1; the-bar DRY; current durable handoff seam. | Handoff-only prose or raw conversation replay creates competing truth and cannot be validated. |
 | D2 | Keep authorization intent append-only and secret-free; match its exact canonical tuple with the closed per-field narrowing grammar, including target and data identities bound to the same immutable future-output slot, then evaluate current guard/host/provider authority at each effect. | #116 D1; retained #117 intent semantics; private/public denial case. | Requiring an unknowable initial payload digest repeats permission after review, while URL/action subsets or null wildcards omit payload/audience/risk. |
 | D3 | Record host/guard/provider outcomes as launch-bound observations with derived non-secret ids and optional real host references only after a second current-launch check; a stale owner has zero effect and zero write. | Current read-only guard semantics; host may expose no stable id; issue 151 criterion 6. | Persisting a late denial from a stale owner weakens the same fence that protects effects. |
-| D4 | Track exact stage facts plus delivered, merged, closed and cleanup as independent typed observations; pre-merge review/acceptance permits merge, while fresh post-merge integration reachability establishes implementation delivered. | Issue 151 criterion 2; truthful-terminal standard; retained #117 D7. | Requiring delivered-before-merge is circular, while deriving delivery from merge fabricates acceptance/reachability. |
+| D4 | Track exact stage facts plus delivered, merged, closed and cleanup independently; selected output carries explicit acceptance/review/test proof for merge, and delivery repeats each category plus fresh post-merge integration reachability. | Issue 151 criterion 2; truthful-terminal standard; retained #117 D7. | Category inference, delivered-before-merge or delivery-from-merge loses proof or fabricates acceptance/reachability. |
 | D5 | Add a separate capped remainder lineage with disjoint ordinals/action ids; in-place resumes do not spend implementation or remainder retry counts. | Nodo/Arcwave cases; #132/#133; root critical custody constraint. | Reopen implementation or append unbounded generic retries. |
 | D6 | Permit one retry remainder only after authentic failure plus absent effect and a valid recovery basis; otherwise park while accepting independent completion evidence. | Current two-attempt cap; no-blind-retry and stall rules. | Unlimited successor churn or treating environment suspension as a failed attempt. |
 | D7 | Make worktree absence positive only for a predeclared cleanup target; require exact matching worktree/subject/PR for record delivery. | Current phase-zero/misbinding rules; cleanup semantics. | Branch-prefix discovery or absence-as-general-success weakens fencing. |

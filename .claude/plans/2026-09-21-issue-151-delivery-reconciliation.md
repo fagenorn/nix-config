@@ -32,9 +32,9 @@ Git, and repository `just` commands.
   again before its observation is written. A stale or malformed launch causes
   zero external effects and a byte-identical ledger.
 - Per D4, `implementation_delivered`, `pr_merged`, `tracker_closed`, and
-  `cleanup_complete` remain independent. Merge needs reviewed acceptance/test
-  evidence and an open PR, then fresh reachability or record presence establishes
-  delivery; neither observation fabricates the other.
+  `cleanup_complete` remain independent. The immutable selected output carries
+  explicit nonempty acceptance/review/test evidence arrays for merge; delivery
+  repeats each category and adds fresh reachability or record presence.
 - Per D5–D7, implementation attempts and `delivery_remainders` use disjoint finite
   ordinals and custody ids. In-place resume keeps its ordinal/deadline, merge is
   observed before expiry/reaping, and cleanup/record actions require exact

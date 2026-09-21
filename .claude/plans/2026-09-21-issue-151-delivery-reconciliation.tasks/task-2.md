@@ -21,24 +21,22 @@
 - Consumes the accepted Task 1 module by explicit path, requires
   `MODEL_INTERFACE_VERSION == 1`, and calls its validators/reducer rather than
   retaining parallel delivery tables.
-- Workflow-state writes schema 3: legacy issue/attempts/outcome plus delivery and
-  independently capped remainders. Mutation-only `upgrade_state(value, *,
-  run_id, migration_contracts)` composes valid 1→2→3 in memory, calls
-  `validate_state(candidate, *, run_id)`, then writes at most once. Current-launch
-  validates legacy reads separately without lock/upgrade/write.
+- Workflow-state writes schema 3: legacy issue/attempts/outcome, delivery and
+  capped remainders. Mutation-only `upgrade_state(value, *, run_id,
+  migration_contracts)` composes valid 1→2→3 in memory, calls
+  `validate_state(candidate, *, run_id)`, then writes at most once. Current-launch validates legacy reads without
+  lock/upgrade/write.
 - Control v2 retains all v1 top-level keys, replaces only nested `owners`, and
   adds issue-keyed maps `forge`, `delivery_contracts`, `authorization_intents`,
   `authority_observations`, `reevaluation_evidence`, `delivery_observations`.
-  Each map has exactly canonical decimal keys for requested issues. Forge values
-  are existing forge objects; contracts are strict object|null; other values are
-  explicit sorted unique named-object arrays (`[]` when empty). Missing/extra/`01`, or null contract
-  with candidate facts, refuses before lock. Direct retains v1 keys plus nullable
+  Maps have canonical decimal keys for requested issues: existing forge objects,
+  strict contract|null, or sorted unique named-object arrays (`[]` when empty).
+  Missing/extra/`01`, or null contract with facts, refuses before lock. Direct retains v1 keys plus nullable
   `delivery_contract` and sorted unique `authorization_intents`,
   `authority_observations`, `reevaluation_evidence`, `delivery_observations`.
-  Owner value is exact event_id/issue/custody/state=`unavailable`;
-  duplicate event or `(issue,kind,ordinal,launch)` refuses. Historical custody
-  has no current effect; hybrid/unknown/mismatch refuses; remainder never
-  fabricates attempt.
+  Owner is exact event_id/issue/custody/state=`unavailable`; duplicate event or
+  `(issue,kind,ordinal,launch)` refuses. Historical custody
+  has no effect; hybrid/unknown/mismatch refuses; remainder never fabricates attempt.
 - Control outer output retains exact v1 keys and no ledger root. Summary replaces
   `attempt` with nullable custody, retains all other v1 fields, and adds nullable
   contract digest, ordered pending stages and sorted requirements; it therefore
@@ -51,11 +49,10 @@
 - `delivery_remainder` has the design's exact fields plus nullable
   `authority_evaluation`. All nested response members validate through Task 1;
   callers never derive a stage from tracker/forge state.
-- `checkpoint-delivery` validates ship-checkpoint bytes before decode/lock.
-  Ordinary `delivery_checkpointed` is active|suspended and nonterminal. Fourth
-  unchanged suspension stores 3 and returns exact terminal `delivery_stalled`
-  without next action/requirements/evaluation/block. Evaluation actions appear
-  only after consumption.
+- `checkpoint-delivery` validates bytes before decode/lock. Ordinary
+  `delivery_checkpointed` is active|suspended and nonterminal. Fourth unchanged
+  suspension stores 3 and returns terminal `delivery_stalled` without action,
+  requirements, evaluation or block. Evaluation actions follow consumption.
 - Replaces the source finish entry with
   `finish --repo-root ROOT --run-id RUN --now UTC --summary-file FILE`.
   `ship-summary/v2` carries issue and custody, so separate issue/attempt guessing
@@ -74,27 +71,29 @@
   the nonterminal custody, else latest remainder, else latest implementation.
   Callers consume every requirement into normalized owner/worktree observations
   before control. Legacy v1 summary remains historical-read-only.
-- Callers consume validated v2 actions and fence effects; linked model/handoff
-  docs own shared contracts.
+- Callers consume validated v2 actions and fence effects; linked model/handoff docs own contracts.
 
 **Invariants:**
 - Per D8/D14, schema-1 and schema-2 migrations preserve every legacy attempt,
   outcome, result byte and detail pointer. They initialize empty delivery truth
   only: no contract, intent, authority, observation, selected output, stage fact,
   postcondition success, remainder or cleanup claim.
-- Migration is idempotent/fail-closed; malformed, ambiguous or model-load/version
-  failures leave original ledger bytes unchanged.
+- Migration is idempotent/fail-closed; malformed, ambiguous or model/version
+  failures leave ledger bytes unchanged.
 - `migration_contracts` comes only from structurally validated interface-2
   delivery contracts in the request. Empty legacy delivery may use null; any
   candidate delivery/authority fact or remainder dispatch requires one matching
   contract. Missing, conflicting or repository-mismatched context refuses with
   no write. A read-only launch query over schema 1/2 returns its exact four-key
   result and leaves bytes and filesystem inventory unchanged.
-- Per D3/D18, every effect path performs current-launch before the effect and
-  again before writing its observation. A stale caller writes nothing. A current
-  direct/control collector may persist a late authority fact under its original
-  launch; old allowed facts cannot authorize current effects, and old rejections
-  remain operative. Checkpoint/summary remain fenced to their own custody.
+- Per D3/D18, each effect checks current-launch before execution and observation
+  persistence. A stale caller writes nothing. Current direct/control may retain
+  a late authority fact under its original launch; old allow cannot authorize a
+  current effect, and old rejection remains operative. Checkpoint/summary stay
+  fenced to their custody.
+- Trusted selected-output ingestion verifies each reference's declared
+  acceptance/review/test category; ids never imply category, and reports may
+  support several.
 - A post-rejection evaluation action is emitted only by the transaction that
   first persists its stable consumption use key. Retry, transfer or crash after
   persistence returns no second action. Covering successor intent and bound
@@ -675,7 +674,8 @@ orchestration together. Their normative sequence is:
 5. submit `ship-checkpoint/v2` immediately for partial progress or blocking
    authority/provider results and wait for persisted response;
 6. use `ship-summary/v2` only for all required postconditions or genuine custody
-   failure; and
+   failure; retain selected-output/delivered acceptance, review and test
+   references by category; and
 7. follow the returned typed implementation/remainder/requirement outcome without
    synthesizing authority, delivery, retry, terminal state or a permission ritual.
 
@@ -844,8 +844,8 @@ trap - EXIT HUP INT TERM
 test -z "$(git diff --cached --name-only)"
 ```
 
-Expected: exit 0; the temporary index includes all 15 Task 2 paths, including the
-new untracked test, and each ordinary per-file U10 candidate diff is within
+Expected: exit 0; the temporary index includes all 15 Task 2 paths and each
+ordinary per-file U10 candidate diff is within
 65,536 bytes without changing the real index. If a file requires a bounded test
 split, stop and amend this member's Files roster, root task index, temporary-index
 allowlist and `justfile` registration before adding it; do not omit lines, reduce
