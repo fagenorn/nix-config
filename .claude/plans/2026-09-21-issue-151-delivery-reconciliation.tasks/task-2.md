@@ -203,3 +203,19 @@ disjoint; suspension count 3 stalls and progress resets it.
 No step authorizes activation, deployment, installed-generation change, forge
 write, live-ledger migration, cap increase, base repin, reduced test set, skipped
 raw receipt or partial-range review.
+
+## Exact verification and boundary precision
+
+Versions, ordinals and suspension/retry counters are plain integers, never booleans. `current-launch` returns exactly
+`action_id`, `current`, `current_action_id`, and `reason`. Every nonnull legacy result slot, including `historical_owner_result`, passes legacy and v1 model validation before decode.
+`test_workflow_delivery.py` covers the pure no-I/O transition and fail-closed source/installed loading.
+
+Run and retain real argv/stdout/stderr/exit receipts for:
+```sh
+python3 -m unittest home/common/agent-skills/tests/test_delivery_model.py home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_workflow_delivery.py home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_artifact_budget.py home/common/agent-skills/tests/test_workflow_skill_contracts.py -v
+just agent-workflow-tests
+just build
+cd /private/tmp/issue-151-skill-validation-env
+for skill in home/common/agent-skills/skills/{from-issue,ship-issue} home/common/claude-code/skills/orchestrate-issues; do devenv shell -- python3 /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py "$PWD/<repo>/$skill"; done
+```
+Use the existing PyYAML devenv and immutable repository root for `<repo>`.
