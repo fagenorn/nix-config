@@ -117,11 +117,10 @@ class DeliveryAdmissionTest(unittest.TestCase):
         return value
 
     def test_interface_two_maps_and_singular_inputs_are_closed(self):
-        request, context = self.workflow.validate_control_request(
-            self.control_request(), model=self.model)
+        request, context = self.workflow.validate_control_request(self.control_request())
         self.assertEqual(context, {151: None}); self.assertEqual(request["interface_version"], 2)
         direct, direct_context = self.workflow.validate_direct_owner_request(
-            self.direct_request(), model=self.model)
+            self.direct_request())
         self.assertEqual(direct_context, {151: None}); self.assertEqual(direct["interface_version"], 2)
         for variant in ("missing", "extra", "noncanonical", "legacy", "null_facts"):
             bad = self.control_request()
@@ -131,24 +130,23 @@ class DeliveryAdmissionTest(unittest.TestCase):
             elif variant == "legacy": bad["interface_version"] = 1
             else: bad["delivery_observations"]["151"] = [{"kind": "delivery-observation"}]
             with self.subTest(variant=variant), self.assertRaises(self.workflow.WorkflowError):
-                self.workflow.validate_control_request(bad, model=self.model)
+                self.workflow.validate_control_request(bad)
         contract, delivery = contract_and_delivery(self.model)
         valid_intent = delivery["authorization_intents"][0]
         for field, value in (("authorization_intents", [valid_intent]),
                              ("requested_scope", stage_scope(self.model, contract, "select"))):
             bad = self.direct_request(); bad[field] = value
             with self.subTest(null_contract_field=field), self.assertRaises(self.workflow.WorkflowError):
-                self.workflow.validate_direct_owner_request(bad, model=self.model)
+                self.workflow.validate_direct_owner_request(bad)
         bad = self.direct_request(contract)
         bad["authorization_intents"] = [valid_intent, valid_intent]
         with self.assertRaises(self.workflow.WorkflowError):
-            self.workflow.validate_direct_owner_request(bad, model=self.model)
+            self.workflow.validate_direct_owner_request(bad)
         bad = self.direct_request(contract); bad["issue"] = 152
         with self.assertRaises(self.workflow.WorkflowError):
-            self.workflow.validate_direct_owner_request(bad, model=self.model)
+            self.workflow.validate_direct_owner_request(bad)
         original = self.direct_request(contract); before = copy.deepcopy(original)
-        detached, context = self.workflow.validate_direct_owner_request(
-            original, model=self.model)
+        detached, context = self.workflow.validate_direct_owner_request(original)
         self.assertEqual(original, before)
         detached["delivery_contract"]["issue"] = 999
         self.assertEqual(original, before)
@@ -309,6 +307,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 store.mkdir(parents=True)
                 shutil.copy2(WORKFLOW, store / "workflow-state.py")
                 shutil.copy2(SCRIPTS / "workflow_delivery.py", store / "workflow_delivery.py")
+                shutil.copy2(SCRIPTS / "workflow_delivery_wire.py",
+                             store / "workflow_delivery_wire.py")
                 shutil.copy2(SCRIPTS / "artifact_budget.py", store / "artifact_budget.py")
                 shutil.copy2(SCRIPTS / "artifact-budget", store / "artifact-budget")
                 shutil.copy2(POLICY, store / "artifact-budget-policy.json")
@@ -325,6 +325,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     (binary / "artifact-budget").symlink_to(store / "artifact-budget")
                     (library / "artifact_budget.py").symlink_to(store / "artifact_budget.py")
                     (library / "workflow_delivery.py").symlink_to(store / "workflow_delivery.py")
+                    (library / "workflow_delivery_wire.py").symlink_to(
+                        store / "workflow_delivery_wire.py")
                     (library / "delivery_model").symlink_to(store / "delivery_model", target_is_directory=True)
                     (share / "artifact-budget-policy.json").symlink_to(
                         store / "artifact-budget-policy.json")

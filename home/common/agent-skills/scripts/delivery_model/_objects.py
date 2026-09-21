@@ -21,6 +21,49 @@ _STAGE_ACTIONS = {
 }
 _POSTCONDITIONS = ("implementation_delivered", "pr_merged", "tracker_closed", "cleanup_complete")
 
+
+def _recovery_proof(value: Any, kind: str) -> dict[str, Any]:
+    common = _members("kind source_kind reference observed_at evidence_digest")
+    extra = (_members("effect_attempted classification") if kind == "effect_failure"
+             else _members("absent probe_succeeded"))
+    value = _object(value, common | extra, f"{kind} proof")
+    if value["kind"] != kind or value["source_kind"] not in {
+        "provider", "host", "tracker", "repository", "filesystem"
+    }: _reject()
+    _string(value["reference"], f"{kind} reference")
+    _utc(value["observed_at"], f"{kind} observed_at")
+    _digest(value["evidence_digest"], f"{kind} evidence")
+    if kind == "effect_failure":
+        if value["effect_attempted"] is not True or value["classification"] != "transient": _reject()
+    elif value["absent"] is not True or value["probe_succeeded"] is not True: _reject()
+    return value
+
+
+def _recovery(value: Any) -> dict[str, Any]:
+    value = _object(value, _members("schema_version kind id contract_digest stage_id requested_scope failure effect_absence basis"), "delivery recovery")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1 or value["kind"] != "delivery-recovery": _reject()
+    _digest(value["contract_digest"], "recovery contract")
+    _string(value["stage_id"], "recovery stage")
+    scope = _scope(value["requested_scope"])
+    _recovery_proof(value["failure"], "effect_failure")
+    _recovery_proof(value["effect_absence"], "effect_absence")
+    basis = value["basis"]
+    if not isinstance(basis, dict) or "kind" not in basis: _reject()
+    if basis["kind"] == "changed_relevant_evidence":
+        basis = _object(basis, _members("kind scope_id source_kind reference observed_at evidence_digest"), "recovery basis")
+        _digest(basis["scope_id"], "recovery basis scope")
+        _recovery_proof({"kind": "effect_absence", "absent": True,
+            "probe_succeeded": True, **{name: basis[name] for name in
+            ("source_kind", "reference", "observed_at", "evidence_digest")}},
+            "effect_absence")
+        if basis["scope_id"] != scope["id"]: _reject()
+    elif basis["kind"] in {"new_authorization", "human_transient_retry"}:
+        basis = _object(basis, _members("kind id"), "recovery basis")
+        _digest(basis["id"], "recovery basis id")
+    else: _reject()
+    _derived(value, "delivery recovery")
+    return value
+
 def _scope(value: Any) -> dict[str, Any]:
     keys = {"schema_version", "kind", "id", "principal", "action", "effect", "target",
             "endpoint", "data", "risk", "spend"}

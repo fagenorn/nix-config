@@ -8,6 +8,7 @@ from ._canonical import (canonical_bytes, canonical_digest, _boolean, _digest,
     _integer, _members, _object, _reject, _sorted_unique, _string, _utc)
 from ._objects import (_POSTCONDITIONS, _STAGE_ACTIONS, _authority, _consumption,
     _contract, _custody_issue, _delivery_observation, _intent, _reevaluation,
+    _recovery,
     _postcondition_observation_matches, _scope, _selected, _selection_for_stage,
     _stage_fact, _stage_observation_matches, validate_custody_ref)
 
@@ -492,7 +493,7 @@ def validate_delivery_object(value: object, *, expected_kind: str | None = None,
         if not isinstance(candidate, dict): _reject()
         kind = candidate.get("kind")
         if expected_kind is not None and kind != expected_kind: _reject()
-        dispatch = {"scope-tuple": _scope, "authorization-intent": _intent, "selected-output": _selected, "delivery-contract": lambda item: _contract(item, notes_max_characters), "authority-observation": _authority, "reevaluation-evidence": _reevaluation, "authority-evaluation-consumption": lambda item: _consumption(item, _custody_issue(item["custody"])), "delivery-observation": lambda item: _delivery_observation(item, notes_max_characters), "delivery-stage-fact": _stage_fact}
+        dispatch = {"scope-tuple": _scope, "authorization-intent": _intent, "selected-output": _selected, "delivery-contract": lambda item: _contract(item, notes_max_characters), "authority-observation": _authority, "reevaluation-evidence": _reevaluation, "authority-evaluation-consumption": lambda item: _consumption(item, _custody_issue(item["custody"])), "delivery-observation": lambda item: _delivery_observation(item, notes_max_characters), "delivery-stage-fact": _stage_fact, "delivery-recovery": _recovery}
         if kind not in dispatch: _reject()
         dispatch[kind](candidate)
     return candidate

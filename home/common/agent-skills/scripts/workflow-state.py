@@ -155,7 +155,7 @@ TRACKER_OBSERVATION_FIELDS = frozenset(
 TRACKER_STATES = frozenset({"open", "closed"})
 DECISION_BLOCKER_FIELDS = frozenset({"issue", "url"})
 OWNER_OBSERVATION_FIELDS = frozenset(
-    {"event_id", "issue", "custody", "state"}
+    {"event_id", "issue", "attempt", "launch", "state"}
 )
 OWNER_OBSERVATION_STATES = frozenset({"unavailable"})
 WORKTREE_OBSERVATION_FIELDS = frozenset({"issue", "recorded", "candidate"})
@@ -248,9 +248,10 @@ def load_delivery_runtime() -> object:
     except Exception as error:
         if isinstance(error, WorkflowError):
             raise
-        if "interface" in str(error) or "delivery model" in str(error):
-            raise WorkflowError(str(error)) from error
-        raise WorkflowError("delivery model is unavailable") from error
+        message = str(error)
+        raise WorkflowError(
+            message if "interface" in message or "delivery model" in message
+            else "delivery model is unavailable") from error
 
 
 def delivery_call(message: str | None, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -655,9 +656,8 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
         for remainder in remainders if isinstance(remainders, list) else []:
             if isinstance(remainder, dict) and remainder.get("result") is not None:
                 validate_result(remainder["result"], expected_issue=issue)
-        delivery_call(
-            None, load_delivery_runtime().validate_issue_delivery,
-            issue_value, issue=issue, attempts=attempts, updated_at=value["updated_at"])
+        delivery_call(None, load_delivery_runtime().validate_issue_state, issue_value,
+                      issue=issue, attempts=attempts, updated_at=value["updated_at"])
         for number, attempt in enumerate(attempts, start=1):
             validate_attempt(
                 attempt, issue=issue, expected_number=number, run_id=run_id
@@ -672,20 +672,12 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
             validate_result(issue_value["outcome"], expected_issue=issue)
             if not attempts or attempts[-1]["result"] != issue_value["outcome"]:
                 raise WorkflowError("issue outcome does not match its latest attempt")
-        nonterminal = sum(attempt["state"] in {"active", "handed_off", "suspended"}
-                          for attempt in attempts) + sum(
-            remainder["state"] in {"active", "handed_off", "suspended"}
-            for remainder in remainders)
-        if nonterminal > 1:
-            raise WorkflowError("multiple nonterminal custody records")
     return value
 
 
 def validate_legacy_state(value: Any, *, run_id: str) -> dict[str, Any]:
-    projected = delivery_call(
-        "invalid legacy workflow state", load_delivery_runtime().migrate,
-        value, migration_contracts={})
-    validate_state(projected, run_id=run_id)
+    validate_state(delivery_call("invalid legacy workflow state",
+        load_delivery_runtime().migrate, value, migration_contracts={}), run_id=run_id)
     return value
 
 
@@ -901,18 +893,8 @@ def ensure_gitignore(workflows_dir: Path) -> None:
     fsync_directory(workflows_dir)
 
 
-def _empty_delivery() -> dict[str, Any]:
-    return load_delivery_runtime().empty_delivery()
-
-
 def migrate_1_to_2(value: Any) -> Any:
-    candidate = load_delivery_runtime().migrate(value, migration_contracts={})
-    # This compatibility helper exposes the adjacent first edge only.
-    if isinstance(value, dict) and value.get("schema_version") == 1:
-        candidate["schema_version"] = 2
-        for issue in candidate.get("issues", {}).values():
-            issue.pop("delivery", None); issue.pop("delivery_remainders", None)
-    return candidate
+    return load_delivery_runtime().migrate_1_to_2(value)
 
 
 def migrate_2_to_3(value: Any, migration_contracts: dict[int, Any]) -> Any:
@@ -922,21 +904,15 @@ def migrate_2_to_3(value: Any, migration_contracts: dict[int, Any]) -> Any:
 MIGRATORS = {1: migrate_1_to_2, 2: migrate_2_to_3}
 
 
-def upgrade_state(value: Any, *, run_id: str,
-                  migration_contracts: dict[int, Any]) -> dict[str, Any]:
-    runtime = load_delivery_runtime()
-    try:
-        candidate = runtime.migrate(value, migration_contracts=migration_contracts)
-    except Exception as error:
-        if "unsupported workflow state schema version" in str(error):
-            raise WorkflowError(str(error)) from error
-        raise WorkflowError("invalid workflow migration") from error
+def upgrade_state(value: Any, *, run_id: str, migration_contracts: dict[int, Any]
+                  ) -> dict[str, Any]:
+    candidate = delivery_call(None, load_delivery_runtime().migrate, value,
+                              migration_contracts=migration_contracts)
     return validate_state(candidate, run_id=run_id)
 
-def read_locked_state(
-    state_path: Path, run_id: str, *, migration_contracts: dict[int, Any],
-    allowed_source_schema_versions: frozenset[int] | None = None,
-) -> tuple[dict[str, Any], bool]:
+def read_locked_state(state_path: Path, run_id: str, *, migration_contracts: dict[int, Any],
+                      allowed_source_schema_versions: frozenset[int] | None = None,
+                      ) -> tuple[dict[str, Any], bool]:
     require_regular_path(state_path, "workflow state", allow_missing=False)
     try:
         descriptor = open_existing_regular(state_path, "workflow state", os.O_RDONLY)
@@ -998,12 +974,8 @@ Mutation = Callable[[dict[str, Any] | None], tuple[Any, bool]]
 
 
 def transact(
-    repo_root: str,
-    run_id: str,
-    mutation: Mutation,
-    *,
-    allow_missing: bool = False,
-    migration_contracts: dict[int, Any],
+    repo_root: str, run_id: str, mutation: Mutation, *, allow_missing: bool = False,
+    migration_contracts: dict[int, Any] | None = None,
     allowed_source_schema_versions: frozenset[int] | None = None,
 ) -> Any:
     load_delivery_runtime()
@@ -1019,7 +991,7 @@ def transact(
         )
         if state_exists:
             current, migrated = read_locked_state(
-                state_path, run_id, migration_contracts=migration_contracts,
+                state_path, run_id, migration_contracts=migration_contracts or {},
                 allowed_source_schema_versions=allowed_source_schema_versions,
             )
             state = copy.deepcopy(current)
@@ -1393,17 +1365,15 @@ def validate_tracker_observation(value: Any) -> dict[str, Any]:
     return observation
 
 
-def validate_owner_observation(value: Any, *, model: object) -> dict[str, Any]:
+def validate_owner_observation(value: Any) -> dict[str, Any]:
     observation = require_exact_fields(
         value, OWNER_OBSERVATION_FIELDS, "owner observation"
     )
     if not isinstance(observation["event_id"], str) or not observation["event_id"]:
         raise WorkflowError("invalid owner event_id")
-    issue = require_plain_int(observation["issue"], "owner issue", minimum=1)
-    try:
-        model.validate_custody_ref(observation["custody"], issue=issue)
-    except Exception as error:
-        raise WorkflowError("invalid owner custody") from error
+    require_plain_int(observation["issue"], "owner issue", minimum=1)
+    require_plain_int(observation["attempt"], "owner attempt", minimum=1)
+    require_plain_int(observation["launch"], "owner launch", minimum=1)
     if (
         not isinstance(observation["state"], str)
         or observation["state"] not in OWNER_OBSERVATION_STATES
@@ -1485,7 +1455,11 @@ def validate_worktree_observation(value: Any) -> dict[str, Any]:
     return observation
 
 
-def validate_control_request(value: Any, *, model: object) -> tuple[dict[str, Any], dict[int, Any]]:
+def _empty_delivery():
+    return load_delivery_runtime().empty_delivery()
+
+
+def validate_control_request(value: Any) -> tuple[dict[str, Any], dict[int, Any]]:
     request = require_exact_fields(
         copy.deepcopy(value), CONTROL_REQUEST_FIELDS, "control request")
     if (
@@ -1526,38 +1500,8 @@ def validate_control_request(value: Any, *, model: object) -> tuple[dict[str, An
     if not tracker_issues <= seen_issues:
         raise WorkflowError("tracker observation outside requested issues")
 
-    owners = request["owners"]
-    if not isinstance(owners, list):
-        raise WorkflowError("invalid owner observations")
-    owner_event_ids: set[str] = set()
-    owner_identities: set[tuple[int, int, int]] = set()
-    for raw_observation in owners:
-        observation = validate_owner_observation(raw_observation, model=model)
-        if observation["issue"] not in seen_issues:
-            raise WorkflowError("owner observation outside requested issues")
-        if observation["event_id"] in owner_event_ids:
-            raise WorkflowError("duplicate owner event_id")
-        owner_event_ids.add(observation["event_id"])
-        custody = observation["custody"]
-        identity = (observation["issue"], custody["kind"],
-                    custody.get("attempt", custody.get("remainder")), custody["launch"])
-        if identity in owner_identities:
-            raise WorkflowError("duplicate owner observation")
-        owner_identities.add(identity)
-
-    worktrees = request["worktrees"]
-    if not isinstance(worktrees, list):
-        raise WorkflowError("invalid worktree observations")
-    worktree_issues: set[int] = set()
-    for raw_observation in worktrees:
-        observation = validate_worktree_observation(raw_observation)
-        issue = observation["issue"]
-        if issue in worktree_issues:
-            raise WorkflowError("duplicate worktree observation")
-        worktree_issues.add(issue)
-        if issue not in seen_issues:
-            raise WorkflowError("worktree observation outside requested issues")
     runtime = load_delivery_runtime()
+    delivery_call(None, runtime.validate_control_observations, request, seen_issues)
     forge = delivery_call(None, runtime.validate_issue_map,
                           request["forge"], seen_issues, "forge")
     migration_contracts = delivery_call(
@@ -1581,12 +1525,11 @@ def load_json_request(path_value: str, label: str) -> Any:
     return value
 
 
-def load_control_request(path_value: str, *, model: object) -> tuple[dict[str, Any], dict[int, Any]]:
-    return validate_control_request(
-        load_json_request(path_value, "control request"), model=model)
+def load_control_request(path_value: str) -> tuple[dict[str, Any], dict[int, Any]]:
+    return validate_control_request(load_json_request(path_value, "control request"))
 
 
-def validate_direct_owner_request(value: Any, *, model: object) -> tuple[dict[str, Any], dict[int, Any]]:
+def validate_direct_owner_request(value: Any) -> tuple[dict[str, Any], dict[int, Any]]:
     request = require_exact_fields(
         copy.deepcopy(value), DIRECT_OWNER_REQUEST_FIELDS, "direct owner request"
     )
@@ -1615,10 +1558,7 @@ def validate_direct_owner_request(value: Any, *, model: object) -> tuple[dict[st
         tracker = validate_tracker_observation(request["tracker"])
         if tracker["issue"] != issue:
             raise WorkflowError("tracker observation does not match requested issue")
-    if request["worktree"] is not None:
-        worktree = validate_worktree_observation(request["worktree"])
-        if worktree["issue"] != issue:
-            raise WorkflowError("worktree observation does not match requested issue")
+    delivery_call(None, load_delivery_runtime().validate_direct_observations, request, issue)
     if request["forge"] is not None:
         request["forge"] = validate_forge_observation(request["forge"])
     context = delivery_call(
@@ -1627,10 +1567,8 @@ def validate_direct_owner_request(value: Any, *, model: object) -> tuple[dict[st
     return request, context
 
 
-def load_direct_owner_request(path_value: str, *, model: object) -> tuple[dict[str, Any], dict[int, Any]]:
-    return validate_direct_owner_request(
-        load_json_request(path_value, "direct owner request"), model=model
-    )
+def load_direct_owner_request(path_value: str) -> tuple[dict[str, Any], dict[int, Any]]:
+    return validate_direct_owner_request(load_json_request(path_value, "direct owner request"))
 
 
 def render_action_id(attempt: dict[str, Any]) -> str:
@@ -1660,8 +1598,7 @@ def reject_reserved_direct_run_id(run_id: str) -> None:
 
 
 def command_init_run(args: argparse.Namespace) -> int:
-    runtime = load_delivery_runtime()
-    model = runtime.model
+    load_delivery_runtime()
     reject_reserved_direct_run_id(args.run_id)
     now = format_utc(parse_utc(args.now, "--now"))
 
@@ -1673,7 +1610,6 @@ def command_init_run(args: argparse.Namespace) -> int:
 
     state = transact(
         args.repo_root, args.run_id, initialize, allow_missing=True,
-        migration_contracts={},
     )
     print_json(bootstrap_response(state))
     return 0
@@ -1837,24 +1773,17 @@ def _apply_one_issue_policy(
 
     now_value = parse_utc(now, "policy now")
     if delivery_request is not None:
-        recovery = delivery_call(
-            "delivery recovery refused", load_delivery_runtime().recovery_policy,
+        plan = delivery_call(
+            None, load_delivery_runtime().delivery_policy,
             ledger_issue, issue=issue, request=delivery_request,
             source_kind=delivery_source_kind, now=now,
             dispatch_permitted=dispatch_permitted,
             remainder_deadline=attempt_deadline(now, attempt_budget_minutes),
-        )
-        if recovery is not None:
-            return recovery
-    plan = delivery_call(
-        "remainder policy refused",
-        load_delivery_runtime().remainder_policy, ledger_issue, now=now,
-        owner_unavailable=current_owner_unavailable,
-        dispatch_permitted=dispatch_permitted,
-        tracker_halted=bool(tracker and tracker_halt_reason(tracker)),
-        recorded_worktree=(None if worktree is None else worktree["recorded"]))
-    if plan:
-        return plan
+            owner_unavailable=current_owner_unavailable,
+            tracker_halted=bool(tracker and tracker_halt_reason(tracker)),
+            recorded_worktree=None if worktree is None else worktree["recorded"])
+        if plan is not None:
+            return plan
     expired = bool(
         latest is not None
         and latest["state"] in {"active", "handed_off"}
@@ -2090,7 +2019,7 @@ def _apply_one_issue_policy(
     if ledger_issue is None:
         ledger_issue = {
             "issue": issue, "attempts": [attempt], "outcome": None,
-            "delivery": _empty_delivery(), "delivery_remainders": [],
+            "delivery": load_delivery_runtime().empty_delivery(), "delivery_remainders": [],
         }
     elif retryable:
         ledger_issue["attempts"].append(attempt)
@@ -2105,9 +2034,8 @@ def _apply_one_issue_policy(
 
 def command_control(args: argparse.Namespace) -> int:
     runtime = load_delivery_runtime()
-    model = runtime.model
     reject_reserved_direct_run_id(args.run_id)
-    request, migration_contracts = load_control_request(args.request_file, model=model)
+    request, migration_contracts = load_control_request(args.request_file)
     now = request["now"]
     now_value = parse_utc(now, "control now")
     if all(contract is None for contract in migration_contracts.values()):
@@ -2129,49 +2057,7 @@ def command_control(args: argparse.Namespace) -> int:
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise WorkflowError("control time must not move backward")
 
-        unavailable: set[tuple[int, str, int, int]] = set()
-        for observation in request["owners"]:
-            issue_state = state["issues"].get(str(observation["issue"]))
-            if issue_state is None:
-                raise WorkflowError("unknown owner observation identity")
-            custody = observation["custody"]
-            records = (issue_state["attempts"] if custody["kind"] == "implementation"
-                       else issue_state["delivery_remainders"])
-            ordinal = custody.get("attempt", custody.get("remainder"))
-            if ordinal > len(records):
-                raise WorkflowError("unknown owner observation identity")
-            record = records[ordinal - 1]
-            if custody["launch"] > len(record["launches"]):
-                raise WorkflowError("unknown owner observation identity")
-            if ordinal == len(records) and custody["launch"] == len(record["launches"]):
-                unavailable.add((observation["issue"], custody["kind"], ordinal,
-                                 custody["launch"]))
-
-        def owner_is_unavailable(issue_state: dict[str, Any] | None) -> bool:
-            if issue_state is None:
-                return False
-            custody, latest = runtime.current_custody(issue_state["issue"], issue_state)
-            if custody is None or latest is None:
-                return False
-            ordinal = custody.get("attempt", custody.get("remainder"))
-            identity = (latest.get("issue", issue_state["issue"]), custody["kind"],
-                        ordinal, custody["launch"])
-            return latest["state"] == "active" and identity in unavailable
-
-        for issue, observation in worktree_by_issue.items():
-            recorded = observation["recorded"]
-            if recorded is None:
-                continue
-            issue_state = state["issues"].get(str(issue))
-            if issue_state is None:
-                raise WorkflowError("recorded worktree has no ledger custody")
-            _, current_record = runtime.current_custody(issue, issue_state)
-            if current_record is None:
-                current_record = (issue_state["delivery_remainders"][-1]
-                                  if issue_state["delivery_remainders"] else
-                                  issue_state["attempts"][-1] if issue_state["attempts"] else None)
-            if current_record is None or recorded["path"] != current_record["worktree"]:
-                raise WorkflowError("recorded worktree path does not match ledger")
+        unavailable = delivery_call(None, runtime.validate_control_custody, state, request)
 
         analysis: dict[int, dict[str, Any]] = {}
         for issue in request["issues"]:
@@ -2182,7 +2068,7 @@ def command_control(args: argparse.Namespace) -> int:
                 worktree=worktree_by_issue.get(issue),
                 now=now,
                 attempt_budget_minutes=request["attempt_budget_minutes"],
-                current_owner_unavailable=owner_is_unavailable(issue_state),
+                current_owner_unavailable=runtime.owner_is_unavailable(issue_state, unavailable),
                 dispatch_permitted=False,
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
@@ -2203,7 +2089,7 @@ def command_control(args: argparse.Namespace) -> int:
                 worktree=worktree_by_issue.get(issue),
                 now=now,
                 attempt_budget_minutes=request["attempt_budget_minutes"],
-                current_owner_unavailable=owner_is_unavailable(issue_state),
+                current_owner_unavailable=runtime.owner_is_unavailable(issue_state, unavailable),
                 dispatch_permitted=dispatch_permitted,
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
@@ -2492,20 +2378,9 @@ def direct_terminal(
     }
 
 
-def direct_owner_response(
-    repo_root: Path, run_id: str, attempt: dict[str, Any], operation: str,
-    *, issue_state: dict[str, Any], reduction: dict[str, Any],
-) -> dict[str, Any]:
-    return load_delivery_runtime().owner_response(
-        ledger_repo_root=str(repo_root), run_id=run_id, issue_state=issue_state,
-        attempt=attempt, launch_kind=operation, reduction=reduction)
-
-
 def command_direct_owner(args: argparse.Namespace) -> int:
     runtime = load_delivery_runtime()
-    model = runtime.model
-    request, migration_contracts = load_direct_owner_request(
-        args.request_file, model=model)
+    request, migration_contracts = load_direct_owner_request(args.request_file)
     issue = request["issue"]
     if not Path(args.repo_root).is_absolute():
         raise WorkflowError("repository root path must be absolute")
@@ -2762,40 +2637,14 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         )
                     else:
                         state["issues"][str(issue)] = policy["issue_state"]
-                    before_delivery = copy.deepcopy(
-                        state["issues"][str(issue)]["delivery"])
-                    reduction = policy.get("reduction")
-                    if reduction is None:
-                        reduction = delivery_call(
-                            "delivery transition refused", runtime.apply_transition,
-                            state["issues"][str(issue)], issue=issue, request=request,
-                            source_kind="direct", at_time=request["now"])
-                    changed = (policy["changed"] or
-                               state["issues"][str(issue)]["delivery"] != before_delivery)
-                    if changed:
-                        state["updated_at"] = request["now"]
+                    changed, response = delivery_call(
+                        "delivery transition refused", runtime.complete_direct_policy,
+                        state, issue=issue, request=request, policy=policy,
+                        ledger_repo_root=str(repo_root), run_id=run_id,
+                        reentry=reentry_command(issue))
                     validate_state(state, run_id=run_id)
                     if changed:
                         atomic_write_state(run_dir, state_path, state)
-                    if operation == "refuse":
-                        response = direct_terminal(
-                            issue=issue, run_id=run_id, source="lifecycle",
-                            reason="failed", blockers=[],
-                            result=policy["issue_state"]["outcome"],
-                        )
-                    else:
-                        if policy.get("custody_kind") == "remainder":
-                            response = runtime.remainder_response(
-                                ledger_repo_root=str(repo_root), run_id=run_id,
-                                issue_state=state["issues"][str(issue)],
-                                remainder=state["issues"][str(issue)]
-                                    ["delivery_remainders"][-1], reduction=reduction)
-                        else:
-                            response = direct_owner_response(
-                                repo_root, run_id, policy["attempt"], operation,
-                                issue_state=state["issues"][str(issue)],
-                                reduction=reduction,
-                            )
                 else:
                     raise WorkflowError("invalid one-issue policy operation")
 
@@ -2819,7 +2668,6 @@ def load_delivery_report(path_value: str, boundary: str) -> dict[str, Any]:
 
 def command_checkpoint_delivery(args: argparse.Namespace) -> int:
     runtime = load_delivery_runtime()
-    model = runtime.model
     now = format_utc(parse_utc(args.now, "--now"))
     report = load_delivery_report(args.checkpoint_file, "ship-checkpoint")
     issue = report["issue"]
@@ -2844,9 +2692,7 @@ def command_checkpoint_delivery(args: argparse.Namespace) -> int:
             run_id=args.run_id, issue_state=issue_state, report=report,
             stalled=stalled)
 
-    response = transact(
-        args.repo_root, args.run_id, checkpoint, migration_contracts={}
-    )
+    response = transact(args.repo_root, args.run_id, checkpoint)
     print_json(response)
     return 0
 
@@ -2944,7 +2790,7 @@ def command_progress(args: argparse.Namespace) -> int:
         state["updated_at"] = now
         return attempt, True
 
-    persisted = transact(args.repo_root, args.run_id, progress, migration_contracts={})
+    persisted = transact(args.repo_root, args.run_id, progress)
     print_json(persisted)
     return 0
 
@@ -2987,11 +2833,11 @@ def command_suspend(args: argparse.Namespace) -> int:
             "reentry": reentry_command(attempt["issue"]),
         }, True
 
-    print_json(transact(args.repo_root, args.run_id, suspend, migration_contracts={}))
+    print_json(transact(args.repo_root, args.run_id, suspend))
     return 0
 
 
-def command_finish_legacy(args: argparse.Namespace) -> int:
+def command_finish(args: argparse.Namespace) -> int:
     """Record an owner's reported terminal result for one attempt.
 
     A finish at or after the attempt budget's ``deadline_at`` records the reported
@@ -3005,6 +2851,10 @@ def command_finish_legacy(args: argparse.Namespace) -> int:
     Legacy ``expiry`` records only reach this ledger from a pre-suspension run
     (per D2, D15).
     """
+    if args.summary_file is not None:
+        return command_finish_delivery(args)
+    if args.issue is None or args.attempt is None or args.result_file is None:
+        raise WorkflowError("finish requires --summary-file")
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
     result = load_result_file(args.result_file, args.issue)
@@ -3067,7 +2917,7 @@ def command_finish_legacy(args: argparse.Namespace) -> int:
         return result, True
 
     persisted = transact(
-        args.repo_root, args.run_id, finish, migration_contracts={},
+        args.repo_root, args.run_id, finish,
         allowed_source_schema_versions=frozenset({1, 2}),
     )
     print_json(persisted)
@@ -3076,7 +2926,6 @@ def command_finish_legacy(args: argparse.Namespace) -> int:
 
 def command_finish_delivery(args: argparse.Namespace) -> int:
     runtime = load_delivery_runtime()
-    model = runtime.model
     now = format_utc(parse_utc(args.now, "--now"))
     report = load_delivery_report(args.summary_file, "ship-summary")
 
@@ -3088,20 +2937,9 @@ def command_finish_delivery(args: argparse.Namespace) -> int:
             ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id)
         return response, True
 
-    response = transact(
-        args.repo_root, args.run_id, finish_delivery,
-        migration_contracts={},
-    )
+    response = transact(args.repo_root, args.run_id, finish_delivery)
     print_json(response)
     return 0
-
-
-def command_finish(args: argparse.Namespace) -> int:
-    if args.summary_file is not None:
-        return command_finish_delivery(args)
-    if args.issue is None or args.attempt is None or args.result_file is None:
-        raise WorkflowError("finish requires --summary-file")
-    return command_finish_legacy(args)
 
 
 def command_check_launch(args: argparse.Namespace) -> int:
@@ -3117,7 +2955,6 @@ def command_check_launch(args: argparse.Namespace) -> int:
     that is not a well-formed question is an error (per D3).
     """
     runtime = load_delivery_runtime()
-    model = runtime.model
     repo_root = resolve_repo_root(args.repo_root)
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise WorkflowError("invalid run_id")

@@ -126,6 +126,7 @@ in
 
     ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
     ".agents/lib/python/workflow_delivery.py".source = ./scripts/workflow_delivery.py;
+    ".agents/lib/python/workflow_delivery_wire.py".source = ./scripts/workflow_delivery_wire.py;
     ".agents/lib/python/delivery_model" = {
       source = ./scripts/delivery_model;
       recursive = false;

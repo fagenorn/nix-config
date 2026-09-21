@@ -19,6 +19,7 @@ from ._delivery_model_fixtures import (
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 ENTRY = SCRIPTS / "workflow_delivery.py"
+PROJECTION = SCRIPTS / "workflow_delivery_wire.py"
 
 
 def load(path: Path, name: str):
@@ -57,14 +58,45 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             shutil.copy2(ENTRY, root / "workflow_delivery.py")
+            shutil.copy2(PROJECTION, root / "workflow_delivery_wire.py")
             shutil.copytree(SCRIPTS / "delivery_model", root / "delivery_model")
             installed = load(root / "workflow_delivery.py", "workflow_delivery_installed_test")
             self.assertEqual(installed.DeliveryRuntime(
                 notes_max_characters=100).model.MODEL_INTERFACE_VERSION, 1)
+
+            (root / "workflow_delivery_wire.py").unlink()
+            with self.assertRaises(ValueError):
+                installed.DeliveryRuntime(notes_max_characters=100)
+            shutil.copy2(PROJECTION, root / "workflow_delivery_wire.py")
             shutil.rmtree(root / "delivery_model")
             broken = load(root / "workflow_delivery.py", "workflow_delivery_broken_test")
             with self.assertRaises(ValueError):
                 broken.DeliveryRuntime(notes_max_characters=100)
+
+            shutil.copytree(SCRIPTS / "delivery_model", root / "delivery_model")
+            (root / "workflow_delivery_wire.py").write_text(
+                "WORKFLOW_DELIVERY_WIRE_INTERFACE_VERSION = 2\n"
+                "class DeliveryProjection: pass\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                broken.DeliveryRuntime(notes_max_characters=100)
+
+    def test_projection_validates_interface_two_owner_and_worktree_grammar(self):
+        runtime = load(ENTRY, "workflow_delivery_projection_test").DeliveryRuntime(
+            notes_max_characters=100)
+        owner = {"event_id": "owner-1", "issue": 151, "state": "unavailable",
+                 "custody": custody()}
+        worktree = {"issue": 151,
+                    "recorded": {"path": "/owned", "state": "matching_issue_branch"},
+                    "candidate": None}
+        request = {"owners": [owner], "worktrees": [worktree]}
+        runtime.validate_control_observations(request, {151})
+        for changed in (
+            {**owner, "custody": {**owner["custody"], "action_id": "151:2:1"}},
+            {**owner, "issue": 152},
+        ):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                runtime.validate_control_observations(
+                    {"owners": [changed], "worktrees": [worktree]}, {151})
 
     def test_cleanup_facts_bind_the_exact_recorded_worktree(self):
         module = load(ENTRY, "workflow_delivery_worktree_binding_test")
