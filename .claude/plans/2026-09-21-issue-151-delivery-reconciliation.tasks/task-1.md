@@ -216,13 +216,13 @@ class DeliveryModelTest(unittest.TestCase):
             contract, opened, evaluation=evaluation_context()
         )
         self.assertEqual(pre_merge["next_stage_id"], "merge")
-        self.assertEqual(pre_merge["postconditions"]["implementation_delivered"]["state"], "pending")
+        self.assertEqual(pre_merge["next_delivery"]["postconditions"]["implementation_delivered"]["state"], "pending")
         merged = with_observed_stages(self.model, contract, opened, ["merge"])
         after_merge = self.model.reduce_delivery(
             contract, merged, evaluation=evaluation_context()
         )
-        self.assertEqual(after_merge["postconditions"]["pr_merged"]["state"], "observed")
-        self.assertEqual(after_merge["postconditions"]["implementation_delivered"]["state"], "pending")
+        self.assertEqual(after_merge["next_delivery"]["postconditions"]["pr_merged"]["state"], "observed")
+        self.assertEqual(after_merge["next_delivery"]["postconditions"]["implementation_delivered"]["state"], "pending")
         self.assertEqual(empty_delivery, before)
 
     def test_conflicting_observation_and_operational_denial_refuse(self):
@@ -262,8 +262,22 @@ class DeliveryModelTest(unittest.TestCase):
                 authorization_intents=[successor], reevaluation_evidence=[],
             ),
         )
-        self.assertEqual(by_intent["authority_evaluation"]["basis_kind"], "successor_intent")
-        self.assertEqual(by_intent["authority_evaluation"]["basis_id"], successor["id"])
+        intent_permit = by_intent["authority_evaluation"]
+        self.assertEqual(intent_permit["basis_kind"], "successor_intent")
+        self.assertEqual(intent_permit["basis_id"], successor["id"])
+        self.assertEqual(
+            [fact["use_key"] for fact in by_intent["next_delivery"]
+             ["authority_evaluation_consumptions"]], [intent_permit["use_key"]],
+        )
+        for replay_custody in (custody, next_launch(custody)):
+            replay = self.model.reduce_delivery(
+                contract, by_intent["next_delivery"], evaluation=evaluation_context(
+                    custody=replay_custody, current_launch=True,
+                    requested_scope=requested, authorization_intents=[successor],
+                ),
+            )
+            self.assertIsNone(replay["authority_evaluation"])
+            self.assertEqual(replay["blocking"]["reason_code"], "reevaluation_consumed")
 
         reevaluation = reevaluation_for(self.model, contract, denied)
         by_evidence = self.model.reduce_delivery(
@@ -292,6 +306,9 @@ class DeliveryModelTest(unittest.TestCase):
             ),
         )
         self.assertIsNone(after_crash_transfer["authority_evaluation"])
+        self.assertEqual(
+            after_crash_transfer["blocking"]["reason_code"], "reevaluation_consumed"
+        )
 
     def test_revocation_binds_intent_id_and_key(self):
         contract, delivery = strict_contract_and_delivery(self.model)

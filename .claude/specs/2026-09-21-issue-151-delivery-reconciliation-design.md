@@ -688,13 +688,19 @@ atomically deduplicates and persists valid observations, recomputes stage facts
 and postconditions, and returns the next stage or exact requirement without
 terminalizing custody or spending either retry budget.
 
-The checkpoint response has exactly interface version 2, literal kind
-`delivery_checkpointed`, ledger root, run id, issue, owner, custody, contract
-digest, sorted accepted observation ids, ordered pending stage ids, nullable next
+Ordinary checkpoint response `delivery_checkpointed` has exactly interface
+version 2, kind, ledger root, run id, issue, owner, custody, contract digest,
+sorted accepted observation ids, ordered pending stage ids, nullable next
 action, sorted requirements, nullable `authority_evaluation`, state `active |
-suspended`, and nullable `blocked_on`. Control/direct owner actions carry the
-same nullable field. It is nonnull only in the first response after the matching
-consumption was durably appended; replay never re-emits it.
+suspended`, and nullable `blocked_on`. Ordinary partial/blocking checkpoints
+never terminalize. The fourth unchanged-progress suspension instead atomically
+stores count 3, terminalizes as stalled, and returns the separate exact variant
+`delivery_stalled`: the common identity/observation/pending fields above plus
+state `terminal_failed`, integer `stalled_resumes` 3, result source `stalled` and
+reason code `suspension_stalled_without_progress`; it has no next action,
+requirements, authority evaluation or blocked-on member. Control/direct actions
+carry the nullable evaluation field. It appears only after its consumption was
+durably appended; replay never re-emits it.
 
 When the accepted facts produce a true blocking requirement, the reducer—not a
 shipping caller—maps its closed reason to `human_gate`, `external`, or
@@ -738,15 +744,17 @@ validators keep the legacy row readable for old result files, while v3 writers
 emit only v2 handoff/checkpoint/summary shapes. No validator-first or prose-only
 cutover is allowed.
 
-Artifact-budget also exposes one structural raw-byte `workflow-response`
-boundary for control/direct actions, the exact legacy-shaped four-key
-current-launch result, checkpoint responses and finish outcomes. `init-run` is a
-setup-only command: callers check its exit status but do not decode its bootstrap
-stdout through this union. The boundary loads the shared model and validates the
-closed response union before other caller/test decode. It proves shape and
-canonical bytes and internal custody/action-id consistency only. Current-ledger freshness,
-accepted-contract audience/data matching and normalized-source authenticity
-remain workflow-state semantic checks under lock or native trust-boundary facts.
+Artifact-budget exposes one structural raw-byte `workflow-response` boundary
+for control/direct actions, current-launch, both checkpoint variants, finish and
+`workflow_bootstrap`. Bootstrap v2 has exactly interface version 2, kind, run id
+and sorted `requirements`; each requirement has exactly issue, owner, custody and
+recorded worktree. For each issue with custody history it selects the sole
+nonterminal custody, otherwise the latest remainder, otherwise latest
+implementation. Callers validate/decode it, gather normalized owner/worktree
+observations for every requirement, and include them in control; implementation
+and remainder refs use the same closed custody union. The boundary proves shape,
+canonical bytes and internal ids only. Ledger freshness, contract matching and
+source authenticity remain locked/trusted semantic checks.
 
 ### Deterministic simulated acceptance cases
 
@@ -869,7 +877,7 @@ architecture authority. They are not recorded human answers.
 | D12 | Finish issue 151 through its run-specific retained v2/v1 operational bridge; keep exact-old-generation conformance/topology/runtime receipts with the root controller, test only new-source product interfaces in shipped suites, and activate v3 only through separate managed scope. | #66 bridge/activation separation; dynamic validator/module/policy resolution; worktree cleanup removes source. | Hardcoded machine hashes, committed historical runtime fixtures, a generic bridge runtime, migrating the live run or depending on its deleted worktree would mix product behavior with one delivery's operations. |
 | D13 | Put canonical delivery validation, narrowing and pure reduction in one import-safe `delivery_model.py` published as a library and consumed by workflow-state and artifact-budget; adopt every wire atomically after the pure seam is reviewed. | DRY; review-package feasibility; current source/installed Python layouts. | Duplicate validators drift, while a generic framework or early schema cutover would exceed this issue and violate D9. |
 | D14 | Keep valid schema-1 ledgers readable by applying the existing 1→2 migration and the new 2→3 migration as an adjacent in-memory chain, validating the complete schema-3 result, and performing at most one atomic write. | Current source already supports schema 1→2; D8 requires immutable legacy history; an interface cutover must not strand an older valid ledger. | Setting the sole prior version to 2 would reject supported schema-1 history, while persisting an intermediate schema-2 ledger would expose a partial cutover. |
-| D15 | Give the pure model one closed eight-name public surface with explicit contract/intent/time/custody/candidate inputs and a complete persistable next-delivery result; checkpoint/owner output is closed and may carry only the model's nullable authority-evaluation action after durable one-shot consumption. | D2/D3 require explicit facts; D9 atomic cutover; D13 one contract owner. | Caller-specific reduction dictionaries, ambient reads, free-text consumption, or an open response would duplicate policy and permit replay. |
+| D15 | Give the pure model one closed eight-name public surface with explicit contract/intent/time/custody/candidate inputs and a complete persistable next-delivery result; checkpoint/owner/bootstrap output is closed; only durable one-shot consumption may expose an authority-evaluation action, and only the fourth unchanged suspension returns the stalled terminal variant. | D2/D3 require explicit facts; D9 atomic cutover; D13 one contract owner. | Caller-specific reduction dictionaries, ambient reads, free-text consumption, or an open response would duplicate policy and permit replay. |
 | D16 | Keep artifact/model validation structural, add one raw `workflow-response` union boundary, and reserve ledger freshness plus normalized-source/host authenticity for workflow-state under lock and the existing trust boundary. | Defense in depth; D3 launch fence; normalized controller facts are not authenticated by digests or opaque references. | Asking the stateless artifact validator to reject a once-valid stale action or fabricated but well-shaped source claim would invent authority and make public tests impossible. |
 | D17 | Upgrade schema 1/2 only inside a mutation transaction with explicit request-derived contract context and final `validate_state(..., run_id=...)`; keep current-launch on a no-write legacy read path. | D8/D14 immutable history and atomic migration; current no-lock/no-create launch guard. | Value-only migration cannot resolve new contract context, while upgrading during current-launch would make a read-only fence mutate or strand legacy runs. |
 | D18 | Bind each fresh post-rejection evaluation to one append-only consumption keyed by rejection and its independent successor-intent or reevaluation-evidence basis; persist it before emitting the one-time evaluation action, and preserve original-launch facts separately from current-effect eligibility. | Operative-denial and late-collector requirements; round-two review. | Replayable evidence, crash-reset permission, or discarding/authorizing through old-launch history. |

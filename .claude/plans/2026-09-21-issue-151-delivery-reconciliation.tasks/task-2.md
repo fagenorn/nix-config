@@ -47,13 +47,13 @@
   `artifact-budget validate-report --boundary ship-checkpoint` before decode,
   locks, rechecks exact custody, folds observations atomically, reduces, and
   either returns the next typed action/requirement or suspends the same custody.
-  Its response has exactly `interface_version` 2, literal `kind`
-  `delivery_checkpointed`, `ledger_repo_root`, `run_id`, `issue`, `owner`,
-  `custody`, `contract_digest`, sorted `accepted_observation_ids`, ordered
-  `pending_stage_ids`, nullable `next_action`, sorted `requirements`, nullable strict
-  `authority_evaluation`, `state` (`active | suspended`), and nullable
-  `blocked_on`. Control/direct actions carry the same nullable action; it is
-  emitted only after its matching consumption is durably stored.
+  Ordinary response `delivery_checkpointed` has the exact design fields and
+  state `active | suspended`; partial/blocking progress never terminalizes.
+  Fourth unchanged-progress suspension instead atomically stores count 3,
+  terminalizes, and returns exact `delivery_stalled`: common identity,
+  observation and pending fields plus state `terminal_failed`, count 3, source
+  `stalled` and closed reason, with no next action/requirements/evaluation/block.
+  Control/direct/checkpoint evaluation actions appear only after consumption.
 - Replaces the source finish entry with
   `finish --repo-root ROOT --run-id RUN --now UTC --summary-file FILE`.
   `ship-summary/v2` carries issue and custody, so separate issue/attempt guessing
@@ -62,13 +62,13 @@
   next remainder. Requirements and partial progress are never terminal failure.
 - `artifact_budget.py` adds `ship-checkpoint` and `workflow-response` to the closed boundary set and
   validates `ship-handoff/v2`, `ship-checkpoint/v2`, and `ship-summary/v2` by
-  loading Task 1's model. `workflow-response` structurally validates raw
-  control/direct actions, the exact four-key current-launch object, checkpoint
-  responses and finish outcomes before caller/test decode. `init-run` remains a
-  setup-only exit-status check whose bootstrap stdout is not decoded through
-  that union. It may still read the
-  exact legacy v1 summary shape for retained evidence, but no schema-3 producer
-  emits it and workflow-state's v2 finish rejects it.
+  loading Task 1's model. `workflow-response` validates raw control/direct,
+  current-launch, bootstrap, checkpoint and finish responses before decode.
+  `workflow_bootstrap` v2 has exact interface/kind/run/requirements keys; each
+  sorted requirement has issue, owner, custody and recorded worktree. It selects
+  the nonterminal custody, else latest remainder, else latest implementation.
+  Callers consume every requirement into normalized owner/worktree observations
+  before control. Legacy v1 summary remains historical-read-only.
 - Production caller prose/evals consume only interface 2 and the closed typed
   action. They copy contract/intents/digests exactly, validate raw stdout before
   decode, run `current-launch` immediately before each effect, checkpoint the
@@ -83,9 +83,8 @@
   outcome, result byte and detail pointer. They initialize empty delivery truth
   only: no contract, intent, authority, observation, selected output, stage fact,
   postcondition success, remainder or cleanup claim.
-- Migration is idempotent and fail-closed. Unknown fields, partial schema-3
-  objects, invalid legacy rows, ambiguous repository identity, model-load error
-  or version mismatch leave the original ledger byte-identical.
+- Migration is idempotent/fail-closed; malformed, ambiguous or model-load/version
+  failures leave original ledger bytes unchanged.
 - `migration_contracts` comes only from structurally validated interface-2
   delivery contracts in the request. Empty legacy delivery may use null; any
   candidate delivery/authority fact or remainder dispatch requires one matching
@@ -102,9 +101,8 @@
   persistence returns no second action. Covering successor intent and bound
   reevaluation evidence are separate bases; ordinary authorized actions do not
   manufacture a new-permission requirement.
-- Checkpoint deduplicates facts, rejects same-id conflicts before write, and
-  atomically suspends true blockers as `human_gate | external | transport`;
-  local evidence stays active and `unknown` remains reaper-only.
+- Checkpoint deduplicates facts and ordinary blockers suspend nonterminally;
+  only unchanged-progress count 3 terminalizes and returns `delivery_stalled`.
 - Remainder action ids are `issue:r<remainder>:launch`; implementation ids remain
   `issue:attempt:launch`. Resume keeps ordinal/deadline and increments neither
   retry count. A genuine failed remainder with absent effect and valid recovery
@@ -113,8 +111,7 @@
   persist counters 0, 1, 2, then 3; the first three may resume and 3 terminalizes
   as stalled. Accepted stage/postcondition progress clears phase and resets 0. Capacity ordering and
   existing implementation retry behavior remain intact.
-- No source command opens or migrates the real issue-151 ledger. No installed
-  activation, bridge runtime, provider command or external mutation is added.
+- No source command touches live issue 151; no activation, bridge or external effect.
 - Task 2 is one atomic source cutover; no mixed schema/caller/report midpoint
   or duplicated model validation is allowed.
 - Artifact validation proves structure/ids only. Stale custody and shaped host
@@ -183,25 +180,30 @@ Create `test_delivery_workflow.py`. Its fixture factory writes complete strict
 contract, intent, selected output, authority and delivery observations using the
 Task 1 public model; it creates only `sim.invalid` identities, fixed 40-hex
 subjects and temporary ledgers. Put all CLI invocation in `DeliveryHarness`.
-Its exact methods are `init(*, schema_fixture=None)`,
-`control(request, *, now, ok=True)`, `direct(request, *, now, ok=True)`,
-`current(custody, *, ok=True)`, `checkpoint(report, *, now, ok=True)`,
-`finish(report, *, now, ok=True)`, `state_bytes()`, and `state()`. Every method except `init` writes its request/report as canonical bytes under the
-harness temporary root, invokes `workflow-state.py`, feeds raw successful stdout
-through `artifact-budget validate-report --boundary workflow-response --input -`,
-and decodes only after validation. `init` invokes setup, requires exit 0, and
-intentionally ignores bootstrap stdout; it never calls `json.loads` or the
-workflow-response validator. Handoff,
-checkpoint and summary input files use their named report boundaries before
-workflow-state reads them; malformed command errors are not decoded as
-responses.
+Its methods are `init(*, schema_fixture=None)`, `control`, `direct`, `current`,
+`checkpoint`, `finish`, `state_bytes`, and `state`, with the argument signatures
+shown by their calls below. Every successful stdout, including `init`, passes raw
+through `workflow-response` before decode; init returns the strict bootstrap.
+Report inputs use named boundaries before workflow-state; errors are not decoded.
 
 ```python
 class DeliveryWorkflowRoundTripTest(unittest.TestCase):
     def setUp(self):
         self.h = DeliveryHarness(self)
         self.fx = DeliveryFixtures()
-        self.h.init()
+        self.bootstrap = self.h.init()
+        self.assertEqual(self.bootstrap["requirements"], [])
+
+    def test_bootstrap_requirements_cover_both_custody_kinds(self):
+        for kind in ("implementation", "remainder"):
+            harness = DeliveryHarness(self)
+            bootstrap = harness.init(schema_fixture=self.fx.active_custody_state(kind))
+            requirement = bootstrap["requirements"][0]
+            self.assertEqual(requirement["custody"]["kind"], kind)
+            request = self.fx.control_from_bootstrap(bootstrap)
+            self.assertEqual(request["owners"][0]["action_id"],
+                             requirement["custody"]["action_id"])
+            harness.control(request, now=self.fx.t0)
 
     def test_normal_v3_owner_merge_precedes_delivered_truth(self):
         owner = self.h.direct(self.fx.direct_request(), now=self.fx.t0)
@@ -377,18 +379,18 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
             suspended = self.h.checkpoint(
                 self.fx.transport_suspension(custody), now=self.fx.tick()
             )
-            self.assertEqual(suspended["state"], "suspended")
             if suspension_number < 4:
-                action = self.h.direct(
-                    self.fx.resume_request(suspended), now=self.fx.tick()
-                )
-                self.assertEqual(action["custody"]["remainder"], 1)
+                self.assertEqual((suspended["kind"], suspended["state"]),
+                                 ("delivery_checkpointed", "suspended"))
+                action = self.h.direct(self.fx.resume_request(suspended), now=self.fx.tick())
                 seen.append(action["custody"]["action_id"])
             else:
-                self.assertEqual(self.fx.suspend_phase(self.h.state(), 151), "stall")
-                refused = self.h.direct(
-                    self.fx.resume_request(suspended), now=self.fx.tick()
-                )
+                self.assertEqual((suspended["kind"], suspended["state"],
+                                  suspended["stalled_resumes"], suspended["result_source"]),
+                                 ("delivery_stalled", "terminal_failed", 3, "stalled"))
+                self.assertEqual(suspended["reason_code"],
+                                 "suspension_stalled_without_progress")
+                refused = self.h.direct(self.fx.resume_request(suspended), now=self.fx.tick())
                 self.assertNotEqual(refused["kind"], "delivery_remainder")
         self.assertEqual(seen, ["151:r1:1", "151:r1:2", "151:r1:3", "151:r1:4"])
         self.assertEqual(self.fx.remainder_count(self.h.state(), 151), 1)
@@ -415,6 +417,9 @@ class DeliveryWorkflowRoundTripTest(unittest.TestCase):
             seen.append(self.fx.stalled_resumes(self.h.state(), 151))
             if expected < 3:
                 action = self.h.direct(self.fx.resume_request(parked), now=self.fx.tick())
+            else:
+                self.assertEqual((parked["kind"], parked["state"]),
+                                 ("delivery_stalled", "terminal_failed"))
         self.assertEqual(seen, [0, 1, 2, 3])
         self.assertEqual(self.fx.result_source(self.h.state(), 151), "stalled")
 
@@ -517,7 +522,8 @@ def test_delivery_v2_boundaries_accept_exact_shapes_and_reject_hybrids(self):
         "invalid_host_reference_type",
         "unsuccessful_absence_probe", "bool_ordinal", "duplicate_observation",
         "revocation_subject_mismatch", "duplicate_consumption_use_key",
-        "permit_consumption_mismatch", "duplicate_json_key", "invalid_utf8",
+        "permit_consumption_mismatch", "bootstrap_custody_mismatch",
+        "stalled_response_extra_action", "duplicate_json_key", "invalid_utf8",
     })
     for name, boundary, raw in mutations.values():
         with self.subTest(name=name):
@@ -526,18 +532,11 @@ def test_delivery_v2_boundaries_accept_exact_shapes_and_reject_hybrids(self):
             self.assertEqual(refused.stdout, b"")
 ```
 
-`delivery_boundary_fixtures()` returns all three exact design shapes, the
-closed response variants (including nullable/non-null authority evaluation), and
-valid revocation/consumption objects sharing one
-contract/custody. `delivery_boundary_mutations()` recomputes enclosing hashes
-after each semantic mutation so every case reaches the intended validator;
-duplicate-key and invalid-UTF-8 cases mutate raw bytes and remain raw through the
-validator. `action_id_mismatch` is an internally inconsistent custody object,
-not a once-current action that later became stale. `invalid_host_reference_type`
-is a shape error; a well-shaped opaque string passes structural validation and
-does not create an allowed verdict. Also assert a strict v1 legacy summary
-remains readable only by its legacy validator path, while adding any v2 member
-to it fails.
+Fixtures cover all reports, bootstrap/stalled/evaluation responses, revocation
+and consumption under one contract/custody. Mutations recompute enclosing hashes;
+duplicate-key/UTF-8 remain raw. Action mismatch is internally inconsistent, host
+reference type is structural, and a shaped string grants nothing. Legacy v1
+summary is readable only on its historical path and rejects v2 members.
 
 Add semantic-layer cases where valid old custody passes report validation then
 fails under lock without a write; valid public-audience/changed-payload requests
@@ -557,7 +556,8 @@ def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
     required = (
         "interface_version 2", "ship-checkpoint/v2", "ship-summary/v2",
         "custody", "current-launch", "validate before decoding",
-        "workflow-response", "checkpoint-delivery", "delivery_remainder",
+        "workflow-response", "workflow_bootstrap", "bootstrap requirements",
+        "checkpoint-delivery", "delivery_remainder",
     )
     for name, text in documents.items():
         with self.subTest(name=name):
@@ -647,8 +647,8 @@ Implement `checkpoint-delivery` and the v2 finish entry exactly as **Interfaces*
 states. Capture the report as regular raw bytes, invoke artifact-budget on those
 bytes before JSON decode, then under lock compare issue/run/contract/custody to
 ledger truth. Persist facts and suspension in one atomic replacement. Emit
-canonical JSON only after persistence. Checkpoint never terminalizes custody;
-finish never maps a requirement or partial success to `terminal_failed`.
+canonical JSON only after persistence. Checkpoint terminalizes only count-3 anti-zombie stall via the exact
+`delivery_stalled` response; finish never maps a requirement or partial success to `terminal_failed`.
 
 Reduce stage facts in contract order. Observe merge before expiry/reaping;
 calculate deadline/stall/retry only after accepted observations update the
@@ -664,18 +664,17 @@ refusal, load the pure model, validate the outer boundary's exact keys and every
 nested delivery object, then emit the accepted canonical bytes. Do not copy a
 second object schema into artifact-budget. Keep strict legacy v1 summary reading
 only for historical files; reject hybrids and do not let schema-3 finish consume
-v1. The response union covers control/direct actions, the exact four-key
-current-launch result, checkpoint responses and finish outcomes. Init bootstrap
-remains setup-only and is checked only for successful exit, never decoded by the
-harness or production caller through this union. It performs no
-ledger lookup and authenticates no host/source reference.
+v1. The response union covers control/direct, current-launch,
+`workflow_bootstrap`, ordinary/stalled checkpoint and finish outcomes. Validate
+bootstrap before decode, consume all custody requirements into observations, then
+construct control. The structural validator performs no ledger/authentication.
 
 Update from-issue, AUTO, its ship handoff, ship-issue, REVIEW, HUMAN-GATE, and
 orchestration together. Their normative sequence is:
 
-1. validate raw direct/control/current/checkpoint/finish responses through
-   `workflow-response`, and handoff/checkpoint/summary reports through their
-   named boundaries, before decoding;
+1. validate raw init/direct/control/current/checkpoint/finish responses through
+   `workflow-response`, and handoff/checkpoint/summary reports through named
+   boundaries, before decoding; consume bootstrap requirements before control;
 2. copy the exact contract, intent chain, digests, custody and pending stages;
 3. execute only the returned closed action after response validation and a
    `current-launch` exact four-key current result; an authority evaluation action

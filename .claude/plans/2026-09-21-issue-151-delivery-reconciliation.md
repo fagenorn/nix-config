@@ -60,8 +60,8 @@ Git, and repository `just` commands.
   installed loading permits the managed lexical symlink to its regular store file.
 - Per D16, model/artifact checks prove canonical structure, while workflow-state
   owns locked freshness/semantic checks and native boundaries own source/host
-  authenticity. Raw control/direct/current/checkpoint/finish responses pass the
-  closed `workflow-response` boundary before caller decode.
+  authenticity. Raw init/control/direct/current/checkpoint/finish responses pass
+  the closed `workflow-response` boundary before caller decode.
 - Per D17, schema 1/2 upgrades receive request-derived contract context only in a
   mutation transaction and finish with `validate_state(candidate, run_id=run_id)` before
   one write. Read-only current-launch validates legacy state without upgrading.
@@ -84,8 +84,8 @@ Git, and repository `just` commands.
   objects, slot-bound narrowing, refusal preservation and ordered reduction.
 - Workflow CLI tests invoke real `init-run`, `control`, `direct-owner`,
   `current-launch`, `checkpoint-delivery`, and `finish` subprocesses against
-  temporary ledgers. Init is setup-only with exit-status checking; every other
-  successful stdout uses the closed response validator before decode.
+  temporary ledgers. Every successful stdout validates before decode; init's
+  exact bootstrap requirements drive owner/worktree observations before control.
 - Artifact boundary tests feed exact raw v2 handoff/checkpoint/summary and
   workflow-response bytes to
   `artifact-budget validate-report` before any workflow decode and exercise
@@ -138,8 +138,9 @@ reduction dictionaries or an open output envelope. Round-one review adds D16's
 structural-versus-semantic boundary plus public response validator and D17's
 explicit migration/read-only split. Round-two review adds D18's durable
 post-rejection consumption/action rule, exact revocation subject, late-fact
-history/current-effect split, explicit bootstrap handling, and persisted stall
-arithmetic.
+history/current-effect split and persisted stall arithmetic. Round-three review
+closes the count-3 stalled checkpoint response and restores strict bootstrap
+requirements consumption for both custody kinds.
 
 Plan review provenance: an independent Sol/high review of head
 `d1c9c47ea94daa8d4f97e127d72021f8e3896baf` reported 3 Blocking / 3 Should-fix /
@@ -157,5 +158,11 @@ The independent Sol/high round-two review of corrected head
 reported 2 Blocking / 2 Should-fix in
 `/private/tmp/issue-151-root-plan-critical-round2.md`. All residuals are accepted
 and resolved by the D18 wire plus the focused executable-test repairs above.
+
+The independent Sol/high round-three review of head
+`e029d81081a81990bfe747f47365ddfebeab9e48` reported 2 Blocking / 2 Should-fix /
+0 Discussion in `/private/tmp/issue-151-plan-review-round3.md`. Root verified all
+four; the bounded corrections close the terminal stall/bootstrap wires and fix
+the two executable model assertions without reopening prior dispositions.
 
 ---
