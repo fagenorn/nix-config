@@ -154,17 +154,6 @@ TRACKER_OBSERVATION_FIELDS = frozenset(
 )
 TRACKER_STATES = frozenset({"open", "closed"})
 DECISION_BLOCKER_FIELDS = frozenset({"issue", "url"})
-OWNER_OBSERVATION_FIELDS = frozenset(
-    {"event_id", "issue", "attempt", "launch", "state"}
-)
-OWNER_OBSERVATION_STATES = frozenset({"unavailable"})
-WORKTREE_OBSERVATION_FIELDS = frozenset({"issue", "recorded", "candidate"})
-RECORDED_WORKTREE_FIELDS = frozenset({"path", "state"})
-RECORDED_WORKTREE_STATES = frozenset(
-    {"matching_issue_branch", "absent", "mismatch"}
-)
-CANDIDATE_WORKTREE_FIELDS = frozenset({"path", "state"})
-CANDIDATE_WORKTREE_STATES = frozenset({"absent"})
 CONTROL_RESPONSE_FIELDS = frozenset(
     {
         "interface_version",
@@ -1365,23 +1354,6 @@ def validate_tracker_observation(value: Any) -> dict[str, Any]:
     return observation
 
 
-def validate_owner_observation(value: Any) -> dict[str, Any]:
-    observation = require_exact_fields(
-        value, OWNER_OBSERVATION_FIELDS, "owner observation"
-    )
-    if not isinstance(observation["event_id"], str) or not observation["event_id"]:
-        raise WorkflowError("invalid owner event_id")
-    require_plain_int(observation["issue"], "owner issue", minimum=1)
-    require_plain_int(observation["attempt"], "owner attempt", minimum=1)
-    require_plain_int(observation["launch"], "owner launch", minimum=1)
-    if (
-        not isinstance(observation["state"], str)
-        or observation["state"] not in OWNER_OBSERVATION_STATES
-    ):
-        raise WorkflowError("invalid owner state")
-    return observation
-
-
 def issue_branch_prefix(issue: int) -> str:
     """The stable head of one issue's branch name under ``branchNaming``.
 
@@ -1422,36 +1394,6 @@ def validate_forge_observation(value: Any) -> dict[str, Any]:
         raise WorkflowError("an absent pull request carries no url")
     if observation["state"] == "merged" and observation["url"] is None:
         raise WorkflowError("a merged pull request requires its url")
-    return observation
-
-
-def validate_worktree_observation(value: Any) -> dict[str, Any]:
-    observation = require_exact_fields(
-        value, WORKTREE_OBSERVATION_FIELDS, "worktree observation"
-    )
-    require_plain_int(observation["issue"], "worktree issue", minimum=1)
-    recorded = observation["recorded"]
-    if recorded is not None:
-        recorded = require_exact_fields(
-            recorded, RECORDED_WORKTREE_FIELDS, "recorded"
-        )
-        require_absolute_path(recorded["path"], "recorded")
-        if (
-            not isinstance(recorded["state"], str)
-            or recorded["state"] not in RECORDED_WORKTREE_STATES
-        ):
-            raise WorkflowError("invalid recorded state")
-    candidate = observation["candidate"]
-    if candidate is not None:
-        candidate = require_exact_fields(
-            candidate, CANDIDATE_WORKTREE_FIELDS, "candidate"
-        )
-        require_absolute_path(candidate["path"], "candidate")
-        if (
-            not isinstance(candidate["state"], str)
-            or candidate["state"] not in CANDIDATE_WORKTREE_STATES
-        ):
-            raise WorkflowError("invalid candidate state")
     return observation
 
 

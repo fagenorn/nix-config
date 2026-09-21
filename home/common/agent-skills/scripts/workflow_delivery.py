@@ -352,6 +352,8 @@ class DeliveryRuntime:
         stage = next(item for item in contract["stages"] if item["id"] == stage_id)
         if not stage["retryable"]:
             raise ValueError("recovery stage is not retryable")
+        self._validate_recorded_worktree(
+            prior, issue_state["delivery"], [], recovery["requested_scope"])
         scope_probe = self.transition(
             issue_state["delivery"], contract=contract, at_time=now,
             custody=None, current_launch=None,
@@ -509,6 +511,13 @@ class DeliveryRuntime:
         if values["contract"] is None:
             raise ValueError("delivery contract is required")
         custody, record = self.current_custody(issue, issue_state)
+        binding_record = record
+        if binding_record is None:
+            retained = issue_state["delivery_remainders"] or issue_state["attempts"]
+            binding_record = retained[-1] if retained else None
+        self._validate_recorded_worktree(
+            binding_record, issue_state["delivery"],
+            values["delivery_observations"], values["requested_scope"])
         reduced = self.transition(
             issue_state["delivery"], contract=values["contract"], at_time=at_time,
             custody=custody,
@@ -555,7 +564,6 @@ class DeliveryRuntime:
         if delivery["contract_digest"] != report_digest:
             raise ValueError(f"{source_kind} contract mismatch")
         requested_scope = report.get("requested_scope") if source_kind == "checkpoint" else None
-        self._validate_recorded_worktree(record, delivery, report, requested_scope)
         reduced = self.apply_transition(
             issue_state, issue=issue_state["issue"], source_kind=source_kind,
             at_time=at_time,
@@ -575,13 +583,14 @@ class DeliveryRuntime:
 
     @staticmethod
     def _validate_recorded_worktree(
-        record: dict[str, Any], delivery: dict[str, Any], report: dict[str, Any],
+        record: dict[str, Any] | None, delivery: dict[str, Any],
+        candidate_observations: list[dict[str, Any]],
         requested_scope: dict[str, Any] | None,
     ) -> None:
         """Bind worktree cleanup facts/actions to the custody record under lock."""
         observations = [
             item for item in (
-                delivery["delivery_observations"] + report["delivery_observations"]
+                delivery["delivery_observations"] + candidate_observations
             ) if item["observation_kind"] == "worktree_absent"
         ]
         requests_cleanup = (
@@ -590,6 +599,8 @@ class DeliveryRuntime:
         )
         if not observations and not requests_cleanup:
             return
+        if record is None:
+            raise ValueError("cleanup has no recorded custody worktree")
         stages = [stage for stage in delivery["contract"]["stages"]
                   if stage["kind"] == "remove_worktree"]
         if len(stages) != 1 or stages[0]["target_ref"] != {

@@ -640,6 +640,8 @@ source kind is `provider|host|tracker|repository|filesystem`. Basis is exact
 `{kind:changed_relevant_evidence,scope_id,source_kind,reference,observed_at,
 evidence_digest}`, `{kind:new_authorization,id}`, or explicit-user
 `{kind:human_transient_retry,id}`.
+Every `reference` is a nonempty string, every `observed_at` is RFC 3339 UTC,
+and every `evidence_digest` is a canonical SHA-256 digest.
 
 Only latest terminal owner-failed/stalled R1, no live custody/R2, and ready
 retryable work qualify. Failure follows the latest effect launch and precedes

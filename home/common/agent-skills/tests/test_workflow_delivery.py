@@ -14,6 +14,8 @@ from ._delivery_model_fixtures import (
     custody,
     observation,
     rebind_contract,
+    seal,
+    stage_scope,
 )
 
 
@@ -121,21 +123,59 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
                 "probe_mode": "no_follow", "absent": True,
             })
 
-        for path, identity in (("/foreign", "/foreign"),
-                               (worktree, "foreign-identity")):
-            candidate = copy.deepcopy(issue_state)
-            rejected = {**report, "delivery_observations": [absent(path, identity)]}
-            with self.subTest(path=path, identity=identity), self.assertRaises(ValueError):
-                runtime.prepare_report_transition(
-                    candidate, rejected, source_kind="checkpoint",
-                    at_time="2026-09-21T00:00:00Z")
-            self.assertEqual(candidate, issue_state)
+        def request(source, facts, requested=None):
+            values = {"delivery_contract": contract,
+                      "authorization_intents": [], "authority_observations": [],
+                      "reevaluation_evidence": [], "delivery_observations": facts,
+                      "requested_scope": requested, "recovery": None}
+            if source == "direct":
+                return values
+            return {"delivery_contracts": {"151": values["delivery_contract"]},
+                    "authorization_intents": {"151": []},
+                    "authority_observations": {"151": []},
+                    "reevaluation_evidence": {"151": []},
+                    "delivery_observations": {"151": facts},
+                    "requested_scopes": {"151": requested},
+                    "recoveries": {"151": None}}
 
-        accepted = {**report,
-                    "delivery_observations": [absent(worktree, worktree)]}
-        runtime.prepare_report_transition(
-            issue_state, accepted, source_kind="checkpoint",
-            at_time="2026-09-21T00:00:00Z")
+        for source in ("direct", "control", "checkpoint"):
+            for path, identity in (("/foreign", "/foreign"),
+                                   (worktree, "foreign-identity")):
+                candidate = copy.deepcopy(issue_state)
+                fact = absent(path, identity)
+                with self.subTest(source=source, path=path, identity=identity), \
+                        self.assertRaises(ValueError):
+                    if source == "checkpoint":
+                        runtime.prepare_report_transition(
+                            candidate, {**report, "delivery_observations": [fact]},
+                            source_kind=source, at_time="2026-09-21T00:00:00Z")
+                    else:
+                        runtime.apply_transition(
+                            candidate, issue=151, request=request(source, [fact]),
+                            source_kind=source, at_time="2026-09-21T00:00:00Z")
+                self.assertEqual(candidate, issue_state)
+
+            accepted = copy.deepcopy(issue_state)
+            fact = absent(worktree, worktree)
+            if source == "checkpoint":
+                runtime.prepare_report_transition(
+                    accepted, {**report, "delivery_observations": [fact]},
+                    source_kind=source, at_time="2026-09-21T00:00:00Z")
+            else:
+                runtime.apply_transition(
+                    accepted, issue=151, request=request(source, [fact]),
+                    source_kind=source, at_time="2026-09-21T00:00:00Z")
+
+        cleanup_scope = stage_scope(runtime.model, contract, "worktree")
+        wrong_scope = copy.deepcopy(cleanup_scope)
+        wrong_scope["endpoint"]["value"] = "/foreign"
+        seal(runtime.model, wrong_scope)
+        candidate = copy.deepcopy(issue_state)
+        with self.assertRaises(ValueError):
+            runtime.apply_transition(
+                candidate, issue=151, request=request("direct", [], wrong_scope),
+                source_kind="direct", at_time="2026-09-21T00:00:00Z")
+        self.assertEqual(candidate, issue_state)
 
 
 if __name__ == "__main__":

@@ -427,12 +427,6 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(remainder["custody"]["action_id"], "151:r1:1")
 
     def test_typed_effect_uses_raw_validation_and_both_launch_fences(self):
-        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
-        digest = self.model.canonical_digest(contract)
-        selected = selection(self.model, digest)
-        effect_observation = observation(
-            self.model, contract, "selected_output", {"selected_output": selected})
-
         def validated(boundary, raw):
             result = subprocess.run(
                 [sys.executable, str(ARTIFACT_BUDGET), "validate-report",
@@ -441,9 +435,21 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, (result.stderr, raw))
             return json.loads(result.stdout)
 
-        for case in ("success", "scope_mismatch", "stale_after_effect"):
+        for case in ("success", "scope_mismatch", "stale_after_effect",
+                     "provider_denial"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw); worktree = str(root / "worktree")
+                if case == "provider_denial":
+                    contract, initial_intent = self.all_stage_contract()
+                    delivery = {"authorization_intents": [initial_intent],
+                                "delivery_observations": []}
+                    actual = stage_scope(self.model, contract, "publish")
+                else:
+                    contract, delivery, actual = contract_and_delivery_for_stage(
+                        self.model, "select")
+                effect_scope = (stage_scope(self.model, contract, "select")
+                                if case == "provider_denial" else actual)
+                digest = self.model.canonical_digest(contract)
 
                 def invoke(*args):
                     return subprocess.run(
@@ -463,14 +469,18 @@ class DeliveryAdmissionTest(unittest.TestCase):
                               "candidate": {"path": worktree, "state": "absent"}},
                     forge={"state": "none", "url": None, "merge_sha": None},
                     authorization_intents=delivery["authorization_intents"],
-                    requested_scope=actual,
+                    delivery_observations=delivery["delivery_observations"],
+                    requested_scope=effect_scope,
                 )
                 owner_raw = invoke("direct-owner", "--repo-root", root,
                                    "--request-file", store("direct.json", request))
                 self.assertEqual(owner_raw.returncode, 0, owner_raw.stderr.decode())
                 action = validated("workflow-response", owner_raw.stdout)
-                provider = FakeProvider(effect_observation)
-                supplied_scope = copy.deepcopy(actual)
+                provider_result = observation(
+                    self.model, contract, "selected_output",
+                    {"selected_output": selection(self.model, digest)})
+                provider = FakeProvider(provider_result)
+                supplied_scope = copy.deepcopy(effect_scope)
                 if case == "scope_mismatch":
                     supplied_scope["endpoint"] = {"kind": "literal", "value": "foreign"}
                 before = (root / ".superpowers/workflows" / action["run_id"] /
@@ -508,9 +518,10 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     continue
 
                 self.assertTrue(second["current"])
-                allowed = authority(self.model, contract, actual, action["custody"],
-                                    verdict="allowed")
                 report = self.report_common(action["custody"], digest)
+                allowed = authority(
+                    self.model, contract, effect_scope, action["custody"],
+                    verdict="allowed")
                 report.update(delivery_observations=[observed],
                               authority_observations=[allowed],
                               requested_scope=None)
@@ -524,7 +535,74 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 self.assertEqual(checkpoint.returncode, 0, checkpoint.stderr.decode())
                 response = validated("workflow-response", checkpoint.stdout)
                 self.assertIn(observed["id"], response["accepted_observation_ids"])
-                self.assertEqual(provider.calls, [actual])
+                self.assertEqual(provider.calls, [effect_scope])
+                if case == "provider_denial":
+                    proposal = self.report_common(action["custody"], digest)
+                    proposal["requested_scope"] = actual
+                    proposal = validated(
+                        "ship-checkpoint", json.dumps(proposal).encode())
+                    proposed = invoke(
+                        "checkpoint-delivery", "--repo-root", root, "--run-id",
+                        action["run_id"], "--checkpoint-file",
+                        store("proposal.json", proposal), "--now",
+                        "2026-09-21T00:00:01Z")
+                    self.assertEqual(proposed.returncode, 0,
+                                     proposed.stderr.decode())
+                    proposed = validated("workflow-response", proposed.stdout)
+                    self.assertEqual(proposed["requested_scope"], actual)
+                    denial = authority(self.model, contract, actual,
+                                       action["custody"], verdict="rejected")
+                    denial["observed_at"] = "2026-09-21T00:00:02Z"
+                    seal(self.model, denial)
+                    denying_provider = FakeProvider(denial)
+                    first = validated("workflow-response", invoke(
+                        "current-launch", "--repo-root", root, "--run-id",
+                        action["run_id"], "--action-id",
+                        action["custody"]["action_id"]).stdout)
+                    self.assertTrue(first["current"])
+                    rejected = denying_provider.execute(actual)
+                    second = validated("workflow-response", invoke(
+                        "current-launch", "--repo-root", root, "--run-id",
+                        action["run_id"], "--action-id",
+                        action["custody"]["action_id"]).stdout)
+                    self.assertTrue(second["current"])
+                    denied_report = self.report_common(action["custody"], digest)
+                    denied_report.update(authority_observations=[rejected],
+                                         requested_scope=actual)
+                    denied_report = validated(
+                        "ship-checkpoint", json.dumps(denied_report).encode())
+                    denied = invoke(
+                        "checkpoint-delivery", "--repo-root", root, "--run-id",
+                        action["run_id"], "--checkpoint-file",
+                        store("denied.json", denied_report), "--now",
+                        "2026-09-21T00:00:02Z")
+                    self.assertEqual(denied.returncode, 0, denied.stderr.decode())
+                    denied = validated("workflow-response", denied.stdout)
+                    self.assertEqual((denied["state"], denied["blocked_on"]),
+                                     ("suspended", "human_gate"))
+                    resume = self.direct_request(contract)
+                    resume.update(now="2026-09-21T00:00:03Z",
+                        tracker={"issue": 151, "state": "open", "open_blockers": [],
+                                 "decision_blockers": []},
+                        worktree={"issue": 151, "recorded": {
+                            "path": worktree, "state": "matching_issue_branch"},
+                            "candidate": None},
+                        forge={"state": "none", "url": None, "merge_sha": None})
+                    resumed_raw = invoke("direct-owner", "--repo-root", root,
+                        "--request-file", store("resume.json", resume))
+                    self.assertEqual(resumed_raw.returncode, 0,
+                                     resumed_raw.stderr.decode())
+                    resumed = validated("workflow-response", resumed_raw.stdout)
+                    self.assertEqual(resumed["custody"]["launch"], 2)
+                    saved = json.loads((root / ".superpowers/workflows" /
+                        action["run_id"] / "state.json").read_text())["issues"]["151"]["delivery"]
+                    self.assertIn(rejected["id"], [item["id"] for item in
+                                                   saved["authority_observations"]])
+                    self.assertEqual(next(item["state"] for item in saved["stage_facts"]
+                                          if item["stage_id"] == "select"), "observed")
+                    self.assertEqual(next(item["state"] for item in saved["stage_facts"]
+                                          if item["stage_id"] == "publish"), "pending")
+                    self.assertEqual(denying_provider.calls, [actual])
 
     def test_all_stages_fold_before_delivery_completion(self):
         contract, initial_intent = self.all_stage_contract()
