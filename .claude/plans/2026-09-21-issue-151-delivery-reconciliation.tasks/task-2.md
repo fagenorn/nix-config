@@ -187,31 +187,23 @@ Task-1 member, Task-2 member and design spec process artifacts.
 
 ## Preservation and review constraints
 
-Migration preserves attempts, results, result sources, timestamps, durable detail,
-outcomes and lineage byte-for-byte except adjacent default fields; it creates no
-authority or delivery truth. Invalid legacy/hybrid/version/attempt/result rows
-and legacy current queries leave bytes and inventory unchanged. Normalize before
-lock, validate/upgrade detached state, validate custody, reduce, atomically
-persist one final v3 state, then render. Rejection writes nothing; retry cannot
-duplicate consumption. Runtime owns this transition; workflow-state owns CLI,
-locks and writes.
-
-Effects use only returned action, exact actual scope and custody, with current-
-launch fences immediately before effect and observation. Historical handoff/allow
-is never operative. Partial work checkpoints; finish requires complete required
-postconditions or a genuine custody failure. Resume preserves deadline/ordinal;
-remainder 2 requires failure, absent effect and recovery; identity spaces remain
-disjoint; suspension count 3 stalls and progress resets it.
-
-No step authorizes activation, deployment, installed-generation change, forge
-write, live-ledger migration, cap increase, base repin, reduced test set, skipped
-raw receipt or partial-range review.
+The design and root-plan constraints remain binding without duplication here.
+Migration preserves historical values except its adjacent defaults and creates
+no authority or delivery truth. The runtime normalizes and validates detached
+input before lock, revalidates custody, reduces, then makes one atomic write;
+refusal is byte-identical. Effects use only returned action/scope/custody and two
+current-launch fences. D21 recovery, finite suspension, D18 consumption and all
+independent postconditions retain their exact accepted behavior. No step
+authorizes activation, deployment, installed-generation change, forge/live-
+ledger mutation, cap/base/test changes, skipped receipts or partial review.
 
 ## Exact verification and boundary precision
 
-Versions, ordinals and suspension/retry counters are plain integers, never booleans. `current-launch` returns exactly
-`action_id`, `current`, `current_action_id`, and `reason`. Every nonnull legacy result slot, including `historical_owner_result`, passes legacy and v1 model validation before decode.
-`test_workflow_delivery.py` covers the pure no-I/O transition and fail-closed source/installed loading.
+Versions, ordinals and counters are integers, never booleans. `current-launch`
+returns exactly `action_id`, `current`, `current_action_id`, and `reason`.
+Every nonnull legacy result slot, including `historical_owner_result`, passes
+legacy and v1 model validation before decode. `test_workflow_delivery.py`
+covers the pure transition and fail-closed source/installed loading.
 
 Run and retain real argv/stdout/stderr/exit receipts for:
 ```sh
@@ -223,16 +215,9 @@ for skill in home/common/agent-skills/skills/{from-issue,ship-issue} home/common
 ```
 Use the existing PyYAML devenv.
 
-D21 in the spec and root plan Global Constraints binds this task's exact recovery
-wire, proof chronology/types, authority/denial behavior, replay, custody and stall
-rules. Public tests cover valid recovery plus absence, denial, replay, third
-allocation, active custody and stale-proof no-write outcomes. Raw receipts and
+D21 and D22 in the spec/root plan bind the exact recovery proof, chronology,
+denial, replay, custody/stall behavior and private runtime/projection split.
+Public tests cover valid recovery and every accepted refusal, plus lexical
+source/installed loading failures. The roster is 24 product paths (28 with the
+four process artifacts); `default.nix` publishes the helper. Raw receipts and
 the no-activation/live-ledger boundary remain mandatory.
-
-D22 in the spec and root plan binds the private
-`workflow_delivery_wire.py`/`DeliveryRuntime` split, unchanged runtime interface
-1 and model eight-name facade, lexical source/installed fail-closed loading, and
-the no-callback/fallback/policy-copy boundary. The roster is 24 product paths (28
-with the four Task-2 process artifacts); `default.nix` publishes the helper and existing
-`test_workflow_delivery.py` covers its loading/errors. The six-module command is
-unchanged.

@@ -13,68 +13,48 @@
 - Modify: `justfile`
 
 **Interfaces:**
-- Produces `MODEL_INTERFACE_VERSION = 1` and `DeliveryModelError(ValueError)`.
-- Produces `canonical_bytes(value: object, *, omit_derived: str | None = None) -> bytes` and `canonical_digest(value: object, *, omit_derived: str | None = None) -> str`. Bytes are sorted-key compact UTF-8 JSON plus one newline; booleans never pass integer fields; duplicate keys remain a boundary-decoder concern. Digest is `sha256:<64 lowercase hex>` over canonical bytes after omitting only the named top-level derived member.
-- Produces `validate_delivery_object(value: object, *, expected_kind: str | None = None, notes_max_characters: int) -> dict[str, object]`. It dispatches the closed v1 kinds in the spec, validates exact keys/types/order/derived identities/cross-references, and returns a detached normalized copy. It also accepts the nested strict `delivery` value, v2 checkpoint/handoff/summary envelopes, and closed workflow-response union used by Task 2; it does not validate workflow schema, ledger freshness, source authenticity or legacy result rows.
-- Produces `validate_custody_ref(value: object, *, issue: int) -> dict[str, object]`, accepting only the implementation/remainder union and its exact derived action id.
-- Produces `match_scope(contract: object, intent: object, requested: object, *, selected_outputs: list[object], at_time: str, revocation_observations: list[object]) -> dict[str, object]`. The intent contains the declared scope, expiry and revocation key; the contract supplies the digest and complete slot constraints. The return has exactly `matched` (bool), nullable `scope_id`, and `reason_code` (closed string). It applies only the narrowing table and never reads time/ledger state.
-- Produces `reduce_delivery(contract: object, delivery: object, *, evaluation: object) -> dict[str, object]`. `evaluation` has exactly RFC3339 `at_time`, nullable `custody`, nullable boolean `current_launch` (null exactly when custody is null), nullable `requested_scope`, `source_kind` (`control | direct | checkpoint | summary`), and sorted candidate `authorization_intents`, `authority_observations`, `reevaluation_evidence`, and `delivery_observations`. The result has exactly complete normalized `next_delivery`, ordered `pending_stage_ids`, nullable `next_stage_id`, sorted `requirements`, `completion_state` (`pending | delivery_complete`), nullable typed `blocking`, and nullable strict `authority_evaluation`. Workflow-state can persist `next_delivery` without reconstructing accepted facts or consumption state.
-- `__init__.py` exports exactly these eight names and no other public names. The
-  four underscore modules are private, use normal relative imports, and own
-  canonical primitives, objects/evidence, wire envelopes and reconciliation,
-  respectively. Publish the whole directory at
-  `~/.agents/lib/python/delivery_model`; callers explicitly load its
-  `__init__.py` as interface version 1.
+- Export exactly eight names: `MODEL_INTERFACE_VERSION = 1`,
+  `DeliveryModelError(ValueError)`, `canonical_bytes`, `canonical_digest`,
+  `validate_delivery_object`, `validate_custody_ref`, `match_scope`, and
+  `reduce_delivery`. Their exact signatures, closed inputs/results and
+  canonicalization rules are the design's public API; Task 2 may not add a
+  ninth name.
+- The private relative-import package owns canonical primitives,
+  objects/evidence, wire envelopes and reconciliation once, and is published as
+  `~/.agents/lib/python/delivery_model`. Callers load only its `__init__.py` as
+  interface version 1.
 
 **Invariants:**
-- Per D1–D4 and D13, this package is the sole owner of new delivery validation,
-  canonical identity, narrowing and reduction. `_canonical` → `_objects` →
-  `_wire`/`_reconcile`; the facade imports them without cycles, duplicate policy,
-  registries or caller injection. It has no CLI, I/O, clock, provider, ledger,
-  schema selection, activation or import side effect.
-- All strict objects reject unknown/missing keys, bool-as-int, invalid nulls, duplicate or unsorted set-like arrays, bad RFC 3339 UTC values, bad ids/digests, broken intent predecessors, stage graph cycles/forward references, slot mismatches and conflicting observation identities.
-- `stages`, `stage_facts`, and `pending_stage_ids` retain contract order. Other set-like arrays are sorted by scalar or member id and unique.
-- Selection precedes every slot use; publish precedes open. Selected output has
-  explicit nonempty acceptance/review/test evidence arrays; merge requires all
-  three and an open PR, not `implementation_delivered`. Fresh post-merge
-  reachability or record presence independently observes delivery.
-- A host rejection remains operative until either a valid post-rejection intent covering the exact tuple or accepted reevaluation evidence independently permits one fresh evaluation. Before exposing that evaluation, the result appends one `authority-evaluation-consumption/v1` keyed by rejection and basis; workflow-state persists it first. Replay, transfer and crash never reissue the same basis. Human completion may satisfy an exact effect while preserving the rejection and granting no mutation right.
-- An intent-revocation observation carries the exact target intent id and revocation key. Direct/control may retain trusted late facts under their original old launch, but only a current-custody allowed fact authorizes the current effect.
-- `validate_delivery_object` checks structural/canonical truth only. `reduce_delivery` owns intent-chain, contract/slot, launch/effect, rejection and one-shot reevaluation semantics over caller-supplied facts. Workflow-state remains the transaction/trusted-source owner and supplies the current time/launch; neither the model nor artifact-budget authenticates an opaque host reference.
-- The publication stanza adds one library target; it does not change the installed workflow/artifact wrappers or activate a new protocol.
+- The design's D1–D4, D13 and closed tables bind every field, order,
+  relationship, narrowing, evidence category and response. The acyclic
+  `_canonical` → `_objects` → `_wire`/`_reconcile` package is pure: no CLI, I/O,
+  clock, provider, ledger, schema choice, activation, registry or import side
+  effect.
+- Structural validation rejects all malformed shape/type/order/identity/
+  reference/graph cases and returns detached normalized values. Reduction owns
+  contract, stage, scope, intent, authority, rejection and D18 consumption
+  semantics over supplied facts. Workflow-state remains the freshness,
+  transaction and trusted-source owner.
+- Publication adds the managed library and test only; it changes no workflow or
+  artifact wrapper and activates no protocol.
 
 - [ ] **Step 1: Write public model/publication tests and capture RED**
 
-Private _delivery_model_fixtures.py uses explicit relative imports and strict
-synthetic builders receiving the model; valid seeds normalize, deliberate
-invalid builders leave rejection to the public assertion. It has no policy, I/O,
-clock, provider, ledger, entry point, fallback or second implementation.
-
-Public tests cover D1–D19 model behavior: canonical identity/bool-as-int; closed
-shape/order/reference/graph validation; intent chain/expiry/revocation; exact
-slot/literal/data/spend narrowing; all acceptance/review/test categories;
-current/old launch authority; D18 consumption/replay/crash/transfer/bases and
-rejection precedence; D19 missing/wrong/uncovered/covered/post-fold scope; every
-stage and independent postcondition; exact cleanup/record subjects; full
-workflow-response nesting; source/installed loading failures. Run and retain
-python3 -m unittest home/common/agent-skills/tests/test_delivery_model.py -v
-before implementation; RED must be the absent package, never an invented result.
+Fixture helpers use explicit relative imports and strict synthetic builders;
+they contain no policy or I/O. Public tests cover every D1–D19 scenario and
+negative in the design, including canonical/closed validation, graphs,
+narrowing, evidence categories, current/old custody, D18 replay/crash/transfer,
+D19 scope outcomes, postconditions, cleanup/record subjects, complete response
+nesting and source/installed loading. Capture the absent-package RED with
+`python3 -m unittest home/common/agent-skills/tests/test_delivery_model.py -v`.
 
 - [ ] **Step 2: Implement and publish the pure model**
 
-Implement the eight-name interface. Keep __init__.py a facade and the acyclic
-_canonical → _objects → _wire/_reconcile ownership. Validate outer shape/type,
-identity, ordering, then references; return detached values. Apply the exact
-narrowing/reduction/response contract, including typed requirements, D18
-consumption/action and authority time/custody rules. The model validates
-legacy-result placement, while Task 2 composes the legacy row validator; it owns
-no workflow I/O, freshness or source authentication.
-
-Publish the managed .agents/lib/python/delivery_model directory and register its
-test once. Load only lexical __init__.py as a package, clean partial members,
-accept managed directory symlinks and fail before decode/mutation for
-missing/partial/wrong input. No sys.path, fallback or workflow-state/artifact
-cutover belongs to Task 1.
+Implement the facade and private ownership above, preserving the design's exact
+validation order, narrowing, reduction, typed requirements and D18 rules.
+Publish and register the whole package once. Lexical package loading accepts the
+managed symlink layout, cleans partial modules and fails before decode/mutation;
+it never edits `sys.path` or falls back. Workflow cutover belongs to Task 2.
 
 - [ ] **Step 3: Verify, scope, sign and review**
 
