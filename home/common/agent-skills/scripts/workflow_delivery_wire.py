@@ -61,6 +61,15 @@ class DeliveryProjection:
                 "action_id": f"{issue}:{middle}:{len(record['launches'])}"}
 
     @staticmethod
+    def remainder_facade(issue_state: dict[str, Any], remainder: dict[str, Any]
+                         ) -> dict[str, Any]:
+        return {"issue": issue_state["issue"],
+                "attempt": remainder["source_attempt"], "state": remainder["state"],
+                "owner": remainder["owner"], "worktree": remainder["worktree"],
+                "handoff_path": None, "deadline_at": remainder["deadline_at"],
+                "launches": remainder["launches"], "result": remainder["result"]}
+
+    @staticmethod
     def delivery_complete(issue_state: dict[str, Any]) -> bool:
         delivery = issue_state.get("delivery")
         return (isinstance(delivery, dict) and delivery.get("contract") is not None

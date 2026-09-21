@@ -223,27 +223,22 @@ class WorkflowError(Exception):
 
 
 def _delivery():
-    root = Path(__file__).parent
-    entry = (root / "workflow_delivery.py" if root.name == "scripts"
-             else Path.home() / ".agents/lib/python/workflow_delivery.py")
+    src = Path(__file__).parent
+    entry = src / "workflow_delivery.py" if src.name == "scripts" else Path.home() / ".agents/lib/python/workflow_delivery.py"
     try:
-        if not entry.is_file():
-            raise FileNotFoundError(entry)
-        module = runpy.run_path(str(entry), run_name="_delivery")
+        module = runpy.run_path(str(entry))
         if module.get("WORKFLOW_DELIVERY_INTERFACE_VERSION") != 1:
-            raise ValueError("unsupported interface")
+            raise ValueError("interface")
         return module["DeliveryRuntime"](notes_max_characters=phase_notes_maximum())
-    except Exception as error:
-        text = str(error)
-        raise WorkflowError(text if "interface" in text or "model" in text
-                            else "delivery runtime unavailable") from error
+    except Exception as exc:
+        raise WorkflowError(f"delivery runtime: {exc}") from exc
 
 
 def _call(message, function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
-    except Exception as error:
-        raise WorkflowError(str(error) if message is None else message) from error
+    except Exception as exc:
+        raise WorkflowError(str(exc) if message is None else message) from exc
 
 
 def parse_utc(value: str, label: str = "time") -> datetime:
@@ -2241,8 +2236,7 @@ def direct_run_is_terminal(issue_state: dict[str, Any]) -> bool:
         latest["state"] == "stopped" and latest["result_source"] == "expiry"
     ):
         return False
-    return (issue_state["delivery"]["contract"] is None
-            or _delivery().delivery_complete(issue_state))
+    return True
 
 
 def direct_observe(
@@ -2369,6 +2363,11 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 selected is not None
                 and direct_run_is_terminal(selected[4]["issues"][str(issue)])
             )
+            if (selected_is_terminal
+                    and runtime.historical_direct_requested(
+                        selected[4]["issues"][str(issue)], request)
+                    and not runtime.delivery_complete(selected[4]["issues"][str(issue)])):
+                selected_is_terminal = False
 
             selected_attempts = (
                 [] if selected is None
@@ -2566,20 +2565,11 @@ def command_checkpoint_delivery(args):
     now = format_utc(parse_utc(args.now, "--now"))
     report = artifact_budget_validate("validate-report", Path(args.checkpoint_file),
                                       boundary="ship-checkpoint")
-    issue = report["issue"]
 
-    def checkpoint(state):
-        assert state is not None
-        issue_state = state["issues"].get(str(issue))
-        if issue_state is None:
-            raise WorkflowError("unknown checkpoint issue")
-        state["updated_at"] = now
-        return _call(
-            "checkpoint transition refused", runtime.checkpoint_state,
-            issue_state, report, now=now, suspend_attempt=suspend_attempt,
-            ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id)
-
-    response = transact(args.repo_root, args.run_id, checkpoint)
+    response = transact(args.repo_root, args.run_id, lambda state: _call(
+        "checkpoint transition refused", runtime.checkpoint_state,
+        state, report, now=now, suspend_attempt=suspend_attempt,
+        ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id))
     print_json(response)
     return 0
 

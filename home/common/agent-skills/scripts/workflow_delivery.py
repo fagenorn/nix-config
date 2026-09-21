@@ -280,6 +280,11 @@ class DeliveryRuntime:
     def delivery_complete(self, issue_state: dict[str, Any]) -> bool:
         return self._projection.delivery_complete(issue_state)
 
+    def historical_direct_requested(
+        self, issue_state: dict[str, Any], request: dict[str, Any]
+    ) -> bool:
+        return self._projection.historical_direct_requested(issue_state, request)
+
 
     def remainder_policy(
         self, issue_state: dict[str, Any] | None, *, now: str,
@@ -507,15 +512,10 @@ class DeliveryRuntime:
                 "custody_kind": "remainder", "expired": False,
                 "reduction": reduction}
 
-    @staticmethod
     def _remainder_facade(
-        issue_state: dict[str, Any], remainder: dict[str, Any]
+        self, issue_state: dict[str, Any], remainder: dict[str, Any]
     ) -> dict[str, Any]:
-        return {"issue": issue_state["issue"],
-                "attempt": remainder["source_attempt"], "state": remainder["state"],
-                "owner": remainder["owner"], "worktree": remainder["worktree"],
-                "handoff_path": None, "deadline_at": remainder["deadline_at"],
-                "launches": remainder["launches"], "result": remainder["result"]}
+        return self._projection.remainder_facade(issue_state, remainder)
 
     def occupied_count(
         self, state: dict[str, Any], *, at_time: str,
@@ -719,9 +719,12 @@ class DeliveryRuntime:
                 "accepted": accepted, "blocking": blocking, "stalled": stalled}
 
     def checkpoint_state(
-        self, issue_state: dict[str, Any], report: dict[str, Any], *, now: str,
+        self, state: dict[str, Any], report: dict[str, Any], *, now: str,
         suspend_attempt: Any, ledger_repo_root: str, run_id: str,
     ) -> tuple[dict[str, Any], bool]:
+        issue_state = state["issues"].get(str(report["issue"]))
+        if issue_state is None:
+            raise ValueError("unknown checkpoint issue")
         context = self.checkpoint_begin(issue_state, report, now=now)
         stalled = context["stalled"]
         if (context["blocking"] is not None
@@ -730,6 +733,7 @@ class DeliveryRuntime:
                 context["record"], blocked_on=context["blocking"]["blocked_on"], now=now)
             if stalled:
                 issue_state["outcome"] = copy.deepcopy(context["record"]["result"])
+        state["updated_at"] = now
         return self.complete_checkpoint(
             context, ledger_repo_root=ledger_repo_root, run_id=run_id,
             issue_state=issue_state, report=report, stalled=stalled)
