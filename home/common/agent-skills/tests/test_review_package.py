@@ -666,45 +666,107 @@ class ReviewPackageCliTest(unittest.TestCase):
                     self.assertEqual({p.name for p in final_members.iterdir()},
                                      {competed_path.name})
 
+    def publication_fixture(
+        self,
+        directory: Path,
+        members: tuple[bytes, ...] = (b"staged-one", b"staged-two"),
+    ) -> tuple[Path, Path, Path]:
+        stage = directory / "stage"
+        stage_members = stage / "review.shards"
+        stage_members.mkdir(parents=True)
+        stage_root = stage / "review.json"
+        stage_root.write_bytes(b"staged-manifest")
+        for number, raw in enumerate(members, 1):
+            (stage_members / f"shard-{number:03d}.diff").write_bytes(raw)
+        final_root = directory / "review.json"
+        return stage_root, final_root, directory / "review.shards"
+
+    def test_publication_cleanup_stays_with_retained_member_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            stage_root, final_root, final_members = self.publication_fixture(directory)
+            stage_members = stage_root.with_suffix(".shards")
+            original_members = directory / "review-original"
+            competitor = final_members / "shard-001.diff"
+            sentinel = final_members / "competitor"
+
+            def replace_at_manifest(label: str, _path: Path):
+                if label != "manifest":
+                    return
+                final_members.rename(original_members)
+                final_members.mkdir()
+                os.link(stage_members / "shard-001.diff", competitor,
+                        follow_symlinks=False)
+                sentinel.write_bytes(b"competitor-bytes")
+
+            with self.assertRaises(review_package_module.PublicationError):
+                review_package_module.publish_package(
+                    stage_root, final_root, replace_at_manifest
+                )
+
+            self.assertFalse(final_root.exists())
+            self.assertTrue(competitor.exists())
+            self.assertEqual(competitor.read_bytes(), b"staged-one")
+            self.assertEqual(sentinel.read_bytes(), b"competitor-bytes")
+            self.assertEqual(list(original_members.iterdir()), [])
+
     def test_publication_rejects_changed_directory_and_link_identities(self):
         for mutation in ("directory-before-first", "member-before-second",
                          "directory-before-manifest"):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw:
-                directory = Path(raw)
-                stage = directory / "stage"
-                stage_members = stage / "review.shards"
-                stage_members.mkdir(parents=True)
-                stage_root = stage / "review.json"
-                stage_root.write_bytes(b"staged-manifest")
-                (stage_members / "shard-001.diff").write_bytes(b"staged-one")
-                (stage_members / "shard-002.diff").write_bytes(b"staged-two")
-                final_root = directory / "review.json"
-                final_members = directory / "review.shards"
-                competitor = b"competitor-bytes"
-                competed_path = final_members / "competitor"
+            attempts = 128 if mutation == "directory-before-first" else 1
+            for attempt in range(attempts):
+                with (self.subTest(mutation=mutation, attempt=attempt + 1),
+                      tempfile.TemporaryDirectory() as raw):
+                    directory = Path(raw)
+                    stage_root, final_root, final_members = self.publication_fixture(
+                        directory
+                    )
+                    competitor = b"competitor-bytes"
+                    competed_path = final_members / "competitor"
+                    observed: dict[str, tuple[int, int]] = {}
 
-                def inject(label: str, path: Path):
-                    if mutation == "directory-before-first" and label == "member:shard-001.diff":
-                        final_members.rmdir()
-                        final_members.mkdir()
-                        competed_path.write_bytes(competitor)
-                    elif mutation == "member-before-second" and label == "member:shard-002.diff":
-                        prior = final_members / "shard-001.diff"
-                        prior.unlink()
-                        prior.write_bytes(competitor)
-                    elif mutation == "directory-before-manifest" and label == "manifest":
+                    def replace_directory():
+                        before = final_members.lstat()
+                        observed["before"] = (before.st_dev, before.st_ino)
                         for member in final_members.iterdir():
                             member.unlink()
                         final_members.rmdir()
                         final_members.mkdir()
+                        after = final_members.lstat()
+                        observed["after"] = (after.st_dev, after.st_ino)
                         competed_path.write_bytes(competitor)
 
-                with self.assertRaises(review_package_module.PublicationError):
-                    review_package_module.publish_package(stage_root, final_root, inject)
-                self.assertFalse(final_root.exists())
-                if mutation == "member-before-second":
-                    competed_path = final_members / "shard-001.diff"
-                self.assertEqual(competed_path.read_bytes(), competitor)
+                    def inject(label: str, _path: Path):
+                        if (mutation == "directory-before-first"
+                                and label == "member:shard-001.diff"):
+                            replace_directory()
+                        elif (mutation == "member-before-second"
+                              and label == "member:shard-002.diff"):
+                            prior = final_members / "shard-001.diff"
+                            prior.unlink()
+                            prior.write_bytes(competitor)
+                        elif (mutation == "directory-before-manifest"
+                              and label == "manifest"):
+                            replace_directory()
+
+                    try:
+                        review_package_module.publish_package(
+                            stage_root, final_root, inject
+                        )
+                    except review_package_module.PublicationError:
+                        pass
+                    else:
+                        self.fail(
+                            "publication accepted replacement: "
+                            f"mutation={mutation} attempt={attempt + 1}/{attempts} "
+                            f"platform={sys.platform} before={observed.get('before')} "
+                            f"after={observed.get('after')}"
+                        )
+
+                    self.assertFalse(final_root.exists())
+                    if mutation == "member-before-second":
+                        competed_path = final_members / "shard-001.diff"
+                    self.assertEqual(competed_path.read_bytes(), competitor)
 
     def test_parent_swap_cannot_redirect_publication_outside_root(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -744,6 +806,530 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual(list(outside.iterdir()), [])
             self.assertFalse((moved / "review.json").exists())
             self.assertFalse((moved / "review.shards").exists())
+
+    def test_member_link_cannot_be_redirected_at_the_syscall_boundary(self):
+        for replacement in ("directory", "symlink"):
+            with (self.subTest(replacement=replacement),
+                  tempfile.TemporaryDirectory() as raw):
+                directory = Path(raw)
+                stage_root, final_root, final_members = self.publication_fixture(
+                    directory, (b"staged-one",)
+                )
+                stage_members = stage_root.with_suffix(".shards")
+                original_members = directory / "review-original"
+                outside = directory / "outside"
+                outside.mkdir()
+                redirected_during_link = False
+                real_link = review_package_module.os.link
+
+                def replace_then_link(source, destination, *args, **kwargs):
+                    nonlocal redirected_during_link
+                    if Path(source).parent == stage_members:
+                        final_members.rename(original_members)
+                        if replacement == "directory":
+                            final_members.mkdir()
+                            replacement_root = final_members
+                        else:
+                            final_members.symlink_to(outside, target_is_directory=True)
+                            replacement_root = outside
+                        (replacement_root / "competitor").write_bytes(
+                            b"competitor-bytes"
+                        )
+                        result = real_link(source, destination, *args, **kwargs)
+                        redirected_during_link = (
+                            replacement_root / Path(source).name
+                        ).exists()
+                        return result
+                    return real_link(source, destination, *args, **kwargs)
+
+                with mock.patch.object(
+                    review_package_module.os, "link", side_effect=replace_then_link
+                ):
+                    with self.assertRaises(review_package_module.PublicationError):
+                        review_package_module.publish_package(stage_root, final_root)
+
+                replacement_root = (
+                    final_members if replacement == "directory" else outside
+                )
+                self.assertFalse(redirected_during_link)
+                self.assertEqual(
+                    {path.name for path in replacement_root.iterdir()}, {"competitor"}
+                )
+                self.assertEqual(
+                    (replacement_root / "competitor").read_bytes(),
+                    b"competitor-bytes",
+                )
+                self.assertEqual(list(original_members.iterdir()), [])
+                self.assertFalse(final_root.exists())
+
+    def test_member_directory_acquisition_errors_refuse_without_deleting_name(self):
+        for fault in ("open", "fstat"):
+            with (self.subTest(fault=fault),
+                  tempfile.TemporaryDirectory() as raw):
+                directory = Path(raw)
+                stage_root, final_root, final_members = self.publication_fixture(
+                    directory, (b"staged-one",)
+                )
+                real_open = review_package_module.os.open
+                real_fstat = review_package_module.os.fstat
+                acquired: list[int] = []
+
+                def open_member(path, flags, *args, **kwargs):
+                    if Path(path).name == final_members.name and fault == "open":
+                        raise OSError("injected member-directory open failure")
+                    descriptor = real_open(path, flags, *args, **kwargs)
+                    if Path(path).name == final_members.name:
+                        acquired.append(descriptor)
+                    return descriptor
+
+                def stat_member(descriptor):
+                    if acquired and descriptor == acquired[-1] and fault == "fstat":
+                        raise OSError("injected member-directory stat failure")
+                    return real_fstat(descriptor)
+
+                with (mock.patch.object(review_package_module.os, "open",
+                                        side_effect=open_member),
+                      mock.patch.object(review_package_module.os, "fstat",
+                                        side_effect=stat_member)):
+                    with self.assertRaises(review_package_module.PublicationError):
+                        review_package_module.publish_package(stage_root, final_root)
+
+                self.assertTrue(final_members.is_dir())
+                self.assertEqual(list(final_members.iterdir()), [])
+                self.assertFalse(final_root.exists())
+                for descriptor in acquired:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+    def test_member_directory_acquisition_rejects_open_boundary_replacement(self):
+        for boundary in ("before-open", "after-open"):
+            with (self.subTest(boundary=boundary),
+                  tempfile.TemporaryDirectory() as raw):
+                directory = Path(raw)
+                stage_root, final_root, final_members = self.publication_fixture(
+                    directory, (b"staged-one",)
+                )
+                original_members = directory / "review-original"
+                sentinel = final_members / "competitor"
+                real_open = review_package_module.os.open
+                acquired: list[int] = []
+                callbacks: list[str] = []
+
+                def observe_callback(label: str, _path: Path):
+                    callbacks.append(label)
+
+                def replace_around_open(path, flags, *args, **kwargs):
+                    if Path(path) != final_members:
+                        return real_open(path, flags, *args, **kwargs)
+                    if boundary == "before-open":
+                        final_members.rename(original_members)
+                        final_members.mkdir()
+                        sentinel.write_bytes(b"competitor-bytes")
+                        descriptor = real_open(path, flags, *args, **kwargs)
+                    else:
+                        descriptor = real_open(path, flags, *args, **kwargs)
+                        final_members.rename(original_members)
+                        final_members.mkdir()
+                        sentinel.write_bytes(b"competitor-bytes")
+                    acquired.append(descriptor)
+                    return descriptor
+
+                with mock.patch.object(
+                    review_package_module.os, "open", side_effect=replace_around_open
+                ):
+                    with self.assertRaises(review_package_module.PublicationError):
+                        review_package_module.publish_package(
+                            stage_root, final_root, observe_callback
+                        )
+
+                self.assertEqual(callbacks, ["member_dir"])
+                self.assertEqual(sentinel.read_bytes(), b"competitor-bytes")
+                self.assertEqual(list(original_members.iterdir()), [])
+                self.assertFalse(final_root.exists())
+                self.assertTrue(acquired)
+                for descriptor in acquired:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+    def test_publication_releases_owned_descriptors_and_preserves_borrowed_parent(self):
+        for outcome in ("success", "publication-failure"):
+            with (self.subTest(outcome=outcome),
+                  tempfile.TemporaryDirectory() as raw):
+                directory = Path(raw)
+                primary = directory / "primary"
+                primary.mkdir()
+                chain = review_package_module._ensure_directories(
+                    primary, ["destination"], retain=True
+                )
+                self.assertIsNotNone(chain)
+                destination = primary / "destination"
+                stage_root, _, _ = self.publication_fixture(
+                    directory / "fixture", (b"staged-one",)
+                )
+                final_root = destination / "review.json"
+                starting_cwd = Path.cwd()
+                real_open = review_package_module.os.open
+                opened: list[int] = []
+                member_fds: list[int] = []
+
+                def observe_open(path, flags, *args, **kwargs):
+                    descriptor = real_open(path, flags, *args, **kwargs)
+                    opened.append(descriptor)
+                    if Path(path).name == "review.shards":
+                        member_fds.append(descriptor)
+                    return descriptor
+
+                def compete_with_manifest(label: str, path: Path):
+                    if outcome == "publication-failure" and label == "manifest":
+                        path.write_bytes(b"competitor-manifest")
+
+                try:
+                    with mock.patch.object(
+                        review_package_module.os, "open", side_effect=observe_open
+                    ):
+                        if outcome == "success":
+                            review_package_module.publish_package(
+                                stage_root, final_root,
+                                final_parent_fd=chain.leaf,
+                                verify_final_parent=chain.verify,
+                            )
+                        else:
+                            with self.assertRaises(
+                                review_package_module.PublicationError
+                            ):
+                                review_package_module.publish_package(
+                                    stage_root, final_root, compete_with_manifest,
+                                    final_parent_fd=chain.leaf,
+                                    verify_final_parent=chain.verify,
+                                )
+
+                    self.assertEqual(Path.cwd(), starting_cwd)
+                    os.fstat(chain.leaf)
+                    self.assertTrue(opened)
+                    self.assertTrue(member_fds)
+                    for descriptor in opened:
+                        with self.assertRaises(OSError):
+                            os.fstat(descriptor)
+                    if outcome == "success":
+                        self.assertEqual(final_root.read_bytes(), b"staged-manifest")
+                    else:
+                        self.assertEqual(
+                            final_root.read_bytes(), b"competitor-manifest"
+                        )
+                finally:
+                    chain.close()
+
+    def test_publication_releases_member_descriptor_without_parent_fd(self):
+        for outcome in ("success", "publication-failure"):
+            with (self.subTest(outcome=outcome),
+                  tempfile.TemporaryDirectory() as raw):
+                directory = Path(raw)
+                stage_root, final_root, final_members = self.publication_fixture(
+                    directory, (b"staged-one",)
+                )
+                starting_cwd = Path.cwd()
+                real_open = review_package_module.os.open
+                member_fds: list[int] = []
+
+                def observe_open(path, flags, *args, **kwargs):
+                    descriptor = real_open(path, flags, *args, **kwargs)
+                    if Path(path) == final_members:
+                        member_fds.append(descriptor)
+                    return descriptor
+
+                def compete_with_manifest(label: str, path: Path):
+                    if outcome == "publication-failure" and label == "manifest":
+                        path.write_bytes(b"competitor-manifest")
+
+                with mock.patch.object(
+                    review_package_module.os, "open", side_effect=observe_open
+                ):
+                    if outcome == "success":
+                        review_package_module.publish_package(stage_root, final_root)
+                    else:
+                        with self.assertRaises(review_package_module.PublicationError):
+                            review_package_module.publish_package(
+                                stage_root, final_root, compete_with_manifest
+                            )
+
+                self.assertEqual(Path.cwd(), starting_cwd)
+                self.assertTrue(member_fds)
+                for descriptor in member_fds:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+                if outcome == "success":
+                    self.assertEqual(final_root.read_bytes(), b"staged-manifest")
+                else:
+                    self.assertEqual(final_root.read_bytes(), b"competitor-manifest")
+
+    def test_close_failure_after_publication_preserves_package_and_recycled_fd(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            primary = directory / "primary"
+            primary.mkdir()
+            chain = review_package_module._ensure_directories(
+                primary, ["destination"], retain=True
+            )
+            self.assertIsNotNone(chain)
+            destination = primary / "destination"
+            stage_root, _, _ = self.publication_fixture(
+                directory / "fixture", (b"staged-one",)
+            )
+            final_root = destination / "review.json"
+            final_members = destination / "review.shards"
+            starting_cwd = Path.cwd()
+            real_open = review_package_module.os.open
+            real_close = review_package_module.os.close
+            opened: list[int] = []
+            member_fds: list[int] = []
+            recycled_fd: int | None = None
+            injected = False
+
+            def observe_open(path, flags, *args, **kwargs):
+                descriptor = real_open(path, flags, *args, **kwargs)
+                opened.append(descriptor)
+                if Path(path).name == final_members.name:
+                    member_fds.append(descriptor)
+                return descriptor
+
+            def fail_after_real_close(descriptor):
+                nonlocal recycled_fd, injected
+                if member_fds and descriptor == member_fds[-1] and not injected:
+                    real_close(descriptor)
+                    recycled_fd = real_open(os.devnull, os.O_RDONLY)
+                    if recycled_fd != descriptor:
+                        real_close(recycled_fd)
+                        recycled_fd = None
+                        raise RuntimeError("fixture could not observe fd reuse")
+                    injected = True
+                    raise OSError("injected close failure after real close")
+                return real_close(descriptor)
+
+            try:
+                with (mock.patch.object(review_package_module.os, "open",
+                                        side_effect=observe_open),
+                      mock.patch.object(review_package_module.os, "close",
+                                        side_effect=fail_after_real_close)):
+                    with self.assertRaises(review_package_module.PublicationError):
+                        review_package_module.publish_package(
+                            stage_root, final_root,
+                            final_parent_fd=chain.leaf,
+                            verify_final_parent=chain.verify,
+                        )
+
+                self.assertTrue(injected)
+                self.assertIsNotNone(recycled_fd)
+                os.fstat(recycled_fd)
+                self.assertEqual(Path.cwd(), starting_cwd)
+                os.fstat(chain.leaf)
+                for descriptor in opened:
+                    if descriptor != recycled_fd:
+                        with self.assertRaises(OSError):
+                            os.fstat(descriptor)
+                self.assertEqual(final_root.read_bytes(), b"staged-manifest")
+                self.assertEqual(
+                    (final_members / "shard-001.diff").read_bytes(), b"staged-one"
+                )
+            finally:
+                if recycled_fd is not None:
+                    real_close(recycled_fd)
+                chain.close()
+
+    def test_restoration_failure_still_closes_saved_cwd_descriptor(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            primary = directory / "primary"
+            primary.mkdir()
+            chain = review_package_module._ensure_directories(
+                primary, ["destination"], retain=True
+            )
+            self.assertIsNotNone(chain)
+            destination = primary / "destination"
+            stage_root, _, _ = self.publication_fixture(
+                directory / "fixture", (b"staged-one",)
+            )
+            final_root = destination / "review.json"
+            starting_cwd = Path.cwd()
+            real_open = review_package_module.os.open
+            real_close = review_package_module.os.close
+            real_fchdir = review_package_module.os.fchdir
+            rescue_fd = real_open(
+                starting_cwd,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            previous_fds: list[int] = []
+            member_fds: list[int] = []
+
+            def observe_open(path, flags, *args, **kwargs):
+                descriptor = real_open(path, flags, *args, **kwargs)
+                if Path(path) == starting_cwd:
+                    previous_fds.append(descriptor)
+                if Path(path).name == "review.shards":
+                    member_fds.append(descriptor)
+                return descriptor
+
+            def fail_restoration(descriptor):
+                if previous_fds and descriptor == previous_fds[-1]:
+                    raise OSError("injected cwd restoration failure")
+                return real_fchdir(descriptor)
+
+            try:
+                try:
+                    with (mock.patch.object(review_package_module.os, "open",
+                                            side_effect=observe_open),
+                          mock.patch.object(review_package_module.os, "fchdir",
+                                            side_effect=fail_restoration)):
+                        with self.assertRaises(review_package_module.PublicationError):
+                            review_package_module.publish_package(
+                                stage_root, final_root,
+                                final_parent_fd=chain.leaf,
+                                verify_final_parent=chain.verify,
+                            )
+                finally:
+                    real_fchdir(rescue_fd)
+                    real_close(rescue_fd)
+
+                self.assertEqual(Path.cwd(), starting_cwd)
+                self.assertTrue(previous_fds)
+                self.assertTrue(member_fds)
+                for descriptor in previous_fds + member_fds:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+                os.fstat(chain.leaf)
+                self.assertEqual(final_root.read_bytes(), b"staged-manifest")
+            finally:
+                chain.close()
+
+    def test_publication_failure_remains_primary_when_release_also_fails(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            stage_root, final_root, final_members = self.publication_fixture(
+                directory, (b"staged-one",)
+            )
+            stage_members = stage_root.with_suffix(".shards")
+            real_open = review_package_module.os.open
+            real_link = review_package_module.os.link
+            real_close = review_package_module.os.close
+            member_fds: list[int] = []
+            release_failed = False
+
+            def observe_open(path, flags, *args, **kwargs):
+                descriptor = real_open(path, flags, *args, **kwargs)
+                if Path(path) == final_members:
+                    member_fds.append(descriptor)
+                return descriptor
+
+            def fail_member_link(source, destination, *args, **kwargs):
+                if Path(source).parent == stage_members:
+                    raise OSError("injected publication failure")
+                return real_link(source, destination, *args, **kwargs)
+
+            def fail_member_release(descriptor):
+                nonlocal release_failed
+                if member_fds and descriptor == member_fds[-1] and not release_failed:
+                    real_close(descriptor)
+                    release_failed = True
+                    raise OSError("injected member release failure")
+                return real_close(descriptor)
+
+            with (mock.patch.object(review_package_module.os, "open",
+                                    side_effect=observe_open),
+                  mock.patch.object(review_package_module.os, "link",
+                                    side_effect=fail_member_link),
+                  mock.patch.object(review_package_module.os, "close",
+                                    side_effect=fail_member_release)):
+                with self.assertRaises(
+                    review_package_module.PublicationError
+                ) as raised:
+                    review_package_module.publish_package(stage_root, final_root)
+
+            failure = raised.exception
+            self.assertEqual(str(failure), "exclusive package publication failed")
+            self.assertIsInstance(failure.__cause__, OSError)
+            self.assertEqual(str(failure.__cause__), "injected publication failure")
+            self.assertTrue(release_failed)
+            self.assertTrue(any(
+                "injected member release failure" in note
+                for note in getattr(failure, "__notes__", [])
+            ))
+            for descriptor in member_fds:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+            self.assertFalse(final_root.exists())
+
+    def test_replaced_member_name_keeps_primary_failure_and_release_note(self):
+        for replacement in ("symlink", "file"):
+            with (self.subTest(replacement=replacement),
+                  tempfile.TemporaryDirectory() as raw):
+                directory = Path(raw)
+                stage_root, final_root, final_members = self.publication_fixture(
+                    directory, (b"staged-one",)
+                )
+                original_members = directory / "review-original"
+                outside = directory / "outside"
+                outside.mkdir()
+                primary = RuntimeError("injected primary publication failure")
+                real_open = review_package_module.os.open
+                real_close = review_package_module.os.close
+                member_fds: list[int] = []
+                release_failed = False
+
+                def replace_then_fail(label: str, _path: Path):
+                    if label != "manifest":
+                        return
+                    final_members.rename(original_members)
+                    if replacement == "symlink":
+                        (outside / "competitor").write_bytes(b"competitor-bytes")
+                        final_members.symlink_to(outside, target_is_directory=True)
+                    else:
+                        final_members.write_bytes(b"competitor-bytes")
+                    raise primary
+
+                def observe_open(path, flags, *args, **kwargs):
+                    descriptor = real_open(path, flags, *args, **kwargs)
+                    if Path(path) == final_members:
+                        member_fds.append(descriptor)
+                    return descriptor
+
+                def fail_member_close(descriptor):
+                    nonlocal release_failed
+                    if member_fds and descriptor == member_fds[-1] and not release_failed:
+                        real_close(descriptor)
+                        release_failed = True
+                        raise OSError("injected member release failure")
+                    return real_close(descriptor)
+
+                with (mock.patch.object(review_package_module.os, "open",
+                                        side_effect=observe_open),
+                      mock.patch.object(review_package_module.os, "close",
+                                        side_effect=fail_member_close)):
+                    with self.assertRaises(
+                        review_package_module.PublicationError
+                    ) as raised:
+                        review_package_module.publish_package(
+                            stage_root, final_root, replace_then_fail
+                        )
+
+                failure = raised.exception
+                self.assertIs(failure.__cause__, primary)
+                self.assertTrue(release_failed)
+                self.assertTrue(any(
+                    "OSError: injected member release failure" in note
+                    for note in getattr(failure, "__notes__", [])
+                ))
+                self.assertFalse(final_root.exists())
+                self.assertEqual(list(original_members.iterdir()), [])
+                self.assertTrue(member_fds)
+                for descriptor in member_fds:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+                if replacement == "symlink":
+                    self.assertEqual(
+                        (outside / "competitor").read_bytes(), b"competitor-bytes"
+                    )
+                else:
+                    self.assertEqual(final_members.read_bytes(), b"competitor-bytes")
 
     def test_stage_write_failure_removes_partial_stage_directory(self):
         with tempfile.TemporaryDirectory() as raw:

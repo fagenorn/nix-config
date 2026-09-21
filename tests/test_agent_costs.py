@@ -12,6 +12,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,8 +34,9 @@ def record(rec):
 
 def assistant(msg_id, usage=None, content=None, model="claude-opus-5",
               effort="xhigh", stop_reason="tool_use", cwd="/Users/me/repo",
-              agent_id=None, attribution_skill=None, sidechain=False):
-    return record({
+              agent_id=None, attribution_skill=None, sidechain=False, *,
+              timestamp=None, version=None):
+    value = {
         "type": "assistant",
         "cwd": cwd,
         "effort": effort,
@@ -48,6 +50,22 @@ def assistant(msg_id, usage=None, content=None, model="claude-opus-5",
             "usage": usage,
             "content": content or [],
         },
+    }
+    if timestamp is not None:
+        value["timestamp"] = timestamp
+    if version is not None:
+        value["version"] = version
+    return record(value)
+
+
+def agent_result(tool_id, agent_id, *, timestamp, status="completed"):
+    return record({
+        "type": "user", "timestamp": timestamp,
+        "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": tool_id, "content": "done",
+        }]},
+        "toolUseResult": {"agentId": agent_id, "agentType": "reviewer",
+                          "status": status, "content": "done"},
     })
 
 
@@ -1021,6 +1039,353 @@ def run_main(*argv):
         except SystemExit as exit_error:
             code = exit_error.code
     return buf.getvalue(), code
+
+
+class ExecutionTelemetryRoutingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    REQUEST_HOST_ABSENT = object()
+
+    def claude_pair(self, *, request_at="2026-09-20T10:05:00Z",
+                    execution_at="2026-09-20T10:06:00Z",
+                    request_host=REQUEST_HOST_ABSENT, request_model="opus",
+                    request_effort="high", execution_model="claude-opus-5-20260901",
+                    execution_effort="high", child_prefix=""):
+        project = self.root / "-Users-me-repo-issue-120-x"
+        child_dir = project / "s1" / "subagents"
+        child_dir.mkdir(parents=True, exist_ok=True)
+        launch_input = {"subagent_type": "reviewer", "role": "reviewer",
+                        "prompt": "review"}
+        if request_model is not None:
+            launch_input["model"] = request_model
+        if request_effort is not None:
+            launch_input["effort"] = request_effort
+        if request_host is not self.REQUEST_HOST_ABSENT:
+            launch_input["host"] = request_host
+        launch = {"type": "tool_use", "id": "toolu-route-1", "name": "Agent",
+                  "input": launch_input}
+        root_file = project / "s1.jsonl"
+        root_file.write_text(assistant("launch", usage=USAGE_1, content=[launch],
+                                       timestamp=request_at, version="2.1.0")
+                             + agent_result("toolu-route-1", "agent-child-1",
+                                            timestamp="2026-09-20T10:05:30Z"), encoding="utf-8")
+        (child_dir / "child.jsonl").write_text(child_prefix +
+            assistant("child", usage=USAGE_2, model=execution_model, effort=execution_effort,
+                      agent_id="agent-child-1", sidechain=True, timestamp=execution_at,
+                      version="2.1.0"), encoding="utf-8")
+        return root_file
+
+    def json_record(self, *extra):
+        raw, code = run_main("--projects-dir", str(self.root), "--days", "1", "--format", "json",
+                             "--events-since", "2026-09-20T10:00:00Z",
+                             "--events-before", "2026-09-20T11:00:00Z", *extra)
+        self.assertIsNone(code)
+        return json.loads(raw)
+
+    def test_exact_claude_request_result_child_pair_is_observed(self):
+        old_file = self.claude_pair()
+        os.utime(old_file, (1, 1))
+        telemetry = self.json_record()["execution_telemetry"]
+        self.assertEqual(telemetry["event_window"], {"start": "2026-09-20T10:00:00Z",
+                                                      "end": "2026-09-20T11:00:00Z"})
+        self.assertEqual(telemetry["producer"], {"name": "agent-costs", "version": 1,
+                         "harness_versions": {"claude": ["2.1.0"]}})
+        self.assertEqual(telemetry["source_coverage"]["routing"],
+                         {"state": "full", "eligible_events": 1, "paired_events": 1, "reasons": []})
+        self.assertEqual(telemetry["source_coverage"]["source_only"], {})
+        self.assertEqual(len(telemetry["runs"]), 1)
+        self.assertEqual(telemetry["runs"][0]["run_id"], "claude:repo:120")
+        self.assertEqual(telemetry["runs"][0]["routing"]["coverage"],
+                         telemetry["source_coverage"]["routing"])
+        observation = telemetry["runs"][0]["routing"]["observations"][0]
+        self.assertEqual(observation["declaration"], {"dispatch_id": None, "role": "reviewer",
+                                                        "authority": "runtime-agent-type"})
+        self.assertEqual(observation["requested"], {"host": "claude", "model": "opus", "effort": "high"})
+        self.assertEqual(observation["configured"], {"host": None, "model": None, "effort": None})
+        self.assertEqual(observation["observed"], {"host": "claude", "model": "claude-opus-5-20260901",
+                                                     "effort": "high", "authority": "assistant-execution"})
+        self.assertIsNone(observation["escalation"])
+        self.assertEqual((observation["count"], observation["first_event_at"], observation["last_event_at"]),
+                         (1, "2026-09-20T10:06:00Z", "2026-09-20T10:06:00Z"))
+        self.assertEqual(tuple(telemetry["runs"][0]["scheduling"]),
+                         agent_costs.SCHEDULING_METRICS)
+
+    def test_replayed_result_preserves_one_exact_pair_but_conflicts_do_not(self):
+        root = self.claude_pair()
+        replay = agent_result("toolu-route-1", "agent-child-1",
+                              timestamp="2026-09-20T10:05:30Z")
+        root.write_text(root.read_text(encoding="utf-8") + replay, encoding="utf-8")
+        coverage = self.json_record()["execution_telemetry"]["source_coverage"]["routing"]
+        self.assertEqual(coverage, {"state": "full", "eligible_events": 1,
+                                    "paired_events": 1, "reasons": []})
+        root.write_text(root.read_text(encoding="utf-8") + agent_result(
+            "toolu-route-1", "agent-child-2", timestamp="2026-09-20T10:05:31Z"),
+                        encoding="utf-8")
+        coverage = self.json_record()["execution_telemetry"]["source_coverage"]["routing"]
+        self.assertEqual((coverage["eligible_events"], coverage["paired_events"]), (2, 0))
+
+    def test_harness_versions_exclude_old_root_history(self):
+        root = self.claude_pair()
+        root.write_text(assistant("old", usage=USAGE_1, timestamp="2026-09-19T10:00:00Z",
+                                  version="old-runtime") + root.read_text(encoding="utf-8"),
+                        encoding="utf-8")
+        self.assertEqual(self.json_record()["execution_telemetry"]["producer"]["harness_versions"],
+                         {"claude": ["2.1.0"]})
+
+    def test_requested_host_missing_or_conflicting_is_null_with_reason(self):
+        for host, reason in ((None, "request_host_missing"), ("codex", "request_host_conflict")):
+            with self.subTest(host=host):
+                self.claude_pair(request_host=host)
+                telemetry = self.json_record()["execution_telemetry"]
+                self.assertIsNone(telemetry["runs"][0]["routing"]["observations"][0]["requested"]["host"])
+                self.assertIn({"code": reason, "count": 1}, telemetry["source_coverage"]["routing"]["reasons"])
+
+    def test_event_window_uses_event_time_while_accounting_keeps_file_mtime(self):
+        old_file = self.claude_pair(); os.utime(old_file, (1, 1))
+        os.utime(old_file.parent / "s1" / "subagents" / "child.jsonl", (1, 1))
+        record_value = self.json_record()
+        self.assertEqual(record_value["strata"]["claude"]["runs"], [])
+        self.assertEqual(record_value["execution_telemetry"]["runs"][0]["routing"]["observations"][0]["count"], 1)
+
+    def test_missing_execution_timestamp_is_inconclusive_not_outside(self):
+        self.claude_pair(execution_at=None)
+        routing = self.json_record()["execution_telemetry"]["source_coverage"]["routing"]
+        self.assertEqual(routing["state"], "none")
+        self.assertIn({"code": "timestamp_missing", "count": 1}, routing["reasons"])
+
+    def test_multi_turn_child_selects_final_execution_once(self):
+        earlier = assistant("child-turn-1", usage=USAGE_2,
+                            model="claude-opus-5-20260901", effort="high",
+                            agent_id="agent-child-1", sidechain=True,
+                            timestamp="2026-09-20T10:05:45Z", version="2.1.0")
+        self.claude_pair(child_prefix=earlier)
+        routing = self.json_record()["execution_telemetry"]["runs"][0]["routing"]
+        self.assertEqual(routing["coverage"],
+                         {"state": "full", "eligible_events": 1,
+                          "paired_events": 1, "reasons": []})
+        self.assertEqual(routing["observations"][0]["count"], 1)
+        self.assertEqual(routing["observations"][0]["last_event_at"],
+                         "2026-09-20T10:06:00Z")
+
+    def test_missing_request_or_execution_tiers_are_paired_with_reasons(self):
+        self.claude_pair(request_model=None, request_effort=None)
+        routing = self.json_record()["execution_telemetry"]["runs"][0]["routing"]
+        self.assertEqual(routing["coverage"]["paired_events"], 1)
+        self.assertIn({"code": "request_missing", "count": 1},
+                      routing["coverage"]["reasons"])
+        self.claude_pair(execution_model=None, execution_effort=None)
+        routing = self.json_record()["execution_telemetry"]["runs"][0]["routing"]
+        self.assertEqual(routing["coverage"]["paired_events"], 1)
+        self.assertIn({"code": "execution_model_missing", "count": 1},
+                      routing["coverage"]["reasons"])
+        self.assertIn({"code": "execution_effort_missing", "count": 1},
+                      routing["coverage"]["reasons"])
+
+    def test_unpaired_event_flags_and_invalid_range_are_usage_errors(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            out, code = run_main("--projects-dir", str(self.root), "--format", "json",
+                                 "--events-since", "2026-09-20T10:00:00Z")
+        self.assertEqual((out, code), ("", 2))
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            out, code = run_main("--projects-dir", str(self.root), "--format", "json",
+                                 "--events-since", "2026-09-20T11:00:00Z",
+                                 "--events-before", "2026-09-20T10:00:00Z")
+        self.assertEqual((out, code), ("", 2))
+
+    def test_codex_turn_context_is_configured_and_not_observed(self):
+        codex = self.root / "codex" / "2026" / "09" / "20"; codex.mkdir(parents=True)
+        (codex / "rollout.jsonl").write_text(
+            codex_meta("thread-1", thread_source="subagent", source={"subagent": {"thread_spawn": {
+                "parent_thread_id": "parent", "depth": 1, "agent_role": "reviewer",
+                "model": "gpt-5.6-sol", "effort": "high"}}})
+            + codex_turn_context("gpt-5.6-sol", "high") + codex_usage(10), encoding="utf-8")
+        raw, code = run_main("--projects-dir", "/nonexistent/claude", "--codex-sessions", str(self.root / "codex"),
+                             "--strata", "codex", "--format", "json", "--days", "0",
+                             "--events-since", "2026-08-04T00:00:00Z", "--events-before", "2026-08-05T00:00:00Z")
+        self.assertIsNone(code)
+        observation = json.loads(raw)["execution_telemetry"]["runs"][0]["routing"]["observations"][0]
+        self.assertEqual(observation["configured"], {"host": "codex", "model": "gpt-5.6-sol", "effort": "high"})
+        self.assertEqual(observation["observed"], {"host": "codex", "model": None, "effort": None,
+                                                    "authority": "codex-rollout"})
+
+    def test_unbounded_direct_projection_and_shared_transport_are_inconclusive(self):
+        rec = agent_costs.build_record({}, {})
+        self.assertIn({"code": "cohort_incomplete", "count": 1},
+                      rec["execution_telemetry"]["source_coverage"]["routing"]["reasons"])
+        reasons = agent_costs.Counter()
+        self.assertEqual(agent_costs._declaration({"subagent_type": "reviewer"}, reasons)["authority"], "unknown")
+        self.assertEqual(reasons["role_ambiguous"], 1)
+
+    def test_unspawned_codex_evidence_respects_the_event_window(self):
+        codex = self.root / "codex" / "2026"; codex.mkdir(parents=True)
+        spawned = codex_meta("thread-1", thread_source="subagent", source={"subagent": {"thread_spawn": {
+            "agent_role": "reviewer", "model": "gpt", "effort": "high"}}}) + codex_turn_context()
+        outside = codex_meta("thread-2", thread_source="subagent", source={"subagent": {}}).replace(
+            "2026-08-04T14:08:50.499Z", "2026-08-05T14:08:50.499Z")
+        (codex / "spawned.jsonl").write_text(spawned, encoding="utf-8")
+        (codex / "outside.jsonl").write_text(outside, encoding="utf-8")
+        raw, code = run_main("--projects-dir", "/missing", "--codex-sessions", str(self.root / "codex"),
+                             "--strata", "codex", "--format", "json", "--days", "0",
+                             "--events-since", "2026-08-04T00:00:00Z", "--events-before", "2026-08-05T00:00:00Z")
+        self.assertIsNone(code)
+        self.assertEqual(json.loads(raw)["execution_telemetry"]["source_coverage"]["source_only"], {})
+
+
+class ExecutionTelemetrySchedulingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.projects = self.root / "claude"
+        self.projects.mkdir()
+
+    def run_record(self, *, bounded=True, strata="claude"):
+        args = ["--projects-dir", str(self.projects), "--days", "0", "--format", "json"]
+        if strata != "claude":
+            codex_root = self.root / "codex"
+            codex_root.mkdir(exist_ok=True)
+            args += ["--strata", strata, "--codex-sessions", str(codex_root)]
+        if bounded:
+            args += ["--events-since", "2026-09-20T10:00:00Z",
+                     "--events-before", "2026-09-20T11:00:00Z"]
+        raw, code = run_main(*args)
+        self.assertIsNone(code)
+        return json.loads(raw)
+
+    def write_root(self, *lines):
+        project = self.projects / "-Users-me-repo-issue-120-x"
+        project.mkdir(parents=True, exist_ok=True)
+        (project / "s1.jsonl").write_text("".join(lines), encoding="utf-8")
+
+    def test_complete_bounded_source_distinguishes_measured_zero_from_null(self):
+        self.write_root(assistant("ordinary", usage=USAGE_1, timestamp="2026-09-20T10:05:00Z",
+                                  version="2.1.0", stop_reason="end_turn"))
+        telemetry = self.run_record()["execution_telemetry"]
+        scheduling = telemetry["runs"][0]["scheduling"]
+        self.assertEqual(tuple(scheduling), agent_costs.SCHEDULING_METRICS)
+        self.assertEqual(scheduling["spawn_attempts"], {
+            "value": 0, "coverage": {"state": "full", "eligible_events": 0,
+            "paired_events": 0, "reasons": []}, "cohort_digest": agent_costs.cohort_digest([])})
+        for name in agent_costs.SCHEDULING_METRICS[1:]:
+            self.assertIsNone(scheduling[name]["value"], name)
+            self.assertEqual(scheduling[name]["coverage"]["state"], "none", name)
+            self.assertIn({"code": "source_unsupported", "count": 1},
+                          scheduling[name]["coverage"]["reasons"], name)
+            self.assertIsNone(scheduling[name]["cohort_digest"], name)
+        self.assertEqual(telemetry["source_coverage"]["scheduling"]["spawn_attempts"],
+                         scheduling["spawn_attempts"]["coverage"])
+
+    def test_spawn_attempts_are_event_time_selected_and_tool_id_deduped(self):
+        launch = {"type": "tool_use", "id": "toolu-spawn", "name": "Agent",
+                  "input": {"subagent_type": "reviewer", "prompt": "review"}}
+        outside = {"type": "tool_use", "id": "toolu-outside", "name": "Agent",
+                   "input": {"subagent_type": "reviewer", "prompt": "old"}}
+        self.write_root(
+            assistant("outside", usage=USAGE_1, content=[outside], timestamp="2026-09-20T09:59:59Z", version="2.1.0"),
+            assistant("inside", usage=USAGE_1, content=[launch], timestamp="2026-09-20T10:05:00Z", version="2.1.0"),
+            assistant("inside", usage=USAGE_1, content=[launch], timestamp="2026-09-20T10:05:00Z", version="2.1.0"))
+        metric = self.run_record()["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertEqual(metric["value"], 1)
+        self.assertEqual(metric["coverage"]["state"], "full")
+        self.assertEqual(metric["coverage"]["eligible_events"], 1)
+        self.assertEqual(metric["coverage"]["paired_events"], 1)
+
+    def test_conflicting_replayed_launch_timestamps_leave_spawn_attempts_unavailable(self):
+        launch = {"type": "tool_use", "id": "toolu-conflicting-time", "name": "Agent",
+                  "input": {"subagent_type": "reviewer", "prompt": "review"}}
+        self.write_root(
+            assistant("first", usage=USAGE_1, content=[launch],
+                      timestamp="2026-09-20T10:05:00Z", version="2.1.0"),
+            assistant("replayed", usage=USAGE_1, content=[launch],
+                      timestamp="2026-09-20T10:06:00Z", version="2.1.0"))
+        metric = self.run_record()["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertIsNone(metric["value"])
+        self.assertEqual(metric["coverage"], {
+            "state": "none", "eligible_events": 1, "paired_events": 0,
+            "reasons": [{"code": "timestamp_missing", "count": 1}],
+        })
+        self.assertIsNone(metric["cohort_digest"])
+
+    def test_missing_timestamp_and_unbounded_cohort_do_not_project_a_zero(self):
+        launch = {"type": "tool_use", "id": "toolu-no-time", "name": "Agent",
+                  "input": {"subagent_type": "reviewer", "prompt": "review"}}
+        self.write_root(assistant("launch", usage=USAGE_1, content=[launch], timestamp=None, version="2.1.0"))
+        bounded = self.run_record()["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertIsNone(bounded["value"])
+        self.assertIn({"code": "timestamp_missing", "count": 1}, bounded["coverage"]["reasons"])
+        unbounded = self.run_record(bounded=False)["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertIsNone(unbounded["value"])
+        self.assertIn({"code": "cohort_incomplete", "count": 1}, unbounded["coverage"]["reasons"])
+
+    def test_telemetry_contains_no_scheduling_verdict_vocabulary(self):
+        self.write_root(assistant("ordinary", usage=USAGE_1, timestamp="2026-09-20T10:05:00Z",
+                                  version="2.1.0", stop_reason="end_turn"))
+        encoded = json.dumps(self.run_record()["execution_telemetry"], sort_keys=True).lower()
+        for forbidden in ("waste", "cheap", "useful", "savings", "billing", "utilization"):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_selected_empty_codex_contributes_without_a_run(self):
+        self.write_root(assistant("ordinary", usage=USAGE_1, timestamp="2026-09-20T10:05:00Z",
+                                  version="2.1.0", stop_reason="end_turn"))
+        telemetry = self.run_record(strata="both")["execution_telemetry"]
+        self.assertFalse(any(run["run_id"].startswith("codex:") for run in telemetry["runs"]))
+        codex = telemetry["source_coverage"]["source_only"]["codex"]
+        self.assertEqual(codex["routing"], {"state": "none", "eligible_events": 0, "paired_events": 0,
+                         "reasons": [{"code": "runtime_version_missing", "count": 1}]})
+        for name in agent_costs.SCHEDULING_METRICS:
+            self.assertEqual(codex["scheduling"][name], {"state": "none", "eligible_events": 0,
+                             "paired_events": 0, "reasons": [{"code": "source_unsupported", "count": 1}]})
+        self.assertEqual(telemetry["source_coverage"]["routing"]["reasons"], [
+            {"code": "runtime_version_missing", "count": 2}])
+        self.assertEqual(telemetry["source_coverage"]["scheduling"]["spawn_attempts"],
+                         codex["scheduling"]["spawn_attempts"])
+
+    def test_scheduling_only_versionless_root_preserves_routing_coverage(self):
+        self.write_root(assistant("ordinary", usage=USAGE_1, timestamp="2026-09-20T10:05:00Z"))
+        telemetry = self.run_record()["execution_telemetry"]
+        expected = {"state": "none", "eligible_events": 0, "paired_events": 0,
+                    "reasons": [{"code": "runtime_version_missing", "count": 1}]}
+        self.assertEqual(telemetry["runs"][0]["routing"]["coverage"], expected)
+        self.assertEqual(telemetry["source_coverage"]["routing"], expected)
+        self.assertEqual(telemetry["runs"][0]["scheduling"]["spawn_attempts"]["value"], 0)
+
+    def test_spawn_attempts_deduplicate_identical_tool_ids_across_root_files(self):
+        project = self.projects / "-Users-me-repo-issue-120-x"
+        project.mkdir(parents=True)
+        launch = {"type": "tool_use", "id": "toolu-copied", "name": "Task",
+                  "input": {"subagent_type": "reviewer"}}
+        line = assistant("copied", usage=USAGE_1, content=[launch],
+                         timestamp="2026-09-20T10:05:00Z", version="2.1.0")
+        (project / "s1.jsonl").write_text(line, encoding="utf-8")
+        (project / "s2.jsonl").write_text(line, encoding="utf-8")
+        metric = self.run_record()["execution_telemetry"]["runs"][0]["scheduling"]["spawn_attempts"]
+        self.assertEqual((metric["value"], metric["coverage"]["eligible_events"],
+                          metric["coverage"]["paired_events"]), (1, 1, 1))
+
+    def test_future_token_and_slot_pairs_require_declared_digest_shapes(self):
+        full = {"state": "full", "eligible_events": 1, "paired_events": 1, "reasons": []}
+        event_window = {"start": "2026-09-20T10:00:00Z", "end": "2026-09-20T11:00:00Z"}
+        metrics = {name: agent_costs.unsupported_metric() for name in agent_costs.SCHEDULING_METRICS}
+        for name, value in (("wait_input_tokens", 1), ("covered_input_tokens", 2)):
+            metrics[name] = {"value": value, "coverage": full, "cohort_digest": None}
+        with self.assertRaises(ValueError):
+            agent_costs._validate_scheduling(metrics, event_window)
+        token_digest = agent_costs.cohort_digest([("toolu-1",)])
+        for name, value in (("wait_input_tokens", 1), ("covered_input_tokens", 2)):
+            metrics[name] = {"value": value, "coverage": full, "cohort_digest": token_digest}
+        slot_digest = agent_costs.canonical_digest(event_window)
+        self.assertNotEqual(slot_digest, agent_costs.cohort_digest([tuple(event_window.values())]))
+        for name, value in (("slot_capacity_seconds", 10), ("claimed_slot_seconds", 5)):
+            metrics[name] = {"value": value, "coverage": full, "cohort_digest": slot_digest}
+        agent_costs._validate_scheduling(metrics, event_window)
+        for name in ("slot_capacity_seconds", "claimed_slot_seconds"):
+            metrics[name]["cohort_digest"] = agent_costs.cohort_digest([tuple(event_window.values())])
+        with self.assertRaises(ValueError):
+            agent_costs._validate_scheduling(metrics, event_window)
 
 
 class BuildRecordTest(unittest.TestCase):

@@ -723,6 +723,13 @@ class DiffScopeCommandTest(unittest.TestCase):
                 self.assertEqual(completed.returncode, 1, completed.stdout)
                 self.assertIn(b"diff-scope:", completed.stderr)
 
+        completed = run_helper(self.root, self.range, "--artifact-path", ".//x")
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertEqual(
+            completed.stderr,
+            b"diff-scope: --artifact-path must be repository-relative: .//x\n",
+        )
+
 
 class DiffScopeAllExcludedRangeTest(unittest.TestCase):
     """A range that produces rows but no content candidate still measures.

@@ -276,11 +276,11 @@ def normalize_artifact_path(value: str) -> bytes:
     Root-relative because git reports numstat paths root-relative even when it
     is run from a subdirectory (D8).
     """
-    if value.startswith("/"):
-        raise DiffScopeError(f"--artifact-path must be repository-relative: {value}")
     cleaned = value
     while cleaned.startswith("./"):
         cleaned = cleaned[2:]
+    if cleaned.startswith("/"):
+        raise DiffScopeError(f"--artifact-path must be repository-relative: {value}")
     cleaned = cleaned.rstrip("/")
     if cleaned in ("", "."):
         raise DiffScopeError(f"--artifact-path is empty: {value}")

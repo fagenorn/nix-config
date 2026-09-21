@@ -57,6 +57,19 @@ PRICING = {
 
 SCHEMA_VERSION = 1
 RECORD_KIND = "agent-cost-record"
+EXECUTION_TELEMETRY_SCHEMA_VERSION = 1
+EXECUTION_TELEMETRY_PRODUCER_VERSION = 1
+TELEMETRY_REASON_CODES: tuple[str, ...] = (
+    "timestamp_missing", "request_missing", "request_host_missing",
+    "request_host_conflict", "result_missing", "child_missing",
+    "dispatch_missing", "role_ambiguous", "execution_model_missing",
+    "execution_effort_missing", "runtime_version_missing",
+    "source_unsupported", "cohort_incomplete",
+)
+ROUTING_AUTHORITIES = ("assistant-execution", "codex-rollout")
+SCHEDULING_METRICS = ("spawn_attempts", "capacity_rejections", "waits", "follow_ups",
+                      "wait_input_tokens", "covered_input_tokens", "slot_capacity_seconds",
+                      "claimed_slot_seconds")
 # The one authoritative home for the comparative-telemetry caveat (D18): the
 # text footer prints it behind "NOTE: " and the record carries it as `notes`.
 DISCLAIMER = (
@@ -1054,6 +1067,488 @@ def canonical_digest(body):
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+
+
+def parse_rfc3339_utc(value: str) -> datetime:
+    """Parse an RFC3339 instant and return an aware UTC datetime."""
+    if not isinstance(value, str) or not RFC3339_UTC_RE.fullmatch(value):
+        raise ValueError("timestamp must be a string")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as error:
+        raise ValueError("invalid RFC3339 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must include an offset")
+    return parsed.astimezone(timezone.utc)
+
+
+def format_rfc3339_utc(value):
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def event_in_window(value: object, start: datetime | None, end: datetime | None) -> bool | None:
+    """Whether a source event is in [start, end), or None when unknowable."""
+    try:
+        event = parse_rfc3339_utc(value)
+    except ValueError:
+        return None
+    return (start is None or event >= start) and (end is None or event < end)
+
+
+def coverage(eligible: int, paired: int, reasons: Counter) -> dict:
+    items = [{"code": code, "count": reasons[code]} for code in sorted(reasons) if reasons[code]]
+    if not items:
+        state = "full"
+    elif paired:
+        state = "partial"
+    else:
+        state = "none"
+    return {"state": state, "eligible_events": eligible, "paired_events": paired,
+            "reasons": items}
+
+
+def _routing_coverage(events, extra_reasons=None):
+    reasons = Counter()
+    eligible = paired = 0
+    for event in events:
+        eligible += 1
+        paired += bool(event["paired"])
+        reasons.update(event["reasons"])
+    reasons.update(extra_reasons or {})
+    return coverage(eligible, paired, reasons)
+
+
+def _merge_coverage(values):
+    reasons = Counter()
+    eligible = paired = 0
+    for value in values:
+        eligible += value["eligible_events"]
+        paired += value["paired_events"]
+        reasons.update({item["code"]: item["count"] for item in value["reasons"]})
+    return coverage(eligible, paired, reasons)
+
+
+def cohort_digest(identities: list[tuple[str, ...]]) -> str:
+    """Return a stable digest for the bounded cohort identities."""
+    return canonical_digest(sorted([list(identity) for identity in identities]))
+
+
+def merge_metric_coverage(metrics: list[dict]) -> dict:
+    """Merge scheduling coverage without treating unavailable cohorts as full."""
+    return _merge_coverage(metrics)
+
+
+def unsupported_metric(reason_count=1):
+    return {"value": None, "coverage": coverage(0, 0, Counter({"source_unsupported": reason_count})),
+            "cohort_digest": None}
+
+
+def _metric(value, metric_coverage, digest):
+    if metric_coverage["state"] != "full":
+        value = None
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+        raise ValueError("scheduling metric value must be a non-negative integer")
+    return {"value": value, "coverage": metric_coverage, "cohort_digest": digest if value is not None else None}
+
+
+def _validate_scheduling(metrics, event_window):
+    for name, metric in metrics.items():
+        if metric["coverage"]["state"] != "full" and metric["value"] is not None:
+            raise ValueError("incomplete scheduling coverage cannot project a value")
+        value = metric["value"]
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError("scheduling metric value must be a non-negative integer")
+    for left, right in (("wait_input_tokens", "covered_input_tokens"),
+                        ("slot_capacity_seconds", "claimed_slot_seconds")):
+        a, b = metrics[left], metrics[right]
+        if (a["value"] is None) != (b["value"] is None):
+            raise ValueError("paired scheduling metrics must project together")
+        digest = a["cohort_digest"]
+        if a["value"] is not None and (a["coverage"]["state"] != "full" or
+                                        b["coverage"]["state"] != "full" or
+                                        not isinstance(digest, str) or
+                                        not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or
+                                        digest != b["cohort_digest"]):
+            raise ValueError("paired scheduling metrics require one full cohort")
+    capacity, claimed = metrics["slot_capacity_seconds"], metrics["claimed_slot_seconds"]
+    if capacity["value"] is not None:
+        if capacity["cohort_digest"] != canonical_digest(event_window):
+            raise ValueError("slot metrics require the event-window cohort")
+        if claimed["value"] > capacity["value"]:
+            raise ValueError("claimed slots exceed capacity")
+
+
+def _spawn_metric(source, launches, start, end):
+    if source != "claude":
+        return unsupported_metric()
+    reasons = Counter()
+    identities = []
+    eligible = paired = 0
+    for tool_id, timestamps in launches.items():
+        selected = {event_in_window(timestamp, start, end) for timestamp in timestamps}
+        if selected == {False}:
+            continue
+        eligible += 1
+        if None in selected:
+            reasons["timestamp_missing"] += 1
+        elif len({format_rfc3339_utc(parse_rfc3339_utc(timestamp)) for timestamp in timestamps}) != 1:
+            # Replayed launch records must identify one event instant. Conflicting
+            # timestamps leave that instant unavailable to the bounded cohort.
+            reasons["timestamp_missing"] += 1
+        else:
+            paired += 1
+            identities.append((tool_id,))
+    if start is None or end is None:
+        reasons["cohort_incomplete"] += 1
+    metric_coverage = coverage(eligible, paired, reasons)
+    return _metric(len(identities), metric_coverage, cohort_digest(identities))
+
+
+def _scheduling(source, launches, start, end):
+    metrics = {"spawn_attempts": _spawn_metric(source, launches, start, end)}
+    metrics.update({name: unsupported_metric() for name in SCHEDULING_METRICS[1:]})
+    _validate_scheduling(metrics, {"start": format_rfc3339_utc(start) if start else None,
+                                   "end": format_rfc3339_utc(end) if end else None})
+    return metrics
+
+
+def _scheduling_coverage(metrics):
+    return {name: metrics[name]["coverage"] for name in SCHEDULING_METRICS}
+
+
+def _empty_telemetry(selected, start=None, end=None):
+    versions = {source: None for source in selected}
+    contributions = {
+        source: coverage(0, 0, Counter({"runtime_version_missing": 1,
+                                         "cohort_incomplete": 1 if start is None else 0}))
+        for source in selected
+    }
+    scheduling = {source: _scheduling_coverage(_scheduling(source, {}, start, end))
+                  for source in selected}
+    aggregate = _merge_coverage(contributions.values()) if contributions else coverage(
+        0, 0, Counter({"cohort_incomplete": 1})
+    )
+    return {
+        "schema_version": EXECUTION_TELEMETRY_SCHEMA_VERSION,
+        "producer": {"name": "agent-costs", "version": EXECUTION_TELEMETRY_PRODUCER_VERSION,
+                     "harness_versions": versions},
+        "event_window": {"start": format_rfc3339_utc(start) if start else None,
+                         "end": format_rfc3339_utc(end) if end else None},
+        "source_coverage": {"routing": aggregate,
+                            "scheduling": {name: merge_metric_coverage(
+                                [item[name] for item in scheduling.values()])
+                                           for name in SCHEDULING_METRICS},
+                            "source_only": {source: {"routing": contribution,
+                                                      "scheduling": scheduling[source]}
+                                            for source, contribution in contributions.items()}},
+        "runs": [],
+    }
+
+
+def _read_jsonl(path):
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    continue
+    except OSError:
+        return
+
+
+def _request_host(value, target, reasons):
+    if "host" not in value:
+        return target
+    host = value["host"]
+    if not isinstance(host, str) or host == "":
+        reasons["request_host_missing"] += 1
+    elif host != target:
+        reasons["request_host_conflict"] += 1
+    else:
+        return target
+    return None
+
+
+def _declaration(value, reasons):
+    dispatch = value.get("dispatch_id") if isinstance(value.get("dispatch_id"), str) else None
+    role = value.get("role") if isinstance(value.get("role"), str) else None
+    subagent_type = value.get("subagent_type")
+    # The matrix is deliberately not read here. These are the source's known
+    # canonical role spellings; shared transport types remain ambiguous.
+    canonical = {"bookkeeper", "codex-transport", "conformance-reviewer", "explorer",
+                 "implementer", "issue-owner", "mechanic", "researcher", "reviewer",
+                 "reviewer-lite", "ship-owner"}
+    if role in canonical:
+        authority = "structured-dispatch" if dispatch else "runtime-agent-type"
+        return {"dispatch_id": dispatch, "role": role, "authority": authority}
+    if subagent_type in canonical - {"reviewer", "mechanic"}:
+        return {"dispatch_id": dispatch, "role": subagent_type,
+                "authority": "runtime-agent-type"}
+    reasons["role_ambiguous"] += 1
+    if dispatch is None:
+        reasons["dispatch_missing"] += 1
+    return {"dispatch_id": dispatch, "role": None, "authority": "unknown"}
+
+
+def _escalation(value):
+    if "source_dispatch_id" not in value and "reason_code" not in value:
+        return None
+    return {"source_dispatch_id": value.get("source_dispatch_id")
+            if isinstance(value.get("source_dispatch_id"), str) else None,
+            "reason_code": value.get("reason_code")
+            if isinstance(value.get("reason_code"), str) else None}
+
+
+def _add_observation(bucket, observation, event_at):
+    key = json.dumps({k: observation[k] for k in ("declaration", "requested", "configured",
+                                                    "observed", "escalation")},
+                     sort_keys=True, separators=(",", ":"))
+    current = bucket.get(key)
+    if current is None:
+        current = dict(observation, count=0, first_event_at=event_at, last_event_at=event_at)
+        bucket[key] = current
+    current["count"] += 1
+    current["first_event_at"] = min(current["first_event_at"], event_at)
+    current["last_event_at"] = max(current["last_event_at"], event_at)
+
+
+def collect_execution_telemetry(selected: tuple[str, ...], claude_root: Path | None,
+                                codex_root: Path | None, start: datetime | None,
+                                end: datetime | None, project_filter: str | None,
+                                executor_factory) -> dict:
+    """Independently correlate routing evidence from every selected source file."""
+    del executor_factory  # correlation requires a deterministic global index
+    source_versions = {source: set() for source in selected}
+    runs = defaultdict(lambda: {"events": [], "observations": {}, "reasons": Counter(),
+                                "launches": defaultdict(list)})
+    source_events = defaultdict(list)
+    source_reasons = defaultdict(Counter)
+    unassigned_events = defaultdict(list)
+
+    if "claude" in selected and claude_root and claude_root.is_dir():
+        children = defaultdict(list)
+        roots = []
+        for path in sorted(claude_root.rglob("*.jsonl")):
+            records = list(_read_jsonl(path))
+            if "subagents" in path.parts:
+                for rec in records:
+                    if rec.get("type") == "assistant" and rec.get("agentId"):
+                        children[(path.parent.parent.name, str(rec["agentId"]))].append(rec)
+            else:
+                roots.append((path, records))
+        for path, records in roots:
+            root_cwds = Counter()
+            for rec in records:
+                if rec.get("type") == "assistant" and rec.get("cwd"):
+                    root_cwds[rec["cwd"]] += 1
+            project = project_name(path.parent.name, root_cwds)
+            if project_filter and project_filter.lower() not in project.lower():
+                continue
+            run_id = "claude:%s:%s" % (project, "none" if issue_key(path.parent.name, root_cwds) is None
+                                        else issue_key(path.parent.name, root_cwds))
+            runs[run_id]
+            requests, results = {}, defaultdict(list)
+            for rec in records:
+                if rec.get("type") == "assistant":
+                    for block in ((rec.get("message") or {}).get("content") or []):
+                        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in ("Agent", "Task"):
+                            bid = block.get("id")
+                            if isinstance(bid, str) and bid not in requests:
+                                requests[bid] = (block.get("input") if isinstance(block.get("input"), dict) else {}, rec.get("timestamp"))
+                            if isinstance(bid, str):
+                                runs[run_id]["launches"][bid].append(rec.get("timestamp"))
+                elif rec.get("type") == "user":
+                    tur = rec.get("toolUseResult")
+                    content = (rec.get("message") or {}).get("content")
+                    if isinstance(tur, dict) and isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
+                                agent_id = tur.get("agentId")
+                                if agent_id not in results[block["tool_use_id"]]:
+                                    results[block["tool_use_id"]].append(agent_id)
+            used_agents = set()
+            for tool_id, (request, _request_at) in requests.items():
+                reasons = Counter()
+                candidates = results.get(tool_id, [])
+                agent_id = candidates[0] if len(candidates) == 1 else None
+                if agent_id:
+                    used_agents.add(str(agent_id))
+                if not agent_id:
+                    reasons["result_missing"] += 1
+                executions = children.get((path.stem, str(agent_id)), []) if agent_id else []
+                if not executions:
+                    reasons["child_missing"] += 1
+                    request_window = event_in_window(_request_at, start, end)
+                    if request_window is not False:
+                        local = Counter(reasons)
+                        if request_window is None:
+                            local["timestamp_missing"] += 1
+                        event = {"paired": False, "reasons": local}
+                        source_events["claude"].append(event); runs[run_id]["events"].append(event)
+                    continue
+                # A child transcript normally contains several assistant turns.
+                # The final timestamped assistant record is the deterministic
+                # execution-side evidence for this completed launch; selecting
+                # one avoids turning a multi-turn child into duplicate events.
+                execution = max(enumerate(executions), key=lambda item: (
+                    parse_rfc3339_utc(item[1].get("timestamp"))
+                    if event_in_window(item[1].get("timestamp"), None, None) is not None
+                    else datetime.min.replace(tzinfo=timezone.utc), item[0]))[1]
+                for execution in (execution,):
+                    in_window = event_in_window(execution.get("timestamp"), start, end)
+                    if in_window is False:
+                        continue
+                    local = Counter(reasons)
+                    if in_window is None:
+                        local["timestamp_missing"] += 1
+                        source_events["claude"].append({"paired": False, "reasons": local})
+                        runs[run_id]["events"].append({"paired": False, "reasons": local})
+                        continue
+                    requested_host = _request_host(request, "claude", local)
+                    declaration = _declaration(request, local)
+                    if not request.get("model") or not request.get("effort"):
+                        local["request_missing"] += 1
+                    msg = execution.get("message") or {}
+                    model, effort = msg.get("model"), execution.get("effort")
+                    if not model: local["execution_model_missing"] += 1
+                    if not effort: local["execution_effort_missing"] += 1
+                    # Pairing proves request-to-child correlation.  Missing
+                    # execution tiers remain paired observations so the
+                    # consumer can report their explicit inconclusive state.
+                    paired = True
+                    version = execution.get("version")
+                    if isinstance(version, str) and version:
+                        source_versions["claude"].add(version)
+                    event = {"paired": paired, "reasons": local}
+                    source_events["claude"].append(event); runs[run_id]["events"].append(event)
+                    obs = {"declaration": declaration,
+                           "requested": {"host": requested_host, "model": request.get("model"), "effort": request.get("effort")},
+                           "configured": {"host": None, "model": None, "effort": None},
+                           "observed": {"host": "claude", "model": model, "effort": effort,
+                                        "authority": "assistant-execution"},
+                           "escalation": _escalation(request)}
+                    _add_observation(runs[run_id]["observations"], obs, format_rfc3339_utc(parse_rfc3339_utc(execution["timestamp"])))
+            for (session_id, agent_id), executions in children.items():
+                if session_id != path.stem or agent_id in used_agents:
+                    continue
+                for execution in executions:
+                    verdict = event_in_window(execution.get("timestamp"), start, end)
+                    if verdict is not False:
+                        why = Counter({"request_missing": 1})
+                        if verdict is None:
+                            why["timestamp_missing"] += 1
+                        event = {"paired": False, "reasons": why}
+                        source_events["claude"].append(event); runs[run_id]["events"].append(event)
+
+    if "codex" in selected and codex_root and codex_root.is_dir():
+        # Mirror collect_codex_groups: a thread's root rollout CWD owns its
+        # project/issue identity, with all-CWD fallback only when no root exists.
+        thread_cwds = defaultdict(lambda: (Counter(), Counter()))
+        for candidate in sorted(codex_root.rglob("*.jsonl")):
+            for candidate_rec in _read_jsonl(candidate):
+                if candidate_rec.get("type") != "session_meta":
+                    continue
+                candidate_payload = candidate_rec.get("payload") or {}
+                session_id = candidate_payload.get("session_id") or candidate_payload.get("id")
+                cwd = candidate_payload.get("cwd") or ""
+                if session_id and cwd:
+                    all_cwds, root_cwds = thread_cwds[session_id]
+                    all_cwds[cwd] += 1
+                    if codex_is_root(candidate_payload):
+                        root_cwds[cwd] += 1
+                break
+        for path in sorted(codex_root.rglob("*.jsonl")):
+            records = list(_read_jsonl(path)); meta = next((r for r in records if r.get("type") == "session_meta"), None)
+            if not meta: continue
+            payload = meta.get("payload") or {}; version = payload.get("cli_version")
+            session_id = payload.get("session_id") or payload.get("id")
+            all_cwds, root_cwds = thread_cwds.get(session_id, (Counter(), Counter()))
+            canonical_cwds = root_cwds or all_cwds
+            project = project_name("codex", canonical_cwds)
+            if project_filter and project_filter.lower() not in project.lower():
+                continue
+            spawn = ((payload.get("source") or {}).get("subagent") or {}).get("thread_spawn") if isinstance(payload.get("source"), dict) else None
+            if not isinstance(spawn, dict):
+                # A subagent rollout is execution-side evidence even when its
+                # structured launch was lost; do not manufacture full zero coverage.
+                if payload.get("thread_source") == "subagent" or payload.get("source"):
+                    verdict = event_in_window(meta.get("timestamp"), start, end)
+                    if verdict is not False:
+                        reasons = Counter({"request_missing": 1})
+                        if verdict is None:
+                            reasons["timestamp_missing"] += 1
+                        unassigned_events["codex"].append({"paired": False, "reasons": reasons})
+                continue
+            issue = issue_key("codex", canonical_cwds)
+            run_id = "codex:%s:%s" % (project, "none" if issue is None else issue)
+            contexts = [r for r in records if r.get("type") == "turn_context"] or [meta]
+            for context in contexts[:1]:
+                verdict = event_in_window(context.get("timestamp"), start, end)
+                local = Counter()
+                if verdict is False: continue
+                if verdict is None:
+                    local["timestamp_missing"] += 1; paired = False
+                else: paired = True
+                if isinstance(version, str) and version:
+                    source_versions["codex"].add(version)
+                requested_host = _request_host(spawn, "codex", local)
+                declaration = _declaration({"role": spawn.get("agent_role"), "dispatch_id": spawn.get("dispatch_id")}, local)
+                if not spawn.get("model") or not spawn.get("effort"):
+                    local["request_missing"] += 1
+                configured = (context.get("payload") or {})
+                local["execution_model_missing"] += 1; local["execution_effort_missing"] += 1
+                event = {"paired": paired, "reasons": local}
+                source_events["codex"].append(event); runs[run_id]["events"].append(event)
+                if verdict is not None:
+                    obs = {"declaration": declaration,
+                           "requested": {"host": requested_host, "model": spawn.get("model"), "effort": spawn.get("effort")},
+                           "configured": {"host": "codex", "model": configured.get("model"), "effort": configured.get("effort")},
+                           "observed": {"host": "codex", "model": None, "effort": None, "authority": "codex-rollout"},
+                           "escalation": _escalation(spawn)}
+                    _add_observation(runs[run_id]["observations"], obs, format_rfc3339_utc(parse_rfc3339_utc(context["timestamp"])))
+
+    source_only, projected_runs = {}, []
+    run_sources = {run_id.split(":", 1)[0] for run_id in runs}
+    for source in selected:
+        if not source_versions[source]:
+            if source in run_sources:
+                first = next((value for key, value in runs.items() if key.startswith(source + ":")), None)
+                if first is not None:
+                    first["reasons"]["runtime_version_missing"] += 1
+            else:
+                source_reasons[source]["runtime_version_missing"] += 1
+        if start is None:
+            target = next((v for k, v in runs.items() if k.startswith(source + ":")), None)
+            (target["reasons"] if target else source_reasons[source])["cohort_incomplete"] += 1
+    for run_id in sorted(runs):
+        item = runs[run_id]; routing = _routing_coverage(item["events"], item["reasons"])
+        projected_runs.append({"run_id": run_id, "routing": {"coverage": routing,
+                              "observations": sorted(item["observations"].values(), key=lambda x: json.dumps(x, sort_keys=True))}, "scheduling": {}})
+    for source in selected:
+        if source not in run_sources or unassigned_events[source]:
+            source_only[source] = {"routing": _routing_coverage(
+                unassigned_events[source] if source in run_sources else source_events[source],
+                source_reasons[source]), "scheduling": _scheduling_coverage(
+                    _scheduling(source, {}, start, end))}
+    for run, item in zip(projected_runs, (runs[run_id] for run_id in sorted(runs))):
+        run["scheduling"] = _scheduling(run["run_id"].split(":", 1)[0], item["launches"], start, end)
+    top = _merge_coverage([run["routing"]["coverage"] for run in projected_runs] +
+                          [item["routing"] for item in source_only.values()])
+    return {"schema_version": EXECUTION_TELEMETRY_SCHEMA_VERSION,
+            "producer": {"name": "agent-costs", "version": EXECUTION_TELEMETRY_PRODUCER_VERSION,
+                         "harness_versions": {source: sorted(source_versions[source]) or None for source in selected}},
+            "event_window": {"start": format_rfc3339_utc(start) if start else None,
+                             "end": format_rfc3339_utc(end) if end else None},
+            "source_coverage": {"routing": top,
+                                "scheduling": {name: merge_metric_coverage(
+                                    [run["scheduling"][name]["coverage"] for run in projected_runs] +
+                                    [item["scheduling"][name] for item in source_only.values()])
+                                               for name in SCHEDULING_METRICS},
+                                "source_only": source_only}, "runs": projected_runs}
+
+
 def sum_or_none(values):
     """Total the values, or None when nothing was measured.
 
@@ -1113,7 +1608,7 @@ def project_run(stratum, key, g):
     return run
 
 
-def build_record(groups_by_stratum, window):
+def build_record(groups_by_stratum, window, execution_telemetry=None):
     """Project {stratum: {cost_basis, groups}} into one agent-cost-record (D9)."""
     strata = {}
     for name in sorted(groups_by_stratum):
@@ -1148,6 +1643,7 @@ def build_record(groups_by_stratum, window):
         "strata": strata,
         "fleet": fleet,
         "notes": DISCLAIMER,
+        "execution_telemetry": execution_telemetry if execution_telemetry is not None else _empty_telemetry(()),
     }
     return dict(
         body,
@@ -1261,6 +1757,8 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                     help="which strata to scan; meaningful only with --format json")
     ap.add_argument("--codex-sessions", default=os.path.expanduser("~/.codex/sessions"),
                     help="Codex rollout root")
+    ap.add_argument("--events-since", help="RFC3339 event-time lower bound (JSON only)")
+    ap.add_argument("--events-before", help="RFC3339 event-time upper bound (JSON only)")
     args = ap.parse_args(argv)
 
     json_mode = args.format == "json"
@@ -1268,6 +1766,19 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         ap.error("--strata is meaningful only with --format json")
     if json_mode and args.artifacts:
         ap.error("--artifacts is not available with --format json")
+    if not json_mode and (args.events_since or args.events_before):
+        ap.error("--events-since/--events-before are available only with --format json")
+    if bool(args.events_since) != bool(args.events_before):
+        ap.error("--events-since and --events-before must be used together")
+    event_start = event_end = None
+    if args.events_since:
+        try:
+            event_start = parse_rfc3339_utc(args.events_since)
+            event_end = parse_rfc3339_utc(args.events_before)
+        except ValueError:
+            ap.error("event bounds must be RFC3339 instants with an offset")
+        if event_start >= event_end:
+            ap.error("--events-since must be before --events-before")
     selected = ("claude", "codex") if args.strata == "both" else (args.strata,)
 
     cutoff = time.time() - args.days * 86400 if args.days > 0 else None
@@ -1326,8 +1837,11 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                          "whole_selected_file_usage": True,
                          "strata": sorted(selected),
                          "sources": sources}
-        json.dump(build_record(groups_by_stratum, record_window), sys.stdout,
-                  sort_keys=True, separators=(",", ":"))
+        execution_telemetry = collect_execution_telemetry(
+            selected, root, codex_root, event_start, event_end, args.project, executor_factory
+        )
+        json.dump(build_record(groups_by_stratum, record_window, execution_telemetry), sys.stdout,
+                  separators=(",", ":"))
         print()
         return
 

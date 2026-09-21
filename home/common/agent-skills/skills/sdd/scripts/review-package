@@ -349,19 +349,72 @@ def _descriptor_identity(descriptor: int) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
+def _directory_identity(path: Path) -> tuple[int, int]:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise PublicationError("published member directory is not a directory")
+    return info.st_dev, info.st_ino
+
+
 def _verify_published_identities(
     member_dir: Path,
+    member_fd: int,
     directory_identity: tuple[int, int],
-    linked: Sequence[tuple[Path, tuple[int, int]]],
+    linked: Sequence[tuple[str, tuple[int, int]]],
 ) -> None:
     try:
-        if _identity(member_dir) != directory_identity:
+        if _directory_identity(member_dir) != directory_identity:
             raise PublicationError("published member directory identity changed")
-        for path, expected in linked:
-            if _identity(path) != expected:
+        if _descriptor_identity(member_fd) != directory_identity:
+            raise PublicationError("published member directory identity changed")
+        for leaf, expected in linked:
+            info = os.stat(leaf, dir_fd=member_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(info.st_mode)
+                    or (info.st_dev, info.st_ino) != expected):
                 raise PublicationError("published member identity changed")
     except OSError as exc:
         raise PublicationError("published package identity changed") from exc
+
+
+def _cleanup_published_members(
+    member_dir: Path,
+    member_fd: int,
+    directory_identity: tuple[int, int],
+    linked: Sequence[tuple[str, tuple[int, int]]],
+) -> list[Exception]:
+    """Remove only links still owned through the retained member descriptor."""
+    failures: list[Exception] = []
+    for leaf, expected in reversed(linked):
+        try:
+            info = os.stat(leaf, dir_fd=member_fd, follow_symlinks=False)
+            if (stat.S_ISREG(info.st_mode)
+                    and (info.st_dev, info.st_ino) == expected):
+                os.unlink(leaf, dir_fd=member_fd)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            failures.append(exc)
+    try:
+        empty = not os.listdir(member_fd)
+    except OSError as exc:
+        failures.append(exc)
+        empty = False
+    if not empty:
+        return failures
+    try:
+        info = member_dir.lstat()
+        if (stat.S_ISDIR(info.st_mode)
+                and (info.st_dev, info.st_ino) == directory_identity):
+            member_dir.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        failures.append(exc)
+    return failures
+
+
+def _failure_note(failure: Exception) -> str:
+    return f"{type(failure).__name__}: {failure}"
 
 
 def publish_package(
@@ -374,61 +427,87 @@ def publish_package(
 ) -> None:
     """Publish with exclusive hard links and inode-matched cleanup (D16)."""
     previous_fd = -1
-    if final_parent_fd is not None:
-        previous_fd = _open_directory(Path.cwd())
-        os.fchdir(final_parent_fd)
-        final_root = Path(final_root.name)
+    member_fd = -1
+    primary_failure: Exception | None = None
+    release_failures: list[Exception] = []
     stage_members = stage_root.with_suffix(".shards")
     final_members = final_root.with_suffix(".shards")
-    linked: list[tuple[Path, tuple[int, int]]] = []
+    linked: list[tuple[str, tuple[int, int]]] = []
     directory_identity: tuple[int, int] | None = None
     try:
+        if final_parent_fd is not None:
+            previous_fd = _open_directory(Path.cwd())
+            os.fchdir(final_parent_fd)
+            final_root = Path(final_root.name)
+            final_members = final_root.with_suffix(".shards")
         if before_mutation is not None:
             before_mutation("member_dir", final_members)
         if verify_final_parent is not None:
             verify_final_parent()
         final_members.mkdir()
-        directory_identity = _identity(final_members)
+        named_identity = _directory_identity(final_members)
+        member_fd = _open_directory(final_members)
+        descriptor_identity = _descriptor_identity(member_fd)
+        if descriptor_identity != named_identity:
+            raise PublicationError("published member directory identity changed")
+        if _directory_identity(final_members) != descriptor_identity:
+            raise PublicationError("published member directory identity changed")
+        directory_identity = descriptor_identity
         for source in sorted(stage_members.iterdir()):
-            destination = final_members / source.name
             if before_mutation is not None:
-                before_mutation(f"member:{source.name}", destination)
+                before_mutation(f"member:{source.name}", final_members / source.name)
             if verify_final_parent is not None:
                 verify_final_parent()
             _verify_published_identities(
-                final_members, directory_identity, linked
+                final_members, member_fd, directory_identity, linked
             )
             expected = _identity(source)
-            os.link(source, destination, follow_symlinks=False)
-            linked.append((destination, expected))
+            os.link(
+                source, source.name, dst_dir_fd=member_fd, follow_symlinks=False
+            )
+            linked.append((source.name, expected))
             _verify_published_identities(
-                final_members, directory_identity, linked
+                final_members, member_fd, directory_identity, linked
             )
         if before_mutation is not None:
             before_mutation("manifest", final_root)
         if verify_final_parent is not None:
             verify_final_parent()
-        _verify_published_identities(final_members, directory_identity, linked)
+        _verify_published_identities(
+            final_members, member_fd, directory_identity, linked
+        )
         os.link(stage_root, final_root, follow_symlinks=False)
     except (OSError, RuntimeError, PublicationError) as exc:
-        for path, expected in reversed(linked):
-            try:
-                if _identity(path) == expected:
-                    path.unlink()
-            except (FileNotFoundError, OSError):
-                pass
+        primary_failure = exc
         if directory_identity is not None:
-            try:
-                if (_identity(final_members) == directory_identity
-                        and not any(final_members.iterdir())):
-                    final_members.rmdir()
-            except (FileNotFoundError, OSError):
-                pass
-        raise PublicationError("exclusive package publication failed") from exc
+            release_failures.extend(_cleanup_published_members(
+                final_members, member_fd, directory_identity, linked
+            ))
     finally:
+        if member_fd >= 0:
+            try:
+                os.close(member_fd)
+            except OSError as exc:
+                release_failures.append(exc)
         if previous_fd >= 0:
-            os.fchdir(previous_fd)
-            os.close(previous_fd)
+            try:
+                os.fchdir(previous_fd)
+            except OSError as exc:
+                release_failures.append(exc)
+            try:
+                os.close(previous_fd)
+            except OSError as exc:
+                release_failures.append(exc)
+    if primary_failure is not None:
+        failure = PublicationError("exclusive package publication failed")
+        for secondary in release_failures:
+            failure.add_note(_failure_note(secondary))
+        raise failure from primary_failure
+    if release_failures:
+        failure = PublicationError("exclusive package publication release failed")
+        for secondary in release_failures[1:]:
+            failure.add_note(_failure_note(secondary))
+        raise failure from release_failures[0]
 
 
 def _cleanup_stage(staging: Path) -> None:
