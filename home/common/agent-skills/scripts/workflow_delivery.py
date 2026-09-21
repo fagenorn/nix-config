@@ -78,7 +78,7 @@ class DeliveryRuntime:
     def validate_issue_state(
         self, issue_value: dict[str, Any], *, issue: int,
         attempts: list[dict[str, Any]], updated_at: str,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         self.validate_issue_delivery(
             issue_value, issue=issue, attempts=attempts, updated_at=updated_at)
         records = (attempts, issue_value["delivery_remainders"])
@@ -86,14 +86,30 @@ class DeliveryRuntime:
                    for values in records for record in values)
         if live > 1:
             raise ValueError("multiple nonterminal custody records")
+        return [record["result"] for record in issue_value["delivery_remainders"]
+                if record["result"] is not None]
 
     def validate_control_observations(
         self, request: dict[str, Any], issues: set[int],
     ) -> None:
         self._projection.validate_control_observations(request, issues, self._model)
 
+    def validate_control_inputs(
+        self, request: dict[str, Any], issues: set[int], tracker_issues: set[int],
+    ) -> tuple[dict[str, Any], dict[int, Any]]:
+        self.validate_control_observations(request, issues)
+        forge = self.validate_issue_map(request["forge"], issues, "forge")
+        contracts = self.validate_control_delivery(request, issues, tracker_issues)
+        return forge, contracts
+
     def validate_direct_observations(self, request: dict[str, Any], issue: int) -> None:
         self._projection.validate_direct_observations(request, issue)
+
+    def validate_direct_inputs(
+        self, request: dict[str, Any], issue: int,
+    ) -> dict[int, Any]:
+        self.validate_direct_observations(request, issue)
+        return self.validate_direct_delivery(request, issue)
 
     def validate_control_custody(
         self, state: dict[str, Any], request: dict[str, Any],

@@ -100,7 +100,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             issue=151, attempt_number=1, worktree="/worktree", now=NOW,
             deadline_at="2026-09-21T01:00:00Z")
         state["issues"]["151"] = {"issue": 151, "attempts": [attempt],
-            "outcome": None, "delivery": self.workflow._empty_delivery(),
+            "outcome": None,
+            "delivery": self.workflow._delivery().empty_delivery(),
             "delivery_remainders": []}
         return state
 
@@ -113,7 +114,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             value.pop("prior_run")
             for attempt in value["issues"]["151"]["attempts"]:
                 for field in self.workflow.SUSPENSION_DEFAULTS: attempt.pop(field)
-        self.workflow.validate_legacy_state(value, run_id="admission")
+        migrated = self.workflow._delivery().migrate(value, migration_contracts={})
+        self.workflow.validate_state(migrated, run_id="admission")
         return value
 
     def test_interface_two_maps_and_singular_inputs_are_closed(self):
@@ -216,7 +218,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 legacy, run_id="admission", migration_contracts={151: contract})
             self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 3)
             self.assertEqual(migrated["issues"]["151"]["delivery"],
-                             self.workflow._empty_delivery())
+                             self.workflow._delivery().empty_delivery())
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); run = root / ".superpowers/workflows/admission"
             run.mkdir(parents=True)
