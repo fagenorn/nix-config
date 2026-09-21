@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +17,7 @@ from ._delivery_model_fixtures import (
     observation,
     rebind_contract,
     seal,
+    selection,
     stage_scope,
 )
 
@@ -22,6 +25,7 @@ from ._delivery_model_fixtures import (
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 ENTRY = SCRIPTS / "workflow_delivery.py"
 PROJECTION = SCRIPTS / "workflow_delivery_wire.py"
+WORKFLOW = SCRIPTS / "workflow-state.py"
 
 
 def load(path: Path, name: str):
@@ -99,6 +103,112 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 runtime.validate_control_observations(
                     {"owners": [changed], "worktrees": [worktree]}, {151})
+
+    def test_remainder_reentry_uses_the_ready_stage_worktree_requirement(self):
+        runtime = load(ENTRY, "workflow_delivery_reentry_requirement_test").DeliveryRuntime(
+            notes_max_characters=10_000)
+        contract, delivery = cleanup_contract_and_delivery(runtime.model)
+
+        def issue_state():
+            return {"issue": 151, "attempts": [], "outcome": None,
+                "delivery": copy.deepcopy(delivery), "delivery_remainders": [{
+                    "remainder": 1, "contract_digest": delivery["contract_digest"],
+                    "source_attempt": 1, "prior_remainder": None,
+                    "pending_stage_ids": [], "owner": "151:r1",
+                    "worktree": "/worktree", "state": "suspended",
+                    "launches": [{"kind": "fresh", "owner": "151:r1",
+                                  "worktree": "/worktree", "at": "2026-09-21T00:00:00Z"}],
+                    "deadline_at": "2026-09-21T03:00:00Z", "progress_token": "token",
+                    "blocked_on": "external", "suspend_phase": 0,
+                    "stalled_resumes": 0, "result": None, "result_source": None,
+                    "recovery": None, "finished_at": None}]}
+
+        cases = (
+            ("close", None),
+            ("worktree", {"path": "/worktree", "state": "absent"}),
+        )
+        for stage_id, recorded in cases:
+            state = issue_state()
+            result = runtime.remainder_policy(
+                state, now="2026-09-21T00:01:00Z", owner_unavailable=False,
+                dispatch_permitted=True, tracker_halted=True,
+                recorded_worktree=recorded,
+                remainder_deadline="2026-09-21T03:01:00Z",
+                preview={"next_stage_id": stage_id})
+            self.assertEqual((result["operation"], result["attempt"]["state"],
+                              len(result["attempt"]["launches"])),
+                             ("resume", "active", 2))
+        state = issue_state(); before = copy.deepcopy(state)
+        with self.assertRaises(ValueError):
+            runtime.remainder_policy(
+                state, now="2026-09-21T00:01:00Z", owner_unavailable=False,
+                dispatch_permitted=True, tracker_halted=False,
+                recorded_worktree={"path": "/worktree", "state": "mismatch"},
+                remainder_deadline="2026-09-21T03:01:00Z",
+                preview={"next_stage_id": "worktree"})
+        self.assertEqual(state, before)
+
+    def test_public_historical_merge_folds_facts_before_terminal_replay(self):
+        runtime = load(ENTRY, "workflow_delivery_historical_merge_test").DeliveryRuntime(
+            notes_max_characters=10_000)
+        contract, delivery, actual = contract_and_delivery_for_stage(
+            runtime.model, "select")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); worktree = str(root / "worktree"); serial = 0
+            def invoke(request):
+                nonlocal serial
+                serial += 1; path = root / f"direct-{serial}.json"
+                path.write_text(json.dumps(request))
+                result = subprocess.run(
+                    [sys.executable, str(WORKFLOW), "direct-owner", "--repo-root",
+                     str(root), "--request-file", str(path)],
+                    capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return json.loads(result.stdout)
+            request = {"interface_version": 2, "issue": 151,
+                "now": "2026-09-21T00:00:00Z", "attempt_budget_minutes": 30,
+                "new_run": False, "owner_unavailable": False,
+                "tracker": {"issue": 151, "state": "open", "open_blockers": [],
+                            "decision_blockers": []},
+                "worktree": {"issue": 151, "recorded": None,
+                    "candidate": {"path": worktree, "state": "absent"}},
+                "forge": {"state": "none", "url": None, "merge_sha": None},
+                "delivery_contract": contract,
+                "authorization_intents": delivery["authorization_intents"],
+                "authority_observations": [], "reevaluation_evidence": [],
+                "delivery_observations": [], "requested_scope": actual,
+                "recovery": None}
+            owner = invoke(request)
+            state_path = root / f".superpowers/workflows/{owner['run_id']}/state.json"
+            state = json.loads(state_path.read_text())
+            historical = {"issue": 151, "state": "merged",
+                "pr_url": "https://sim.invalid/pr/17", "merge_sha": "b" * 40,
+                "issue_closed": False, "discussion_items": [],
+                "detail_state": "none", "report_path": None, "notes": "merged"}
+            attempt = state["issues"]["151"]["attempts"][0]
+            attempt.update(state="merged", blocked_on=None, result=historical,
+                           result_source="superseded",
+                           finished_at="2026-09-21T00:00:01Z")
+            state["issues"]["151"]["outcome"] = copy.deepcopy(historical)
+            state["updated_at"] = "2026-09-21T00:00:01Z"
+            state_path.write_text(json.dumps(state, sort_keys=True,
+                                             separators=(",", ":")) + "\n")
+            selected = selection(runtime.model, runtime.model.canonical_digest(contract))
+            request.update(now="2026-09-21T00:00:02Z", requested_scope=None,
+                worktree={"issue": 151, "recorded": {
+                    "path": worktree, "state": "matching_issue_branch"},
+                    "candidate": None}, forge={"state": "merged",
+                    "url": historical["pr_url"], "merge_sha": historical["merge_sha"]},
+                delivery_observations=[observation(
+                    runtime.model, contract, "selected_output",
+                    {"selected_output": selected})])
+            remainder = invoke(request)
+            self.assertEqual((remainder["kind"], remainder["custody"]["action_id"],
+                              remainder["pending_stage_ids"][0]),
+                             ("delivery_remainder", "151:r1:1", "publish"))
+            issue = json.loads(state_path.read_text())["issues"]["151"]
+            self.assertEqual((len(issue["attempts"]), issue["attempts"][0]["state"],
+                              len(issue["delivery_remainders"])), (1, "merged", 1))
 
     def test_cleanup_facts_bind_the_exact_recorded_worktree(self):
         module = load(ENTRY, "workflow_delivery_worktree_binding_test")

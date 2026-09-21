@@ -161,6 +161,71 @@ class DeliveryProjection:
             "requested_scope": copy.deepcopy(reduction["requested_scope"])}
 
     @staticmethod
+    def create_first_remainder(
+        issue_state: dict[str, Any], record: dict[str, Any],
+        reduction: dict[str, Any], *, now: str, deadline: str,
+        progress_token: str,
+    ) -> dict[str, Any]:
+        owner = f"{issue_state['issue']}:r1"
+        remainder = {
+            "remainder": 1,
+            "contract_digest": issue_state["delivery"]["contract_digest"],
+            "source_attempt": record.get("attempt", record.get("source_attempt")),
+            "prior_remainder": None,
+            "pending_stage_ids": copy.deepcopy(reduction["pending_stage_ids"]),
+            "owner": owner, "worktree": record["worktree"], "state": "active",
+            "launches": [{"kind": "fresh", "owner": owner,
+                          "worktree": record["worktree"], "at": now}],
+            "deadline_at": deadline, "progress_token": progress_token,
+            "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
+            "result": None, "result_source": None, "recovery": None,
+            "finished_at": None,
+        }
+        issue_state["delivery_remainders"].append(remainder)
+        return remainder
+
+    @staticmethod
+    def suspend_expired_remainder(
+        issue_state: dict[str, Any], remainder: dict[str, Any], now: str,
+    ) -> None:
+        remainder["state"], remainder["blocked_on"] = "suspended", "unknown"
+        remainder["stalled_resumes"] = (
+            remainder["stalled_resumes"] + 1
+            if remainder["suspend_phase"] is not None else 0)
+        remainder["suspend_phase"] = 0
+        if remainder["stalled_resumes"] < 3:
+            return
+        remainder["state"], remainder["blocked_on"] = "failed", None
+        remainder["result"] = {
+            "issue": issue_state["issue"], "state": "failed",
+            "pr_url": None, "merge_sha": None, "issue_closed": False,
+            "discussion_items": [], "detail_state": "none",
+            "report_path": None,
+            "notes": "Delivery remainder stalled without progress.",
+        }
+        remainder["result_source"], remainder["finished_at"] = "stalled", now
+
+    @staticmethod
+    def remainder_worktree_requirements(
+        contract: dict[str, Any], stage_id: str | None,
+        recorded: dict[str, Any] | None, path: str,
+    ) -> list[dict[str, Any]]:
+        stage = (None if stage_id is None else next(
+            item for item in contract["stages"] if item["id"] == stage_id))
+        requirement = "not_required" if stage is None else stage["worktree_requirement"]
+        state = None if recorded is None else recorded.get("state")
+        if recorded is not None and recorded.get("path") != path:
+            raise ValueError("recorded worktree path does not match remainder")
+        if state == "mismatch":
+            raise ValueError("recorded worktree does not match remainder")
+        missing = (requirement == "matching_required" and state != "matching_issue_branch") \
+            or (requirement == "cleanup_target"
+                and state not in {"matching_issue_branch", "absent"})
+        if requirement not in {"matching_required", "cleanup_target", "not_required"}:
+            raise ValueError("invalid remainder worktree requirement")
+        return [{"kind": "recorded_worktree", "path": path}] if missing else []
+
+    @staticmethod
     def report_response(*, ledger_repo_root: str, run_id: str, issue: int,
                         record: dict[str, Any], report: dict[str, Any],
                         delivery: dict[str, Any], reduction: dict[str, Any],

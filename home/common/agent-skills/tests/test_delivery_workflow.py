@@ -94,6 +94,18 @@ class DeliveryAdmissionTest(unittest.TestCase):
             "requested_scope": None, "detail_state": "none",
             "report_path": None, "notes": ""}
 
+    @staticmethod
+    def failed_summary(custody_value, digest, notes="failed"):
+        historical = {"issue": 151, "state": "failed", "pr_url": None,
+            "merge_sha": None, "issue_closed": False, "discussion_items": [],
+            "detail_state": "none", "report_path": None, "notes": notes}
+        return {"interface_version": 2, "issue": 151,
+            "state": "terminal_failed", "custody": custody_value,
+            "historical_owner_result": historical,
+            "delivery_contract_digest": digest, "delivery_observations": [],
+            "authority_observations": [], "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": notes}
+
     def state_with_attempt(self):
         state = self.workflow.new_run_state(run_id="admission", now=NOW, issues={})
         attempt = self.workflow.new_control_attempt(
@@ -407,16 +419,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(checkpointed["accepted_observation_ids"], [allowed["id"]])
             self.assertEqual(checkpointed["requested_scope"], actual)
 
-            historical = {"issue": 151, "state": "failed", "pr_url": None,
-                "merge_sha": None, "issue_closed": False, "discussion_items": [],
-                "detail_state": "none", "report_path": None, "notes": "provider failed"}
-            summary = {"interface_version": 2, "issue": 151,
-                "state": "terminal_failed", "custody": owner_value["custody"],
-                "historical_owner_result": historical,
-                "delivery_contract_digest": self.model.canonical_digest(contract),
-                "delivery_observations": [], "authority_observations": [],
-                "reevaluation_evidence": [], "detail_state": "none",
-                "report_path": None, "notes": "provider failed"}
+            summary = self.failed_summary(
+                owner_value["custody"], self.model.canonical_digest(contract),
+                "provider failed")
             summary_path = root / "summary.json"; summary_path.write_text(json.dumps(summary))
             finished = subprocess.run(
                 [sys.executable, str(WORKFLOW), "finish", "--repo-root", str(root),
@@ -720,15 +725,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 requested_scope=actual)
             owner = json.loads(call("direct-owner", "--repo-root", root,
                                "--request-file", store("owner.json", request)).stdout)
-            failed = {"interface_version": 2, "issue": 151,
-                "state": "terminal_failed", "custody": owner["custody"],
-                "historical_owner_result": {"issue": 151, "state": "failed",
-                    "pr_url": None, "merge_sha": None, "issue_closed": False,
-                    "discussion_items": [], "detail_state": "none",
-                    "report_path": None, "notes": "failed"},
-                "delivery_contract_digest": digest, "delivery_observations": [],
-                "authority_observations": [], "reevaluation_evidence": [],
-                "detail_state": "none", "report_path": None, "notes": "failed"}
+            failed = self.failed_summary(owner["custody"], digest)
             remainder = json.loads(call("finish", "--repo-root", root, "--run-id",
                 owner["run_id"], "--summary-file", store("failed.json", failed), "--now",
                 "2026-09-21T00:00:01Z").stdout)
@@ -756,21 +753,27 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual((value["kind"], value["custody"]["remainder"],
                               value["custody"]["launch"], value["deadline_at"]),
                              ("delivery_remainder", 1, 2, remainder["deadline_at"]))
-            for ordinal in (1, 2, 3):
+            resume["now"] = "2026-09-21T04:00:00Z"
+            value = json.loads(call("direct-owner", "--repo-root", root,
+                "--request-file", store("expired-resume.json", resume)).stdout)
+            self.assertEqual(
+                (value["custody"]["remainder"], value["custody"]["launch"],
+                 value["deadline_at"]), (1, 3, "2026-09-21T04:30:00Z"))
+            for ordinal in (1, 2):
                 repeated = self.report_common(value["custody"], digest)
                 repeated["requested_scope"] = actual
                 parked = json.loads(call("checkpoint-delivery", "--repo-root", root,
                     "--run-id", owner["run_id"], "--checkpoint-file",
                     store(f"repeat-{ordinal}.json", repeated), "--now",
-                    f"2026-09-21T00:00:{3 + ordinal:02d}Z").stdout)
-                if ordinal == 3:
+                    f"2026-09-21T04:00:0{ordinal}Z").stdout)
+                if ordinal == 2:
                     self.assertEqual((parked["kind"], parked["stalled_resumes"]),
                                      ("delivery_stalled", 3))
                     break
-                resume["now"] = f"2026-09-21T00:00:{4 + ordinal:02d}Z"
+                resume["now"] = f"2026-09-21T04:00:0{ordinal + 1}Z"
                 value = json.loads(call("direct-owner", "--repo-root", root,
                     "--request-file", store(f"resume-{ordinal}.json", resume)).stdout)
-                self.assertEqual(value["custody"]["launch"], ordinal + 2)
+                self.assertEqual(value["custody"]["launch"], ordinal + 3)
 
     def test_remainder_two_requires_closed_recovery_proof_and_replays(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
@@ -918,15 +921,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             request["requested_scopes"]["151"] = actual
             owner = invoke("control", "--repo-root", root, "--run-id", run_id,
                            "--request-file", store(request))["actions"][0]
-            failed = {"interface_version": 2, "issue": 151,
-                "state": "terminal_failed", "custody": owner["custody"],
-                "historical_owner_result": {"issue": 151, "state": "failed",
-                    "pr_url": None, "merge_sha": None, "issue_closed": False,
-                    "discussion_items": [], "detail_state": "none",
-                    "report_path": None, "notes": "failed"},
-                "delivery_contract_digest": digest, "delivery_observations": [],
-                "authority_observations": [], "reevaluation_evidence": [],
-                "detail_state": "none", "report_path": None, "notes": "failed"}
+            failed = self.failed_summary(owner["custody"], digest)
             remainder = invoke("finish", "--repo-root", root, "--run-id", run_id,
                                "--summary-file", store(failed), "--now",
                                "2026-09-21T00:00:01Z")
@@ -939,7 +934,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                    "2026-09-21T00:00:02Z")
             resume = self.control_request(contract)
             resume.update(now="2026-09-21T00:00:03Z",
-                tracker=request["tracker"], worktrees=[{"issue": 151,
+                tracker=[{"issue": 151, "state": "closed", "open_blockers": [],
+                          "decision_blockers": []}], worktrees=[{"issue": 151,
                     "recorded": {"path": worktree, "state": "matching_issue_branch"},
                     "candidate": None}])
             response = invoke("control", "--repo-root", root, "--run-id", run_id,

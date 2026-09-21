@@ -173,11 +173,17 @@ class DeliveryRuntime:
             raise ValueError("delivery recovery refused") from error
         if recovery is not None:
             return recovery
+        if (issue_state is None or not issue_state["delivery_remainders"]
+                or issue_state["delivery_remainders"][-1]["state"]
+                not in {"active", "suspended"}):
+            return None
         try:
             return self.remainder_policy(
                 issue_state, now=now, owner_unavailable=owner_unavailable,
                 dispatch_permitted=dispatch_permitted, tracker_halted=tracker_halted,
-                recorded_worktree=recorded_worktree)
+                recorded_worktree=recorded_worktree,
+                remainder_deadline=remainder_deadline, issue=issue,
+                request=request, source_kind=source_kind)
         except (TypeError, ValueError) as error:
             raise ValueError("remainder policy refused") from error
 
@@ -251,6 +257,9 @@ class DeliveryRuntime:
         self, issue_state: dict[str, Any] | None, *, now: str,
         owner_unavailable: bool, dispatch_permitted: bool,
         tracker_halted: bool, recorded_worktree: dict[str, Any] | None,
+        remainder_deadline: str, preview: dict[str, Any] | None = None,
+        issue: int | None = None, request: dict[str, Any] | None = None,
+        source_kind: str | None = None,
     ) -> dict[str, Any] | None:
         """Resume the current delivery remainder without spending an attempt."""
         if issue_state is None or not issue_state["delivery_remainders"]:
@@ -261,34 +270,44 @@ class DeliveryRuntime:
         expired = (remainder["state"] == "active"
                    and self._time(now) >= self._time(remainder["deadline_at"]))
         if expired:
-            remainder["state"], remainder["blocked_on"] = "suspended", "unknown"
+            self._projection.suspend_expired_remainder(
+                issue_state, remainder, now)
 
         def result(operation: str, *, changed: bool = False,
                    requirements: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-            facade = {"issue": issue_state["issue"],
-                "attempt": remainder["source_attempt"], "state": remainder["state"],
-                "owner": remainder["owner"], "worktree": remainder["worktree"],
-                "handoff_path": None, "deadline_at": remainder["deadline_at"],
-                "launches": remainder["launches"]}
+            facade = self._remainder_facade(issue_state, remainder)
             return {"operation": operation, "changed": changed,
                     "issue_state": issue_state, "attempt": facade,
                     "requirements": [] if requirements is None else requirements,
                     "uses_candidate": False, "desired": "resume",
-                    "custody_kind": "remainder", "expired": False}
+                    "custody_kind": "remainder", "expired": expired,
+                    "reduction": preview}
 
+        if remainder["state"] == "failed":
+            if preview is None:
+                preview = {"next_stage_id": None}
+            return result("terminal", changed=True)
+        if preview is None:
+            if issue is None or request is None or source_kind is None:
+                raise ValueError("remainder preview inputs are required")
+            preview_state = copy.deepcopy(issue_state)
+            preview = self.apply_transition(
+                preview_state, issue=issue, request=request,
+                source_kind=source_kind, at_time=now)
         if owner_unavailable and remainder["state"] != "active":
             raise ValueError("owner_unavailable is not applicable")
         if remainder["state"] == "active" and not owner_unavailable:
             return result("idle")
-        if tracker_halted:
-            return result("terminal", changed=expired)
+        _ = tracker_halted
         if not dispatch_permitted:
             return result("idle", changed=expired)
-        if (recorded_worktree is None
-                or recorded_worktree.get("path") != remainder["worktree"]
-                or recorded_worktree.get("state") != "matching_issue_branch"):
-            return result("observe", changed=expired, requirements=[
-                {"kind": "recorded_worktree", "path": remainder["worktree"]}])
+        requirements = self._projection.remainder_worktree_requirements(
+            issue_state["delivery"]["contract"], preview["next_stage_id"],
+            recorded_worktree, remainder["worktree"])
+        if requirements:
+            return result("observe", changed=expired, requirements=requirements)
+        if expired:
+            remainder["deadline_at"] = remainder_deadline
         remainder["launches"].append({"kind": "resume", "owner": remainder["owner"],
             "worktree": remainder["worktree"], "at": now})
         remainder["state"], remainder["blocked_on"] = "active", None
@@ -745,41 +764,61 @@ class DeliveryRuntime:
             record["finished_at"] = now
         terminal = {**common, "kind": "terminal_failed", "state": "terminal_failed",
                     "result_source": "owner", "reason_code": "owner_reported_failure"}
+        remainder = self._create_first_remainder(
+            issue_state, record, reduction, now=now,
+            remainder_deadline=remainder_deadline)
+        if remainder is None:
+            return terminal
+        return self.remainder_response(
+            ledger_repo_root=ledger_repo_root, run_id=run_id,
+            issue_state=issue_state, remainder=remainder, reduction=reduction)
+
+    def _create_first_remainder(
+        self, issue_state: dict[str, Any], record: dict[str, Any],
+        reduction: dict[str, Any], *, now: str, remainder_deadline: str,
+    ) -> dict[str, Any] | None:
         if (not reduction["pending_stage_ids"] and not reduction["requirements"]
                 or issue_state["delivery_remainders"]):
-            return terminal
-        number = 1
+            return None
         contract = issue_state["delivery"]["contract"]
         next_stage = reduction["next_stage_id"]
         if next_stage is not None and not next(
             stage["retryable"] for stage in contract["stages"]
             if stage["id"] == next_stage):
-            return terminal
+            return None
         progress_token = self._model.canonical_digest({
             "pending": reduction["pending_stage_ids"],
             "postconditions": issue_state["delivery"]["postconditions"],
         })
-        owner = f"{issue_state['issue']}:r{number}"
-        remainder = {
-            "remainder": number,
-            "contract_digest": issue_state["delivery"]["contract_digest"],
-            "source_attempt": (report["custody"].get("attempt")
-                               or record["source_attempt"]),
-            "prior_remainder": None if number == 1 else number - 1,
-            "pending_stage_ids": copy.deepcopy(reduction["pending_stage_ids"]),
-            "owner": owner, "worktree": record["worktree"], "state": "active",
-            "launches": [{"kind": "fresh", "owner": owner,
-                          "worktree": record["worktree"], "at": now}],
-            "deadline_at": remainder_deadline,
-            "progress_token": progress_token,
-            "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
-            "result": None, "result_source": None, "recovery": None,
-            "finished_at": None,
-        }
-        issue_state["delivery_remainders"].append(remainder)
-        return self.remainder_response(
-            ledger_repo_root=ledger_repo_root, run_id=run_id,
-            issue_state=issue_state, remainder=remainder, reduction=reduction)
+        return self._projection.create_first_remainder(
+            issue_state, record, reduction, now=now,
+            deadline=remainder_deadline, progress_token=progress_token)
+
+    def complete_historical_direct(
+        self, state: dict[str, Any], *, issue: int, request: dict[str, Any],
+        policy: dict[str, Any], ledger_repo_root: str, run_id: str, reentry: str,
+        remainder_deadline: str,
+    ) -> tuple[bool, dict[str, Any]]:
+        changed, reduction = self.apply_direct_delivery(
+            state, issue=issue, request=request, policy=policy)
+        issue_state = state["issues"][str(issue)]
+        if policy.get("custody_kind") == "remainder":
+            record = issue_state["delivery_remainders"][-1]
+            result = record["result"]
+        else:
+            record = issue_state["attempts"][-1]
+            result = issue_state["outcome"]
+            remainder = self._create_first_remainder(
+                issue_state, record, reduction, now=request["now"],
+                remainder_deadline=remainder_deadline)
+            if remainder is not None:
+                return True, self.remainder_response(
+                    ledger_repo_root=ledger_repo_root, run_id=run_id,
+                    issue_state=issue_state, remainder=remainder,
+                    reduction=reduction)
+        return changed, self._projection.direct_terminal(
+            issue=issue, run_id=run_id,
+            reason=record["result"]["state"], result=result, reentry=reentry)
 
     def finish_state(
         self, state: dict[str, Any], report: dict[str, Any], *, now: str,

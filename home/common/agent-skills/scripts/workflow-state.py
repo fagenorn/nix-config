@@ -2371,6 +2371,27 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 selected is not None
                 and direct_run_is_terminal(selected[4]["issues"][str(issue)])
             )
+            carries_delivery_facts = False
+            if selected is not None:
+                terminal_issue = selected[4]["issues"][str(issue)]
+                retained_delivery = terminal_issue["delivery"]
+                new_facts = any(
+                    item["id"] not in {old["id"] for old in retained_delivery[name]}
+                    for request_name, name in (
+                        ("authorization_intents", "authorization_intents"),
+                        ("authority_observations", "authority_observations"),
+                        ("reevaluation_evidence", "reevaluation_evidence"),
+                        ("delivery_observations", "delivery_observations"))
+                    for item in request[request_name])
+                carries_delivery_facts = (
+                    request["requested_scope"] is not None
+                    or request.get("recovery") is not None
+                    or new_facts)
+                if (selected_is_terminal
+                        and retained_delivery["contract"] is not None
+                        and carries_delivery_facts
+                        and not runtime.delivery_complete(terminal_issue)):
+                    selected_is_terminal = False
 
             selected_attempts = (
                 [] if selected is None
@@ -2489,13 +2510,24 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         source="tracker", reason=policy["tracker_reason"],
                         blockers=policy["blockers"], result=None,
                     )
+                elif (operation in {"terminal", "reconcile"}
+                      and carries_delivery_facts):
+                    assert state is not None
+                    state["issues"][str(issue)] = policy["issue_state"]
+                    changed, response = _call(
+                        "delivery transition refused",
+                        runtime.complete_historical_direct,
+                        state, issue=issue, request=request, policy=policy,
+                        ledger_repo_root=str(repo_root), run_id=run_id,
+                        reentry=reentry_command(issue),
+                        remainder_deadline=attempt_deadline(
+                            request["now"], request["attempt_budget_minutes"]),
+                    )
+                    if changed:
+                        state["updated_at"] = request["now"]
+                        validate_state(state, run_id=run_id)
+                        atomic_write_state(run_dir, state_path, state)
                 elif operation == "terminal":
-                    # The one lifecycle terminal that carries no tracker reason:
-                    # the reaper's suspension was the fourth at an unchanged
-                    # phase, so `suspend_attempt` stopped the attempt instead
-                    # (per D4). The envelope equals the next call's replay,
-                    # which `direct_run_is_terminal` will route through
-                    # `direct_terminal` from the same stored fields.
                     assert state is not None
                     if policy["changed"]:
                         state["issues"][str(issue)] = policy["issue_state"]

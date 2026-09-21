@@ -382,9 +382,14 @@ def _stage_scope_matches(contract: dict[str, Any], delivery: dict[str, Any],
         if selected is None:
             if output != {"kind": "slot", "slot_id": stage_target["slot_id"]} or data != declared_data: _reject()
         else:
-            expected = {"kind": "literal", "digest": selected["data_identity_digest"],
-                        "classification": declared_data["classification"],
-                        "audience": declared_data["audience"]}
+            if declared_data["kind"] == "selected_output_slot":
+                expected = {"kind": "literal", "digest": selected["data_identity_digest"],
+                            "classification": declared_data["classification"],
+                            "audience": declared_data["audience"]}
+            elif declared_data["kind"] == "none":
+                expected = {"kind": "none"}
+            else:
+                _reject()
             if not ((output == {"kind": "slot", "slot_id": stage_target["slot_id"]} and data == declared_data)
                     or (output == {"kind": "literal", "value": selected["subject_value"]} and data == expected)):
                 _reject()
