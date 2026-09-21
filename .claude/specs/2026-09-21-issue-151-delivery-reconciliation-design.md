@@ -174,7 +174,7 @@ unknown or duplicate keys are invalid, and JSON `null` is accepted only where a
 field below says nullable. Null means no value; it is never a wildcard. Canonical
 bytes are UTF-8 JSON with lexicographically sorted object keys, compact
 separators, shortest decimal integers and one trailing newline. Arrays keep
-semantic order only for `stages`; every other array named below is sorted by
+contract order for `stages`, `stage_facts`, and `pending_stage_ids`; every other array named below is sorted by
 scalar value or member id and contains unique values. A digest is lowercase
 `sha256:<64-hex>` over the object's canonical bytes with that object's own
 derived `id` or `digest` member omitted. Producers and consumers use the same
