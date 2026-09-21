@@ -173,6 +173,34 @@ class DeliveryRuntime:
             raise ValueError("delivery recovery refused") from error
         if recovery is not None:
             return recovery
+        if (source_kind == "direct" and issue_state is not None
+                and not issue_state["delivery_remainders"]
+                and issue_state["attempts"]
+                and issue_state["attempts"][-1]["state"]
+                in {"merged", "completed", "stopped", "failed"}
+                and self.historical_direct_requested(issue_state, request)):
+            before = copy.deepcopy(issue_state["delivery"])
+            reduction = self.apply_transition(
+                issue_state, issue=issue, request=request,
+                source_kind="direct", at_time=now)
+            record = issue_state["attempts"][-1]
+            remainder = self._create_first_remainder(
+                issue_state, record, reduction, now=now,
+                remainder_deadline=remainder_deadline)
+            if remainder is not None:
+                return {"operation": "resume", "changed": True,
+                    "issue_state": issue_state,
+                    "attempt": self._remainder_facade(issue_state, remainder),
+                    "requirements": copy.deepcopy(reduction["requirements"]),
+                    "uses_candidate": False, "desired": "resume",
+                    "custody_kind": "remainder", "expired": False,
+                    "reduction": reduction}
+            return {"operation": "terminal",
+                "changed": issue_state["delivery"] != before,
+                "issue_state": issue_state, "attempt": record,
+                "requirements": copy.deepcopy(reduction["requirements"]),
+                "uses_candidate": False, "desired": "terminal",
+                "expired": False, "reduction": reduction}
         if (issue_state is None or not issue_state["delivery_remainders"]
                 or issue_state["delivery_remainders"][-1]["state"]
                 not in {"active", "suspended"}):
@@ -251,6 +279,11 @@ class DeliveryRuntime:
 
     def delivery_complete(self, issue_state: dict[str, Any]) -> bool:
         return self._projection.delivery_complete(issue_state)
+
+    def historical_direct_requested(
+        self, issue_state: dict[str, Any], request: dict[str, Any]
+    ) -> bool:
+        return self._projection.historical_direct_requested(issue_state, request)
 
 
     def remainder_policy(
@@ -793,32 +826,6 @@ class DeliveryRuntime:
         return self._projection.create_first_remainder(
             issue_state, record, reduction, now=now,
             deadline=remainder_deadline, progress_token=progress_token)
-
-    def complete_historical_direct(
-        self, state: dict[str, Any], *, issue: int, request: dict[str, Any],
-        policy: dict[str, Any], ledger_repo_root: str, run_id: str, reentry: str,
-        remainder_deadline: str,
-    ) -> tuple[bool, dict[str, Any]]:
-        changed, reduction = self.apply_direct_delivery(
-            state, issue=issue, request=request, policy=policy)
-        issue_state = state["issues"][str(issue)]
-        if policy.get("custody_kind") == "remainder":
-            record = issue_state["delivery_remainders"][-1]
-            result = record["result"]
-        else:
-            record = issue_state["attempts"][-1]
-            result = issue_state["outcome"]
-            remainder = self._create_first_remainder(
-                issue_state, record, reduction, now=request["now"],
-                remainder_deadline=remainder_deadline)
-            if remainder is not None:
-                return True, self.remainder_response(
-                    ledger_repo_root=ledger_repo_root, run_id=run_id,
-                    issue_state=issue_state, remainder=remainder,
-                    reduction=reduction)
-        return changed, self._projection.direct_terminal(
-            issue=issue, run_id=run_id,
-            reason=record["result"]["state"], result=result, reentry=reentry)
 
     def finish_state(
         self, state: dict[str, Any], report: dict[str, Any], *, now: str,

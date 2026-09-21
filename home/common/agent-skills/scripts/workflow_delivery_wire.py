@@ -18,6 +18,19 @@ class DeliveryProjection:
     """Project validated workflow state into closed interface-2 values."""
 
     @staticmethod
+    def historical_direct_requested(issue_state: dict[str, Any],
+                                    request: dict[str, Any]) -> bool:
+        delivery = issue_state["delivery"]
+        if delivery["contract"] is None:
+            return False
+        names = ("authorization_intents", "authority_observations",
+                 "reevaluation_evidence", "delivery_observations")
+        return (request["requested_scope"] is not None
+                or request.get("recovery") is not None
+                or any(item["id"] not in {old["id"] for old in delivery[name]}
+                       for name in names for item in request[name]))
+
+    @staticmethod
     def custody_for_record(issue: int, kind: str, record: dict[str, Any]) -> dict[str, Any]:
         ordinal_name = "attempt" if kind == "implementation" else "remainder"
         ordinal = record[ordinal_name]
