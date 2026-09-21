@@ -757,7 +757,18 @@ Direct/v2 has required nullable `recovery`; control/v2 has exact canonical
 issue-keyed `recoveries` (explicit nulls). Remainders have required nullable
 `recovery` (null r1, exact object r2) and `finished_at` (null nonterminal,
 actual failed/stalled terminal event). No summary, handoff or checkpoint recovery field. Recovery is
-`{schema_version:1,kind:delivery-recovery,id,contract_digest,stage_id,requested_scope,failure,effect_absence,basis}`; derived id covers all other members. Failure is exactly `{kind:effect_failure,effect_attempted:true,classification:transient,source_kind:provider|host|tracker|repository|filesystem,reference,observed_at,evidence_digest}`; absence is exactly `{kind:effect_absence,absent:true,probe_succeeded:true,source_kind:<same>,reference,observed_at,evidence_digest}`. Both bind actual scope/stage. Basis is exactly `{kind:changed_relevant_evidence,scope_id,observed_at,evidence_digest,source_kind,reference}` for actual scope after failure, `{kind:new_authorization,id}` for unrevoked covering intent issued after failure, or `{kind:human_transient_retry,id}` for the same explicit-user source; successor intent may arrive atomically.
+`{schema_version:1,kind:delivery-recovery,id,contract_digest,stage_id,requested_scope,failure,effect_absence,basis}`; id covers all other members.
+For the following exact objects, P expands to keys `source_kind,reference,
+observed_at,evidence_digest`: independently chosen source enum
+`provider|host|tracker|repository|filesystem`, nonempty string reference,
+RFC3339 UTC time and canonical SHA-256 digest. P is notation, not a wire member.
+Failure is `{kind:effect_failure,effect_attempted:true,classification:transient,P}`;
+absence is `{kind:effect_absence,absent:true,probe_succeeded:true,P}`. Both bind
+actual scope/stage. Basis is `{kind:changed_relevant_evidence,scope_id,P}` with
+scope_id equal to the actual scope id and time after failure;
+`{kind:new_authorization,id}` names unrevoked covering intent issued after failure;
+`{kind:human_transient_retry,id}` additionally requires explicit-user source.
+Successor intent may arrive atomically; proof structure authenticates no source.
 
 Under lock only latest terminal authentic failed(owner)/stalled r1, no other
 nonterminal/r2, and a pending ready retryable stage qualify. Fold facts/intents
@@ -768,7 +779,9 @@ semantics stay unchanged. Any latest unresolved rejected/unknown
 verdict for actual or matched declared scope parks; ordinary proof never
 overrides D18. Persist r2+recovery atomically with no effect/evaluation/
 consumption; return null r2 scope and fresh requirements. Contractless, active,
-wrong target/time/basis, replay, stale owner and third requests refuse unchanged.
+wrong target/time/basis, stale-owner or proof-reuse/third-allocation requests
+refuse unchanged. Identical recovery replay returns existing r2 or completed
+replay without writing; it never allocates again.
 Finish mints r1 only. Test valid recovery plus absence, denial, replay, third,
 active and stale-proof negatives.
 
@@ -850,6 +863,6 @@ architecture authority. They are not recorded human answers.
 | D16 | Keep artifact/model validation structural, add one raw `workflow-response` union boundary, and reserve ledger freshness plus normalized-source/host authenticity for workflow-state under lock and the existing trust boundary. | Defense in depth; D3 launch fence; normalized controller facts are not authenticated by digests or opaque references. | Asking the stateless artifact validator to reject a once-valid stale action or fabricated but well-shaped source claim would invent authority and make public tests impossible. |
 | D17 | Upgrade schema 1/2 only inside a mutation transaction with explicit request-derived contract context and final `validate_state(..., run_id=...)`; keep current-launch on a no-write legacy read path. | D8/D14 immutable history and atomic migration; current no-lock/no-create launch guard. | Value-only migration cannot resolve new contract context, while upgrading during current-launch would make a read-only fence mutate or strand legacy runs. |
 | D18 | Bind each fresh post-rejection evaluation to one append-only consumption keyed by rejection and its independent successor-intent or reevaluation-evidence basis; persist before action, bind the returned fact by use key/time/scope/custody, require current intent, and let a new rejection win while retaining all history. | Operative-denial and late-collector requirements; response-closure review. | Replayable evidence, crash-reset permission, cosmetic-basis authority, or old-launch allow reuse. |
-| D19 | Carry an independently normalized nullable requested scope through direct/control/checkpoint; let the pure model bind it to the post-fold contract-ordered stage; echo it on effect-bearing responses while treating handoff as history and requiring a fresh proposal after transfer/remainder. | Actual endpoint/audience/principal/risk/spend are absent from the accepted request wire; independent Sol critique accepted by root. | Deriving actual scope from intent, duplicating stage policy in workflow-state, treating mismatch as new permission, or requiring a prior allow for ordinary effects. |
-| D20 | Put v2 admission, schema-3 delivery-envelope validation and the shared locked delivery transition behind one private `workflow_delivery` runtime installed beside workflow-state; keep CLI, locks, writes and effects in workflow-state. | The complete `workflow-state.py` fixed-base diff already uses 62,664 of 65,536 bytes before the remaining transition/caller work; a deep boundary preserves one model owner and reviewable files. | Growing the monolith, callback injection, another public framework, copied model policy, `sys.path` mutation or a surviving v1 effect path. |
+| D19 | Independently proposed nullable scope binds the post-fold ordered stage and is echoed; handoff is historical and transfer/remainder needs a fresh proposal. | The wire lacked actual endpoint, audience, principal, risk and spend; independent Sol critique accepted. | Intent-derived actual scope, copied stage policy, mismatch as permission or prior-allow prerequisites. |
+| D20 | Private `workflow_delivery` owns v2 admission, schema-3 delivery validation and transition; workflow-state owns CLI, locks, writes and effects. | Its fixed-base monolith diff was 62,664/65,536 bytes. | Callbacks, copied policy, public framework, `sys.path`, fallback imports or live v1 effects. |
 | D21 | Permit only exact proof-gated r2 recovery after failed/stalled r1; it grants no authority and D18 denial remains controlling. | I2 recovery correction. | Blind retry, stale minting or a third remainder. |
