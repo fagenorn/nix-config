@@ -438,60 +438,29 @@ promoted into a stage fact or postcondition.
 
 ### Separate finite remainder custody
 
-State schema 3 adds `delivery_remainders` beside existing implementation
-`attempts`. The two arrays have independent ordinals and retry counts. Existing
-attempt ordinals, the two-attempt implementation cap and historical results do
-not change. A remainder record has exactly contract digest, remainder ordinal,
-source implementation attempt, nullable prior remainder, pending stage ids,
-owner/worktree, state, launches, fixed deadline, progress token, suspension
-fields, result and result source.
+Schema 3 `delivery_remainders` is one disjoint finite lineage with independent
+attempt/remainder ordinals, budgets and existing attempt-cap/result semantics.
+Each record has the canonical `issue:r<ordinal>:launch` custody id, source
+attempt, sorted pending stages, current postcondition/auth-heads, requested
+scope, recovery and `finished_at`; its creation key is exactly that canonical
+contract/source-attempt/sorted-pending/current-postcondition/auth-head tuple.
+Only one nonterminal custody exists across both lineages. R1 is idempotent,
+validated-contract custody for pending work and has no active implementation;
+repeated identical direct/control requests return the existing/completed result
+without writing. R2 requires latest authentic terminal failed/stalled R1,
+retryable ready work, verified absence and D21 proof; no third remainder exists.
+`finished_at` is null while live and is the actual failed/stalled terminal event;
+other independent completion/history behavior is unchanged.
 
-Implementation launch ids retain `issue:attempt:launch`. Remainder launches use
-the disjoint `issue:r<remainder>:launch` form. The read-only current-launch query
-accepts this closed union and otherwise keeps its no-clock, no-lock, no-create,
-no-write behavior. Every protected effect uses the received id verbatim. Every
-remainder mutation of tracker, provider, branch or worktree is protected: the
-caller invokes current-launch immediately before the effect, and false, missing
-or malformed output permits no effect, ledger write or cleanup. This retains the
-implementation path's existing pre-merge guard while fencing the new
-successor-owned post-merge path.
-
-There is at most one nonterminal custody record across implementation and
-remainder lineages. Creating remainder 1 requires a validated contract, no active implementation
-owner, and either a pending predeclared stage or a required pending
-postcondition. Its creation
-key is the canonical digest of contract, source attempt, sorted pending stages
-and current postcondition/authorization heads. Repeating the same direct/control
-request returns the existing record or completed replay without a write.
-
-Owner unavailability, ordinary handoff, expiry and environmental suspension
-resume the same remainder ordinal with a new launch. They never spend either
-retry budget. Preserve the fixed wall-clock deadline: handoff/dead-owner resume
-inside the window retains it; expiry suspends/parks before in-place resume gets a
-fresh full window. The persisted no-progress counter is 0 on the first
-suspension at a new progress token, then 1 and 2 on the next two suspensions; those three suspensions
-may resume. The fourth stores 3 before terminalizing as stalled and cannot
-resume. Meaningful persisted stage/postcondition progress clears the remembered
-phase and resets the counter to 0 before the next suspension starts a new epoch.
-
-The remainder lineage is independently capped at two ordinals, matching the
-current implementation-attempt ceiling without consuming it. Remainder 2 is
-allowed only after an authentic failed/stalled remainder, exact inspection says
-the required effect is still absent, the action is declared retryable, and a
-new recovery basis is present: changed relevant evidence, new actual
-authorization, or explicit human-directed retry of an unchanged authorized
-transient failure. A guard, host or provider rejection/unknown is not a
-transient-failure basis and requires the authority/material-evidence rules above.
-No third remainder is minted. A successor may still record
-independent human/provider completion evidence without new custody.
-
-Merge observation remains ahead of expiry/reaping. Persist observations first,
-derive pending stages second, and only then select or resume custody under
-capacity and deadline rules. An old terminal owner result is never overwritten;
-an active result-less implementation attempt may receive the existing truthful
-forge-reconciled closeout, while delivery truth stays in the independent record.
-Terminal replay checks an eligible remainder before returning the historical
-terminal envelope.
+Every effect and observation rechecks the current guard; false, missing or
+malformed guard causes zero effect, ledger write or cleanup. The fixed deadline
+is within its launch window; expiry parks before a fresh window. The counter is
+zero at first suspension, one/two resume, and the fourth suspension records
+three stalls. Real stage/postcondition progress resets it and remembered phase.
+Handoff, expiry and suspension resume in place without spending retry; human or
+provider completion is independent of new custody. Fold merge/facts before
+selection, preserve terminal history, and select an eligible terminal remainder
+before creating custody. Worktree rules below remain exact.
 
 ### Worktree and subject requirements
 
@@ -788,6 +757,29 @@ fake-provider state, never external payload/transcript/grant.
 - **Normal v3:** accepted/reviewed/tested selection permits publish/PR/merge;
   fresh integration reachability separately proves delivery.
 
+
+### D21 — authenticated effect-failure recovery
+
+Direct/v2 has required nullable `recovery`; control/v2 has exact canonical
+issue-keyed `recoveries` (explicit nulls). Remainders have required nullable
+`recovery` (null r1, exact object r2) and `finished_at` (null nonterminal,
+actual failed/stalled terminal event). No summary, handoff or checkpoint recovery field. Recovery is
+`{schema_version:1,kind:delivery-recovery,id,contract_digest,stage_id,requested_scope,failure,effect_absence,basis}`; derived id covers all other members. Failure is exactly `{kind:effect_failure,effect_attempted:true,classification:transient,source_kind:provider|host|tracker|repository|filesystem,reference,observed_at,evidence_digest}`; absence is exactly `{kind:effect_absence,absent:true,probe_succeeded:true,source_kind:<same>,reference,observed_at,evidence_digest}`. Both bind actual scope/stage. Basis is exactly `{kind:changed_relevant_evidence,scope_id,observed_at,evidence_digest,source_kind,reference}` for actual scope after failure, `{kind:new_authorization,id}` for unrevoked covering intent issued after failure, or `{kind:human_transient_retry,id}` for the same explicit-user source; successor intent may arrive atomically.
+
+Under lock only latest terminal authentic failed(owner)/stalled r1, no other
+nonterminal/r2, and a pending ready retryable stage qualify. Fold facts/intents
+with null scope first; model binds recovery scope to that stage/selected target.
+Failure is at/after latest effect-capable launch and by r1 `finished_at`; absence is
+at/after finish and failure and by request now. `finished_at` is null while live
+and the authentic failed/stalled terminal event; it changes no independent
+completion/history result. Any latest unresolved rejected/unknown
+verdict for actual or matched declared scope parks; ordinary proof never
+overrides D18. Persist r2+recovery atomically with no effect/evaluation/
+consumption; return null r2 scope and fresh requirements. Contractless, active,
+wrong target/time/basis, replay, stale owner and third requests refuse unchanged.
+Finish mints r1 only. Test valid recovery plus absence, denial, replay, third,
+active and stale-proof negatives.
+
 ## Test seams
 
 Acceptance uses public executable seams; prose alone is insufficient.
@@ -868,3 +860,4 @@ architecture authority. They are not recorded human answers.
 | D18 | Bind each fresh post-rejection evaluation to one append-only consumption keyed by rejection and its independent successor-intent or reevaluation-evidence basis; persist before action, bind the returned fact by use key/time/scope/custody, require current intent, and let a new rejection win while retaining all history. | Operative-denial and late-collector requirements; response-closure review. | Replayable evidence, crash-reset permission, cosmetic-basis authority, or old-launch allow reuse. |
 | D19 | Carry an independently normalized nullable requested scope through direct/control/checkpoint; let the pure model bind it to the post-fold contract-ordered stage; echo it on effect-bearing responses while treating handoff as history and requiring a fresh proposal after transfer/remainder. | Actual endpoint/audience/principal/risk/spend are absent from the accepted request wire; independent Sol critique accepted by root. | Deriving actual scope from intent, duplicating stage policy in workflow-state, treating mismatch as new permission, or requiring a prior allow for ordinary effects. |
 | D20 | Put v2 admission, schema-3 delivery-envelope validation and the shared locked delivery transition behind one private `workflow_delivery` runtime installed beside workflow-state; keep CLI, locks, writes and effects in workflow-state. | The complete `workflow-state.py` fixed-base diff already uses 62,664 of 65,536 bytes before the remaining transition/caller work; a deep boundary preserves one model owner and reviewable files. | Growing the monolith, callback injection, another public framework, copied model policy, `sys.path` mutation or a surviving v1 effect path. |
+| D21 | Permit only exact proof-gated r2 recovery after failed/stalled r1; it grants no authority and D18 denial remains controlling. | I2 recovery correction. | Blind retry, stale minting or a third remainder. |

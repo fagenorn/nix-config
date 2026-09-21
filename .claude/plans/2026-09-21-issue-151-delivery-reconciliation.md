@@ -63,6 +63,13 @@ Git, and repository `just` commands.
   exposes only interface version 1 and `DeliveryRuntime`. It owns v2 admission,
   schema-3 delivery-envelope validation and the shared locked transition;
   workflow-state retains CLI parsing, locks, atomic persistence and effects.
+- Per D21, only trusted direct/control recovery input may atomically allocate r2
+  after a terminal failed/stalled r1: direct carries required nullable recovery,
+  control carries the canonical issue-keyed recoveries map, and remainders carry
+  nullable recovery and `finished_at`. Exact recovery proof binds the selected
+  actual scope/stage, is folded null-first with successor intents, grants no
+  authority, and cannot override D18 denial; allocation emits no evaluation,
+  effect or consumption.
   There are no callbacks, policy copies, fallback imports or live v1 effect path.
 - Per D16, model/artifact checks prove canonical structure, while workflow-state
   owns locked freshness/semantic checks and native boundaries own source/host

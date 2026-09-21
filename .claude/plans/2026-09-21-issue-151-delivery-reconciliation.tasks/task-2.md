@@ -193,16 +193,9 @@ persist one final v3 state, then render. Rejection writes nothing; retry cannot
 duplicate consumption. Runtime owns this transition; workflow-state owns CLI,
 locks and writes.
 
-Effects use only returned action, exact actual scope and custody, with current-
-launch fences immediately before effect and observation. Historical handoff/allow
-is never operative. Partial work checkpoints; finish requires complete required
-postconditions or a genuine custody failure. Resume preserves deadline/ordinal;
-remainder 2 requires failure, absent effect and recovery; identity spaces remain
-disjoint; suspension count 3 stalls and progress resets it.
+Effects use exact returned scope/custody with current-launch fences; history never authorizes.
 
-No step authorizes activation, deployment, installed-generation change, forge
-write, live-ledger migration, cap increase, base repin, reduced test set, skipped
-raw receipt or partial-range review.
+No step authorizes activation, forge/live-ledger writes, cap/base changes, reduced tests or partial review.
 
 ## Exact verification and boundary precision
 
@@ -219,3 +212,25 @@ task_root=$PWD; cd /private/tmp/issue-151-skill-validation-env
 for skill in home/common/agent-skills/skills/{from-issue,ship-issue} home/common/claude-code/skills/orchestrate-issues; do devenv shell -- python3 /Users/anis/.codex/skills/.system/skill-creator/scripts/quick_validate.py "$task_root/$skill"; done
 ```
 Use the existing PyYAML devenv.
+
+D21 recovery closes direct/control/remainder wire shapes: direct/v2 has required
+nullable `recovery`; control/v2 has the exact canonical issue-keyed `recoveries`
+map (including explicit nulls); no summary, handoff or checkpoint has recovery;
+and every remainder has nullable recovery plus `finished_at` (null live; actual
+failed/stalled terminal time). A recovery is exactly the design's version-1
+`delivery-recovery` object with derived id, exact transient failure and verified
+absence objects, and one exact changed-evidence/new-authorization/
+human-transient-retry basis. It binds actual scope/stage, does not grant
+authority, folds null-first with successor intent, and D18 unresolved
+denial/unknown still parks. Only trusted direct/control input can atomically mint
+r2 after the latest failed/stalled r1, with retryable ready work and no active or
+existing r2; it emits no evaluation/effect/consumption, gives r2 null requested
+scope and fresh post-fold requirements, and never lets finish/stale owner output
+mint r2. Add public valid recovery plus absence, denial, replay, third, active
+and stale-proof no-write tests. Preserve the finite-custody invariant: disjoint
+attempt/remainder ordinals and budgets, canonical creation key, current guard
+before every effect/observation, fixed-deadline parking, 0/1/2 resume then fourth
+suspension records three stalls, progress reset, and terminal-remainder-first
+selection; identical direct/control replay returns existing/completed without a
+write. Retain raw receipts and do not activate, install a generation or mutate a
+live ledger.
