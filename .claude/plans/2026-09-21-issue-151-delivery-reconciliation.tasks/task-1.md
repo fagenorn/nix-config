@@ -627,7 +627,8 @@ records = subprocess.check_output(
     ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"]
 ).split(b"\0")
 changed = {record[3:].decode("utf-8") for record in records if record}
-assert changed == allowed, (changed, allowed)
+required = allowed - {"justfile"}
+assert required <= changed <= allowed, (changed, required, allowed)
 PY
 candidate_index=$(mktemp "${TMPDIR:-/tmp}/issue-151-task1-index-XXXXXX")
 rm "$candidate_index"
@@ -662,7 +663,8 @@ env = {**os.environ, "GIT_INDEX_FILE": os.environ["GIT_INDEX_FILE"]}
 candidate = set(subprocess.check_output(
     ["git", "diff", "--cached", "--name-only", "--"], env=env,
 ).decode().splitlines())
-assert candidate == allowed, (candidate, allowed)
+required = allowed - {"justfile"}
+assert required <= candidate <= allowed, (candidate, required, allowed)
 for path in sorted(allowed):
     patch = subprocess.check_output(
         ["git", "diff", "--cached", "--unified=10", "--", path], env=env,
@@ -674,10 +676,10 @@ trap - EXIT HUP INT TERM
 test -z "$(git diff --cached --name-only)"
 ```
 
-Expected: all commands exit 0; the tests pass, exactly nine correction paths
-differ (the standalone deletion, five package files and three existing paths),
-and no whitespace error appears. The temporary index measures deletions/new
-files without touching the real index. After the signed commit, the complete
+Expected: all commands exit 0 and no whitespace error appears. The correction
+allows nine paths: mandatory standalone deletion, five package files, focused
+test and publication, plus `justfile` only if registration changes. The temporary
+index measures deletions/new files without touching the real index. The complete
 immutable-Task-1-base package has eight net paths because the standalone file
 was created and removed within that range. Require full changed-path/line
 coverage and unchanged limits before review. If a split is needed, first amend
@@ -697,16 +699,25 @@ git add -A -- \
   home/common/agent-skills/tests/test_delivery_model.py \
   home/common/agent-skills/default.nix justfile
 test -z "$(git diff --name-only)"
-test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' \
-  home/common/agent-skills/default.nix \
-  home/common/agent-skills/scripts/delivery_model.py \
-  home/common/agent-skills/scripts/delivery_model/__init__.py \
-  home/common/agent-skills/scripts/delivery_model/_canonical.py \
-  home/common/agent-skills/scripts/delivery_model/_objects.py \
-  home/common/agent-skills/scripts/delivery_model/_reconcile.py \
-  home/common/agent-skills/scripts/delivery_model/_wire.py \
-  home/common/agent-skills/tests/test_delivery_model.py \
-  justfile)"
+python3 - <<'PY'
+import subprocess
+allowed = {
+    "home/common/agent-skills/default.nix",
+    "home/common/agent-skills/scripts/delivery_model.py",
+    "home/common/agent-skills/scripts/delivery_model/__init__.py",
+    "home/common/agent-skills/scripts/delivery_model/_canonical.py",
+    "home/common/agent-skills/scripts/delivery_model/_objects.py",
+    "home/common/agent-skills/scripts/delivery_model/_reconcile.py",
+    "home/common/agent-skills/scripts/delivery_model/_wire.py",
+    "home/common/agent-skills/tests/test_delivery_model.py",
+    "justfile",
+}
+staged = set(subprocess.check_output(
+    ["git", "diff", "--cached", "--name-only", "--"]
+).decode().splitlines())
+required = allowed - {"justfile"}
+assert required <= staged <= allowed, (staged, required, allowed)
+PY
 git commit -S -m "feat: add canonical delivery model" \
   -m "Co-Authored-By: Codex <noreply@openai.com>"
 ```
