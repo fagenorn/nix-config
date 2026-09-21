@@ -12,7 +12,7 @@
 - Produces `validate_delivery_object(value: object, *, expected_kind: str | None = None, notes_max_characters: int) -> dict[str, object]`. It dispatches the closed v1 kinds in the spec, validates exact keys/types/order/derived identities/cross-references, and returns a detached normalized copy. It also accepts the nested strict `delivery` value, v2 checkpoint/handoff/summary envelopes, and closed workflow-response union used by Task 2; it does not validate workflow schema, ledger freshness, source authenticity or legacy result rows.
 - Produces `validate_custody_ref(value: object, *, issue: int) -> dict[str, object]`, accepting only the implementation/remainder union and its exact derived action id.
 - Produces `match_scope(contract: object, intent: object, requested: object, *, selected_outputs: list[object], at_time: str, revocation_observations: list[object]) -> dict[str, object]`. The intent contains the declared scope, expiry and revocation key; the contract supplies the digest and complete slot constraints. The return has exactly `matched` (bool), nullable `scope_id`, and `reason_code` (closed string). It applies only the narrowing table and never reads time/ledger state.
-- Produces `reduce_delivery(contract: object, delivery: object, *, evaluation: object) -> dict[str, object]`. `evaluation` has exactly RFC3339 `at_time`, nullable `custody`, nullable boolean `current_launch` (null exactly when custody is null), nullable `requested_scope`, `source_kind` (`control | direct | checkpoint | summary`), and sorted candidate `authorization_intents`, `authority_observations`, `reevaluation_evidence`, and `delivery_observations`. The result has exactly normalized `stage_facts`, `postconditions`, ordered `pending_stage_ids`, nullable `next_stage_id`, sorted `requirements`, `completion_state` (`pending | delivery_complete`), and nullable `blocking` with exact `blocked_on`, `reason_code`, and `subject_id`. It is deterministic and does not mutate any input.
+- Produces `reduce_delivery(contract: object, delivery: object, *, evaluation: object) -> dict[str, object]`. `evaluation` has exactly RFC3339 `at_time`, nullable `custody`, nullable boolean `current_launch` (null exactly when custody is null), nullable `requested_scope`, `source_kind` (`control | direct | checkpoint | summary`), and sorted candidate `authorization_intents`, `authority_observations`, `reevaluation_evidence`, and `delivery_observations`. The result has exactly complete normalized `next_delivery`, ordered `pending_stage_ids`, nullable `next_stage_id`, sorted `requirements`, `completion_state` (`pending | delivery_complete`), nullable typed `blocking`, and nullable strict `authority_evaluation`. Workflow-state can persist `next_delivery` without reconstructing accepted facts or consumption state.
 - Publishes the same regular source file as `~/.agents/lib/python/delivery_model.py`; later source and installed callers explicitly load that lexical path and require interface version 1.
 
 **Invariants:**
@@ -20,7 +20,8 @@
 - All strict objects reject unknown/missing keys, bool-as-int, invalid nulls, duplicate or unsorted set-like arrays, bad RFC 3339 UTC values, bad ids/digests, broken intent predecessors, stage graph cycles/forward references, slot mismatches and conflicting observation identities.
 - `stages`, `stage_facts`, and `pending_stage_ids` retain contract order. Other set-like arrays are sorted by scalar or member id and unique.
 - Selection precedes every slot use; publish precedes open; merge requires selected output, an open PR, and pre-merge acceptance/review/test evidence but not `implementation_delivered`. Fresh post-merge reachability or record presence independently observes delivery.
-- A host rejection remains operative until a valid later intent covering the exact tuple or accepted reevaluation evidence permits one fresh evaluation. New spelling, owner, context or host does not clear it. Human completion may satisfy an exact effect while preserving the rejection and granting no mutation right.
+- A host rejection remains operative until either a valid post-rejection intent covering the exact tuple or accepted reevaluation evidence independently permits one fresh evaluation. Before exposing that evaluation, the result appends one `authority-evaluation-consumption/v1` keyed by rejection and basis; workflow-state persists it first. Replay, transfer and crash never reissue the same basis. Human completion may satisfy an exact effect while preserving the rejection and granting no mutation right.
+- An intent-revocation observation carries the exact target intent id and revocation key. Direct/control may retain trusted late facts under their original old launch, but only a current-custody allowed fact authorizes the current effect.
 - `validate_delivery_object` checks structural/canonical truth only. `reduce_delivery` owns intent-chain, contract/slot, launch/effect, rejection and one-shot reevaluation semantics over caller-supplied facts. Workflow-state remains the transaction/trusted-source owner and supplies the current time/launch; neither the model nor artifact-budget authenticates an opaque host reference.
 - The publication stanza adds one library target; it does not change the installed workflow/artifact wrappers or activate a new protocol.
 
@@ -241,50 +242,96 @@ class DeliveryModelTest(unittest.TestCase):
         self.assertEqual(reduced["blocking"]["blocked_on"], "human_gate")
         self.assertEqual(reduced["blocking"]["reason_code"], "host_rejected")
 
-    def test_rejection_successor_reevaluation_and_launch_binding(self):
+    def test_rejection_successor_and_evidence_are_independent_one_shot_bases(self):
         contract, delivery = strict_contract_and_delivery(self.model)
         custody = implementation_custody()
         denied = with_host_rejection(self.model, contract, delivery, custody=custody)
         requested = denied["authorization_intents"][-1]["scopes"][0]
-        still_denied = self.model.reduce_delivery(
-            contract, denied,
-            evaluation=evaluation_context(
+        cosmetic = self.model.reduce_delivery(
+            contract, denied, evaluation=evaluation_context(
                 custody=custody, current_launch=True, requested_scope=requested,
                 authorization_intents=[cosmetic_successor(self.model, denied)],
             ),
         )
-        self.assertEqual(still_denied["blocking"]["reason_code"], "host_rejected")
+        self.assertEqual(cosmetic["blocking"]["reason_code"], "host_rejected")
 
         successor = covering_successor(self.model, denied, requested)
+        by_intent = self.model.reduce_delivery(
+            contract, denied, evaluation=evaluation_context(
+                custody=custody, current_launch=True, requested_scope=requested,
+                authorization_intents=[successor], reevaluation_evidence=[],
+            ),
+        )
+        self.assertEqual(by_intent["authority_evaluation"]["basis_kind"], "successor_intent")
+        self.assertEqual(by_intent["authority_evaluation"]["basis_id"], successor["id"])
+
         reevaluation = reevaluation_for(self.model, contract, denied)
-        permitted = self.model.reduce_delivery(
-            contract, denied,
-            evaluation=evaluation_context(
+        by_evidence = self.model.reduce_delivery(
+            contract, denied, evaluation=evaluation_context(
                 custody=custody, current_launch=True, requested_scope=requested,
-                authorization_intents=[successor],
+                authorization_intents=[], reevaluation_evidence=[reevaluation],
+            ),
+        )
+        permit = by_evidence["authority_evaluation"]
+        self.assertEqual(permit["basis_kind"], "reevaluation_evidence")
+        self.assertEqual(permit["basis_id"], reevaluation["id"])
+        consumptions = by_evidence["next_delivery"]["authority_evaluation_consumptions"]
+        self.assertEqual([fact["use_key"] for fact in consumptions], [permit["use_key"]])
+        replay = self.model.reduce_delivery(
+            contract, by_evidence["next_delivery"], evaluation=evaluation_context(
+                custody=custody, current_launch=True, requested_scope=requested,
                 reevaluation_evidence=[reevaluation],
             ),
         )
-        self.assertEqual(permitted["requirements"][0]["reason_code"], "native_evaluation_required")
-        replay = delivery_with_reevaluation_consumed(self.model, denied, reevaluation)
-        one_shot = self.model.reduce_delivery(
-            contract, replay,
-            evaluation=evaluation_context(
-                custody=custody, current_launch=True, requested_scope=requested,
-                authorization_intents=[successor],
-                reevaluation_evidence=[reevaluation],
-            ),
-        )
-        self.assertEqual(one_shot["blocking"]["reason_code"], "host_rejected")
-        wrong_launch = self.model.reduce_delivery(
-            contract, denied,
-            evaluation=evaluation_context(
+        self.assertIsNone(replay["authority_evaluation"])
+        self.assertEqual(replay["blocking"]["reason_code"], "reevaluation_consumed")
+        after_crash_transfer = self.model.reduce_delivery(
+            contract, by_evidence["next_delivery"], evaluation=evaluation_context(
                 custody=next_launch(custody), current_launch=True,
-                requested_scope=requested,
-                authority_observations=[allowed_for(self.model, custody, requested)],
+                requested_scope=requested, reevaluation_evidence=[reevaluation],
             ),
         )
-        self.assertEqual(wrong_launch["requirements"][0]["reason_code"], "authority_launch_mismatch")
+        self.assertIsNone(after_crash_transfer["authority_evaluation"])
+
+    def test_revocation_binds_intent_id_and_key(self):
+        contract, delivery = strict_contract_and_delivery(self.model)
+        requested = delivery["authorization_intents"][-1]["scopes"][0]
+        first, second = same_scope_distinct_key_intents(self.model, delivery, requested)
+        revoked_first = revocation_for(self.model, contract, first)
+        self.assertEqual(
+            self.model.match_scope(
+                contract, first, requested, selected_outputs=delivery["selected_outputs"],
+                at_time="2026-09-21T00:00:00Z", revocation_observations=[revoked_first],
+            )["reason_code"], "intent_revoked",
+        )
+        self.assertTrue(self.model.match_scope(
+            contract, second, requested, selected_outputs=delivery["selected_outputs"],
+            at_time="2026-09-21T00:00:00Z", revocation_observations=[revoked_first],
+        )["matched"])
+
+    def test_late_old_launch_facts_are_history_not_current_authority(self):
+        contract, delivery = strict_contract_and_delivery(self.model)
+        old, current = implementation_custody(), next_launch(implementation_custody())
+        requested = delivery["authorization_intents"][-1]["scopes"][0]
+        old_allowed = allowed_for(self.model, old, requested)
+        retained = self.model.reduce_delivery(
+            contract, delivery, evaluation=evaluation_context(
+                source_kind="direct", custody=current, current_launch=True,
+                requested_scope=requested, authority_observations=[old_allowed],
+            ),
+        )
+        self.assertIn(old_allowed["id"], {
+            item["id"] for item in retained["next_delivery"]["authority_observations"]
+        })
+        self.assertEqual(retained["requirements"][0]["reason_code"], "authority_launch_mismatch")
+        old_rejected = rejected_for(self.model, old, requested)
+        rejected = self.model.reduce_delivery(
+            contract, delivery, evaluation=evaluation_context(
+                source_kind="control", custody=current, current_launch=True,
+                requested_scope=requested, authority_observations=[old_rejected],
+            ),
+        )
+        self.assertEqual(rejected["blocking"]["reason_code"], "host_rejected")
 
     def test_workflow_response_validation_is_structural_only(self):
         stale_but_well_formed = {
@@ -344,8 +391,11 @@ observations in contract order and recomputes their ids;
 derived id; `with_host_rejection(model, contract, delivery)` supplies the exact merge scope and a
 launch-bound rejected host observation. Also define the exact helper names used
 above for evaluation contexts, custody, intent successors, revocation,
-reevaluation, contract/slot mutation and allowed observations. Every helper
-first validates one common valid seed. Positive helpers and semantic-negative
+reevaluation, consumption, same-scope/distinct-key intents, bound revocation,
+contract/slot mutation and old-launch allowed/rejected observations. The
+consumption helper computes the stable use key from rejection+basis, then its
+full id; revocation helpers always carry both target intent id and exact key.
+Every helper first validates one common valid seed. Positive helpers and semantic-negative
 helpers recompute every affected id/digest and validate before return so the
 case reaches the intended semantic check. In particular,
 `authorization_case(model, variant=...)` reseals the intent, its enclosing
@@ -396,8 +446,10 @@ a closed reason such as `scope_target_mismatch`, `scope_data_mismatch`,
 `reduce_delivery` validates the contract, delivery and complete evaluation
 context; folds candidate facts only from the allowed `source_kind`; validates
 the append-only intent chain, current custody/launch and observation effect
-binding; applies rejection persistence and one-shot reevaluation; derives stage
-facts/postconditions without mutating input; and scans contract order. The
+binding; and returns the complete normalized next delivery. A post-rejection
+basis creates one stable use key and consumption plus one evaluation action; an
+already stored use key yields no action. It derives stage facts/postconditions
+without mutating input and scans contract order. The
 caller-supplied current-launch boolean is a transaction fact, not permission.
 Unmet local evidence produces a typed requirement and leaves custody active.
 Only closed reasons map to blocking: missing/new user authority or an operative
@@ -406,10 +458,11 @@ transport failure → `transport`; unknown stays nonblocking/reaper-only.
 `control` and `direct` may supply normalized successor intents plus all four
 candidate fact arrays. `checkpoint` and `summary` require the candidate intent
 array to be empty and may carry only their specified observation/evidence arrays;
-an owner report therefore cannot append authority intent. Every accepted runtime
-authority observation must bind the evaluation custody launch and requested
-scope; a null custody/current launch is valid only for projection with no
-requested effect.
+an owner report therefore cannot append authority intent. Checkpoint/summary runtime authority facts must bind the evaluation custody.
+Direct/control may accept a trusted late fact under its original launch into
+`next_delivery`; current-effect eligibility still requires its allowed verdict
+to bind the evaluation custody. A null custody/current launch is valid only for
+projection with no requested effect.
 
 Add the Home Manager publication beside the existing Python library targets.
 The managed public leaf is a lexical symlink to a regular Nix-store file; source

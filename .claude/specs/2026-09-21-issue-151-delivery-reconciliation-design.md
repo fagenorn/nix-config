@@ -131,11 +131,13 @@ permission to retry it.
 `authority-observation/v1` is append-only and binds contract digest, scope-tuple
 id, nullable current launch, authority kind (`intent_revocation`, `native_guard`,
 `host`, `provider`), verdict (`allowed`, `rejected`, `unknown`, `revoked`), reason
-code, observation time, evidence digest and optional opaque host reference.
-Launch may be null only for an intent-revocation observation with verdict
-`revoked`; every runtime verdict requires the exact launch. Its observation id
-is the SHA-256 of the canonical non-secret members, so a host need not provide a
-stable receipt. An opaque host reference is retained only when actually returned.
+code, observation time, evidence digest, optional opaque host reference, and a
+nullable strict `revocation_subject`. That subject is required exactly for
+`intent_revocation`/`revoked`, contains the target `intent_id` and its exact
+`revocation_key`, and is null otherwise. Launch is null exactly for that
+revocation shape; every runtime verdict requires its original launch. The
+observation id covers every canonical non-secret member. Scope equality alone
+therefore cannot revoke a successor with a distinct key.
 
 Durable intent authorizes requesting the normal native/host evaluation; it does
 not require a pre-existing `allowed` observation that a tool cannot issue until
@@ -146,7 +148,9 @@ returns a refusal to that caller with zero external effect and byte-identical
 ledger state.
 
 After a successful guard, the current owner may request the native/host/provider
-evaluation. Before persisting its returned `allowed`, `rejected` or `unknown`
+evaluation. When a prior rejection requires a fresh evaluation, the transaction
+first persists the one-shot consumption described below; only the response from
+that first successful persistence carries the evaluation permit. Before persisting its returned `allowed`, `rejected` or `unknown`
 observation, it checks the same launch again. If ownership changed meanwhile,
 that owner writes nothing; the current successor or an authorized external
 observation collector may later ingest the exact non-secret result through the
@@ -262,15 +266,40 @@ Scope matching permits only these narrowings:
 `observed_at` and `evidence_digest`. The reducer accepts it only as a normalized
 source-bound fact from the existing trusted controller/adapter boundary and
 structurally binds it to the rejection; it provides no new authentication
-service. It permits
-one fresh evaluation of the same tuple; it neither authorizes the effect nor
-predicts the result, and neither deletes nor changes the old rejection.
+service. It is one alternative basis for one fresh evaluation of the same tuple; a
+post-rejection successor intent that independently covers the exact tuple is the
+other. Neither alternative authorizes the effect, predicts the result, deletes
+the rejection, or requires the other alternative.
+
+`authority-evaluation-consumption/v1` is the append-only one-shot record. It has
+exactly `schema_version` 1, literal `kind` `authority-evaluation-consumption`,
+derived `id`, derived `use_key`, `contract_digest`, `scope_id`,
+`rejected_observation_id`, strict `basis`, strict nonnull `custody`, and UTC
+`consumed_at`. `basis` has exactly `kind` (`successor_intent |
+reevaluation_evidence`) and `id`. `use_key` is the canonical digest of exactly
+contract digest, scope id, rejected observation id and basis; it deliberately
+excludes custody and time. The full object id covers all members except `id`.
+The delivery array is unique by both id and use key. Thus a transfer, retry,
+crash or later timestamp cannot mint a second use of the same basis.
+
+For an otherwise eligible unconsumed basis, `reduce_delivery` returns a complete
+next delivery containing the new consumption and one nullable
+`authority_evaluation` action. That action has exactly literal kind
+`native_authority_evaluation`, contract digest, scope id, custody, rejected
+observation id, `basis_kind`, `basis_id`, and `use_key`. Workflow-state rechecks custody under
+lock and atomically persists the returned next delivery before it emits a
+response containing that action. The caller may run the external evaluation
+only after validating that response. A persistence failure emits no action. A
+replay after persistence returns `reevaluation_consumed` with no action; a crash
+after persistence but before evaluation consumes the basis fail-closed rather
+than silently resetting it. The returned provider/host fact follows the normal
+second current-launch check and observation path.
 
 `authority-observation/v1` has exactly `schema_version` 1, literal `kind`
-`authority-observation`, derived `id`,
-`contract_digest`, `scope_id`, nullable `launch_id`, closed `authority_kind` and
-`verdict`, `reason_code`, UTC `observed_at`, `evidence_digest` and nullable
-`opaque_host_reference`, with the null restriction stated above.
+`authority-observation`, derived `id`, `contract_digest`, `scope_id`, nullable
+`launch_id`, closed `authority_kind` and `verdict`, `reason_code`, UTC
+`observed_at`, `evidence_digest`, nullable `opaque_host_reference`, and nullable
+strict `revocation_subject`, with the discriminator rules stated above.
 `delivery-observation/v1` has exactly `schema_version` 1, literal `kind`
 `delivery-observation`, derived `id`,
 `contract_digest`, strict `project`, closed `observation_kind`, strict
@@ -415,9 +444,11 @@ Owner unavailability, ordinary handoff, expiry and environmental suspension
 resume the same remainder ordinal with a new launch. They never spend either
 retry budget. Preserve the fixed wall-clock deadline: handoff/dead-owner resume
 inside the window retains it; expiry suspends/parks before in-place resume gets a
-fresh full window. The same no-progress arithmetic permits three resumes and
-stops automatic dispatch on the next suspension. Meaningful persisted stage or
-postcondition progress resets the streak.
+fresh full window. The persisted no-progress counter is 0 on the first
+suspension at a new progress token, then 1 and 2 on the next two suspensions; those three suspensions
+may resume. The fourth stores 3 before terminalizing as stalled and cannot
+resume. Meaningful persisted stage/postcondition progress clears the remembered
+phase and resets the counter to 0 before the next suspension starts a new epoch.
 
 The remainder lineage is independently capped at two ordinals, matching the
 current implementation-attempt ceiling without consuming it. Remainder 2 is
@@ -491,15 +522,17 @@ and matching revocation observations; it never reads a clock or ledger.
 strict evaluation context containing explicit time, nullable custody/current
 launch, nullable requested scope, a closed trusted-source kind and candidate
 intent, authority, reevaluation and delivery observations. The source kind says
-which already validated workflow boundary supplied the normalized facts; it is
-not authentication evidence and cannot replace guard, host or provider verdicts.
-Validation returns detached normalized objects; scope matching returns only
-matched/scope/reason; reduction validates the complete intent chain and
-contract/slot/launch/effect bindings, consumes one-shot reevaluation only for its
-bound rejection, preserves historical rejection, and returns normalized stage
-facts and postconditions, ordered pending stages, nullable next stage, sorted
-requirements, completion state and nullable typed blocking. This keeps transport
-callers thin without exposing ledger or provider operations through the model.
+which validated workflow boundary supplied normalized facts; it is not proof of
+authority. Reduction validates the intent chain and all bindings and returns a
+complete normalized `next_delivery` for persistence, ordered pending stages,
+nullable next stage, sorted requirements, completion state, nullable typed
+blocking, and nullable `authority_evaluation`. Direct/control may persist a
+well-formed trusted candidate authority fact bound to its original old launch;
+only an allowed fact bound to the evaluation custody is eligible for the current
+effect. Checkpoint/summary cannot introduce such a late fact. This preserves old
+allowed/rejected history without turning an old allow into a new grant. The
+one-shot consumption and action are returned together as above, so no caller
+must infer persistence from free text.
 
 `validate_delivery_object` is structural and canonical: it cannot know current
 ledger custody or authenticate a normalized source/opaque host reference.
@@ -542,8 +575,9 @@ The v3 issue object has exactly existing `issue`, `attempts`, and `outcome` plus
 `delivery` and `delivery_remainders`. `delivery` has exactly `contract`,
 `contract_digest`, sorted `authorization_intents`,
 `authorization_chain_digest`, sorted `authority_observations`, sorted
-`reevaluation_evidence`, sorted `delivery_observations`, sorted
-`selected_outputs`, ordered `stage_facts`, and `postconditions` with exactly the
+`reevaluation_evidence`, sorted `authority_evaluation_consumptions`, sorted
+`delivery_observations`, sorted `selected_outputs`, ordered `stage_facts`, and
+`postconditions` with exactly the
 four named keys; each value has exactly `state`
 `pending | observed | not_applicable` and nullable `observation_id`, with the
 same state/id relationship as stage facts. A remainder record has exactly
@@ -657,9 +691,10 @@ terminalizing custody or spending either retry budget.
 The checkpoint response has exactly interface version 2, literal kind
 `delivery_checkpointed`, ledger root, run id, issue, owner, custody, contract
 digest, sorted accepted observation ids, ordered pending stage ids, nullable next
-action, sorted requirements, state `active | suspended`, and nullable
-`blocked_on`. It contains no guessed stage, terminal verdict or alternate
-authority field.
+action, sorted requirements, nullable `authority_evaluation`, state `active |
+suspended`, and nullable `blocked_on`. Control/direct owner actions carry the
+same nullable field. It is nonnull only in the first response after the matching
+consumption was durably appended; replay never re-emits it.
 
 When the accepted facts produce a true blocking requirement, the reducer—not a
 shipping caller—maps its closed reason to `human_gate`, `external`, or
@@ -677,7 +712,8 @@ durable progress rather than a fabricated `failed` delivery.
 `auto`, `report_path`, `notes`, `delivery_contract`,
 `delivery_contract_digest`, `authorization_intents`,
 `authorization_chain_digest`, `authority_observation_ids`,
-`reevaluation_evidence_ids`, `pending_stage_ids`, and `selected_outputs`. The v1
+`reevaluation_evidence_ids`, `authority_evaluation_consumption_ids`,
+`pending_stage_ids`, and `selected_outputs`. The v1
 attempt/action lifecycle group is replaced by the closed custody object rather
 than retained beside it. `ship-summary/v2` has exactly `interface_version` 2, `issue`, `state`
 (`delivery_complete | terminal_failed`), `custody`, nullable
@@ -704,10 +740,11 @@ cutover is allowed.
 
 Artifact-budget also exposes one structural raw-byte `workflow-response`
 boundary for control/direct actions, the exact legacy-shaped four-key
-current-launch result, checkpoint responses and finish outcomes. It loads the
-shared model and validates the closed response union before callers or tests
-decode stdout. This boundary proves shape, canonical bytes and internal
-custody/action-id consistency only. Current-ledger freshness,
+current-launch result, checkpoint responses and finish outcomes. `init-run` is a
+setup-only command: callers check its exit status but do not decode its bootstrap
+stdout through this union. The boundary loads the shared model and validates the
+closed response union before other caller/test decode. It proves shape and
+canonical bytes and internal custody/action-id consistency only. Current-ledger freshness,
 accepted-contract audience/data matching and normalized-source authenticity
 remain workflow-state semantic checks under lock or native trust-boundary facts.
 
@@ -832,6 +869,7 @@ architecture authority. They are not recorded human answers.
 | D12 | Finish issue 151 through its run-specific retained v2/v1 operational bridge; keep exact-old-generation conformance/topology/runtime receipts with the root controller, test only new-source product interfaces in shipped suites, and activate v3 only through separate managed scope. | #66 bridge/activation separation; dynamic validator/module/policy resolution; worktree cleanup removes source. | Hardcoded machine hashes, committed historical runtime fixtures, a generic bridge runtime, migrating the live run or depending on its deleted worktree would mix product behavior with one delivery's operations. |
 | D13 | Put canonical delivery validation, narrowing and pure reduction in one import-safe `delivery_model.py` published as a library and consumed by workflow-state and artifact-budget; adopt every wire atomically after the pure seam is reviewed. | DRY; review-package feasibility; current source/installed Python layouts. | Duplicate validators drift, while a generic framework or early schema cutover would exceed this issue and violate D9. |
 | D14 | Keep valid schema-1 ledgers readable by applying the existing 1→2 migration and the new 2→3 migration as an adjacent in-memory chain, validating the complete schema-3 result, and performing at most one atomic write. | Current source already supports schema 1→2; D8 requires immutable legacy history; an interface cutover must not strand an older valid ledger. | Setting the sole prior version to 2 would reject supported schema-1 history, while persisting an intermediate schema-2 ledger would expose a partial cutover. |
-| D15 | Give the pure model one closed eight-name public surface, with explicit validated contract/intent/evaluation-time/custody/candidate-fact inputs, and make checkpoint output a closed custody-bound response carrying accepted facts, pending stages, next action/requirements and suspension state. | D2/D3 require facts the pure function cannot read itself; D9 atomic wire cutover; D13 one contract owner. | Caller-specific reduction dictionaries, ambient clocks/ledger reads or an open-ended checkpoint response would recreate duplicate policy and let callers infer authority or terminal truth. |
+| D15 | Give the pure model one closed eight-name public surface with explicit contract/intent/time/custody/candidate inputs and a complete persistable next-delivery result; checkpoint/owner output is closed and may carry only the model's nullable authority-evaluation action after durable one-shot consumption. | D2/D3 require explicit facts; D9 atomic cutover; D13 one contract owner. | Caller-specific reduction dictionaries, ambient reads, free-text consumption, or an open response would duplicate policy and permit replay. |
 | D16 | Keep artifact/model validation structural, add one raw `workflow-response` union boundary, and reserve ledger freshness plus normalized-source/host authenticity for workflow-state under lock and the existing trust boundary. | Defense in depth; D3 launch fence; normalized controller facts are not authenticated by digests or opaque references. | Asking the stateless artifact validator to reject a once-valid stale action or fabricated but well-shaped source claim would invent authority and make public tests impossible. |
 | D17 | Upgrade schema 1/2 only inside a mutation transaction with explicit request-derived contract context and final `validate_state(..., run_id=...)`; keep current-launch on a no-write legacy read path. | D8/D14 immutable history and atomic migration; current no-lock/no-create launch guard. | Value-only migration cannot resolve new contract context, while upgrading during current-launch would make a read-only fence mutate or strand legacy runs. |
+| D18 | Bind each fresh post-rejection evaluation to one append-only consumption keyed by rejection and its independent successor-intent or reevaluation-evidence basis; persist it before emitting the one-time evaluation action, and preserve original-launch facts separately from current-effect eligibility. | Operative-denial and late-collector requirements; round-two review. | Replayable evidence, crash-reset permission, or discarding/authorizing through old-launch history. |

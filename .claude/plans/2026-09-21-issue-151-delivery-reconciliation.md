@@ -65,6 +65,9 @@ Git, and repository `just` commands.
 - Per D17, schema 1/2 upgrades receive request-derived contract context only in a
   mutation transaction and finish with `validate_state(candidate, run_id=run_id)` before
   one write. Read-only current-launch validates legacy state without upgrading.
+- Per D18, each post-rejection successor-intent or reevaluation-evidence basis
+  has one append-only consumption use key persisted before its evaluation action
+  is emitted. Old-launch facts remain history; only current-launch allow applies.
 - Every ordinary source file remains below the review packer's 65,536-byte
   per-file diff limit. Do not depend on an unpublished projector or raise any
   root, member, count or aggregate cap.
@@ -81,7 +84,8 @@ Git, and repository `just` commands.
   objects, slot-bound narrowing, refusal preservation and ordered reduction.
 - Workflow CLI tests invoke real `init-run`, `control`, `direct-owner`,
   `current-launch`, `checkpoint-delivery`, and `finish` subprocesses against
-  temporary ledgers; internal helper calls are not acceptance evidence.
+  temporary ledgers. Init is setup-only with exit-status checking; every other
+  successful stdout uses the closed response validator before decode.
 - Artifact boundary tests feed exact raw v2 handoff/checkpoint/summary and
   workflow-response bytes to
   `artifact-budget validate-report` before any workflow decode and exercise
@@ -132,7 +136,10 @@ history or expose an intermediate schema. It added D15 to close the intermodule
 model surface and the public checkpoint response instead of leaving caller-owned
 reduction dictionaries or an open output envelope. Round-one review adds D16's
 structural-versus-semantic boundary plus public response validator and D17's
-explicit migration/read-only split.
+explicit migration/read-only split. Round-two review adds D18's durable
+post-rejection consumption/action rule, exact revocation subject, late-fact
+history/current-effect split, explicit bootstrap handling, and persisted stall
+arithmetic.
 
 Plan review provenance: an independent Sol/high review of head
 `d1c9c47ea94daa8d4f97e127d72021f8e3896baf` reported 3 Blocking / 3 Should-fix /
@@ -143,5 +150,12 @@ The corrected members bind PR/output evidence separately, supply complete pure
 evaluation and migration context, add the actual raw response route, separate
 structural/trust/ledger checks, make double fencing and stall/deadline scenarios
 executable, and use temporary-index candidate inventories that include new files.
+
+The independent Sol/high round-two review of corrected head
+`a5e4250e9333f0fc4006f1814b5b0936278e678b` reported 4 Blocking / 2 Should-fix /
+0 Discussion in `/private/tmp/issue-151-plan-review-round2.md`; root's Astra pass
+reported 2 Blocking / 2 Should-fix in
+`/private/tmp/issue-151-root-plan-critical-round2.md`. All residuals are accepted
+and resolved by the D18 wire plus the focused executable-test repairs above.
 
 ---
