@@ -231,6 +231,33 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
                 self.assert_validates(report)
                 self.assertEqual(self.entry_ids(root, env), [SCHEMA_CHECK_ID])
 
+    def test_the_installed_schema_set_decides_schema_support(self):
+        """Support comes from the installed manifest, not a constant or the
+        committed set: widening it admits a schema-1 contract, narrowing it
+        refuses one, and the facts name the installed set (D4, D6)."""
+        base = {"platform_version": "1.4.2", "project_schema_version": 1,
+                "platform_min_inclusive": "1.0.0",
+                "platform_max_exclusive": "2.0.0"}
+        cases = (
+            ([1, 2], ["passed", None, None,
+                      {**base, "supported_project_schemas": ["1", "2"]}]),
+            ([2], ["failed", "unsupported_schema", "contract.schema.unsupported",
+                   {**base, "supported_project_schemas": ["2"],
+                    "schema_reason_code": "project_schema_unsupported",
+                    "violations": 1, "first_pointer": "/schema_version"}]),
+        )
+        for versions, expected in cases:
+            with self.subTest(versions=versions), fixture() as tmp:
+                root = with_contract(make_root(tmp), platform=INTERVAL)
+                env = platform_env(tmp, mutated_manifest(
+                    platform_version="1.4.2", project_schema_versions=versions))
+                report, by_id = doctor(self, root, env=env)
+                check = by_id[SCHEMA_CHECK_ID]
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["repair_id"],
+                     check["facts"]], expected)
+                self.assert_validates(report)
+
     def test_a_malformed_interval_fails_valid_and_suppresses_schema_supported(self):
         with fixture() as tmp:
             root = with_contract(make_root(tmp), platform={
@@ -306,7 +333,7 @@ in-suite form of the Demo (D7, D11):
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_conformance.py -k PlatformLadderTest -k EngineFailureTest 2>&1 | tail -1; python3 -m unittest home/common/agent-skills/tests/test_conformance_registry.py -k AcceptanceDemoTest 2>&1 | tail -1`
 
-Expected: `FAILED (failures=7, errors=1)`, then `FAILED (failures=1)`. The ladder
+Expected: `FAILED (failures=9, errors=1)`, then `FAILED (failures=1)`. The ladder
 still calls the pre-slice signatures, so every subprocess run reports
 `resolver_failure`. `EngineFailureTest` already passes at this point. Its new
 `stage` assertion guards against a regression, not against today's code.
@@ -317,7 +344,8 @@ In `scripts/conformance-checks.py`, replace everything from `def settle(` up to,
 but not including, `def stage_result(` with the block below. Leave the rest of the
 module unchanged. The block is written out in full because its order, its stage
 labels and where the facts attach are the decisions D4–D6 record. It was validated
-against a scratch replay: 85 conformance tests and 178 resolver tests pass.
+against a scratch replay: 85 conformance tests and 178 resolver tests passed,
+before Phase 5 added `test_the_installed_schema_set_decides_schema_support`.
 
 ```python
 def settle(context: Context, error, facts: dict | None = None) -> bool:
@@ -467,8 +495,8 @@ The `dedup_violations` docstring stays true: `validate_contract` still re-runs
 
 Run: `T=home/common/agent-skills/tests; python3 -m unittest $T/test_resolve_project.py $T/test_resolve_platform.py $T/test_resolve_platform_status.py $T/test_conformance.py $T/test_conformance_checks.py $T/test_conformance_registry.py 2>&1 | tail -3`
 
-Expected: `Ran 263 tests` and `OK`. That is 178 resolver tests plus 85 conformance
-tests, the 80 existing ones and the 5 new ones. At the start of this task, the same
+Expected: `Ran 264 tests` and `OK`. That is 178 resolver tests plus 86 conformance
+tests, the 80 existing ones and the 6 new ones. At the start of this task, the same
 command reports `Ran 258 tests` and `FAILED (failures=50, errors=8)`.
 
 Run: `git diff --quiet HEAD -- home/common/agent-skills/scripts/conformance-registry.py home/common/agent-skills/scripts/conformance.py && echo "closed sets untouched"`
@@ -477,7 +505,7 @@ Expected: `closed sets untouched`.
 
 Run: `L="${TMPDIR:-/tmp}/t2-awt.log"; just agent-workflow-tests > "$L" 2>&1; grep -E '^(Ran [0-9]+ tests|OK|FAILED)' "$L"`
 
-Expected: `Ran 999 tests` and `OK`, in about 3 minutes. 999 is the count at this
+Expected: `Ran 1000 tests` and `OK`, in about 3 minutes. 1000 is the count at this
 base, and any failure line is a stop.
 
 - [ ] **Step 5: Commit**

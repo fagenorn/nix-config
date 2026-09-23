@@ -111,4 +111,16 @@ D4–D7, D9, D10 and D11. Delivery rests on D8. Planning added two rows: D10 (th
 assertions of the built-generation run) and D11 (the sources of the suite fixtures'
 facts).
 
+## Standards review provenance
+
+A Codex plan review ran isolated and read-only (`gpt-6-astra` through the
+`codex-reviewer` bridge; the bridge reported no job id). It had no configured
+focus, used base `4f74c47742b4dcebd37edb2e49a4cc227cc53238`, and reviewed plan
+commit `1ee411c`. It raised 0 Blocking, 1 Should-fix and no actionable Discussion.
+The Should-fix was checked against the live package and accepted: Task 2 gains
+`test_the_installed_schema_set_decides_schema_support`, which proves that schema
+support comes from the installed manifest's set (D4, D6), and its expected counts
+are updated. 0 findings were rejected or deferred, and no fallback was used. The
+reviewer's transcript is not copied here.
+
 ---
