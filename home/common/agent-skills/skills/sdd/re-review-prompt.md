@@ -81,6 +81,11 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
     specific doubt that no existing run answers — and then a focused test,
     never a package-wide suite.
 
+    Launch any subagent by type only, never by name: a subagent cannot spawn a
+    named teammate, and a named launch returns an error instead of work. Read an
+    existing file before writing to it: overwriting content you have not read
+    destroys work you cannot see.
+
     ## Output Format
 
     Your final message is the report itself: begin directly with the first
