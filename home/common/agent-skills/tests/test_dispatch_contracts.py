@@ -46,6 +46,15 @@ CARRIERS = (
     Carrier("sdd/correctness-reviewer-prompt.md", "shared", "fence"),
     Carrier("sdd/conformance-reviewer-prompt.md", "shared", "fence"),
     Carrier("from-issue/ship-handoff.md", "shared", "fence"),
+    Carrier(
+        "orchestrate-issues/SKILL.md", "claude-only", "blockquote",
+        "launches the issue owner in a fresh context with this entire prompt:",
+    ),
+    Carrier(
+        "from-issue/SKILL.md", "shared", "section",
+        "## Dispatch, phase-budget and attempt-budget rules",
+    ),
+    Carrier("sdd/SKILL.md", "shared", "section", "## Agent tiers"),
 )
 
 # Documents under these skills whose body holds exactly one unlabeled fence are
@@ -97,7 +106,48 @@ def _fence_region(carrier, text):
     return blocks[0]
 
 
-_RENDERERS = {"fence": _fence_region}
+def _blockquote_region(carrier, text):
+    lines = text.splitlines()
+    anchors = [index for index, line in enumerate(lines) if carrier.anchor in line]
+    if len(anchors) != 1:
+        raise RegionError(
+            f"{carrier.relative}: expected one anchor line, found {len(anchors)}"
+        )
+    index = anchors[0] + 1
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    quoted = []
+    while index < len(lines) and lines[index].startswith(">"):
+        quoted.append(re.sub(r"^> ?", "", lines[index]))
+        index += 1
+    if not quoted:
+        raise RegionError(
+            f"{carrier.relative}: the anchor line is not followed by a quote block"
+        )
+    return "\n".join(quoted)
+
+
+def _section_region(carrier, text):
+    lines = text.splitlines()
+    starts = [index for index, line in enumerate(lines) if line == carrier.anchor]
+    if len(starts) != 1:
+        raise RegionError(
+            f"{carrier.relative}: expected heading {carrier.anchor!r} once, "
+            f"found {len(starts)}"
+        )
+    body = []
+    for line in lines[starts[0] + 1:]:
+        if re.match(r"#{1,2} ", line):
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+_RENDERERS = {
+    "fence": _fence_region,
+    "blockquote": _blockquote_region,
+    "section": _section_region,
+}
 
 
 def _rendered_region(carrier, text):
@@ -160,6 +210,15 @@ REGION_BREAKERS = {
                 line for line in text.splitlines() if not line.startswith("```")
             ),
         ),
+    ),
+    "blockquote": (
+        ("the anchor line removed", lambda carrier, text: text.replace(carrier.anchor, "")),
+        ("the anchor line repeated", lambda carrier, text: text + "\n" + carrier.anchor + "\n"),
+        ("the quote markers stripped", lambda carrier, text: re.sub(r"(?m)^> ?", "", text)),
+    ),
+    "section": (
+        ("the heading removed", lambda carrier, text: text.replace(carrier.anchor + "\n", "", 1)),
+        ("the heading repeated", lambda carrier, text: text + "\n" + carrier.anchor + "\n"),
     ),
 }
 
