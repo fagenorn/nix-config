@@ -73,7 +73,10 @@ failure emits no stdout, exactly one stable class diagnostic on stderr, and exit
 a sibling temporary candidate, invoke this command, and transport only its validated stdout bytes;
 callers run received bytes back through the same command before trusting them. The shared policy's
 `phase_reports.wire_max_bytes` bounds both bytes read and canonical bytes emitted, so no fixed-shape
-string field can make the transport unbounded.
+string field can make the transport unbounded. The `workflow-response` boundary takes
+`workflow_responses.wire_max_bytes` instead: a control response carries one summary per requested
+issue plus the full delivery contract of every dispatch, so it outgrows an owner phase report
+([#169](https://github.com/fagenorn/nix-config/issues/169)).
 
 `validate-detail-input` reads one no-follow regular file or stdin and requires exactly
 `{"interface_version":1,"findings":[...]}` with a non-empty array and D15's exact finding
@@ -353,7 +356,8 @@ stable for identical content.
 ### Policy schema
 
 Policy version 1 is a strict object with `schema_version`, `unit: "bytes"`, a closed `artifacts` map,
-and exact `phase_reports` integers `notes_max_characters: 500` and `wire_max_bytes: 8192`. Each artifact entry contains positive integer
+exact `phase_reports` integers `notes_max_characters: 500` and `wire_max_bytes: 8192`, and exact
+`workflow_responses` integer `wire_max_bytes: 65536`. Each artifact entry contains positive integer
 `root_max_bytes` and `aggregate_max_bytes`, plus non-negative integer `member_max_bytes` and
 `max_members`. For one-file kinds both member values are zero. The checker rejects booleans,
 fractions, negative values, unknown keys, missing kinds, inconsistent one-file limits, and aggregate
