@@ -188,6 +188,10 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 **Structured report-backs.** A subagent's final message is re-read by its caller on every later turn, so every `Agent` dispatch states the applicable fixed JSON return schema; details live in budgeted worktree files. Prefer the tiered agent types over `general-purpose`.
 
+**Leaf-agent clauses.** Every prompt this skill or a file beside it composes for an `Agent` dispatch carries these two sentences verbatim, as a paragraph of their own; a prompt built from `ship-handoff.md` already carries them:
+
+> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see.
+
 **Artifact report boundary (D5, D6, D11, D14).** At every producer boundary,
 preserve the received stdout bytes and pipe them unchanged through
 `artifact-budget validate-report --boundary producer --input -`; only after that

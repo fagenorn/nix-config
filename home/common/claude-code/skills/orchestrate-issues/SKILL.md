@@ -157,6 +157,12 @@ Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_backg
 > Include `handoff_path` only when non-null.
 > Invoke the `from-issue` skill via the Skill tool with the literal arguments
 > `from-issue <num> --auto`. Preserve the lifecycle identity and exact worktree.
+>
+> Launch any subagent by type only, never by name: a subagent cannot spawn a
+> named teammate, and a named launch returns an error instead of work. Read an
+> existing file before writing to it: overwriting content you have not read
+> destroys work you cannot see.
+>
 > Persist the compact result with `workflow-state finish`, then return exactly
 > its JSON stdout and nothing else.
 

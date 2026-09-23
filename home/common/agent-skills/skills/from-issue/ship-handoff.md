@@ -46,6 +46,11 @@ Your task:
      ship-issue checkpoint and confirmation; return anything requiring a user decision
      instead of treating it as autonomous.
 
+Launch any subagent by type only, never by name: a subagent cannot spawn a named
+teammate, and a named launch returns an error instead of work. Read an existing
+file before writing to it: overwriting content you have not read destroys work
+you cannot see.
+
 Return exactly canonical JSON from `artifact-budget validate-report --boundary ship-summary`
 over a candidate with these exact keys: `issue`, `state`, `pr_url`,
 `merge_sha`, `issue_closed`, `discussion_items`, `detail_state`, `report_path`,

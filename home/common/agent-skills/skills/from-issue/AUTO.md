@@ -113,6 +113,7 @@ beyond the exceptions named below):
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
 - the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
   filter, pasted verbatim from `decision-ledger.md`,
+- the two sentences of `SKILL.md`'s **Leaf-agent clauses** rule, verbatim, as a paragraph of their own,
 - the fixed return schema, with "details live in the committed files, not in your report".
 
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally
