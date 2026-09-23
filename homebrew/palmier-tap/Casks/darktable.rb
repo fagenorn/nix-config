@@ -8,8 +8,7 @@ cask "darktable" do
   version "5.6.1"
   sha256 "155c25a48e06023eeeda3640f6f4fc7848bc1ad8e7384ba1d7b63098986fbeda"
 
-  url "https://github.com/darktable-org/darktable/releases/download/release-#{version}/darktable-#{version}-arm64.dmg",
-      verified: "github.com/darktable-org/darktable/"
+  url "https://github.com/darktable-org/darktable/releases/download/release-#{version}/darktable-#{version}-arm64.dmg"
   name "darktable"
   desc "Photography workflow application and raw developer"
   homepage "https://www.darktable.org/"
