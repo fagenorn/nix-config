@@ -74,7 +74,14 @@ in
   homebrew = {
     enable = true;
     onActivation = {
-      cleanup = "zap";
+      # Homebrew 7 removed `brew bundle install --cleanup` ("Calling the `--cleanup`
+      # switch is disabled"), but nix-darwin 25.11 still emits `--cleanup --zap` for
+      # cleanup = "zap". nix-darwin master fixed this on 2026-06-01 (bb9c29c1: it now
+      # passes `--zap --force-cleanup`) and it was never backported to 25.11. Keep the
+      # zap semantics by passing Homebrew 7's spelling through extraFlags instead;
+      # drop this shim once nix-darwin is bumped past that commit.
+      cleanup = "none";
+      extraFlags = [ "--zap" "--force-cleanup" ];
       autoUpdate = true;
       upgrade = true;
     };
