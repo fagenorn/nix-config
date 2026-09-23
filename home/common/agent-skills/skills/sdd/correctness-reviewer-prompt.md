@@ -86,6 +86,11 @@ Subagent (reviewer, Opus/high for the native path selected above):
       consumes actually match; naming consistent across tasks; no task undone by
       a later one.
 
+    Launch any subagent by type only, never by name: a subagent cannot spawn a
+    named teammate, and a named launch returns an error instead of work. Read an
+    existing file before writing to it: overwriting content you have not read
+    destroys work you cannot see.
+
     ## Output Format
 
     ≤400 words total. Your FIRST line is the axis verdict:

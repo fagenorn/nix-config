@@ -66,6 +66,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_sdd_workspace.py \
     home/common/agent-skills/tests/test_review_package.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
+    home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
@@ -90,6 +91,17 @@ agent-workflow-tests:
 agent-model-matrix:
   python3 home/common/agent-skills/scripts/agent-model-matrix.py validate
   python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
+
+# Check the dispatch contracts against the skill trees the Nix build installs.
+agent-installed-skill-tests: build
+  @set -- $(nix-store --query --requisites ./result \
+    | grep -- '-home-manager-files$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one built home-manager-files output; found $#" >&2; \
+      exit 1; \
+    fi; \
+    AGENT_SKILLS_INSTALLED_HOME="$1" python3 -m unittest -v \
+      home/common/agent-skills/tests/test_dispatch_contracts.py
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.

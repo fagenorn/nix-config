@@ -75,6 +75,10 @@ Dispatch by agent type — the definitions carry the model and effort tier; neve
 
 Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi-step work and costs more overall. Unsure between mechanic and implementer → pick implementer.
 
+**Leaf-agent clauses.** Every prompt this skill composes for an `Agent` dispatch — here, in [fix-loop.md](fix-loop.md) or in [final-review.md](final-review.md) — carries these two sentences verbatim, as a paragraph of their own; a prompt built from one of the `*-prompt.md` templates already carries them:
+
+> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see.
+
 ## The task loop
 
 Everything you paste into a dispatch — and everything a subagent prints back — stays resident in your context for the session. Hand artifacts over as file paths; subagents write detail to files.
