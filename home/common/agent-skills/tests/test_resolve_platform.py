@@ -57,11 +57,13 @@ from test_resolve_project import (
 )
 
 NON_FINITE_TOKENS = ("NaN", "Infinity", "-Infinity")
+# Well-formed numbers that overflow a double: no bare token, same infinity.
+OVERFLOWING_NUMBERS = ("1e999", "-1e999")
 
 
 def non_finite_manifest(token: str) -> str:
-    """The committed manifest's text with one bare non-finite `token` placed
-    in an otherwise valid position: the one element of `deprecations`, an
+    """The committed manifest's text with one non-finite `token` (a bare
+    token or an overflowing number) placed in an otherwise valid position: the one element of `deprecations`, an
     array whose elements the validator does not type."""
     text = json.dumps(committed_manifest())
     marked = text.replace('"deprecations": []', f'"deprecations": [{token}]')
@@ -148,8 +150,10 @@ class ManifestGateTest(ResolverTestCase):
     def test_a_manifest_holding_a_non_finite_number_refuses_as_parse(self):
         """Python's decoder accepts the three bare tokens as an extension;
         RFC 8259 has no such numbers, so the loader refuses them as `parse`
-        (#147 D12) instead of handing validation a value it never checks."""
-        for token in NON_FINITE_TOKENS:
+        (#147 D12) instead of handing validation a value it never checks.
+        A literal such as `1e999` decodes to the same infinity without any
+        bare token, so it refuses the same way."""
+        for token in NON_FINITE_TOKENS + OVERFLOWING_NUMBERS:
             with self.subTest(token=token):
                 self.assert_pointers(non_finite_manifest(token), [""])
                 self.assert_repair_id(non_finite_manifest(token),
@@ -162,7 +166,7 @@ class ManifestGateTest(ResolverTestCase):
         appended to the first. Stdout has to be exactly one parseable
         error object, with or without a named project."""
         root = self.make_root()
-        for token in NON_FINITE_TOKENS:
+        for token in NON_FINITE_TOKENS + OVERFLOWING_NUMBERS:
             self.set_manifest(non_finite_manifest(token))
             for args in ((), ("--repo-root", str(root))):
                 with self.subTest(token=token, args=args):

@@ -18,6 +18,7 @@ replaced by an assumed version (R1.3).
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -342,6 +343,20 @@ def _reject_non_finite(token: str) -> object:
     raise _NonFiniteNumber(token)
 
 
+def _finite_float(literal: str) -> float:
+    """`parse_float` for `json.loads`: a literal that overflows is refused.
+
+    A well-formed number such as `1e999` needs no bare token to decode to
+    infinity, so `_reject_non_finite` alone would let it reach the same
+    emit guard mid-response. Refusing it here keeps the loader's promise
+    that nothing it returns is a float JSON cannot carry.
+    """
+    value = float(literal)
+    if not math.isfinite(value):
+        raise _NonFiniteNumber(literal)
+    return value
+
+
 def load_manifest() -> tuple[dict, Path]:
     """The installed manifest and the absolute resolved path it came from.
 
@@ -362,7 +377,8 @@ def load_manifest() -> tuple[dict, Path]:
             "", "the installed platform manifest could not be read",
             "platform.manifest.unreadable")]) from None
     try:
-        source = json.loads(raw, parse_constant=_reject_non_finite)
+        source = json.loads(raw, parse_constant=_reject_non_finite,
+                            parse_float=_finite_float)
     except (json.JSONDecodeError, UnicodeDecodeError, _NonFiniteNumber):
         raise _refuse([_violation(
             "", "the installed platform manifest is not valid JSON",

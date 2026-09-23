@@ -1360,10 +1360,12 @@ def raise_for_projection_violations(violations: list[dict]) -> None:
 def emit_json(value: object) -> int:
     # `allow_nan=False`: the parse side already refuses the three non-finite
     # tokens, and this is the second half of that check — nothing this tool
-    # prints is JSON another parser would reject.
-    json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"),
-              allow_nan=False)
-    sys.stdout.write("\n")
+    # prints is JSON another parser would reject. The document is serialized
+    # whole before any byte is written, so a value the guard refuses leaves
+    # stdout empty for the error object instead of truncating mid-response.
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      allow_nan=False)
+    sys.stdout.write(text + "\n")
     return 0
 
 
