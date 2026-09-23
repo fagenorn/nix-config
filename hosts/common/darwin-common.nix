@@ -224,8 +224,9 @@ in
         greedy = true;
         # No `no_quarantine` arg: Homebrew 6 removed `--no-quarantine` entirely
         # (Homebrew/brew#23363), and bundle passes unknown args through verbatim, so the
-        # install dies with "invalid option". Quarantine suppression already comes from
-        # the system-wide LSQuarantine = false preference.
+        # install dies with "invalid option". The app stays quarantined: Homebrew stamps
+        # com.apple.quarantine on cask apps regardless of the system-wide
+        # LSQuarantine = false preference, so Gatekeeper checks each fresh copy on launch.
       }
     ];
     masApps = {
