@@ -45,6 +45,10 @@ RC_SET = {
     # then have exactly one tone mapping.
     "plugins/darkroom/workflow": "display-referred (legacy)",
     "plugins/lighttable/layout": "1",
+    # collapse groups: each migrated raw is grouped under its Lightroom-rendered JPEG (the group
+    # leader), so the library shows one thumbnail per photo; the raw is one click on the "G"
+    # overlay away. Also collapses camera RAW+JPEG pairs, which darktable groups on import.
+    "ui_last/grouping": "true",
     "lighttable/ui/scrollbars": "true",
     # --- export: full-size JPEG q92 into ~/Pictures/exports/<trip>/; a launchd watcher imports
     # everything that lands there into Photos (iCloud) ---
