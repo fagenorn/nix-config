@@ -123,7 +123,7 @@ too rather than redefining it.
 - [ ] **Step 3: Verify the source run**
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_dispatch_contracts.py`
-Expected: `OK (skipped=2)`, and the skip reason (visible with `-v`) still reads
+Expected: `OK (skipped=1)` (the installed class skips once, from `setUpClass`), and the skip reason (visible with `-v`) still reads
 `AGENT_SKILLS_INSTALLED_HOME is unset; run `just agent-installed-skill-tests` …`.
 
 - [ ] **Step 4: Verify the fail-closed root rule still fails**
@@ -134,7 +134,8 @@ Expected: exit 1, two failures whose message contains
 
 - [ ] **Step 5: Verify the single home**
 
-Run: `git grep -n -e "INSTALLED_HOME_ENV = " -e "SOURCE_TREES = " -e "INSTALLED_VIEWS = " -- home/common/agent-skills/tests`
+Run: `rg -n -e "INSTALLED_HOME_ENV = " -e "SOURCE_TREES = " -e "INSTALLED_VIEWS = " home/common/agent-skills/tests`
+(`rg`, not `git grep`: the support file is still untracked until Step 7 stages it.)
 Expected: exactly three lines, all in `skill_tree_support.py` (at the base
 commit this prints three lines in `test_dispatch_contracts.py` — the check that
 fails before the move).

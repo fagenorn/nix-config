@@ -70,9 +70,16 @@ In `test_ship_release_contracts.py`, `test_prev_tag_command_ignores_unreachable_
   `re.search(r"^git for-each-ref --count=1 .*$", self.skill, re.M)` with the
   message `"PREV_TAG command missing from SKILL.md"`; keep
   `self.assertIn('--merged "$MERGE_SHA"', command)`;
+- the fixture gains an older reachable tag, so the count and the ordering are
+  tested too: directly after the first commit, before the existing
+  `git tag -a v0.1.0 -m v0.1.0` line, add
+  `sh("git tag -a v0.0.9 -m v0.0.9", repo)` — the same commit may carry both
+  tags; the unreachable `v9.9.9` stays;
 - the execution becomes
   `prev = sh(command, repo, extra_env={"MERGE_SHA": merge_sha})` followed by
-  `self.assertEqual(prev, "v0.1.0")` (the repo-wide sanity block stays).
+  `self.assertEqual(prev, "v0.1.0")` — exactly one line, so dropping
+  `--count=1` (two lines) or reversing the sort (`v0.0.9`) reds it (the
+  repo-wide sanity block stays).
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_ship_release_contracts.py`
 Expected: FAIL — only this test (`PREV_TAG command missing from SKILL.md`).

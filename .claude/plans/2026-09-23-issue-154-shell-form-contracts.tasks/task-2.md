@@ -116,6 +116,10 @@ OPERATOR_CASES = (
     ("redirect", "git diff --no-index <(git show HEAD:a.txt) a.txt"),
     ("heredoc", "git commit -F - <<-EOF\n\tmessage\n\tEOF"),
     ("heredoc", "git hash-object --stdin <<< text"),
+    # A substitution nested in a parameter expansion or an arithmetic
+    # expansion is live shell (per D22): its operators still count.
+    ("pipe", 'git show "${REV:-$(git rev-parse HEAD | head -1)}"'),
+    ("pipe", 'git log -n "$(( $(git rev-list --count HEAD | wc -l) + 1 ))"'),
 )
 
 
@@ -194,6 +198,8 @@ class RefusedFormFixtureTest(unittest.TestCase):
             "prose outside a span":
                 "Chain it: git restore --staged a && git checkout HEAD -- a > out | grep x",
             "report shape in a span": "The verdict is one of `clean | residuals | unknown`.",
+            "arithmetic operators": '```bash\ngit log -n "$(( 1 << 2 ))" --skip "$(( 3 > 2 ))"\n```',
+            "parameter expansion default": '```bash\ngit show "${REV:-HEAD}"\n```',
             "sanctioned prefix before a merge":
                 f"Run `{SANCTIONED_PREFIX}gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch`.",
             "bare prefix mention": f"Prefix every call with `{SANCTIONED_PREFIX.strip()}`.",
@@ -332,13 +338,19 @@ Above the tests, implement the produced names. Decisions the code must keep:
 - **Scanner** over one example's placeholder-stripped text, tracking a context
   stack and the current line offset:
   - single quote → literal until the next `'`; double quote → literal except
-    `$(`, `` ` `` and `${`, until the next unescaped `"`; `${` → opaque until
-    its `}`; a backslash escapes the next character, and a backslash as the
-    last character leaves the text open (continuation);
+    `$(`, `` ` `` and `${`, until the next unescaped `"`; a backslash escapes
+    the next character, and a backslash as the last character leaves the text
+    open (continuation);
+  - expansion contexts (per D22): `${` pushes a parameter-expansion context
+    that pops at its matching `}` and `$((` pushes an arithmetic context that
+    pops at its matching `))`; inside either, operator characters are not
+    shell forms (`$(( 1 << 2 ))` and `${REV:-HEAD}` yield nothing), but a
+    nested `$(`, backtick, `${` or `$((` pushes its own context, so a command
+    substitution inside an expansion is live and its operators count;
   - live context (top level, `$(`, `<(`, `>(`, backticks, and a bare `(`):
-    `$((…))` is skipped whole; `$(`, `<(`, `>(` and a bare `(` push, `)` pops
-    the innermost of them, a backtick pushes or pops its own context; `#` at a
-    word start skips to the end of the line;
+    `$(`, `<(`, `>(` and a bare `(` push, `)` pops the innermost of them, a
+    backtick pushes or pops its own context; `#` at a word start skips to the
+    end of the line;
   - operators in live context, longest match first: `<<<` → heredoc; `<<-` or
     `<<` → heredoc, then a delimiter word (optionally `\`-prefixed or quoted)
     must follow or the text is open, and at the next live newline the lines up
@@ -354,10 +366,16 @@ Above the tests, implement the produced names. Decisions the code must keep:
   fence (same region and call walk), excluding calls with no head.
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_shell_example_contracts.py`
-Expected: FAIL — exactly `test_host_baseline_yields_nothing` (findings
-`chain`, `pipe` and `redirect` on the old probe's lines) and
-`test_isolation_probe_is_one_rev_parse_with_the_no_line_note`; every fixture,
-prefix and guard test passes. This is the proof the host baseline can fail.
+Expected: FAIL — `test_host_baseline_yields_nothing` (findings `chain`,
+`pipe` and `redirect` on the old probe's lines),
+`test_isolation_probe_is_one_rev_parse_with_the_no_line_note`, and every
+`RefusedFormFixtureTest` method that builds on the host, each failing only
+because its actual findings carry the same old-probe findings ahead of the
+expected ones; `SanctionedPrefixTest` passes, and a `VocabularyGuardTest`
+method may fail only on heads taken from the old probe's lines. No other
+difference is acceptable: an extra or missing finding beyond the old probe's
+lines is a classifier bug — stop and fix it. This is the proof the host
+baseline can fail; Step 5 proves the fixtures clean once the probe is rewritten.
 
 - [ ] **Step 4: Rewrite the isolation probe (recovered)**
 

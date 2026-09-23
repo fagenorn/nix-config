@@ -98,6 +98,18 @@ The spec's `## Decision ledger` is authoritative. Tasks cite D1–D18 from desig
 and the three rows planning added: D19 (per-call examples, finding lines, the
 fixed vocabulary), D20 (the source sweep lands with the last rewrite; earlier
 rewrites gate on the classifier directly) and D21 (per-operator fixtures and
-the heredoc-body control).
+the heredoc-body control). Standards review added D22 (expansions are scanned
+contexts; substitutions nested in them are live).
+
+## Standards review provenance
+
+Reviewer: Codex (isolated, read-only runtime; no fallback), base
+`a6ac80f630bf4a98ea9613840c21aa7e30c7eb8b`, reviewed plan head `fc06df1`, no
+focus configured. Findings: 1 Blocking, 3 Should fix, 0 Discussion — all 4
+verified against the live worktree and accepted, 0 rejected, 0 deferred.
+154-B1 → Task 2 scanner and fixtures (D22); 154-S1 → Task 1 Steps 3 and 5
+(one class-level skip; `rg` for the untracked support file); 154-S2 → Task 2
+Step 3's expected failures now include the host-appended fixtures; 154-S3 →
+Task 5's PREV_TAG fixture gains an older reachable tag.
 
 ---
