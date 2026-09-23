@@ -56,6 +56,18 @@ from test_resolve_project import (
     source_contract,
 )
 
+NON_FINITE_TOKENS = ("NaN", "Infinity", "-Infinity")
+
+
+def non_finite_manifest(token: str) -> str:
+    """The committed manifest's text with one bare non-finite `token` placed
+    in an otherwise valid position: the one element of `deprecations`, an
+    array whose elements the validator does not type."""
+    text = json.dumps(committed_manifest())
+    marked = text.replace('"deprecations": []', f'"deprecations": [{token}]')
+    assert marked != text, "the committed manifest's deprecations moved"
+    return marked
+
 
 class ManifestGateTest(ResolverTestCase):
     """R1.3: a broken platform installation refuses loudly, from every subcommand.
@@ -132,6 +144,39 @@ class ManifestGateTest(ResolverTestCase):
     def test_a_manifest_that_is_not_valid_json_refuses(self):
         self.assert_pointers("{", [""])
         self.assert_repair_id("{", "platform.manifest.parse")
+
+    def test_a_manifest_holding_a_non_finite_number_refuses_as_parse(self):
+        """Python's decoder accepts the three bare tokens as an extension;
+        RFC 8259 has no such numbers, so the loader refuses them as `parse`
+        (#147 D12) instead of handing validation a value it never checks."""
+        for token in NON_FINITE_TOKENS:
+            with self.subTest(token=token):
+                self.assert_pointers(non_finite_manifest(token), [""])
+                self.assert_repair_id(non_finite_manifest(token),
+                                      "platform.manifest.parse")
+
+    def test_platform_status_on_a_non_finite_manifest_prints_one_error_object(self):
+        """`platform-status` republishes `deprecations` verbatim, so a
+        non-finite value that got past the loader streamed part of the
+        response before the emit guard raised, leaving a second object
+        appended to the first. Stdout has to be exactly one parseable
+        error object, with or without a named project."""
+        root = self.make_root()
+        for token in NON_FINITE_TOKENS:
+            self.set_manifest(non_finite_manifest(token))
+            for args in ((), ("--repo-root", str(root))):
+                with self.subTest(token=token, args=args):
+                    code, out, err = run("platform-status", *args,
+                                         home=self.home)
+                    self.assertEqual(code, 2, err)
+                    self.assertTrue(out.endswith("\n"), out)
+                    self.assertNotIn("\n", out[:-1], out)
+                    payload = json.loads(out)
+                    self.assertEqual(sorted(payload), ["error"])
+                    self.assertEqual(payload["error"]["code"],
+                                     "resolver_failure")
+                    self.assertEqual(payload["error"]["repair_id"],
+                                     "platform.manifest.parse")
 
     def test_a_manifest_that_is_not_an_object_refuses(self):
         self.assert_pointers([], [""])

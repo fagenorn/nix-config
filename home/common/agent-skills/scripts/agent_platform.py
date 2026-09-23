@@ -326,6 +326,22 @@ def manifest_path() -> Path:
     return Path(os.environ["HOME"]) / ".agents" / "share" / "platform-manifest.json"
 
 
+class _NonFiniteNumber(ValueError):
+    """A bare NaN, Infinity or -Infinity token met while decoding."""
+
+
+def _reject_non_finite(token: str) -> object:
+    """`parse_constant` for `json.loads`: the three bare tokens are refused.
+
+    Python's decoder accepts them as an extension, RFC 8259 has none, and a
+    caller that republishes a manifest member verbatim would otherwise hand
+    one to an emit guard (`allow_nan=False`) only after part of its response
+    was already written (#147 D12). This library sits below the resolver, so
+    it carries its own hook rather than importing `reject_non_finite`.
+    """
+    raise _NonFiniteNumber(token)
+
+
 def load_manifest() -> tuple[dict, Path]:
     """The installed manifest and the absolute resolved path it came from.
 
@@ -346,8 +362,8 @@ def load_manifest() -> tuple[dict, Path]:
             "", "the installed platform manifest could not be read",
             "platform.manifest.unreadable")]) from None
     try:
-        source = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        source = json.loads(raw, parse_constant=_reject_non_finite)
+    except (json.JSONDecodeError, UnicodeDecodeError, _NonFiniteNumber):
         raise _refuse([_violation(
             "", "the installed platform manifest is not valid JSON",
             "platform.manifest.parse")]) from None
