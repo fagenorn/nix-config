@@ -16,7 +16,8 @@ from pathlib import Path
 # already on sys.path; the shared support module lives beside them.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from conformance_test_support import (  # noqa: E402
-    REPO_ROOT, ReportAssertions, doctor, fixture, load_module, make_root, run,
+    MANIFEST, REPO_ROOT, ReportAssertions, doctor, fixture, load_module,
+    make_root, run,
 )
 
 
@@ -204,6 +205,18 @@ class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
         self.assertEqual(by_id["host.tracker.credential"]["reason_code"],
                          "offline_constraint")
         self.assertEqual(report["outcome"]["status"], "incomplete")
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        contract = json.loads(
+            (REPO_ROOT / ".agents/project.json").read_text(encoding="utf-8"))
+        schema = by_id["compatibility.contract.schema_supported"]
+        self.assertEqual([schema["status"], schema["facts"]], ["passed", {
+            "platform_version": manifest["platform_version"],
+            "supported_project_schemas":
+                [str(version) for version in manifest["project_schema_versions"]],
+            "project_schema_version": contract["schema_version"],
+            "platform_min_inclusive": contract["platform"]["min_inclusive"],
+            "platform_max_exclusive": contract["platform"]["max_exclusive"],
+        }])
         for repair in report["repairs"]:
             self.assertNotEqual(repair["safety_class"], "destructive")
         self.assert_validates(report)

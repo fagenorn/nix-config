@@ -16,6 +16,11 @@ refuses on drift; `resolve` runs the same check before it builds anything, so
 a hand-edited target is a structural refusal rather than a stale snapshot
 (D10).
 
+`platform-status` is the administrative operation: it reports the installed
+platform's version facts, and — when asked — one project's declared interval
+and compatibility verdict, or one verdict row per registered fleet member. It
+is never normal workflow context (R3.1).
+
 `write-projections` is the tool's only writer. It renders each declared
 projection from the single instruction source and brings its native entry
 target into sync: a wholly generated file for one agent, one managed import
@@ -23,6 +28,11 @@ line inside an otherwise authored file for the other (D11). Rendering is a
 pure function of the source bytes, the projection id and the schema version,
 so two machines regenerate byte-identical targets; a target already in sync is
 left untouched, mtime included.
+
+Every subcommand loads and validates the installed platform manifest before it
+looks at the repository, so a missing or malformed platform installation always
+surfaces as `resolver_failure` and can never be masked by `not_onboarded` or a
+contract error (R1.3).
 
 A structural refusal prints exactly one JSON object carrying an `error` member
 on stdout and exits 2 (D12). An argparse usage error also exits 2 but prints no
@@ -39,10 +49,85 @@ from pathlib import Path
 import re
 import shutil
 import sys
-import tempfile
+
+# The shared platform library, bound by `bootstrap_platform_library` before any
+# subcommand runs. It is deliberately not imported at module scope: an absent
+# library is a platform installation defect and has to reach the caller as the
+# D12 error object on stdout, not as an import traceback on stderr (R1.3).
+agent_platform = None
+
+# Exactly the library members this script uses. The library and this binary are
+# two separately installed files, so an older library can pair with a newer
+# resolver; naming every member here is what makes that pairing refuse as
+# `platform.library.missing` (R1.3, D12) rather than surface as an
+# `AttributeError` swallowed into `resolver.internal`.
+PLATFORM_LIBRARY_MEMBERS = (
+    "PlatformManifestError",
+    "SCHEMA_REASON_CODES",
+    "compare_semver",
+    "interval_verdict",
+    "load_manifest",
+    "parse_semver",
+    "read_registry",
+    "write_atomically",
+)
+PLATFORM_LIBRARY_REPAIR_ID = "platform.library.missing"
 
 
-SCHEMA_VERSION = 1
+def loaded_from(module: object, library_dir: Path) -> bool:
+    """Whether `module` was loaded from its own installed file in `library_dir`.
+
+    Importing by name is not the guard: `sys.path` still carries this script's
+    own directory behind the insertion, and a `PYTHONPATH` entry or a
+    site-packages install of the same name answers the import just as
+    willingly. Only the resolved `__file__` says *which* file answered, so an
+    absent installation refuses here instead of being silently substituted by
+    whatever else the interpreter can reach.
+
+    Both sides are resolved, because Home Manager installs the library as a
+    symlink into the Nix store: the module reports the symlink's path and the
+    comparison has to be made over the file they both name.
+    """
+    origin = getattr(module, "__file__", None)
+    if not origin:
+        return False
+    try:
+        return (Path(origin).resolve()
+                == (library_dir / f"{module.__name__}.py").resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def bootstrap_platform_library() -> bool:
+    """Bind the shared library from its one installed path, or report failure.
+
+    `$HOME/.agents/lib/python` — the same directory the `artifact-budget` pair
+    installs into (D23) — goes on `sys.path` at position 0, so the installed
+    copy wins whenever it exists. The script's own directory stays on the path
+    behind it, which is how the repository checkout imports the sibling in
+    `scripts/`; in the deployed layout that directory is `~/.agents/bin` and
+    holds no library, so an uninstalled one is caught here — by `loaded_from`,
+    which is what makes "caught here" true of every other importable
+    `agent_platform` as well.
+    """
+    global agent_platform
+    home = os.environ.get("HOME")
+    if not home:
+        return False
+    library_dir = Path(home) / ".agents" / "lib" / "python"
+    sys.path.insert(0, str(library_dir))
+    try:
+        import agent_platform as loaded
+    except Exception:
+        return False
+    if (not loaded_from(loaded, library_dir)
+            or any(not hasattr(loaded, name)
+                   for name in PLATFORM_LIBRARY_MEMBERS)):
+        return False
+    agent_platform = loaded
+    return True
+
+
 CAPABILITY_NAMES = (
     "tracker",
     "worktrees",
@@ -78,13 +163,37 @@ PROJECTION_STATUSES = ("in_sync", "missing", "stale")
 AGENT_IDS = ("claude", "codex")
 CONTRACT_FILENAME = ".agents/project.json"
 
+# The `platform-status` report's own interface version, independent of the
+# project schema and of `ResolvedProject.schema_version`: those two are
+# answered by the manifest (D8) and appear inside the report's `platform`
+# block, so reusing either here would publish one fact twice under two names.
+PLATFORM_STATUS_SCHEMA_VERSION = 1
+
+# The manifest members the `platform` block republishes, in the manifest's own
+# order. The manifest's `schema_version` is not among them: it versions the
+# manifest file, which is the loader's concern and not a platform fact a
+# caller can act on.
+PLATFORM_STATUS_MANIFEST_MEMBERS = (
+    "platform_version",
+    "project_schema_versions",
+    "resolved_schema_version",
+    "migrations",
+    "deprecations",
+    "removals",
+)
+
 TOP_LEVEL_MEMBERS = (
     "schema_version",
     "project",
     "bindings",
     "capabilities",
     "projections",
+    "platform",
 )
+# R2.1: the interval's exact members. The closed schema-compatibility reason
+# codes are `agent_platform.SCHEMA_REASON_CODES` — one home for that set (D7),
+# read through the library rather than copied here.
+PLATFORM_MEMBERS = ("min_inclusive", "max_exclusive")
 VCS_MEMBERS = (
     "kind",
     "default_branch",
@@ -161,11 +270,15 @@ MANAGED_IMPORT_TEMPLATE = "@{source}"
 class ContractError(Exception):
     """One refusal: a closed code, a stable repair id, and ordered violations."""
 
-    def __init__(self, code: str, repair_id: str, violations: list[dict]) -> None:
+    def __init__(self, code: str, repair_id: str, violations: list[dict],
+                 *, reason_code: str | None = None) -> None:
         super().__init__(f"{code}: {repair_id}")
         self.code = code
         self.repair_id = repair_id
         self.violations = violations
+        # D7: carried only by `unsupported_schema`; `emit_error` is where that
+        # positional rule is enforced, so no caller can publish it elsewhere.
+        self.reason_code = reason_code
 
 
 # --------------------------------------------------------------------------
@@ -369,14 +482,71 @@ def load_contract(root: Path) -> dict:
 # --------------------------------------------------------------------------
 
 
-def validate_schema_version(source: dict, violations: list[dict]) -> None:
+def schema_reason_repair_id(reason_code: str) -> str:
+    """The stable repair id each `SCHEMA_REASON_CODES` member publishes.
+
+    Exhaustive over the closed set with a raising default: a member added to
+    the tuple without an id here is a crash, never a plausible-looking blank.
+    """
+    if reason_code == "platform_too_old":
+        return "contract.platform.too_old"
+    if reason_code == "platform_too_new":
+        return "contract.platform.too_new"
+    if reason_code == "project_schema_unsupported":
+        return "contract.schema_version.unsupported"
+    if reason_code == "project_identity_mismatch":
+        return "registry.project_id.mismatch"
+    raise ValueError(f"unknown schema reason code: {reason_code!r}")
+
+
+def schema_reason_message(reason_code: str) -> str:
+    """The fixed sentence each `SCHEMA_REASON_CODES` member publishes.
+
+    Fixed, because nothing here embeds a version or a path: two runs refusing
+    for the same reason emit identical bytes (D12). Exhaustive over the closed
+    set with a raising default, like `schema_reason_repair_id`.
+    """
+    if reason_code == "platform_too_old":
+        return ("the installed platform version is below this contract's "
+                "min_inclusive bound")
+    if reason_code == "platform_too_new":
+        return ("the installed platform version has reached this contract's "
+                "max_exclusive bound")
+    if reason_code == "project_schema_unsupported":
+        return ("the declared project schema version is not one this platform "
+                "supports")
+    if reason_code == "project_identity_mismatch":
+        return ("the contract at the registered root declares a different "
+                "project id than the one the registry recorded")
+    raise ValueError(f"unknown schema reason code: {reason_code!r}")
+
+
+def unsupported_schema(reason_code: str, pointer: str) -> ContractError:
+    """The one constructor for `unsupported_schema` (R2.3, R2.4).
+
+    Both the repair id and the message come from the exhaustive dispatches
+    above, so a reason code outside `SCHEMA_REASON_CODES` cannot reach the
+    caller as a refusal at all.
+    """
+    return ContractError(
+        "unsupported_schema",
+        schema_reason_repair_id(reason_code),
+        [{"pointer": pointer, "message": schema_reason_message(reason_code)}],
+        reason_code=reason_code,
+    )
+
+
+def validate_schema_version(source: dict, violations: list[dict],
+                            supported: list) -> None:
     """Version first, but only an unsupported integer version short-circuits.
 
     An absent, non-integer or boolean version contributes its violation to the
     same one-pass list as every other shape violation: `invalid_contract` owes
-    the caller every violation it can see. An integer that is not this
-    schema aborts immediately instead, because the schema-1 shape rules the
-    rest of this pass applies do not describe another schema (D8, D19).
+    the caller every violation it can see. An integer outside the manifest's
+    `project_schema_versions` aborts immediately instead, because the shape
+    rules the rest of this pass applies describe only the schemas this platform
+    publishes (D8, D19). `supported` is that published set — the resolver holds
+    no schema literal of its own.
     """
     value = source.get("schema_version")
     if ("schema_version" not in source
@@ -388,15 +558,60 @@ def validate_schema_version(source: dict, violations: list[dict]) -> None:
             "contract.schema_version.invalid",
         ))
         return
-    if value != SCHEMA_VERSION:
-        raise ContractError(
-            "unsupported_schema",
-            "contract.schema_version.unsupported",
-            [{
-                "pointer": "/schema_version",
-                "message": "this resolver supports schema version 1 only",
-            }],
-        )
+    if value not in supported:
+        raise unsupported_schema("project_schema_unsupported", "/schema_version")
+
+
+def validate_platform(source: dict, violations: list[dict]) -> None:
+    """Shape-check the contract's `[min, max)` platform interval (R2.1, R2.2).
+
+    Shape only, and every finding joins the same one-pass list as the rest of
+    the contract's violations. Whether the installed platform version falls
+    inside the interval is a separate question answered by
+    `raise_for_platform_range`, and only once this pass has found nothing (D4).
+    """
+    value = source.get("platform")
+    if not check_object(value, "/platform", "platform", violations):
+        return
+    check_exact_members(
+        value, "/platform", PLATFORM_MEMBERS, "platform", violations)
+    bounds: dict[str, str] = {}
+    for name in PLATFORM_MEMBERS:
+        if name not in value:
+            continue
+        # A non-string bound and a loose spelling are one violation at one
+        # pointer: `parse_semver` returns None for both, and for a pre-release
+        # or build-metadata suffix (D9).
+        if agent_platform.parse_semver(value[name]) is None:
+            violations.append(violation(
+                f"/platform/{name}",
+                "must be a strict MAJOR.MINOR.PATCH version string",
+                f"contract.platform.{name}.not_semver"))
+            continue
+        bounds[name] = value[name]
+    if len(bounds) != len(PLATFORM_MEMBERS):
+        return
+    # R2.2: strictly greater. An exact pin (equal bounds) and a minimum-only
+    # range (an absent `max_exclusive`, reported above) are both invalid.
+    if agent_platform.compare_semver(
+            bounds["max_exclusive"], bounds["min_inclusive"]) <= 0:
+        violations.append(violation(
+            "/platform/max_exclusive",
+            "must be strictly greater than min_inclusive",
+            "contract.platform.max_exclusive.not_above_min"))
+
+
+def raise_for_platform_range(platform: dict, platform_version: str) -> None:
+    """Refuse when the installed platform version is outside the interval (R2.3).
+
+    Runs only after `validate_platform` has passed, so all three versions
+    parse and `interval_verdict` answers the range question alone.
+    """
+    verdict = agent_platform.interval_verdict(
+        platform_version, platform["min_inclusive"], platform["max_exclusive"])
+    if verdict is None:
+        return
+    raise unsupported_schema(verdict, "/platform")
 
 
 def validate_project(source: dict, violations: list[dict]) -> None:
@@ -736,15 +951,20 @@ def validate_projection_entries(source: dict, violations: list[dict]) -> None:
                 "contract.projections.target_is_source"))
 
 
-def validate_contract(source: dict) -> list[dict]:
+def validate_contract(source: dict, manifest: dict) -> list[dict]:
     """Every shape violation of the authored source, collected in one pass.
 
     Each returned violation carries `pointer`, `message` and the internal
     `repair_id` that `raise_for_violations` publishes for the first violation
     in pointer order. The list is returned unsorted; the caller orders it.
+
+    `manifest` is the installed platform manifest: it carries the set of
+    project schema versions this platform supports (D8), which is the only
+    authority for "supported" — the resolver holds no schema literal.
     """
     violations: list[dict] = []
-    validate_schema_version(source, violations)
+    validate_schema_version(
+        source, violations, manifest["project_schema_versions"])
     for name in TOP_LEVEL_MEMBERS:
         # `schema_version` reports its own absence above, with the repair id
         # that names the version rather than the generic missing-member one.
@@ -765,6 +985,8 @@ def validate_contract(source: dict) -> list[dict]:
         validate_capabilities(source, violations)
     if "projections" in source:
         validate_projection_entries(source, violations)
+    if "platform" in source:
+        validate_platform(source, violations)
     violations.extend(validate_capability_bindings(source))
     return violations
 
@@ -877,12 +1099,17 @@ def compute_capabilities(bindings: dict, root: Path, declarations: dict) -> dict
     return resolved
 
 
-def build_snapshot(root: Path, source: dict) -> dict:
+def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # Readiness reads the normalized bindings, so each command's `cwd` is
     # already the absolute base a relative argv[0] resolves against (D22).
+    #
+    # D8: the snapshot's own interface version is the manifest's
+    # `resolved_schema_version`, the schema this platform resolves *to*. It is
+    # not the contract's declared `schema_version`, which may legally be an
+    # older supported schema (R2.5).
     bindings = normalize_bindings(source["bindings"], root)
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": manifest["resolved_schema_version"],
         "project": {
             "root": str(root),
             "id": source["project"]["id"],
@@ -973,17 +1200,22 @@ def read_projection_source(root: Path, entry: dict) -> bytes:
         ) from None
 
 
-def render_projection(entry: dict, source_bytes: bytes) -> bytes:
+def render_projection(entry: dict, source_bytes: bytes,
+                      schema_version: int) -> bytes:
     """Contract: the exact bytes a generated_file target must hold, or the
     exact single managed line (with its newline) a managed_import must contain.
 
-    A pure function of `entry` and `source_bytes`: no clock, no environment, no
-    path outside the entry, so regeneration on any machine is byte-identical.
+    A pure function of its three arguments: no clock, no environment, no path
+    outside the entry, so regeneration on any machine is byte-identical.
+    `schema_version` is the contract's own declared schema — the header records
+    which project schema the target was generated from, so a project resting on
+    a supported older schema keeps its bytes (R2.5) rather than drifting the
+    moment the platform's `resolved_schema_version` moves.
     """
     kind = entry["kind"]
     if kind == "generated_file":
         header = GENERATED_HEADER_TEMPLATE.format(
-            source=entry["source"], version=SCHEMA_VERSION)
+            source=entry["source"], version=schema_version)
         return header.encode("utf-8") + b"\n\n" + source_bytes
     if kind == "managed_import":
         line = MANAGED_IMPORT_TEMPLATE.format(source=entry["source"])
@@ -1009,7 +1241,7 @@ def managed_line_occurrences(target_bytes: bytes, entry: dict) -> int:
     return target_bytes.decode("utf-8", errors="replace").splitlines().count(line)
 
 
-def projection_status(root: Path, entry: dict) -> str:
+def projection_status(root: Path, entry: dict, schema_version: int) -> str:
     """Contract: exactly one of "in_sync", "missing", "stale".
 
     The source is read for either kind, so a missing source refuses as
@@ -1021,8 +1253,8 @@ def projection_status(root: Path, entry: dict) -> str:
         return "missing"
     kind = entry["kind"]
     if kind == "generated_file":
-        return "in_sync" if existing == render_projection(entry, source_bytes) \
-            else "stale"
+        return "in_sync" if existing == render_projection(
+            entry, source_bytes, schema_version) else "stale"
     if kind == "managed_import":
         return "in_sync" if managed_line_occurrences(existing, entry) == 1 \
             else "stale"
@@ -1043,7 +1275,7 @@ def validate_projections(root: Path, contract: dict) -> None:
         # Each of the three statuses is named: a value outside the closed set
         # is a bug in this module, and reclassifying it as drift would hide
         # that behind a plausible refusal.
-        status = projection_status(root, entry)
+        status = projection_status(root, entry, contract["schema_version"])
         if status == "in_sync":
             continue
         if status == "missing":
@@ -1069,78 +1301,28 @@ def validate_projections(root: Path, contract: dict) -> None:
     )
 
 
-def destination_mode(target: Path) -> int:
-    """The permission bits the replaced target must end up holding.
-
-    `tempfile` creates at 0600 and `os.replace` carries the temporary file's
-    mode onto the destination, so an unadjusted atomic write silently narrows
-    a file other uids have to read — invisibly, since git records no bit but
-    the executable one. An existing target therefore keeps exactly the bits it
-    already had, and a new one gets what a plain `open()` would have given it:
-    0666 with the process umask applied. Reading the umask means briefly
-    setting it, which is safe here because the resolver is single-threaded and
-    forks nothing.
-    """
-    try:
-        return os.stat(target).st_mode & 0o7777
-    except OSError:
-        umask = os.umask(0)
-        os.umask(umask)
-        return 0o666 & ~umask
-
-
-def write_atomically(target: Path, data: bytes) -> None:
-    """Replace `target` with `data` in one step, never a partial file.
-
-    The temporary file is named distinctively so an orphan left by a crashed
-    process is recognizable and is caught by the repository's `.gitignore`
-    rather than offered as an untracked file.
-
-    A nested target is a safe path the validator accepts, so its parent may not
-    exist yet; it is created here, because the temporary file is opened inside
-    that directory and a missing one would surface as `resolver_failure`
-    instead of a written projection.
-    """
-    mode = destination_mode(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    pending: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-                dir=str(target.parent),
-                prefix=".resolve-project.",
-                suffix=".tmp",
-                delete=False) as handle:
-            pending = Path(handle.name)
-            handle.write(data)
-            handle.flush()
-        os.chmod(pending, mode)
-        os.replace(pending, target)
-        pending = None
-    finally:
-        if pending is not None:
-            pending.unlink(missing_ok=True)
-
-
-def apply_projection(root: Path, entry: dict, violations: list[dict]) -> str | None:
+def apply_projection(root: Path, entry: dict, schema_version: int,
+                    violations: list[dict]) -> str | None:
     """Bring one target into sync and name the action taken.
 
     Returns None when the entry is refused rather than resolved: a managed
     import already present more than once is reported, never repaired, because
     only the author knows which of the duplicates was meant (D17).
     """
-    rendered = render_projection(entry, read_projection_source(root, entry))
+    rendered = render_projection(
+        entry, read_projection_source(root, entry), schema_version)
     target = root / entry["target"]
-    status = projection_status(root, entry)
+    status = projection_status(root, entry, schema_version)
     if status == "in_sync":
         return "unchanged"
     if status == "missing":
-        write_atomically(target, rendered)
+        agent_platform.write_atomically(target, rendered)
         return "written"
     if status != "stale":
         raise ValueError(f"unknown projection status: {status!r}")
     kind = entry["kind"]
     if kind == "generated_file":
-        write_atomically(target, rendered)
+        agent_platform.write_atomically(target, rendered)
         return "written"
     if kind != "managed_import":
         raise ValueError(f"unknown projection kind: {kind!r}")
@@ -1156,7 +1338,7 @@ def apply_projection(root: Path, entry: dict, violations: list[dict]) -> str | N
     # line is appended, on a line of its own.
     suffix = rendered if existing.endswith(b"\n") or not existing \
         else b"\n" + rendered
-    write_atomically(target, existing + suffix)
+    agent_platform.write_atomically(target, existing + suffix)
     return "written"
 
 
@@ -1178,18 +1360,74 @@ def raise_for_projection_violations(violations: list[dict]) -> None:
 def emit_json(value: object) -> int:
     # `allow_nan=False`: the parse side already refuses the three non-finite
     # tokens, and this is the second half of that check — nothing this tool
-    # prints is JSON another parser would reject.
-    json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"),
-              allow_nan=False)
-    sys.stdout.write("\n")
+    # prints is JSON another parser would reject. The document is serialized
+    # whole before any byte is written, so a value the guard refuses leaves
+    # stdout empty for the error object instead of truncating mid-response.
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      allow_nan=False)
+    sys.stdout.write(text + "\n")
     return 0
 
 
-def emit_error(code: str, repair_id: str, violations: list[dict]) -> int:
-    emit_json({
-        "error": {"code": code, "repair_id": repair_id, "violations": violations},
-    })
+def emit_error(code: str, repair_id: str, violations: list[dict],
+               reason_code: str | None = None) -> int:
+    """The one place an error object reaches stdout (D12).
+
+    D7 fixes `reason_code`'s position exactly: present for `unsupported_schema`
+    and absent for every other code. That rule is asserted here rather than
+    trusted from the caller — a defence in depth, so no future refusal path can
+    publish a reason code out of position or one outside the closed set.
+    """
+    if (reason_code is not None) != (code == "unsupported_schema"):
+        raise ValueError(
+            "reason_code belongs to unsupported_schema and to no other code: "
+            f"got code {code!r} with reason_code {reason_code!r}")
+    if reason_code is not None \
+            and reason_code not in agent_platform.SCHEMA_REASON_CODES:
+        raise ValueError(f"unknown schema reason code: {reason_code!r}")
+    error = {"code": code, "repair_id": repair_id, "violations": violations}
+    if reason_code is not None:
+        error["reason_code"] = reason_code
+    emit_json({"error": error})
     return 2
+
+
+def require_platform_manifest() -> tuple[dict, Path]:
+    """The installed platform manifest, or a refusal if it will not load.
+
+    Every subcommand calls this before root discovery and before any contract
+    read, so a broken platform installation always surfaces as
+    `resolver_failure` and can never be masked by `not_onboarded` or a contract
+    error (R1.3). There is no default and no assumed version: the library's
+    ordered violations are published verbatim.
+
+    It returns the manifest because the manifest is now read for its values —
+    `project_schema_versions` (D8), `resolved_schema_version` and
+    `platform_version` (R2.3) — and beside it the absolute resolved path it was
+    loaded from, which is the deployment identity `platform-status` publishes
+    (D2). One load, one call site: a second `load_manifest()` elsewhere would
+    be a second failure surface for one fact.
+    """
+    try:
+        manifest, path = agent_platform.load_manifest()
+    except agent_platform.PlatformManifestError as error:
+        raise ContractError(
+            "resolver_failure", error.repair_id, error.violations) from None
+    return manifest, path
+
+
+def require_registry() -> list[dict]:
+    """The registered fleet, or a refusal when the registry will not read.
+
+    The registry is platform-written state, so a corrupt one is an installation
+    defect and reaches the caller as `resolver_failure`, exactly like a corrupt
+    manifest. An absent one is the empty fleet and never gets here.
+    """
+    try:
+        return agent_platform.read_registry()
+    except agent_platform.PlatformManifestError as error:
+        raise ContractError(
+            "resolver_failure", error.repair_id, error.violations) from None
 
 
 # --------------------------------------------------------------------------
@@ -1198,13 +1436,20 @@ def emit_error(code: str, repair_id: str, violations: list[dict]) -> int:
 
 
 def command_resolve(args: argparse.Namespace) -> int:
+    # Before root discovery, so a broken platform installation can never be
+    # masked by `not_onboarded` or a contract error (R1.3).
+    manifest, _ = require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
-    raise_for_violations(validate_contract(source))
+    raise_for_violations(validate_contract(source, manifest))
+    # The range check is the inner half of the manifest gate, and it runs only
+    # once interval *shape* validation has succeeded: a malformed interval is
+    # `invalid_contract`, an out-of-range one `unsupported_schema` (R2.3).
+    raise_for_platform_range(source["platform"], manifest["platform_version"])
     # Drift is a structural refusal, not a capability state, and it refuses
     # before a single snapshot member exists (D10).
     validate_projections(root, source)
-    snapshot = build_snapshot(root, source)
+    snapshot = build_snapshot(root, source, manifest)
     raise_for_unavailable(args.require, snapshot["capabilities"])
     return emit_json(snapshot)
 
@@ -1218,13 +1463,17 @@ def command_write_projections(args: argparse.Namespace) -> int:
     entry keep their new bytes and the refusal names only what it could not
     resolve.
     """
+    # Before root discovery, so a broken platform installation can never be
+    # masked by `not_onboarded` or a contract error (R1.3).
+    manifest, _ = require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
-    raise_for_violations(validate_contract(source))
+    raise_for_violations(validate_contract(source, manifest))
     applied: list[dict] = []
     violations: list[dict] = []
     for entry in source["projections"]:
-        action = apply_projection(root, entry, violations)
+        action = apply_projection(
+            root, entry, source["schema_version"], violations)
         if action is not None:
             applied.append({"id": entry["id"], "action": action})
     raise_for_projection_violations(violations)
@@ -1238,14 +1487,204 @@ def command_check_projections(args: argparse.Namespace) -> int:
     against a source the validator accepts. Like `resolve`, this reads: it
     opens no file for writing and creates no directory.
     """
+    # Before root discovery, so a broken platform installation can never be
+    # masked by `not_onboarded` or a contract error (R1.3).
+    manifest, _ = require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
-    raise_for_violations(validate_contract(source))
+    raise_for_violations(validate_contract(source, manifest))
     validate_projections(root, source)
     return emit_json({"projections": [
         {"id": entry["id"], "action": "unchanged"}
         for entry in source["projections"]
     ]})
+
+
+# --------------------------------------------------------------------------
+# `platform-status`
+#
+# D6 fixes the split this operation turns on: a contract that cannot be parsed
+# into an interval is refused exactly as `resolve` refuses it, while an
+# interval that parses and falls outside the range is the verdict the operation
+# exists to publish. Everything below reads (R3.6): no file is opened for
+# writing, no directory is created — the registry reader reads `state_root()`
+# and never makes it — and no child process runs.
+# --------------------------------------------------------------------------
+
+
+def platform_block(manifest: dict, manifest_path: Path) -> dict:
+    """The installed platform's facts, verbatim, and where they came from.
+
+    `manifest_path` is the absolute resolved path of the file actually loaded,
+    which under Home Manager is the content-addressed store path (D2). It is
+    published as it is: shortening it would discard the deployment identity it
+    exists to carry.
+    """
+    block = {name: manifest[name] for name in PLATFORM_STATUS_MANIFEST_MEMBERS}
+    block["manifest_path"] = str(manifest_path)
+    return block
+
+
+def compatibility_block(reason_code: str | None) -> dict:
+    """One contract's verdict; `reason_code` None is the compatible answer.
+
+    The repair id comes from the same exhaustive dispatch `unsupported_schema`
+    publishes, so a reported verdict and the refusal for the same cause always
+    name one repair.
+    """
+    return {
+        "compatible": reason_code is None,
+        "reason_code": reason_code,
+        "repair_id": (None if reason_code is None
+                      else schema_reason_repair_id(reason_code)),
+    }
+
+
+def declared_facts(source: object) -> dict:
+    """What a contract declares about its identity, schema and interval.
+
+    Read defensively, because this also runs over contracts validation
+    rejected: a fleet member's, or one at a schema this platform does not
+    publish, whose remaining members were never shape-checked. A member that is
+    absent or of the wrong shape is reported as null — a description of what is
+    written, never a defaulted value, since nothing here is used as policy.
+    """
+    facts: dict = {
+        "project_id": None,
+        "project_schema_version": None,
+        "platform_interval": None,
+    }
+    if not isinstance(source, dict):
+        return facts
+    identity = source.get("project")
+    if isinstance(identity, dict) and isinstance(identity.get("id"), str) \
+            and identity["id"]:
+        facts["project_id"] = identity["id"]
+    version = source.get("schema_version")
+    if isinstance(version, int) and not isinstance(version, bool):
+        facts["project_schema_version"] = version
+    interval = source.get("platform")
+    if (isinstance(interval, dict)
+            and sorted(interval) == sorted(PLATFORM_MEMBERS)
+            and all(isinstance(interval[name], str)
+                    for name in PLATFORM_MEMBERS)):
+        facts["platform_interval"] = {
+            name: interval[name] for name in PLATFORM_MEMBERS}
+    return facts
+
+
+def evaluate_named_project(root: Path, source: dict,
+                           manifest: dict) -> tuple[dict, dict]:
+    """The `project` and `compatibility` members for the named repository (R3.3).
+
+    A structural violation refuses from here, by letting `raise_for_violations`
+    through: the operator asked about this contract, and one that will not
+    parse into an interval cannot be evaluated (R3.5). A schema this platform
+    does not publish and an out-of-range interval are the two reported
+    verdicts.
+    """
+    try:
+        raise_for_violations(validate_contract(source, manifest))
+    except ContractError as error:
+        if error.code != "unsupported_schema":
+            raise
+        reason_code = error.reason_code
+    else:
+        reason_code = agent_platform.interval_verdict(
+            manifest["platform_version"],
+            source["platform"]["min_inclusive"],
+            source["platform"]["max_exclusive"])
+    facts = declared_facts(source)
+    project = {
+        "project_id": facts["project_id"],
+        "root": str(root),
+        "project_schema_version": facts["project_schema_version"],
+        "platform_interval": facts["platform_interval"],
+    }
+    return project, compatibility_block(reason_code)
+
+
+def fleet_verdict(root: Path, manifest: dict) -> tuple[object, str | None]:
+    """One registered project's contract, and its failing reason code or None.
+
+    Nothing here refuses. The registry named this project, not the operator, so
+    a root that is gone, an unreadable or unparseable contract and a structural
+    violation are all reported as `project_schema_unsupported`: a preflight has
+    to be able to describe a broken fleet member (R3.4).
+    """
+    try:
+        source = load_contract(root)
+    except ContractError:
+        return None, "project_schema_unsupported"
+    try:
+        violations = validate_contract(source, manifest)
+    except ContractError as error:
+        return source, error.reason_code or "project_schema_unsupported"
+    if violations:
+        return source, "project_schema_unsupported"
+    return source, agent_platform.interval_verdict(
+        manifest["platform_version"],
+        source["platform"]["min_inclusive"],
+        source["platform"]["max_exclusive"])
+
+
+def fleet_row(entry: dict, manifest: dict) -> dict:
+    """One registry entry's verdict row.
+
+    Identity and location come from the registry, because they are the two
+    facts a row still has when its contract will not load at all (D18). That
+    is also why the identity is checked rather than trusted: a registered root
+    that has been replaced, or whose contract now declares a different id,
+    still has a registry entry naming the old one, and reporting that entry
+    beside a *live* version verdict would call a row compatible whose stale
+    half is the very thing a preflight is asked about.
+
+    The check runs only where the row would otherwise be compatible. A row the
+    contract already failed carries a verdict and a repair id for that failure,
+    and re-labelling it with the identity question would replace one true
+    answer with another.
+    """
+    source, reason_code = fleet_verdict(Path(entry["root"]), manifest)
+    facts = declared_facts(source)
+    if reason_code is None and facts["project_id"] != entry["project_id"]:
+        reason_code = "project_identity_mismatch"
+    return {
+        "project_id": entry["project_id"],
+        "root": entry["root"],
+        "project_schema_version": facts["project_schema_version"],
+        "platform_interval": facts["platform_interval"],
+        **compatibility_block(reason_code),
+    }
+
+
+def command_platform_status(args: argparse.Namespace) -> int:
+    """Report the platform's facts, and whatever was asked about beside them.
+
+    The five members are always present, `null` where not applicable. Both
+    flags compose and neither suppresses the other.
+
+    Projection drift is deliberately not checked: a stale target is `resolve`'s
+    structural refusal (D10), not a fact about platform compatibility.
+    """
+    # Before root discovery, so a broken platform installation can never be
+    # masked by `not_onboarded` or a contract error (R1.3).
+    manifest, path = require_platform_manifest()
+    status: dict = {
+        "schema_version": PLATFORM_STATUS_SCHEMA_VERSION,
+        "platform": platform_block(manifest, path),
+        "project": None,
+        "compatibility": None,
+        "fleet": None,
+    }
+    if args.repo_root is not None:
+        root = discover_root(args.repo_root)
+        status["project"], status["compatibility"] = evaluate_named_project(
+            root, load_contract(root), manifest)
+    if args.fleet:
+        status["fleet"] = sorted(
+            (fleet_row(entry, manifest) for entry in require_registry()),
+            key=lambda row: row["project_id"])
+    return emit_json(status)
 
 
 def add_repo_root(subparser: argparse.ArgumentParser) -> None:
@@ -1284,6 +1723,22 @@ def build_parser() -> argparse.ArgumentParser:
         "write-projections",
         help="write every declared projection target that is missing or stale")
     add_repo_root(write_projections)
+    platform_status = subparsers.add_parser(
+        "platform-status",
+        help="report the installed platform's version facts",
+        description=(
+            "Report the installed platform's version facts. With --repo-root, "
+            "add that project's declared interval and its compatibility "
+            "verdict; with --fleet, add one verdict row per registered "
+            "project. Without --repo-root no project is inspected and no "
+            "project root is discovered."),
+    )
+    add_repo_root(platform_status)
+    platform_status.add_argument(
+        "--fleet",
+        action="store_true",
+        help="add one compatibility row per project in the fleet registry",
+    )
     return parser
 
 
@@ -1294,16 +1749,36 @@ def dispatch(args: argparse.Namespace) -> int:
         return command_check_projections(args)
     if args.command == "write-projections":
         return command_write_projections(args)
+    if args.command == "platform-status":
+        return command_platform_status(args)
     raise ValueError(f"unknown subcommand: {args.command!r}")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # After argparse, so a usage error stays argparse's own (D16), and before
+    # dispatch, so the library half of the installation refuses exactly like
+    # the manifest half: one JSON object on stdout, exit 2 (R1.3, D12). The
+    # message names the fixed installed path and embeds nothing variable, so
+    # two runs refusing for this reason emit identical bytes.
+    if not bootstrap_platform_library():
+        return emit_error(
+            "resolver_failure",
+            PLATFORM_LIBRARY_REPAIR_ID,
+            [{
+                "pointer": "",
+                "message": (
+                    "the shared platform library was not found at "
+                    "~/.agents/lib/python/agent_platform.py"
+                ),
+            }],
+        )
     try:
         return dispatch(args)
     except ContractError as error:
-        return emit_error(error.code, error.repair_id, error.violations)
+        return emit_error(error.code, error.repair_id, error.violations,
+                          error.reason_code)
     except Exception:
         # One fixed sentence: refusal bytes stay deterministic and no internal
         # detail reaches the caller.
