@@ -150,7 +150,10 @@ in
       # "screenflow"         # Screen recording and video editing (Paid)
       # "vlc"                # Versatile cross-platform media player
       # Graphics, 3D Printing & Design
-      "adobe-creative-cloud" # Manager for Adobe Creative Cloud suite
+      # darktable replaced Adobe Creative Cloud / Lightroom (2026-09-20). Served from the
+      # self-authored fagenorn/palmier tap because the upstream cask is disabled
+      # (fails_gatekeeper_check); see homebrew/palmier-tap/Casks/darktable.rb.
+      "fagenorn/palmier/darktable" # Raw photo developer (open-source Lightroom replacement)
       # "bambu-studio",       # Slicer software for Bambu Lab 3D printers
       # "prusaslicer",        # Slicer software for Prusa and other 3D printers
       # Screen Capture
