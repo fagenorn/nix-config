@@ -13,8 +13,9 @@ import unittest
 from unittest import mock
 
 from ._delivery_model_fixtures import (
-    authority, contract_and_delivery, contract_and_delivery_for_stage,
-    observation, pr_subject, seal, selection, stage_scope,
+    authority, cleanup_contract_and_delivery, contract_and_delivery,
+    contract_and_delivery_for_stage, observation, pr_subject, seal, selection,
+    stage_scope,
 )
 
 
@@ -1036,6 +1037,73 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(next(item for item in replay["actions"]
                                   if item["kind"] == "delivery_remainder"), second)
             self.assertEqual(state_path.read_bytes(), before)
+
+    def issue_contract(self, issue):
+        """The eight-stage cleanup contract and its first intent, bound to one issue."""
+        contract, delivery = cleanup_contract_and_delivery(self.model)
+        intent = copy.deepcopy(delivery["authorization_intents"][0])
+        contract["issue"] = issue
+        contract["deliverable"]["id"] = f"delivery-{issue}"
+        for stage in contract["stages"]:
+            if stage["kind"] == "close_tracker":
+                stage["target_ref"]["value"] = str(issue)
+        for declared in intent["scopes"]:
+            declared["target"]["issue"] = issue
+            seal(self.model, declared)
+        intent["scopes"].sort(key=lambda item: item["id"])
+        seal(self.model, intent)
+        contract["initial_authorization_intent_id"] = intent["id"]
+        contract["initial_authorization_intent_digest"] = self.model.canonical_digest(intent)
+        return contract, intent
+
+    def test_dispatching_control_response_passes_raw_workflow_response_validation(self):
+        """The adapter validates control bytes before decoding; a real dispatch must pass."""
+        issues = [151, 152]
+        bound = {issue: self.issue_contract(issue) for issue in issues}
+
+        def keyed(value):
+            return {str(issue): copy.deepcopy(value) for issue in issues}
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); run_id = "dispatch-wire"
+            initialized = subprocess.run(
+                [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
+                 "--run-id", run_id, "--now", NOW], capture_output=True, check=False)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            request = {"interface_version": 2, "now": NOW, "max_parallel": 2,
+                "attempt_budget_minutes": 30, "human_directed": True, "issues": issues,
+                "tracker": [{"issue": issue, "state": "open", "open_blockers": [],
+                             "decision_blockers": []} for issue in issues],
+                "owners": [],
+                "worktrees": [{"issue": issue, "recorded": None, "candidate": {
+                    "path": str(root / f"worktree-{issue}"), "state": "absent"}}
+                    for issue in issues],
+                "forge": keyed({"state": "none", "url": None, "merge_sha": None}),
+                "delivery_contracts": {str(issue): bound[issue][0] for issue in issues},
+                "authorization_intents": {str(issue): [bound[issue][1]] for issue in issues},
+                "authority_observations": keyed([]), "reevaluation_evidence": keyed([]),
+                "delivery_observations": keyed([]), "requested_scopes": keyed(None),
+                "recoveries": keyed(None)}
+            path = root / "control.json"; path.write_text(json.dumps(request))
+            completed = subprocess.run(
+                [sys.executable, str(WORKFLOW), "control", "--repo-root", str(root),
+                 "--run-id", run_id, "--request-file", str(path)],
+                capture_output=True, check=False)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            response = json.loads(completed.stdout)
+            self.assertEqual([action["kind"] for action in response["actions"]],
+                             ["spawn", "spawn", "wait"])
+            self.assertEqual(response["actions"][-1]["wake_on"],
+                             ["deadline", "owner_notification", "tracker_change"])
+            # Two dispatched contracts already outgrow the owner phase-report bound.
+            policy = json.loads(POLICY.read_text(encoding="utf-8"))
+            self.assertGreater(len(completed.stdout), policy["phase_reports"]["wire_max_bytes"])
+            validated = subprocess.run(
+                [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+                 "workflow-response", "--input", "-", "--policy", str(POLICY)],
+                input=completed.stdout, capture_output=True, check=False)
+            self.assertEqual((validated.returncode, validated.stderr), (0, b""))
+            self.assertEqual(validated.stdout, completed.stdout)
 
 
 if __name__ == "__main__":

@@ -157,12 +157,13 @@ def _read_regular(path: Path, *, limit: int | None = None) -> bytes:
         os.close(descriptor)
 
 
-def _load_policy(path: Path) -> tuple[dict[str, ArtifactLimits], int, int]:
+def _load_policy(path: Path) -> tuple[dict[str, ArtifactLimits], int, int, int]:
     try:
         value = _decode_json(_read_regular(path))
     except InputReadError as exc:
         raise ArtifactBudgetError("cannot read policy") from exc
-    if not _exact_keys(value, {"schema_version", "unit", "artifacts", "phase_reports"}):
+    if not _exact_keys(value, {"schema_version", "unit", "artifacts", "phase_reports",
+                               "workflow_responses"}):
         raise ArtifactBudgetError("invalid policy keys")
     assert isinstance(value, dict)
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
@@ -206,7 +207,17 @@ def _load_policy(path: Path) -> tuple[dict[str, ArtifactLimits], int, int]:
     wire = reports["wire_max_bytes"]
     if not _integer(notes, minimum=1) or not _integer(wire, minimum=1):
         raise ArtifactBudgetError("invalid report limits")
-    return limits, notes, wire
+    # A workflow response is helper transport, not an owner-authored phase
+    # report: control carries one summary per requested issue plus the full
+    # delivery contract of every dispatch, so it takes its own bound.
+    responses = value["workflow_responses"]
+    if not _exact_keys(responses, {"wire_max_bytes"}):
+        raise ArtifactBudgetError("invalid response policy")
+    assert isinstance(responses, dict)
+    response_wire = responses["wire_max_bytes"]
+    if not _integer(response_wire, minimum=1):
+        raise ArtifactBudgetError("invalid response limits")
+    return limits, notes, wire, response_wire
 
 
 def _default_policy_path() -> Path:
@@ -904,11 +915,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.buffer.write(_canonical(result.to_dict()))
             return 0 if result.status == "within_budget" else 3
         try:
-            _, notes_max, wire_max = _load_policy(_policy_path(args.policy))
+            _, notes_max, report_wire_max, response_wire_max = _load_policy(
+                _policy_path(args.policy))
         except ArtifactBudgetError:
             label = "report" if args.command == "validate-report" else "detail input"
             sys.stderr.write(f"artifact-budget: invalid {label}\n")
             return 2
+        wire_max = (response_wire_max if args.command == "validate-report"
+                    and args.boundary == "workflow-response" else report_wire_max)
         try:
             raw = _input_bytes(args.input, wire_max)
         except InputReadError:
