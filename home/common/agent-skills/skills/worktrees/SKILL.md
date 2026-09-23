@@ -24,11 +24,10 @@ A worktree-failure audit found **43% of `EnterWorktree`/`ExitWorktree` errors ar
 ## Detect existing isolation
 
 ```bash
-[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ] &&
-  ! git rev-parse --show-superproject-working-tree 2>/dev/null | grep -q .
+git rev-parse --git-dir --git-common-dir --show-superproject-working-tree
 ```
 
-True → you are already in a linked worktree; report the path and branch and stop. (The submodule check matters: a submodule also has a distinct git-dir and is *not* isolation.)
+Compare the first two lines: different → you are already in a linked worktree; report the path and branch and stop. Identical → this is the default checkout. The superproject flag prints **no line at all** outside a submodule, so two lines is the normal case and a third line means a submodule: its first two lines match, so only the third line distinguishes it from the default checkout, and it is *not* isolation.
 
 ## Branch and prefix contract
 
