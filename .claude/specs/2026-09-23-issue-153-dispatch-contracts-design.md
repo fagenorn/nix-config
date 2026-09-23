@@ -6,7 +6,7 @@ Design for [#153](https://github.com/fagenorn/nix-config/issues/153), one slice 
 worktree-checker guidance), [#155](https://github.com/fagenorn/nix-config/issues/155)
 (prose consolidation after the behavior fixes),
 [#100](https://github.com/fagenorn/nix-config/issues/100) (strict project resolver,
-retiring the legacy bindings fallback). Decisions D1–D13 bind the plan.
+retiring the legacy bindings fallback). Decisions D1–D14 bind the plan.
 
 ## Problem
 
@@ -172,9 +172,12 @@ such trailer.
 
 ## Decisions
 
-**The contract is asserted on the rendered region (D6).** A clause counts only
-inside the text the recipient receives: the fence body, the blockquote with its
-quote markers removed, or the named section. Prose outside that region is
+**The contract is asserted on the rendered region (D6, D14).** A clause counts
+only inside the text the recipient receives: the fence body — narrowed to the
+block after its `prompt: |` line when the fence declares one, as the five sdd
+templates do, because the lines above it (`description`, `model`, `effort`) are
+dispatch parameters, not prompt text — the blockquote with its quote markers
+removed, or the named section. Prose outside that region is
 dispatcher-facing; a file-wide match would pass with the clause somewhere no
 subagent reads it. Rendering fails loud when its region is missing or ambiguous
 — a fence carrier without exactly one unlabeled fence, an absent anchor line,
@@ -221,7 +224,9 @@ carrier and contract tables it closes over. Four test classes:
    `from-issue/SKILL.md`, whose single fence is the `## The flow` diagram; that
    file is still a carrier, of the section kind. A new single-fence template
    fails the guard until enrolled; blockquote and section carriers are enrolled
-   explicitly and are outside the guard's reach.
+   explicitly and are outside the guard's reach. The guard and the mutation
+   matrix run on the source tree only: enrolment and checker behaviour are
+   authoring concerns, and the installed classes check the enrolled set.
 
 Prior art: the permission-guard suite's `CLAUDE_SETTINGS_PATH` built-artifact
 seam and `show-claude-settings`' requisite discovery; the contract suite's
@@ -281,10 +286,11 @@ reviewer-agnostic check.
 | D4 | The test module's contract mapping is each clause's one authoritative home; carriers repeat the text and are asserted whitespace-normalized against it | the-bar DRY; a pasted template carries no link target into the subagent's context; `REPORT_CANDIDATE_CLAUSE` precedent | A shared document the templates link to — the link never reaches the subagent |
 | D5 | The `SendMessage` delivery clause stays only where it is (implementer) and is not spread | #153 names two contracts; delivery is not among the audit's four classes; the-bar YAGNI | Recover `LEAF_DELIVERY_CLAUSE` into every carrier — a third, unevidenced contract |
 | D6 | A clause counts only inside the carrier's rendered region, and rendering fails loud on a missing or ambiguous region | the-bar Fail loud and Tests that can fail; dispatcher-facing prose never reaches the recipient | File-wide substring — green with the clause where no subagent reads it |
-| D7 | "Installed tree" is the built `home-manager-files` output, read through `AGENT_SKILLS_INSTALLED_HOME` in a Claude view (all carriers) and a Codex view (shared carriers); a new `agent-installed-skill-tests` recipe builds, discovers exactly one output and runs the module | CLAUDE_SETTINGS_PATH and `show-claude-settings` precedent; skills install via `skillsDir` and whole-directory `.agents/skills` links from one output | The live `~/.claude/skills` — the activated generation, stale until a switch; a synthesized temp layout — a copy of source that proves nothing about the build |
+| D7 | "Installed tree" is the built `home-manager-files` output, read through `AGENT_SKILLS_INSTALLED_HOME` in a Claude view (all carriers) and a Codex view (shared carriers); a new `agent-installed-skill-tests` recipe builds, discovers exactly one output and runs the module | CLAUDE_SETTINGS_PATH and `show-claude-settings` precedent; skills install via `skillsDir` and whole-directory `.agents/skills` links from one output; the two views resolve to distinct store copies (one `hm_skills` tree versus one `hm_<name>` path per skill, observed in the current generation), so checking one does not prove the other | The live `~/.claude/skills` — the activated generation, stale until a switch; a synthesized temp layout — a copy of source that proves nothing about the build |
 | D8 | Unset variable skips the installed class with a reason naming the recipe; a set variable with a missing view or carrier fails | Precedented capability skips in `test_workflow_state.py`; the-bar Truthful terminal states and Fail loud | A module-level required variable like the permission guard — breaks `agent-workflow-tests` and CI's advisory job; silent fallback to source — a green installed run that checked nothing installed |
 | D9 | The checks live in a new `test_dispatch_contracts.py`, not in `test_workflow_skill_contracts.py` | the-bar Single responsibility; the installed recipe must run only these checks against another root | Extend the 3,500-line contract suite as the retained work did — the installed run would drag every repo-rooted test along |
 | D10 | Independence is proved by one test method per contract per tree plus a live-text mutation matrix (remove, relocate outside the region, unmodified) over every carrier × contract, with each clause required exactly once | #153 AC3 "fail independently"; the-bar: fixtures shaped like production values | One combined clause test — a missing launch clause masks a missing read-before-write clause; hand-written fixture strings — pass while the real carriers drift |
 | D11 | Fence carriers are guarded by the recovered enrolment test (single-unlabeled-fence docs under `from-issue/` and `sdd/` minus `{from-issue/SKILL.md}`); blockquote and section carriers are enrolled explicitly | Retained #99 D6/D21/D23, re-verified at `4f74c47`: seven such docs exist, the six templates plus `from-issue/SKILL.md`'s flow diagram | Glob-only enrolment (silently covers nothing once a template gains a second fence) or constants-only (silently ignores a new template) |
 | D12 | Recovery re-applies adapted hunks read with `git show`/`git diff` from `3c9709ca`; each recovering commit carries a `Recovered-From: 3c9709ca…` trailer and a body inventory; the retained branch tip is verified unchanged | #153 AC4 and "keep that branch and worktree read-only"; `ship-handoff.md` changed since `95b6caf`; a trailer is queryable with `git log --format=%(trailers)` | Cherry-pick or merge — imports the #100/#154 hunks and conflicts on the moved base; provenance recorded only in the spec — detached from the code history it describes |
 | D13 | No ADR, context doc or `CLAUDE.md` edit | The ADR gate needs hard-to-reverse and surprising; this is reversible prose held by tests, and the repo has no ADR home. `CLAUDE.md`'s command list is not exhaustive and no sentence in it is falsified by this change | Found `docs/areas/system/adr/` for a reversible prose fix; list the new recipe in `CLAUDE.md` — prose growth that #155 is chartered to consolidate |
+| D14 | A fence carrier's rendered region is the block after its `prompt: \|` line when the fence declares one (all five sdd templates), else the whole fence body (ship-handoff); refines D6 | D6's own rule — count only what the recipient receives; the lines above `prompt: \|` are the dispatch's `description`/`model`/`effort` parameters | The whole fence body — green with a clause placed in the `description` header, which no subagent reads as instructions |
