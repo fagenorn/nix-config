@@ -48,8 +48,9 @@ Interface 2 cannot run a single issue end to end, so neither `/from-issue <n>
 - **PR binding.** Implement SPEC151's declared "slot PR" narrowing, so the
   initial intent covers "the PR opened for the reviewed slot" and no
   successor intent is needed.
-- **Contract-last acquisition.** Contractless calls are read-only and ask for
-  the contract only once a write is next.
+- **Contract-last acquisition.** Contractless calls never create a run or
+  dispatch. They apply only lifecycle transitions and ask for the contract where
+  a dispatch would follow.
 - **Legacy continuity.** Legacy `finish` stays usable on migrated contractless
   issues, and control leaves live contractless custody alone.
 - **Forge reconciliation.** Control reconciles a merged forge for issues
@@ -63,7 +64,7 @@ Interface 2 cannot run a single issue end to end, so neither `/from-issue <n>
 ### 1. The delivery builder (per D3, D4, D5, D6)
 
 `workflow-state build-delivery --repo-root <ledger_repo_root> --kind <kind>
---input <absolute-json-path>` prints the canonical bytes of the sealed object(s)
+--input <absolute-json-path|->` prints the canonical bytes of the sealed object(s)
 and exits 0; any refusal exits 2 with nothing on stdout. It takes no lock, reads
 no ledger, reads no clock (time is an input), and writes nothing. A new private
 build module beside the delivery projection holds all derivation. It loads
@@ -207,20 +208,21 @@ with the issue's recorded worktree when one exists, otherwise with their
 reserved candidate.
 
 **Direct acquisition: contract last (D9).** A `direct-owner` request with a null
-contract, on an issue with no installed contract, creates no run and writes no
-state. Only the benign issue lock is taken. It scans and runs the lifecycle
-policy on detached state, then returns one of three things:
+contract, on an issue with no installed contract, never creates a run and never
+dispatches. On an existing contractless run it applies the same lifecycle-only
+transitions control does (reap, tracker halt, forge reconcile) and replays
+terminals. It returns one of three things:
 
 - the policy's own `observe` requirements (tracker, forge, recorded or candidate
   worktree);
-- a terminal replay of an already-terminal run, which needs no contract;
-- otherwise, exactly the `delivery_contract` requirement, with the selected
-  run's id or null.
+- a terminal replay or reconciled terminal, which needs no contract;
+- otherwise, exactly the `delivery_contract` requirement where a dispatch would
+  follow, with the selected run's id or null.
 
 The acquirer then builds the contract, adds the initial intent as
 `authorization_intents`, and repeats the call with every retained fact. This
 refines SPEC151's "no contract yields only the contract requirement": no contract
-still yields no owner/remainder action and no write, but legacy observations
+still yields no owner/remainder action and no new run, but legacy observations
 come first.
 
 **Null contract means "none supplied" (D10).** This rule applies to both
@@ -229,7 +231,9 @@ control and direct:
 - **Contracted issue.** For an issue whose ledger already holds a contract, a
   null request contract means the installed contract governs. A supplied
   contract must equal the installed one, or the request refuses (the contract is
-  immutable). Facts or scope still require a non-null contract before the lock.
+  immutable). Facts, scope or a D21 recovery still require the non-null
+  installed contract before the lock. A controller takes it from the dispatch
+  action it executed.
 - **Contractless or absent issue.**
   - With a null contract, the issue runs lifecycle-only policy: reaping,
     tracker halts, forge reconciliation, idle. The would-be dispatch becomes
@@ -343,10 +347,13 @@ the handoff, is current truth.
   the native guard, repository policy and the existing `check-launch` fence
   before every forge write. These effects precede selection, so no stage is
   ready for them.
-- **Selection at the pre-merge gate.** On the final CI-green head, the ship
-  owner builds the selection and the now-true `selected_output`,
-  `branch_published` and `pr_opened` observations. It checkpoints them with the
-  built scope for `merge_pr`, the post-fold ready stage.
+- **Selection at the pre-merge gate.** Selection is immutable, and a later
+  implementation retry cannot deliver a different head under the same contract.
+  Selection therefore waits for the final CI-green head. There, the ship owner
+  builds the selection and the now-true `selected_output`, `branch_published`
+  and `pr_opened` observations. It checkpoints them with the built scope for
+  `merge_pr`, the post-fold ready stage. Selection is observation-only, because
+  its effect is that checkpoint write.
 - **Each post-selection effect** (merge, issue close, worktree removal,
   local-branch deletion) runs one cycle:
   1. The scope proposal is checkpointed.
@@ -416,11 +423,14 @@ interface-1 request, response or legacy terminal instruction for new runs.
   - The D16 writer rule.
   - REVIEW/HUMAN-GATE appendices point at the loop instead of restating it.
 
-Every skill writes request and input files with the file-write tool. It invokes
-the helper as one command, optionally piped into `artifact-budget
-validate-report`, which D18 depends on.
+Every lifecycle call is one simple command (D22). The request, checkpoint,
+summary or builder input goes to the helper on stdin through a heredoc, via a
+`-` input path. The command is optionally piped into or out of `artifact-budget
+validate-report --input -`. The helper is named by bare name or the
+`~/.agents/bin/` form only. This replaces the mktemp/trap request-file pattern
+and CLAUDE.md's sentence about it.
 
-### 8. Auto-mode allow rules (per D18)
+### 8. Auto-mode allow rules and single-command calls (per D18, D22)
 
 Four entries are added to the managed `permissions.allow`, taking the list
 from 18 to 22:
@@ -432,9 +442,12 @@ Both helpers are lifecycle infrastructure. Their only writes are validated
 ledger transitions beneath `.superpowers/workflows/`, so neither can alter code
 or a remote. Allowing `artifact-budget` covers the mandated
 `helper | artifact-budget validate-report` pipeline, whose segments must all
-match. The `PreToolUse` guard still adjudicates the four forge verbs unchanged.
-The permission-guard test's expected list and CLAUDE.md's entry count are
-updated with it.
+match. Every helper input flag (`--request-file`, `--checkpoint-file`,
+`--summary-file`, `--result-file`, `--input`) accepts `-` for stdin. A call
+therefore has no mktemp/trap/cat segments that would fall back to the
+classifier. The `PreToolUse` guard still adjudicates the four forge verbs
+unchanged. The permission-guard test's expected list and CLAUDE.md's entry count
+and request-file sentence are updated with it.
 
 ## Acceptance criteria
 
@@ -458,6 +471,8 @@ updated with it.
   - A contract naming another worktree refuses without a write.
   - A later null-contract re-entry is governed by the installed contract.
   - A contractless call on a terminal legacy direct run replays it.
+  - A contractless call on a suspended legacy direct run whose PR merged
+    reconciles it to terminal `merged`.
 - AC1.4 — Bootstrap reports `contract_digest`.
   - Control with a built contract for a fresh issue spawns it with that contract.
   - Null for a contracted issue uses the installed one.
@@ -523,6 +538,10 @@ updated with it.
 - AC5.1 — `just show-claude-settings` lists exactly the 22 entries.
 - AC5.2 — The guard test pins them, and the guard's adjudication tests are
   unchanged.
+- AC5.3 — Each helper input flag accepts `-`. A heredoc-fed `control` and
+  `finish --summary-file -`, piped through `artifact-budget validate-report
+  --input -`, round-trip identically to the path form. A relative path still
+  refuses.
 
 ## Test seams
 
@@ -579,18 +598,20 @@ Verification uses the project's commands, `nix-build` and
 | D3 | The contract source is one read-only `workflow-state build-delivery` verb backed by a new private build module. It covers contract, initial intent, scope, selection, observation and authority kinds. | SPEC151:32-36 assumes a trusted controller that no code implements; the-bar DRY (one home per convention) and token economy (one CLI, one allow rule); the investigator's prior that LLM-composed canonical digests are the weakest boundary | Skill-composed JSON (hand-made sha256); the helper defaulting a null contract (bootstrap "no project policy is defaulted", SPEC151:34-35); a `resolve-project` projection (lacks invocation facts); a separate executable (second tool and allow rule for the same boundary); contract-only scope (owners still hand-seal every checkpoint, so end-to-end fails at finish) |
 | D4 | The contract is derived from resolved policy: `repository_id` = the tracker slug; only `github` is supported; all four obligations required; a linear stage chain with remote deletion iff `delete_branch`; every stage retryable; the summary carries no issue content | bootstrap.md policy-only rule; the-bar YAGNI; SPEC151:21-22 (missing evidence never creates `not_applicable`) | Provider node id via `gh repo view` (a network read and a value policy does not carry); supporting `tracker.kind none` or record deliverables now (no caller) |
 | D5 | One scope/evidence vocabulary lives only in the builder: per-issue `issue_owner` principal, risk = effect, a named repository audience, endpoint only for worktree removal, tree-based data identity, and head-keyed evidence ids fixed by skill-defined refs, so re-derivation is identical | Exact matching (SPEC151 narrowing table); the-bar DRY; a relaunched owner must re-derive selection without ledger reads | A per-attempt principal (breaks exact match across retries/remainders); `private`/`public` audience (visibility is not in policy and would lie for one of them) |
-| D6 | Source kinds: explicit numbers and direct `--auto` → `explicit_user`; label/milestone sweeps → `standing_repository`; `parent_handoff` unused by initial intents | Existing `human_directed` semantics; D21 `human_transient_retry` requires `explicit_user` | `explicit_user` for sweeps (claims per-issue authorization nobody gave); `parent_handoff` for orchestrated owners (describes transport, not authority) |
+| D6 | Source kinds: explicit numbers, direct `--auto` and an explicit durable interactive request → `explicit_user`; label/milestone sweeps → `standing_repository`; `parent_handoff` unused by initial intents | Existing `human_directed` semantics; D21 `human_transient_retry` requires `explicit_user` | `explicit_user` for sweeps (claims per-issue authorization nobody gave); `parent_handoff` for orchestrated owners (describes transport, not authority) |
 | D7 | A slot `pr_ref` binds the PR through the unique matching `pr_opened` observation, with no successor intent. This implements SPEC151's "slot PR" narrowing and answers "who mints the PR intent" with "nobody". | SPEC151:26-31 and the narrowing-table row "slot PR/output"; `subject_kind` already includes `pull_request`; checkpoint/summary cannot carry intents (SPEC151, the reducer) | A successor intent after `open_pr` (no mid-flight controller transport exists: `direct-owner` refuses a live owner, and the orchestrator sees no PR number without a human round trip); a checkpoint intent carve-out (contradicts SPEC151's trusted-source rule) |
 | D8 | The contract binds the custody worktree and branch. A mismatched transition refuses without a write; an absent recorded path is re-created in place; no relocation. | Cleanup stages require literal targets (SPEC151 cleanup rules; "never permits relocation or candidate discovery"); the AUTO.md `expected_branch` rule | Letting the helper switch to a fresh candidate under a contract (the immutable contract would then name a dead path) |
-| D9 | A contractless `direct-owner` call is read-only and asks for the contract last, after legacy observations; terminal replay needs no contract. Refines SPEC151:533-534. | Fixes finding 6 (terminal replay unreachable); the worktree must be known before the contract (D8) | Contract first (the acquirer cannot know the recorded path of a run it may not know exists) |
+| D9 | A contractless `direct-owner` call never creates a run or dispatches. It applies lifecycle-only transitions (reap, tracker halt, forge reconcile) to an existing contractless run, as control does (D10), replays terminals, and asks for the contract last, after legacy observations. Refines SPEC151:533-534. | Fixes finding 6 (terminal replay unreachable); the worktree must be known before the contract (D8); the grill found that a write-free variant would strand the repo's suspended legacy direct runs whose PRs merged | Contract first (the acquirer cannot know the recorded path of a run it may not know exists); fully read-only (legacy merged direct runs could never reconcile without inventing a contract) |
 | D10 | A null contract means "none supplied": an installed contract governs; contractless issues run lifecycle-only; a supplied contract installs only at a custody-creating/relaunching transition; the bootstrap exposes `contract_digest`; `contractless_control` is removed | SPEC151 "contracts are context, not inferred authority"; a restarted adapter cannot reproduce a contract built at an earlier `now` | Always re-send the contract (restart breaks immutability); null ⇒ refuse (strands legacy issues); discover contract need from a first control call (a premature `finalize` ends the run) |
 | D11 | Legacy `finish` is accepted on any schema for a contractless issue without remainders, and refused on a contracted one. Migration-on-write stays, with no legacy writer and no bridge. Supersedes 151 task-2's "legacy v1 summaries are read-only" and re-pins `concurrent_finish` to "both succeed". | Issue fix option 2; SPEC151:445-453 (legacy results remain historical claims, no truth promoted); SPEC151:494-497 (no bridge) | Do not migrate while legacy attempts are live (needs a schema-2 writer; misses finish, init-run and control; useless for already-migrated runs); ship the bridge (forbidden by SPEC151) |
-| D12 | Refine interface 2 in place, with no version bump: a null-digest control summary may carry legacy custody; the bootstrap gains `contract_digest`; `pr_ref` gains the slot form | No v2 run has ever completed (acquisition was impossible), so no persisted v2 consumer exists; SPEC151 "all callers cut over together" | Interface/schema version bumps (a second migration and compatibility surface for zero consumers) |
+| D12 | Refine interface 2 in place, with no version bump: a null-digest control summary may carry legacy custody; the bootstrap gains `contract_digest`; `pr_ref` gains the slot form | No v2 run has ever completed (acquisition was impossible); every refinement is additive to persisted grammar, so existing ledgers stay valid, including any run that installed contracts (#169's `orch-1635-1642`); SPEC151 "all callers cut over together" | Interface/schema version bumps (a second migration and compatibility surface for zero consumers) |
 | D13 | Control reconciles a merged forge only without live custody, and only for a nonterminal or retryable latest attempt (never over an owner verdict). Contracted issues get remainder 1 as a `delivery_remainder`; contractless issues get the lifecycle closeout only. | SPEC151:366-371; direct's live-owner guard precedes its reconcile; the investigator's E5b (control resumed a merged suspended attempt) | Reconcile active attempts (races every owner between merge and finish); reconcile without minting a remainder (leaves contracted delivery pending forever); document "direct only" (orchestrated runs could never reconcile) |
 | D14 | A `terminal_failed` finish mints remainder 1 only after selection is observed; forge reconciliation mints it regardless. Refines SPEC151's remainder-creation rule. | Otherwise a Phase-0 stop mints a delivery remainder that blocks the implementation retry (one nonterminal custody); the-bar truthful terminal states | `select_reviewed_output` non-retryable (overloads `retryable` and also blocks reconciled remainders) |
 | D15 | Pre-selection review publication (push, PR for review, fix pushes, CI) stays under the guard and `check-launch`. Selection happens at the pre-merge gate on the final head; each post-selection effect is proposed via checkpoint; already-true stages are observation-only. | SPEC151's model requires selection before publication/merge, while ship-issue publishes in order to be reviewed; observations fold independently of readiness (the reducer) | Reorder ship-issue to review before publishing (drops PR review); select after sdd (the head moves in sync and fixes, so a merge could never match the selection) |
 | D16 | The ship owner writes only checkpoints under implementation custody; completing observations ride its returned `ship-summary/v2`; from-issue writes `finish`. A remainder owner (ship-issue remainder mode) writes its own `finish`. | `check-launch` reports inactive once delivery completes, so a completing checkpoint would make the parent's fence refuse; the existing completion test puts `implementation_delivered` in the summary; "the custody owner writes the terminal" | Change `check-launch` semantics (reopens #151's fence decision); the parent converting a legacy 9-key return (the ship owner owns the facts and proposals) |
 | D17 | The owner envelope is the validated v2 `owner` object (the adapter projects control actions into it); the remainder envelope is the `delivery_remainder` object; Phase 7 uses `ship-handoff/v2` with the builder-regenerated intent and the historical arrays the author holds; the ledger is synchronized by a null-scope checkpoint | One validated shape for both routes; artifact-budget already validates it; truthful handoff arrays | key=value envelope lines (cannot carry the contract); a new read-only delivery-view verb (a wider wire surface than a null checkpoint); `ship-handoff/v2` for remainders (it requires spec/plan fields a remainder does not have) |
-| D18 | Allow `workflow-state` and `artifact-budget` in both bare and `~/.agents/bin/` forms (18 → 22). Skills write inputs with the file tool and invoke the helper standalone or piped into `artifact-budget`. | 2026-08-17 lifecycle-permissions design (Bash rules precede the classifier; literal prefixes; compound segments must all match); the issue's evidence of refused `finish`/`init-run`; D11 removes the stranding the refused `init-run` could have caused | Leave the list alone (the lifecycle stalls at the classifier: "[Auto-Mode Bypass]"); `Bash(python*)`-style rules (dropped in auto mode, far broader) |
+| D18 | Allow `workflow-state` and `artifact-budget` in both bare and `~/.agents/bin/` forms (18 → 22), as whole-helper prefixes | 2026-08-17 lifecycle-permissions design (Bash rules precede the classifier; literal prefixes; compound segments must all match); the issue's evidence of refused `finish`/`init-run`; D11 removes the stranding the refused `init-run` could have caused; the classifier sees only the command line, never the request body, so it never guarded an `owner_unavailable` takeover (that stays the skills' explicit-instruction rule plus the helper's active-owner refusal) | Leave the list alone (the lifecycle stalls at the classifier: "[Auto-Mode Bypass]"); per-subcommand rules excluding `direct-owner` (a 20-rule surface protecting nothing the classifier could see; they would also block every acquisition); `Bash(python*)`-style rules (dropped in auto mode, far broader) |
 | D19 | Tests use only existing public seams: CLI subprocess round trips, the model facade, the artifact-budget CLI, skill contract tests/evals and the settings guard test. The builder is tested through its verb. | design skill "prefer existing, highest seams"; the-bar "tests that can fail" | Importing the private build module in tests (pins internals, misses the loader) |
 | D20 | No ledger repair ships; the operator note relies on the upgraded helper's ordinary lifecycle | SPEC151:494-497; the brief's scope boundary | A migration script for stranded ledgers (the forbidden bridge) |
+| D21 | No ADR or context doc. The CLAUDE.md edits (allow count, the stdin request pattern replacing the mktemp sentence, the builder in the Claude Code section) ship with the code that makes them true. | The repo has no context map or ADR home (the 153 D13 precedent; grill-with-docs "don't impose the standard tree mid-flight"); the-bar "moves keep their history" (living docs change with the code) | Found `docs/areas/system/adr/` for this issue (imposes the tree mid-flight); edit CLAUDE.md now (it would lie until the code lands) |
+| D22 | Every helper input flag accepts `-` for stdin, so each lifecycle call is one heredoc-fed simple command, optionally piped through `artifact-budget validate-report --input -`, with no temp request files | D18 only works when every segment matches, and the existing mktemp/trap/cat pattern is compound; CLAUDE.md records that the guard treats a heredoc body as non-command; the-bar token economy | Keep temp files (compound commands reach the classifier and D18 is moot); Write-tool files (need read-before-write on an mktemp path plus cleanup) |
