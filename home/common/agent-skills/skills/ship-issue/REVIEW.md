@@ -117,3 +117,12 @@ Then keep the worktree and do not remove it; return only `stopped` or
 `failed`. Missing, unreadable, malformed,
 wrong-schema, or empty findings cannot support unpublished detail. With no
 Minor/Discussion items, use `detail_state: "none"` and a null path.
+
+## Delivery interface version 2
+
+Validate raw `workflow-response`, `ship-checkpoint/v2`, and `ship-summary/v2`
+before decoding. Preserve custody, requested_scope, selected-output references,
+accepted review evidence, and pending postconditions. Bind the actual invocation
+to the echoed scope and require the current-launch four-key fence both before a
+provider effect and before submitting its observation. A partial review result
+is checkpoint progress; it is not an unfinished delivery reported as failed.

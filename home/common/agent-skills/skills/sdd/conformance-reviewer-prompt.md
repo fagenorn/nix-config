@@ -81,6 +81,11 @@ Subagent (reviewer, Sonnet/high as selected above):
       must-fix-before-merge or defer-with-reason. Parked rulings deserve
       skepticism, not deference.
 
+    Launch any subagent by type only, never by name: a subagent cannot spawn a
+    named teammate, and a named launch returns an error instead of work. Read an
+    existing file before writing to it: overwriting content you have not read
+    destroys work you cannot see.
+
     ## Output Format
 
     ≤400 words total. Your FIRST line is the axis verdict:

@@ -1,7 +1,6 @@
 ---
 name: ship-issue
 description: Deliver a finished feature-branch worktree — sync integration branch, PR, review, CI, merge, close issue, clean up. Phase 7 of from-issue. Use for "ship #X", "land it".
-argument-hint: "[issue number — optional; inferred from branch name]"
 ---
 
 # Ship Issue
@@ -381,3 +380,15 @@ ledger call it makes.
 - Merge commits, learning-doc updates, and blocker fixes fall under standing local-commit authorization. Don't re-confirm each. The `Co-Authored-By` trailer follows `commit.coAuthoredBy`.
 - If a phase reveals an earlier one was wrong (review surfaces a misaligned spec, say), back up to the appropriate `from-issue` phase. Don't paper over.
 - Absent sibling skills (`from-issue`, `sdd`, `worktrees`) degrade to no-ops; this skill still runs.
+
+## Delivery interface version 2
+
+Validate raw handoff and `workflow-response` bytes before decoding. Retain the
+contract, custody, pending stages, and requested_scope. Normalize the actual
+provider invocation, including endpoint, audience/data, principal, risk and
+spend, and bind the actual invocation to the response echo. Require the exact
+four-key current-launch result immediately before each external effect and again
+before its observation. Persist partial progress or provider/authority blocking
+through `ship-checkpoint/v2` and `checkpoint-delivery`. Submit
+`ship-summary/v2` only after all required postconditions or genuine custody
+failure, then follow the typed delivery_remainder or requirement response.

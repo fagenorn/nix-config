@@ -59,21 +59,31 @@ evals skill id:
 agent-workflow-tests:
   python3 -m unittest -v \
     home/common/agent-skills/tests/test_workflow_state.py \
+    home/common/agent-skills/tests/test_delivery_model.py \
+    home/common/agent-skills/tests/test_delivery_workflow.py \
+    home/common/agent-skills/tests/test_workflow_delivery.py \
     home/common/agent-skills/tests/test_task_brief.py \
     home/common/agent-skills/tests/test_sdd_workspace.py \
     home/common/agent-skills/tests/test_review_package.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
+    home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_diff_scope.py \
     home/common/agent-skills/tests/test_resolve_bindings.py \
     home/common/agent-skills/tests/test_resolve_project.py \
+    home/common/agent-skills/tests/test_resolve_platform.py \
+    home/common/agent-skills/tests/test_resolve_platform_status.py \
     home/common/agent-skills/tests/test_conformance.py \
     home/common/agent-skills/tests/test_conformance_checks.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_costs.py \
+    tests/test_agent_model_drift_schema.py \
+    tests/test_agent_model_drift_routing.py \
+    tests/test_agent_model_drift_scheduling.py \
+    tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
     tests/test_branch_protection.py
 
@@ -81,6 +91,17 @@ agent-workflow-tests:
 agent-model-matrix:
   python3 home/common/agent-skills/scripts/agent-model-matrix.py validate
   python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
+
+# Check the dispatch contracts against the skill trees the Nix build installs.
+agent-installed-skill-tests: build
+  @set -- $(nix-store --query --requisites ./result \
+    | grep -- '-home-manager-files$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one built home-manager-files output; found $#" >&2; \
+      exit 1; \
+    fi; \
+    AGENT_SKILLS_INSTALLED_HOME="$1" python3 -m unittest -v \
+      home/common/agent-skills/tests/test_dispatch_contracts.py
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
@@ -133,6 +154,9 @@ install IP:
 # Report agent token spend per issue from the local Claude Code and Codex sessions
 agent-costs *args:
   python3 scripts/agent-costs.py {{args}}
+
+agent-model-drift *args:
+  python3 scripts/agent-model-drift.py {{args}}
 
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:

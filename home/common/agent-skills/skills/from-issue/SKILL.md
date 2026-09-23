@@ -1,7 +1,6 @@
 ---
 name: from-issue
 description: Drive one tracker issue through investigate → spec → plan → review → execute in a worktree. Use for "work on issue #X"; pass --auto for autonomous mode.
-argument-hint: "<issue number or URL> [--auto]"
 ---
 
 # From Issue
@@ -189,6 +188,10 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 **Structured report-backs.** A subagent's final message is re-read by its caller on every later turn, so every `Agent` dispatch states the applicable fixed JSON return schema; details live in budgeted worktree files. Prefer the tiered agent types over `general-purpose`.
 
+**Leaf-agent clauses.** Every prompt this skill or a file beside it composes for an `Agent` dispatch carries these two sentences verbatim, as a paragraph of their own; a prompt built from `ship-handoff.md` already carries them:
+
+> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see.
+
 **Artifact report boundary (D5, D6, D11, D14).** At every producer boundary,
 preserve the received stdout bytes and pipe them unchanged through
 `artifact-budget validate-report --boundary producer --input -`; only after that
@@ -282,19 +285,23 @@ Without lifecycle identity, apply the same action order locally with the
 
 ## Terminal return procedure
 
-Use this one procedure for Phase-0 content stops, attempt budget stops, execution failure,
-and Phase-7 success whenever lifecycle identity exists. Assemble a new absolute
-temporary result file beneath `${TMPDIR:-/tmp}`, removed under an unconditional
-cleanup that runs on every outcome, including validation rejection and failure:
-a shell `trap` on `EXIT HUP INT TERM`, or the equivalent `finally`. Its JSON
-holds exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`,
-`discussion_items`, `detail_state`, `report_path`, and `notes`. Validate the
-candidate with `artifact-budget validate-report --boundary ship-summary`; use
-only its canonical stdout as the `--result-file` bytes. The policy's
-`phase_reports.notes_max_characters` is authoritative. Pass it with
-`--result-file <path>` to `workflow-state finish` using the exact run, issue,
-attempt, and current time. Capture stdout; only after that durable write succeeds,
-send the exact JSON from stdout unchanged to the caller.
+Use this one procedure for Phase-0 content stops, attempt budget stops, execution
+failure, and Phase-7 success whenever lifecycle identity exists. Assemble a new
+absolute temporary `ship-summary/v2` file beneath `${TMPDIR:-/tmp}`, removed
+under an unconditional cleanup that runs on every outcome, including validation
+rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, or the equivalent
+`finally`. Bind the exact current custody and contract digest; include a
+validated legacy owner result only as `historical_owner_result`, and include the
+fresh delivery, authority, and reevaluation observations that establish the
+reported delivery state. Validate the raw candidate with `artifact-budget
+validate-report --boundary ship-summary` before decoding, and use only its
+canonical stdout as the summary-file bytes. The policy's
+`phase_reports.notes_max_characters` is authoritative. After the current-launch
+fence, pass it with `--summary-file <path>` to `workflow-state finish` using the
+exact run and current time. Validate the raw workflow response before decoding;
+only after that durable write succeeds, send those canonical bytes unchanged to
+the caller. The legacy `--issue/--attempt/--result-file` transport is historical
+input only and must not be used for a schema-3 run.
 
 The earlier direct-autonomous controller that delegated at the mandatory
 Phase-5 rollover does not run this procedure after receiving the fresh owner's
@@ -462,9 +469,9 @@ with this owner's own `action_id`: the ship owner and this parent share one
 launch identity, so a ship report from a superseded launch means this launch is
 superseded too. On `current: false` or any helper failure, write nothing, print
 the canonical re-entry line `/from-issue <num> --auto` on its own line, and
-stop. Then call `workflow-state finish` and send the exact JSON printed on
-stdout unchanged. A fresh ship agent never writes the owner's final ledger
-result. Apply the same procedure to any Phase-6 execution
+stop. Then call `workflow-state finish --summary-file <canonical-path>` and
+validate its raw response before sending the canonical JSON unchanged. A fresh
+ship agent never writes the owner's final ledger result. Apply the same procedure to any Phase-6 execution
 failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating so the two sequences stay distinguishable.
 
 ## Notes
@@ -478,3 +485,21 @@ failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8;
 - Append `Co-Authored-By` unless `commit.coAuthoredBy` is false. **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
 - **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`**; derive the slug from `repoSlug` if configured, else `git remote get-url origin`.
 - If a phase reveals the previous one was wrong, back up to that phase and redo it. Don't paper over it.
+
+## Delivery interface version 2
+
+Treat every `workflow-state` reply as untrusted transport. Capture its raw bytes,
+run `artifact-budget validate-report --boundary workflow-response`, and validate
+before decoding. Consume `workflow_bootstrap` bootstrap requirements before a
+control request. Interface_version 2 requests carry the exact contract, intent
+chain, custody, pending stages, observations, and `requested_scope`.
+
+Build requested_scope from the actual invocation: provider, repository,
+endpoint, audience/data, principal, risk, and spend. Tracker and intent data
+cannot select the next stage. Require the validated response echo to equal that actual
+scope, then require the exact four-key `current-launch` result immediately before
+the external effect and again before submitting its observation. Submit partial
+or blocked progress as `ship-checkpoint/v2` through `checkpoint-delivery`; use
+`ship-summary/v2` only after all required postconditions or a genuine custody
+failure. Follow the returned `delivery_remainder`, requirement, or terminal
+variant without manufacturing authority, retry, or another permission ritual.

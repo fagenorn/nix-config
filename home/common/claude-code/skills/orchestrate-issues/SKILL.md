@@ -1,7 +1,6 @@
 ---
 name: orchestrate-issues
 description: Dispatch a set of tracker issues through from-issue --auto as independent background agents, tracking only a ledger. Use for "orchestrate issues X, Y, Z".
-argument-hint: "<issue numbers... | --label X | --milestone Y>"
 ---
 
 # orchestrate-issues — a control adapter, not a manager
@@ -158,6 +157,12 @@ Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_backg
 > Include `handoff_path` only when non-null.
 > Invoke the `from-issue` skill via the Skill tool with the literal arguments
 > `from-issue <num> --auto`. Preserve the lifecycle identity and exact worktree.
+>
+> Launch any subagent by type only, never by name: a subagent cannot spawn a
+> named teammate, and a named launch returns an error instead of work. Read an
+> existing file before writing to it: overwriting content you have not read
+> destroys work you cannot see.
+>
 > Persist the compact result with `workflow-state finish`, then return exactly
 > its JSON stdout and nothing else.
 
@@ -220,3 +225,16 @@ and never `retry_refused`, so never report it as a spent attempt.
 Claude-only skill: it depends on background agents and host task notifications,
 so it lives outside the shared skills tree. Codex users continue to run
 `/from-issue` per issue.
+
+## Interface_version 2 control adapter
+
+Validate raw init, control, direct-owner, current-launch, checkpoint, and finish
+`workflow-response` bytes before decoding. Consume every workflow_bootstrap
+bootstrap requirement, including custody and recorded worktree, then send closed
+issue-keyed contract, intent, observation, and requested_scope maps. Dispatch
+only the returned custody/action and bind the actual invocation to its echoed
+scope. Require the four-key current-launch fence before effect and observation.
+Persist partial or denied progress with `ship-checkpoint/v2` and
+`checkpoint-delivery`; follow delivery_remainder and use `ship-summary/v2` only
+for completed postconditions or genuine custody failure. Tracker data cannot
+select the next stage.

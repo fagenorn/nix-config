@@ -88,12 +88,12 @@ REQUEST_FILE_INVOCATION = "--request-file <absolute-json-path>"
 # shares that home; unlike the request file the helper consumes within the call,
 # it outlives its own validation and carries the report candidate's cleanup.
 RESULT_FILE_HOME = (
-    "a new absolute temporary result file beneath `${TMPDIR:-/tmp}`, removed "
+    "a new absolute temporary `ship-summary/v2` file beneath `${TMPDIR:-/tmp}`, removed "
     "under an unconditional cleanup that runs on every outcome, including "
     "validation rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, "
     "or the equivalent `finally`"
 )
-RESULT_FILE_INVOCATION = "--result-file <path>"
+RESULT_FILE_INVOCATION = "--summary-file <path>"
 
 # "sibling <=2 words> candidate" — the in-working-tree prescription being
 # removed. The bounded gap keeps it off handoff's legitimate
@@ -234,6 +234,41 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertNotEqual(next_position, -1, f"missing anchor: {anchor!r}")
             self.assertGreater(next_position, position, f"out-of-order anchor: {anchor!r}")
             position = next_position
+
+    def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
+        documents = {
+            str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
+            for path in (FROM_ISSUE, AUTO, FROM_ISSUE.parent / "ship-handoff.md",
+                         SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE,
+                         ORCHESTRATE)
+        }
+        corpus = " ".join(documents.values())
+        for phrase in ("workflow-response", "validate before decoding", "custody",
+                       "current-launch", "requested_scope", "bind the actual invocation",
+                       "ship-checkpoint/v2", "ship-summary/v2", "delivery_remainder"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, corpus)
+        self.assertIn("workflow_bootstrap", normalized(self.orchestrate))
+        self.assertIn("bootstrap requirement", normalized(self.orchestrate))
+        self.assertIn("checkpoint-delivery", corpus)
+        self.assertNotIn("infer the next stage from tracker", corpus.lower())
+        self.assertNotIn("unfinished delivery as failed", corpus.lower())
+        terminal = normalized(self.section(
+            FROM_ISSUE.read_text(encoding="utf-8"),
+            "## Terminal return procedure", "## Suspension procedure"
+        ))
+        self.assertIn("--summary-file", terminal)
+        self.assertIn("historical input only", terminal)
+        self.assertNotIn("--result-file <path>", terminal)
+
+    def test_orchestration_eval_covers_denial_partial_progress_and_remainder(self):
+        text = json.dumps(self.orchestrate_evals, sort_keys=True)
+        for phrase in ("partial effect", "host rejection", "same custody",
+                       "delivery_remainder", "zero external effect",
+                       "implementation_delivered", "pr_merged", "actual scope",
+                       "fresh proposal"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
 
     def section(self, text, heading, next_heading):
         start = text.index(heading)
@@ -857,20 +892,19 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assert_ordered(
             owner_return_section,
-            "--result-file",
+            "--summary-file",
             "workflow-state finish",
-            "send the exact JSON",
+            "send those canonical bytes",
         )
         for field in (
-            "issue",
-            "state",
-            "pr_url",
-            "merge_sha",
-            "issue_closed",
-            "discussion_items",
-            "notes",
+            "custody",
+            "contract digest",
+            "historical_owner_result",
+            "delivery",
+            "authority",
+            "reevaluation",
         ):
-            self.assertIn(field, self.from_issue)
+            self.assertIn(field, owner_return_section)
         self.assertIn("failure to persist is a failure to finish", owner_return_section)
         self.assertIn("never report the issue as merged or completed", owner_return_section)
 
@@ -1102,14 +1136,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
         self.assertIn("lifecycle identity", phase_zero)
         self.assertIn("workflow-state finish", phase_zero)
-        self.assertIn("execution failure", self.from_issue)
+        self.assertIn("execution failure", normalized(self.from_issue))
         phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
         self.assert_ordered(
             phase_seven,
             "ledger_repo_root",
             "receiving the ship report",
             "workflow-state finish",
-            "send the exact JSON",
+            "canonical JSON unchanged",
         )
 
     def test_from_issue_revalidates_its_launch_before_the_terminal_finish(self):

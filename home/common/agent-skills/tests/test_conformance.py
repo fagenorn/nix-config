@@ -26,8 +26,9 @@ from pathlib import Path
 # already on sys.path; the shared support module lives beside them.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from conformance_test_support import (  # noqa: E402
-    REPO_ROOT, HERMETIC_ENV, SCRIPT, ReportAssertions, Rebinding, doctor,
-    fixture, load_module, make_root, make_stub_bin, run,
+    COMMITTED, REPO_ROOT, HERMETIC_ENV, SCRIPT, PlatformHome, ReportAssertions,
+    Rebinding, doctor, fixture, load_module, make_root, make_stub_bin,
+    mutated_manifest, platform_env, run,
 )
 
 
@@ -353,6 +354,172 @@ class ContractParseFailureTest(ReportAssertions, unittest.TestCase):
             self.assert_validates(report)
 
 
+SCHEMA_CHECK_ID = "compatibility.contract.schema_supported"
+LADDER_STAGE_IDS = (
+    "repository.contract.present", SCHEMA_CHECK_ID, "repository.contract.valid",
+    "repository.projection.fresh", "host.capability.required")
+# The interval every platform case declares for itself, so no expectation
+# below depends on what the committed contract happens to declare.
+INTERVAL = {"min_inclusive": "1.0.0", "max_exclusive": "2.0.0"}
+
+
+def with_contract(root: Path, **members) -> Path:
+    """Replace top-level members of the fixture root's contract."""
+    contract = root / ".agents/project.json"
+    authored = json.loads(contract.read_text(encoding="utf-8"))
+    authored.update(members)
+    contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+    return root
+
+
+class PlatformLadderTest(ReportAssertions, unittest.TestCase):
+    """#147 D4-D6: the ladder binds the platform first and judges the interval
+    on `compatibility.contract.schema_supported`, which carries the facts."""
+
+    def entry_ids(self, root: Path, env: dict) -> list[str]:
+        """The one root cause `workflow_entry` stops at, as check ids."""
+        code, out, err = run("run", "--purpose", "workflow_entry",
+                             "--repo-root", str(root), env=env)
+        self.assertEqual(code, 2, err)
+        report = json.loads(out)
+        self.assert_validates(report)
+        return [check["id"] for check in report["checks"]]
+
+    def test_a_broken_installation_fails_resolvable_at_the_platform_stage(self):
+        cases = (("library", COMMITTED, False, "platform.library.missing"),
+                 ("manifest", None, True, "platform.manifest.missing"))
+        for missing, manifest, library, repair_id in cases:
+            with self.subTest(missing=missing), fixture() as tmp:
+                root = make_root(tmp)
+                env = platform_env(tmp, manifest, library=library)
+                report, by_id = doctor(self, root, env=env)
+                resolvable = by_id["repository.contract.resolvable"]
+                self.assertEqual(
+                    [resolvable["status"], resolvable["reason_code"],
+                     resolvable["repair_id"], resolvable["facts"]],
+                    ["failed", "resolver_failure", "conformance.internal",
+                     {"stage": "platform", "resolver_repair_id": repair_id}])
+                for check_id in LADDER_STAGE_IDS:
+                    self.assertEqual(
+                        [by_id[check_id]["status"], by_id[check_id]["facts"]],
+                        ["suppressed",
+                         {"suppressed_by": "repository.contract.resolvable"}])
+                self.assertEqual(report["outcome"]["primary_check_id"],
+                                 "repository.contract.resolvable")
+                self.assert_validates(report)
+                self.assertEqual(self.entry_ids(root, env),
+                                 ["repository.contract.resolvable"])
+
+    def test_an_incompatible_platform_or_schema_fails_schema_supported(self):
+        cases = (
+            ("platform_too_old", "0.9.0", 1, "/platform"),
+            ("platform_too_new", "2.0.0", 1, "/platform"),
+            ("project_schema_unsupported", "1.4.2", 2, "/schema_version"),
+        )
+        for reason_code, version, schema, pointer in cases:
+            with self.subTest(reason_code=reason_code), fixture() as tmp:
+                root = with_contract(make_root(tmp), schema_version=schema,
+                                     platform=INTERVAL)
+                env = platform_env(
+                    tmp, mutated_manifest(platform_version=version))
+                report, by_id = doctor(self, root, env=env)
+                check = by_id[SCHEMA_CHECK_ID]
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["repair_id"]],
+                    ["failed", "unsupported_schema",
+                     "contract.schema.unsupported"])
+                self.assertEqual(check["facts"], {
+                    "platform_version": version,
+                    "supported_project_schemas": ["1"],
+                    "project_schema_version": schema,
+                    "platform_min_inclusive": "1.0.0",
+                    "platform_max_exclusive": "2.0.0",
+                    "schema_reason_code": reason_code,
+                    "violations": 1,
+                    "first_pointer": pointer,
+                })
+                valid = by_id["repository.contract.valid"]
+                self.assertEqual([valid["status"], valid["facts"]],
+                                 ["suppressed", {"suppressed_by": SCHEMA_CHECK_ID}])
+                self.assert_validates(report)
+                self.assertEqual(self.entry_ids(root, env), [SCHEMA_CHECK_ID])
+
+    def test_the_installed_schema_set_decides_schema_support(self):
+        """Support comes from the installed manifest, not a constant or the
+        committed set: widening it admits a schema-1 contract, narrowing it
+        refuses one, and the facts name the installed set (D4, D6)."""
+        base = {"platform_version": "1.4.2", "project_schema_version": 1,
+                "platform_min_inclusive": "1.0.0",
+                "platform_max_exclusive": "2.0.0"}
+        cases = (
+            ([1, 2], ["passed", None, None,
+                      {**base, "supported_project_schemas": ["1", "2"]}]),
+            ([2], ["failed", "unsupported_schema", "contract.schema.unsupported",
+                   {**base, "supported_project_schemas": ["2"],
+                    "schema_reason_code": "project_schema_unsupported",
+                    "violations": 1, "first_pointer": "/schema_version"}]),
+        )
+        for versions, expected in cases:
+            with self.subTest(versions=versions), fixture() as tmp:
+                root = with_contract(make_root(tmp), platform=INTERVAL)
+                env = platform_env(tmp, mutated_manifest(
+                    platform_version="1.4.2", project_schema_versions=versions))
+                report, by_id = doctor(self, root, env=env)
+                check = by_id[SCHEMA_CHECK_ID]
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["repair_id"],
+                     check["facts"]], expected)
+                self.assert_validates(report)
+
+    def test_a_malformed_interval_fails_valid_and_suppresses_schema_supported(self):
+        with fixture() as tmp:
+            root = with_contract(make_root(tmp), platform={
+                "min_inclusive": "1.0", "max_exclusive": "2.0.0"})
+            report, by_id = doctor(self, root)
+            valid = by_id["repository.contract.valid"]
+            self.assertEqual(
+                [valid["status"], valid["reason_code"],
+                 valid["facts"]["first_pointer"]],
+                ["failed", "invalid_contract", "/platform/min_inclusive"])
+            schema = by_id[SCHEMA_CHECK_ID]
+            self.assertEqual(
+                [schema["status"], schema["facts"]],
+                ["suppressed", {"suppressed_by": "repository.contract.valid"}])
+            self.assert_validates(report)
+
+    def test_a_shape_violation_outranks_an_out_of_range_platform(self):
+        """The range check runs only once shape validation has passed, so the
+        root cause is the one `resolve` would refuse with (#147 D4)."""
+        with fixture() as tmp:
+            root = with_contract(make_root(tmp), platform=INTERVAL,
+                                 unexpected_member=True)
+            env = platform_env(tmp, mutated_manifest(platform_version="2.0.0"))
+            _, by_id = doctor(self, root, env=env)
+            self.assertEqual(
+                [by_id["repository.contract.valid"]["status"],
+                 by_id[SCHEMA_CHECK_ID]["status"]], ["failed", "suppressed"])
+            self.assertEqual(self.entry_ids(root, env),
+                             ["repository.contract.valid"])
+
+    def test_a_compatible_root_passes_schema_supported_with_the_platform_facts(self):
+        with fixture() as tmp:
+            root = with_contract(make_root(tmp), platform=INTERVAL)
+            env = platform_env(tmp, mutated_manifest(platform_version="1.4.2"))
+            report, by_id = doctor(self, root, env=env)
+            check = by_id[SCHEMA_CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"]],
+                ["passed", None, None])
+            self.assertEqual(check["facts"], {
+                "platform_version": "1.4.2",
+                "supported_project_schemas": ["1"],
+                "project_schema_version": 1,
+                "platform_min_inclusive": "1.0.0",
+                "platform_max_exclusive": "2.0.0",
+            })
+            self.assert_validates(report)
+
+
 class NotOnboardedTest(unittest.TestCase):
     """D23, D28: identity is null rather than fabricated; the root is discovered."""
 
@@ -642,7 +809,7 @@ class FactBoundingTest(unittest.TestCase):
             registry.bound_facts([f"{index}" + "w" * 300 for index in range(12)])))
 
 
-class EvaluatorResolutionTest(Rebinding, unittest.TestCase):
+class EvaluatorResolutionTest(PlatformHome, Rebinding, unittest.TestCase):
     """S3: an evaluator is resolved through the module that declared it.
 
     `load_module` builds a fresh instance per call under one shared
@@ -669,7 +836,7 @@ class EvaluatorResolutionTest(Rebinding, unittest.TestCase):
             ["failed", "not_onboarded"])
 
 
-class EngineFailureTest(Rebinding, unittest.TestCase):
+class EngineFailureTest(PlatformHome, Rebinding, unittest.TestCase):
     """S3: the boundary refuses; the ladder's declared catch does not (D17, D29).
 
     Both cases pass --offline, and every later S3 case calling main must: in
@@ -704,8 +871,10 @@ class EngineFailureTest(Rebinding, unittest.TestCase):
         self.assertEqual(code, 0)
         check = {c["id"]: c for c in json.loads(buf.getvalue())["checks"]}[
             "repository.contract.resolvable"]
-        self.assertEqual([check["status"], check["reason_code"]],
-                         ["failed", "resolver_failure"])
+        # The stage fact pins *which* step broke: with the platform unbound
+        # this case would fail at `platform` for a reason it does not test.
+        self.assertEqual([check["status"], check["reason_code"], check["facts"]],
+                         ["failed", "resolver_failure", {"stage": "present"}])
 
 
 class BootstrapFailureTest(unittest.TestCase):
