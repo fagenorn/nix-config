@@ -168,7 +168,7 @@ Run: `python3 -m unittest home/common/agent-skills/tests/test_dispatch_contracts
 Expected: `Ran 9 tests`, `OK`.
 Run: `python3 -m unittest -k test_dispatcher_passes_immutable_ledger_root_separately_from_worktree home/common/agent-skills/tests/test_workflow_skill_contracts.py 2>&1 | tail -1` — `OK`.
 Run: `just agent-workflow-tests 2>&1 | tail -3` — `OK`.
-Run: `just agent-model-matrix 2>&1 | head -1` — `agent model matrix: valid`.
+Run: `just agent-model-matrix` unpiped — expected exit 0 with `agent model matrix: valid` in its output (the recipe echoes each command first, so never truncate it with `head`).
 Run: `if grep -q 'Launch any subagent' home/common/agent-skills/skills/from-issue/AUTO.md; then echo "AUTO.md restates the clause"; exit 1; fi`
 Run: `git diff --numstat -- home/common/claude-code/skills home/common/agent-skills/skills`
 Expected rows: orchestrate-issues `6 0`, from-issue/SKILL.md `4 0`,

@@ -351,7 +351,7 @@ you cannot see.
 Run: `python3 -m unittest home/common/agent-skills/tests/test_dispatch_contracts.py 2>&1 | tail -3`
 Expected: `Ran 9 tests` and `OK`.
 Run: `just agent-workflow-tests 2>&1 | tail -3` — expected `OK` (a skip count is fine).
-Run: `just agent-model-matrix 2>&1 | head -1` — expected `agent model matrix: valid`.
+Run: `just agent-model-matrix` unpiped — expected exit 0 with `agent model matrix: valid` in its output (the recipe echoes each command first, so never truncate it with `head`).
 Run: `git diff --numstat -- home/common/agent-skills/skills` — expected six rows,
 each `5	0`.
 

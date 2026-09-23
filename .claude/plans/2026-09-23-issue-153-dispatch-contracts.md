@@ -101,3 +101,15 @@ matrix's duplicate, header and top-of-document mutations) and D16 (installed
 root must be an absolute directory).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (isolated, read-only runtime; no Claude fallback), against
+  base `4f74c47742b4dcebd37edb2e49a4cc227cc53238`, plan head `5832173`; focus none.
+- Findings: 0 Blocking, 1 Should fix, 0 Discussion — 1 accepted, 0 rejected,
+  0 deferred.
+- PR-153-01 (accepted, verified against `justfile`'s `agent-model-matrix`
+  recipe, which echoes each command before running it): Task 1 Step 5 and
+  Task 2 Step 4 now run `just agent-model-matrix` unpiped and require exit 0
+  plus `agent model matrix: valid`, instead of `2>&1 | head -1`, which kept only
+  the command echo and masked the exit status.
