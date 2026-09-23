@@ -62,6 +62,38 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             bootstrap, sort_keys=True, separators=(",", ":")
         ).encode("utf-8") + b"\n")
 
+    def test_workflow_response_takes_its_own_wire_bound(self):
+        """Control responses grow with the issue set, past the phase-report bound."""
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        report_bound = policy["phase_reports"]["wire_max_bytes"]
+        response_bound = policy["workflow_responses"]["wire_max_bytes"]
+        self.assertGreater(response_bound, report_bound)
+
+        def bootstrap(count):
+            return {"interface_version": 2, "kind": "workflow_bootstrap", "run_id": "bound",
+                    "requirements": [{"issue": issue, "owner": f"{issue}:1",
+                        "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
+                                    "action_id": f"{issue}:1:1"},
+                        "recorded_worktree": f"/worktrees/issue-{issue}"}
+                        for issue in range(1, count + 1)]}
+
+        def canonical(value):
+            return json.dumps(value, sort_keys=True,
+                              separators=(",", ":")).encode("utf-8") + b"\n"
+
+        count = 1
+        while len(canonical(bootstrap(count))) <= report_bound:
+            count += 1
+        within = bootstrap(count)
+        accepted = self.run_validate("workflow-response", within, use_stdin=True)
+        self.assertEqual((accepted.returncode, accepted.stdout), (0, canonical(within)),
+                         accepted.stderr.decode("utf-8"))
+        while len(canonical(bootstrap(count))) <= response_bound:
+            count += 1
+        refused = self.run_validate("workflow-response", bootstrap(count), use_stdin=True)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", b"artifact-budget: invalid report\n"))
+
     def test_delivery_v2_boundaries_accept_closed_shapes_and_reject_hybrids(self):
         model = artifact_budget._delivery_model()
         contract, _ = contract_and_delivery(model)
@@ -209,8 +241,11 @@ class ArtifactBudgetCliTest(unittest.TestCase):
 
     def test_workflow_response_partial_package_import_cleans_namespace(self):
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); script = root / "artifact_budget.py"; package = root / "delivery_model"
-            shutil.copy2(SCRIPT, script); package.mkdir()
+            # A `scripts` parent selects the source layout, so the loader reaches the
+            # broken package below instead of whatever HOME has installed.
+            root = Path(raw) / "scripts"; script = root / "artifact_budget.py"
+            package = root / "delivery_model"
+            root.mkdir(); shutil.copy2(SCRIPT, script); package.mkdir()
             (package / "__init__.py").write_text("from . import _broken\nMODEL_INTERFACE_VERSION = 1\n")
             (package / "_broken.py").write_text("raise RuntimeError('boom')\n")
             name = "artifact_budget_partial_loader_test"
@@ -978,6 +1013,9 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 lambda p: p.__setitem__("schema_version", True),
                 lambda p: p["phase_reports"].__setitem__("notes_max_characters", 0),
                 lambda p: p["phase_reports"].__setitem__("wire_max_bytes", 1.5),
+                lambda p: p.pop("workflow_responses"),
+                lambda p: p["workflow_responses"].__setitem__("unexpected", 1),
+                lambda p: p["workflow_responses"].__setitem__("wire_max_bytes", 0),
                 lambda p: p["artifacts"]["handoff"].__setitem__("root_max_bytes", 0),
                 lambda p: p["artifacts"]["handoff"].__setitem__("aggregate_max_bytes", 0),
                 lambda p: p["artifacts"]["handoff"].__setitem__("member_max_bytes", 1),

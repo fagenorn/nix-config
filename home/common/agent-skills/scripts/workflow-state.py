@@ -2202,7 +2202,7 @@ def command_control(args: argparse.Namespace) -> int:
         else:
             actions.append({
                 "id": f"wait:{next_deadline}", "kind": "wait",
-                "wake_on": ["owner_notification", "tracker_change", "deadline"],
+                "wake_on": sorted(CONTROL_WAKE_EVENTS),
                 "deadline_at": next_deadline,
             })
         runtime.decorate_control(

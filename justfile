@@ -74,6 +74,8 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_diff_scope.py \
     home/common/agent-skills/tests/test_resolve_bindings.py \
     home/common/agent-skills/tests/test_resolve_project.py \
+    home/common/agent-skills/tests/test_resolve_platform.py \
+    home/common/agent-skills/tests/test_resolve_platform_status.py \
     home/common/agent-skills/tests/test_conformance.py \
     home/common/agent-skills/tests/test_conformance_checks.py \
     home/common/agent-skills/tests/test_conformance_registry.py \

@@ -920,7 +920,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         })
         self.assertEqual(response["actions"][-1], {
             "id": "wait:2026-08-19T15:00:00Z", "kind": "wait",
-            "wake_on": ["owner_notification", "tracker_change", "deadline"],
+            "wake_on": ["deadline", "owner_notification", "tracker_change"],
             "deadline_at": "2026-08-19T15:00:00Z",
         })
         self.assertEqual(response["next_deadline"], "2026-08-19T15:00:00Z")

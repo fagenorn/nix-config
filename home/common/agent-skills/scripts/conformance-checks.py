@@ -84,10 +84,13 @@ def suppress_unset_stages(context: Context, suppressed_by: str) -> None:
                 "suppressed", facts={"suppressed_by": suppressed_by})
 
 
-def settle(context: Context, error) -> bool:
+def settle(context: Context, error, facts: dict | None = None) -> bool:
     """Record one resolver refusal against the stage its code names (D33).
 
-    Returns False for a code no stage owns, which the caller reports on
+    `facts` are the stage's own facts; the refusal's `violations` and
+    `first_pointer` are merged over them. The ladder passes the compatibility
+    facts this way for an `unsupported_schema` refusal (#147 D6). Returns
+    False for a code no stage owns, which the caller reports on
     `repository.contract.resolvable` itself.
     """
     stage = CODE_STAGES.get(error.code)
@@ -98,22 +101,68 @@ def settle(context: Context, error) -> bool:
     # `validate_projections` refuses `invalid_contract` after `valid` passed.
     context.stages[stage] = Outcome(
         "failed", error.code, stage_repair_id(stage, error.code),
-        {"violations": len(error.violations),
+        {**(facts or {}),
+         "violations": len(error.violations),
          "first_pointer": bound_fact(error.violations[0]["pointer"])})
     suppress_unset_stages(context, check_id)
     return True
 
 
+def compatibility_facts(resolver, manifest: dict, source) -> dict:
+    """What `compatibility.contract.schema_supported` reports (#147 D6).
+
+    The installed platform's version and supported project schemas always;
+    the contract's declared schema version and interval only as far as the
+    resolver's defensive `declared_facts` reads them, so an absent or
+    malformed member is left out rather than defaulted. At most five keys,
+    which leaves a failed check room for `schema_reason_code`, `violations`
+    and `first_pointer` within the eight-key cap (D9).
+    """
+    facts = {
+        "platform_version": bound_fact(manifest["platform_version"]),
+        "supported_project_schemas": bound_facts(
+            str(version) for version in manifest["project_schema_versions"]),
+    }
+    declared = resolver.declared_facts(source)
+    if declared["project_schema_version"] is not None:
+        facts["project_schema_version"] = declared["project_schema_version"]
+    interval = declared["platform_interval"]
+    if interval is not None:
+        facts["platform_min_inclusive"] = bound_fact(interval["min_inclusive"])
+        facts["platform_max_exclusive"] = bound_fact(interval["max_exclusive"])
+    return facts
+
+
 def check_contract_resolvable(context: Context) -> Outcome:
     """Run the resolver ladder once and cache every stage it settles (D17).
 
+    The steps follow `resolve`'s refusal precedence (#147 D4): bind the
+    platform library and manifest, discover the root, check the declared
+    schema version against the manifest's supported set, validate the
+    contract's shape, and only then check the installed platform version
+    against the declared interval. `schema_supported` is recorded as passed
+    after that range check, so a passed compatibility check always means the
+    interval was evaluated.
+
     This is the engine's one declared exception to the single boundary in
-    `main`: a failure *of the resolver* is this check's finding, while a
-    failure of anything else is the refusal (D29).
+    `main`: a failure *of the resolver* is this check's finding — a broken
+    platform installation among them, reported at the `platform` stage with
+    the resolver's own repair id (#147 D5) — while a failure of anything else
+    is the refusal (D29).
     """
     resolver = context.resolver
-    stage = "present"
+    stage = "platform"
+    manifest = None
     try:
+        if not resolver.bootstrap_platform_library():
+            return resolver_failed(
+                context, stage, resolver.PLATFORM_LIBRARY_REPAIR_ID)
+        try:
+            manifest, _ = resolver.require_platform_manifest()
+        except resolver.ContractError as error:
+            return resolver_failed(context, stage, error.repair_id)
+
+        stage = "present"
         root = resolver.discover_root(context.root_arg)
         context.root = root
         context.stages["present"] = Outcome("passed")
@@ -122,13 +171,19 @@ def check_contract_resolvable(context: Context) -> Outcome:
         source = resolver.load_contract(root)
         context.contract = source
         violations: list[dict] = []
-        resolver.validate_schema_version(source, violations)
-        context.stages["schema_supported"] = Outcome("passed")
+        resolver.validate_schema_version(
+            source, violations, manifest["project_schema_versions"])
 
         stage = "valid"
-        violations += resolver.validate_contract(source)
+        violations += resolver.validate_contract(source, manifest)
         resolver.raise_for_violations(dedup_violations(violations))
         context.stages["valid"] = Outcome("passed")
+
+        stage = "schema_supported"
+        resolver.raise_for_platform_range(
+            source["platform"], manifest["platform_version"])
+        context.stages["schema_supported"] = Outcome(
+            "passed", facts=compatibility_facts(resolver, manifest, source))
 
         stage = "projection_fresh"
         context.bindings = resolver.normalize_bindings(source["bindings"], root)
@@ -141,18 +196,32 @@ def check_contract_resolvable(context: Context) -> Outcome:
         resolver.raise_for_unavailable(list(context.required), context.capabilities)
         context.stages["capability_required"] = Outcome("passed")
     except resolver.ContractError as error:
-        if not settle(context, error):
+        facts = None
+        if error.code == "unsupported_schema":
+            # Both raise sites run after the manifest and the contract are
+            # bound, so the refusal can say what it was measured against.
+            facts = {**compatibility_facts(resolver, manifest, context.contract),
+                     "schema_reason_code": error.reason_code}
+        if not settle(context, error, facts):
             return resolver_failed(context, stage)
     except Exception:
         return resolver_failed(context, stage)
     return Outcome("passed")
 
 
-def resolver_failed(context: Context, stage: str) -> Outcome:
-    """The ladder itself broke: every unsettled stage suppresses under it."""
+def resolver_failed(context: Context, stage: str,
+                    resolver_repair_id: str | None = None) -> Outcome:
+    """The ladder itself broke: every unsettled stage suppresses under it.
+
+    `stage` names the ladder step that broke. A broken platform installation
+    also carries the resolver's own repair id, so the report names what to
+    reinstall without a new repair in the closed set (#147 D5).
+    """
     suppress_unset_stages(context, RESOLVABLE_CHECK_ID)
-    return Outcome("failed", "resolver_failure", "conformance.internal",
-                   {"stage": stage})
+    facts = {"stage": stage}
+    if resolver_repair_id is not None:
+        facts["resolver_repair_id"] = bound_fact(resolver_repair_id)
+    return Outcome("failed", "resolver_failure", "conformance.internal", facts)
 
 
 def stage_result(context: Context, stage: str) -> Outcome:

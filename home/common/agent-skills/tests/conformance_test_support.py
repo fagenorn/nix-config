@@ -11,17 +11,24 @@ environment, so no test can reach the network, the caller's credentials or a
 tool the fixture did not place. HERMETIC_ENV points PATH at a stub bin holding
 one exit-0 script per tool the contract names; a case that needs a different
 tool outcome builds its own bin with make_stub_bin and overrides PATH.
+
+HERMETIC_ENV's HOME also holds the platform installation the resolver ladder
+binds first — the committed manifest and library, installed by the resolver
+family's own `install_home` (#147 D7). A case that needs another manifest, or
+no library, runs under `platform_env` instead.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "conformance.py"
@@ -44,7 +51,18 @@ def make_stub_bin(directory: Path, exits: dict | None = None) -> str:
     return str(directory)
 
 
-_HERMETIC_HOME = tempfile.mkdtemp(prefix="conformance-home-")
+# The resolver family's installer is the one home of the installed layout
+# (#147 D7), so this module lends it to the conformance suites rather than
+# copying it. Only the named helpers are imported, so no resolver TestCase
+# enters a conformance suite's namespace. The directory has to be importable
+# however this module was reached.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_resolve_project import (  # noqa: E402
+    COMMITTED, MANIFEST, install_home, mutated_manifest,
+)
+
+_HERMETIC_HOME = str(install_home(
+    Path(tempfile.mkdtemp(prefix="conformance-home-")).resolve()))
 HERMETIC_ENV = {
     "PATH": make_stub_bin(Path(tempfile.mkdtemp(prefix="conformance-bin-"))),
     "HOME": _HERMETIC_HOME,
@@ -153,3 +171,37 @@ class Rebinding:
         original = getattr(owner, name)
         self.addCleanup(setattr, owner, name, original)
         setattr(owner, name, value)
+
+
+def platform_env(tmp: Path, manifest: object = COMMITTED, *,
+                 library: bool = True) -> dict:
+    """HERMETIC_ENV with `HOME` at a platform installation built under `tmp`.
+
+    `manifest` and `library` are `install_home`'s override hook, unchanged:
+    `COMMITTED` copies the repository's manifest, `None` installs none, any
+    other value is written as the manifest, and `library=False` leaves the
+    library uninstalled.
+    """
+    home = install_home(tmp / "home", manifest, library=library)
+    return {**HERMETIC_ENV, "HOME": str(home)}
+
+
+class PlatformHome:
+    """S3 cases run the ladder in this process, so `HOME` is pinned (#147 D7).
+
+    In process the ladder binds `agent_platform` from this process's own
+    `$HOME/.agents/lib/python`. Pinned to the hermetic installation, a case's
+    outcome no longer depends on whether the machine has switched to a
+    generation that installs the platform. The library caches in
+    `sys.modules` under its one name, and the resolver's origin guard refuses
+    a copy imported from any other `HOME`, so the cached module is evicted on
+    the way in and again on the way out.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, {"HOME": HERMETIC_ENV["HOME"]})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        sys.modules.pop("agent_platform", None)
+        self.addCleanup(sys.modules.pop, "agent_platform", None)
