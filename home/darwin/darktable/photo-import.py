@@ -5,12 +5,13 @@
         [--timeline ~/Downloads/Timeline.json] [--tz +01:00] [--root ~/Pictures/darktable/Travel] \
         [--dry-run] [--no-open] [--allow-unassigned]
 
-Each range is inclusive (dates in the camera's local time, from EXIF DateTimeOriginal). Files land in
+Each range is inclusive (dates in the camera's local time, from EXIF DateTimeOriginal, else CreateDate). Files land in
 <root>/<year>/<trip>/<original filename>; an existing file with the same size is skipped, a different
 one is never overwritten (reported instead). Images outside every range are listed and abort the run
 unless --allow-unassigned is given. With --timeline, a Google Maps Timeline export (the on-device
-"Timeline.json" format or Takeout's "Records.json") is converted to GPX and exiftool geotags the newly
-copied files that have no GPS yet, assuming the camera clock is at --tz (default +01:00), with the
+"Timeline.json" format or Takeout's "Records.json") is converted to GPX before anything is copied, and
+exiftool geotags the copied files that have no GPS yet (including ones an earlier run copied but never
+tagged), assuming the camera clock is at --tz (default +01:00), with the
 same 30-minute interpolation window as the old Lightroom workflow. Finally darktable opens the new
 folders (its import is recursive and applies your default style).
 """
@@ -154,10 +155,29 @@ def main():
         if not a.allow_unassigned:
             sys.exit("aborting: add a range for them or pass --allow-unassigned")
 
-    copied, skipped, conflicts = [], 0, []
+    # convert the timeline before touching the library: a missing or malformed export has to
+    # stop the run here, not after the copy, when a rerun would skip the files it never tagged
+    gpx, npts = None, 0
+    if a.timeline:
+        with tempfile.NamedTemporaryFile(suffix=".gpx", delete=False) as tmp:
+            gpx = tmp.name
+        try:
+            npts = timeline_to_gpx(os.path.expanduser(a.timeline), gpx)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            os.unlink(gpx)
+            sys.exit(f"cannot read timeline {a.timeline}: {e}")
+        if not npts:
+            os.unlink(gpx)
+            sys.exit(f"no location points in timeline {a.timeline}")
+
+    copied, skipped, conflicts, untagged = [], 0, [], []
     for src, dest, has_gps in plan:
         if os.path.exists(dest):
             if os.path.getsize(dest) == os.path.getsize(src):
+                # same size means untouched since an earlier run (geotagging rewrites the file),
+                # so it still lacks GPS if the source does: tag it on this run instead
+                if not has_gps:
+                    untagged.append(dest)
                 skipped += 1
                 continue
             conflicts.append(dest)
@@ -178,22 +198,23 @@ def main():
         print(f"{n:5d}  {d}")
     print(f"{len(copied)} copied, {skipped} already present, {len(conflicts)} conflicts" + (" (dry run)" if a.dry_run else ""))
 
-    if a.timeline and copied and not a.dry_run:
-        need = [dest for dest, has_gps in copied if not has_gps]
+    if gpx and (copied or untagged) and not a.dry_run:
+        need = untagged + [dest for dest, has_gps in copied if not has_gps]
         if need:
-            with tempfile.NamedTemporaryFile(suffix=".gpx", delete=False) as tmp:
-                gpx = tmp.name
-            n = timeline_to_gpx(os.path.expanduser(a.timeline), gpx)
-            print(f"geotagging {len(need)} image(s) from {n} timeline points (camera clock {a.tz})")
-            r = subprocess.run(["exiftool", "-geotag", gpx, f"-geotime<${{DateTimeOriginal}}{a.tz}",
+            print(f"geotagging {len(need)} image(s) from {npts} timeline points (camera clock {a.tz})")
+            # the capture time falls back exactly as in scan(): exiftool applies the later
+            # assignment only when its source tag exists, so DateTimeOriginal wins over CreateDate
+            r = subprocess.run(["exiftool", "-geotag", gpx, f"-geotime<${{CreateDate}}{a.tz}",
+                                f"-geotime<${{DateTimeOriginal}}{a.tz}",
                                 "-api", "GeoMaxIntSecs=1800", "-overwrite_original", "-P", "-q", "-@", "-"],
                                input="\n".join(need), capture_output=True, text=True)
-            os.unlink(gpx)
             sys.stderr.write(r.stderr)
             if r.returncode not in (0, 1):
                 print("exiftool geotag failed", file=sys.stderr)
         else:
             print("all copied images already carry GPS; timeline not needed")
+    if gpx:
+        os.unlink(gpx)
 
     if copied and not a.no_open and not a.dry_run:
         subprocess.Popen(["open", "-a", "darktable", "--args", *sorted(per_trip)])

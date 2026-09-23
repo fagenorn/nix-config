@@ -12,14 +12,26 @@ mapfile -t files < <(find "$EXPORTS" -type f \( -iname '*.jpg' -o -iname '*.jpeg
   -not -path "$DONE/*" -mmin +0.5 | sort)
 [ "${#files[@]}" -gt 0 ] || exit 0
 
-list=""
-for f in "${files[@]}"; do list="$list, POSIX file \"$f\""; done
-list="${list#, }"
-if osascript -e "tell application \"Photos\" to import {$list} with skip check duplicates" >>"$LOG" 2>&1; then
+# paths go in as arguments, never spliced into the script text: a quote or backslash in a file
+# name would otherwise break (or rewrite) the AppleScript and block every queued file
+if osascript - "${files[@]}" >>"$LOG" 2>&1 <<'OSA'; then
+on run argv
+	set theFiles to {}
+	repeat with p in argv
+		set end of theFiles to POSIX file (contents of p)
+	end repeat
+	tell application "Photos" to import theFiles with skip check duplicates
+end run
+OSA
   for f in "${files[@]}"; do
     rel="${f#"$EXPORTS"/}"
-    mkdir -p "$DONE/$(dirname "$rel")"
-    mv -n "$f" "$DONE/$rel"
+    dest="$DONE/$rel"
+    # a re-export under an already-archived name must still leave the folder, or every later
+    # run would import it again: archive it beside the earlier copy with a timestamp
+    [ ! -e "$dest" ] || dest="$DONE/${rel%.*}.$(date '+%Y%m%d-%H%M%S').${rel##*.}"
+    mkdir -p "$(dirname "$dest")"
+    mv -n "$f" "$dest" || true
+    [ ! -e "$f" ] || log "could not archive $f to $dest; it will be imported again"
   done
   log "imported ${#files[@]} file(s) into Photos"
 else
