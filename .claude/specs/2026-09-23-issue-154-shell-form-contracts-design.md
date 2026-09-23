@@ -5,7 +5,7 @@ Design for [#154](https://github.com/fagenorn/nix-config/issues/154), one slice 
 [#153](https://github.com/fagenorn/nix-config/issues/153) (dispatch contracts,
 merged at `a6ac80f`), [#155](https://github.com/fagenorn/nix-config/issues/155)
 (prose consolidation), [#100](https://github.com/fagenorn/nix-config/issues/100)
-(strict project resolver). Decisions D1–D17 bind the plan.
+(strict project resolver). Decisions D1–D18 bind the plan.
 
 ## Problem
 
@@ -51,8 +51,9 @@ class — the largest single class), then the contract and what works instead.
 - **What works instead.** One command per call; a dependent step is the next
   call, decided by reading the previous call's exit status and output. Filter or
   count output by reading it, not by piping it. Create files with the
-  file-writing tool and pass them by path (`--notes-file`, `--body-file`,
-  `-F <file>`); pass a short body as one literal quoted argument. Carry the
+  file-writing tool and pass them by path where the CLI takes one
+  (`--notes-file`, `-F <file>`), or pass a body as one literal quoted argument
+  with no substitution inside it. Carry the
   directory inside the invocation (`git -C <path>`, absolute paths under the
   worktree root), never a `cd … &&` prelude. Treat a non-zero exit as
   information rather than suppressing stderr. Refused → change the shell form,
@@ -128,9 +129,10 @@ body. Angle-bracket placeholders (`<pr-num>`: `<`, a non-space, …, a non-space
 | `unparseable` | an example the scanner cannot close (unterminated quote, substitution or heredoc) |
 
 `unparseable` is fail-closed: an example the classifier cannot vouch for reds,
-as the harness refuses what it cannot parse. Command substitution itself is not
-a refused form (D8). A newline inside a shell fence separates successive calls,
-not a chain.
+as the harness refuses what it cannot parse; a fence still open at the end of a
+document is `unparseable` at its opener line, since its extent is unknowable.
+Command substitution itself is not a refused form (D8). A newline inside a shell
+fence separates successive calls, not a chain.
 
 **Sanctioned prefix (D5).** An example that begins with exactly the lifecycle
 guard's literal `unset GITHUB_TOKEN && ` is classified without it, and an
@@ -176,9 +178,9 @@ longer exists in the tree; nothing to dispose.
 addressed by `AGENT_SKILLS_INSTALLED_HOME`, in a Claude view (`.claude/skills`:
 shared and Claude-only documents) and a Codex view (`.agents/skills`: shared
 documents). The installed sweep enumerates the documents from the source trees
-and reads each one's installed copy, so a document the build dropped is a
-failure, not a silent pass; enumeration follows the views' links (the Codex view
-links whole directories). Skills installed from elsewhere (UI/UX Pro Max) are
+and reads each one's installed copy by relative path, so a document the build
+dropped is a failure, not a silent pass, and no walk of the installed links is
+needed. Skills installed from elsewhere (UI/UX Pro Max) are
 not source-authored and not swept. Unset variable → skip naming the recipe;
 empty, relative, non-directory, or a missing view → fail (#153 D8, D16).
 
@@ -196,7 +198,7 @@ unchanged at the end.
 
 | Retained hunk | Disposition |
 |---|---|
-| `worktrees` "Shell forms the isolation checker refuses" section | adapted: named alternatives kept; pipes added; `--body-file` becomes one path-passing option beside the literal argument; sanctioned-prefix sentence added (D5, D6) |
+| `worktrees` "Shell forms the isolation checker refuses" section | adapted: named alternatives kept; pipes added; `--body-file` dropped from the examples, the literal argument added; sanctioned-prefix sentence added (D5, D6, D11) |
 | `worktrees` single `git rev-parse` probe and its prose | recovered |
 | `SHELL_FENCE_INFO`, stack-based `FENCE`, `command_head`, `PLACEHOLDER`, `SHELL_COMMANDS` | adapted into the classifier: `zsh` added, placeholder pattern tightened to non-space edges, heads compared by basename, vocabulary widened and guarded (D2, D14) |
 | `HEREDOC`/`CHAIN`/`REDIRECT` regexes, `shell_commands`, `without_placeholders`, the four per-form tests and the whole-document heredoc test | replaced by the quote/substitution-aware scanner and fixture classes (D3, D4) — the regexes cannot see into `"$(…)"` or skip quoted text |
@@ -224,17 +226,18 @@ the vocabulary and the guard-derived prefix. Classes:
    `worktrees` section.
 2. **Installed sweep** — the same assertion over each view's installed copies;
    skipped when the variable is unset (D13).
-3. **Refused-form fixtures** — per form, one representative unsafe example from
-   the pre-rewrite text at `a6ac80f` and its accepted replacement from the
-   rewrite table. Each unsafe example spliced into a live document yields
-   exactly `{form}` at the spliced line in every region kind it can occupy
-   (shell fence, ambiguous fence, inline span); each replacement yields nothing.
-   Negative controls yield nothing: the unsafe text in single quotes, a
-   heredoc body, a `#` comment, a `json` fence, and a prose line
+3. **Refused-form fixtures** (D18) — per form, one representative unsafe
+   example, verbatim from the pre-rewrite text at `a6ac80f`, and its accepted
+   replacement from the rewrite table. The host is the live `worktrees/SKILL.md`,
+   first asserted to yield no findings. Each unsafe example appended to it
+   yields exactly `{form}` on the appended operator's line in every region kind
+   it can occupy (shell fence, ambiguous fence, inline span); each replacement
+   yields nothing. Negative controls yield nothing: the unsafe text in single
+   quotes, a heredoc body, a `#` comment, a `json` fence, and a prose line
    outside a span; `clean | residuals | unknown` in a span with a non-command
    head; the sanctioned prefix before `gh pr merge`, and the bare prefix
-   mention. An unterminated `"$(` yields `unparseable`; `unset GITHUB_TOKEN; gh`
-   yields `chain`.
+   mention. An unterminated `"$(` and an unclosed fence yield `unparseable`;
+   `unset GITHUB_TOKEN; gh` yields `chain`.
 4. **Vocabulary guard** — every command head in a shell fence of either source
    tree is in the vocabulary, so ambiguous regions and spans recognise every
    command the skills actually run (D14).
@@ -277,6 +280,7 @@ shared support module.
 - `ship-release`'s release-PR creation not matching the guard's `gh pr create`
   grammar — true before and after this change; its body carries backticks the
   guard forbids (D11).
+- Vocabulary coverage of a command shown only in spans or ambiguous fences (D14).
 - Eval fixtures, skill scripts, agent definitions, global guidance, historical
   specs and plans (D1).
 - #155 consolidation, #100 config-presence guards, #153 leaf-agent clauses.
@@ -296,10 +300,11 @@ shared support module.
 | D8 | Command substitution is not a refused form; existing `$(…)` sites stay unless their site is rewritten anyway | Not among the audit's measured classes or the issue's four shapes; the harness refuses only "certain" nested expansions, version-bound (YAGNI) | Sweep `$(…)` too — rewrites a dozen sites against an unverified rule |
 | D9 | Prose quoting an anti-pattern inside a code span is swept like any example and reworded to name the filter in words; no exemption mechanism | Retained D10; a quoted pipe is still a copyable shape; an exemption list is the allowlist D1 rejects | Exempt anti-pattern quotes — needs a per-site list and re-teaches the shape |
 | D10 | `2>/dev/null` and `\|\| true` are replaced by prose that treats a non-zero exit as information (no tag → empty `PREV`); agents run one call at a time, so there is no `set -e` to survive | the-bar Root causes (no muting an error); the checker refuses the redirect and the chain | Keep `\|\| true` under an exemption — keeps a refused chain for a shell mode agents do not run |
-| D11 | ship-issue's PR creation (Phase 4, Gate 1) becomes the lifecycle guard's exact `--repo/--base/--head/--title/--body` form with a literal body free of `"`, `$`, backtick and backslash; ship-release's release PR uses `--body-file` | CLAUDE.md and `validate_pr_create`: exactly 13 argv, those chars forbidden, `--body-file` refused; shipped PR #166's body has zero backticks; ship-release runs from the default checkout and its body carries backticks, so no form satisfies the guard there | `--body-file` everywhere (retained) — the guard blocks ship-issue's standing-authorized PR creation; the literal form for releases — backticks in release bodies are refused |
+| D11 | ship-issue's PR creation (Phase 4, Gate 1) becomes the lifecycle guard's exact `--repo/--base/--head/--title/--body` form with a literal body free of `"`, `$`, backtick and backslash; ship-release's release PR uses `--body-file`; the `worktrees` guidance names no `--body-file` example, so it never points a ship-issue agent at a guard-refused form | CLAUDE.md and `validate_pr_create`: exactly 13 argv, those chars forbidden, `--body-file` refused; shipped PR #166's body has zero backticks; ship-release runs from the default checkout and its body carries backticks, so no form satisfies the guard there | `--body-file` everywhere (retained) — the guard blocks ship-issue's standing-authorized PR creation; the literal form for releases — backticks in release bodies are refused |
 | D12 | 4.5c uses `git for-each-ref --count=1 --merged "$MERGE_SHA" --sort=-v:refname … 'refs/tags/v[0-9]*'`, whose single line is `PREV_TAG` | Verified locally: returns `v0.10.0` over `v0.1.0`, excludes an unreachable `v9.9.9`, prints nothing with no match; keeps the executed test an exact-equality check | Retained "first line of `git tag --list`" — the executed test must parse output and the example depends on prose |
-| D13 | The installed sweep reads each source-enumerated document's copy in the Claude and Codex views of `AGENT_SKILLS_INSTALLED_HOME`, following links; the tree/view layout moves into one support module both contract suites import; `agent-installed-skill-tests` runs both | #153 D7/D8/D16; AC4 "same contract sweep"; the-bar DRY and Single responsibility (the second consumer arrives now); conformance suites' support-module precedent; Codex view links whole directories, which `rglob` does not descend | Copy the constants into the new module — two homes that must change together; enumerate installed files — a dropped document passes silently |
-| D14 | The command vocabulary is a closed constant, and a guard test requires every command head in shell fences of both trees to be in it | the-bar Fail loud; ambiguous regions and spans are only as good as the vocabulary | An open heuristic — silently misses a new command |
+| D13 | The installed sweep reads each source-enumerated document's copy, by relative path, in the Claude and Codex views of `AGENT_SKILLS_INSTALLED_HOME`; the tree/view layout and the installed-root skip/fail rules move into one support module both contract suites import; `agent-installed-skill-tests` runs both | #153 D7/D8/D16; AC4 "same contract sweep"; the-bar DRY and Single responsibility (the second consumer arrives now); conformance suites' support-module precedent | Copy the constants into the new module — two homes that must change together; walk the installed views — a dropped document passes silently, and the Codex view's directory links need special traversal |
+| D14 | The command vocabulary is a closed constant, and a guard test requires every command head in shell fences of both trees to be in it; a command shown only in spans or ambiguous fences is outside the guard's reach, a named residual | the-bar Fail loud; ambiguous regions and spans are only as good as the vocabulary; no prose parser can tell an unknown command from a word | An open heuristic — silently misses a new command; guard ambiguous fences too — their prompt and diagram lines would demand vocabulary entries for words |
 | D15 | Recovery re-applies adapted hunks from `3c9709ca` by hand with a `Recovered-From` trailer and body inventory; the tip is verified unchanged | #153 D12; #154 AC5 | Cherry-pick — imports #100/#153 hunks and D20 |
 | D16 | #154's guidance and sweep checks live in the new module, not in `test_workflow_skill_contracts.py` | the-bar Single responsibility; the installed recipe must run only these checks (#153 D9) | Extend the 3,500-line suite as the retained work did |
 | D17 | No ADR, context doc, `CLAUDE.md` or `.nix` edit | #153 D13 re-decided: reversible prose held by tests; no ADR home; no `CLAUDE.md` sentence is falsified | Document the recipe in `CLAUDE.md` — growth #155 is chartered to consolidate |
+| D18 | Fixtures use the historical offenders verbatim as constants, appended to the live `worktrees/SKILL.md` after a no-findings baseline, and assert the exact form on the appended operator's line; an unclosed fence is `unparseable` at its opener (refines D4) | the-bar Tests that can fail (fixtures shaped like production values); #153 D10/D15 live-host precedent; after the rewrite the offenders no longer exist in any live document | Minimal synthetic strings — pass while real offender shapes slip through; re-mutate each rewritten site back — needs a reverse mapping per site for no extra coverage |
