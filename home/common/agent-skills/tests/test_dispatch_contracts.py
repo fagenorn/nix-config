@@ -5,6 +5,7 @@ counts only inside the carrier's rendered region, the text the recipient
 actually receives, and must occur there exactly once.
 """
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 import unittest
@@ -14,6 +15,16 @@ REPO_ROOT = Path(__file__).parents[4]
 SHARED_TREE = REPO_ROOT / "home/common/agent-skills/skills"
 CLAUDE_ONLY_TREE = REPO_ROOT / "home/common/claude-code/skills"
 SOURCE_TREES = {"shared": SHARED_TREE, "claude-only": CLAUDE_ONLY_TREE}
+
+# Any directory laid out like the home home-manager populates: the built
+# home-manager-files output, or $HOME after a switch.
+INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
+INSTALLED_RECIPE = "just agent-installed-skill-tests"
+# (view, skill directory under the installed home, source trees it publishes)
+INSTALLED_VIEWS = (
+    ("claude", ".claude/skills", frozenset({"shared", "claude-only"})),
+    ("codex", ".agents/skills", frozenset({"shared"})),
+)
 
 # The one authoritative home of each clause. Carriers repeat the text because a
 # pasted template carries no link into the subagent's context; every copy is
@@ -198,6 +209,48 @@ class SourceTreeContractsTest(unittest.TestCase):
 
     def test_read_before_write(self):
         self.assert_contract_held("read-before-write")
+
+
+class InstalledTreeContractsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        root = os.environ.get(INSTALLED_HOME_ENV)
+        if root is None:
+            raise unittest.SkipTest(
+                f"{INSTALLED_HOME_ENV} is unset; run `{INSTALLED_RECIPE}` to "
+                "check the skill trees the Nix build installs"
+            )
+        cls.root = Path(root)
+
+    def assert_contract_installed(self, contract_id):
+        self.assertTrue(
+            self.root.is_absolute() and self.root.is_dir(),
+            f"{INSTALLED_HOME_ENV}={str(self.root)!r} is not an absolute directory",
+        )
+        for view, skills_dir, trees in INSTALLED_VIEWS:
+            base = self.root / skills_dir
+            if not base.is_dir():
+                with self.subTest(view=view):
+                    self.fail(f"the {view} view is missing: {base}")
+                continue
+            for carrier in CARRIERS:
+                if carrier.tree not in trees:
+                    continue
+                path = base / carrier.relative
+                with self.subTest(view=view, carrier=carrier.relative):
+                    self.assertTrue(path.is_file(), f"the {view} view lacks {path}")
+                    self.assertNotIn(
+                        contract_id,
+                        missing_contracts(carrier, path.read_text(encoding="utf-8")),
+                        f"{path}: the {contract_id} clause must occur exactly "
+                        "once in the rendered region",
+                    )
+
+    def test_launch_by_type(self):
+        self.assert_contract_installed("launch-by-type")
+
+    def test_read_before_write(self):
+        self.assert_contract_installed("read-before-write")
 
 
 # Region breakages per carrier kind, each derived from the live text.
