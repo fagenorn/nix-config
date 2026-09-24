@@ -11,9 +11,6 @@ deployed `adopt-project`, land its one commit, and register it after the merge (
 the loop, the issue owner runs B1–B7 in Phase 6 while the attempt is `active`. The ship
 owner runs B8–B9 (D11). The adoption commit is the branch's last authored commit.
 
-**Tech stack:** Markdown; git plumbing; the deployed `adopt-project`, `resolve-project`
-and `conformance`; `just build` and `just agent-workflow-tests`; `workflow-state`; `gh`.
-
 **Authority:** the spec `.claude/specs/2026-09-24-issue-149-adopt-and-register-design.md`,
 with its Stage B and `## Decision ledger` (D1–D14). From B5 on, the spec and this plan
 live where the migration map puts them (D7).
@@ -33,20 +30,14 @@ live where the migration map puts them (D7).
 
 ## Test seams
 
-These are the spec's seams. The installed CLIs run as subprocesses: the real run uses the
-deployed runtime, and rehearsals use a scratch `HOME` against a scratch clone, never
-the worktree (#148 D4). Git plumbing is the review oracle, and GitHub's commit
-`verification` is the signature oracle. The contract's `nix-build` and
-`agent-workflow-tests` are the gates. The fleet registry is read through its bytes and
-`platform-status --fleet`. No test is added.
+These are the spec's seams: the installed CLIs run as subprocesses, git plumbing is the
+review oracle, and GitHub's commit `verification` is the signature oracle. No test is
+added.
 
 ## Delivery estimate and boundaries
 
-All figures are estimates. Task 1 changes 8 lines in 4 files. The adoption commit, per the
-spec's probe, has about 244 `R100`, 3 `A` and 2 `M`. Its `-M100%` diff is about 137 KB,
-and its largest file is the map at about 47.5 KB, which is under the 65,536-byte member
-cap. A package over policy is a reported gap, and the commit is never split (D9). The
-work ships as one PR.
+These are estimates. Task 1 changes 8 lines in 4 files. The adoption commit has about 244
+`R100`, 3 `A` and 2 `M`. It is never split (D9), and the work ships as one PR.
 
 ## Task index
 
@@ -54,9 +45,7 @@ Task 1 — Re-point the eight living references to the adopted paths — `CLAUDE
 
 ## Decisions
 
-Task 1 rests on D3 and D4. The owner steps rest on D1, D2, D5–D7 and D9–D11. Planning
-added D12: Task 1 needs no generation of its own, and the operator ask stays on `main`. Phase-5 review added D13 (owner-route hardening) and D14 (fix commits after the
-adoption).
+Task 1 rests on D3 and D4, and the owner steps on D1, D2, D5–D7 and D9–D14.
 
 ## Owner delivery steps (not sdd tasks)
 
@@ -246,16 +235,7 @@ ship-review fix commit may follow the adoption only under D14.
 
 ## Standards review provenance
 
-- Reviewer: Claude fallback (a fresh read-only native reviewer). Codex `plan-review` failed at
-  launch on a usage limit, a real runtime failure, so the one-time fallback ran.
-- Base SHA `2c36848681a6ef18bee933bec966bd869b31013b`, reviewed at plan commit `37e6b97`,
-  isolated and read-only, with no focus.
-- Dispositions:
-  - Accepted 1 blocking finding: B5's guard-safe literal branch delete.
-  - Accepted 5 should-fix findings: reset before a loop return and B1's grep re-run
-    (D13), the benign re-plan (D13), B8's shorter notes, literal carried values, and CLI
-    field and flag alignment.
-  - Decided 4 discussion items: sync conflict as stale, engine drift, and B9's
-    follow-up owner (all D13); fix commits after the adoption (D14); signing and policy
-    failures in B4 stop the run.
-  - Rejected 0 and deferred 0.
+The reviewer was the Claude fallback, fresh and read-only, because Codex failed on a usage
+limit. It reviewed base `2c368486` at plan commit `37e6b97`, with no focus. Accepted: 1
+blocking finding (B5) and 5 should-fix findings. Decided: 4 discussion items (D13, D14,
+and B4's stop route). Rejected: 0. Deferred: 0.
