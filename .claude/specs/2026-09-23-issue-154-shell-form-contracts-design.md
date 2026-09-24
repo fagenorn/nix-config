@@ -6,7 +6,8 @@ Design for [#154](https://github.com/fagenorn/nix-config/issues/154), one slice 
 merged at `a6ac80f`), [#155](https://github.com/fagenorn/nix-config/issues/155)
 (prose consolidation), [#100](https://github.com/fagenorn/nix-config/issues/100)
 (strict project resolver). Decisions D1–D18 bind the plan; planning added
-D19–D21.
+D19–D21, plan review D22, and the amendment after merging origin/main `185cc1a`
+(#171's lifecycle calls) D23–D25.
 
 ## Problem
 
@@ -63,17 +64,30 @@ class — the largest single class), then the contract and what works instead.
   `from-issue/bindings.md`'s tracker-cli hygiene prescribes stays exactly as
   spelled there: the lifecycle guard accepts that literal and nothing looser
   (D5).
+- **The one sanctioned pipeline.** A lifecycle helper call — one heredoc-fed
+  `workflow-state` command, optionally piped into or out of `artifact-budget
+  validate-report --input -` — stays exactly as `from-issue/SKILL.md`'s
+  lifecycle-call rule spells it, since a request file would reverse #171's
+  no-file rule. The shape belongs to those whole-allowed helpers alone: never
+  copy a pipe or heredoc into another command on its strength. Should the
+  checker refuse one, report the refusal rather than reshape the call: that
+  rule owns its form (D23).
 
 No rule table: the section names the invariant, the four forms and the remedy,
 nothing version-specific (D6).
 
 The existing `## Detect existing isolation` probe becomes one invocation,
-`git rev-parse --git-dir --git-common-dir --show-superproject-working-tree`, with
-prose: compare the first two lines — different means a linked worktree (report
-the path and branch and stop), identical means the default checkout; the
-superproject flag prints **no line at all** outside a submodule, so a third
-line means a submodule, which is not isolation. Verified on git 2.51.2: two
-distinct lines in a linked worktree, exit 0.
+`git rev-parse --path-format=absolute --git-dir --git-common-dir
+--show-superproject-working-tree`, with prose: compare the first two lines —
+different means a linked worktree (report the path and branch and stop),
+identical means the default checkout; the superproject flag prints **no line at
+all** outside a submodule, so a third line means a submodule, which is not
+isolation. `--path-format=absolute` is load-bearing (D25): without it git prints
+the common dir relative to the working directory, so a subdirectory of the
+default checkout prints `/…/.git` over `../../.git` and reads as a linked
+worktree. Verified on git 2.51.2, exit 0 each: the default checkout's root and a
+subdirectory print two identical lines, a linked worktree's root and a
+subdirectory two distinct lines.
 
 ### Where examples live, and how they are found (D1, D2)
 
@@ -89,7 +103,13 @@ skill, agent definitions and global guidance (measured: zero offenders), and
 Three region kinds carry examples. Fences nest; the innermost opener's info
 string decides, and a closer must be a bare run at least as long as its opener
 (retained stack-based `FENCE`), so a `bash` fence inside a ````` ````markdown `````
-plan template is still a shell fence.
+plan template is still a shell fence. A fence body is read as CommonMark reads
+fenced content: each body line loses up to as many leading spaces as its opener
+is indented, so a fence inside a list item scans like a top-level one;
+delimiters are still recognised at any indentation (D24). A line indented past
+its fence keeps the excess, so a heredoc terminator indented relative to its
+fence is not the exact line bash's `<<` needs: the example stays open and is
+`unparseable`.
 
 1. **Shell fences** — first word of the info string in
    `{bash, sh, shell, console, zsh}`: the whole body is shell.
@@ -137,12 +157,27 @@ Command substitution itself is not a refused form (D8). A newline inside a shell
 fence separates successive calls, not a chain.
 
 **Sanctioned prefix (D5).** An example that begins with exactly the lifecycle
-guard's literal `unset GITHUB_TOKEN && ` is classified without it, and an
-example that is only that literal (the inline mention in hygiene prose) yields
-nothing. The literal is not restated: the test module reads it from the guard's
-single `UNSET_GITHUB_TOKEN_PREFIX = "…"` assignment in
-`home/common/claude-code/default.nix` and fails loud unless exactly one exists.
-`unset GITHUB_TOKEN; gh …` or any other spelling is still a `chain`.
+guard's literal `unset GITHUB_TOKEN && ` is classified without it, and a
+finished example that is only that literal (the inline mention in hygiene prose)
+yields nothing. The exemption never ends a call: in a fence the literal's
+trailing `&&` keeps the call open (D19), so a prefix line and the command after
+it are one call, classified whole by this rule. The literal is not restated: the
+test module reads it from the guard's single `UNSET_GITHUB_TOKEN_PREFIX = "…"`
+assignment in `home/common/claude-code/default.nix` and fails loud unless
+exactly one exists. `unset GITHUB_TOKEN; gh …` or any other spelling is still a
+`chain`.
+
+**Sanctioned lifecycle helper call (D23).** An example that is one pipeline — no
+chain, no redirect, no command substitution — whose every segment's command head
+is a whole-allowed helper, and whose every heredoc is `<<` with a quoted
+delimiter, drops its `pipe` and `heredoc` findings; an `unparseable` still reds,
+and an example that misses any condition is classified in full. The helpers are
+not restated: the test module reads the basenames of `default.nix`'s single-word
+`"Bash(<word>:*)"` allow entries — today `workflow-state` and `artifact-budget`,
+bare and by `~/.agents/bin` path — and fails loud when there are none. This is
+the shape #171 prescribes for every lifecycle call (its D22: one heredoc-fed
+command, no request file), shaped so its D18 whole-helper allow rules match each
+segment; a pipe or heredoc headed by any other command is still refused.
 
 ### Example rewrites (D7, D9–D11)
 
@@ -150,9 +185,18 @@ Measured on `a6ac80f` with a prototype of the classifier above: 24 offending
 examples in 10 documents; 5 keep the sanctioned prefix, 19 are rewritten in 8
 documents. Every rewrite keeps the example's meaning.
 
-| Site (at `a6ac80f`) | Forms | Disposition |
+Re-measured at `a311fda` (origin/main `185cc1a` merged) with the committed
+classifier: every rewrite site's text is unchanged — only line numbers moved —
+and the `worktrees` probe is already rewritten, leaving 18 in 7 documents; the 5
+prefix sites yield nothing. Main added 8 lifecycle helper calls in 3 documents
+(13 `pipe`/`heredoc` findings, one of them `unparseable` from an indented
+fence), which D23 and D24 keep rather than rewrite. A prototype applying
+D23–D24 reports exactly the 18.
+
+| Site (text unchanged at `a311fda`) | Forms | Disposition |
 |---|---|---|
-| `worktrees/SKILL.md` isolation probe | chain, pipe, redirect | single `git rev-parse` + three-line prose above (recovered) |
+| `worktrees/SKILL.md` isolation probe | chain, pipe, redirect | single `git rev-parse --path-format=absolute` + three-line prose above (adapted, D25) |
+| `from-issue/SKILL.md` direct-owner, build-delivery, finish; `ship-issue/SKILL.md` checkpoint, finish; `orchestrate-issues/SKILL.md` init-run, build-delivery, control (added by #171) | pipe, heredoc | kept — lifecycle helper call (D23); from-issue's build-delivery fence sits in a list item and is read de-indented (D24) |
 | `from-issue/SKILL.md` pre-flight `git worktree list \| grep …` | pipe | `git worktree list`, then keep the entries whose branch starts `<worktreePrefix>issue-<num>-` (new) |
 | `from-issue/bindings.md`, `from-issue/REVIEW-CONTRACT.md`, `ship-issue/SKILL.md` gh hygiene, `ship-release/SKILL.md` gh hygiene and Phase 4 | chain | kept — sanctioned prefix (D5) |
 | `ship-issue/SKILL.md` Phase 4 and `HUMAN-GATE.md` Gate 1 PR creation | heredoc | the guard's exact form `gh pr create --repo <repoSlug> --base <integrationBranch> --head <branch> --title "<title>" --body "<body>"`, the body one literal double-quoted argument that may span lines and carries no `"`, `$`, backtick or backslash; Gate 1's "heredoc expanded" becomes "body fully rendered" (D11) |
@@ -201,7 +245,7 @@ unchanged at the end.
 | Retained hunk | Disposition |
 |---|---|
 | `worktrees` "Shell forms the isolation checker refuses" section | adapted: named alternatives kept; pipes added; `--body-file` dropped from the examples, the literal argument added; sanctioned-prefix sentence added (D5, D6, D11) |
-| `worktrees` single `git rev-parse` probe and its prose | recovered |
+| `worktrees` single `git rev-parse` probe and its prose | adapted: `--path-format=absolute` added, so a default-checkout subdirectory no longer reads as a linked worktree (D25) |
 | `SHELL_FENCE_INFO`, stack-based `FENCE`, `command_head`, `PLACEHOLDER`, `SHELL_COMMANDS` | adapted into the classifier: `zsh` added, placeholder pattern tightened to non-space edges, heads compared by basename, vocabulary widened and guarded (D2, D14) |
 | `HEREDOC`/`CHAIN`/`REDIRECT` regexes, `shell_commands`, `without_placeholders`, the four per-form tests and the whole-document heredoc test | replaced by the quote/substitution-aware scanner and fixture classes (D3, D4) — the regexes cannot see into `"$(…)"` or skip quoted text |
 | `test_worktrees_names_the_refused_shell_forms_and_the_alternative` | adapted into the new module's guidance check (D16) |
@@ -221,7 +265,8 @@ and lists those hunks in its body; new work carries no such trailer.
 One new module, `home/common/agent-skills/tests/test_shell_example_contracts.py`,
 registered in `agent-workflow-tests` and `agent-installed-skill-tests`. Its
 public boundary is `refused_examples(document_text)` plus the closed form set,
-the vocabulary and the guard-derived prefix. Classes:
+the vocabulary, the guard-derived prefix and the config-derived helper set.
+Classes:
 
 1. **Source sweep** — one `subTest` per document across both source trees; any
    finding fails with document, line, form, example and a pointer to the
@@ -239,15 +284,24 @@ the vocabulary and the guard-derived prefix. Classes:
    outside a span; `clean | residuals | unknown` in a span with a non-command
    head; the sanctioned prefix before `gh pr merge`, and the bare prefix
    mention. An unterminated `"$(` and an unclosed fence yield `unparseable`;
-   `unset GITHUB_TOKEN; gh` yields `chain`.
+   `unset GITHUB_TOKEN; gh` yields `chain`, and so does a fence line
+   `unset GITHUB_TOKEN &&` followed by a `gh pr merge` line. Lifecycle controls
+   (D23): the `ship-issue/SKILL.md` checkpoint call verbatim (three segments, a
+   quoted heredoc on the first) yields nothing in every fence kind; that call
+   with a non-helper segment, a chain, a redirect, an unquoted delimiter or a
+   `$(…)` argument reds in full; a config text with no single-word allow entry
+   fails loud. Indentation (D24): a quoted heredoc in a list-item fence
+   indented three spaces, terminator at the fence's indentation, yields
+   `heredoc`; the terminator indented two further yields `unparseable`.
 4. **Vocabulary guard** — every command head in a shell fence of either source
    tree is in the vocabulary, so ambiguous regions and spans recognise every
    command the skills actually run (D14).
 5. **Guidance** — the `worktrees` section exists and names, in order, the
    invariant, the four forms, the one-command-per-call alternative, the
    path-passing alternative, the per-invocation directory, the sanctioned
-   prefix and "change the shell form, never the isolation"; the probe is the
-   single `git rev-parse` with the "no line at all" note (D16).
+   prefix, the lifecycle helper call and "change the shell form, never the
+   isolation"; the probe is the single `git rev-parse --path-format=absolute`
+   with the "no line at all" note (D16, D23, D25).
 
 Existing suites that pin rewritten text are adjusted in the same change:
 `test_workflow_skill_contracts.py`'s Gate 1 anchor follows the guard-form
@@ -265,7 +319,7 @@ shared support module.
 | #154 criterion | Satisfied by | Verified by |
 |---|---|---|
 | 1. Worktree guidance explains the checker contract for redirects, heredoc-to-stdin, pipes and multi-clause chains, naming an accepted alternative | the new `worktrees` section | guidance class |
-| 2. Living shared-skill examples no longer teach refused shapes for worktree execution | 19 rewrites; 5 sanctioned-prefix sites | source sweep green over both trees |
+| 2. Living shared-skill examples no longer teach refused shapes for worktree execution | 19 rewrites; 5 sanctioned-prefix sites; 8 lifecycle helper calls kept (D23) | source sweep green over both trees |
 | 3. Fixtures cover each refused shape and one accepted replacement through the production parser/checker boundary | fixture class through `refused_examples` | fixture class green; each unsafe example reds exactly its form |
 | 4. Source and installed trees pass the same sweep | one function, two sweep classes | `just agent-workflow-tests` green (installed skipped); `just agent-installed-skill-tests` green with both views run |
 | 5. Selective recovery with provenance; unrelated #99 work excluded | recovery table | `Recovered-From` trailer on each recovering commit; retained tip still `3c9709ca`; the branch diff adds no `env -u GITHUB_TOKEN`, no `.claude/skills.config.json` guard, no leaf-agent clause |
@@ -275,7 +329,14 @@ shared support module.
 
 ## Out of scope
 
-- The harness checker and the lifecycle guard; no guard grammar change (D5, D11).
+- The harness checker and the lifecycle guard; no guard grammar or permission
+  allow-list change (D5, D11, D23).
+- Rewriting #171's lifecycle calls (D23). Whether the harness checker accepts
+  that shape inside an `EnterWorktree`-pinned session is unverified; #171's
+  rule governs those calls and this issue keeps them as written. No follow-up
+  issue is warranted yet: one is, once an audit records the checker refusing a
+  lifecycle call, and its fix belongs to the helpers' input contract (#171's
+  surface), not to this sweep.
 - Command substitution as a refused form, and the sites that keep it
   (`BASE_SHA=$(…)`, `EXISTING=$(…)`, the Phase 0 `cd $(git -C …)`) — residual
   against the harness's version-bound nested-expansion rule (D8).
@@ -314,3 +375,6 @@ shared support module.
 | D20 | The source sweep lands with the last rewrite (plan Task 5); earlier rewrite tasks gate on `refused_examples` over the documents they touch, and no commit carries an expected-failure list | the-bar Production-grade (no half-wired path) and Tests that can fail; #153 plan: every task leaves `agent-workflow-tests` green | Land the sweep first with an allowlist of pending offenders — a shim the-bar forbids; land it red — every intermediate review grades a red suite |
 | D21 | The fixture class adds one real-shaped command per remaining operator of the form table, and the "heredoc body" control asserts the opener's single `heredoc` finding with nothing from any body line (refines D18) | Spec form table lists `\|\|`, `;`, `&`, `\|&`, `>>`, `&>`, `>&`, `<`, `<(`, `<<-`, `<<<` that the four offenders never exercise; a heredoc opener is itself refused (D4), so its body cannot yield literally nothing | Offenders only — eleven operators untested; a body-only control — not a shell example the scanner could reach |
 | D22 | Parameter (`${…}`) and arithmetic (`$((…))`) expansions are scanned contexts, not opaque skips: their own operator characters are not shell forms, but a `$(…)`/backtick substitution nested inside one is live and its operators count; fixtures pin `${REV:-$(… | …)}` and `$(( $(… | …) + 1 ))` as exactly `pipe` and `$(( 1 << 2 ))`/`${REV:-HEAD}` as clean | Phase-5 Codex plan review 154-B1: an opaque `${` or whole-skipped `$((` hides a live pipe, contradicting this spec's classifier contract; the-bar Tests that can fail | Opaque/whole skips — a refused form passes the sweep inside any expansion; fail closed as `unparseable` on any expansion — reds legitimate `${VAR:-default}` examples |
+| D23 | A second sanctioned shape, the lifecycle helper call: one pipeline with no chain, redirect or command substitution, every segment headed by a whole-allowed helper (basenames of `default.nix`'s single-word `"Bash(<word>:*)"` allow entries, derived, empty → fail loud), every heredoc `<<` with a quoted delimiter, drops its `pipe`/`heredoc` findings; anything short of that is classified in full; the `worktrees` guidance names it beside the prefix, forbids generalizing it, and has a refused one reported, never reshaped (refines D5, D7) | #171 D22 (one heredoc-fed command, no request file) and D18 (helpers allowed whole so each segment matches), the `default.nix` allow-list comment, the lifecycle-call rule in `from-issue`, `ship-issue` and `orchestrate-issues`; measured at `a311fda`: 8 calls, 13 findings, none with a chain, redirect or substitution; the-bar DRY and Fail loud | Rewrite them to `--request-file <path>` — reverses #171's no-file rule and reintroduces the compound mktemp/cleanup it removed; a per-site or per-document exemption — the list D9/D20 reject; name the helpers in the test — a second home beside the allow list |
+| D24 | A fence body line loses up to its opener's indentation in leading spaces before scanning; delimiters keep D2's stack rule at any indentation; a line indented past its fence keeps the excess, so an over-indented heredoc terminator is `unparseable` (refines D2, D4) | CommonMark fenced-content rule; from-issue's build-delivery fence sits in a list item with terminator `   EOF`, which the committed classifier reports `unparseable`; bash `<<` needs the exact delimiter line and `<<-` strips only tabs; measured: all 10 indented fence delimiters in both trees sit at ≤3 spaces | Strip all leading whitespace — passes a terminator bash would not match; CommonMark's 0–3-space delimiter limit — without list-container tracking it drops a deeper nested fence from the sweep or leaves it open, and no live fence needs it |
+| D25 | The isolation probe is `git rev-parse --path-format=absolute --git-dir --git-common-dir --show-superproject-working-tree`; D15's disposition of that hunk becomes adapted | Task-2 review Important-2; verified on git 2.51.2: without the flag a default-checkout subdirectory prints `/…/.git` over `../../.git` (a false linked worktree); with it the default root and subdirectory print identical lines, a linked worktree's root and subdirectory distinct ones, through a symlinked path too; `ship-issue/SKILL.md`'s cleanup already uses `--path-format=absolute --git-dir` | The retained plain form — misreports every subdirectory of the default checkout; compare `--show-toplevel` with the common dir's parent — two calls or a substitution for the same answer |
