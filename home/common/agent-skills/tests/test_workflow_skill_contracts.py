@@ -2485,7 +2485,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
         # The gate states a policy and calls the helper; the accounting itself
-        # lives in diff-scope.py and is not restated here.
+        # lives in `agent_tools.diff_scope` and is not restated here.
         gate = self.section(
             self.ship_issue,
             "**Pick the path first.**",

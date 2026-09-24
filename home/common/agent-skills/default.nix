@@ -95,11 +95,6 @@ in
       executable = true;
     };
 
-    ".agents/bin/diff-scope" = {
-      source = ./scripts/diff-scope.py;
-      executable = true;
-    };
-
     ".agents/bin/artifact-budget" = {
       source = ./scripts/artifact-budget;
       executable = true;

@@ -39,6 +39,7 @@ let
   commands = [
     "agent-evidence"
     "agent-model-matrix"
+    "diff-scope"
   ];
 
   # -I drops every PYTHON* variable, the working directory and the user site.
