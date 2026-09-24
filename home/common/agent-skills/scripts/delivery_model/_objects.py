@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from types import MappingProxyType
 from typing import Any
 
 from ._canonical import (canonical_bytes, canonical_digest, _boolean, _data_ref,
@@ -19,6 +20,7 @@ _STAGE_ACTIONS = {
     "remove_worktree": ("remove_worktree", "filesystem_write", "worktree_absent"),
     "delete_local_branch": ("delete_local_branch", "repository_write", "local_branch_absent"),
 }
+STAGE_ACTIONS = MappingProxyType(_STAGE_ACTIONS)
 _POSTCONDITIONS = ("implementation_delivered", "pr_merged", "tracker_closed", "cleanup_complete")
 
 
@@ -78,7 +80,11 @@ def _scope(value: Any) -> dict[str, Any]:
     for key in ("project_id", "provider", "repository_id", "repository_slug", "branch", "base"):
         _string(target[key], f"target {key}")
     _integer(target["issue"], "target issue", minimum=1)
-    _ref(target["pr_ref"], "pr ref"); _ref(target["output_ref"], "output ref") if target["output_ref"].get("kind") != "slot" else _slot_ref(target["output_ref"], "output ref", constraints=False)
+    if isinstance(target["pr_ref"], dict) and target["pr_ref"].get("kind") == "slot":
+        _slot_ref(target["pr_ref"], "pr ref", constraints=False)
+        if target["output_ref"] != {"kind": "slot", "slot_id": target["pr_ref"]["slot_id"]}: _reject()
+    else: _ref(target["pr_ref"], "pr ref")
+    _ref(target["output_ref"], "output ref") if target["output_ref"].get("kind") != "slot" else _slot_ref(target["output_ref"], "output ref", constraints=False)
     _ref(value["endpoint"], "endpoint")
     _data_ref(value["data"], "scope data")
     _string(value["risk"], "risk")
@@ -423,7 +429,18 @@ def _pr_numbers(contract: dict[str, Any], delivery: dict[str, Any],
             if output not in ({"kind": "slot", "slot_id": selected["slot_id"]},
                               {"kind": "literal", "value": selected["subject_value"]}): continue
             ref = target["pr_ref"]
-            if ref["kind"] == "literal" and ref["value"].isdigit(): values.add(int(ref["value"]))
+            if ref["kind"] == "literal" and ref["value"].isdigit():
+                values.add(int(ref["value"]))
+            elif ref == {"kind": "slot", "slot_id": selected["slot_id"]}:
+                head = _selected_head(delivery, selected)
+                values.update(
+                    item["subject"]["pr_number"]
+                    for item in delivery["delivery_observations"]
+                    if item["observation_kind"] == "pr_opened"
+                    and item["subject"]["provider_repository_id"]
+                    == contract["project"]["repository_id"]
+                    and head is not None and item["subject"]["expected_head"] == head
+                    and item["subject"]["base"] == selected["base"])
     return values
 
 

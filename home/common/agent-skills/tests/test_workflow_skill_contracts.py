@@ -80,20 +80,38 @@ REPORT_CANDIDATE_CLAUSE = (
     "`EXIT HUP INT TERM`, or the equivalent `finally`"
 )
 
-# One literal for all three lifecycle request-file prescriptions (D17).
-REQUEST_FILE_HOME = "a new absolute temporary request file beneath `${TMPDIR:-/tmp}`"
-REQUEST_FILE_INVOCATION = "--request-file <absolute-json-path>"
-
-# The terminal result file is the same class of control-plane scratch, so it
-# shares that home; unlike the request file the helper consumes within the call,
-# it outlives its own validation and carries the report candidate's cleanup.
-RESULT_FILE_HOME = (
-    "a new absolute temporary `ship-summary/v2` file beneath `${TMPDIR:-/tmp}`, removed "
-    "under an unconditional cleanup that runs on every outcome, including "
-    "validation rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, "
-    "or the equivalent `finally`"
-)
-RESULT_FILE_INVOCATION = "--summary-file <path>"
+LIFECYCLE_DOCS = (FROM_ISSUE, AUTO, FROM_ISSUE_DIR / "ship-handoff.md", SHIP_ISSUE,
+                  SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE, ORCHESTRATE)
+STDIN_CLAUSE = ("lifecycle call is one command that reads its input from stdin "
+                "through a quoted heredoc")
+WRITER_RULE = ("Under implementation custody a ship owner writes only "
+               "`checkpoint-delivery`, never `finish`; a remainder owner writes its "
+               "own `finish --summary-file -`.")
+INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
+V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "now", "attempt_budget_minutes",
+    "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
+    "authorization_intents", "authority_observations", "reevaluation_evidence",
+    "delivery_observations", "requested_scope", "recovery"}
+V2_CONTROL_REQUEST_KEYS = {"interface_version", "now", "max_parallel",
+    "attempt_budget_minutes", "human_directed", "issues", "tracker", "owners",
+    "worktrees", "forge", "delivery_contracts", "authorization_intents",
+    "authority_observations", "reevaluation_evidence", "delivery_observations",
+    "requested_scopes", "recoveries"}
+V2_OWNER_KEYS = {"interface_version", "kind", "ledger_repo_root", "run_id", "issue",
+    "attempt", "owner", "action_id", "launch_kind", "worktree", "handoff_path",
+    "deadline_at", "custody", "contract", "contract_digest", "pending_stage_ids",
+    "requirements", "authority_evaluation", "requested_scope"}
+SHIP_HANDOFF_V2_KEYS = {"interface_version", "state", "ledger_repo_root", "run_id",
+    "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path",
+    "spec_artifact", "plan_artifact", "head_sha", "review_state", "auto", "report_path",
+    "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents",
+    "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids",
+    "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs",
+    "requested_scope"}
+SHIP_SUMMARY_V2_KEYS = {"interface_version", "issue", "state", "custody",
+    "historical_owner_result", "delivery_contract_digest", "delivery_observations",
+    "authority_observations", "reevaluation_evidence", "detail_state", "report_path",
+    "notes"}
 
 # "sibling <=2 words> candidate" — the in-working-tree prescription being
 # removed. The bounded gap keeps it off handoff's legitimate
@@ -185,6 +203,13 @@ def nested_workflow_documents():
             yield path, path.read_text(encoding="utf-8")
 
 
+def json_block(text):
+    match = re.search(r"```json\n(\{.*?\})\n```", text, re.DOTALL)
+    if match is None:
+        raise AssertionError("missing json block")
+    return json.loads(match.group(1))
+
+
 class WorkflowSkillContractsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -261,6 +286,102 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("historical input only", terminal)
         self.assertNotIn("--result-file <path>", terminal)
 
+    def test_direct_and_control_requests_are_interface_two(self):
+        direct = self.section(self.from_issue, "### Direct autonomous acquisition",
+                              "### Interactive direct acquisition")
+        request = json_block(direct)
+        self.assertEqual((set(request), request["interface_version"]),
+                         (V2_DIRECT_REQUEST_KEYS, 2))
+        for anchor in ("`delivery_contract`", "--kind contract", "`authorization_intents`",
+                       "kind: delivery_remainder", "--request-file -"):
+            self.assertIn(anchor, normalized(direct))
+        decide = self.section(self.orchestrate, "## 3. Decide", "## 4. Execute control actions")
+        self.assertEqual(set(json_block(decide)), V2_CONTROL_REQUEST_KEYS)
+        for anchor in ("workflow-state build-delivery",
+                       "while its latest summary carries `delivery_contract_required`",
+                       "report the refusal", "--request-file -",
+                       "only when this invocation created the run"):
+            self.assertIn(anchor, normalized(decide))
+        durable = self.section(self.from_issue, "### Explicit durable interactive acquisition",
+                               "The `workflow-state` executable")
+        self.assertIn("only when this invocation created the run", normalized(durable))
+
+    def test_orchestrate_bootstrap_actions_and_projected_owner(self):
+        observe = normalized(self.section(self.orchestrate, "## 2. Bootstrap and observe",
+                                          "## 3. Decide"))
+        for anchor in ("workflow_bootstrap", "`contract_digest`", "`forge_pr`",
+                       "never a candidate for it"):
+            self.assertIn(anchor, observe)
+        execute = normalized(self.section(self.orchestrate, "## 4. Execute control actions",
+                                          "## 5. Final report"))
+        for anchor in ("`spawn`, `resume`, `retry`, `delivery_remainder`, `wait`, or `finalize`",
+                       "rename `id` to `action_id` and `kind` to `launch_kind`",
+                       "`kind: owner`", "`interface_version: 2`", "canonical JSON",
+                       "--boundary workflow-response"):
+            self.assertIn(anchor, execute)
+        self.assertNotIn("Interface_version 2 control adapter", self.orchestrate)
+
+    def test_ship_handoff_v2_ship_summary_v2_and_remainder_prompt(self):
+        line = next(item for item in self.ship_handoff.splitlines()
+                    if item.startswith('{"interface_version":2'))
+        self.assertLessEqual(SHIP_HANDOFF_V2_KEYS, set(re.findall(r'"([a-z_]+)":', line)))
+        for key in SHIP_SUMMARY_V2_KEYS:
+            self.assertIn(f"`{key}`", self.ship_handoff)
+        for anchor in ("--kind initial-intent", "--boundary ship-summary",
+                       "## Remainder owner prompt"):
+            self.assertIn(anchor, self.ship_handoff)
+        self.assertNotIn("## Delivery handoff v2", self.ship_handoff)
+
+    def test_ship_issue_writer_rule_delivery_loop_and_remainder_mode(self):
+        self.assertIn(WRITER_RULE, normalized(self.ship_issue))
+        self.assertNotIn("never writes workflow-state itself", normalized(self.ship_issue))
+        loop = normalized(self.section(self.ship_issue, "## Delivery loop", "## Remainder mode"))
+        self.assert_ordered(loop, "pre-merge selection gate", "--kind selected-output",
+            "`selected_output`, `branch_published` and `pr_opened`", "checkpoint-delivery",
+            "equal the scope", "current-launch", "current-launch", "authority-observation",
+            "observation-only", "`human_gate`", "`delivery_complete`")
+        self.assert_ordered(loop, "the denied stage's scope as `requested_scope`",
+                            "`state: suspended`", "`blocked_on: human_gate`", "fail loudly")
+        remainder = normalized(self.ship_issue.split("## Remainder mode", 1)[1])
+        for anchor in ("`delivery_remainder`", "ready stage", "finish --summary-file -",
+                       "`delivery_stalled`"):
+            self.assertIn(anchor, remainder)
+        for text in (self.ship_handoff.split("## Remainder owner prompt", 1)[1],
+                     self.section(self.from_issue, "### Dispatcher-owned acquisition",
+                                  "### Direct autonomous acquisition"),
+                     self.section(self.from_issue, "3. **`kind: delivery_remainder`**",
+                                  "4. **`kind: terminal`**")):
+            self.assertIn("re-entry line", normalized(text))
+        for appendix in (self.ship_review, self.ship_human_gate):
+            self.assertIn("## Delivery loop", appendix)
+
+    def test_auto_continuation_and_bookkeeper_are_interface_two(self):
+        transfer = self.section(self.auto, "#### Mandatory transfer gate",
+                                "#### Fresh delegated owner")
+        owner = json_block(transfer)["owner"]
+        self.assertEqual((set(owner), owner["interface_version"]), (V2_OWNER_KEYS, 2))
+        self.assert_ordered(normalized(self.auto), "workflow-state check-launch",
+                            "workflow-state finish --summary-file -")
+
+    def test_lifecycle_calls_are_single_stdin_commands_on_interface_two(self):
+        for path in LIFECYCLE_DOCS:
+            text = normalized(path.read_text(encoding="utf-8"))
+            with self.subTest(path=path.name):
+                for forbidden in ('"interface_version": 1', "version-1",
+                                  "temporary request file", "temporary `ship-summary/v2` file"):
+                    self.assertNotIn(forbidden, text)
+                for flag, value in INPUT_FLAG_RE.findall(text):
+                    self.assertEqual(value.strip("`.,;"), "-", flag)
+                self.assertLessEqual(text.count("--result-file"), 1)
+        for path in (FROM_ISSUE, ORCHESTRATE, SHIP_ISSUE):
+            with self.subTest(clause=path.name):
+                self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
+        expected = " ".join(case["expected_output"] for case in self.orchestrate_evals["evals"])
+        for anchor in ("interface_version 2", "delivery_remainder", "contract_digest",
+                       "build-delivery", "only when this invocation created the run"):
+            self.assertIn(anchor, expected)
+        self.assertNotIn("version-1", expected)
+
     def test_orchestration_eval_covers_denial_partial_progress_and_remainder(self):
         text = json.dumps(self.orchestrate_evals, sort_keys=True)
         for phrase in ("partial effect", "host rejection", "same custody",
@@ -295,7 +416,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertRegex(observe, r"never omit the recorded-path\s+observation")
         self.assertNotIn("tracker-ready", observe)
         self.assertNotIn("classify tracker readiness", observe)
-        self.assert_ordered(decide, "--request-file <absolute-json-path>",
+        self.assert_ordered(decide, "--request-file -",
                             "workflow-state control",
                             "only source of action order, kind, and lifecycle identity")
         for retired in ("workflow-state launch", "workflow-state reconcile"):
@@ -629,35 +750,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
-    def assert_every_carrier_states_the_temp_home(self, invocation, home, minimum):
-        carriers = [
-            (str(path.relative_to(REPO_ROOT)), normalized(text))
-            for path, text in corpus_documents()
-            if invocation in normalized(text)
-        ]
-        names = [name for name, _ in carriers]
-        # Non-vacuity: the rule must have something to police.
-        self.assertGreaterEqual(len(carriers), minimum, names)
-        missing = [name for name, text in carriers if home not in text]
-        self.assertEqual(missing, [])
-
-    def test_request_file_prescriptions_name_the_temp_home(self):
-        self.assertEqual(normalized(self.from_issue).count(REQUEST_FILE_HOME), 2)
-        self.assertEqual(normalized(self.orchestrate).count(REQUEST_FILE_HOME), 1)
-
-    def test_result_file_prescription_names_the_temp_home(self):
-        self.assertEqual(normalized(self.from_issue).count(RESULT_FILE_HOME), 1)
-
-    def test_every_request_file_invocation_names_the_temp_home(self):
-        self.assert_every_carrier_states_the_temp_home(
-            REQUEST_FILE_INVOCATION, REQUEST_FILE_HOME, 2
-        )
-
-    def test_every_result_file_invocation_names_the_temp_home(self):
-        self.assert_every_carrier_states_the_temp_home(
-            RESULT_FILE_INVOCATION, RESULT_FILE_HOME, 1
-        )
-
     def test_from_issue_validates_artifacts_before_every_phase_advance(self):
         self.assert_ordered(self.from_issue, "validate the returned state", "artifact-budget check",
                             "compare all four metrics", "workflow-state progress")
@@ -763,6 +855,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "validate-report --boundary ship-summary",
         )
         self.assertIn("do not forge", cleanup)
+        self.assert_ordered(normalized(self.section(self.ship_issue, "## Delivery loop",
+                                                    "## Remainder mode")),
+                            "Only after the last cycle",
+                            "validate-report --boundary ship-summary")
 
     def test_review_package_failure_before_dispatch_has_no_fabricated_detail(self):
         self.assert_ordered(self.sdd, "base_sha and head_sha", "review-package",
@@ -944,11 +1040,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(set(continuation), {
             "owner", "reviewed_head_sha", "spec_artifact", "plan_artifact",
         })
-        self.assertEqual(set(continuation["owner"]), {
-            "interface_version", "kind", "ledger_repo_root", "run_id", "issue",
-            "attempt", "owner", "action_id", "launch_kind", "worktree",
-            "handoff_path", "deadline_at",
-        })
+        self.assertEqual(set(continuation["owner"]), V2_OWNER_KEYS)
         self.assertEqual(continuation["owner"]["kind"], "owner")
         self.assertRegex(continuation["reviewed_head_sha"], r"^[0-9a-f]{40}$")
         artifact_fields = {"kind", "path", "metrics", "budget_status"}
@@ -1013,10 +1105,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             earlier,
             "received bytes",
-            "artifact-budget validate-report --boundary ship-summary",
+            "artifact-budget validate-report --boundary workflow-response",
             "relay the canonical bytes unchanged",
             "stop",
         )
+        self.assertNotIn("--boundary ship-summary", earlier)
         self.assertIn(
             "post-delegation action set is exactly validate, relay, and stop",
             earlier,
@@ -1320,7 +1413,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn("workflow-state direct-owner", direct)
         self.assertIn("--repo-root <ledger_repo_root>", direct)
-        self.assertIn("--request-file <absolute-json-path>", direct)
+        self.assertIn("--request-file -", direct)
         self.assertNotIn("workflow-state init-run", direct)
         self.assertNotIn("workflow-state control", direct)
         self.assertNotIn("wait envelope", direct)
@@ -2135,6 +2228,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "Run `check-launch` (see `## Launch guard`) immediately before the merge",
             "gh pr merge <pr-num> --repo <repoSlug> --merge",
         )
+        self.assertIn("the `merge_pr` cycle of `## Delivery loop`", normalized(phase7))
+        self.assertIn("current-launch", phase7)
         # D6/D10: the new Phase-4 pointer introduces no merge spelling, so
         # Phase 4 stays free of `gh pr merge` exactly as it is today.
         self.assertNotIn("gh pr merge", phase4)
@@ -2286,8 +2381,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("/from-issue <num> --auto", collapsed)
         self.assertIn("`stopped` ship summary", collapsed)
         self.assertNotIn("workflow-state suspend", guard)
-        # The post-merge exemption and the ledger-free skip.
-        self.assertIn("after the merge is verified", collapsed)
+        # The post-merge effects are loop cycles (D29), and the ledger-free skip.
+        self.assertIn("each post-merge effect is a `## Delivery loop` cycle", collapsed)
         self.assertIn("skip the guard silently", collapsed)
 
         # Phase 4: the query immediately precedes each of its two forge writes.
@@ -2349,16 +2444,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("re-fix `HEAD_SHA`", apply_push)
         self.assertNotIn("repeats the headRefOid equality check", apply_push)
         self.assertIn("the reviewed `HEAD_SHA`", apply_push)
-
-    def test_ship_owner_reads_the_ledger_but_never_writes_it(self):
-        # AC3's invariant, previously unpinned. The read-only exception is named
-        # so a reader cannot take the sentence as a ban on consulting the ledger.
-        self.assertIn(
-            "A fresh ship owner never writes workflow-state itself; the "
-            "read-only `check-launch` query of `## Launch guard` is the one "
-            "ledger call it makes.",
-            normalized(self.ship_issue),
-        )
 
     def test_phase0_size_note_delegates_counting_to_diff_scope(self):
         # Issues #21-#22 made diff-scope the accounting authority and retired the

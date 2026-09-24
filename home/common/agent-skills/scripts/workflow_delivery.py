@@ -20,6 +20,7 @@ class DeliveryRuntime:
             raise ValueError("invalid delivery notes limit")
         self._notes_max = notes_max_characters
         self._model = self._load_model()
+        self._builder = self._load_builder(self._model, notes_max_characters)
         self._projection = self._load_projection()
 
     @staticmethod
@@ -67,6 +68,50 @@ class DeliveryRuntime:
         except Exception:
             sys.modules.pop(name, None)
             raise
+
+    @staticmethod
+    def _load_builder(model: object, notes_max: int) -> object:
+        entry = Path(__file__).with_name("workflow_delivery_build.py")
+        if not entry.is_file():
+            raise ValueError("workflow delivery builder is unavailable")
+        name = "_workflow_delivery_build"
+        spec = importlib.util.spec_from_file_location(name, entry)
+        if spec is None or spec.loader is None:
+            raise ValueError("workflow delivery builder is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+            if getattr(module, "WORKFLOW_DELIVERY_BUILD_INTERFACE_VERSION", None) != 1:
+                raise ValueError("unsupported workflow delivery builder interface")
+            return module.DeliveryBuilder(model, notes_max_characters=notes_max)
+        except Exception:
+            sys.modules.pop(name, None)
+            raise
+
+    _BUILD_OUTPUT_KINDS = {"initial-intent": "authorization-intent", "scope": "scope-tuple",
+                           "selected-output": "selected-output",
+                           "observation": "delivery-observation",
+                           "authority-observation": "authority-observation"}
+
+    def build_delivery(self, kind: str, value: object, *, policy: dict[str, Any] | None
+                       ) -> object:
+        """Build one sealed delivery value and validate every object it carries."""
+        result = self._builder.build(kind, value, policy=policy)
+        if kind == "contract":
+            if not isinstance(result, dict) or set(result) != {"contract", "initial_intent"}:
+                raise ValueError("builder returned an invalid contract result")
+            self.validate(result["contract"], "delivery-contract")
+            self.validate(result["initial_intent"], "authorization-intent")
+        elif kind == "authorization-chain":
+            if not isinstance(result, dict) or set(result) != {"authorization_chain_digest"} \
+                    or not isinstance(result["authorization_chain_digest"], str) \
+                    or not result["authorization_chain_digest"].startswith("sha256:"):
+                raise ValueError("builder returned an invalid authorization chain")
+        elif kind in self._BUILD_OUTPUT_KINDS:
+            self.validate(result, self._BUILD_OUTPUT_KINDS[kind])
+        else:
+            raise ValueError(f"unknown builder kind: {kind!r}")
+        return result
 
     @property
     def model(self) -> object:
@@ -171,16 +216,22 @@ class DeliveryRuntime:
             raise ValueError("delivery recovery refused") from error
         if recovery is not None:
             return recovery
-        if (source_kind == "direct" and issue_state is not None
+        # Direct's historical remainder, and control's once a merged forge has
+        # been reconciled and dispatch is permitted (per D13, D30).
+        if (issue_state is not None
+                and (source_kind == "direct"
+                     or (source_kind == "control" and dispatch_permitted))
                 and not issue_state["delivery_remainders"]
                 and issue_state["attempts"]
                 and issue_state["attempts"][-1]["state"]
                 in {"merged", "completed", "stopped", "failed"}
-                and self._projection.historical_direct_requested(issue_state, request)):
+                and self.historical_requested(
+                    issue_state, **self.historical_request(request, issue,
+                                                           source_kind=source_kind))):
             before = copy.deepcopy(issue_state["delivery"])
             reduction = self.apply_transition(
                 issue_state, issue=issue, request=request,
-                source_kind="direct", at_time=now)
+                source_kind=source_kind, at_time=now)
             record = issue_state["attempts"][-1]
             remainder = self._create_first_remainder(
                 issue_state, record, reduction, now=now,
@@ -278,10 +329,24 @@ class DeliveryRuntime:
     def delivery_complete(self, issue_state: dict[str, Any]) -> bool:
         return self._projection.delivery_complete(issue_state)
 
-    def historical_direct_requested(
-        self, issue_state: dict[str, Any], request: dict[str, Any]
+    def historical_requested(
+        self, issue_state: dict[str, Any], *, forge: object, contract: object,
+        new_run: object,
     ) -> bool:
-        return self._projection.historical_direct_requested(issue_state, request)
+        return self._projection.historical_requested(
+            issue_state, forge=forge, contract=contract, new_run=new_run)
+
+    @staticmethod
+    def historical_request(
+        request: dict[str, Any], issue: int, *, source_kind: str,
+    ) -> dict[str, Any]:
+        """The historical predicate's inputs from a direct or control request shape."""
+        if source_kind == "control":
+            key = str(issue)
+            return {"forge": request["forge"][key],
+                    "contract": request["delivery_contracts"][key], "new_run": False}
+        return {"forge": request.get("forge"), "contract": request["delivery_contract"],
+                "new_run": request.get("new_run")}
 
 
     def remainder_policy(
@@ -550,12 +615,29 @@ class DeliveryRuntime:
         return self._projection.request_values(
             request, issue, control=control)
 
+    @staticmethod
+    def effective_contract(
+        issue_state: dict[str, Any] | None, supplied: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """The contract that governs one issue: the installed one, else the supplied one.
+
+        A null request contract means "none supplied", never "none governs": an
+        installed contract keeps governing, and a supplied one must equal it (D10).
+        """
+        installed = None if issue_state is None else issue_state["delivery"]["contract"]
+        if installed is None:
+            return supplied
+        if supplied is not None and supplied != installed:
+            raise ValueError("delivery contract is immutable")
+        return installed
+
     def apply_transition(
         self, issue_state: dict[str, Any], *, issue: int,
         request: dict[str, Any], source_kind: str, at_time: str,
     ) -> dict[str, Any]:
         values = self.request_values(request, issue, control=source_kind == "control")
-        if values["contract"] is None:
+        contract = self.effective_contract(issue_state, values["contract"])
+        if contract is None:
             raise ValueError("delivery contract is required")
         custody, record = self.current_custody(issue, issue_state)
         binding_record = record
@@ -566,7 +648,7 @@ class DeliveryRuntime:
             binding_record, issue_state["delivery"],
             values["delivery_observations"], values["requested_scope"])
         reduced = self.transition(
-            issue_state["delivery"], contract=values["contract"], at_time=at_time,
+            issue_state["delivery"], contract=contract, at_time=at_time,
             custody=custody,
             current_launch=(record["state"] == "active" if record is not None else None),
             requested_scope=values["requested_scope"], source_kind=source_kind,
@@ -796,6 +878,11 @@ class DeliveryRuntime:
             record["finished_at"] = now
         terminal = {**common, "kind": "terminal_failed", "state": "terminal_failed",
                     "result_source": "owner", "reason_code": "owner_reported_failure"}
+        if not self._selection_observed(issue_state["delivery"]):
+            # Before selection a failure belongs to the implementation retry
+            # lane: a remainder here would be the one nonterminal custody and
+            # block the retry (per D14).
+            return terminal
         remainder = self._create_first_remainder(
             issue_state, record, reduction, now=now,
             remainder_deadline=remainder_deadline)
@@ -804,6 +891,13 @@ class DeliveryRuntime:
         return self.remainder_response(
             ledger_repo_root=ledger_repo_root, run_id=run_id,
             issue_state=issue_state, remainder=remainder, reduction=reduction)
+
+    @staticmethod
+    def _selection_observed(delivery: dict[str, Any]) -> bool:
+        selection = {stage["id"] for stage in delivery["contract"]["stages"]
+                     if stage["kind"] == "select_reviewed_output"}
+        return all(fact["state"] == "observed" for fact in delivery["stage_facts"]
+                   if fact["stage_id"] in selection)
 
     def _create_first_remainder(
         self, issue_state: dict[str, Any], record: dict[str, Any],
@@ -855,18 +949,16 @@ class DeliveryRuntime:
         return self._projection.control_summary(**values)
 
 
-    def contractless_control(self, request: dict[str, Any], run_id: str) -> dict[str, Any]:
-        return self._projection.contractless_control(request, run_id)
-
-
     def control_transitions(
-        self, state: dict[str, Any], request: dict[str, Any]
+        self, state: dict[str, Any], request: dict[str, Any], installing: set[int],
     ) -> tuple[dict[int, dict[str, Any]], bool]:
+        """Fold delivery only where a contract governs or is being installed (D10)."""
         reductions = {}
         changed = False
         for issue in request["issues"]:
             issue_state = state["issues"].get(str(issue))
-            if issue_state is None:
+            if issue_state is None or (issue_state["delivery"]["contract"] is None
+                                       and issue not in installing):
                 continue
             before = copy.deepcopy(issue_state["delivery"])
             reductions[issue] = self.apply_transition(
@@ -971,7 +1063,7 @@ class DeliveryRuntime:
     ) -> dict[int, Any]:
         contracts = self.validate_issue_map(request["delivery_contracts"], issues,
                                     "delivery contracts")
-        if any(value is not None for value in contracts.values()) and tracker_issues != issues:
+        if tracker_issues != issues:
             raise ValueError("tracker observations must match requested issues")
         names = ("authorization_intents", "authority_observations",
                  "reevaluation_evidence", "delivery_observations", "requested_scopes",
