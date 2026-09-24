@@ -468,9 +468,11 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(checkpointed["accepted_observation_ids"], [allowed["id"]])
             self.assertEqual(checkpointed["requested_scope"], actual)
 
-            summary = self.failed_summary(
-                owner_value["custody"], self.model.canonical_digest(contract),
-                "provider failed")
+            digest = self.model.canonical_digest(contract)
+            summary = self.failed_summary(owner_value["custody"], digest, "provider failed")
+            summary["delivery_observations"] = [
+                observation(self.model, contract, "selected_output",
+                            {"selected_output": selection(self.model, digest)})]
             summary_path = root / "summary.json"; summary_path.write_text(json.dumps(summary))
             finished = subprocess.run(
                 [sys.executable, str(WORKFLOW), "finish", "--repo-root", str(root),
@@ -754,7 +756,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                              (False, "inactive_attempt"))
 
     def test_suspended_remainder_resumes_same_identity_and_deadline(self):
-        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); worktree = str(root / "worktree")
@@ -770,11 +772,13 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "decision_blockers": []}, worktree={"issue": 151, "recorded": None,
                 "candidate": {"path": worktree, "state": "absent"}},
                 forge={"state": "none", "url": None, "merge_sha": None},
-                authorization_intents=delivery["authorization_intents"],
-                requested_scope=actual)
+                authorization_intents=delivery["authorization_intents"])
             owner = json.loads(call("direct-owner", "--repo-root", root,
                                "--request-file", store("owner.json", request)).stdout)
             failed = self.failed_summary(owner["custody"], digest)
+            failed["delivery_observations"] = [
+                observation(self.model, contract, "selected_output",
+                            {"selected_output": selection(self.model, digest)})]
             remainder = json.loads(call("finish", "--repo-root", root, "--run-id",
                 owner["run_id"], "--summary-file", store("failed.json", failed), "--now",
                 "2026-09-21T00:00:01Z").stdout)
@@ -825,7 +829,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 self.assertEqual(value["custody"]["launch"], ordinal + 3)
 
     def test_remainder_two_requires_closed_recovery_proof_and_replays(self):
-        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); worktree = str(root / "worktree"); serial = 0
@@ -845,8 +849,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 worktree={"issue": 151, "recorded": None,
                           "candidate": {"path": worktree, "state": "absent"}},
                 forge={"state": "none", "url": None, "merge_sha": None},
-                authorization_intents=delivery["authorization_intents"],
-                requested_scope=actual)
+                authorization_intents=delivery["authorization_intents"])
             owner = json.loads(call("direct-owner", "--repo-root", root,
                 "--request-file", store(request)).stdout)
             historical = {"issue": 151, "state": "failed", "pr_url": None,
@@ -859,12 +862,16 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     "delivery_contract_digest": digest, "delivery_observations": [],
                     "authority_observations": [], "reevaluation_evidence": [],
                     "detail_state": "none", "report_path": None, "notes": "transient"}
+            selected = failed(owner["custody"])
+            selected["delivery_observations"] = [
+                observation(self.model, contract, "selected_output",
+                            {"selected_output": selection(self.model, digest)})]
             first = json.loads(call("finish", "--repo-root", root, "--run-id",
-                owner["run_id"], "--summary-file", store(failed(owner["custody"])),
+                owner["run_id"], "--summary-file", store(selected),
                 "--now", "2026-09-21T00:00:01Z").stdout)
 
             proof = {"schema_version": 1, "kind": "delivery-recovery", "id": "",
-                "contract_digest": digest, "stage_id": "select",
+                "contract_digest": digest, "stage_id": "publish",
                 "requested_scope": actual,
                 "failure": {"kind": "effect_failure", "effect_attempted": True,
                     "classification": "transient", "source_kind": "provider",
@@ -947,7 +954,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(state_path.read_bytes(), replay_bytes)
 
     def test_control_resumes_remainder_without_spending_implementation_attempt(self):
-        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); worktree = str(root / "worktree")
@@ -967,10 +974,12 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "decision_blockers": []}], worktrees=[{"issue": 151, "recorded": None,
                 "candidate": {"path": worktree, "state": "absent"}}])
             request["authorization_intents"]["151"] = delivery["authorization_intents"]
-            request["requested_scopes"]["151"] = actual
             owner = invoke("control", "--repo-root", root, "--run-id", run_id,
                            "--request-file", store(request))["actions"][0]
             failed = self.failed_summary(owner["custody"], digest)
+            failed["delivery_observations"] = [
+                observation(self.model, contract, "selected_output",
+                            {"selected_output": selection(self.model, digest)})]
             remainder = invoke("finish", "--repo-root", root, "--run-id", run_id,
                                "--summary-file", store(failed), "--now",
                                "2026-09-21T00:00:01Z")
@@ -998,7 +1007,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(len(state["issues"]["151"]["attempts"]), 1)
 
     def test_control_allocates_only_one_proven_second_remainder(self):
-        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); run_id = "recovery-control"; serial = 0
@@ -1017,7 +1026,6 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "decision_blockers": []}], worktrees=[{"issue": 151, "recorded": None,
                 "candidate": {"path": str(root / "worktree"), "state": "absent"}}])
             request["authorization_intents"]["151"] = delivery["authorization_intents"]
-            request["requested_scopes"]["151"] = actual
             owner = invoke("control", "--repo-root", root, "--run-id", run_id,
                            "--request-file", store(request))["actions"][0]
             historical = {"issue": 151, "state": "failed", "pr_url": None,
@@ -1030,14 +1038,18 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     "delivery_contract_digest": digest, "delivery_observations": [],
                     "authority_observations": [], "reevaluation_evidence": [],
                     "detail_state": "none", "report_path": None, "notes": "transient"}
+            selected = failed(owner["custody"])
+            selected["delivery_observations"] = [
+                observation(self.model, contract, "selected_output",
+                            {"selected_output": selection(self.model, digest)})]
             first = invoke("finish", "--repo-root", root, "--run-id", run_id,
-                "--summary-file", store(failed(owner["custody"])), "--now",
+                "--summary-file", store(selected), "--now",
                 "2026-09-21T00:00:01Z")
             invoke("finish", "--repo-root", root, "--run-id", run_id,
                 "--summary-file", store(failed(first["custody"])), "--now",
                 "2026-09-21T00:00:02Z")
             recovery = {"schema_version": 1, "kind": "delivery-recovery", "id": "",
-                "contract_digest": digest, "stage_id": "select", "requested_scope": actual,
+                "contract_digest": digest, "stage_id": "publish", "requested_scope": actual,
                 "failure": {"kind": "effect_failure", "effect_attempted": True,
                     "classification": "transient", "source_kind": "host",
                     "reference": "host:failed", "observed_at": "2026-09-21T00:00:02Z",
@@ -1873,6 +1885,127 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         summary = next(item for item in self.control("survive", self.control_request(
             [151, 152], now=LATER))["summaries"] if item["issue"] == 152)
         self.assertEqual((summary["state"], summary["result"]["state"]), ("merged", "merged"))
+
+    MERGED_PR = {"state": "merged", "url": "https://example.invalid/pr/9", "merge_sha": "e" * 40}
+
+    def forge_request(self, **changes):
+        return self.control_request([171], now=LATER, forge={"171": self.MERGED_PR}, **changes)
+
+    def failed_summary(self, custody_value, digest, observations=()):
+        historical = {"issue": 171, "state": "failed", "pr_url": None, "merge_sha": None,
+            "issue_closed": False, "discussion_items": [], "detail_state": "none",
+            "report_path": None, "notes": "failed"}
+        return {"interface_version": 2, "issue": 171, "state": "terminal_failed",
+            "custody": custody_value, "historical_owner_result": historical,
+            "delivery_contract_digest": digest,
+            "delivery_observations": sorted(observations, key=lambda item: item["id"]),
+            "authority_observations": [], "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": "failed"}
+
+    def spawn_contracted(self, run_id):
+        self.cli("init-run", "--repo-root", self.root, "--run-id", run_id, "--now", NOW)
+        built = self.build("contract", self.contract_input())
+        response = self.control(run_id, self.control_request([171],
+            contracts={"171": built["contract"]}, intents={"171": [built["initial_intent"]]},
+            worktrees=[{"issue": 171, "recorded": None,
+                        "candidate": {"path": self.worktree, "state": "absent"}}]))
+        return built["contract"], response["actions"][0]["custody"]
+
+    def latest(self, path):
+        return json.loads(path.read_text())["issues"]["171"]["attempts"][-1]
+
+    def test_control_reconciles_a_merged_forge_only_without_live_custody(self):
+        self.project()
+        suspended = self.attempt(171)
+        self.workflow.suspend_attempt(suspended, blocked_on="external", now=NOW)
+        path = self.write_run("forge-suspended", [suspended])
+        response = self.control("forge-suspended", self.forge_request())
+        self.assertEqual([item["kind"] for item in response["actions"]], ["finalize"])
+        self.assertEqual((self.latest(path)["state"], self.latest(path)["result_source"],
+                          self.latest(path)["result"]["issue_closed"]),
+                         ("merged", "superseded", False))
+        report = ".superpowers/issue-delivery/171/run-1/ship-review.json"
+        verdict = {"issue": 171, "state": "failed", "pr_url": None, "merge_sha": None,
+            "issue_closed": False, "discussion_items": [], "detail_state": "present",
+            "report_path": report, "notes": f"owner verdict; details: {report}"}
+        path = self.write_run("forge-detail", [self.attempt(171, state="failed",
+            result=verdict, result_source="owner", finished_at=NOW)])
+        self.control("forge-detail", self.forge_request())
+        self.assertEqual((self.latest(path)["result_source"],
+                          self.latest(path)["result"]["report_path"]), ("superseded", report))
+        path = self.write_run("forge-live", [self.attempt(171)]); before = path.read_bytes()
+        self.control("forge-live", self.forge_request())
+        self.assertEqual(path.read_bytes(), before)
+        self.legacy_finish("forge-live", 171)
+        path = self.write_run("forge-verdict", [self.attempt(171, state="merged",
+            result=self.merged(171), result_source="owner", finished_at=NOW)])
+        before = path.read_bytes()
+        self.control("forge-verdict", self.forge_request())
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_contracted_reconciliation_mints_remainder_one(self):
+        self.project()
+        self.spawn_contracted("forge-v2")
+        self.cli("suspend", "--repo-root", self.root, "--run-id", "forge-v2", "--now", LATER,
+                 "--issue", 171, "--attempt", 1, "--blocked-on", "external")
+        response = self.control("forge-v2", self.forge_request())
+        remainder = next(item for item in response["actions"]
+                         if item["kind"] == "delivery_remainder")
+        self.assertEqual((remainder["custody"]["action_id"], remainder["pending_stage_ids"][0]),
+                         ("171:r1:1", "select_reviewed_output"))
+        path = self.root / ".superpowers/workflows/forge-v2/state.json"
+        self.assertEqual(self.latest(path)["result_source"], "superseded")
+
+    def test_reconciled_remainder_waits_for_capacity(self):
+        """A reconcile sweep without capacity persists the closeout; a later sweep mints r1."""
+        self.project()
+        self.spawn_contracted("forge-wait")
+        self.cli("suspend", "--repo-root", self.root, "--run-id", "forge-wait", "--now", LATER,
+                 "--issue", 171, "--attempt", 1, "--blocked-on", "external")
+        path = self.root / ".superpowers/workflows/forge-wait/state.json"
+        state = json.loads(path.read_text())
+        holder = self.workflow.new_control_attempt(issue=172, attempt_number=1,
+            worktree=str(self.root / ".worktrees/holder"), now=NOW,
+            deadline_at="2026-09-21T01:00:00Z")
+        state["issues"]["172"] = {"issue": 172, "attempts": [holder], "outcome": None,
+            "delivery": self.workflow._delivery().empty_delivery(), "delivery_remainders": []}
+        path.write_text(json.dumps(state))
+        starved = self.control("forge-wait", self.forge_request(max_parallel=1))
+        self.assertEqual([item for item in starved["actions"]
+                          if item["kind"] == "delivery_remainder"], [])
+        self.assertEqual((self.latest(path)["state"], self.latest(path)["result_source"]),
+                         ("merged", "superseded"))
+        self.legacy_finish("forge-wait", 172)
+        minted = self.control("forge-wait", self.forge_request(max_parallel=1))
+        remainder = next(item for item in minted["actions"]
+                         if item["kind"] == "delivery_remainder")
+        self.assertEqual(remainder["custody"]["action_id"], "171:r1:1")
+
+    def test_failure_before_selection_keeps_the_retry_lane(self):
+        self.project()
+        contract, custody_value = self.spawn_contracted("orch-fail")
+        digest = self.model.canonical_digest(contract)
+        run = ("--repo-root", self.root, "--run-id", "orch-fail", "--now", LATER)
+        failed = json.loads(self.cli("finish", *run, "--summary-file", "-", stdin=json.dumps(
+            self.failed_summary(custody_value, digest)).encode()).stdout)
+        self.assertEqual(failed["kind"], "terminal_failed")
+        retried = self.control("orch-fail", self.control_request([171], now=LATER,
+            worktrees=[{"issue": 171, "recorded": {"path": self.worktree, "state": "absent"},
+                        "candidate": None}]))
+        action = retried["actions"][0]
+        self.assertEqual((action["kind"], action["attempt"], action["worktree"]),
+                         ("retry", 2, self.worktree))
+        selection = self.build("selected-output", {"contract": contract, "head": "a" * 40,
+            "tree": "c" * 40, "acceptance_ref": "spec", "review_ref": "clean",
+            "test_ref": "checks"})
+        selected = self.build("observation", {"contract": contract,
+            "observation_kind": "selected_output", "selection": selection,
+            "source_kind": "repository", "source_reference": "probe", "observed_at": NOW,
+            "evidence": "selected"})
+        minted = json.loads(self.cli("finish", *run, "--summary-file", "-", stdin=json.dumps(
+            self.failed_summary(action["custody"], digest, [selected])).encode()).stdout)
+        self.assertEqual((minted["kind"], minted["custody"]["action_id"]),
+                         ("delivery_remainder", "171:r1:1"))
 
 if __name__ == "__main__":
     unittest.main()

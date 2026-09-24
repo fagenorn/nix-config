@@ -1615,10 +1615,15 @@ def _apply_one_issue_policy(
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
 
-    ``require_forge`` says the caller must observe the issue branch's pull
-    request before it may take or keep ownership, and ``forge`` carries that
-    observation once it has. Only the acquiring direct owner is asked for it —
-    it is the one that reads the forge anyway (per D3).
+    ``forge`` carries the issue branch's pull-request observation, from direct
+    and control alike. A merged one reconciles the latest attempt only when
+    nobody holds live custody of it — it is not ``active`` and unexpired unless
+    a current owner-unavailable fact names its launch — and it is nonterminal or
+    retryable, so an owner verdict is never overwritten and a live owner's later
+    ``finish`` is never raced (per D13, D30). ``require_forge`` says the caller
+    must observe that pull request before it may take or keep ownership; only
+    the acquiring direct owner is asked for it, since it reads the forge anyway
+    (per D3).
 
     ``contract`` is the issue's effective delivery contract: the installed one,
     else the caller's supplied one, else ``None``. Without one only the
@@ -1645,10 +1650,10 @@ def _apply_one_issue_policy(
     attempt, or into a ``stopped(stalled)`` terminal at the anti-zombie bound.
     ``handed_off``, ``suspended`` and ``retryable`` all read the post-reap
     attempt, so an expiry reaches the suspension lane and never the retry lane
-    (per D1). The forge-merged reconciliation is hoisted above the reaper
-    because reconciliation precedes ownership: a stall escalation returns a
-    terminal, and without the hoist that return would come before a merged pull
-    request had ever been considered (per D3).
+    (per D1). The forge-merged reconciliation sits above the reaper, behind the
+    live-custody guard: a stall escalation returns a terminal, and without that
+    order the return would come before a merged pull request had ever been
+    considered for an attempt nobody holds (per D3, D13).
     """
     if ledger_issue is not None:
         issue = ledger_issue["issue"]
@@ -1741,19 +1746,32 @@ def _apply_one_issue_policy(
     if current_owner_unavailable and not active_unexpired:
         raise WorkflowError("owner_unavailable is not applicable")
 
-    if forge is not None and forge["state"] == "merged" and latest is not None:
-        # Reconciliation precedes ownership: whatever this request would have
-        # earned, a merged pull request has already ended the work (per D3).
-        assert ledger_issue is not None
+    live_custody = active_unexpired and not current_owner_unavailable
+    reconcilable = bool(
+        latest is not None
+        and not live_custody
+        and (
+            latest["state"] in {"active", "handed_off", "suspended"}
+            or (latest["state"] == "failed" and latest["result_source"] == "owner")
+            or (latest["state"] == "stopped" and latest["result_source"] == "expiry")
+        )
+    )
+    if forge is not None and forge["state"] == "merged" and reconcilable:
+        # The live-custody guard: a merged pull request ends the work of an
+        # attempt nobody holds — whatever this request would have earned — but
+        # never a live owner's, which finishes it itself, and never an owner
+        # verdict's terminal (per D3, D13).
+        assert ledger_issue is not None and latest is not None
         reconcile_merged_attempt(ledger_issue, latest, forge=forge, now=now)
         return decision("reconcile", changed=True, expired=False)
 
     if expired:
         # One reaper, one call site, running before any lane predicate is
         # derived: everything below sees an ordinary suspension, or the stall
-        # escalation's terminal (per D1). Reconciliation is deliberately above
-        # this line — an escalation would otherwise return a terminal before a
-        # merged pull request was ever considered (per D3).
+        # escalation's terminal (per D1). Reconciliation of an attempt nobody
+        # holds is deliberately above this line — an escalation would otherwise
+        # return a terminal before a merged pull request was ever considered
+        # (per D3, D13).
         assert latest is not None and ledger_issue is not None
         demote_expired_attempt(ledger_issue, latest, now=now)
 
@@ -2032,6 +2050,7 @@ def command_control(args: argparse.Namespace) -> int:
                 dispatch_permitted=False,
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
+                forge=request["forge"][str(issue)],
                 delivery_request=request, delivery_source_kind="control",
                 contract=contracts[issue],
             )
@@ -2054,11 +2073,48 @@ def command_control(args: argparse.Namespace) -> int:
                 dispatch_permitted=dispatch_permitted,
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
+                forge=request["forge"][str(issue)],
                 delivery_request=request, delivery_source_kind="control",
                 contract=contracts[issue],
             )
             planned[issue] = result
             return result
+
+        # A merged forge's closeout is a lifecycle fact, not a dispatch: it is
+        # persisted with no action, delta or capacity. It lands in
+        # `state["issues"]` now because `apply_policy` re-plans from a deep copy
+        # of that state, and the remainder lane below must see it (per D13, D30).
+        reconciled = False
+        for issue in request["issues"]:
+            if analysis[issue]["desired"] == "reconcile":
+                state["issues"][str(issue)] = apply_policy(issue, False)["issue_state"]
+                reconciled = True
+
+        # Remainder 1 for a reconciled contracted issue, keyed on persisted
+        # state rather than this sweep's analysis: a later sweep's policy
+        # answers `terminal` for the already-reconciled attempt, and a sweep
+        # without capacity leaves the remainder for that later one (per D24, D30).
+        for issue in request["issues"]:
+            if capacity <= 0:
+                break
+            issue_state = state["issues"].get(str(issue))
+            if (
+                issue_state is None
+                or issue_state["delivery"]["contract"] is None
+                or issue_state["delivery_remainders"]
+                or not issue_state["attempts"]
+                or issue_state["attempts"][-1]["state"]
+                not in {"merged", "completed", "stopped", "failed"}
+                or not runtime.historical_requested(
+                    issue_state, forge=request["forge"][str(issue)],
+                    contract=issue_state["delivery"]["contract"], new_run=False)
+            ):
+                continue
+            result = apply_policy(issue, True)
+            if result.get("custody_kind") != "remainder":
+                continue
+            proposal_order.append(issue)
+            capacity -= 1
 
         for issue in request["issues"]:
             if analysis[issue]["desired"] != "recover":
@@ -2159,7 +2215,8 @@ def command_control(args: argparse.Namespace) -> int:
             issue_state = state["issues"].get(str(issue))
             if issue_state is None or not issue_state["attempts"]:
                 continue
-            if analysis[issue].get("custody_kind") == "remainder":
+            if "remainder" in (analysis[issue].get("custody_kind"),
+                               planned.get(issue, {}).get("custody_kind")):
                 continue
             latest = issue_state["attempts"][-1]
             observation = worktree_by_issue.get(issue)
@@ -2254,7 +2311,8 @@ def command_control(args: argparse.Namespace) -> int:
             "delivery transition refused", runtime.control_transitions,
             state, request, installing)
 
-        changed = any(result["changed"] for result in planned.values()) or delivery_changed
+        changed = (reconciled or delivery_changed
+                   or any(result["changed"] for result in planned.values()))
         if changed:
             state["updated_at"] = now
 
@@ -2446,8 +2504,9 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 and direct_run_is_terminal(selected[4]["issues"][str(issue)])
             )
             if (selected_is_terminal
-                    and runtime.historical_direct_requested(
-                        selected[4]["issues"][str(issue)], request)
+                    and runtime.historical_requested(
+                        selected[4]["issues"][str(issue)], forge=request["forge"],
+                        contract=contract, new_run=request["new_run"])
                     and not runtime.delivery_complete(selected[4]["issues"][str(issue)])):
                 selected_is_terminal = False
 

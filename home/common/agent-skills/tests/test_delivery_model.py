@@ -102,7 +102,9 @@ class DeliveryModelTest(unittest.TestCase):
             candidates = (request, {**request, "new_run": True},
                 {**request, "forge": {**forge, "merge_sha": "b" * 40}})
             self.assertEqual(
-                [runtime.historical_direct_requested(issue, value)
+                [runtime.historical_requested(
+                    issue, forge=value["forge"], contract=value["delivery_contract"],
+                    new_run=value["new_run"])
                  for value in candidates], [True, False, False])
             policy = runtime.delivery_policy(
                 issue, issue=151, request=request, source_kind="direct",
