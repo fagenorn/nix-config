@@ -143,7 +143,7 @@ Run: `just agent-installed-skill-tests 2>&1 | grep -E "^Ran |^OK|FAILED"`
 Expected: `OK`. The hostile run and the controls now include `diff-scope`.
 
 Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests 2>&1 | tail -3`
-Expected: `Ran 1223 tests`, `OK (skipped=2)`.
+Expected: `Ran 1224 tests`, `OK (skipped=2)`.
 
 - [ ] **Step 5: Commit**
 

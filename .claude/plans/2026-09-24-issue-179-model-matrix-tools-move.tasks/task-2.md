@@ -67,6 +67,20 @@ the `:h` modifier.
   `module = agent_model_matrix`.
 - In the CLI test near L670, make the argv
   `[sys.executable, "-m", "agent_tools.agent_model_matrix", "validate", "--root", str(root)]`.
+- Append this method to `AgentModelMatrixTest`. It fails if `load_matrix`
+  stops passing canonical's hook (D13):
+
+```python
+
+    def test_a_duplicate_matrix_key_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "home/common/agent-skills/model-matrix.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"schema_version": 1, "schema_version": 1}', encoding="utf-8")
+            errors = agent_model_matrix.validate(root)
+        self.assertIn("duplicate JSON key 'schema_version'", "\n".join(errors))
+```
 
 `tests/agent_model_drift_test_support.py`: in `matrix_fixture`, delete the list
 member `Path("home/common/agent-skills/scripts/agent-model-matrix.py")`, so the
@@ -136,7 +150,7 @@ be a conflicting definition beside the launcher (#175 D5).
 - [ ] **Step 5: Verify**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_agent_model_matrix.py tests/test_agent_model_drift_schema.py tests/test_agent_model_drift_routing.py tests/test_agent_model_drift_scheduling.py tests/test_agent_model_drift_producer_integration.py 2>&1 | tail -3`
-Expected: `Ran 76 tests` and `OK`. Every drift CLI test now runs against a root
+Expected: `Ran 77 tests` and `OK`. Every drift CLI test now runs against a root
 with no validator script, which exercises D5.
 
 Run: `git add python/agent_tools && git diff --cached -M --name-status -- home/common/agent-skills/scripts/agent-model-matrix.py python/agent_tools/agent_model_matrix.py`
@@ -186,7 +200,7 @@ Expected: `OK`. The hostile run and the controls now include
 `agent-model-matrix`.
 
 Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests 2>&1 | tail -3`
-Expected: `Ran 1223 tests`, `OK (skipped=2)`.
+Expected: `Ran 1224 tests`, `OK (skipped=2)`.
 
 - [ ] **Step 6: Commit**
 

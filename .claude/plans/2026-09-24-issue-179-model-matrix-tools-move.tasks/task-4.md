@@ -28,8 +28,8 @@ documents (D10)". Work from the worktree root. `PK` = `python/agent_tools`,
   - The built `~/.agents/bin/context-map-lint` is the generated launcher
     `exec <env>/bin/python3 -I -m agent_tools.context_map_lint "$@"`, at the
     same path other projects' CIs call.
-  - In `tests/test_agent_tools_launchers.py`, the module constant
-    `MISUSE_USAGE: dict[str, str]`. It maps a launcher name to a line that only
+  - In `tests/test_agent_tools_launchers.py`, the unannotated module constant
+    `MISUSE_USAGE`, a dict that maps a launcher name to a line that only
     its module docstring prints. Task 5 adds `LAUNCHER_FLOOR` beside it.
 
 **Invariants:**
@@ -211,7 +211,7 @@ Run: `just agent-installed-skill-tests 2>&1 | grep -E "^Ran |^OK|FAILED"`
 Expected: `OK`, where Step 3 showed a failure.
 
 Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests 2>&1 | tail -3`
-Expected: `Ran 1227 tests`, `OK (skipped=2)`. The 4 added tests are the lint
+Expected: `Ran 1228 tests`, `OK (skipped=2)`. The 4 added tests are the lint
 suite.
 
 - [ ] **Step 7: Commit**

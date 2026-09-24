@@ -13,7 +13,8 @@ installed-layout test (D8)" and "Acceptance criteria and how each is verified
   command table after Task 4 holds `"agent-evidence"`, `"agent-model-matrix"`,
   `"context-map-lint"` and `"diff-scope"`.
 - Produces: the module constant
-  `LAUNCHER_FLOOR: tuple[str, ...] = ("agent-evidence", "agent-model-matrix", "context-map-lint", "diff-scope")`
+  `LAUNCHER_FLOOR = ("agent-evidence", "agent-model-matrix", "context-map-lint", "diff-scope")`,
+  unannotated like the file's other constants,
   and the test `test_the_command_table_generates_each_deployed_command`, which
   replaces `test_the_command_table_generates_agent_evidence`.
 
@@ -116,7 +117,7 @@ echo ac2-clean
 ```
 
 Expected: `ac2-clean`. The suites' `REPO_ROOT` constants locate data files,
-not code.
+or source read as text, never code to import.
 
 AC3. The telemetry digest and the duplicate-key hook are defined only in
 `agent_tools.canonical` across product code (D9):
@@ -161,7 +162,7 @@ Run: `just build 2>&1 | tail -3`
 Expected: success, with no `error:` line.
 
 Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests 2>&1 | tail -3`
-Expected: `Ran 1227 tests`, `OK (skipped=2)`.
+Expected: `Ran 1228 tests`, `OK (skipped=2)`.
 
 Demo:
 - Run `just agent-model-matrix 2>/dev/null | head -2`. Expected:

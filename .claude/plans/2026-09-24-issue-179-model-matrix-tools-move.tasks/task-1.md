@@ -80,6 +80,15 @@ Then remove the imports that served only the insert:
   Keep `import sys`, and add `import subprocess` between `import json` and
   `import sys`.
 
+In `test_agent_model_drift_schema.py`, inside
+`test_corrupted_ids_duplicate_keys_and_observation_shapes_exit_two`, add this
+line after the method's last line, at its indentation. It pins D4's message,
+which the base already prints (D13):
+
+```python
+        self.assertEqual(stderr.getvalue(), "cannot load JSON input\n")
+```
+
 In `test_agent_model_drift_scheduling.py`, inside
 `RepositoryWiringTest.test_justfile_wires_new_suite_without_dropping_issue_100_boundaries`,
 replace the tuple member `"python3 scripts/agent-model-drift.py {{args}}"` with
