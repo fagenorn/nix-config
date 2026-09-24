@@ -47,6 +47,17 @@ class LifecycleHarness:
         self.run_id = "issue-14-test"
         self.control_request_serial = 0
         self.direct_request_serial = 0
+        # The CLI runs with HOME at a fixture declaring 64 claude-code slots, so
+        # suites that predate admission never bind a slot (per D23).
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = Path(home.name).resolve()
+        declaration = self.home / ".agents/share/host-declaration.json"
+        declaration.parent.mkdir(parents=True)
+        declaration.write_text(json.dumps({"schema_version": 1, "routes": {
+            "claude-code": {"support": "supported", "agent_slots": 64},
+            "codex": {"support": "unsupported"}}}), encoding="utf-8")
+        self.cli_env = {**os.environ, "HOME": str(self.home)}
 
     @staticmethod
     def empty_delivery():
@@ -125,6 +136,7 @@ class LifecycleHarness:
             capture_output=True,
             text=True,
             check=False,
+            env=self.cli_env,
         )
         if ok and completed.returncode != 0:
             self.fail(
@@ -170,6 +182,7 @@ class LifecycleHarness:
     @staticmethod
     def _legacy_control(value):
         value = copy.deepcopy(value); value["interface_version"] = 1
+        value.pop("admission", None)
         for summary in value["summaries"]:
             custody = summary.pop("custody")
             summary["attempt"] = (None if custody is None
@@ -359,10 +372,11 @@ class LifecycleHarness:
 
     def control_request(self, *, now, issues, tracker, worktrees, owners=None,
                         max_parallel=2, attempt_budget_minutes=30,
-                        human_directed=False):
+                        human_directed=False, host_route="claude-code"):
         contracts = {str(issue): self.delivery_contract(issue) for issue in issues}
         return {
-            "interface_version": 2,
+            "interface_version": 3,
+            "host_route": host_route,
             "now": now,
             "max_parallel": max_parallel,
             "attempt_budget_minutes": attempt_budget_minutes,
@@ -381,7 +395,7 @@ class LifecycleHarness:
             "recoveries": {str(issue): None for issue in issues},
         }
 
-    def control_raw(self, *, request=None, ok=True, **request_fields):
+    def control_raw(self, *, request=None, ok=True, legacy=True, **request_fields):
         value = request if request is not None else self.control_request(**request_fields)
         self.control_request_serial += 1
         request_path = self.root / f"control-{self.control_request_serial}.json"
@@ -393,7 +407,7 @@ class LifecycleHarness:
             "--request-file", request_path,
             ok=ok,
         )
-        if completed.returncode == 0:
+        if legacy and completed.returncode == 0:
             completed.stdout = json.dumps(
                 self._legacy_control(json.loads(completed.stdout)),
                 sort_keys=True, separators=(",", ":")) + "\n"
@@ -684,6 +698,36 @@ class LifecycleHarness:
     def read_state(self):
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
+    def assert_controller_finalized(self, before, *, now):
+        """The ledger `before` as a sweep ending in `finalize` at `now` leaves it
+        (per D20): its held controller claim released `finalized`, or, for a
+        ledger a schema-2 round trip left unbound (D23), only the re-bound route
+        with nothing live to adopt."""
+        expected = json.loads(before)
+        admission = expected["admission"]
+        if admission is None:
+            expected["admission"] = {"route": "claude-code", "releases": 0, "claims": []}
+        else:
+            controller = next(claim for claim in admission["claims"]
+                              if claim["holder"] == "controller"
+                              and claim["released_at"] is None)
+            admission["releases"] += 1
+            controller.update(released_at=now, release_event="finalized",
+                              release_seq=admission["releases"])
+        expected["updated_at"] = now
+        self.assertEqual(self.read_state(), expected)
+
+    @staticmethod
+    def spawned_admission(issue, *, at=DEFAULT_NOW):
+        """The admission block one claude-code sweep writes when it spawns `issue`:
+        the route binding, the controller claim a `wait` keeps, then the owner
+        role set of launch `issue:1:1` (per D4, D20, D21)."""
+        held = {"released_at": None, "release_event": None, "release_seq": None}
+        return {"route": "claude-code", "releases": 0, "claims": [
+            {"holder": "controller", "roles": {"controller": 1}, "acquired_at": at, **held},
+            {"holder": f"{issue}:1:1", "roles": {"owner": 1, "worker": 1, "reviewer": 1},
+             "acquired_at": at, **held}]}
+
     def write_state(self, state):
         self.state_path.write_text(
             json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
@@ -757,6 +801,10 @@ class LifecycleHarness:
         })
         issue_state["outcome"] = copy.deepcopy(result)
         state["updated_at"] = now
+        # The record predates admission, so it carries none: a held claim would
+        # otherwise name a launch this record just ended. The next sweep
+        # re-binds and adopts (per D11, D23).
+        state["admission"] = None
         if prior_schema:
             state["schema_version"] = 2
             state.pop("admission")
@@ -802,7 +850,7 @@ class LifecycleHarness:
             process = subprocess.Popen(
                 [sys.executable, "-c", wrapper, str(read_fd), str(SCRIPT), *args],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                pass_fds=(read_fd,),
+                pass_fds=(read_fd,), env=self.cli_env,
             )
             os.close(read_fd)
             processes.append((issue, attempt, result, process))
@@ -831,7 +879,7 @@ class LifecycleHarness:
         completed = subprocess.run(
             [sys.executable, str(SCRIPT), "control", "--repo-root", str(root),
              "--run-id", self.run_id, "--request-file", str(request_path)],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, env=self.cli_env,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         completed.stdout = json.dumps(
@@ -2440,7 +2488,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(resumed["summaries"][0]["state"], "stopped")
         self.assertEqual(resumed["actions"], [{"id": "finalize", "kind": "finalize"}])
         self.assertEqual(len(self.read_state()["issues"]["14"]["attempts"]), 2)
-        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assert_controller_finalized(before, now="2026-08-13T20:40:00Z")  # per D20
 
     def test_progress_action_precedence_and_complete_inputs_are_persisted(self):
         self.init_run()
@@ -2599,7 +2647,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 expected_state = {
                     "schema_version": 4, "run_id": run_id,
                     "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
-                    "prior_run": None, "admission": None,
+                    "prior_run": None, "admission": self.spawned_admission(14),
                     "issues": {"14": {
                         "issue": 14, "attempts": [expected_attempt],
                         "outcome": None, "delivery": delivery,
@@ -2646,7 +2694,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         expected_state = {
             "schema_version": 4, "run_id": self.run_id,
             "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
-            "prior_run": None, "admission": None,
+            "prior_run": None, "admission": self.spawned_admission(14),
             "issues": {"14": {
                 "issue": 14, "attempts": [expected_attempt], "outcome": None,
                 "delivery": delivery, "delivery_remainders": [],
@@ -3125,7 +3173,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assert_control_response_shape(resumed)
         self.assertEqual(resumed["summaries"][0]["result"], result)
         self.assertEqual(resumed["actions"], [{"id": "finalize", "kind": "finalize"}])
-        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assert_controller_finalized(before, now="2026-08-13T20:20:00Z")  # per D20
 
     def test_invalid_schema_state_and_action_are_rejected_without_changes(self):
         corruptions = (
@@ -3589,6 +3637,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 stderr=subprocess.PIPE,
                 text=True,
                 pass_fds=(read_fd,),
+                env=self.cli_env,
             )
             os.close(read_fd)
             processes.append(process)
@@ -4131,7 +4180,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 "--request-file", zero_request,
             )
             controlled_value = json.loads(controlled.stdout)
-            self.assertEqual(controlled_value["interface_version"], 2)
+            self.assertEqual(controlled_value["interface_version"], 3)
             self.assertEqual(controlled_value["run_id"], zero_id)
             self.assertEqual(controlled_value["summaries"][0]["state"], "closed")
             self.assertEqual(controlled_value["actions"],
@@ -5218,7 +5267,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         attempt = self.read_state()["issues"]["43"]["attempts"][-1]
         self.assertEqual(attempt["state"], "suspended")
         self.assertEqual(attempt["blocked_on"], "external")
-        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assert_controller_finalized(before, now="2026-08-13T20:06:00Z")  # per D20
 
     def test_human_directed_control_resumes_a_gated_suspension(self):
         # A sweep the caller named issue-by-issue carries the same consent a
@@ -5256,7 +5305,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assert_control_response_shape(swept)
         self.assertEqual([a for a in swept["actions"] if a["kind"] == "resume"], [])
         self.assertEqual(swept["deltas"], [])
-        self.assertEqual(self.state_path.read_bytes(), parked)
+        self.assert_controller_finalized(parked, now="2026-08-13T20:06:00Z")  # per D20
 
         directed = self.control(
             now="2026-08-13T20:07:00Z", issues=[45, 46],

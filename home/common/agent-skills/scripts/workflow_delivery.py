@@ -584,11 +584,16 @@ class DeliveryRuntime:
     ) -> dict[str, Any]:
         return self._projection.remainder_facade(issue_state, remainder)
 
-    def occupied_count(
+    def live_launches(
         self, state: dict[str, Any], *, at_time: str,
         unavailable: set[tuple[int, str, int, int]],
-    ) -> int:
-        count = 0
+    ) -> set[str]:
+        """The current-custody ``action_id``s still occupying a launch at ``at_time``.
+
+        A launch is live when its record is ``active``, ``at_time`` is before its
+        ``deadline_at`` and its identity is not observed unavailable.
+        """
+        live: set[str] = set()
         for issue_state in state["issues"].values():
             custody, record = self.current_custody(issue_state["issue"], issue_state)
             if custody is None or record is None or record["state"] != "active":
@@ -596,8 +601,14 @@ class DeliveryRuntime:
             ordinal = custody.get("attempt", custody.get("remainder"))
             identity = (issue_state["issue"], custody["kind"], ordinal, custody["launch"])
             if self._time(at_time) < self._time(record["deadline_at"]) and identity not in unavailable:
-                count += 1
-        return count
+                live.add(custody["action_id"])
+        return live
+
+    def occupied_count(
+        self, state: dict[str, Any], *, at_time: str,
+        unavailable: set[tuple[int, str, int, int]],
+    ) -> int:
+        return len(self.live_launches(state, at_time=at_time, unavailable=unavailable))
 
     def next_deadline(self, state: dict[str, Any], issues: list[int]) -> str | None:
         values = []

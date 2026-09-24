@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 
 SCHEMA_VERSION = 4
-CONTROL_INTERFACE_VERSION = 2
+CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
     {"active", "handed_off", "suspended", "stopped", "failed", "merged"}
@@ -125,6 +125,7 @@ BOOTSTRAP_REQUIREMENT_FIELDS = frozenset(
 CONTROL_REQUEST_FIELDS = frozenset(
     {
         "interface_version",
+        "host_route",
         "now",
         "max_parallel",
         "attempt_budget_minutes",
@@ -1617,6 +1618,16 @@ def validate_control_request(value):
             raise WorkflowError("duplicate control issue")
         seen_issues.add(issue)
 
+    # `direct` is single-owner control: one issue at `max_parallel` 1 and no
+    # declaration read; any other route is a declared route name (D3, D9).
+    library = _host_admission()
+    route = request["host_route"]
+    if not isinstance(route, str) or not (
+            route == library.DIRECT_ROUTE or library.ROUTE_NAME_PATTERN.fullmatch(route)):
+        raise WorkflowError("invalid control host_route")
+    if route == library.DIRECT_ROUTE and (len(issues) != 1 or request["max_parallel"] != 1):
+        raise WorkflowError("the direct host route controls exactly one issue at max_parallel 1")
+
     tracker = request["tracker"]
     if not isinstance(tracker, list):
         raise WorkflowError("invalid tracker observations")
@@ -2257,6 +2268,23 @@ def command_control(args: argparse.Namespace) -> int:
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
     tracker_by_issue = {item["issue"]: item for item in request["tracker"]}
     worktree_by_issue = {item["issue"]: item for item in request["worktrees"]}
+    library = _host_admission()
+    route = request["host_route"]
+    direct = route == library.DIRECT_ROUTE
+    # A supported route's slots come from the declaration, read once before the
+    # transaction; any other verdict refuses the sweep with nothing written (D9).
+    declared_slots: int | None = None
+    if not direct:
+        verdict = route_verdict(route)
+        if verdict["support"] != "supported":
+            raise WorkflowError(
+                f"host route {route!r} is unsupported: {verdict['reason_code']}")
+        declared_slots = verdict["agent_slots"]
+    role_set_size = sum(library.OWNER_ROLE_SET.values())
+
+    def new_claim(holder: str, roles: Any) -> dict[str, Any]:
+        return {"holder": holder, "roles": dict(roles), "acquired_at": now,
+                "released_at": None, "release_event": None, "release_seq": None}
 
     def control(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         assert state is not None
@@ -2275,6 +2303,34 @@ def command_control(args: argparse.Namespace) -> int:
         }
 
         unavailable = _call(None, runtime.validate_control_custody, state, request)
+
+        # Bind the run's route at its first interface-3 sweep and adopt every
+        # live custody it already holds, even beyond the declaration (D3, D11).
+        admission_changed = False
+        if state["admission"] is None:
+            state["admission"] = {"route": route, "releases": 0, "claims": []}
+            admission_changed = True
+            if not direct:
+                for issue_state in state["issues"].values():
+                    holder = current_launch_id(runtime, issue_state["issue"], issue_state)
+                    if holder is not None:
+                        state["admission"]["claims"].append(
+                            new_claim(holder, library.OWNER_ROLE_SET))
+        elif state["admission"]["route"] != route:
+            raise WorkflowError(
+                f"control host route {route!r} does not match the run's bound route "
+                f"{state['admission']['route']!r}")
+        admission = state["admission"]
+        if not direct:
+            releases_before = admission["releases"]
+            settle_admission(state, at=now)
+            for claim in admission["claims"]:
+                if claim["holder"] == CONTROLLER_HOLDER or claim["released_at"] is not None:
+                    continue
+                issue, kind, ordinal, launch = parse_claim_holder(claim["holder"])
+                if (issue, kind, ordinal, launch) in unavailable:
+                    release_claim(admission, claim, event="owner_unavailable", at=now)
+            admission_changed = admission_changed or admission["releases"] != releases_before
 
         analysis: dict[int, dict[str, Any]] = {}
         for issue in request["issues"]:
@@ -2296,6 +2352,49 @@ def command_control(args: argparse.Namespace) -> int:
 
         occupied = runtime.occupied_count(state, at_time=now, unavailable=unavailable)
         capacity = max(0, request["max_parallel"] - occupied)
+
+        # The controller's own role, then every held claim still occupying a
+        # live launch, come off the declared slots before any lane admits (D4).
+        controller_claim = None
+        new_controller = False
+        available = 0
+        if not direct:
+            controller_claim = next(
+                (claim for claim in admission["claims"]
+                 if claim["holder"] == CONTROLLER_HOLDER and claim["released_at"] is None),
+                None)
+            if controller_claim is None:
+                controller_claim = new_claim(CONTROLLER_HOLDER, library.CONTROLLER_ROLES)
+                admission["claims"].append(controller_claim)
+                new_controller = True
+            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
+            available = declared_slots - sum(
+                sum(claim["roles"].values()) for claim in admission["claims"]
+                if claim["released_at"] is None
+                and (claim["holder"] == CONTROLLER_HOLDER or claim["holder"] in live))
+        waiting: set[int] = set()
+        acquired = False
+
+        def slot_withheld(issue: int) -> bool:
+            """Whether no whole role set is free; the skipped issue then waits (D21)."""
+            if direct or available >= role_set_size:
+                return False
+            waiting.add(issue)
+            return True
+
+        def acquire(issue: int) -> None:
+            """Claim the role set of the launch this dispatch created, once (D21)."""
+            nonlocal available, acquired
+            if direct:
+                return
+            custody, record = runtime.current_custody(issue, planned[issue]["issue_state"])
+            if custody is None or record is None or record["state"] != "active":
+                return
+            if any(claim["holder"] == custody["action_id"] for claim in admission["claims"]):
+                return
+            admission["claims"].append(new_claim(custody["action_id"], library.OWNER_ROLE_SET))
+            available -= role_set_size
+            acquired = True
 
         planned: dict[int, dict[str, Any]] = {}
         proposal_order: list[int] = []
@@ -2349,10 +2448,13 @@ def command_control(args: argparse.Namespace) -> int:
                     contract=issue_state["delivery"]["contract"], new_run=False)
             ):
                 continue
+            if slot_withheld(issue):
+                continue
             result = apply_policy(issue, True)
             if result.get("custody_kind") != "remainder":
                 continue
             proposal_order.append(issue)
+            acquire(issue)
             capacity -= 1
 
         for issue in request["issues"]:
@@ -2360,9 +2462,12 @@ def command_control(args: argparse.Namespace) -> int:
                 continue
             if analysis[issue]["changed"] and capacity <= 0:
                 continue
+            if analysis[issue]["changed"] and slot_withheld(issue):
+                continue
             apply_policy(issue, True)
             proposal_order.append(issue)
             if analysis[issue]["changed"]:
+                acquire(issue)
                 capacity -= 1
 
         for issue in request["issues"]:
@@ -2380,6 +2485,8 @@ def command_control(args: argparse.Namespace) -> int:
                 # and the next sweep resumes it. A handoff, and any worktree
                 # observed as absent or mismatched, stays a refusal (per D9).
                 continue
+            if slot_withheld(issue):
+                continue
             result = apply_policy(issue, True)
             if result["operation"] == "observe":
                 raise WorkflowError(
@@ -2388,6 +2495,7 @@ def command_control(args: argparse.Namespace) -> int:
             if result["operation"] == "contract":
                 continue
             proposal_order.append(issue)
+            acquire(issue)
             capacity -= 1
 
         for issue in request["issues"]:
@@ -2397,6 +2505,8 @@ def command_control(args: argparse.Namespace) -> int:
                 proposal_order.append(issue)
             elif desired == "retry":
                 if capacity > 0:
+                    if slot_withheld(issue):
+                        continue
                     result = apply_policy(issue, True)
                     if result["operation"] == "observe":
                         raise WorkflowError(
@@ -2405,6 +2515,7 @@ def command_control(args: argparse.Namespace) -> int:
                     if result["operation"] == "contract":
                         continue
                     proposal_order.append(issue)
+                    acquire(issue)
                     capacity -= 1
             elif analysis[issue]["expired"] and issue not in planned:
                 # The resume pass may already have dispatched this reap.
@@ -2417,6 +2528,8 @@ def command_control(args: argparse.Namespace) -> int:
         for issue in request["issues"]:
             if capacity <= 0 or analysis[issue]["desired"] != "spawn":
                 continue
+            if slot_withheld(issue):
+                continue
             result = apply_policy(issue, True)
             if result["operation"] == "observe":
                 raise WorkflowError(
@@ -2425,6 +2538,7 @@ def command_control(args: argparse.Namespace) -> int:
             if result["operation"] == "contract":
                 continue
             proposal_order.append(issue)
+            acquire(issue)
             capacity -= 1
 
         dispatch_results = [
@@ -2550,10 +2664,29 @@ def command_control(args: argparse.Namespace) -> int:
             "delivery transition refused", runtime.control_transitions,
             state, request, installing)
 
-        changed = (reconciled or delivery_changed
+        next_deadline=runtime.next_deadline(state,request["issues"])
+        if not direct:
+            # Release every claim whose launch this sweep ended; a sweep ending
+            # in `finalize` keeps no controller claim (D19, D20).
+            releases_before = admission["releases"]
+            settle_admission(state, at=now)
+            if next_deadline is None:
+                if new_controller:
+                    admission["claims"].remove(controller_claim)
+                    new_controller = False
+                else:
+                    release_claim(admission, controller_claim, event="finalized", at=now)
+            admission_changed = (admission_changed or acquired or new_controller
+                                 or admission["releases"] != releases_before)
+
+        changed = (reconciled or delivery_changed or admission_changed
                    or any(result["changed"] for result in planned.values()))
         if changed:
             state["updated_at"] = now
+
+        def contract_missing(issue: int) -> bool:
+            issue_state = state["issues"].get(str(issue))
+            return issue_state is None or issue_state["delivery"]["contract"] is None
 
         summaries = [
             control_summary(
@@ -2562,12 +2695,12 @@ def command_control(args: argparse.Namespace) -> int:
                 issue_state=state["issues"].get(str(issue)),
                 reduction=reductions.get(issue),
                 contract_required=(
-                    issue in planned and planned[issue]["operation"] == "contract"
+                    (issue in planned and planned[issue]["operation"] == "contract")
+                    or (issue in waiting and contract_missing(issue))
                 ),
             )
             for issue in request["issues"]
         ]
-        next_deadline=runtime.next_deadline(state,request["issues"])
 
         # A wait must name the instant it ends. With no deadline armed there is
         # nothing left for this sweep to wake up for, so control renders the
@@ -2584,6 +2717,21 @@ def command_control(args: argparse.Namespace) -> int:
         runtime.decorate_control(
             state, deltas, actions, reductions, CONTROL_DISPATCH_KINDS,
             ledger_repo_root=str(resolve_repo_root(args.repo_root)))
+        reserved = {role: 0 for role in library.ROLE_NAMES}
+        report: dict[str, Any] = {
+            "route": route, "declared_slots": None, "reserved": reserved,
+            "available": None, "waiting": []}
+        if not direct:
+            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
+            for claim in admission["claims"]:
+                if claim["released_at"] is None and (
+                        claim["holder"] == CONTROLLER_HOLDER or claim["holder"] in live):
+                    for role, count in claim["roles"].items():
+                        reserved[role] += count
+            report.update(
+                declared_slots=declared_slots,
+                available=max(0, declared_slots - sum(reserved.values())),
+                waiting=[issue for issue in request["issues"] if issue in waiting])
         return {
             "interface_version": CONTROL_INTERFACE_VERSION,
             "run_id": args.run_id,
@@ -2592,6 +2740,7 @@ def command_control(args: argparse.Namespace) -> int:
             "deltas": deltas,
             "actions": actions,
             "next_deadline": next_deadline,
+            "admission": report,
         }, changed
 
     response = transact(args.repo_root, args.run_id, control,

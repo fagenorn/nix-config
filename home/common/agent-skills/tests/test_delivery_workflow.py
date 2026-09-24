@@ -59,7 +59,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
 
     def control_request(self, contract=None):
         empty = {"151": []}; scope = {"151": None}
-        return {"interface_version": 2, "now": NOW, "max_parallel": 1,
+        return {"interface_version": 3, "host_route": "direct", "now": NOW, "max_parallel": 1,
             "attempt_budget_minutes": 30, "human_directed": False,
             "issues": [151], "tracker": [{"issue": 151, "state": "open",
                 "open_blockers": [], "decision_blockers": []}],
@@ -140,7 +140,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
 
     def test_interface_two_maps_and_singular_inputs_are_closed(self):
         request, context = self.workflow.validate_control_request(self.control_request())
-        self.assertEqual(context, {151: None}); self.assertEqual(request["interface_version"], 2)
+        self.assertEqual(context, {151: None}); self.assertEqual(request["interface_version"], 3)
         direct, direct_context = self.workflow.validate_direct_owner_request(
             self.direct_request())
         self.assertEqual(direct_context, {151: None}); self.assertEqual(direct["interface_version"], 2)
@@ -1127,13 +1127,17 @@ class DeliveryAdmissionTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); run_id = "dispatch-wire"
+            home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+            env = {**os.environ, "HOME": str(home)}
             bound = {issue: self.issue_contract(issue, str(root / f"worktree-{issue}"))
                      for issue in issues}
             initialized = subprocess.run(
                 [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
-                 "--run-id", run_id, "--now", NOW], capture_output=True, check=False)
+                 "--run-id", run_id, "--now", NOW], capture_output=True, check=False,
+                env=env)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
-            request = {"interface_version": 2, "now": NOW, "max_parallel": 2,
+            request = {"interface_version": 3, "host_route": "claude-code", "now": NOW,
+                "max_parallel": 2,
                 "attempt_budget_minutes": 30, "human_directed": True, "issues": issues,
                 "tracker": [{"issue": issue, "state": "open", "open_blockers": [],
                              "decision_blockers": []} for issue in issues],
@@ -1151,7 +1155,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             completed = subprocess.run(
                 [sys.executable, str(WORKFLOW), "control", "--repo-root", str(root),
                  "--run-id", run_id, "--request-file", str(path)],
-                capture_output=True, check=False)
+                capture_output=True, check=False, env=env)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             response = json.loads(completed.stdout)
             self.assertEqual([action["kind"] for action in response["actions"]],
@@ -1227,10 +1231,11 @@ class BuilderHarness:
         return owner
 
     def control_request(self, issues, *, now=NOW, contracts=None, intents=None,
-                        worktrees=(), forge=None, max_parallel=2):
+                        worktrees=(), forge=None, max_parallel=2, host_route="claude-code"):
         def keyed(value):
             return {str(issue): copy.deepcopy(value) for issue in issues}
-        return {"interface_version": 2, "now": now, "max_parallel": max_parallel,
+        return {"interface_version": 3, "host_route": host_route, "now": now,
+            "max_parallel": max_parallel,
             "attempt_budget_minutes": 30, "human_directed": True, "issues": list(issues),
             "tracker": [{"issue": issue, "state": "open", "open_blockers": [],
                          "decision_blockers": []} for issue in issues],
@@ -1678,6 +1683,21 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         (path.parent / "state.lock").touch()
         return path
 
+    def assert_bound(self, path, before, *, adopted=(), controller=True, now=LATER):
+        """The ledger `before` plus only what a first claude-code sweep persists (per
+        D11, D20): the route binding, each live launch it adopted, and the controller
+        claim when the sweep ends in `wait`."""
+        held = {"acquired_at": now, "released_at": None, "release_event": None,
+                "release_seq": None}
+        claims = [{"holder": holder, "roles": {"owner": 1, "worker": 1, "reviewer": 1},
+                   **held} for holder in adopted]
+        if controller:
+            claims.append({"holder": "controller", "roles": {"controller": 1}, **held})
+        expected = json.loads(before)
+        expected.update(updated_at=now, admission={
+            "route": "claude-code", "releases": 0, "claims": claims})
+        self.assertEqual(json.loads(path.read_bytes()), expected)
+
     def attempt(self, issue, number=1, **changes):
         value = self.workflow.new_control_attempt(issue=issue, attempt_number=number,
             worktree=self.worktree, now=NOW, deadline_at="2026-09-21T01:00:00Z")
@@ -1784,7 +1804,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                 self.assertEqual([(item["kind"], item.get("deadline_at"))
                                   for item in response["actions"]],
                                  [("wait", "2026-09-21T01:00:00Z")])
-                self.assertEqual(path.read_bytes(), before)
+                self.assert_bound(path, before, adopted=["171:1:1"])
                 wire = subprocess.run([sys.executable, str(ARTIFACT_BUDGET), "validate-report",
                     "--boundary", "workflow-response", "--input", "-", "--policy", str(POLICY)],
                     input=raw, capture_output=True, check=False)
@@ -1829,7 +1849,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         starved = self.control("retry", self.control_request([171], now=LATER,
             worktrees=absent, max_parallel=1, **supplied))
         self.assertEqual(starved["summaries"][0]["requirements"], [])
-        self.assertEqual(path.read_bytes(), before)
+        # Binding adopts 172's live launch; the sweep finalizes, so no controller claim.
+        self.assert_bound(path, before, adopted=["172:1:1"], controller=False)
         # Capacity and no contract: the issue asks for it; the sweep is not refused.
         asked = self.control("retry", self.control_request([171], now=LATER,
             worktrees=absent))
@@ -1837,7 +1858,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                           asked["summaries"][0]["requirements"]),
                          (None, CONTRACT_REQUIRED))
         self.assertEqual([item for item in asked["actions"] if item.get("issue") == 171], [])
-        self.assertEqual(path.read_bytes(), before)
+        self.assert_bound(path, before, adopted=["172:1:1"], controller=False)
         # The builder contract bound to the recorded path retries in place.
         retried = self.control("retry", self.control_request([171], now=LATER,
             worktrees=absent, **supplied))
@@ -2003,13 +2024,13 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                           self.latest(path)["result"]["report_path"]), ("superseded", report))
         path = self.write_run("forge-live", [self.attempt(171)]); before = path.read_bytes()
         self.control("forge-live", self.forge_request())
-        self.assertEqual(path.read_bytes(), before)
+        self.assert_bound(path, before, adopted=["171:1:1"])
         self.legacy_finish("forge-live", 171)
         path = self.write_run("forge-verdict", [self.attempt(171, state="merged",
             result=self.merged(171), result_source="owner", finished_at=NOW)])
         before = path.read_bytes()
         self.control("forge-verdict", self.forge_request())
-        self.assertEqual(path.read_bytes(), before)
+        self.assert_bound(path, before, controller=False)
 
     def test_contracted_reconciliation_mints_remainder_one(self):
         self.project()

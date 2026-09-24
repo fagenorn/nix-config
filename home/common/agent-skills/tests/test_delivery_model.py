@@ -627,6 +627,9 @@ class DeliveryModelTest(unittest.TestCase):
         bad = copy.deepcopy(fixtures["host_route"]); bad["reason_code"] = "declared_unsupported"; mutations["host_route_supported_reason"] = bad
         bad = copy.deepcopy(fixtures["host_route_unsupported"]); bad["reason_code"] = "busy"; mutations["host_route_reason"] = bad
         bad = copy.deepcopy(fixtures["host_route_unsupported"]); bad["alternative"] = None; mutations["host_route_alternative"] = bad
+        bad = copy.deepcopy(fixtures["control"]); bad["admission"]["waiting"] = [151]; mutations["waiting_dispatched"] = bad
+        bad = copy.deepcopy(fixtures["control"]); bad["interface_version"] = 2; mutations["control_interface_two"] = bad
+        bad = copy.deepcopy(fixtures["control"]); bad["admission"]["route"] = "direct"; mutations["direct_with_slots"] = bad
         for name, value in mutations.items():
             with self.subTest(mutation=name): self.assert_invalid(value, "workflow-response")
 
