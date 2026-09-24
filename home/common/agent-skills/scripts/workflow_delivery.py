@@ -102,6 +102,11 @@ class DeliveryRuntime:
                 raise ValueError("builder returned an invalid contract result")
             self.validate(result["contract"], "delivery-contract")
             self.validate(result["initial_intent"], "authorization-intent")
+        elif kind == "authorization-chain":
+            if not isinstance(result, dict) or set(result) != {"authorization_chain_digest"} \
+                    or not isinstance(result["authorization_chain_digest"], str) \
+                    or not result["authorization_chain_digest"].startswith("sha256:"):
+                raise ValueError("builder returned an invalid authorization chain")
         elif kind in self._BUILD_OUTPUT_KINDS:
             self.validate(result, self._BUILD_OUTPUT_KINDS[kind])
         else:
@@ -211,16 +216,22 @@ class DeliveryRuntime:
             raise ValueError("delivery recovery refused") from error
         if recovery is not None:
             return recovery
-        if (source_kind == "direct" and issue_state is not None
+        # Direct's historical remainder, and control's once a merged forge has
+        # been reconciled and dispatch is permitted (per D13, D30).
+        if (issue_state is not None
+                and (source_kind == "direct"
+                     or (source_kind == "control" and dispatch_permitted))
                 and not issue_state["delivery_remainders"]
                 and issue_state["attempts"]
                 and issue_state["attempts"][-1]["state"]
                 in {"merged", "completed", "stopped", "failed"}
-                and self._projection.historical_direct_requested(issue_state, request)):
+                and self.historical_requested(
+                    issue_state, **self.historical_request(request, issue,
+                                                           source_kind=source_kind))):
             before = copy.deepcopy(issue_state["delivery"])
             reduction = self.apply_transition(
                 issue_state, issue=issue, request=request,
-                source_kind="direct", at_time=now)
+                source_kind=source_kind, at_time=now)
             record = issue_state["attempts"][-1]
             remainder = self._create_first_remainder(
                 issue_state, record, reduction, now=now,
@@ -318,10 +329,24 @@ class DeliveryRuntime:
     def delivery_complete(self, issue_state: dict[str, Any]) -> bool:
         return self._projection.delivery_complete(issue_state)
 
-    def historical_direct_requested(
-        self, issue_state: dict[str, Any], request: dict[str, Any]
+    def historical_requested(
+        self, issue_state: dict[str, Any], *, forge: object, contract: object,
+        new_run: object,
     ) -> bool:
-        return self._projection.historical_direct_requested(issue_state, request)
+        return self._projection.historical_requested(
+            issue_state, forge=forge, contract=contract, new_run=new_run)
+
+    @staticmethod
+    def historical_request(
+        request: dict[str, Any], issue: int, *, source_kind: str,
+    ) -> dict[str, Any]:
+        """The historical predicate's inputs from a direct or control request shape."""
+        if source_kind == "control":
+            key = str(issue)
+            return {"forge": request["forge"][key],
+                    "contract": request["delivery_contracts"][key], "new_run": False}
+        return {"forge": request.get("forge"), "contract": request["delivery_contract"],
+                "new_run": request.get("new_run")}
 
 
     def remainder_policy(
@@ -853,6 +878,11 @@ class DeliveryRuntime:
             record["finished_at"] = now
         terminal = {**common, "kind": "terminal_failed", "state": "terminal_failed",
                     "result_source": "owner", "reason_code": "owner_reported_failure"}
+        if not self._selection_observed(issue_state["delivery"]):
+            # Before selection a failure belongs to the implementation retry
+            # lane: a remainder here would be the one nonterminal custody and
+            # block the retry (per D14).
+            return terminal
         remainder = self._create_first_remainder(
             issue_state, record, reduction, now=now,
             remainder_deadline=remainder_deadline)
@@ -861,6 +891,13 @@ class DeliveryRuntime:
         return self.remainder_response(
             ledger_repo_root=ledger_repo_root, run_id=run_id,
             issue_state=issue_state, remainder=remainder, reduction=reduction)
+
+    @staticmethod
+    def _selection_observed(delivery: dict[str, Any]) -> bool:
+        selection = {stage["id"] for stage in delivery["contract"]["stages"]
+                     if stage["kind"] == "select_reviewed_output"}
+        return all(fact["state"] == "observed" for fact in delivery["stage_facts"]
+                   if fact["stage_id"] in selection)
 
     def _create_first_remainder(
         self, issue_state: dict[str, Any], record: dict[str, Any],

@@ -18,15 +18,18 @@ class DeliveryProjection:
     """Project validated workflow state into closed interface-2 values."""
 
     @staticmethod
-    def historical_direct_requested(issue_state: dict[str, Any],
-                                    request: dict[str, Any]) -> bool:
+    def historical_requested(issue_state: dict[str, Any], *, forge: object,
+                             contract: object, new_run: object) -> bool:
+        """A merged latest attempt the forge confirms, with contracted delivery pending.
+
+        Direct passes its singular request's forge and contract; control passes
+        the issue's ``forge`` entry and its effective contract (per D30).
+        """
         delivery = issue_state["delivery"]
         attempt = issue_state["attempts"][-1]
         result = attempt.get("result")
-        forge = request.get("forge")
-        return (request.get("new_run") is not True
-                and (request["delivery_contract"] is not None
-                     or delivery["contract"] is not None)
+        return (new_run is not True
+                and (contract is not None or delivery["contract"] is not None)
                 and attempt["state"] == "merged"
                 and isinstance(result, dict) and result.get("state") == "merged"
                 and isinstance(forge, dict) and forge.get("state") == "merged"

@@ -218,12 +218,14 @@ then dispatch exactly one fresh issue owner at the existing
 mechanical-only direct autonomous runs.
 
 The continuation is one closed JSON object shaped like this representative
-value:
+value. Its `owner` is the validated interface-2 owner object this controller
+acquired, unchanged, with all 19 members; the angle-bracketed strings stand for
+the helper's own values:
 
 ```json
 {
   "owner": {
-    "interface_version": 1,
+    "interface_version": 2,
     "kind": "owner",
     "ledger_repo_root": "/absolute/primary-checkout",
     "run_id": "direct-74-000001",
@@ -232,9 +234,16 @@ value:
     "owner": "74:1",
     "action_id": "74:1:1",
     "launch_kind": "spawn",
-    "worktree": "/absolute/issue-worktree",
+    "worktree": "/absolute/.worktrees/worktree-issue-74-cache",
     "handoff_path": null,
-    "deadline_at": "2026-08-20T12:00:00Z"
+    "deadline_at": "2026-08-20T12:00:00Z",
+    "custody": {"kind": "implementation", "attempt": 1, "launch": 1, "action_id": "74:1:1"},
+    "contract": "<the installed delivery-contract/v1 object>",
+    "contract_digest": "<sha256 digest of that contract>",
+    "pending_stage_ids": ["select_reviewed_output", "publish_branch", "open_pr", "merge_pr", "close_tracker", "delete_remote_branch", "remove_worktree", "delete_local_branch"],
+    "requirements": [{"kind": "scope_tuple", "subject_id": "select_reviewed_output", "reason_code": "scope_tuple_required", "detail_pointer": null}],
+    "authority_evaluation": null,
+    "requested_scope": null
   },
   "reviewed_head_sha": "0123456789abcdef0123456789abcdef01234567",
   "spec_artifact": {
@@ -277,7 +286,9 @@ Repository bindings are re-resolved in the delegated worktree.
 
 #### Fresh delegated owner
 
-Before reading either artifact, re-resolve `branchPattern` and `worktreePrefix`
+First pipe the continuation's `owner` object through
+`artifact-budget validate-report --boundary workflow-response --input -`; an
+invalid object stops the attempt before anything else runs. Before reading either artifact, re-resolve `branchPattern` and `worktreePrefix`
 from repository bindings in `owner.worktree`. Quote the pattern's literal bytes,
 substitute decimal `owner.issue` for `<num>` and
 `[a-z0-9][a-z0-9-]*` for `<slug>`, and accept exactly the resulting pattern with
@@ -304,14 +315,17 @@ persisted action `delegate`. For this already-delegated implementation owner,
 that Phase-6 delegate is fulfilled by the existing fresh Phase-7 ship owner with
 `auto: true`; it must not dispatch a second issue owner.
 
-After validating the ship owner's ship-summary bytes, call
-`workflow-state progress` for completed Phase 7. Make the terminal result file
-and finish invocation the ledger-only remainder; use truthful available usage
-and the same three gate values, require persisted `delegate`, and use the
-existing ledger-only bookkeeper route.
+After validating the ship owner's `ship-summary/v2` bytes, call
+`workflow-state progress` for completed Phase 7. Make the finish invocation,
+fed those validated summary bytes on stdin, the ledger-only remainder; use
+truthful available usage and the same three gate values, require persisted
+`delegate`, and use the existing ledger-only bookkeeper route.
 Give the bookkeeper an exact two-command sequence and nothing else: first
 `~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
-with this owner's own `action_id`, then the exact `workflow-state finish` command.
+with this owner's own `action_id`, then the exact `workflow-state finish` command,
+`workflow-state finish --summary-file - --repo-root <ledger_repo_root> --run-id <run-id> --now <utc>`,
+with the ship owner's validated summary inline in its quoted heredoc and its
+reply piped through `artifact-budget validate-report --boundary workflow-response --input -`.
 It executes exactly that sequence and relays the `finish` stdout; it decides
 nothing and edits nothing. It runs `finish` only after a `current: true` answer
 from a well-formed `check-launch` on exit 0. On `current: false`, a non-zero
@@ -329,10 +343,11 @@ ledger-only progress, and terminal sequence.
 #### Earlier controller stop
 
 The earlier controller's
-post-delegation action set is exactly validate, relay, and stop. For the
-received bytes, run
-`artifact-budget validate-report --boundary ship-summary`; after successful
-validation, relay the canonical bytes unchanged to its caller and stop.
+post-delegation action set is exactly validate, relay, and stop. The
+received bytes are the delegated owner's durable `finish` reply, a workflow
+response, so run `artifact-budget validate-report --boundary workflow-response`
+over them; after successful validation, relay the canonical bytes unchanged to
+its caller and stop.
 
 The earlier controller does not invoke `sdd`.
 It does not edit implementation files.
@@ -369,10 +384,9 @@ stops the action and is never routed around.
 
 ## Interface_version 2 delivery relay
 
-Validate every raw `workflow-response` before decoding. Preserve custody,
-contract digest, pending stages, and requested_scope across relays. Bind the
-actual invocation to the echoed scope and run the exact four-key current-launch
-fence before an effect and before reporting its observation. Send partial effect
-or authority/provider denial as `ship-checkpoint/v2` to `checkpoint-delivery`;
-send `ship-summary/v2` only for complete delivery or genuine custody failure.
-Resume the returned implementation or delivery_remainder identity unchanged.
+Every relay here carries a validated object unchanged: the interface-2 `owner`
+object in the continuation, the ship owner's `ship-summary/v2` into `finish`,
+and each `workflow-state` reply after `artifact-budget validate-report
+--boundary workflow-response`. Delivery effects, scopes and observations belong
+to ship-issue's `## Delivery loop`; a returned `delivery_remainder` launches
+ship-issue remainder mode per `SKILL.md`.

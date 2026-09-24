@@ -806,13 +806,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             os.write(write_fd, b"x")
             os.close(write_fd)
         for _, _, _, process in processes:
-            _, stderr = process.communicate()
-            if process.returncode != 0:
-                self.assertIn("legacy finish is read-only for schema 3 runs", stderr)
-        self.assertEqual(sum(process.returncode == 0 for *_, process in processes), 1)
-        for issue, attempt, result, process in processes:
-            if process.returncode != 0:
-                self.finish(attempt, result, issue=issue, now=now)
+            process.communicate()
+        self.assertTrue(all(process.returncode == 0 for *_, process in processes))
         self._restore_deliveries(current)
         return [process for *_, process in processes]
 
@@ -1501,7 +1496,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             {51: (1, self.merged_result(51)), 53: (1, self.merged_result(53))},
             now="2026-08-19T12:40:00Z",
         )
-        self.assertEqual(sum(process.returncode == 0 for process in finished), 1)
+        self.assertEqual(sum(process.returncode == 0 for process in finished), 2)
         reopened = self.read_state()
         self.assertEqual(reopened["issues"]["51"]["outcome"], self.merged_result(51))
         self.assertEqual(reopened["issues"]["53"]["outcome"], self.merged_result(53))
@@ -1683,7 +1678,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             {47: (2, self.merged_result(47)), 51: (1, self.merged_result(51))},
             now="2026-08-19T12:10:00Z",
         )
-        self.assertEqual(sum(item.returncode == 0 for item in completed), 1)
+        self.assertEqual(sum(item.returncode == 0 for item in completed), 2)
         reopened = self.read_state()
         self.assertEqual(reopened["issues"]["47"]["outcome"], self.merged_result(47))
         self.assertEqual(reopened["issues"]["51"]["outcome"], self.merged_result(51))
