@@ -1,8 +1,15 @@
 # Task 2: Classifier, fixtures, vocabulary guard and isolation probe
 
-Decisions: D2, D3, D4, D5, D8, D14, D15, D18, D19, D21. Work from the worktree
-root; paths are repo-relative. Lands recovered hunks — the commit carries the
-`Recovered-From` trailer (root Global Constraints).
+Decisions: D2, D3, D4, D5, D8, D14, D15, D18, D19, D21, D22; fix round D23,
+D24, D25, D26. Work from the worktree root; paths are repo-relative. Lands
+recovered and adapted hunks — each commit carries the `Recovered-From` trailer
+(root Global Constraints).
+
+**Status.** Steps 1–6 ran and committed as `d4bcfdb`; their full-lane review
+returned Spec ❌. Steps 7–12 (the fix round below) are pending and fold the two
+Important findings together with the spec amendment D23–D26. Where Steps 3–4
+and the fix round differ (Step 3's bare-prefix rule, Step 4's probe text), the
+fix round wins; Steps 1–6 stay as the executed record.
 
 **Files:**
 - Create: `home/common/agent-skills/tests/test_shell_example_contracts.py`
@@ -23,8 +30,12 @@ root; paths are repo-relative. Lands recovered hunks — the commit carries the
   - `refused_examples(document_text: str) -> tuple[Finding, ...]`
   - `shell_fence_heads(document_text: str) -> frozenset[str]`
   - `swept_documents() -> tuple[tuple[str, str], ...]` — `(SOURCE_TREES key, posix path relative to that tree)`, sorted
-  - test classes `RefusedFormFixtureTest`, `SanctionedPrefixTest`,
-    `VocabularyGuardTest`, `WorktreesGuidanceTest` (Task 3 adds methods to the last)
+  - fix round: `whole_allowed_helpers(nix_text: str) -> frozenset[str]` —
+    `ValueError` when there is no single-word allow entry;
+    `LIFECYCLE_HELPERS: frozenset[str] = whole_allowed_helpers(<GUARD_SOURCE text>)`
+  - test classes `RefusedFormFixtureTest`, `LifecycleHelperCallTest`,
+    `FenceIndentationTest`, `SanctionedPrefixTest`, `VocabularyGuardTest`,
+    `WorktreesGuidanceTest` (Task 3 adds methods to the last)
 
 **Invariants:**
 - `refused_examples` is the only function that produces findings (D3); findings
@@ -39,8 +50,13 @@ root; paths are repo-relative. Lands recovered hunks — the commit carries the
   "The classifier").
 - The sanctioned literal is read from the guard, never written in this module.
 - The fixture host is the live `worktrees/SKILL.md` and yields `()`.
+- Fix round: the bare literal never ends a call — only an inline span equal to
+  it is exempt (D5, D26); the lifecycle helper set is derived from
+  `GUARD_SOURCE`, never named in the implementation (D23); a lifecycle call
+  drops only its `pipe` and `heredoc` findings, and only when every D23/D26
+  condition holds; fence bodies are read de-indented by their opener (D24).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `home/common/agent-skills/tests/test_shell_example_contracts.py` with a
 module docstring (what a living example is, the closed forms, and that
@@ -292,12 +308,12 @@ class WorktreesGuidanceTest(unittest.TestCase):
         self.assertIn("no line at all", " ".join(section.split()))
 ```
 
-- [ ] **Step 2: Run the tests and watch them fail**
+- [x] **Step 2: Run the tests and watch them fail**
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_shell_example_contracts.py`
 Expected: ERROR — `refused_examples` (and the other produced names) are not defined.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Above the tests, implement the produced names. Decisions the code must keep:
 
@@ -377,7 +393,7 @@ difference is acceptable: an extra or missing finding beyond the old probe's
 lines is a classifier bug — stop and fix it. This is the proof the host
 baseline can fail; Step 5 proves the fixtures clean once the probe is rewritten.
 
-- [ ] **Step 4: Rewrite the isolation probe (recovered)**
+- [x] **Step 4: Rewrite the isolation probe (recovered)**
 
 In `worktrees/SKILL.md`, replace the `## Detect existing isolation` fence body
 and the paragraph after it with the retained hunk verbatim (read it with
@@ -387,7 +403,7 @@ it, which is Task 3). The result is the one-line fence
 `git rev-parse --git-dir --git-common-dir --show-superproject-working-tree`
 and the paragraph starting "Compare the first two lines".
 
-- [ ] **Step 5: Register and verify**
+- [x] **Step 5: Register and verify**
 
 Add `home/common/agent-skills/tests/test_shell_example_contracts.py \` to
 `agent-workflow-tests` in `justfile`, directly after the
@@ -402,7 +418,7 @@ Expected: exit 0.
 Run: `git show 3c9709ca --stat --format=%H`
 Expected: first line `3c9709ca470bd473d49b39a611ca6cab258973db` (tip unmoved).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add home/common/agent-skills/tests/test_shell_example_contracts.py justfile home/common/agent-skills/skills/worktrees/SKILL.md
@@ -413,4 +429,230 @@ Message: `test(agent-skills): classify refused shell forms in skill examples`;
 the body lists the recovered/adapted hunks — the `worktrees` probe (recovered)
 and the retained `SHELL_FENCE_INFO`, `FENCE`, `command_head`, `PLACEHOLDER`,
 `SHELL_COMMANDS` (adapted per D2, D14) — then the trailer paragraph with
+`Recovered-From: 3c9709ca470bd473d49b39a611ca6cab258973db`.
+
+## Fix round (Steps 7–12): review findings and the D23–D26 amendment
+
+The full-lane review of `5b64f90..d4bcfdb` found Important-1 (a line equal to
+the bare sanctioned prefix closes its call, so `unset GITHUB_TOKEN &&` followed
+by a command line is an unreported chain) and Important-2 (the isolation probe
+reads a default-checkout subdirectory as a linked worktree; decided by D25).
+The branch then merged origin/main at `a311fda`: #171's lifecycle helper calls
+in `from-issue/SKILL.md`, `ship-issue/SKILL.md` and the Claude-only
+`orchestrate-issues/SKILL.md` add 13 `pipe`/`heredoc` findings (one
+`unparseable`, from a list-item fence) that D23, D24 and D26 keep. The four
+Minor findings stay deferred to the final review, except the positional
+open-fence entry, which Step 9d replaces because D24 adds a field to it. Same
+files as above minus `justfile`; the lane stays full.
+
+- [ ] **Step 7: Write the failing tests**
+
+(1) In `RefusedFormFixtureTest`, directly after
+`test_any_other_token_scrub_is_a_chain`, add:
+
+```python
+    def test_the_bare_prefix_keeps_a_fence_call_open(self):
+        prefix_line = SANCTIONED_PREFIX.rstrip()
+        cases = {
+            "prefix line then a command": (
+                f"```bash\n{prefix_line}\n"
+                "gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch\n```",
+                [(1, "chain")]),
+            "prefix line ends the fence": (f"```bash\n{prefix_line}\n```", [(1, "unparseable")]),
+        }
+        for name, (block, expected) in cases.items():
+            with self.subTest(case=name):
+                document, first = _appended(self.host, block)
+                self.assertEqual(_lines_and_forms(document),
+                                 [(first + offset, form) for offset, form in expected])
+```
+
+(2) Directly before `class SanctionedPrefixTest`, add:
+
+```python
+# ship-issue/SKILL.md "Delivery loop" checkpoint call, verbatim at a311fda:
+# three helper segments, a quoted heredoc feeding the first (per D23).
+CHECKPOINT_CALL = """artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
+<ship-checkpoint/v2 JSON>
+EOF"""
+PATH_NAMED_CALL = ("~/.agents/bin/workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> "
+                   "--now <utc> | ~/.agents/bin/artifact-budget validate-report --boundary workflow-response --input -")
+# Each variant misses one D23/D26 condition, so the call is classified in full.
+LIFECYCLE_VARIANTS = (
+    ("non-helper segment",
+     "| artifact-budget validate-report --boundary workflow-response --input -", "| jq -r .state",
+     ("pipe", "heredoc")),
+    ("chain", "--boundary workflow-response --input -",
+     "--boundary workflow-response --input - && git status", ("chain", "pipe", "heredoc")),
+    ("redirect", "--boundary workflow-response --input -",
+     "--boundary workflow-response --input - > reply.json", ("pipe", "redirect", "heredoc")),
+    ("unquoted delimiter", "<<'EOF'", "<<EOF", ("pipe", "heredoc")),
+    ("substitution argument", "--now <utc>", '--now "$(date -u +%FT%TZ)"', ("pipe", "heredoc")),
+    ("escaped delimiter", "<<'EOF'", "<<\\EOF", ("pipe", "heredoc")),
+    ("stderr pipe", "<<'EOF' | workflow-state", "<<'EOF' |& workflow-state", ("pipe", "heredoc")),
+)
+
+
+class LifecycleHelperCallTest(unittest.TestCase):
+    def setUp(self):
+        self.host = _host()
+
+    def test_single_word_allow_entries_name_the_helpers_by_basename(self):
+        text = ('        "Bash(git fetch:*)"\n'
+                '        "Bash(workflow-state:*)"\n'
+                '        "Bash(~/.agents/bin/workflow-state:*)"\n')
+        self.assertEqual(whole_allowed_helpers(text), frozenset({"workflow-state"}))
+
+    def test_no_single_word_allow_entry_fails_loud(self):
+        with self.assertRaises(ValueError):
+            whole_allowed_helpers('        "Bash(git fetch:*)"\n')
+
+    def test_sanctioned_calls_yield_nothing_in_every_region(self):
+        for name, call in (("checkpoint", CHECKPOINT_CALL), ("path-named", PATH_NAMED_CALL)):
+            for region in _regions_for((call,)):
+                with self.subTest(call=name, region=region):
+                    document, _ = _appended(self.host, _wrap(region, (call,)))
+                    self.assertEqual(refused_examples(document), ())
+
+    def test_a_call_missing_any_condition_is_classified_in_full(self):
+        for name, old, new, forms in LIFECYCLE_VARIANTS:
+            self.assertEqual(CHECKPOINT_CALL.count(old), 1, name)
+            call = CHECKPOINT_CALL.replace(old, new)
+            for region in _regions_for((call,)):
+                with self.subTest(variant=name, region=region):
+                    document, first = _appended(self.host, _wrap(region, (call,)))
+                    self.assertEqual(_lines_and_forms(document),
+                                     [(first + 1, form) for form in forms])
+
+
+class FenceIndentationTest(unittest.TestCase):
+    """A fence body is read de-indented by its opener's indentation (per D24)."""
+
+    def setUp(self):
+        self.host = _host()
+
+    def test_a_list_item_fence_scans_like_a_top_level_one(self):
+        block = ("1. Commit it:\n\n   ```bash\n   git commit -F - <<'EOF'\n"
+                 "   message\n   EOF\n   git status\n   ```")
+        document, first = _appended(self.host, block)
+        self.assertEqual(_lines_and_forms(document), [(first + 3, "heredoc")])
+
+    def test_an_over_indented_terminator_is_unparseable(self):
+        block = ("1. Commit it:\n\n   ```bash\n   git commit -F - <<'EOF'\n"
+                 "   message\n     EOF\n   ```")
+        document, first = _appended(self.host, block)
+        self.assertEqual(_lines_and_forms(document), [(first + 3, "unparseable")])
+```
+
+(3) In `WorktreesGuidanceTest.test_isolation_probe_is_one_rev_parse_with_the_no_line_note`,
+the pinned fence becomes:
+
+```python
+            "```bash\ngit rev-parse --path-format=absolute --git-dir "
+            "--git-common-dir --show-superproject-working-tree\n```",
+```
+
+- [ ] **Step 8: Run the tests and watch them fail**
+
+Run: `python3 -m unittest home/common/agent-skills/tests/test_shell_example_contracts.py`
+Expected: `FAILED (failures=11, errors=2)`, counting subtests — errors: the two
+`whole_allowed_helpers` tests (`NameError`); failures:
+`test_the_bare_prefix_keeps_a_fence_call_open` (both subtests: the committed
+classifier reports nothing), `test_sanctioned_calls_yield_nothing_in_every_region`
+(all 7 subtests), `test_a_list_item_fence_scans_like_a_top_level_one`
+(`unparseable` instead of `heredoc`) and the probe pin.
+`test_a_call_missing_any_condition_is_classified_in_full` and
+`test_an_over_indented_terminator_is_unparseable` already pass: they guard
+against an over-broad fix. Verified against a copy of `d4bcfdb` with these
+tests added. Any other difference: stop and report it.
+
+- [ ] **Step 9: Implement**
+
+a. **Helper set (D23).** Read `GUARD_SOURCE` once; `SANCTIONED_PREFIX` and the
+   helper set share that text. `whole_allowed_helpers(nix_text)`: every match
+   of `^\s*"Bash\(([^\s()"]+):\*\)"` (multiline) is a single-word allow entry;
+   return the frozenset of their basenames (text after the last `/`); no match
+   → `ValueError` naming `GUARD_SOURCE`. Then
+   `LIFECYCLE_HELPERS = whole_allowed_helpers(<that text>)`. No helper name is
+   written in the implementation.
+b. **Bare prefix (Important-1, D5, D26).** `_reduced(text)` loses its
+   bare-literal branch: it strips a leading `SANCTIONED_PREFIX`, substitutes
+   placeholders, and never returns `None`. `_still_open(text)` is the scanner's
+   open flag on `_reduced(text)`, so a fence line equal to the bare literal
+   stays open on its trailing `&&` and joins the next line; the joined text
+   does not start with the literal (its trailing space is a newline there), so
+   it is classified whole — `chain` on the prefix line, or `unparseable` when
+   the body ends first. The one exemption left moves into the inline-span
+   branch of `_examples`: a span whose stripped text equals
+   `SANCTIONED_PREFIX.strip()` is not an example.
+c. **Lifecycle helper call (D23, D26).** `_scan` returns a private
+   `NamedTuple` `_Scan(firsts, is_open, substituted, heredocs, pipes)`:
+   `firsts` and `is_open` as today; `substituted` — whether any command
+   substitution opened (`$(` in any context, or an opening backtick);
+   `heredocs` — per heredoc operator, whether it is `<<` with a delimiter
+   written in single or double quotes (`HEREDOC_DELIMITER` group 1 or 2), so
+   `<<-`, `<<<` and a bare or `\`-escaped delimiter are all `False`; `pipes` —
+   per pipe operator, `(is a plain "|", text offset just past it)`. In `_classify`
+   the open check stays first (an `unparseable` still reds). Then, when the
+   example has no `chain` and no `redirect` finding, no substitution, only
+   quoted `<<` heredocs, only plain `|` pipes, and `command_head` of the
+   reduced text and of the text after every pipe offset are all in
+   `LIFECYCLE_HELPERS`, drop its `pipe` and `heredoc` findings. Anything short
+   of that is classified in full.
+d. **Fence indentation (D24).** The positional open-fence list becomes a
+   private `NamedTuple` `_OpenFence(run, info, opener_line, opener_text, indent, body)`
+   (the deferred Minor on the positional stack, absorbed because this step adds
+   a field). `indent` is the number of leading spaces on the opener line; each
+   body line is stored with `min(indent, its own leading spaces)` leading
+   spaces removed. Delimiter lines are still matched by `FENCE` on the raw
+   line, at any indentation. An over-indented heredoc terminator keeps its
+   excess, so the example stays open and is `unparseable`.
+e. **Module docstring.** After its sentence on the sanctioned chain, add:
+   "The one sanctioned pipeline is a lifecycle helper call: a pipeline whose
+   every segment is headed by a helper that `default.nix`'s permission allow
+   list admits whole, whose heredocs are `<<` with a quoted delimiter, and
+   which carries no chain, redirect or command substitution; the helpers are
+   read from that allow list, never restated."
+f. **Isolation probe (Important-2, D25; adapted hunk).** In
+   `worktrees/SKILL.md`, `## Detect existing isolation`, the fence line becomes
+   `git rev-parse --path-format=absolute --git-dir --git-common-dir --show-superproject-working-tree`
+   and the paragraph after it becomes this plain paragraph:
+
+   > Compare the first two lines: different → you are already in a linked worktree; report the path and branch and stop. Identical → this is the default checkout. `--path-format=absolute` keeps that comparison true from a subdirectory: without it git prints the common directory relative to the current directory, so a subdirectory of the default checkout reads as a linked worktree. The superproject flag prints **no line at all** outside a submodule, so two lines is the normal case and a third line means a submodule: its first two lines match, so only the third line distinguishes it from the default checkout, and it is *not* isolation.
+
+- [ ] **Step 10: Verify**
+
+Run: `python3 -m unittest home/common/agent-skills/tests/test_shell_example_contracts.py`
+Expected: `OK`.
+
+Run the lifecycle-documents probe (one line per finding):
+
+```bash
+python3 -c "import pathlib, sys; sys.path.insert(0, 'home/common/agent-skills/tests'); from test_shell_example_contracts import refused_examples; [print(p, f.line, f.form) for p in sys.argv[1:] for f in refused_examples(pathlib.Path(p).read_text(encoding='utf-8'))]" home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/skills/ship-issue/SKILL.md home/common/claude-code/skills/orchestrate-issues/SKILL.md
+```
+
+Expected: exactly three lines — `…/from-issue/SKILL.md 440 pipe`,
+`…/ship-issue/SKILL.md 210 heredoc`, `…/ship-issue/SKILL.md 273 pipe` (line
+numbers at `a311fda`; a later sync may move them, never the documents or
+forms). These are Task 4's pending rewrites; a line on any lifecycle call means
+Step 9c or 9d is wrong. A prototype of Step 9 at `a311fda` sweeps both trees to 18
+examples (20 findings) in 7 documents — exactly the spec's pending rewrites.
+
+- [ ] **Step 11: Run the suite**
+
+Run: `just agent-workflow-tests`
+Expected: exit 0 (a failure confined to the root's HOME-note test: follow that note).
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/skills/worktrees/SKILL.md
+git commit
+```
+
+Message: `fix(agent-skills): keep the bare prefix open and sanction lifecycle helper calls`;
+the body names the review findings fixed (Important-1, Important-2, and the
+absorbed open-fence Minor), the D23/D24/D26 classifier changes as new work,
+and the adapted hunk — the `worktrees` single `git rev-parse` probe with
+`--path-format=absolute` added (D25) — then the trailer paragraph with
 `Recovered-From: 3c9709ca470bd473d49b39a611ca6cab258973db`.

@@ -1,6 +1,6 @@
 # Task 4: from-issue and ship-issue rewrites
 
-Decisions: D5, D7, D9, D11, D15, D20. Work from the worktree root; paths are
+Decisions: D5, D7, D9, D11, D15, D20, D23. Work from the worktree root; paths are
 repo-relative (skill paths below are under `home/common/agent-skills/skills/`).
 Lands recovered hunks — the commit carries the `Recovered-From` trailer (root
 Global Constraints).
@@ -14,7 +14,10 @@ Global Constraints).
 - Modify: `home/common/agent-skills/tests/test_workflow_skill_contracts.py` (Gate 1 anchor)
 
 **Interfaces:**
-- Consumes (Task 2, `test_shell_example_contracts.py`): `refused_examples`.
+- Consumes (Task 2, `test_shell_example_contracts.py`): `refused_examples` as
+  amended by Task 2's fix round (lifecycle helper calls sanctioned, fence
+  bodies de-indented — D23, D24, D26). Before that round lands, the findings
+  probe below also prints the lifecycle calls; do not start this task then.
 - Produces: rewritten skill text only; no new names.
 
 **Invariants:**
@@ -25,6 +28,11 @@ Global Constraints).
 - The `unset GITHUB_TOKEN &&` gh-hygiene span in `ship-issue/SKILL.md` and the
   spans in `from-issue/bindings.md` and `from-issue/REVIEW-CONTRACT.md` are
   unchanged (D5).
+- #171's lifecycle helper calls and their rule prose stay byte-identical: in
+  `from-issue/SKILL.md` the lifecycle-call rule and the direct-owner,
+  build-delivery and finish calls; in `ship-issue/SKILL.md` the delivery-loop
+  rule and the checkpoint and finish calls (D23). No line this task adds or
+  removes names `workflow-state` or `artifact-budget`.
 - `test_workflow_skill_contracts.py`'s Phase 4 ordering assertion
   (`check-launch`, `git push -u origin <branch>`, `check-launch`,
   `gh pr create`, ending at the first `## Summary`) still holds unedited: the
@@ -46,16 +54,18 @@ with `'gh pr create --repo <repoSlug> --base <integrationBranch> --head <branch>
 Run: `python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 Expected: FAIL — the Gate 1 ordering test only.
 
-Run the findings probe. Expected: exactly six lines — `from-issue/SKILL.md`
-pipe; `ship-issue/SKILL.md` heredoc (PR creation) and pipe (docs-only check);
-`HUMAN-GATE.md` heredoc; `CI-MERGE.md` pipe; `SYNC.md` chain. The gh-hygiene
-span is the bare sanctioned literal and yields nothing. Any other line is a
-classifier bug or a missed site — stop and report it rather than editing
-around it.
+Run the findings probe. Expected: exactly six lines, at these lines at
+`a311fda` (a later sync may move the numbers, never the documents or forms) —
+`from-issue/SKILL.md 440 pipe` (pre-flight); `ship-issue/SKILL.md 210 heredoc`
+(PR creation) and `273 pipe` (docs-only check); `HUMAN-GATE.md 40 heredoc`;
+`CI-MERGE.md 26 pipe`; `SYNC.md 61 chain`. The gh-hygiene span is the bare
+sanctioned literal and the lifecycle helper calls are sanctioned (D23), so
+neither yields a line. Any other line is a classifier bug or a missed site —
+stop and report it rather than editing around it.
 
 - [ ] **Step 2: Rewrite the new-work sites**
 
-1. `from-issue/SKILL.md`, the **Pre-flight** paragraph: replace
+1. `from-issue/SKILL.md`, the **Pre-flight** paragraph under `## Phase 0 — Investigate`: replace
    ``Then `git worktree list | grep <worktreePrefix>issue-<num>-`:`` with
    ``Then run `git worktree list` and keep the entries whose branch — the bracketed last field of each line — starts with `<worktreePrefix>issue-<num>-`:``
    (the none/one/several bullets that follow are unchanged).
@@ -104,6 +114,9 @@ Do **not** apply the retained Phase 4 `--body-file` hunk (reversed by D11), its
 
 Run the findings probe. Expected: empty output.
 
+Run (before committing): `git diff --name-only -G "workflow-state|artifact-budget" HEAD -- home/common/agent-skills/skills/from-issue home/common/agent-skills/skills/ship-issue`
+Expected: no output — no added or removed line names a lifecycle helper (D23).
+
 Run: `git grep -n -e "--body-file" -e "env -u GITHUB_TOKEN" -- home/common/agent-skills/skills/ship-issue`
 Expected: no output, exit 1.
 
@@ -111,7 +124,7 @@ Run: `python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_con
 Expected: `OK`.
 
 Run: `just agent-workflow-tests`
-Expected: exit 0.
+Expected: exit 0 (a failure confined to the root's HOME-note test: follow that note).
 
 - [ ] **Step 5: Commit**
 

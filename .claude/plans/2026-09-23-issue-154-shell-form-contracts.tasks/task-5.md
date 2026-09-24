@@ -1,6 +1,6 @@
 # Task 5: ship-release rewrites and the source sweep
 
-Decisions: D1, D5, D7, D9, D10, D11, D12, D15, D20. Work from the worktree
+Decisions: D1, D5, D7, D9, D10, D11, D12, D15, D20, D23, D24. Work from the worktree
 root; paths are repo-relative (skill paths below are under
 `home/common/agent-skills/skills/`). Lands recovered and adapted hunks — the
 commit carries the `Recovered-From` trailer (root Global Constraints).
@@ -12,8 +12,10 @@ commit carries the `Recovered-From` trailer (root Global Constraints).
 - Modify: `home/common/agent-skills/tests/test_shell_example_contracts.py`
 
 **Interfaces:**
-- Consumes (Task 2, `test_shell_example_contracts.py`): `refused_examples`,
-  `swept_documents`, `SOURCE_TREES` (imported from the support module).
+- Consumes (Task 2, `test_shell_example_contracts.py`): `refused_examples`
+  as amended by Task 2's fix round (D23, D24, D26), `swept_documents`,
+  `SOURCE_TREES` (imported from the support module). Tasks 3 and 4 have
+  committed.
 - Produces (in `test_shell_example_contracts.py`, Task 6 uses both):
   - `GUIDANCE_POINTER = "see worktrees/SKILL.md, ## Shell forms the isolation checker refuses"`
   - `findings_report(document: str, findings: tuple[Finding, ...]) -> str` —
@@ -23,7 +25,11 @@ commit carries the `Recovered-From` trailer (root Global Constraints).
 
 **Invariants:**
 - `swept_documents()` over both source trees yields no finding at the end of
-  this task (spec AC2); the sweep has no allowlist (D9, D20).
+  this task (spec AC2); the sweep has no allowlist (D9, D20). #171's 8
+  lifecycle helper calls (3 in `from-issue/SKILL.md`, 2 in
+  `ship-issue/SKILL.md`, 3 in the Claude-only `orchestrate-issues/SKILL.md`)
+  stay as written and pass through the classifier's D23 sanction, not an
+  exemption list.
 - The two `unset GITHUB_TOKEN && ` spans in `ship-release/SKILL.md` (gh hygiene,
   Phase 4 grammar sentence) are unchanged (D5).
 - The release PR keeps `--body-file` (D11); `EXISTING=$(…)` and the Phase 0
@@ -59,8 +65,12 @@ Run: `python3 -m unittest home/common/agent-skills/tests/test_shell_example_cont
 Expected: FAIL — subtests for `shared:ship-release/SKILL.md` (13 findings
 across its 11 offending examples: chain ×5, pipe ×4, redirect ×3, heredoc ×1,
 per the spec's site table) and `shared:ship-release/CHANGELOG.md` (one
-redirect); no other document fails. Any other failing document is a classifier bug or a
-missed site: stop and report it.
+redirect): 12 examples, 14 findings, the remainder of the 18 the fix round
+leaves at `a311fda` once Task 4 removes its 6. No other document fails — in
+particular not `from-issue/SKILL.md`, `ship-issue/SKILL.md` or
+`claude-only:orchestrate-issues/SKILL.md`, which hold the lifecycle calls. Any
+other failing document is a classifier bug or a missed site: stop and report
+it.
 
 - [ ] **Step 2: Update the PREV_TAG execution test (adapted, D12)**
 
@@ -129,7 +139,7 @@ Expected: `home/common/agent-skills/skills/ship-release/SKILL.md:2` (both
 sanctioned spans kept).
 
 Run: `just agent-workflow-tests`
-Expected: exit 0.
+Expected: exit 0 (a failure confined to the root's HOME-note test: follow that note).
 
 - [ ] **Step 6: Commit**
 

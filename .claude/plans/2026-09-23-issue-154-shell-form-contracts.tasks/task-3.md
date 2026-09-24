@@ -1,8 +1,10 @@
 # Task 3: Checker-contract guidance
 
-Decisions: D5, D6, D11, D15, D16. Work from the worktree root; paths are
+Decisions: D5, D6, D11, D15, D16, D23. Work from the worktree root; paths are
 repo-relative. Lands an adapted retained hunk — the commit carries the
-`Recovered-From` trailer (root Global Constraints).
+`Recovered-From` trailer (root Global Constraints). Starts after Task 2's fix
+round (Steps 7–12) has committed: its `## Detect existing isolation` probe is
+the anchor this section is inserted before.
 
 **Files:**
 - Modify: `home/common/agent-skills/skills/worktrees/SKILL.md`
@@ -21,7 +23,10 @@ repo-relative. Lands an adapted retained hunk — the commit carries the
   `## Detect existing isolation`.
 - It names, in this order: the invariant, the four forms, the one-command-per-
   call alternative, the path-passing alternative, the per-invocation directory,
-  the sanctioned prefix and "change the shell form, never the isolation" (D16).
+  the sanctioned prefix, the lifecycle helper call and "change the shell form,
+  never the isolation" (D16, D23).
+- The lifecycle helper call is named as the helpers' own shape, never as a
+  pattern to copy into another command (D23).
 - It names no `--body-file` example (D11) and no version-specific rule table (D6).
 - `worktrees/SKILL.md` still yields no findings — it is the fixture host.
 
@@ -50,6 +55,8 @@ Add to `WorktreesGuidanceTest` in `test_shell_example_contracts.py`:
             "pass them by path",
             "`git -C <path>`",
             f"`{SANCTIONED_PREFIX}`",
+            "one heredoc-fed `workflow-state` command",
+            "never copy a pipe or heredoc into another command",
             "change the shell form, never the isolation",
         )
         position = 0
@@ -70,8 +77,9 @@ section heading); every Task-2 test still passes.
 
 The retained text is in `git diff 95b6caf 3c9709ca -- home/common/agent-skills/skills/worktrees/SKILL.md`
 (the added `## Shell forms …` block). Insert this adaptation — pipes added,
-`--body-file` dropped, the literal argument and the sanctioned prefix added —
-directly before `## Detect existing isolation`, separated by blank lines:
+`--body-file` dropped, the literal argument and the sanctioned prefix added,
+and the lifecycle helper call bullet added as new work (D23) — directly before
+`## Detect existing isolation`, separated by blank lines:
 
 ```markdown
 ## Shell forms the isolation checker refuses
@@ -85,11 +93,15 @@ What works instead:
 - Carry the directory inside the invocation: absolute paths under the worktree root, or the tool's own directory flag such as `git -C <path>`. A prelude that `cd`s in and chains onward is itself the refused chain.
 - Treat a non-zero exit as information — read it and decide the next call — rather than suppressing stderr.
 - One chain is sanctioned: the `unset GITHUB_TOKEN && ` prefix that `from-issue/bindings.md`'s tracker-cli hygiene prescribes, spelled exactly as there. The lifecycle guard accepts that literal and nothing looser.
+- One pipeline is sanctioned: a lifecycle helper call — one heredoc-fed `workflow-state` command, optionally piped into or out of `artifact-budget validate-report --input -` — stays exactly as `from-issue/SKILL.md`'s lifecycle-call rule spells it, because that rule writes no request file. The shape belongs to those whole-allowed helpers alone: never copy a pipe or heredoc into another command on its strength. Should the checker refuse one, report the refusal rather than reshape the call: that rule owns its form.
 - Refused → change the shell form, never the isolation. Rewriting the command to work outside the worktree defeats the call that put you in it.
 ```
 
 The prefix span must equal the guard literal byte for byte, trailing space
-included — the anchor test builds it from `SANCTIONED_PREFIX`.
+included — the anchor test builds it from `SANCTIONED_PREFIX`. With Task 2's
+fix round in place, the whole section appended to the live host was checked to
+yield no findings: its `workflow-state` and `artifact-budget …` spans are
+single plain commands.
 
 - [ ] **Step 4: Verify**
 
@@ -98,7 +110,7 @@ Expected: `OK` — including `test_host_baseline_yields_nothing`, which proves t
 new prose teaches no refused form.
 
 Run: `just agent-workflow-tests`
-Expected: exit 0.
+Expected: exit 0 (a failure confined to the root's HOME-note test: follow that note).
 
 - [ ] **Step 5: Commit**
 
@@ -110,7 +122,8 @@ git commit
 Message: `docs(worktrees): state the isolation checker's shell-form contract`;
 the body names the adapted retained hunk (the `worktrees` "Shell forms the
 isolation checker refuses" section: pipes added, `--body-file` dropped, literal
-argument and sanctioned prefix added, per D5, D6, D11) and the guidance test
+argument and sanctioned prefix added, per D5, D6, D11), the lifecycle helper
+call bullet as new work (D23), and the guidance test
 adapted from `test_worktrees_names_the_refused_shell_forms_and_the_alternative`
 (D16), then the trailer paragraph with
 `Recovered-From: 3c9709ca470bd473d49b39a611ca6cab258973db`.

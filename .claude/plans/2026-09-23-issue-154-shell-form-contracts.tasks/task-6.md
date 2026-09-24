@@ -90,7 +90,7 @@ Expected: exit 0, `OK`, no skips — both views of the freshly built
 `home-manager-files` pass both modules.
 
 Run: `just agent-workflow-tests`
-Expected: exit 0.
+Expected: exit 0 (a failure confined to the root's HOME-note test: follow that note).
 
 Run: `just agent-model-matrix`
 Expected: exit 0 and `agent model matrix: valid` (no dispatch marker moved).
