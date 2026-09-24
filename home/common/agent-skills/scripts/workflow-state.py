@@ -1682,6 +1682,13 @@ def _apply_one_issue_policy(
          if stage["kind"] == "remove_worktree"
          and stage["target_ref"].get("kind") == "literal"), None)
 
+    # A recorded path a contract could re-create in place: under a binding
+    # contract (per D25), and with no contract at all, since the contract the
+    # caller then builds binds exactly that path (per D34).
+    in_place = frozenset({"matching_issue_branch"}) | (
+        frozenset({"absent"})
+        if contract is None or contract_worktree is not None else frozenset())
+
     def bind_contract_worktree(path: str) -> None:
         if contract_worktree is not None and path != contract_worktree:
             raise WorkflowError("custody worktree does not match the delivery contract")
@@ -1912,11 +1919,9 @@ def _apply_one_issue_policy(
                 ],
                 expired=False,
             )
-        if recorded["state"] == "matching_issue_branch" or (
-            contract_worktree is not None and recorded["state"] == "absent"
-        ):
-            # Under a worktree-binding contract an absent recorded path is
-            # re-created in place rather than swapped for a candidate (per D25).
+        if recorded["state"] in in_place:
+            # An absent recorded path is re-created in place rather than
+            # swapped for a candidate (per D25, D34).
             selected_path = retained_worktree
         elif contract_worktree is not None:
             raise WorkflowError("custody worktree does not match the delivery contract")
@@ -1956,7 +1961,7 @@ def _apply_one_issue_policy(
                 raise WorkflowError(
                     "custody worktree does not match the delivery contract")
             selected_path = latest["worktree"]
-        elif recorded is not None and recorded["state"] == "matching_issue_branch":
+        elif recorded is not None and recorded["state"] in in_place:
             selected_path = latest["worktree"]
         elif candidate is not None:
             selected_path = candidate["path"]

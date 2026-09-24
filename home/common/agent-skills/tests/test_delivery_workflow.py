@@ -1752,5 +1752,61 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.assertEqual((stored["attempts"][-1]["result_source"], stored["delivery"]["contract"]),
                          ("refused", None))
 
+    def failed_attempt(self, issue):
+        return self.attempt(issue, state="failed", result_source="owner", finished_at=NOW,
+                            result=self.workflow.terminal_result(issue, "failed", "one"))
+
+    def test_contractless_retry_on_an_absent_path_asks_for_its_contract(self):
+        """D34: the recorded path, not a candidate, makes a retry contract bindable."""
+        self.project()
+        path = self.write_run("retry", [self.failed_attempt(171)])
+        state = json.loads(path.read_text())
+        holder = self.workflow.new_control_attempt(issue=172, attempt_number=1,
+            worktree=str(self.root / ".worktrees/holder"), now=NOW,
+            deadline_at="2026-09-21T01:00:00Z")
+        state["issues"]["172"] = {"issue": 172, "attempts": [holder], "outcome": None,
+            "delivery": self.workflow._delivery().empty_delivery(), "delivery_remainders": []}
+        path.write_text(json.dumps(state))
+        absent = [{"issue": 171, "recorded": {"path": self.worktree, "state": "absent"},
+                   "candidate": None}]
+        built = self.build("contract", self.contract_input())
+        supplied = {"contracts": {"171": built["contract"]},
+                    "intents": {"171": [built["initial_intent"]]}}
+        # Capacity 0: the retry is not planned, so nothing asks and nothing installs.
+        before = path.read_bytes()
+        starved = self.control("retry", self.control_request([171], now=LATER,
+            worktrees=absent, max_parallel=1, **supplied))
+        self.assertEqual(starved["summaries"][0]["requirements"], [])
+        self.assertEqual(path.read_bytes(), before)
+        # Capacity and no contract: the issue asks for it; the sweep is not refused.
+        asked = self.control("retry", self.control_request([171], now=LATER,
+            worktrees=absent))
+        self.assertEqual((asked["summaries"][0]["contract_digest"],
+                          asked["summaries"][0]["requirements"]),
+                         (None, CONTRACT_REQUIRED))
+        self.assertEqual([item for item in asked["actions"] if item.get("issue") == 171], [])
+        self.assertEqual(path.read_bytes(), before)
+        # The builder contract bound to the recorded path retries in place.
+        retried = self.control("retry", self.control_request([171], now=LATER,
+            worktrees=absent, **supplied))
+        action = retried["actions"][0]
+        self.assertEqual((action["kind"], action["attempt"], action["worktree"],
+                          action["contract_digest"]),
+                         ("retry", 2, self.worktree,
+                          self.model.canonical_digest(built["contract"])))
+
+    def test_contractless_direct_retry_on_an_absent_path_asks_for_its_contract(self):
+        self.project()
+        self.write_run("direct-171-000001", [self.failed_attempt(171)])
+        facts = {"tracker": TRACKER, "forge": NO_PR, "worktree": {"issue": 171,
+                 "recorded": {"path": self.worktree, "state": "absent"}, "candidate": None}}
+        self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
+            "issue": 171, "run_id": "direct-171-000001", "requirements": CONTRACT_REQUIRED})
+        built = self.build("contract", self.contract_input())
+        owner = self.direct(delivery_contract=built["contract"],
+                            authorization_intents=[built["initial_intent"]], **facts)
+        self.assertEqual((owner["kind"], owner["launch_kind"], owner["attempt"],
+                          owner["worktree"]), ("owner", "retry", 2, self.worktree))
+
 if __name__ == "__main__":
     unittest.main()
