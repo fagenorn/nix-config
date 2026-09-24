@@ -1771,7 +1771,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(review_package_fragment=fragment):
                 self.assertIn(fragment, contract)
 
-        # The omission case can only be pinned here. `agent-evidence.py` sees a
+        # The omission case can only be pinned here. `agent-evidence` sees a
         # result, never the packet that produced it, so it cannot tell a scoped
         # dispatch that dropped its coverage from an unscoped one — its own test
         # covers placement only. The obligation therefore has to be stated in

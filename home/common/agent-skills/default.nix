@@ -36,11 +36,19 @@ let
       source = ./skills + "/${name}";
     }
   ) localSkillSources;
+
+  # Each command-table row of lib/agent-tools.nix becomes ~/.agents/bin/<name>.
+  # It enters home.file as a separate definition, so a leftover hand-written
+  # entry for the same command is a conflicting definition, not a silent win.
+  agentTools = import ../../../lib/agent-tools.nix { inherit pkgs; };
+  agentToolFiles = lib.mapAttrs' (
+    name: launcher: lib.nameValuePair ".agents/bin/${name}" { source = launcher; }
+  ) agentTools.launchers;
 in
 {
   # Keep ~/.agents/skills writable while linking each complete skill directory.
   # Claude Code consumes the same authored sources through skillsDir below.
-  home.file = localSkillFiles // {
+  home.file = lib.mkMerge [ (localSkillFiles // {
     ".agents/skills/ui-ux-pro-max".source = uiUxSkill;
 
     # Layers 0 and 1 of the standards architecture, machine-global so every
@@ -89,11 +97,6 @@ in
 
     ".agents/bin/resolve-bindings" = {
       source = ./scripts/resolve-bindings;
-      executable = true;
-    };
-
-    ".agents/bin/agent-evidence" = {
-      source = ./scripts/agent-evidence.py;
       executable = true;
     };
 
@@ -147,7 +150,7 @@ in
       source = uiUxSkill;
       recursive = true;
     };
-  };
+  }) agentToolFiles ];
 
   # One-time migration from the previous `recursive = true` layout. Those
   # generations leave a real directory at each target, which would collide
