@@ -104,7 +104,11 @@ beyond those listed here.
   parser: `main(sys.argv)` checks a fixed argv shape, and on misuse it prints
   the module docstring to stderr and exits 2. That docstring is observable
   output, so it stays byte-identical. Under `-m`, `sys.argv[0]` is the module
-  path, and `main` never reads it.
+  path, and `main` never reads it. Shard rule 2 asks for a parser whose `prog`
+  is the command name. The linter keeps its hand-written check anyway,
+  because parent D15 promises its CLI unchanged and an argparse parser would
+  change its misuse output. Its usage text and each status line already name
+  the command (D8).
 - **`agent_model_drift_routing`.** This is a pure rename: it imports no
   sibling.
 - **`agent_model_drift_scheduling`.** The bare
@@ -160,6 +164,8 @@ the change the same input prints `cannot load JSON input` and still exits 2.
 Accepted input, stdout and exit codes are unchanged. #98's contract for
 malformed documents is exit 2 with empty stdout, and no suite pins that
 message. That edge's stderr text is the only observable delta in this slice.
+One other plain `ValueError` can arise in that block: a path with an embedded
+NUL byte. It cannot arrive through argv, so the command never sees it.
 
 **The packaged validator (D5).** The body of `load_validated_matrix(root)`
 becomes: `errors = agent_model_matrix.validate(root)`; if there are any, raise
@@ -181,7 +187,10 @@ with `matrix validation failed` and are now judged on their data:
   root.
 
 This is #98's stated intent: the reporter "loads the existing matrix through
-its validator module rather than reimplementing" it.
+its validator module rather than reimplementing" it. Once `matrix_fixture`
+stops copying the script (D6), every drift CLI test runs against a root that
+holds no validator script. The existing suites therefore exercise D5 without
+a new test.
 
 ### Wiring (D1, D6)
 
@@ -291,8 +300,9 @@ the deleted loader read.
 
   Its real-home check (`test_installed_policy_surface_matches_source_contract`)
   is unchanged. After a switch, the installed linter is the launcher: a
-  regular executable file with no legacy token, so the check still holds. CI
-  skips it with `WORKFLOW_POLICY_SURFACE=source`.
+  regular executable file with no legacy token, so the check still holds.
+  The check reads the file and never runs it, so shard rule 5 still holds.
+  CI skips it with `WORKFLOW_POLICY_SURFACE=source`.
 
 No suite here builds a child environment from scratch, so no `PYTHONPATH`
 forwarding is needed (parent D8).
@@ -414,8 +424,9 @@ files.
 A design probe, run on a scratch export of the base, applied this section's
 module, recipe and test edits. The edited suites and the contracts suite
 passed: 288 tests, 1 skipped. Both demos ran. An oversized integer literal and
-a duplicate key each printed `cannot load JSON input` and exited 2 (D4). The
-Nix build and the installed-layout test were not probed.
+a duplicate key each printed `cannot load JSON input` and exited 2 (D4). Staged
+with `git mv`, all seven moves paired as renames, with similarity between 79%
+and 100%. The Nix build and the installed-layout test were not probed.
 
 ## Test seams
 
@@ -465,7 +476,7 @@ precedent).
 | D5 | `load_validated_matrix` imports the packaged validator; the matrix root supplies data only; roots lacking the old script path (now including this repo) or below the repo root are judged by data instead of failing; the fixture stops copying the script | #98 design ("through its validator module"); parent D12, D16; AC2 | Keep executing `<root>/…/agent-model-matrix.py` by path — a file-path loader AC2 removes, at a path that no longer exists here |
 | D6 | Tests import modules normally and run `[sys.executable, "-m", …]`; the drift suites use relative sibling imports (the `_delivery_model_fixtures` precedent) and drop every `sys.path` insert; the context-map-lint suite joins `agent-workflow-tests`; the drift reporter gains one `-m --help` run; the drift fixtures keep their own `digest` oracle | Parent D8; shard rule 5; #175 D7; the-bar Tests that can fail | Absolute `from tests.… import` — a second convention beside the existing relative one. Lint suite left outside every recipe — its `-m` runs have no `PYTHONPATH`. Oracle → `telemetry_digest` — canonical checked against itself |
 | D7 | Two existing assertions change only a location literal: the drift recipe literal becomes the `-m` recipe line, and the legacy-surface scan's pathspec `scripts/context-map-lint.py` becomes `python` (the policy-surface fixture copies the linter from its new path) | Issue #179 mandates the recipe switch, and #175 D6 deferred this literal; the scan must keep covering the moved helpers' source, and every `python/` file is clean today | A justfile comment carrying the old literal — a fake green. Re-pointing the scan to the linter file alone — the matrix and diff-scope sources silently leave it |
-| D8 | The installed test's floor becomes the four deployed commands; the hostile `--help` run keeps its argparse expectation except for a one-entry `MISUSE_USAGE` map pinning `context-map-lint`'s docstring-on-stderr, exit-2 answer | Parent D15 (the linter's promised CLI); parent D9 seam 2; #175 D8 | Converting the linter to argparse — changes a CLI other projects call. A no-argument probe — a future command without required arguments would do real work. Any-exit, any-stream assertions — weakens every argparse launcher's check |
+| D8 | The installed test's floor becomes the four deployed commands; the hostile `--help` run keeps its argparse expectation except for a one-entry `MISUSE_USAGE` map pinning `context-map-lint`'s docstring-on-stderr, exit-2 answer; the linter keeps its hand-written argv check, so shard rule 2's parser clause yields to D15 | Parent D15 (the linter's promised CLI outranks the shard's parser clause); parent D9 seam 2; #175 D8 | Converting the linter to argparse — changes a CLI other projects call. A no-argument probe — a future command without required arguments would do real work. Any-exit, any-stream assertions — weakens every argparse launcher's check |
 | D9 | AC3 reads "the telemetry digest" and "the duplicate-key hook" as the exact canonical functions, over product code (test oracles excluded), verified by two greps; `artifact_budget`'s own-error variant, adoption's NaN-refusing digest and the delivery format are variants owned by #178/#177 | #175 D1 (a hook with its own error is a variant); issue #179's parenthetical names only the drift schema, drift scheduling and matrix; parent D12 (a flat script cannot import the package without a loader) | Adopting `artifact_budget`'s hook here — edits a #178 module that cannot import `agent_tools` until it moves |
 | D10 | Re-point `CLAUDE.md`'s transition sentence (no `scripts/` left; names `review-package`); keep the standards index's `scripts/**` glob; carry the linter's stable-path promise to a comment on the command table; skill prose unchanged | the-bar Moves keep their history, Production-grade; parent D6 (legacy globs catch new flat scripts), D14, D15 | Dropping `scripts/**` — reverses parent D6's deterrence without grounding. Leaving `CLAUDE.md` as is — it names a directory with no tracked files |
 | D11 | Take the cluster now: no in-flight branch touches its files; edits to the shared wiring files (#150's PR #184, #121, #152, #154, #117) stay local, with no reflow and no `nixfmt` | Parent D5; #175 D13 | Waiting for those branches — none touches this cluster's files, which is parent D5's gate |
