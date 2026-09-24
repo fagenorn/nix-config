@@ -242,6 +242,55 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertNotEqual(refused.returncode, 0)
             self.assertEqual(refused.stdout, b"")
 
+    def test_relayed_ledger_rows_answer_to_the_ledger_schema(self):
+        # A reconciled merge claims no closed issue and keeps a superseded
+        # owner's detail pointer out of its notes (D3): valid in the ledger,
+        # never a valid owner report.
+        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
+                                 if key == "_artifact_budget_delivery_model"
+                                 or key.startswith("_artifact_budget_delivery_model.")])
+        model = artifact_budget._delivery_model()
+        contract, _ = contract_and_delivery(model)
+        reconciled = {"issue": 151, "state": "merged",
+            "pr_url": "https://sim.invalid/pr/17", "merge_sha": "b" * 40,
+            "issue_closed": False, "discussion_items": [], "detail_state": "present",
+            "report_path": ".superpowers/issue-delivery/151/run-1/ship-review.json",
+            "notes": "reconciled from forge observation; superseded owner failed verdict"}
+        responses = workflow_responses(model)
+        responses["terminal"]["result"] = deepcopy(reconciled)
+        responses["control"]["summaries"][0]["result"] = deepcopy(reconciled)
+        relayed = ((responses["terminal"], ("result",)),
+                   (responses["control"], ("summaries", 0, "result")))
+        for specimen, path in relayed:
+            accepted = self.run_validate("workflow-response", specimen, use_stdin=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            for name, bad in (("state", "completed"), ("issue_closed", "no"),
+                              ("detail_state", "bogus"), ("notes", None)):
+                broken = deepcopy(specimen)
+                target = broken
+                for part in path:
+                    target = target[part]
+                target[name] = bad
+                with self.subTest(slot=path[0], field=name):
+                    refused = self.run_validate("workflow-response", broken, use_stdin=True)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertEqual(refused.stdout, b"")
+        owner_report = {"interface_version": 2, "issue": 151, "state": "delivery_complete",
+            "custody": custody(), "historical_owner_result": None,
+            "delivery_contract_digest": model.canonical_digest(contract),
+            "delivery_observations": [], "authority_observations": [],
+            "reevaluation_evidence": [], "detail_state": "none", "report_path": None,
+            "notes": "delivered"}
+        owner_report["historical_owner_result"] = {
+            **reconciled, "issue_closed": True,
+            "notes": f"delivered; details: {reconciled['report_path']}"}
+        accepted = self.run_validate("ship-summary", owner_report, use_stdin=True)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        owner_report["historical_owner_result"] = deepcopy(reconciled)
+        refused = self.run_validate("ship-summary", owner_report, use_stdin=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(refused.stdout, b"")
+
     def test_workflow_response_uses_source_and_lexical_installed_package(self):
         payload = {"interface_version": 2, "kind": "workflow_bootstrap",
                    "run_id": "synthetic-loader", "requirements": []}

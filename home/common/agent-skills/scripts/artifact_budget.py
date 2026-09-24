@@ -836,12 +836,10 @@ def validate_workflow_response_report(value: object, notes_max_characters: int) 
             value, expected_kind="workflow-response", notes_max_characters=notes_max_characters
         )
         if isinstance(value, dict) and value.get("kind") == "terminal":
-            _validate_legacy_result_slot(value["result"], value["issue"], notes_max_characters)
+            _validate_ledger_result_slot(value["result"], value["issue"])
         elif isinstance(value, dict) and "summaries" in value:
             for summary in value["summaries"]:
-                _validate_legacy_result_slot(
-                    summary["result"], summary["issue"], notes_max_characters
-                )
+                _validate_ledger_result_slot(summary["result"], summary["issue"])
     except Exception as exc:
         raise ArtifactBudgetError("invalid workflow response") from exc
 
@@ -862,10 +860,43 @@ def validate_delivery_model_report(
         raise ArtifactBudgetError(f"invalid {boundary}") from exc
 
 
+_LEDGER_RESULT_KEYS = {"issue", "state", "pr_url", "merge_sha", "issue_closed",
+                       "discussion_items", "detail_state", "report_path", "notes"}
+
+
+def _validate_ledger_result_slot(value: object, issue: object) -> None:
+    """Hold a relayed ledger row to the ledger's own result schema.
+
+    A control summary or terminal replay carries whatever row the ledger
+    holds, and the lifecycle writes rows no owner reported: a reconciled merge
+    claims no closed issue and keeps a superseded owner's detail pointer
+    without naming it in its notes (workflow-state ``reconciled_result``, D3).
+    So these slots answer to the schema workflow-state's ``validate_result``
+    enforces on every row it stores; only an owner's own report, the
+    ``historical_owner_result`` slot, answers to the ship-summary rule.
+    """
+    if value is None:
+        return
+    if not isinstance(issue, int) or isinstance(issue, bool):
+        raise ArtifactBudgetError("invalid ledger result issue")
+    if (not _exact_keys(value, _LEDGER_RESULT_KEYS)
+            or not _integer(value["issue"], minimum=1)
+            or value["state"] not in {"merged", "stopped", "failed"}
+            or any(value[name] is not None and not isinstance(value[name], str)
+                   for name in ("pr_url", "merge_sha", "report_path"))
+            or type(value["issue_closed"]) is not bool
+            or not isinstance(value["discussion_items"], list)
+            or value["detail_state"] not in {"none", "present", "unpublished"}
+            or not isinstance(value["notes"], str)):
+        raise ArtifactBudgetError("invalid ledger result")
+    if value["issue"] != issue:
+        raise ArtifactBudgetError("ledger result issue mismatch")
+
+
 def _validate_legacy_result_slot(
     value: object, issue: object, notes_max_characters: int
 ) -> None:
-    """Compose the legacy result validator into every nullable v2 result slot."""
+    """Compose the legacy result validator into an owner-reported v2 result slot."""
     if value is None:
         return
     if not isinstance(issue, int) or isinstance(issue, bool):

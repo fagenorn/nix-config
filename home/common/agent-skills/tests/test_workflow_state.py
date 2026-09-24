@@ -14,6 +14,8 @@ from unittest import mock
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
 MODEL = Path(__file__).parents[1] / "scripts" / "delivery_model" / "__init__.py"
 MODEL_FIXTURES = Path(__file__).with_name("_delivery_model_fixtures.py")
+ARTIFACT_BUDGET = SCRIPT.with_name("artifact_budget.py")
+BUDGET_POLICY = Path(__file__).parents[1] / "artifact-budget-policy.json"
 DEFAULT_NOW = "2026-08-13T20:00:00Z"
 
 
@@ -5107,6 +5109,95 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertLessEqual(len(result["notes"]), 500)
         self.assertEqual(persisted["outcome"], result)
         self.assertEqual(reconciled["result"], result)
+
+    def raw_response(self, command, request):
+        """Run ``control`` or ``direct-owner`` and return its stdout untouched."""
+        self.control_request_serial += 1
+        path = self.root / f"raw-{command}-{self.control_request_serial}.json"
+        path.write_text(json.dumps(request), encoding="utf-8")
+        run = ("--run-id", self.run_id) if command == "control" else ()
+        return self.run_cli(command, "--repo-root", self.root, *run,
+                            "--request-file", path).stdout
+
+    def assert_workflow_response_valid(self, raw):
+        """The adapter's own check: raw stdout at the workflow-response boundary."""
+        validated = subprocess.run(
+            [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+             "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
+            input=raw.encode("utf-8"), capture_output=True, check=False)
+        self.assertEqual(validated.returncode, 0, (validated.stderr, raw))
+
+    MERGED_FORGE = {"state": "merged",
+                    "url": "https://github.com/fagenorn/nix-config/pull/1672",
+                    "merge_sha": "d" * 40}
+
+    def test_control_response_carrying_a_reconciled_merge_is_valid(self):
+        # Run orch-1635-1642, issue 1638: a suspended attempt's pull request
+        # merged and control reconciled it. Its summary relays the ledger's
+        # reconciled row, which claims no closed issue (D3), and the boundary
+        # judged that row by the owner-report rule instead, so every sweep
+        # naming 1638 failed the adapter's validation.
+        for tracker_state in ("closed", "open"):
+            with self.subTest(tracker=tracker_state):
+                self.run_id = f"reconcile-{tracker_state}"
+                self.init_run()
+                suspended = self.spawn(issue=47, worktree=self.root / f"wt-47-{tracker_state}")
+                self.spawn(issue=51, worktree=self.root / f"wt-51-{tracker_state}")
+                self.suspend(issue=47, attempt=1, blocked_on="external", now=DEFAULT_NOW)
+                for now in ("2026-08-13T20:05:00Z", "2026-08-13T20:06:00Z"):
+                    # 51 holds the only slot, so no remainder takes 47 over and
+                    # its summary keeps relaying the reconciled row.
+                    request = self.sweep_request(
+                        now=now, issues=[47, 51], max_parallel=1,
+                        tracker=[self.tracker_fact(47, state=tracker_state),
+                                 self.tracker_fact(51)],
+                        worktrees=[self.worktree_fact(47, recorded={
+                            "path": suspended["worktree"],
+                            "state": "matching_issue_branch"})])
+                    request["forge"]["47"] = self.MERGED_FORGE
+                    raw = self.raw_response("control", request)
+                    summary = json.loads(raw)["summaries"][0]
+                    self.assertEqual(
+                        (summary["state"], summary["result"]["state"],
+                         summary["result"]["issue_closed"]),
+                        ("merged", "merged", False))
+                    self.assert_workflow_response_valid(raw)
+
+    def test_direct_reconciled_terminal_is_a_valid_workflow_response(self):
+        report_path = ".superpowers/issue-delivery/38/run-1/ship-review.json"
+        for issue, detail in ((32, None), (38, report_path)):
+            with self.subTest(carried_detail=detail):
+                owner = self.acquire_direct(issue=issue)
+                self.run_id = owner["run_id"]
+                if detail is None:
+                    self.suspend(issue=issue, attempt=1, blocked_on="human_gate",
+                                 now="2026-08-20T10:30:00Z")
+                else:
+                    # The owner's failed verdict carries a detail pointer that
+                    # the reconciled row keeps, without its notes naming it.
+                    failed = {"issue": issue, "state": "failed", "pr_url": None,
+                              "merge_sha": None, "issue_closed": False,
+                              "discussion_items": [], "detail_state": "present",
+                              "report_path": detail,
+                              "notes": f"owner verdict; details: {detail}"}
+                    state = self.read_state()
+                    state["issues"][str(issue)]["attempts"][-1].update(
+                        state="failed", blocked_on=None, result=copy.deepcopy(failed),
+                        finished_at="2026-08-20T10:30:00Z", result_source="owner")
+                    state["issues"][str(issue)]["outcome"] = copy.deepcopy(failed)
+                    state["updated_at"] = "2026-08-20T10:30:00Z"
+                    self.write_state(state)
+                raw = self.raw_response("direct-owner", self.direct_request(
+                    issue=issue, now="2026-08-20T11:00:00Z",
+                    worktree=self.worktree_fact(issue, recorded={
+                        "path": owner["worktree"], "state": "matching_issue_branch"}),
+                    forge=self.MERGED_FORGE))
+                terminal = json.loads(raw)
+                self.assertEqual(
+                    (terminal["kind"], terminal["reason"],
+                     terminal["result"]["issue_closed"], terminal["result"]["report_path"]),
+                    ("terminal", "merged", False, detail))
+                self.assert_workflow_response_valid(raw)
 
     def test_merged_forge_reconcile_over_synthetic_record_keeps_no_detail(self):
         # The common case is untouched: reconciling over a synthetic reaper
