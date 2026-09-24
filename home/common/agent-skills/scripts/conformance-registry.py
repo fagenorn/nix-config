@@ -224,6 +224,13 @@ REPAIRS = {
     "host.tracker.authenticate": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
+    # The host declaration is authored policy: the fix is to author
+    # `home/common/agent-skills/host-declaration.json` (or its installed copy)
+    # and switch. No engine command writes it, so the operation is null (#150
+    # D24).
+    "host.admission.declare": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
     # No engine subcommand admits a path into a class, edits an ignore file or
     # destructures a command, so all three operations are null (D25). Editing
     # an ignore file changes the working tree, which is why only the middle one
@@ -325,6 +332,12 @@ REGISTRY: tuple[Check, ...] = (
            ("unsupported_tracker_kind", "host.tracker.authenticate"),
            ("tracker_credential_missing", "host.tracker.authenticate")),
           "check_tracker_credential", network=True),
+    # A host fact independent of the contract, so it depends on no check and a
+    # broken contract never suppresses it (#150 D13, D24).
+    Check("host.admission.declaration", "host", "capability", "optional", (),
+          (("declaration_missing", "host.admission.declare"),
+           ("declaration_invalid", "host.admission.declare")),
+          "check_admission_declaration"),
     Check("repository.paths.classified", "repository", "path", "required",
           ("repository.contract.valid",),
           (("unclassified_path", "lifecycle.path.classify"),),

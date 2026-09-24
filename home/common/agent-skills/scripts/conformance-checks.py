@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import fcntl
 import fnmatch
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -396,6 +397,56 @@ def check_tracker_credential(context: "Context") -> "Outcome":
     return Outcome("failed", "tracker_credential_missing",
                    "host.tracker.authenticate",
                    {"authenticated": False, "cli_invoked": True, "host": host})
+
+
+_HOST_ADMISSION = None
+
+
+def load_host_admission():
+    """The host admission library, loaded once (#150 D18).
+
+    A source sibling when this module runs from the repository's `scripts`
+    directory, the installed `~/.agents/lib/python` copy otherwise -- the same
+    library `workflow-state` loads, so the check and the runtime can never
+    disagree about what a valid declaration is.
+    """
+    global _HOST_ADMISSION
+    if _HOST_ADMISSION is None:
+        here = Path(__file__).parent
+        entry = (here / "host_admission.py" if here.name == "scripts"
+                 else Path.home() / ".agents/lib/python/host_admission.py")
+        spec = importlib.util.spec_from_file_location(
+            "conformance_host_admission", entry)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {entry}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _HOST_ADMISSION = module
+    return _HOST_ADMISSION
+
+
+def check_admission_declaration(context: "Context") -> "Outcome":
+    """Contract: passed when the installed host declaration is valid, with its
+    supported routes (`<route>=<agent_slots>`) and unsupported route names as
+    facts; failed with the library's own reason code otherwise, naming the
+    declaration path. It reports the declaration and route support only: it
+    never reads or writes a ledger or a claim (#150 D13, D24)."""
+    library = load_host_admission()
+    try:
+        declaration = library.load_declaration()
+    except library.DeclarationError as error:
+        path = library.declaration_path()
+        facts = {} if path is None else {"declaration_path": bound_fact(str(path))}
+        return Outcome("failed", error.reason_code, "host.admission.declare", facts)
+    routes = declaration["routes"]
+    return Outcome("passed", None, None, {
+        "supported_routes": bound_facts(
+            f"{name}={route['agent_slots']}" for name, route in routes.items()
+            if route["support"] == "supported"),
+        "unsupported_routes": bound_facts(
+            name for name, route in routes.items()
+            if route["support"] == "unsupported"),
+    })
 
 
 # --------------------------------------------------------------------------

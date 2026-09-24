@@ -1044,3 +1044,45 @@ class TrackerCredentialTest(ReportAssertions, unittest.TestCase):
             self.assertEqual(code, 0, err)
             self.assertNotIn(self.CHECK_ID,
                              [c["id"] for c in json.loads(out)["checks"]])
+
+
+class AdmissionDeclarationCheckTest(ReportAssertions, unittest.TestCase):
+    """#150 D13, D24: the host declaration is reported, never claimed."""
+
+    CHECK_ID = "host.admission.declaration"
+
+    def check(self, tmp, **home):
+        root = make_root(tmp)
+        env = platform_env(tmp, **home)
+        report, by_id = doctor(self, root, "--offline", env=env)
+        self.assert_validates(report)
+        self.assertFalse((root / ".superpowers").exists())
+        return by_id[self.CHECK_ID], env
+
+    def test_the_committed_declaration_passes_with_its_routes(self):
+        with fixture() as tmp:
+            check, _ = self.check(tmp)
+        self.assertEqual(
+            [check[key] for key in ("status", "domain", "subject_kind", "requirement",
+                                    "reason_code", "repair_id")],
+            ["passed", "host", "capability", "optional", None, None])
+        self.assertEqual(check["facts"], {"supported_routes": ["claude-code=7"],
+                                          "unsupported_routes": ["codex"]})
+
+    def test_missing_and_invalid_declarations_name_the_repair(self):
+        below_floor = {"schema_version": 1, "routes": {
+            "claude-code": {"support": "supported", "agent_slots": 3}}}
+        for label, value, reason in (("missing", None, "declaration_missing"),
+                                     ("below floor", below_floor, "declaration_invalid")):
+            with self.subTest(label), fixture() as tmp:
+                check, env = self.check(tmp, declaration=value)
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["repair_id"]],
+                    ["failed", reason, "host.admission.declare"])
+                self.assertEqual(check["facts"], {"declaration_path": str(
+                    Path(env["HOME"]) / ".agents/share/host-declaration.json")})
+
+    def test_local_selects_it_and_workflow_entry_does_not(self):
+        module = load_module()
+        self.assertIn(self.CHECK_ID, [c.id for c in module.select("local")])
+        self.assertNotIn(self.CHECK_ID, [c.id for c in module.select("workflow_entry")])
