@@ -334,11 +334,13 @@ def _scan(text):
 
 def _reduced(text):
     """The example text the scanner sees: a leading sanctioned prefix stripped when
-    a command follows it on the same line, placeholders substituted."""
+    a command follows it on the same line (a comment is not one), placeholders
+    substituted."""
     stripped = text.lstrip()
     if stripped.startswith(SANCTIONED_PREFIX):
         remainder = stripped[len(SANCTIONED_PREFIX):]
-        if remainder.split("\n", 1)[0].strip():
+        same_line = remainder.split("\n", 1)[0].strip()
+        if same_line and not same_line.startswith("#"):
             text = remainder
     return PLACEHOLDER.sub("PH", text)
 
@@ -677,6 +679,14 @@ class RefusedFormFixtureTest(unittest.TestCase):
                 [(1, "chain")]),
             "spaced prefix line ends the fence": (
                 f"```bash\n{SANCTIONED_PREFIX}\n```", [(1, "unparseable")]),
+            # A comment is not a command: the prefix's `&&` still continues
+            # onto the next line (per D27).
+            "prefix line with a comment, then a command": (
+                f"```bash\n{SANCTIONED_PREFIX}# scrub first\n"
+                "gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch\n```",
+                [(1, "chain")]),
+            "prefix line with a comment ends the fence": (
+                f"```bash\n{SANCTIONED_PREFIX}# scrub first\n```", [(1, "unparseable")]),
         }
         for name, (block, expected) in cases.items():
             with self.subTest(case=name):
