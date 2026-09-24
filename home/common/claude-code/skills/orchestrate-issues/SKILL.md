@@ -41,13 +41,20 @@ untrusted transport: pipe its raw bytes through `artifact-budget validate-report
   worktree. Then select the `run_id` per the run-reuse rule in §2 — reuse an
   existing non-final run for the same issue set before minting a new one.
 
-Treat known host capacity as a capability boundary, not scheduling policy. Do
-not calculate available slots, alter control's `max_parallel`, create competing
-owners or nested relays, or repeat a rejected spawn. When the host explicitly
-cannot support an issue owner plus its required independent review, use a
-documented direct or sequential route that preserves the returned lifecycle
-identity; if none exists, report the unsupported capability. This does not add
-reservation or notification scheduling.
+Before `init-run`, ask for the host route once and validate the answer at the
+boundary:
+
+```text
+workflow-state host-route --route claude-code | artifact-budget validate-report --boundary workflow-response --input -
+```
+
+An `unsupported` answer ends the run: render that validated result and its
+`alternative` as the final report and stop, dispatching nothing. A `supported`
+answer means every control request carries `host_route: "claude-code"`. The
+runtime reserves each owner's worker and reviewer slots before it returns a
+dispatch; the adapter never calculates slots, alters `max_parallel`, creates
+competing owners or nested relays, or repeats a rejected launch, and it reads the
+response's `admission` report as rendering data only.
 
 ## 2. Bootstrap and observe
 
@@ -95,9 +102,10 @@ branch, less any worktree prefix, starts with that prefix. Normalize it to
 `none`, `merge_sha` present exactly when `merged`. Correlate a current
 host owner notification only with the returned lifecycle owner and `action_id`;
 then normalize it as the bounded owner event for that exact issue, attempt, and
-launch identity. Host task IDs are correlation data outside the lifecycle
-contract. Ignore unrelated or stale host notifications rather than inventing
-an owner result.
+launch identity. Its `state` is `unavailable` for an owner that died and
+`launch_refused` for an owner launch the host refused. Host task IDs are
+correlation data outside the lifecycle contract. Ignore unrelated or stale host
+notifications rather than inventing an owner result.
 
 At start/resume and after each current owner notification, tracker change, or
 current wait-ID wake, refresh the external facts the next request needs.
@@ -109,14 +117,15 @@ inherited handle.
 
 ## 3. Decide
 
-Every control call sends exactly this interface_version 2 request, with the
+Every control call sends exactly this interface_version 3 request, with the
 ordered `issues`, the normalized facts of §2, and one entry per requested issue
 in every issue-keyed map. Do not add raw issue text or helper history. The
 values are representative; angle-bracketed strings stand for the objects named:
 
 ```json
 {
-  "interface_version": 2,
+  "interface_version": 3,
+  "host_route": "claude-code",
   "now": "2026-09-24T10:00:00Z",
   "max_parallel": 2,
   "attempt_budget_minutes": 180,
@@ -202,8 +211,9 @@ Do not infer, reorder, omit, or add another action. The helper owns readiness, p
 deadline, and completion decisions; the dispatcher only applies the returned
 envelopes.
 
-Accept only the validated interface_version 2 control response with its bounded
-`run_id`, `now`, `summaries`, `deltas`, `actions`, and `next_deadline` fields.
+Accept only the validated interface_version 3 control response with its bounded
+`run_id`, `now`, `summaries`, `deltas`, `actions`, `next_deadline`, and
+`admission` fields.
 It omits `attempts`, `launches`, `phase_inputs`, and older results. Use those
 values only for rendering and action execution; do not rebuild policy from them.
 
@@ -250,6 +260,11 @@ path. For `resume`, include the returned `handoff_path` when present. For a
 custody's `action_id`, and there is no `handoff_path`. Record the host task
 handle beside the returned action ID only for later notification correlation; it
 is never an owner token or action identity.
+
+If the host refuses an owner launch, never retry it: make exactly one control
+call carrying a `launch_refused` owner observation for that action's `custody`,
+and execute that response. The runtime parks the refused owner and dispatches it
+again only after another owner's claim is released by anything but a refusal.
 
 <!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
@@ -312,9 +327,9 @@ report.
 
 ## 5. Final report
 
-Render a `finalize` action from the bounded interface_version 2 summaries in the
-same control response. Produce a per-issue table with issue, state, custody, PR,
-one-line reason, `blocked_on`, open delivery stages, and a re-entry line —
+Render a `finalize` action from the bounded summaries in the same
+interface_version 3 control response. Produce a per-issue table with issue,
+state, custody, PR, one-line reason, `blocked_on`, open delivery stages, and a re-entry line —
 `/from-issue <issue> --auto` for an issue suspended on a human gate, and the
 orchestrate re-invocation itself for the whole run — every column sourced from
 those finalize summaries: `custody` names the implementation attempt or delivery
@@ -324,7 +339,9 @@ A null `contract_digest` means the issue ran lifecycle-only: say so, and name
 the builder refusal from §3 when there was one; a summary still carrying
 `delivery_contract_required` is an issue that never received a contract. Then
 group every `discussion_items` entry by issue and call out anything needing a
-human. Do not perform a second ledger read or reconstruct omitted history.
+human. List every issue in that same control response's `admission.waiting`
+as queued for agent slots, with its summary state. Do not perform a second
+ledger read or reconstruct omitted history.
 
 An `expired` delta is an interruption, not a verdict on the work: it consumes
 no attempt, and the attempt number never advances because of it. Three things
@@ -346,4 +363,6 @@ and never `retry_refused`, so never report it as a spent attempt.
 
 Claude-only skill: it depends on background agents and host task notifications,
 so it lives outside the shared skills tree. Codex users continue to run
-`/from-issue` per issue.
+`/from-issue` per issue. Codex has its own `orchestrate-issues` stub, which
+answers with `workflow-state host-route --route codex` and names
+`/from-issue <n> --auto`.
