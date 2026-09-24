@@ -55,9 +55,12 @@ update:
 evals skill id:
   ./home/common/agent-skills/evals/run-eval.sh {{skill}} {{id}}
 
+# The source package the agent recipes run (#175 D6).
+agent_tools_path := justfile_directory() / "python"
+
 # Verify durable workflow lifecycle and skill contracts without agent/network timing.
 agent-workflow-tests:
-  python3 -m unittest -v \
+  PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v \
     home/common/agent-skills/tests/test_workflow_state.py \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
@@ -82,6 +85,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_adopt_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
+    tests/test_agent_tools_canonical.py \
     tests/test_agent_costs.py \
     tests/test_agent_model_drift_schema.py \
     tests/test_agent_model_drift_routing.py \
@@ -104,7 +108,8 @@ agent-installed-skill-tests: build
       exit 1; \
     fi; \
     AGENT_SKILLS_INSTALLED_HOME="$1" python3 -m unittest -v \
-      home/common/agent-skills/tests/test_dispatch_contracts.py
+      home/common/agent-skills/tests/test_dispatch_contracts.py \
+      tests/test_agent_tools_launchers.py
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
@@ -156,14 +161,14 @@ install IP:
 
 # Report agent token spend per issue from the local Claude Code and Codex sessions
 agent-costs *args:
-  python3 scripts/agent-costs.py {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_costs {{args}}
 
 agent-model-drift *args:
   python3 scripts/agent-model-drift.py {{args}}
 
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:
-  python3 scripts/agent-gate-bundle.py {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_gate_bundle {{args}}
 
 # Garbage collect old OS generations and remove stale packages from the nix store
 gc generations="5":

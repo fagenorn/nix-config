@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Validate current bridge and research evidence artifacts."""
 
 from __future__ import annotations
@@ -11,6 +10,8 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Sequence
+
+from agent_tools.canonical import reject_duplicate_keys
 
 
 BRIDGE_KIND = "bridge-smoke"
@@ -624,28 +625,19 @@ def validate_research(document: object) -> list[Diagnostic]:
     return sorted(diagnostics)
 
 
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key {key!r}")
-        result[key] = value
-    return result
-
-
 def _load_artifact(path: Path) -> tuple[object | None, list[Diagnostic]]:
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         return None, [Diagnostic("ARTIFACT_READ_ERROR", "$", str(error))]
     try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys), []
+        return json.loads(text, object_pairs_hook=reject_duplicate_keys), []
     except (json.JSONDecodeError, ValueError) as error:
         return None, [Diagnostic("JSON_INVALID", "$", str(error))]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="agent-evidence", description=__doc__)
     parser.add_argument("kind", choices=("bridge", "research"))
     parser.add_argument("artifact", type=Path)
     arguments = parser.parse_args(argv)
