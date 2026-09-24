@@ -2413,7 +2413,9 @@ def command_control(args: argparse.Namespace) -> int:
             """Whether a `host_capacity` custody still awaits a later release (D7, D26).
 
             It waits until some other claim is released after the
-            `launch_refused` claim naming its current launch.
+            `launch_refused` claim naming its current launch, by any event but
+            `launch_refused`: another custody's refusal frees no capacity, so two
+            refused owners never wake each other (D31).
             """
             issue_state = state["issues"].get(str(issue))
             custody, record = runtime.current_custody(issue, issue_state)
@@ -2426,7 +2428,7 @@ def command_control(args: argparse.Namespace) -> int:
                  and claim["release_event"] == "launch_refused"), None)
             if refused_claim is None:
                 raise WorkflowError("internal error: refused launch holds no refused claim")
-            if any(claim is not refused_claim and claim["release_seq"] is not None
+            if any(claim["release_event"] not in (None, "launch_refused")
                    and claim["release_seq"] > refused_claim["release_seq"]
                    for claim in admission["claims"]):
                 return False

@@ -468,6 +468,26 @@ class LaunchRefusalTest(AdmissionSweeps, unittest.TestCase):
         again = self.sweep("2026-08-13T20:03:00Z", recorded=(14,), unobserved=(12,))
         self.assertEqual(self.kinds(again), [("resume", 14), ("wait", None)])
 
+    def test_two_refusals_in_one_sweep_dispatch_neither(self):
+        """D31: another custody's refusal frees no capacity, so it opens no gate."""
+        self.admitted_pair()
+        parked = self.sweep("2026-08-13T20:01:00Z", recorded=(12, 14),
+                            owners=[self.refused(12), self.refused(14)])
+        self.assertEqual((self.kinds(parked), parked["admission"]["waiting"]),
+                         ([("finalize", None)], [12, 14]))
+
+    def test_refusing_a_resumed_launch_does_not_wake_the_other_refusal(self):
+        """D31: the refusal of 12's resumed launch is not a release that frees 14."""
+        self.admitted_pair()
+        dead = self.owner_fact(event_id="12-dead", issue=12, attempt=1, launch=1)
+        self.sweep("2026-08-13T20:01:00Z", recorded=(12, 14), owners=[dead])  # 12:1:2
+        self.sweep("2026-08-13T20:02:00Z", recorded=(12, 14), owners=[self.refused(14)])
+        parked = self.sweep("2026-08-13T20:03:00Z", recorded=(12, 14),
+                            owners=[self.refused(12, launch=2)])
+        self.assertEqual((self.kinds(parked), parked["admission"]["waiting"]),
+                         ([("finalize", None)], [12, 14]))
+        self.assertEqual(self.claims()["12:1:2"]["release_event"], "launch_refused")
+
     def test_the_anti_zombie_bound_ends_a_launch_that_keeps_being_refused(self):
         self.admitted_pair()
         self.sweep("2026-08-13T20:01:00Z", recorded=(12, 14), owners=[self.refused(14)])
