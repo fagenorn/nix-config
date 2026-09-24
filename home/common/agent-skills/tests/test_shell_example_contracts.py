@@ -829,6 +829,37 @@ class WorktreesGuidanceTest(unittest.TestCase):
         )
         self.assertIn("no line at all", " ".join(section.split()))
 
+    SECTION = "## Shell forms the isolation checker refuses"
+
+    def test_section_sits_between_positioning_and_detection(self):
+        self.assertLess(self.skill.index("## Already positioned? Skip the call"),
+                        self.skill.index(self.SECTION))
+        self.assertLess(self.skill.index(self.SECTION),
+                        self.skill.index("## Detect existing isolation"))
+
+    def test_section_names_contract_forms_and_alternatives_in_order(self):
+        section = " ".join(self.section(self.SECTION).split())
+        anchors = (
+            "one plain command whose targets are literal arguments",
+            "a multi-clause chain",
+            "a pipe",
+            "a redirect",
+            "a heredoc fed to a command's stdin",
+            "One command per call",
+            "pass them by path",
+            "`git -C <path>`",
+            f"`{SANCTIONED_PREFIX}`",
+            "one heredoc-fed `workflow-state` command",
+            "never copy a pipe or heredoc into another command",
+            "change the shell form, never the isolation",
+        )
+        position = 0
+        for anchor in anchors:
+            found = section.find(anchor, position)
+            self.assertNotEqual(found, -1, f"missing or out of order: {anchor!r}")
+            position = found + len(anchor)
+        self.assertNotIn("--body-file", section)
+
 
 if __name__ == "__main__":
     unittest.main()
