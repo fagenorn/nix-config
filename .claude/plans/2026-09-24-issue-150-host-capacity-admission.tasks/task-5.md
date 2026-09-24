@@ -17,7 +17,7 @@
 **Invariants:**
 - A refusal is applied only to an issue's current `active` launch whose `action_id` names a held claim, under a non-`direct` route; a current launch failing either test, or any refusal under `direct`, is a `WorkflowError` with no write (per D22).
 - Applying a refusal suspends that custody at its current phase with `blocked_on: host_capacity` (attempt: `suspend_attempt`, writing the issue outcome when it returns `False`; remainder: `suspend_remainder`) before `settle_admission`, which releases the claim `launch_refused` — or `finished` at the anti-zombie bound (per D7, D19).
-- The resume lane withholds a custody suspended on `host_capacity` — it joins `waiting` — until some other claim has a `release_seq` greater than that of the released `launch_refused` claim naming its current launch; a missing refused claim is an internal error.
+- The resume lane withholds a custody suspended on `host_capacity` — it joins `waiting` — until some other claim has a `release_seq` greater than that of the released `launch_refused` claim naming its current launch; a missing refused claim is an internal error. Any later release opens the gate, the controller's `finalized` release included: that is how refusal-gated work, which finalizes as `waiting` when nothing else is live, resumes once on the next orchestration invocation (per D26).
 - `unavailable` keeps its instant takeover, subject to admission (per D7).
 
 - [ ] **Step 1: Write the failing tests**
@@ -63,6 +63,20 @@ class LaunchRefusalTest(AdmissionSweeps, unittest.TestCase):
         claims = self.claims()
         self.assertGreater(claims["12:1:1"]["release_seq"], refused["release_seq"])
         self.assertIsNone(claims["14:1:2"]["released_at"])
+
+    def test_a_refusal_gated_finalize_resumes_on_the_next_invocation(self):
+        self.admitted_pair()
+        self.suspend(issue=12, attempt=1, blocked_on="human_gate",
+                     now="2026-08-13T20:01:00Z")
+        parked = self.sweep("2026-08-13T20:02:00Z", recorded=(14,), unobserved=(12,),
+                            owners=[self.refused(14)])
+        self.assertEqual((self.kinds(parked), parked["admission"]["waiting"]),
+                         ([("finalize", None)], [14]))
+        claims = self.claims()
+        self.assertGreater(claims["controller"]["release_seq"],
+                           claims["14:1:1"]["release_seq"])
+        again = self.sweep("2026-08-13T20:03:00Z", recorded=(14,), unobserved=(12,))
+        self.assertEqual(self.kinds(again), [("resume", 14), ("wait", None)])
 
     def test_the_anti_zombie_bound_ends_a_launch_that_keeps_being_refused(self):
         self.admitted_pair()

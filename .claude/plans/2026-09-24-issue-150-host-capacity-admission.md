@@ -116,6 +116,23 @@ design and the rows planning added: D18 (homes and loading), D19 (release
 derivation order), D20 (controller-claim persistence), D21 (slot withholding,
 claims per new launch, waiting issues ask for contracts), D22 (`launch_refused`
 applicability), D23 (test seams), D24 (conformance check shape) and D25 (Codex
-stub home and installed-tree run).
+stub home and installed-tree run). Standards review added D26 (any later release
+opens the refusal gate) and D27 (the replay measures distinct worker and
+reviewer agents).
+
+## Standards review provenance
+
+- Reviewer: Claude fallback, read-only, against `REVIEW-CONTRACT.md`; base
+  `185cc1a`, plan head `4b33241`; no configured focus.
+- Fallback reason: the Codex plan review failed (job ended `failed`: usage
+  limit). Subagent dispatch is disabled in the owning session, so the one-time
+  fallback ran inline in the resumed issue owner, which did not author the plan.
+- Findings: 0 Blocking; 5 Should-fix, all accepted and applied (Task 3 staged
+  runtime layouts, Task 5 refusal-gate re-entry per D26, Task 6 distinct
+  support agents per D27, Task 7 stale §5 interface prose and a whitespace-proof
+  retired-anchor check); 0 rejected, 0 deferred. 2 Discussion items, no plan
+  change: switch generations between orchestration runs (a mid-run adapter
+  fails loudly on interface 3, per D8), and D11's one-time adoption also claims
+  a `finish`-recorded remainder no dispatch launched until its deadline.
 
 ---

@@ -12,7 +12,7 @@
 **Invariants:**
 - The adapter follows orchestrate-issues exactly: one `host-route` answer first, one control call at start and one per delivered host event, owners launched only from returned dispatch actions, contracts sent only while the run is new or a summary carries `delivery_contract_required`, and no call without an event: `controller_turns == 1 + delivered_events` (per D6, D12, D21).
 - Time is whole simulated minutes from `NOW`; each owner runs 60 minutes (two tasks, each a 20-minute worker then a distinct 10-minute reviewer, so exactly one support agent is busy), then finishes `merged` with its delivery complete (per D23).
-- The simulated host refuses any launch that would exceed its declared agents (controller 1 + owner and one support agent per live owner) and any scripted launch, counting refusals; it is a fixture, not a live Claude host (per D14).
+- The simulated host refuses any owner launch that would exceed its declared agents (controller 1 + each live owner + each live support agent, counting the new owner and its first support agent) and any scripted launch, counting refusals. Each owner's worker and reviewer steps are distinct support agents, and the replay asserts the host never exceeds its declared agents at any minute, so the reviewer-never-waits evidence is measured rather than assumed (per D27). It is a fixture, not a live Claude host (per D14).
 - Metrics (per D12): `controller_turns`; `wait_producing_responses`; `owner_dispatches`; `host_refusals`; `time_to_first_useful_result` (minutes to the first merged finish); `makespan` (the minute of the finalizing control call); `worker_utilization` = `[busy support slot-minutes, Σ over makespan minutes of (declared − controller − live owners)]`. No percentage or target field exists.
 - The baseline is the committed exact-match fixture. It starts as the spec's prediction; when the implementation measures something else, commit the measured values and state each deviation and its cause in the task report — never change runtime behavior to meet the prediction (per D12).
 
@@ -60,22 +60,39 @@ def at(minute):
     return (start + timedelta(minutes=minute)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+TASK_STEPS = (("worker", 20), ("reviewer", 10), ("worker", 20), ("reviewer", 10))
+
+
 class SimulatedHost:
-    """The controller is one agent; a live owner is two (itself and one support agent)."""
+    """A fixture host where the controller, each owner and each support agent is one agent.
+
+    An owner runs its two tasks in order, each a worker then a distinct reviewer, so
+    exactly one of its support agents is live at any minute of its run (D12, D14).
+    """
 
     def __init__(self, capacity, refuse=()):
         self.capacity, self.refuse, self.refusals = capacity, set(refuse), 0
         self.owners = {}  # launch action id -> (start, end)
+        self.support = []  # (launch action id, role, start, end), one entry per agent
 
     def live(self, minute):
         return sum(1 for start, end in self.owners.values() if start <= minute < end)
 
+    def agents(self, minute):
+        busy = sum(1 for _, _, start, end in self.support if start <= minute < end)
+        return 1 + self.live(minute) + busy
+
     def launch(self, action_id, minute):
-        if action_id in self.refuse or 1 + 2 * (self.live(minute) + 1) > self.capacity:
+        # The owner and its first support agent must both fit.
+        if action_id in self.refuse or self.agents(minute) + 2 > self.capacity:
             self.refuse.discard(action_id)
             self.refusals += 1
             return False
         self.owners[action_id] = (minute, minute + OWNER_MINUTES)
+        start = minute
+        for role, length in TASK_STEPS:
+            self.support.append((action_id, role, start, start + length))
+            start += length
         return True
 
 
@@ -238,6 +255,10 @@ class AdmissionReplayTest(BuilderHarness, unittest.TestCase):
                     "issue": action["issue"], "custody": action["custody"],
                     "state": "launch_refused"}])
         self.assertEqual(tally["controller_turns"], 1 + tally["delivered_events"])
+        # Every admitted owner's worker and reviewer ran as its own agent, and none
+        # would have waited for a slot: the fixture host never exceeds its budget.
+        self.assertTrue(all(host.agents(minute) <= slots for minute in range(clock)),
+                        "an admitted owner's worker or reviewer would have waited for a slot")
         return {"declared_slots": slots, "max_parallel": 2,
                 "controller_turns": tally["controller_turns"],
                 "wait_producing_responses": tally["wait_producing_responses"],
@@ -245,7 +266,7 @@ class AdmissionReplayTest(BuilderHarness, unittest.TestCase):
                 "host_refusals": host.refusals,
                 "time_to_first_useful_result": first_merged, "makespan": clock,
                 "worker_utilization": [
-                    sum(min(end, clock) - start for start, end in host.owners.values()),
+                    sum(max(0, min(end, clock) - start) for _, _, start, end in host.support),
                     sum(slots - 1 - host.live(minute) for minute in range(clock))],
                 }, first, last
 

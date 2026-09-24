@@ -43,7 +43,7 @@ normalized durable section. Extend the anchor tuple in
                             '`host_route: "claude-code"`', "never calculates slots")
         for retired in ("Treat known host capacity as a capability boundary",
                         "This does not add reservation"):
-            self.assertNotIn(retired, self.orchestrate)
+            self.assertNotIn(retired, normalized(self.orchestrate))
         observe = normalized(self.section(self.orchestrate,
             "## 2. Bootstrap and observe", "## 3. Decide"))
         self.assertIn("`launch_refused` for an owner launch the host refused", observe)
@@ -57,6 +57,9 @@ normalized durable section. Extend the anchor tuple in
                             "exactly one control call", "`launch_refused`")
         report = normalized(self.orchestrate.split("## 5. Final report", 1)[1])
         self.assertIn("`admission.waiting` as queued for agent slots", report)
+        self.assertIn("bounded summaries in the same interface_version 3 control response",
+                      report)
+        self.assertNotIn("interface_version 2 summaries", report)
 
     def test_codex_orchestrate_stub_relays_the_unsupported_route(self):
         raw = CODEX_ORCHESTRATE.read_text(encoding="utf-8")
@@ -120,7 +123,7 @@ Expected: FAIL — the 17-key v2 block, missing anchors, and no Codex stub.
 2. §2 — after the sentence ending "for that exact issue, attempt, and launch identity.", add: "Its `state` is `unavailable` for an owner that died and `launch_refused` for an owner launch the host refused."
 3. §3 — the JSON block gains `"host_route": "claude-code",` after `"interface_version": 3,`; "Every control call sends exactly this interface_version 2 request" → "interface_version 3"; "Accept only the validated interface_version 2 control response with its bounded `run_id`, `now`, `summaries`, `deltas`, `actions`, and `next_deadline` fields." → "Accept only the validated interface_version 3 control response with its bounded `run_id`, `now`, `summaries`, `deltas`, `actions`, `next_deadline`, and `admission` fields."
 4. §4 — after the paragraph that records the host task handle, add: "If the host refuses an owner launch, never retry it: make exactly one control call carrying a `launch_refused` owner observation for that action's `custody`, and execute that response. The runtime parks the refused owner and dispatches it again only after another owner's claim is released."
-5. §5 — after the per-issue table sentence, add: "List every issue in the finalize response's `admission.waiting` as queued for agent slots, with its summary state."
+5. §5 — "Render a `finalize` action from the bounded interface_version 2 summaries in the same control response." → "Render a `finalize` action from the bounded summaries in the same interface_version 3 control response." (the summaries are unchanged; only the response they ride in moved to 3). After the per-issue table sentence, add: "List every issue in the finalize response's `admission.waiting` as queued for agent slots, with its summary state."
 6. Notes — append: "Codex has its own `orchestrate-issues` stub, which answers with `workflow-state host-route --route codex` and names `/from-issue <n> --auto`."
 
 `OI/evals/evals.json`: eval 1's "Send the exact 17-key interface_version 2 control request with ordered issues" → "Send the exact 18-key interface_version 3 control request, with host_route claude-code, ordered issues", and prefix its "Resolve issue numbers" sentence with "Before init-run, ask workflow-state host-route --route claude-code once and validate it; an unsupported answer is the final report." Eval 3 becomes `name` `host-capacity-is-admitted-by-the-runtime`, `prompt` "Plan-only: the host refuses to launch an issue owner because it already runs its maximum number of agents. Explain how orchestrate-issues responds.", `expected_output` "Before init-run the adapter asks workflow-state host-route --route claude-code once and validates it at the workflow-response boundary; an unsupported answer and its alternative are the final report. Every interface_version 3 control request carries host_route claude-code, and the runtime reserves each owner's worker and reviewer slots before returning a dispatch. A rejected owner launch is never retried: the adapter makes exactly one control call with a launch_refused owner observation for that action's custody and executes the response; the runtime parks that owner and re-dispatches it only after another claim is released. The adapter never calculates slots, alters max_parallel, creates competing owners or nested relays, or polls; issues in admission.waiting are reported as queued for agent slots."

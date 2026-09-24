@@ -4,7 +4,7 @@
 - Modify: `home/common/agent-skills/scripts/workflow-state.py`
 - Modify: `home/common/agent-skills/scripts/workflow_delivery.py` (`migrate`, `migrate_1_to_2`)
 - Modify: `home/common/agent-skills/tests/test_workflow_state.py` (`LifecycleHarness` extraction, legacy helpers, schema re-pins)
-- Modify: `home/common/agent-skills/tests/test_delivery_workflow.py` (schema re-pins, `write_run`)
+- Modify: `home/common/agent-skills/tests/test_delivery_workflow.py` (schema re-pins, `write_run`, the staged source/installed layouts of `test_public_source_and_installed_admission_fail_closed`)
 - Test: `home/common/agent-skills/tests/test_host_admission.py`
 
 **Interfaces:**
@@ -163,6 +163,18 @@ Expected: FAIL — schema 3 ledgers carry no `admission` (`KeyError`/`invalid wo
 - [ ] **Step 3: Implement**
 
 The Produces and Invariants above, plus: `validate_state` loads the library once per call; `settle_admission`'s docstring states the D19 order and that it is the only release site besides control's `owner_unavailable` and `finalized` releases; `commit_state`'s docstring names it as the one write boundary. `migrate`'s docstring becomes "Compose schema 1→2→3→4"; its v1/v2 legacy issue-schema check stays scoped to those versions; `migrate_1_to_2` also pops `admission`.
+
+`DeliveryAdmissionTest.test_public_source_and_installed_admission_fail_closed`
+(`T/test_delivery_workflow.py` ≈L333–414) stages the runtime and runs `init-run`,
+whose commit now loads `host_admission.py` from the same two places `_host_admission()`
+looks (Task 1 step 3): copy `SCRIPTS / "host_admission.py"` into `store` beside the
+other copied scripts, and in the installed layout also link `library / "host_admission.py"`
+to it. Then pin the loader's fail-closed path in both layouts: with
+`store/host_admission.py` removed, `host-route --route claude-code` exits 2 with empty
+stdout and `host admission library` in stderr; restore the file afterwards. Keep
+`_host_admission()` lazy (never called at import), so
+`ArtifactBudgetPolicyResolutionTest` (`T/test_workflow_state.py` ≈L5905), which only
+imports the installed script, still needs no library.
 
 Re-pin existing tests to schema 4 (numbers only, plus renaming tests whose names say "schema three"): `T/test_workflow_state.py` lines asserting `schema_version` 3 (≈2198, 5009, 5030–5032, 5057) and the literal schema-3 states (≈2593, 2640, which gain `"admission": None`); `T/test_delivery_workflow.py` ≈250, 263–264, 1929, and `ContractLifecycleTest.write_run`, whose default becomes `schema=4` and which pops `admission` for `schema < 4`.
 
