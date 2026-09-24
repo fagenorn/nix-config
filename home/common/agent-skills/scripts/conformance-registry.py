@@ -336,7 +336,8 @@ REGISTRY: tuple[Check, ...] = (
     # broken contract never suppresses it (#150 D13, D24).
     Check("host.admission.declaration", "host", "capability", "optional", (),
           (("declaration_missing", "host.admission.declare"),
-           ("declaration_invalid", "host.admission.declare")),
+           ("declaration_invalid", "host.admission.declare"),
+           ("library_unavailable", "host.admission.declare")),
           "check_admission_declaration"),
     Check("repository.paths.classified", "repository", "path", "required",
           ("repository.contract.valid",),

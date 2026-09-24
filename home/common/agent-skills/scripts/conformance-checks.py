@@ -408,21 +408,31 @@ def load_host_admission():
     A source sibling when this module runs from the repository's `scripts`
     directory, the installed `~/.agents/lib/python` copy otherwise -- the same
     library `workflow-state` loads, so the check and the runtime can never
-    disagree about what a valid declaration is.
+    disagree about what a valid declaration is. Like `workflow-state`, it
+    refuses a library whose `HOST_ADMISSION_INTERFACE_VERSION` is not 1.
+    Raises on any load failure; `check_admission_declaration` owns turning
+    that into its finding.
     """
     global _HOST_ADMISSION
     if _HOST_ADMISSION is None:
-        here = Path(__file__).parent
-        entry = (here / "host_admission.py" if here.name == "scripts"
-                 else Path.home() / ".agents/lib/python/host_admission.py")
+        entry = host_admission_path()
         spec = importlib.util.spec_from_file_location(
             "conformance_host_admission", entry)
         if spec is None or spec.loader is None:
             raise ImportError(f"cannot load {entry}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        if getattr(module, "HOST_ADMISSION_INTERFACE_VERSION", None) != 1:
+            raise ImportError(f"unsupported interface in {entry}")
         _HOST_ADMISSION = module
     return _HOST_ADMISSION
+
+
+def host_admission_path() -> Path:
+    """The host admission library `load_host_admission` reads."""
+    here = Path(__file__).parent
+    return (here / "host_admission.py" if here.name == "scripts"
+            else Path.home() / ".agents/lib/python/host_admission.py")
 
 
 def check_admission_declaration(context: "Context") -> "Outcome":
@@ -430,8 +440,15 @@ def check_admission_declaration(context: "Context") -> "Outcome":
     supported routes (`<route>=<agent_slots>`) and unsupported route names as
     facts; failed with the library's own reason code otherwise, naming the
     declaration path. It reports the declaration and route support only: it
-    never reads or writes a ledger or a claim (#150 D13, D24)."""
-    library = load_host_admission()
+    never reads or writes a ledger or a claim (#150 D13, D24). A library that
+    is absent, fails to import or declares another interface is this optional
+    check's own `library_unavailable` finding, naming the library path, never
+    an exception that would fail the whole run."""
+    try:
+        library = load_host_admission()
+    except Exception:
+        return Outcome("failed", "library_unavailable", "host.admission.declare",
+                       {"library_path": bound_fact(str(host_admission_path()))})
     try:
         declaration = library.load_declaration()
     except library.DeclarationError as error:
