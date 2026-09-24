@@ -246,8 +246,10 @@ def scaffold(root: Path, contract: dict, home: Path) -> None:
     about what "in sync" means.
     """
     write(root, ".agents/instructions/bootstrap.md", "# invariants\n")
-    (root / "home" / "common" / "agent-skills" / "standards").mkdir(
-        parents=True, exist_ok=True)
+    # Every standards path the contract declares, not a literal copy of one:
+    # the contract is this repository's own, so a path it gains exists here too.
+    for standards in contract["bindings"]["paths"]["standards"]:
+        (root / standards).mkdir(parents=True, exist_ok=True)
     write(root, ".agents/project.json", json.dumps(contract, indent=2) + "\n")
     proc = subprocess.run(
         [sys.executable, str(RESOLVER), "write-projections",

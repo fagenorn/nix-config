@@ -14,7 +14,7 @@ neither file collects the other's tests (the pattern
 The fixture repository is this repository's shape with two substitutions the
 suite cannot do without: its `workflow.verification` names a trivial command
 rather than `just build`, because the commit gates run every declared command
-in full and refuse to be skipped; and one tracked file lives under the
+in full and refuse to be skipped; and one tracked file lives under each
 declared standards path, so the cold-clone export — which carries tracked
 content only — still resolves.
 """
@@ -84,7 +84,8 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     without_platform = json.loads((root / CONTRACT).read_text("utf-8"))
     del without_platform["platform"]
     write(root, CONTRACT, json.dumps(without_platform, indent=2) + "\n")
-    write(root, "home/common/agent-skills/standards/bar.md", "# the bar\n")
+    for standards in contract["bindings"]["paths"]["standards"]:
+        write(root, f"{standards}/bar.md", "# the bar\n")
     for old in MOVED:
         write(root, old, f"# {old}\n")
     write(root, ".claude/skills.config.json", json.dumps(

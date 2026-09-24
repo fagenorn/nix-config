@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Per-issue agent-cost telemetry for Claude Code and Codex sessions.
 
 Scans ~/.claude/projects for root sessions (<project>/<session>.jsonl) plus their
@@ -34,7 +33,6 @@ spec/plan markdown: bytes, fenced-code share, and decision-section share.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -45,6 +43,8 @@ from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+
+from agent_tools.canonical import telemetry_digest
 
 # List price per million tokens: (input, output, cache_write_1h, cache_write_5m, cache_read).
 # Matches the pricing model the transcript-mining report used, so numbers stay
@@ -1061,12 +1061,6 @@ RECORD_TOKEN_FIELDS = ("input_total", "fresh", "cache_create", "cache_read",
                        "output", "reasoning")
 
 
-def canonical_digest(body):
-    """Contract: 'sha256:' + sha256 over canonical JSON of `body` (D9)."""
-    payload = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 
 
@@ -1131,7 +1125,7 @@ def _merge_coverage(values):
 
 def cohort_digest(identities: list[tuple[str, ...]]) -> str:
     """Return a stable digest for the bounded cohort identities."""
-    return canonical_digest(sorted([list(identity) for identity in identities]))
+    return telemetry_digest(sorted([list(identity) for identity in identities]))
 
 
 def merge_metric_coverage(metrics: list[dict]) -> dict:
@@ -1173,7 +1167,7 @@ def _validate_scheduling(metrics, event_window):
             raise ValueError("paired scheduling metrics require one full cohort")
     capacity, claimed = metrics["slot_capacity_seconds"], metrics["claimed_slot_seconds"]
     if capacity["value"] is not None:
-        if capacity["cohort_digest"] != canonical_digest(event_window):
+        if capacity["cohort_digest"] != telemetry_digest(event_window):
             raise ValueError("slot metrics require the event-window cohort")
         if claimed["value"] > capacity["value"]:
             raise ValueError("claimed slots exceed capacity")
@@ -1647,7 +1641,7 @@ def build_record(groups_by_stratum, window, execution_telemetry=None):
     }
     return dict(
         body,
-        record_id=canonical_digest(body),
+        record_id=telemetry_digest(body),
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
             "+00:00", "Z"
         ),
@@ -1734,7 +1728,7 @@ def print_artifact_stats(per_class):
 
 
 def main(argv=None, *, executor_factory=ProcessPoolExecutor):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog="agent-costs", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=35, help="window in days by file mtime (0 = all)")
     ap.add_argument("--project", help="only projects whose name contains this substring")
     ap.add_argument("--top", type=int, default=30, help="rows to print")
