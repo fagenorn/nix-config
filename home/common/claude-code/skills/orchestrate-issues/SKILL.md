@@ -24,7 +24,10 @@ repository, and credential environment; map `bindings.vcs` to worktree and branc
 policy; and map `bindings.workflow.orchestration.attempt_budget_minutes` and
 `bindings.workflow.orchestration.max_parallel` directly to the request. Nested
 issue owners independently resolve at their own phase entries. Do not read raw
-policy, invoke another resolver, infer from Git, or supply defaults.
+policy, invoke another resolver, infer from Git, or supply defaults; the only
+sanctioned exception is `workflow-state build-delivery`, which performs its own
+sealed, read-only resolution when it builds a delivery contract, and this
+dispatcher still never resolves again itself.
 
 Every lifecycle call is one command that reads its input from stdin through a
 quoted heredoc (`<<'EOF'`): `--request-file -` for `control`, `--input -` for

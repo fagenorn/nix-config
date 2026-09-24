@@ -248,6 +248,7 @@ LEGACY_POLICY_SURFACE = (  # policy-gate-pattern
     "codex.planReview", "codex.codeReview", "commit.coAuthoredBy",  # policy-gate-pattern
     "deploy.services", "deploy.watchDoc", "verify.lint", "verify.test",  # policy-gate-pattern
     "verify.lintFix", "review.criticalPaths", "mergeSubjectTemplate",  # policy-gate-pattern
+    "worktreePrefix", "branchPattern", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
 )
 
 SUPPORT_POLICY_FORBIDDEN = (

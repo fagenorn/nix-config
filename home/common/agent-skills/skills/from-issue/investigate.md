@@ -6,7 +6,7 @@ Loaded from `SKILL.md` at Phase 0. The stop rules and worktree-safety inspection
 
 ## PR pre-flight queries
 
-1. `<tracker-cli> pr list --state all --search "issue-<num>" --json number,title,headRefName,state`. The default search hits titles, bodies *and* branch names, catching PRs whose branch is `<worktreePrefix>issue-<num>-...` even when the title omits the number; don't narrow with `in:title,body`.
+1. `<tracker-cli> pr list --state all --search "issue-<num>" --json number,title,headRefName,state`. The default search hits titles, bodies *and* branch names, catching PRs whose branch is `<bindings.vcs.worktree.prefix>issue-<num>-...` even when the title omits the number; don't narrow with `in:title,body`.
 2. **Open PR**: verify the exact issue, head branch, target branch, and acceptance
    evidence. When it belongs to this requested work and existing authorization
    covers delivery, resume its worktree and shipping path; do not rebuild it.

@@ -284,7 +284,7 @@ artifact blocks only:
 - no reconstructed lifecycle field; and
 - no authorization flag.
 
-The delegated phase entry supplies its retained `ResolvedProject` to this continuation.
+The fresh owner resolves once at its own phase entry and applies that retained `ResolvedProject` to these checks; it is never a member of the continuation object.
 
 #### Fresh delegated owner
 
