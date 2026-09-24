@@ -28,8 +28,11 @@ import unittest
 # shared support module lives beside this file.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from skill_tree_support import (  # noqa: E402
+    INSTALLED_VIEWS,
     REPO_ROOT,
     SOURCE_TREES,
+    installed_home_or_skip,
+    installed_root_error,
 )
 
 
@@ -878,6 +881,30 @@ class SourceTreeSweepTest(unittest.TestCase):
                 text = (SOURCE_TREES[tree] / relative).read_text(encoding="utf-8")
                 findings = refused_examples(text)
                 self.assertEqual(findings, (), findings_report(relative, findings))
+
+
+class InstalledTreeSweepTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = installed_home_or_skip()
+
+    def test_no_installed_example_teaches_a_refused_form(self):
+        error = installed_root_error(self.root)
+        self.assertIsNone(error, error)
+        for view, skills_dir, trees in INSTALLED_VIEWS:
+            base = self.root / skills_dir
+            if not base.is_dir():
+                with self.subTest(view=view):
+                    self.fail(f"the {view} view is missing: {base}")
+                continue
+            for tree, relative in swept_documents():
+                if tree not in trees:
+                    continue
+                path = base / relative
+                with self.subTest(view=view, document=relative):
+                    self.assertTrue(path.is_file(), f"the {view} view lacks {path}")
+                    findings = refused_examples(path.read_text(encoding="utf-8"))
+                    self.assertEqual(findings, (), findings_report(str(path), findings))
 
 
 if __name__ == "__main__":

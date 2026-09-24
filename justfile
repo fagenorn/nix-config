@@ -102,7 +102,8 @@ agent-installed-skill-tests: build
       exit 1; \
     fi; \
     AGENT_SKILLS_INSTALLED_HOME="$1" python3 -m unittest -v \
-      home/common/agent-skills/tests/test_dispatch_contracts.py
+      home/common/agent-skills/tests/test_dispatch_contracts.py \
+      home/common/agent-skills/tests/test_shell_example_contracts.py
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
