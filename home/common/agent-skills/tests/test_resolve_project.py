@@ -236,6 +236,7 @@ def make_project_root(contract: object | None = None, *,
     root = Path(tempfile.mkdtemp()).resolve()
     git(root, "init", "--quiet")
     (root / "home" / "common" / "agent-skills" / "standards").mkdir(parents=True)
+    (root / "docs" / "standards").mkdir(parents=True)
     (root / ".out-of-scope").mkdir()
     (root / ".worktrees").mkdir()
     (root / ".agents" / "instructions").mkdir(parents=True)
