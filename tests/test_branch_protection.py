@@ -335,7 +335,11 @@ class WorkflowShape(unittest.TestCase):
         self.assertIn("unknown", summary_shell_body())
         self.assertNotRegex(body, re.compile(r"^    continue-on-error:", re.MULTILINE))
         self.assertIn("nix shell --inputs-from . nixpkgs#just --command just --version", body)
-        self.assertIn("nix shell --inputs-from . nixpkgs#just --command just agent-workflow-tests", body)
+        self.assertIn(
+            "WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just "
+            "--command just agent-workflow-tests",
+            body,
+        )
 
         expected_steps = {
             "Checkout": "checkout",

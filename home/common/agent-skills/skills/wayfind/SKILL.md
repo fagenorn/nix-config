@@ -11,7 +11,7 @@ This is **planning, not doing** — the pull to just do the work usually signals
 
 Each discipline's rationale — and the trap it prevents — is in [DISCIPLINE.md](./DISCIPLINE.md); read it when a rule feels skippable.
 
-Resolve tracker bindings from `.claude/skills.config.json` (`issueTracker{kind,cli}`, default GitHub/`gh`). `kind: none` → markdown under `.claude/wayfind/<effort>/`: `map.md` with `state: open|complete` front-matter; tickets `tickets/NNN-<slug>.md` with `type: wayfinder:<type>`, `state`, `assignee`, `blocked_by: [NNN, …]` above `## Question`; resolving appends `## Resolution` and flips `state`.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker` and `capabilities.tracker`; authored unsupported uses the documented local map route, while blocked stops. The local map uses `map.md` with `state: open|complete` front-matter; tickets use `tickets/NNN-<slug>.md` with `type: wayfinder:<type>`, `state`, `assignee`, `blocked_by: [NNN, …]` above `## Question`; resolving appends `## Resolution` and flips `state`.
 
 ## The map
 

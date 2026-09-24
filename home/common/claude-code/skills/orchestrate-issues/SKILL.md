@@ -14,6 +14,21 @@ policy. Context stays flat regardless of issue count.
 Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
 `workflow-state` name does not resolve on PATH, use that full path.
 
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and
+retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain
+the returned `ResolvedProject` in memory, and treat every resolver error as fatal
+before mutation or external effects. On refusal, preserve and report the
+resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never
+translate it into a partial snapshot or fallback. Map `bindings.tracker` to the tracker CLI,
+repository, and credential environment; map `bindings.vcs` to worktree and branch
+policy; and map `bindings.workflow.orchestration.attempt_budget_minutes` and
+`bindings.workflow.orchestration.max_parallel` directly to the request. Nested
+issue owners independently resolve at their own phase entries. Do not read raw
+policy, invoke another resolver, infer from Git, or supply defaults; the only
+sanctioned exception is `workflow-state build-delivery`, which performs its own
+sealed, read-only resolution when it builds a delivery contract, and this
+dispatcher still never resolves again itself.
+
 Every lifecycle call is one command that reads its input from stdin through a
 quoted heredoc (`<<'EOF'`): `--request-file -` for `control`, `--input -` for
 `build-delivery`, with the helper named bare or as `~/.agents/bin/workflow-state`,
@@ -28,14 +43,14 @@ untrusted transport: pipe its raw bytes through `artifact-budget validate-report
   `human_directed` to `true` for this run. Naming an issue is the caller
   authorizing that issue by name, exactly as `/from-issue <num>` does.
 - `--label X` / `--milestone Y`: resolve the ordered issue numbers with one
-  configured tracker-list call, and set request `human_directed` to `false`. A
-  set the caller never enumerated carries no per-issue authorization. The
-  tracker CLI and `unsetGithubToken` come from `.claude/skills.config.json`,
-  through the same bindings used by `from-issue`.
-- Call `~/.agents/bin/resolve-bindings` once for both orchestration limits. Put
-  the resolved `agentBudgetMinutes` as request `attempt_budget_minutes` and the
-  resolved `maxParallel` as request `max_parallel`. Do not copy either default
-  or calculate capacity in this adapter.
+  configured tracker-list call through retained `bindings.tracker`, and set
+  request `human_directed` to `false`. A set the caller never enumerated carries
+  no per-issue authorization. Apply only the declared credential-environment
+  names from that retained tracker binding.
+- Put retained `bindings.workflow.orchestration.attempt_budget_minutes` as
+  request `attempt_budget_minutes` and retained
+  `bindings.workflow.orchestration.max_parallel` as request `max_parallel`.
+  Do not calculate capacity in this adapter.
 - Resolve the dispatcher's absolute repository root once as `ledger_repo_root`;
   it remains the exact immutable value for the run, independent of any issue
   worktree. Then select the `run_id` per the run-reuse rule in §2 — reuse an

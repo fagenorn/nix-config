@@ -1,8 +1,12 @@
 # Context Map & Area Glossary Format
 
+This included format receives the phase owner's retained `ResolvedProject`. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter invocation, one selects that absolute path, and multiple matches are an invalid caller contract that stops before invocation. Never probe the filesystem, sort the list, take a first match, or infer a location.
+
 Domain knowledge lives as a **map plus area glossaries**. The map is an index, never a store: it names the areas, the paths each one governs, and which area owns each term. The definitions live in the area files. Readers load the map every time (cheap) and open only the area files whose `governs:` globs intersect the paths they are touching.
 
-**Location: contained in `docs/`.** The docs root holds exactly two loose files — `README.md`, the routing index, and `CONTEXT-MAP.md`, the map. Everything else lives in a reserved directory:
+**Illustrative layout:** when the caller-selected map is in `docs/`, that docs
+root holds exactly two loose files — `README.md`, the routing index, and
+`CONTEXT-MAP.md`, the map. Everything else lives in a reserved directory:
 
 ```
 docs/
@@ -26,13 +30,14 @@ docs/
 
 `docs/areas/system/` is the reserved pseudo-area for decisions that belong to no single area. Its map row is real — gist "decisions spanning areas", `governs:` glob `*` — and its `CONTEXT.md` is a stub of a few lines, because every grounding pass loads it. **There is no central `docs/adr/`**: every ADR lives in exactly one `docs/areas/<slug>/adr/`, so tooling has one shape and no special cases.
 
-Prefer `.claude/skills.config.json`'s `docPaths.contextMap` / `docPaths.context` when set. (Two legacy layouts survive where a repo still uses them — a root `CONTEXT-MAP.md` with code-colocated area files, and flat `docs/<slug>/` areas beside a central `docs/adr/`. Follow what a repo actually has rather than imposing this tree on it mid-migration.)
+Use only the caller-selected path from `bindings.paths.context`; included formats never read configuration or discover locations.
 
-Skill output is not documentation and does not live here: specs, plans, handoffs and notes go to `.claude/specs/`, `.claude/plans/`, `.claude/handoffs/`, `.claude/notes/`.
+Skill output is not documentation and does not live here: specs, plans, handoffs
+and notes use their respective retained `bindings.paths.artifacts` locations.
 
 > The Order / Invoice / Customer names below are illustrative DDD samples — substitute the project's real terms.
 
-## `docs/CONTEXT-MAP.md` — the index
+## `<selected-context-map>` — the index
 
 **Hard budget: 150 lines.** Three tables and nothing else.
 
@@ -134,7 +139,7 @@ A new repo may begin with a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md
 
 ## Linting
 
-`~/.agents/bin/context-map-lint <repo-root>` checks that every term resolves to an area file that defines it, every file is within budget, every `governs:` glob matches something, and every relative link in the map resolves.
+`~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>`, given the map selected from the retained `bindings.paths.context` list, checks that every term resolves to an area file that defines it, every file is within budget, every `governs:` glob matches something, and every relative link in the map resolves.
 
 Once `docs/areas/` exists it also enforces the layout above:
 

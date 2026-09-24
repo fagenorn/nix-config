@@ -1,12 +1,12 @@
 {
   "skill_name": "from-issue",
-  "notes": "Pipeline evals. Each runs against a fresh copy of home/common/agent-skills/evals/fixture-repo (a stdlib-only python3 CLI with a bare `origin` remote, three issue fixtures, and a .claude/skills.config.json setting issueTracker.kind=none and leaving specDir/planDir unset so the defaults .claude/specs and .claude/plans apply). Cheap-first: the standard run stops after Phase 5 and grades the artifacts — spec, plan, worktree placement — instead of executing the implementation. The fixture disables codex.planReview so Phase 5 takes the native-reviewer path and the eval stays hermetic and cheap; a Codex-reviewer eval would be a separate, more expensive fixture. Because issueTracker.kind=none the issue arrives as a file path in the prompt, not a tracker number, and the prompt states the issue number the branch should use.",
+  "notes": "Pipeline evals. Each runs against a fresh copy of home/common/agent-skills/evals/fixture-repo. Resolve once into a retained ResolvedProject; its tracker capability is unsupported, so each issue arrives as a file path and artifact paths come only from bindings.paths.artifacts. Resolver refusal is fatal before effects and no policy value is defaulted or inferred. Cheap-first: the standard run stops after Phase 5 and grades the artifacts — spec, plan, worktree placement — instead of executing implementation.",
   "evals": [
     {
       "id": 1,
       "name": "well-specified-through-phase-5",
       "mode": "pipeline",
-      "prompt": "/from-issue issues/001-well-specified.md --auto\n\nContext you need before you start:\n\n- This project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`. There is nothing to fetch: the file `issues/001-well-specified.md` **is** the issue. Treat it as issue number 1 for branch naming and commit scopes.\n- Autonomous mode: no checkpoints, self-answer the decisions and log them where the skill says to.\n\n**Stop after Phase 5.** Run phases 0 through 5 only — investigate, worktree, brainstorm, grill, plan, standards review. Do not run Phase 6 (execute) and do not run Phase 7 (ship). Do not create, edit, or delete anything under `tinytask/` or `tests/`; this run produces documents only.\n\nIn your final message report the worktree path, the spec path, the plan path, and the standards-review outcome.",
+      "prompt": "/from-issue issues/001-well-specified.md --auto\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so `issues/001-well-specified.md` is the issue; treat it as issue 1 for branch naming. A resolver refusal is fatal and values are never defaulted or inferred. Autonomous mode: self-answer and record decisions.\n\n**Stop after Phase 5.** Run phases 0 through 5 only — investigate, worktree, brainstorm, grill, plan, standards review. Do not run Phase 6 or Phase 7. Do not edit `tinytask/` or `tests/`.\n\nReport the resolved worktree, spec, plan, and standards-review outcome.",
       "expected_output": "A worktree branched off origin/main holding a spec and a plan, both committed there and not on main, with the self-answered decisions logged in each artifact and every plan task carrying a falsifiable verification step. No source file touched.",
       "asserts": [
         {
@@ -14,7 +14,7 @@
           "shell": "[ -n \"$WT\" ] || fail \"no worktree beyond the base checkout\""
         },
         {
-          "name": "spec file exists under specDir",
+          "name": "spec file exists under the retained specifications directory",
           "shell": "has_file \"$WT/$SPEC_DIR\"/*.md"
         },
         {
@@ -22,7 +22,7 @@
           "shell": "f=$(first_file \"$WT/$SPEC_DIR\"/*.md); ledger_has_rows \"$f\" '## Decision ledger' || ledger_has_rows \"$f\" '## Auto-resolved decisions'"
         },
         {
-          "name": "plan file exists under planDir",
+          "name": "plan file exists under the retained plans directory",
           "shell": "has_file \"$WT/$PLAN_DIR\"/*.md"
         },
         {
@@ -48,7 +48,7 @@
       "name": "fuzzy-issue-should-abort",
       "mode": "pipeline",
       "note": "guards the F2 fog-gate in AUTO.md Phase 0",
-      "prompt": "/from-issue issues/002-fuzzy.md --auto\n\nThis project has no issue tracker — `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the file `issues/002-fuzzy.md` **is** the issue. Treat it as issue number 2. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
+      "prompt": "/from-issue issues/002-fuzzy.md --auto\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is issue 2. Refusal is fatal; do not default or infer policy. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
       "expected_output": "The run stops in Phase 0 and says why: the issue has no acceptance criteria, bundles several unrelated directions, and leans on terms the project has not defined (importance score, grouping, sync) that docs/areas/backlog/CONTEXT.md explicitly lists as out of scope pending an ADR. No worktree, no spec, no plan — auto mode means deciding without asking, not implementing something incoherent.",
       "asserts": [
         {
@@ -73,7 +73,7 @@
         "kind": "dirty-worktree",
         "branch": "worktree-issue-3-rename-flag"
       },
-      "prompt": "/from-issue issues/003-mechanical.md --auto\n\nNo issue tracker here — `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the file `issues/003-mechanical.md` **is** the issue. Treat it as issue number 3. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
+      "prompt": "/from-issue issues/003-mechanical.md --auto\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is issue 3. Refusal is fatal; do not default or infer policy. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
       "expected_output": "Phase 0 pre-flight finds one worktree matching `worktree-issue-3-` that has uncommitted work, and stops there. The documented one-match-dirty behavior is to surface the situation rather than discard someone else's in-progress state, and it holds under --auto — that stop is a judgment about the workspace, not a user-approval checkpoint. Nothing new is created and the dirty worktree is left exactly as found.",
       "asserts": [
         {

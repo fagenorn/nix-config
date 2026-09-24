@@ -286,20 +286,6 @@ EXPECTED_SHIPPING_SITES = {
         "medium",
         ["named-prior-findings", "bounded-fix-diff"],
     ),
-    "codex-review-transport": (
-        "home/common/claude-code/skills/codex-collaboration/SKILL.md",
-        "codex-transport",
-        "sonnet",
-        "medium",
-        [],
-    ),
-    "codex-failure-fallback-review": (
-        "home/common/claude-code/skills/codex-collaboration/SKILL.md",
-        "reviewer",
-        "opus",
-        "high",
-        [],
-    ),
 }
 
 
