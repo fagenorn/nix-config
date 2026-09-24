@@ -1,7 +1,6 @@
 """Strict wire-format validation for the model-drift reporter."""
 from __future__ import annotations
 
-import hashlib
 import importlib.machinery
 import json
 import math
@@ -9,6 +8,8 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from agent_tools.canonical import reject_duplicate_keys, telemetry_digest
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SCHEDULING_METRICS = (
@@ -27,26 +28,12 @@ class InputError(ValueError):
     """An untrusted input does not meet the closed wire contract."""
 
 
-def _duplicates(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise InputError("duplicate JSON object key")
-        result[key] = value
-    return result
-
-
 def load_json(path):
     try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_duplicates)
-    except (OSError, UnicodeError, json.JSONDecodeError, InputError) as error:
+        value = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys)
+    except (OSError, ValueError) as error:
         raise InputError("cannot load JSON input") from error
     return value
-
-
-def canonical_digest(value):
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
 
 
 def canonical_time(value):
@@ -366,7 +353,7 @@ def validate_record(value):
     if not isinstance(value.get("record_id"), str) or not _DIGEST.fullmatch(value["record_id"]):
         raise InputError("record digest invalid")
     body = {key: item for key, item in value.items() if key not in ("record_id", "generated_at")}
-    if canonical_digest(body) != value["record_id"]:
+    if telemetry_digest(body) != value["record_id"]:
         raise InputError("record digest mismatch")
     telemetry = None
     if "execution_telemetry" in value:
@@ -407,7 +394,7 @@ def validate_baseline(value, matrix, matrix_digest):
     if not start <= captured < end or not isinstance(value["baseline_id"], str) or not _DIGEST.fullmatch(value["baseline_id"]):
         raise InputError("baseline lifecycle invalid")
     body = {key: item for key, item in value.items() if key != "baseline_id"}
-    if canonical_digest(body) != value["baseline_id"] or not isinstance(value["matrix_digest"], str) or not _DIGEST.fullmatch(value["matrix_digest"]):
+    if telemetry_digest(body) != value["baseline_id"] or not isinstance(value["matrix_digest"], str) or not _DIGEST.fullmatch(value["matrix_digest"]):
         raise InputError("baseline digest invalid")
     _closed(value["producer"], ("name", "version", "telemetry_schema_version"), "/baseline/producer")
     producer = value["producer"]

@@ -164,7 +164,7 @@ agent-costs *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_costs {{args}}
 
 agent-model-drift *args:
-  python3 scripts/agent-model-drift.py {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_drift {{args}}
 
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:

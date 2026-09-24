@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import copy
 import hashlib
-import importlib.util
 import io
 import json
 import shutil
@@ -12,13 +11,10 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-from agent_tools import agent_costs
+from agent_tools import agent_costs, agent_model_drift
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "scripts/agent-model-drift.py"
 MATRIX = REPO_ROOT / "home/common/agent-skills/model-matrix.json"
-_spec = importlib.util.spec_from_file_location("agent_model_drift", SCRIPT)
-agent_model_drift = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(agent_model_drift)
 
 def digest(value):
     return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
