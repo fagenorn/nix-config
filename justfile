@@ -55,9 +55,12 @@ update:
 evals skill id:
   ./home/common/agent-skills/evals/run-eval.sh {{skill}} {{id}}
 
+# The source package the agent recipes run (#175 D6).
+agent_tools_path := justfile_directory() / "python"
+
 # Verify durable workflow lifecycle and skill contracts without agent/network timing.
 agent-workflow-tests:
-  python3 -m unittest -v \
+  PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v \
     home/common/agent-skills/tests/test_workflow_state.py \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
@@ -79,6 +82,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_conformance_checks.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
+    tests/test_agent_tools_canonical.py \
     tests/test_agent_costs.py \
     tests/test_agent_model_drift_schema.py \
     tests/test_agent_model_drift_routing.py \
