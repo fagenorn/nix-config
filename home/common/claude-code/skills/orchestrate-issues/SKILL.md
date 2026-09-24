@@ -264,7 +264,9 @@ is never an owner token or action identity.
 If the host refuses an owner launch, never retry it: make exactly one control
 call carrying a `launch_refused` owner observation for that action's `custody`,
 and execute that response. The runtime parks the refused owner and dispatches it
-again only after another owner's claim is released by anything but a refusal.
+again only after some later claim release other than a refusal — another
+owner's, or the controller's `finalized` release, so an issue left in
+`admission.waiting` resumes on the next orchestrate invocation.
 
 <!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:

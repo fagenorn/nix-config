@@ -418,7 +418,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         execute = normalized(self.section(self.orchestrate,
             "## 4. Execute control actions", "## 5. Final report"))
         self.assert_ordered(execute, "host refuses an owner launch, never retry it",
-                            "exactly one control call", "`launch_refused`")
+                            "exactly one control call", "`launch_refused`",
+                            "the controller's `finalized` release",
+                            "resumes on the next orchestrate invocation")
         report = normalized(self.orchestrate.split("## 5. Final report", 1)[1])
         self.assertIn("`admission.waiting` as queued for agent slots", report)
         self.assertIn("bounded summaries in the same interface_version 3 control response",
