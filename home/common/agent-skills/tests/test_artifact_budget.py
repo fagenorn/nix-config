@@ -74,7 +74,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                     "requirements": [{"issue": issue, "owner": f"{issue}:1",
                         "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
                                     "action_id": f"{issue}:1:1"},
-                        "recorded_worktree": f"/worktrees/issue-{issue}"}
+                        "recorded_worktree": f"/worktrees/issue-{issue}",
+                        "contract_digest": None}
                         for issue in range(1, count + 1)]}
 
         def canonical(value):
@@ -93,6 +94,30 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         refused = self.run_validate("workflow-response", bootstrap(count), use_stdin=True)
         self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
                          (2, b"", b"artifact-budget: invalid report\n"))
+
+    def test_null_digest_summary_carries_legacy_custody_and_bootstrap_reports_digest(self):
+        model = artifact_budget._delivery_model()
+        response = deepcopy(workflow_responses(model)["control"])
+        response["summaries"][0].update(contract_digest=None, pending_stage_ids=[],
+            requirements=[{"kind": "delivery_contract", "subject_id": "151",
+                           "reason_code": "delivery_contract_required",
+                           "detail_pointer": None}])
+        response["actions"] = [item for item in response["actions"] if item.get("issue") != 151]
+        self.assertIsNotNone(response["summaries"][0]["custody"])
+        accepted = self.run_validate("workflow-response", response, use_stdin=True)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        response["summaries"][0]["requirements"] = []
+        bare = self.run_validate("workflow-response", response, use_stdin=True)
+        self.assertEqual(bare.returncode, 0, bare.stderr)
+        requirement = {"issue": 151, "owner": "151:1", "custody": custody(),
+                       "recorded_worktree": "/worktree"}
+        for digest, code in ((None, 0), ("sha256:" + "a" * 64, 0), ("absent", 2)):
+            value = dict(requirement) if digest == "absent" else {**requirement, "contract_digest": digest}
+            bootstrap = {"interface_version": 2, "kind": "workflow_bootstrap",
+                         "run_id": "r", "requirements": [value]}
+            with self.subTest(digest=digest):
+                self.assertEqual(self.run_validate("workflow-response", bootstrap,
+                                                   use_stdin=True).returncode, code)
 
     def test_ship_handoff_reads_under_the_response_wire_bound(self):
         """A ship handoff carries the contract and intents, past the phase-report bound."""

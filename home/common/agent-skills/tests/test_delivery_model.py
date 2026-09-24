@@ -985,8 +985,10 @@ class DeliveryModelTest(unittest.TestCase):
         summary = no_contract["summaries"][0]
         summary.update(custody=None, owner=None, worktree=None, deadline_at=None,
                        contract_digest=None, pending_stage_ids=[], requirements=[])
-        no_contract["actions"] = []
+        # A null digest never names its issue in an action (D12, D31).
         self.assert_invalid(no_contract, "workflow-response")
+        no_contract["actions"] = []
+        self.assertEqual(self.validate(no_contract, "workflow-response"), no_contract)
         summary["requirements"] = [{"kind": "delivery_contract", "subject_id": "151",
                                     "reason_code": "delivery_contract_required",
                                     "detail_pointer": None}]

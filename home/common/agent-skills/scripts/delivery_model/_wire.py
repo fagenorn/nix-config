@@ -187,7 +187,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
         if item["contract_digest"] is None:
             expected = {"kind": "delivery_contract", "subject_id": str(issue),
                         "reason_code": "delivery_contract_required", "detail_pointer": None}
-            if item["custody"] is not None or item["pending_stage_ids"] or item["requirements"] != [expected]: _reject()
+            if item["pending_stage_ids"] or item["requirements"] not in ([], [expected]): _reject()
             missing_contracts.add(issue)
     for item in value["deltas"]:
         item = _object(item, _members("issue custody kind state")); issue = _integer(item["issue"], "delta issue", minimum=1)
@@ -222,7 +222,8 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
         _object(value, _members("interface_version kind run_id requirements")); _v2(value); _string(value["run_id"], "run id")
         _sorted_unique(value["requirements"], "bootstrap requirements", key=lambda item: (item.get("issue", 0), item.get("custody", {}).get("action_id", "")))
         for item in value["requirements"]:
-            item = _object(item, _members("issue owner custody recorded_worktree")); issue = _integer(item["issue"], "requirement issue", minimum=1); _string(item["owner"], "requirement owner"); validate_custody_ref(item["custody"], issue=issue); _string(item["recorded_worktree"], "recorded worktree")
+            item = _object(item, _members("issue owner custody recorded_worktree contract_digest")); issue = _integer(item["issue"], "requirement issue", minimum=1); _string(item["owner"], "requirement owner"); validate_custody_ref(item["custody"], issue=issue); _string(item["recorded_worktree"], "recorded worktree")
+            if item["contract_digest"] is not None: _digest(item["contract_digest"], "requirement contract")
         return value
     if value.get("kind") == "observe":
         _object(value, _members("interface_version kind issue run_id requirements")); _v2(value); _integer(value["issue"], "observe issue", minimum=1)

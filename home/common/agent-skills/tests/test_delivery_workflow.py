@@ -61,7 +61,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
         empty = {"151": []}; scope = {"151": None}
         return {"interface_version": 2, "now": NOW, "max_parallel": 1,
             "attempt_budget_minutes": 30, "human_directed": False,
-            "issues": [151], "tracker": [], "owners": [], "worktrees": [],
+            "issues": [151], "tracker": [{"issue": 151, "state": "open",
+                "open_blockers": [], "decision_blockers": []}],
+            "owners": [], "worktrees": [],
             "forge": {"151": {"state": "none", "url": None, "merge_sha": None}},
             "delivery_contracts": {"151": contract},
             "authorization_intents": copy.deepcopy(empty),
@@ -188,10 +190,12 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(direct.returncode, 0, direct.stderr)
             self.assertEqual(json.loads(direct.stdout), {"interface_version": 2,
                 "kind": "observe", "issue": 151, "run_id": None,
-                "requirements": [{"kind": "delivery_contract", "subject_id": "151",
-                    "reason_code": "delivery_contract_required", "detail_pointer": None}]})
+                "requirements": [{"kind": "tracker"}]})
+            control_request = self.control_request()
+            control_request["worktrees"] = [{"issue": 151, "recorded": None, "candidate": {
+                "path": str(root / "worktree"), "state": "absent"}}]
             control_path = root / "control.json"
-            control_path.write_text(json.dumps(self.control_request()))
+            control_path.write_text(json.dumps(control_request))
             control = run("control", "--repo-root", root, "--run-id", "admission",
                           "--request-file", control_path)
             self.assertEqual(control.returncode, 0, control.stderr)
@@ -287,7 +291,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         self.workflow.validate_state(state, run_id="admission")
         requirement = self.workflow.bootstrap_response(state)["requirements"][0]
         self.assertEqual(requirement["custody"]["action_id"], "151:r1:1")
-        self.assertEqual(set(requirement), {"issue", "owner", "custody", "recorded_worktree"})
+        self.assertEqual(set(requirement), {"issue", "owner", "custody", "recorded_worktree",
+                                            "contract_digest"})
         terminal_result = copy.deepcopy(attempt["result"])
         mutations = {}
         both_active = copy.deepcopy(state)
@@ -1057,8 +1062,11 @@ class DeliveryAdmissionTest(unittest.TestCase):
                                   if item["kind"] == "delivery_remainder"), second)
             self.assertEqual(state_path.read_bytes(), before)
 
-    def issue_contract(self, issue):
-        """The eight-stage cleanup contract and its first intent, bound to one issue."""
+    def issue_contract(self, issue, worktree):
+        """The eight-stage cleanup contract and its first intent, bound to one issue.
+
+        Its ``remove_worktree`` literal is the candidate path the caller spawns at.
+        """
         contract, delivery = cleanup_contract_and_delivery(self.model)
         intent = copy.deepcopy(delivery["authorization_intents"][0])
         contract["issue"] = issue
@@ -1066,6 +1074,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         for stage in contract["stages"]:
             if stage["kind"] == "close_tracker":
                 stage["target_ref"]["value"] = str(issue)
+            elif stage["kind"] == "remove_worktree":
+                stage["target_ref"]["value"] = worktree
         for declared in intent["scopes"]:
             declared["target"]["issue"] = issue
             seal(self.model, declared)
@@ -1078,13 +1088,14 @@ class DeliveryAdmissionTest(unittest.TestCase):
     def test_dispatching_control_response_passes_raw_workflow_response_validation(self):
         """The adapter validates control bytes before decoding; a real dispatch must pass."""
         issues = [151, 152]
-        bound = {issue: self.issue_contract(issue) for issue in issues}
 
         def keyed(value):
             return {str(issue): copy.deepcopy(value) for issue in issues}
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); run_id = "dispatch-wire"
+            bound = {issue: self.issue_contract(issue, str(root / f"worktree-{issue}"))
+                     for issue in issues}
             initialized = subprocess.run(
                 [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
                  "--run-id", run_id, "--now", NOW], capture_output=True, check=False)
@@ -1577,6 +1588,169 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
                 self.assertIn(reason, refused.stderr)
 
+
+TRACKER = {"issue": 171, "state": "open", "open_blockers": [], "decision_blockers": []}
+NO_PR = {"state": "none", "url": None, "merge_sha": None}
+CONTRACT_REQUIRED = [{"kind": "delivery_contract", "subject_id": "171",
+                      "reason_code": "delivery_contract_required", "detail_pointer": None}]
+
+
+class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load(MODEL, "delivery_model_lifecycle", package=True)
+        cls.workflow = load(WORKFLOW, "workflow_state_lifecycle")
+
+    def direct(self, *, ok=True, **changes):
+        completed = self.cli("direct-owner", "--repo-root", self.root, "--request-file", "-",
+            stdin=json.dumps(self.direct_request(**changes)).encode(), ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def control(self, run_id, request, *, ok=True):
+        completed = self.cli("control", "--repo-root", self.root, "--run-id", run_id,
+            "--request-file", "-", stdin=json.dumps(request).encode(), ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def write_run(self, run_id, attempts, *, schema=3):
+        state = self.workflow.new_run_state(run_id=run_id, now=NOW, issues={})
+        issue = {"issue": attempts[0]["issue"], "attempts": attempts,
+                 "outcome": attempts[-1]["result"]}
+        if schema == 3:
+            issue.update(delivery=self.workflow._delivery().empty_delivery(),
+                         delivery_remainders=[])
+        state["schema_version"] = schema
+        state["issues"][str(issue["issue"])] = issue
+        path = self.root / f".superpowers/workflows/{run_id}/state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state), encoding="utf-8")
+        (path.parent / "state.lock").touch()
+        return path
+
+    def attempt(self, issue, number=1, **changes):
+        value = self.workflow.new_control_attempt(issue=issue, attempt_number=number,
+            worktree=self.worktree, now=NOW, deadline_at="2026-09-21T01:00:00Z")
+        value.update(changes)
+        return value
+
+    def direct_runs(self, issue):
+        return sorted((self.root / ".superpowers/workflows").glob(f"direct-{issue}-*"))
+
+    def test_direct_acquisition_asks_for_the_contract_last(self):
+        self.project()
+        facts = {}
+        for key, value, expected in (("tracker", TRACKER, [{"kind": "tracker"}]),
+                ("forge", NO_PR, [{"kind": "forge_pr", "path": "issue-171-"}]),
+                ("worktree", {"issue": 171, "recorded": None, "candidate": {
+                    "path": self.worktree, "state": "absent"}}, [{"kind": "candidate_worktree"}])):
+            response = self.direct(**facts)
+            self.assertEqual((response["kind"], response["requirements"]), ("observe", expected))
+            facts[key] = value
+        self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
+            "issue": 171, "run_id": None, "requirements": CONTRACT_REQUIRED})
+        self.assertEqual(self.direct_runs(171), [])
+        other = self.build("contract", self.contract_input(
+            worktree=str(self.root / ".worktrees/worktree-issue-171-other")))
+        refused = self.direct(ok=False, delivery_contract=other["contract"],
+                              authorization_intents=[other["initial_intent"]], **facts)
+        self.assertEqual((refused.returncode, self.direct_runs(171)), (2, []))
+        built = self.build("contract", self.contract_input())
+        owner = self.direct(delivery_contract=built["contract"],
+                            authorization_intents=[built["initial_intent"]], **facts)
+        self.assertEqual((owner["kind"], owner["worktree"], owner["contract"]),
+                         ("owner", self.worktree, built["contract"]))
+        self.cli("suspend", "--repo-root", self.root, "--run-id", owner["run_id"], "--now",
+                 LATER, "--issue", 171, "--attempt", 1, "--blocked-on", "usage_limit")
+        resumed = self.direct(now=LATER, tracker=TRACKER, forge=NO_PR, worktree={
+            "issue": 171, "recorded": {"path": self.worktree,
+                                       "state": "matching_issue_branch"}, "candidate": None})
+        self.assertEqual((resumed["kind"], resumed["launch_kind"], resumed["contract_digest"]),
+                         ("owner", "resume", owner["contract_digest"]))
+
+    def test_contractless_direct_runs_replay_and_reconcile_without_a_contract(self):
+        self.project()
+        merged = self.workflow.reconciled_result(172, "https://example.invalid/pr/1", "b" * 40)
+        self.write_run("direct-172-000001", [self.attempt(172, state="merged", result=merged,
+            result_source="superseded", finished_at=NOW)], schema=2)
+        replay = self.direct(issue=172)
+        self.assertEqual((replay["kind"], replay["reason"], replay["result"]),
+                         ("terminal", "merged", merged))
+        suspended = self.attempt(173)
+        self.workflow.suspend_attempt(suspended, blocked_on="external", now=NOW)
+        path = self.write_run("direct-173-000001", [suspended], schema=2)
+        recorded = {"issue": 173, "recorded": {"path": self.worktree,
+                    "state": "matching_issue_branch"}, "candidate": None}
+        tracker = {**TRACKER, "issue": 173}
+        waiting = self.direct(issue=173, tracker=tracker, forge=NO_PR, worktree=recorded)
+        self.assertEqual((waiting["run_id"], waiting["requirements"][0]["kind"]),
+                         ("direct-173-000001", "delivery_contract"))
+        pr = {"state": "merged", "url": "https://example.invalid/pr/2", "merge_sha": "c" * 40}
+        closed = self.direct(issue=173, tracker=tracker, forge=pr, worktree=recorded)
+        self.assertEqual((closed["kind"], closed["reason"]), ("terminal", "merged"))
+        stored = json.loads(path.read_text())["issues"]["173"]
+        self.assertEqual((stored["attempts"][0]["result_source"], stored["delivery"]["contract"]),
+                         ("superseded", None))
+
+    def test_control_installs_a_built_contract_only_at_spawn_and_keeps_it(self):
+        self.project()
+        self.cli("init-run", "--repo-root", self.root, "--run-id", "orch", "--now", NOW)
+        built = self.build("contract", self.contract_input())
+        digest = self.model.canonical_digest(built["contract"])
+        spawned = self.control("orch", self.control_request([171],
+            contracts={"171": built["contract"]}, intents={"171": [built["initial_intent"]]},
+            worktrees=[{"issue": 171, "recorded": None, "candidate": {
+                "path": self.worktree, "state": "absent"}}]))
+        action = spawned["actions"][0]
+        self.assertEqual((action["kind"], action["contract"], action["worktree"]),
+                         ("spawn", built["contract"], self.worktree))
+        boot = json.loads(self.cli("init-run", "--repo-root", self.root, "--run-id", "orch",
+                                   "--now", LATER).stdout)
+        self.assertEqual([item["contract_digest"] for item in boot["requirements"]], [digest])
+        governed = self.control("orch", self.control_request([171], now=LATER))
+        self.assertEqual(governed["summaries"][0]["contract_digest"], digest)
+        state = self.root / ".superpowers/workflows/orch/state.json"; before = state.read_bytes()
+        other = self.build("contract", self.contract_input(now=LATER))
+        refused = self.control("orch", self.control_request([171], now=LATER,
+            contracts={"171": other["contract"]}, intents={"171": [other["initial_intent"]]}),
+            ok=False)
+        self.assertEqual((refused.returncode, state.read_bytes()), (2, before))
+
+    def test_control_leaves_live_contractless_custody_idle(self):
+        self.project()
+        path = self.write_run("legacy", [self.attempt(171)])
+        before = path.read_bytes()
+        built = self.build("contract", self.contract_input())
+        for label, contracts, intents in (("null", None, None), ("supplied",
+                {"171": built["contract"]}, {"171": [built["initial_intent"]]})):
+            with self.subTest(contract=label):
+                raw = self.cli("control", "--repo-root", self.root, "--run-id", "legacy",
+                    "--request-file", "-", stdin=json.dumps(self.control_request(
+                        [171], now=LATER, contracts=contracts, intents=intents)).encode()).stdout
+                response = json.loads(raw); summary = response["summaries"][0]
+                self.assertEqual((summary["state"], summary["custody"]["action_id"],
+                    summary["contract_digest"], summary["pending_stage_ids"],
+                    summary["requirements"]), ("active", "171:1:1", None, [], []))
+                self.assertEqual([(item["kind"], item.get("deadline_at"))
+                                  for item in response["actions"]],
+                                 [("wait", "2026-09-21T01:00:00Z")])
+                self.assertEqual(path.read_bytes(), before)
+                wire = subprocess.run([sys.executable, str(ARTIFACT_BUDGET), "validate-report",
+                    "--boundary", "workflow-response", "--input", "-", "--policy", str(POLICY)],
+                    input=raw, capture_output=True, check=False)
+                self.assertEqual(wire.returncode, 0, wire.stderr)
+
+    def test_contractless_refusal_is_lifecycle_only(self):
+        self.project()
+        failed = {"state": "failed", "result_source": "owner", "finished_at": NOW}
+        path = self.write_run("refuse", [
+            self.attempt(171, 1, result=self.workflow.terminal_result(171, "failed", "one"), **failed),
+            self.attempt(171, 2, result=self.workflow.terminal_result(171, "failed", "two"), **failed)])
+        response = self.control("refuse", self.control_request([171], now=LATER))
+        # A terminal contractless issue is never asked for a contract (D31).
+        self.assertEqual(response["summaries"][0]["requirements"], [])
+        self.assertEqual([delta["kind"] for delta in response["deltas"]], ["retry_refused"])
+        stored = json.loads(path.read_text())["issues"]["171"]
+        self.assertEqual((stored["attempts"][-1]["result_source"], stored["delivery"]["contract"]),
+                         ("refused", None))
 
 if __name__ == "__main__":
     unittest.main()
