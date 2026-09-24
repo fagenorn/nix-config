@@ -1846,6 +1846,43 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.assertEqual((owner["kind"], owner["launch_kind"], owner["attempt"],
                           owner["worktree"]), ("owner", "retry", 2, self.worktree))
 
+    def mismatched(self, candidate):
+        other = {"path": str(self.root / ".worktrees/worktree-issue-171-other"), "state": "absent"}
+        return {"issue": 171, "recorded": {"path": self.worktree, "state": "mismatch"},
+                "candidate": other if candidate else None}
+
+    def assert_mismatch_refused(self, refused, path, before):
+        self.assertEqual((refused.returncode, refused.stdout, path.read_bytes()), (2, b"", before))
+        self.assertIn(b"recorded custody worktree does not match the issue branch", refused.stderr)
+
+    def test_contractless_retry_on_a_mismatched_path_refuses_at_once(self):
+        """D44: the contract bound to the recorded path could only refuse, so refuse now."""
+        self.project()
+        for candidate in (True, False):
+            with self.subTest(lane="control", candidate=candidate):
+                path = self.write_run("retry", [self.failed_attempt(171)])
+                before = path.read_bytes()
+                self.assert_mismatch_refused(self.control("retry", self.control_request(
+                    [171], now=LATER, worktrees=[self.mismatched(candidate)]), ok=False),
+                    path, before)
+            with self.subTest(lane="direct", candidate=candidate):
+                path = self.write_run("direct-171-000001", [self.failed_attempt(171)])
+                before = path.read_bytes()
+                self.assert_mismatch_refused(self.direct(ok=False, tracker=TRACKER, forge=NO_PR,
+                    worktree=self.mismatched(candidate)), path, before)
+
+    def test_contractless_new_run_on_a_mismatched_retained_path_refuses_at_once(self):
+        self.project()
+        path = self.write_run("direct-171-000001", [self.attempt(171, state="failed",
+            result_source="refused", finished_at=NOW,
+            result=self.workflow.terminal_result(171, "failed", "refused"))])
+        before = path.read_bytes()
+        for candidate in (True, False):
+            with self.subTest(candidate=candidate):
+                self.assert_mismatch_refused(self.direct(ok=False, new_run=True, tracker=TRACKER,
+                    forge=NO_PR, worktree=self.mismatched(candidate)), path, before)
+                self.assertEqual(self.direct_runs(171), [path.parent])
+
     def merged(self, issue):
         return {"issue": issue, "state": "merged", "pr_url": f"https://example.invalid/pr/{issue}",
                 "merge_sha": "d" * 40, "issue_closed": True, "discussion_items": [],

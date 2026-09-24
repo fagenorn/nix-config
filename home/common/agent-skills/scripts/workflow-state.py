@@ -1633,7 +1633,9 @@ def _apply_one_issue_policy(
     the policy itself needs and before any custody is created (per D9, D10,
     D24). A contract whose ``remove_worktree`` stage names a literal path binds
     custody to exactly that path: an absent recorded path is re-created in
-    place, and no candidate relocates it (per D8, D25).
+    place, and no candidate relocates it (per D8, D25). Without a contract, a
+    retry or ``new_run`` whose recorded path is mismatched refuses at once,
+    since the contract it would ask for binds that path (per D44).
 
     Every caller drives an environmentally suspended attempt back to work
     through the recorded-worktree ladder: a quota wall, a transport failure or a
@@ -1682,7 +1684,9 @@ def _apply_one_issue_policy(
 
     # A recorded path a contract could re-create in place: under a binding
     # contract (per D25), and with no contract at all, since the contract the
-    # caller then builds binds exactly that path (per D34).
+    # caller then builds binds exactly that path (per D34). That contract could
+    # only refuse a mismatched one, so without a contract a mismatch refuses at
+    # once rather than asking for a candidate or a contract (per D44).
     in_place = frozenset({"matching_issue_branch"}) | (
         frozenset({"absent"})
         if contract is None or contract_worktree is not None else frozenset())
@@ -1936,6 +1940,9 @@ def _apply_one_issue_policy(
             selected_path = retained_worktree
         elif contract_worktree is not None:
             raise WorkflowError("custody worktree does not match the delivery contract")
+        elif contract is None:
+            raise WorkflowError(
+                "recorded custody worktree does not match the issue branch")
         elif worktree is not None and worktree["candidate"] is not None:
             selected_path = worktree["candidate"]["path"]
             uses_candidate = True
@@ -1974,6 +1981,9 @@ def _apply_one_issue_policy(
             selected_path = latest["worktree"]
         elif recorded is not None and recorded["state"] in in_place:
             selected_path = latest["worktree"]
+        elif recorded is not None and contract is None:
+            raise WorkflowError(
+                "recorded custody worktree does not match the issue branch")
         elif candidate is not None:
             selected_path = candidate["path"]
             uses_candidate = True
