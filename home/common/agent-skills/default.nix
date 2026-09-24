@@ -95,11 +95,6 @@ in
       executable = true;
     };
 
-    ".agents/bin/agent-model-matrix" = {
-      source = ./scripts/agent-model-matrix.py;
-      executable = true;
-    };
-
     ".agents/bin/diff-scope" = {
       source = ./scripts/diff-scope.py;
       executable = true;

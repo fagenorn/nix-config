@@ -46,7 +46,7 @@ def seal_record(value):
 def legacy_record_value():
     value=record_value(); value.pop("execution_telemetry"); return seal_record(value)
 def matrix_fixture(root):
-    data=json.loads(MATRIX.read_text()); paths=[Path("home/common/agent-skills/model-matrix.json"),Path("home/common/agent-skills/scripts/agent-model-matrix.py")]+[Path(x["path"]) for x in data["dispatch_sites"]]+[x.relative_to(REPO_ROOT) for x in (REPO_ROOT/"home/common/claude-code/agents").glob("*.md")]
+    data=json.loads(MATRIX.read_text()); paths=[Path("home/common/agent-skills/model-matrix.json")]+[Path(x["path"]) for x in data["dispatch_sites"]]+[x.relative_to(REPO_ROOT) for x in (REPO_ROOT/"home/common/claude-code/agents").glob("*.md")]
     for path in sorted(set(paths)):
         target=root/path; target.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(REPO_ROOT/path,target)
     return data

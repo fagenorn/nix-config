@@ -1,14 +1,13 @@
 """Strict wire-format validation for the model-drift reporter."""
 from __future__ import annotations
 
-import importlib.machinery
 import json
 import math
 import re
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_tools import agent_model_matrix
 from agent_tools.canonical import reject_duplicate_keys, telemetry_digest
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -364,25 +363,13 @@ def validate_record(value):
 
 def load_validated_matrix(root):
     root = Path(root)
-    module_path = root / "home/common/agent-skills/scripts/agent-model-matrix.py"
-    previous = sys.modules.get("agent_model_matrix_for_drift")
     try:
-        loader = importlib.machinery.SourceFileLoader("agent_model_matrix_for_drift", str(module_path))
-        spec = __import__("importlib.util").util.spec_from_loader(loader.name, loader)
-        module = __import__("importlib.util").util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        loader.exec_module(module)
-        errors = module.validate(root)
+        errors = agent_model_matrix.validate(root)
         if errors:
             raise InputError("matrix validation failed")
-        return module.load_matrix(root)
+        return agent_model_matrix.load_matrix(root)
     except Exception as error:
         raise InputError("matrix validation failed") from error
-    finally:
-        if previous is None:
-            sys.modules.pop("agent_model_matrix_for_drift", None)
-        else:
-            sys.modules["agent_model_matrix_for_drift"] = previous
 
 
 def validate_baseline(value, matrix, matrix_digest):

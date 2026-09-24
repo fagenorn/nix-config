@@ -96,8 +96,8 @@ agent-workflow-tests:
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
 agent-model-matrix:
-  python3 home/common/agent-skills/scripts/agent-model-matrix.py validate
-  python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix validate
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix trace representative
 
 # Check the dispatch contracts against the skill trees the Nix build installs.
 agent-installed-skill-tests: build
