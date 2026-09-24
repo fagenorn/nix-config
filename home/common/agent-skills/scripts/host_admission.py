@@ -147,6 +147,9 @@ def load_declaration() -> dict:
     try:
         value = json.loads(text, object_pairs_hook=_unique_object,
                            parse_constant=_reject_non_finite)
-    except json.JSONDecodeError as error:
+    except (ValueError, RecursionError) as error:
+        # `JSONDecodeError` is a `ValueError`, as is an integer literal past
+        # CPython's conversion limit; deep nesting raises `RecursionError`.
+        # Each is unparseable input, never a crash.
         raise _invalid(f"not JSON: {error}") from None
     return copy.deepcopy(validate_declaration(value))

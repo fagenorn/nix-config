@@ -105,7 +105,10 @@ class HostRouteTest(unittest.TestCase):
                 ("schema two", {"schema_version": 2, "routes": {"claude-code": supported}}),
                 ("duplicate key", '{"schema_version": 1, "schema_version": 1, "routes": '
                                   '{"claude-code": {"support": "supported", "agent_slots": 7}}}'),
-                ("not json", "{")):
+                ("not json", "{"),
+                ("integer past the conversion limit", '{"schema_version": ' + "1" * 5000
+                                                      + ', "routes": {}}'),
+                ("nesting past the recursion limit", "[" * 100000 + "]" * 100000)):
             with self.subTest(label):
                 install_declaration(self.home, value)
                 self.assertEqual(self.answer("claude-code"),
