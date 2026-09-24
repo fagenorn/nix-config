@@ -164,7 +164,7 @@ agent-model-drift *args:
 
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:
-  python3 scripts/agent-gate-bundle.py {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_gate_bundle {{args}}
 
 # Garbage collect old OS generations and remove stale packages from the nix store
 gc generations="5":
