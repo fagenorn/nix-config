@@ -225,9 +225,8 @@ class ShipReleaseContractsTest(unittest.TestCase):
         )
 
     def test_prev_tag_command_ignores_unreachable_tags_in_a_real_repo(self):
-        """Execute the skill's exact PREV_TAG command in a repo where a higher
-        semver tag exists on an unmerged side branch."""
-        match = re.search(r"^PREV_TAG=\$\(git tag --list .*\)$", self.skill, re.M)
+        """Execute the skill's exact PREV_TAG command in a repo where a higher semver tag exists on an unmerged side branch. The command prints only PREV_TAG."""
+        match = re.search(r"^git for-each-ref --count=1 .*$", self.skill, re.M)
         self.assertIsNotNone(match, "PREV_TAG command missing from SKILL.md")
         command = match.group(0)
         self.assertIn('--merged "$MERGE_SHA"', command)
@@ -237,6 +236,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
             repo.mkdir()
             sh("git init -q -b main .", repo)
             sh("echo a > file && git add . && git commit -qm a", repo)
+            sh("git tag -a v0.0.9 -m v0.0.9", repo)
             sh("git tag -a v0.1.0 -m v0.1.0", repo)
             sh("git checkout -qb experiment", repo)
             sh("echo x > file && git commit -qam x", repo)
@@ -245,11 +245,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
             sh("echo b >> file && git commit -qam b", repo)
             merge_sha = sh("git rev-parse main", repo)
 
-            prev = sh(
-                f'{command} && echo "$PREV_TAG"',
-                repo,
-                extra_env={"MERGE_SHA": merge_sha},
-            )
+            prev = sh(command, repo, extra_env={"MERGE_SHA": merge_sha})
             self.assertEqual(prev, "v0.1.0")
 
             # Sanity: without --merged the wrong tag would have won, so the

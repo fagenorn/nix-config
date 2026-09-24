@@ -861,5 +861,24 @@ class WorktreesGuidanceTest(unittest.TestCase):
         self.assertNotIn("--body-file", section)
 
 
+GUIDANCE_POINTER = "see worktrees/SKILL.md, ## Shell forms the isolation checker refuses"
+
+
+def findings_report(document, findings):
+    lines = [
+        f"{document}:{f.line}: {f.form}: {f.example.splitlines()[0]}" for f in findings
+    ]
+    return "\n".join(lines + [GUIDANCE_POINTER])
+
+
+class SourceTreeSweepTest(unittest.TestCase):
+    def test_no_living_example_teaches_a_refused_form(self):
+        for tree, relative in swept_documents():
+            with self.subTest(document=f"{tree}:{relative}"):
+                text = (SOURCE_TREES[tree] / relative).read_text(encoding="utf-8")
+                findings = refused_examples(text)
+                self.assertEqual(findings, (), findings_report(relative, findings))
+
+
 if __name__ == "__main__":
     unittest.main()
