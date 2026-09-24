@@ -207,29 +207,39 @@ class DeliveryAdmissionTest(unittest.TestCase):
                                                    "delivery_remainder"}
                                  for item in response["actions"]))
 
-    def test_schema_three_refuses_the_legacy_finish_transport_without_a_write(self):
+    def test_schema_three_accepts_the_legacy_finish_transport_on_a_contractless_issue(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             initialized = subprocess.run(
                 [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
-                 "--run-id", "legacy-refusal", "--now", NOW],
+                 "--run-id", "legacy-contractless", "--now", NOW],
                 capture_output=True, text=True, check=False)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
-            state_path = root / ".superpowers/workflows/legacy-refusal/state.json"
-            before = state_path.read_bytes()
+            state_path = root / ".superpowers/workflows/legacy-contractless/state.json"
+            worktree = str(root / "worktree")
+            state = json.loads(state_path.read_text())
+            state["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
+                self.workflow.new_control_attempt(issue=151, attempt_number=1,
+                    worktree=worktree, now=NOW, deadline_at="2026-09-21T01:00:00Z")],
+                "delivery": self.workflow._delivery().empty_delivery(),
+                "delivery_remainders": []}
+            state_path.write_text(json.dumps(state), encoding="utf-8")
             result = {"issue": 151, "state": "failed", "pr_url": None,
                 "merge_sha": None, "issue_closed": False, "discussion_items": [],
                 "detail_state": "none", "report_path": None, "notes": "failed"}
             result_path = root / "legacy-result.json"
             result_path.write_text(json.dumps(result), encoding="utf-8")
-            refused = subprocess.run(
+            finished = subprocess.run(
                 [sys.executable, str(WORKFLOW), "finish", "--repo-root", str(root),
-                 "--run-id", "legacy-refusal", "--issue", "151", "--attempt", "1",
+                 "--run-id", "legacy-contractless", "--issue", "151", "--attempt", "1",
                  "--result-file", str(result_path), "--now", NOW],
                 capture_output=True, text=True, check=False)
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertIn("legacy finish is read-only", refused.stderr)
-            self.assertEqual(state_path.read_bytes(), before)
+            self.assertEqual(finished.returncode, 0, finished.stderr)
+            # A failed result retains its worktree path in the notes (retain_worktree).
+            expected = {**result, "notes": f"failed; worktree: {worktree}"}
+            stored = json.loads(state_path.read_text())["issues"]["151"]
+            self.assertEqual((stored["outcome"], stored["delivery"]["contract"]),
+                             (expected, None))
 
     def test_adjacent_migration_is_detached_and_writes_only_schema_three(self):
         contract, _ = contract_and_delivery(self.model)
@@ -1807,6 +1817,62 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                             authorization_intents=[built["initial_intent"]], **facts)
         self.assertEqual((owner["kind"], owner["launch_kind"], owner["attempt"],
                           owner["worktree"]), ("owner", "retry", 2, self.worktree))
+
+    def merged(self, issue):
+        return {"issue": issue, "state": "merged", "pr_url": f"https://example.invalid/pr/{issue}",
+                "merge_sha": "d" * 40, "issue_closed": True, "discussion_items": [],
+                "detail_state": "none", "report_path": None, "notes": "merged"}
+
+    def legacy_finish(self, run_id, issue, *, ok=True):
+        return self.cli("finish", "--repo-root", self.root, "--run-id", run_id, "--now", LATER,
+                        "--issue", issue, "--attempt", 1, "--result-file", "-",
+                        stdin=json.dumps(self.merged(issue)).encode(), ok=ok)
+
+    def test_legacy_finish_lands_only_on_contractless_issues(self):
+        self.project()
+        path = self.write_run("legacy-finish", [self.attempt(171)])
+        persisted = json.loads(self.legacy_finish("legacy-finish", 171).stdout)
+        stored = json.loads(path.read_text())["issues"]["171"]
+        self.assertEqual((persisted, stored["outcome"], stored["attempts"][0]["state"],
+                          stored["delivery"]["contract"]),
+                         (self.merged(171), self.merged(171), "merged", None))
+        self.cli("init-run", "--repo-root", self.root, "--run-id", "v2", "--now", NOW)
+        built = self.build("contract", self.contract_input())
+        self.control("v2", self.control_request([171], contracts={"171": built["contract"]},
+            intents={"171": [built["initial_intent"]]}, worktrees=[{"issue": 171,
+                "recorded": None, "candidate": {"path": self.worktree, "state": "absent"}}]))
+        state = self.root / ".superpowers/workflows/v2/state.json"; before = state.read_bytes()
+        refused = self.legacy_finish("v2", 171, ok=False)
+        self.assertEqual((refused.returncode, state.read_bytes()), (2, before))
+        self.assertIn(b"contracted issue", refused.stderr)
+
+    def test_v1_owners_survive_the_migration_to_interface_two(self):
+        self.project()
+        state = self.workflow.new_run_state(run_id="survive", now=NOW, issues={})
+        state["schema_version"] = 2
+        for issue in (151, 152):
+            state["issues"][str(issue)] = {"issue": issue, "outcome": None, "attempts": [
+                self.workflow.new_control_attempt(issue=issue, attempt_number=1,
+                    worktree=str(self.root / f"wt-{issue}"), now=NOW,
+                    deadline_at="2026-09-21T01:00:00Z")]}
+        path = self.root / ".superpowers/workflows/survive/state.json"
+        path.parent.mkdir(parents=True); path.write_text(json.dumps(state), encoding="utf-8")
+        run = ("--repo-root", self.root, "--run-id", "survive")
+        boot = json.loads(self.cli("init-run", *run, "--now", NOW).stdout)
+        self.assertEqual([(item["issue"], item["contract_digest"]) for item in boot["requirements"]],
+                         [(151, None), (152, None)])
+        self.assertEqual(json.loads(path.read_text())["schema_version"], 3)
+        swept = self.control("survive", self.control_request([151, 152]))
+        self.assertEqual([action["kind"] for action in swept["actions"]], ["wait"])
+        self.cli("progress", *run, "--now", LATER, "--issue", 151, "--attempt", 1,
+                 "--phase", 3, "--next-needs-context", "false",
+                 "--artifacts-sufficient", "true", "--remainder-self-contained", "true")
+        launch = json.loads(self.cli("check-launch", *run, "--action-id", "152:1:1").stdout)
+        self.assertTrue(launch["current"])
+        self.assertEqual(json.loads(self.legacy_finish("survive", 152).stdout), self.merged(152))
+        summary = next(item for item in self.control("survive", self.control_request(
+            [151, 152], now=LATER))["summaries"] if item["issue"] == 152)
+        self.assertEqual((summary["state"], summary["result"]["state"]), ("merged", "merged"))
 
 if __name__ == "__main__":
     unittest.main()

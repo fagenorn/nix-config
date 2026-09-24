@@ -870,8 +870,7 @@ def upgrade_state(value, *, run_id, migration_contracts):
                               migration_contracts=migration_contracts)
     return validate_state(candidate, run_id=run_id)
 
-def read_locked_state(state_path, run_id, *, migration_contracts,
-                      allowed_source_schema_versions=None):
+def read_locked_state(state_path, run_id, *, migration_contracts):
     require_regular_path(state_path, "workflow state", allow_missing=False)
     try:
         descriptor = open_existing_regular(state_path, "workflow state", os.O_RDONLY)
@@ -879,10 +878,6 @@ def read_locked_state(state_path, run_id, *, migration_contracts,
             value = json.load(source)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid workflow state JSON: {error}") from error
-    if allowed_source_schema_versions is not None:
-        version = value.get("schema_version") if isinstance(value, dict) else None
-        if type(version) is not int or version not in allowed_source_schema_versions:
-            raise WorkflowError("legacy finish is read-only for schema 3 runs")
     migrated = isinstance(value, dict) and value.get("schema_version") != SCHEMA_VERSION
     return upgrade_state(value, run_id=run_id,
                          migration_contracts=migration_contracts), migrated
@@ -935,7 +930,6 @@ Mutation = Callable[[dict[str, Any] | None], tuple[Any, bool]]
 def transact(
     repo_root: str, run_id: str, mutation: Mutation, *, allow_missing: bool = False,
     migration_contracts: dict[int, Any] | None = None,
-    allowed_source_schema_versions: frozenset[int] | None = None,
 ) -> Any:
     _delivery()
     run_dir, state_path, lock_path = workflow_paths(repo_root, run_id)
@@ -951,7 +945,6 @@ def transact(
         if state_exists:
             current, migrated = read_locked_state(
                 state_path, run_id, migration_contracts=migration_contracts or {},
-                allowed_source_schema_versions=allowed_source_schema_versions,
             )
             state = copy.deepcopy(current)
         elif allow_missing:
@@ -2853,6 +2846,10 @@ def command_finish(args: argparse.Namespace) -> int:
     never overwritten, which is where write-once means something (per D3, D11).
     Legacy ``expiry`` records only reach this ledger from a pre-suspension run
     (per D2, D15).
+
+    The legacy `--issue/--attempt/--result-file` transport records a v1 owner's
+    result for an attempt launched before interface 2 (a contractless issue) on
+    any schema; a contracted issue refuses it.
     """
     if args.summary_file is not None:
         return command_finish_delivery(args)
@@ -2870,6 +2867,9 @@ def command_finish(args: argparse.Namespace) -> int:
         issue_state = state["issues"].get(str(args.issue))
         if issue_state is None:
             raise WorkflowError(f"unknown issue identity: {args.issue}")
+        if (issue_state["delivery"]["contract"] is not None
+                or issue_state["delivery_remainders"]):
+            raise WorkflowError("legacy finish is refused for a contracted issue")
         if args.attempt > len(issue_state["attempts"]):
             raise WorkflowError(
                 f"unknown attempt identity: issue {args.issue} attempt {args.attempt}"
@@ -2919,10 +2919,7 @@ def command_finish(args: argparse.Namespace) -> int:
         state["updated_at"] = now
         return result, True
 
-    persisted = transact(
-        args.repo_root, args.run_id, finish,
-        allowed_source_schema_versions=frozenset({1, 2}),
-    )
+    persisted = transact(args.repo_root, args.run_id, finish)
     print_json(persisted)
     return 0
 
