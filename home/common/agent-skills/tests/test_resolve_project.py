@@ -94,9 +94,9 @@ def registry(*entries: dict) -> dict:
     """The fleet registry document naming `entries`, in the order given.
 
     The file's shape is the design's, not the reader's: two members, and each
-    entry exactly `{project_id, root}` (D18). Task 6 owns the writer; the suite
-    stages this file by hand so the read side can be exercised before it
-    exists.
+    entry exactly `{project_id, root}` (D18). `adopt-project verify --register`
+    writes it; the suite stages this file by hand so the read side is
+    exercised apart from its writer.
     """
     return {"schema_version": 1, "projects": list(entries)}
 

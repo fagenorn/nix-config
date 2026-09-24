@@ -17,12 +17,15 @@ replaced by an assumed version (R1.3).
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import math
 import os
 from pathlib import Path
 import re
 import tempfile
+from typing import Iterator
 
 
 # R1.2: the manifest's members, exactly. An absent or unexpected member is a
@@ -46,6 +49,7 @@ MIGRATION_MEMBERS = ("id", "from_schema", "to_schema")
 # stale by construction.
 REGISTRY_MEMBERS = ("schema_version", "projects")
 REGISTRY_ENTRY_MEMBERS = ("project_id", "root")
+REGISTRY_SCHEMA_VERSION = 1
 
 # The closed set of compatibility reasons, kept separate from the resolver's
 # capability `REASON_CODES` (D7). `interval_verdict` names the first two;
@@ -408,10 +412,11 @@ def ensure_directory(path: Path) -> Path:
 # --------------------------------------------------------------------------
 # The fleet registry
 #
-# Read here; written only by `adopt-project verify --register`. The registry
-# is platform-written state, so every failure to read one that exists is an
-# installation defect published as `resolver_failure` — an absent file is the
-# one benign case, because nothing has been registered yet.
+# Read by both binaries; written only from `adopt-project verify --register`,
+# through the locked transaction below. The registry is platform-written
+# state, so every failure to read one that exists is an installation defect
+# published as `resolver_failure` — an absent file is the one benign case,
+# because nothing has been registered yet.
 # --------------------------------------------------------------------------
 
 
@@ -504,6 +509,60 @@ def read_registry() -> list[dict]:
     if violations:
         raise _refuse(violations)
     return list(source["projects"])
+
+
+def write_registry(entries: list[dict]) -> None:
+    """Replace the registry with `entries`, atomically and in one shape.
+
+    The two cross-entry invariants the reader deliberately leaves alone are
+    established here, because a writer is the only place they can be: an entry
+    is reduced to exactly `REGISTRY_ENTRY_MEMBERS` (D18) and `projects` is
+    sorted by `project_id`, so a caller cannot persist a stored order or an
+    extra member by handing one in. A repeated `project_id` refuses rather
+    than being deduplicated — which of the two roots to drop is not this
+    function's decision to make.
+    """
+    projects = sorted(
+        ({name: entry[name] for name in REGISTRY_ENTRY_MEMBERS}
+         for entry in entries),
+        key=lambda entry: entry["project_id"])
+    identifiers = [entry["project_id"] for entry in projects]
+    if len(set(identifiers)) != len(identifiers):
+        raise _refuse([_registry_violation(
+            "/projects", "must not register one project id twice",
+            "projects.duplicate_id")])
+    document = {"schema_version": REGISTRY_SCHEMA_VERSION,
+                "projects": projects}
+    violations = validate_registry(document)
+    if violations:
+        raise _refuse(violations)
+    ensure_directory(registry_path().parent)
+    write_atomically(registry_path(), json.dumps(
+        document, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode("utf-8") + b"\n")
+
+
+@contextlib.contextmanager
+def registry_transaction() -> Iterator[list[dict]]:
+    """Hold the registry lock, and yield the entries reread underneath it.
+
+    Registration is a transaction rather than a read-then-write: the entries
+    yielded here are read *inside* the exclusive lock and the lock is released
+    only once the caller's `write_registry` has returned, so two concurrent
+    registrations serialize instead of one overwriting the other's file. The
+    lock file is beside the registry and is never deleted — unlinking it would
+    let a second process create and lock a different inode.
+
+    Follows the pattern `workflow-state.py` establishes for shared state; the
+    caller does the duplicate check inside the `with` and nowhere else.
+    """
+    lock_path = ensure_directory(registry_path().parent) / "registry.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield read_registry()
+    finally:
+        os.close(descriptor)
 
 
 # --------------------------------------------------------------------------
