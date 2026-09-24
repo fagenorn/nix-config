@@ -1417,18 +1417,32 @@ def validate_control_request(value):
     return request, migration_contracts
 
 
-def load_json_request(path_value: str, label: str) -> Any:
-    path = Path(path_value)
+def read_input_bytes(value: str, label: str) -> bytes:
+    """Read one helper input flag: ``-`` is all of stdin, anything else an absolute path."""
+    if value == "-":
+        try:
+            return sys.stdin.buffer.read()
+        except (OSError, ValueError) as error:
+            raise WorkflowError(f"cannot read {label} file: {error}") from error
+    path = Path(value)
     if not path.is_absolute():
-        raise WorkflowError("request file path must be absolute")
+        raise WorkflowError(f"{label} file path must be absolute")
     try:
-        with path.open(encoding="utf-8") as source:
-            value = json.load(source)
+        return path.read_bytes()
+    except OSError as error:
+        raise WorkflowError(f"cannot read {label} file: {error}") from error
+
+
+def load_json_request(path_value: str, label: str) -> Any:
+    raw = read_input_bytes(path_value, label)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise WorkflowError(f"cannot read {label} file: {error}") from error
+    try:
+        return json.loads(text)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid {label} JSON: {error}") from error
-    except (OSError, UnicodeError) as error:
-        raise WorkflowError(f"cannot read {label} file: {error}") from error
-    return value
 
 
 def load_control_request(path_value):
@@ -1580,10 +1594,12 @@ def control_summary(
     tracker: dict[str, Any],
     issue_state: dict[str, Any] | None,
     reduction=None,
+    contract_required: bool = False,
 ) -> dict[str, Any]:
     return _delivery().control_summary(
         issue=issue, tracker=tracker, issue_state=issue_state, reduction=reduction,
-        blockers=control_blockers(tracker), result_fields=RESULT_FIELDS)
+        blockers=control_blockers(tracker), result_fields=RESULT_FIELDS,
+        contract_required=contract_required)
 
 
 def _apply_one_issue_policy(
@@ -1602,6 +1618,7 @@ def _apply_one_issue_policy(
     require_forge: bool = False,
     delivery_request=None,
     delivery_source_kind=None,
+    contract: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
 
@@ -1609,6 +1626,16 @@ def _apply_one_issue_policy(
     request before it may take or keep ownership, and ``forge`` carries that
     observation once it has. Only the acquiring direct owner is asked for it —
     it is the one that reads the forge anyway (per D3).
+
+    ``contract`` is the issue's effective delivery contract: the installed one,
+    else the caller's supplied one, else ``None``. Without one only the
+    lifecycle transitions run — reap, stall terminal, tracker halt, forge
+    reconcile and the third-attempt ``refuse`` — and a would-be spawn, resume or
+    retry becomes the operation ``"contract"``, returned after every observation
+    the policy itself needs and before any custody is created (per D9, D10,
+    D24). A contract whose ``remove_worktree`` stage names a literal path binds
+    custody to exactly that path: an absent recorded path is re-created in
+    place, and no candidate relocates it (per D8, D25).
 
     Every caller drives an environmentally suspended attempt back to work
     through the recorded-worktree ladder: a quota wall, a transport failure or a
@@ -1650,6 +1677,21 @@ def _apply_one_issue_policy(
     attempts = [] if ledger_issue is None else ledger_issue["attempts"]
     latest = attempts[-1] if attempts else None
     recorded_path = retained_worktree if latest is None else latest["worktree"]
+    contract_worktree = None if contract is None else next(
+        (stage["target_ref"]["value"] for stage in contract["stages"]
+         if stage["kind"] == "remove_worktree"
+         and stage["target_ref"].get("kind") == "literal"), None)
+
+    # A recorded path a contract could re-create in place: under a binding
+    # contract (per D25), and with no contract at all, since the contract the
+    # caller then builds binds exactly that path (per D34).
+    in_place = frozenset({"matching_issue_branch"}) | (
+        frozenset({"absent"})
+        if contract is None or contract_worktree is not None else frozenset())
+
+    def bind_contract_worktree(path: str) -> None:
+        if contract_worktree is not None and path != contract_worktree:
+            raise WorkflowError("custody worktree does not match the delivery contract")
 
     def validate_recorded_worktree() -> None:
         if worktree is None or worktree["recorded"] is None:
@@ -1800,6 +1842,11 @@ def _apply_one_issue_policy(
                 ],
                 expired=expired,
             )
+        bind_contract_worktree(latest["worktree"])
+        if contract is None:
+            return decision(
+                "contract", desired="resume", changed=expired, expired=expired,
+            )
         resume_attempt(
             latest, now=now,
             attempt_budget_minutes=attempt_budget_minutes if suspended else None,
@@ -1872,8 +1919,12 @@ def _apply_one_issue_policy(
                 ],
                 expired=False,
             )
-        if recorded["state"] == "matching_issue_branch":
+        if recorded["state"] in in_place:
+            # An absent recorded path is re-created in place rather than
+            # swapped for a candidate (per D25, D34).
             selected_path = retained_worktree
+        elif contract_worktree is not None:
+            raise WorkflowError("custody worktree does not match the delivery contract")
         elif worktree is not None and worktree["candidate"] is not None:
             selected_path = worktree["candidate"]["path"]
             uses_candidate = True
@@ -1896,14 +1947,21 @@ def _apply_one_issue_policy(
         validate_recorded_worktree()
         recorded = None if worktree is None else worktree["recorded"]
         candidate = None if worktree is None else worktree["candidate"]
-        if recorded is None and candidate is None:
+        if recorded is None and (candidate is None or contract_worktree is not None):
             return decision(
                 "observe", desired="retry", requirements=[
                     {"kind": "recorded_worktree", "path": latest["worktree"]}
                 ],
                 expired=False,
             )
-        if recorded is not None and recorded["state"] == "matching_issue_branch":
+        if contract_worktree is not None:
+            # A retry under a worktree-binding contract re-creates an absent
+            # recorded path in place; only a mismatch refuses (per D25).
+            if recorded["state"] == "mismatch":
+                raise WorkflowError(
+                    "custody worktree does not match the delivery contract")
+            selected_path = latest["worktree"]
+        elif recorded is not None and recorded["state"] in in_place:
             selected_path = latest["worktree"]
         elif candidate is not None:
             selected_path = candidate["path"]
@@ -1914,7 +1972,11 @@ def _apply_one_issue_policy(
                 requirements=[{"kind": "candidate_worktree"}], expired=False,
             )
 
+    assert selected_path is not None
+    bind_contract_worktree(selected_path)
     desired = "retry" if retryable else "spawn"
+    if contract is None:
+        return decision("contract", desired=desired, expired=False)
     attempt_number = 2 if retryable else 1
     attempt = new_control_attempt(
         issue=issue, attempt_number=attempt_number, worktree=selected_path,
@@ -1950,8 +2012,17 @@ def command_control(args: argparse.Namespace) -> int:
         assert state is not None
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise WorkflowError("control time must not move backward")
-        if all(contract is None for contract in migration_contracts.values()):
-            return runtime.contractless_control(request, args.run_id), False
+        # A null request contract means "none supplied": an installed contract
+        # governs, and a supplied one must equal it before anything is written
+        # (per D10).
+        contracts = {
+            issue: _call(
+                None, runtime.effective_contract,
+                state["issues"].get(str(issue)),
+                request["delivery_contracts"][str(issue)],
+            )
+            for issue in request["issues"]
+        }
 
         unavailable = _call(None, runtime.validate_control_custody, state, request)
 
@@ -1969,6 +2040,7 @@ def command_control(args: argparse.Namespace) -> int:
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
                 delivery_request=request, delivery_source_kind="control",
+                contract=contracts[issue],
             )
 
         occupied = runtime.occupied_count(state, at_time=now, unavailable=unavailable)
@@ -1990,6 +2062,7 @@ def command_control(args: argparse.Namespace) -> int:
                 run_dir=run_dir,
                 human_directed=request["human_directed"],
                 delivery_request=request, delivery_source_kind="control",
+                contract=contracts[issue],
             )
             planned[issue] = result
             return result
@@ -2024,6 +2097,8 @@ def command_control(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     "resume control action requires a matching recorded worktree observation"
                 )
+            if result["operation"] == "contract":
+                continue
             proposal_order.append(issue)
             capacity -= 1
 
@@ -2039,6 +2114,8 @@ def command_control(args: argparse.Namespace) -> int:
                         raise WorkflowError(
                             "retry control action requires a verified worktree observation"
                         )
+                    if result["operation"] == "contract":
+                        continue
                     proposal_order.append(issue)
                     capacity -= 1
             elif analysis[issue]["expired"] and issue not in planned:
@@ -2057,6 +2134,8 @@ def command_control(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     "fresh control action requires an absent candidate worktree"
                 )
+            if result["operation"] == "contract":
+                continue
             proposal_order.append(issue)
             capacity -= 1
 
@@ -2174,9 +2253,13 @@ def command_control(args: argparse.Namespace) -> int:
                 "deadline_at": attempt["deadline_at"],
             })
 
+        installing = {
+            issue for issue, result in planned.items()
+            if result["operation"] in CONTROL_DISPATCH_KINDS
+        }
         reductions, delivery_changed = _call(
-            "delivery transition refused", runtime.control_transitions, state, request)
-
+            "delivery transition refused", runtime.control_transitions,
+            state, request, installing)
 
         changed = any(result["changed"] for result in planned.values()) or delivery_changed
         if changed:
@@ -2188,6 +2271,9 @@ def command_control(args: argparse.Namespace) -> int:
                 tracker=tracker_by_issue[issue],
                 issue_state=state["issues"].get(str(issue)),
                 reduction=reductions.get(issue),
+                contract_required=(
+                    issue in planned and planned[issue]["operation"] == "contract"
+                ),
             )
             for issue in request["issues"]
         ]
@@ -2280,12 +2366,6 @@ def command_direct_owner(args: argparse.Namespace) -> int:
     issue = request["issue"]
     if not Path(args.repo_root).is_absolute():
         raise WorkflowError("repository root path must be absolute")
-    if request["delivery_contract"] is None:
-        print_json(direct_observe(issue, None, [{
-            "kind": "delivery_contract", "subject_id": str(issue),
-            "reason_code": "delivery_contract_required", "detail_pointer": None,
-        }]))
-        return 0
     repo_root = resolve_repo_root(args.repo_root)
     workflows_dir = ensure_workflows_directory(repo_root)
     issue_lock_path = workflows_dir / f".direct-{issue}.lock"
@@ -2359,6 +2439,15 @@ def command_direct_owner(args: argparse.Namespace) -> int:
 
             greatest = retained[-1] if retained else None
             selected = nonterminal[0] if nonterminal else greatest
+            # The selected run's installed contract governs a null request
+            # contract, and a supplied one must equal it; a new run starts
+            # from the supplied contract alone (per D10).
+            contract = _call(
+                None, runtime.effective_contract,
+                None if selected is None or request["new_run"]
+                else selected[4]["issues"][str(issue)],
+                request["delivery_contract"],
+            )
             selected_is_terminal = bool(
                 selected is not None
                 and direct_run_is_terminal(selected[4]["issues"][str(issue)])
@@ -2460,6 +2549,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     forge=request["forge"],
                     require_forge=True,
                     delivery_request=request, delivery_source_kind="direct",
+                    contract=contract,
                 )
                 operation = policy["operation"]
                 if operation == "idle":
@@ -2472,6 +2562,40 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         observed_run_id = run_id
                     response = direct_observe(
                         issue, observed_run_id, policy["requirements"]
+                    )
+                elif operation == "contract":
+                    # A dispatch would follow but no contract governs: ask for
+                    # it last, after every observation the policy needed, and
+                    # never allocate a run for it (per D9). An expiry reap that
+                    # preceded the answer is still the ledger's truth.
+                    if policy["changed"]:
+                        assert state is not None
+                        state["issues"][str(issue)] = policy["issue_state"]
+                        state["updated_at"] = request["now"]
+                        validate_state(state, run_id=run_id)
+                        atomic_write_state(run_dir, state_path, state)
+                    response = direct_observe(
+                        issue,
+                        run_id if selected is not None and not request["new_run"]
+                        else None,
+                        [{"kind": "delivery_contract", "subject_id": str(issue),
+                          "reason_code": "delivery_contract_required",
+                          "detail_pointer": None}],
+                    )
+                elif (operation == "refuse"
+                      and policy["issue_state"]["delivery"]["contract"] is None):
+                    # The third-attempt refusal is a lifecycle verdict no
+                    # contract governs: record it without installing a supplied
+                    # one (per D24), exactly as the next call will replay it.
+                    assert state is not None
+                    state["issues"][str(issue)] = policy["issue_state"]
+                    state["updated_at"] = request["now"]
+                    validate_state(state, run_id=run_id)
+                    atomic_write_state(run_dir, state_path, state)
+                    response = direct_terminal(
+                        issue=issue, run_id=run_id, source="lifecycle",
+                        reason="failed", blockers=[],
+                        result=policy["issue_state"]["outcome"],
                     )
                 elif operation == "terminal" and "tracker_reason" in policy:
                     if policy["changed"]:
@@ -2555,7 +2679,8 @@ def command_direct_owner(args: argparse.Namespace) -> int:
 
 def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
     value = artifact_budget_validate(
-        "validate-report", Path(path_value), boundary="ship-summary"
+        "validate-report", boundary="ship-summary",
+        input_bytes=read_input_bytes(path_value, "result"),
     )
     return validate_result(value, expected_issue=issue)
 
@@ -2563,8 +2688,9 @@ def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
 def command_checkpoint_delivery(args):
     runtime = _delivery()
     now = format_utc(parse_utc(args.now, "--now"))
-    report = artifact_budget_validate("validate-report", Path(args.checkpoint_file),
-                                      boundary="ship-checkpoint")
+    report = artifact_budget_validate(
+        "validate-report", boundary="ship-checkpoint",
+        input_bytes=read_input_bytes(args.checkpoint_file, "checkpoint"))
 
     response = transact(args.repo_root, args.run_id, lambda state: _call(
         "checkpoint transition refused", runtime.checkpoint_state,
@@ -2805,7 +2931,8 @@ def command_finish_delivery(args):
     runtime = _delivery()
     now = format_utc(parse_utc(args.now, "--now"))
     report = artifact_budget_validate(
-        "validate-report", Path(args.summary_file), boundary="ship-summary")
+        "validate-report", boundary="ship-summary",
+        input_bytes=read_input_bytes(args.summary_file, "summary"))
 
     def finish_delivery(state):
         assert state is not None
@@ -2903,6 +3030,54 @@ def command_check_launch(args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_project_argv() -> list[str]:
+    """Resolve resolve-project the way ``artifact_budget_paths`` resolves its sibling."""
+    source = Path(__file__).resolve().parent / "resolve-project.py"
+    if source.is_file():
+        return [sys.executable, str(source)]
+    installed = Path(__file__).parent / "resolve-project"
+    if not installed.is_file():
+        installed = Path.home() / ".agents/bin/resolve-project"
+    return [str(installed)]
+
+
+def resolve_project_policy(repo_root: str) -> dict[str, Any]:
+    """Run ``resolve-project resolve``; any failure is a builder refusal."""
+    try:
+        completed = subprocess.run(
+            [*resolve_project_argv(), "resolve", "--repo-root", repo_root],
+            capture_output=True, check=False, timeout=60)
+    except subprocess.TimeoutExpired as error:
+        raise WorkflowError("resolve-project timed out") from error
+    try:
+        snapshot = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        snapshot = None
+    if completed.returncode != 0:
+        code = (snapshot.get("error", {}).get("code")
+                if isinstance(snapshot, dict) and isinstance(snapshot.get("error"), dict)
+                else None)
+        raise WorkflowError(f"resolve-project refused: {code or completed.returncode}")
+    if not isinstance(snapshot, dict):
+        raise WorkflowError("resolve-project returned a non-object")
+    return snapshot
+
+
+def command_build_delivery(args: argparse.Namespace) -> int:
+    """Print one sealed delivery value; read-only (no lock, ledger, clock or write)."""
+    if not Path(args.repo_root).is_absolute():
+        raise WorkflowError("repository root path must be absolute")
+    runtime = _delivery()
+    value = load_json_request(args.input, "builder input")
+    policy = resolve_project_policy(args.repo_root) if args.kind == "contract" else None
+    try:
+        result = runtime.build_delivery(args.kind, value, policy=policy)
+    except Exception as error:
+        raise WorkflowError(f"build-delivery refused: {error}") from error
+    sys.stdout.buffer.write(runtime.model.canonical_bytes(result))
+    return 0
+
+
 def print_json(value: Any) -> None:
     json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
@@ -2944,6 +3119,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_run_arguments(checkpoint)
     checkpoint.add_argument("--checkpoint-file", required=True)
     checkpoint.set_defaults(handler=command_checkpoint_delivery)
+
+    build_delivery = subparsers.add_parser("build-delivery")
+    build_delivery.add_argument("--repo-root", required=True)
+    build_delivery.add_argument(
+        "--kind", required=True,
+        choices=("contract", "initial-intent", "scope", "selected-output", "observation",
+                 "authority-observation"))
+    build_delivery.add_argument("--input", required=True)
+    build_delivery.set_defaults(handler=command_build_delivery)
 
     suspend = subparsers.add_parser("suspend")
     add_run_arguments(suspend)

@@ -25,7 +25,8 @@ class DeliveryProjection:
         result = attempt.get("result")
         forge = request.get("forge")
         return (request.get("new_run") is not True
-                and request["delivery_contract"] is not None
+                and (request["delivery_contract"] is not None
+                     or delivery["contract"] is not None)
                 and attempt["state"] == "merged"
                 and isinstance(result, dict) and result.get("state") == "merged"
                 and isinstance(forge, dict) and forge.get("state") == "merged"
@@ -186,7 +187,8 @@ class DeliveryProjection:
                             else ("implementation", issue_state["attempts"][-1]))
             requirements.append({"issue": int(issue_key), "owner": record["owner"],
                 "custody": self.custody_for_record(int(issue_key), kind, record),
-                "recorded_worktree": record["worktree"]})
+                "recorded_worktree": record["worktree"],
+                "contract_digest": issue_state["delivery"]["contract_digest"]})
         return {"interface_version": 2, "kind": "workflow_bootstrap",
                 "run_id": state["run_id"], "requirements": requirements}
 
@@ -323,7 +325,8 @@ class DeliveryProjection:
                         issue_state: dict[str, Any] | None,
                         reduction: dict[str, Any] | None,
                         blockers: list[dict[str, Any]],
-                        result_fields: tuple[str, ...]) -> dict[str, Any]:
+                        result_fields: tuple[str, ...],
+                        contract_required: bool) -> dict[str, Any]:
         latest_kind = None
         latest = None
         if issue_state is not None:
@@ -344,8 +347,11 @@ class DeliveryProjection:
             field: copy.deepcopy(latest["result"][field]) for field in result_fields}
         custody = None if latest is None else self.custody_for_record(issue, latest_kind, latest)
         delivery = None if issue_state is None else issue_state["delivery"]
+        # A null digest asks for a contract only where a dispatch would follow;
+        # idle live custody and lifecycle-only verdicts ask for nothing (D31).
         missing = [{"kind": "delivery_contract", "subject_id": str(issue),
-                    "reason_code": "delivery_contract_required", "detail_pointer": None}]
+                    "reason_code": "delivery_contract_required",
+                    "detail_pointer": None}] if contract_required else []
         return {"issue": issue, "state": state_name, "custody": custody,
             "owner": None if latest is None else latest["owner"],
             "worktree": None if latest is None else latest["worktree"],
@@ -356,22 +362,6 @@ class DeliveryProjection:
             "pending_stage_ids": [] if reduction is None else copy.deepcopy(reduction["pending_stage_ids"]),
             "requirements": (missing if delivery is None or delivery["contract"] is None
                              else ([] if reduction is None else copy.deepcopy(reduction["requirements"])))}
-
-    @staticmethod
-    def contractless_control(request: dict[str, Any], run_id: str) -> dict[str, Any]:
-        summaries = []
-        for issue in request["issues"]:
-            requirement = {"kind": "delivery_contract", "subject_id": str(issue),
-                           "reason_code": "delivery_contract_required", "detail_pointer": None}
-            summaries.append({"issue": issue, "state": "queued", "custody": None,
-                "owner": None, "worktree": None, "deadline_at": None,
-                "blocked_on": None, "blockers": [], "result": None,
-                "contract_digest": None, "pending_stage_ids": [],
-                "requirements": [requirement]})
-        return {"interface_version": 2, "run_id": run_id, "now": request["now"],
-                "summaries": summaries, "deltas": [],
-                "actions": [{"id": "finalize", "kind": "finalize"}],
-                "next_deadline": None}
 
     def decorate_control(self, state: dict[str, Any], deltas: list[dict[str, Any]],
                          actions: list[dict[str, Any]], reductions: dict[int, dict[str, Any]],

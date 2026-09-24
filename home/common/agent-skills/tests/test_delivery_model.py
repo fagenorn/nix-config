@@ -32,6 +32,7 @@ from ._delivery_model_fixtures import (
     workflow_responses,
     with_host_rejection,
     observation,
+    pr_subject,
     with_observed,
     rebind_contract,
     cleanup_contract_and_delivery,
@@ -127,7 +128,7 @@ class DeliveryModelTest(unittest.TestCase):
             self.assertEqual(set(module.__all__), {
                 "MODEL_INTERFACE_VERSION", "DeliveryModelError", "canonical_bytes",
                 "canonical_digest", "validate_delivery_object", "validate_custody_ref",
-                "match_scope", "reduce_delivery",
+                "match_scope", "reduce_delivery", "STAGE_ACTIONS",
             })
             self.assertEqual(set(Path(raw).iterdir()), before)
             self.assertFalse(hasattr(module, "main"))
@@ -186,6 +187,81 @@ class DeliveryModelTest(unittest.TestCase):
             reduced = self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
             with self.subTest(pr=pr):
                 self.assertEqual(post_state(reduced, "pr_merged"), expected)
+
+    def slot_pr_delivery(self):
+        """The fixture contract under an initial intent whose open/merge scopes bind the slot PR."""
+        contract, delivery = contract_and_delivery(self.model)
+        declared = []
+        for stage_id in ("open", "merge"):
+            value = stage_scope(self.model, contract, stage_id)
+            value["target"]["pr_ref"] = {"kind": "slot", "slot_id": "reviewed"}
+            declared.append(seal(self.model, value))
+        first = intent(self.model, declared[0])
+        first["scopes"] = sorted(declared, key=lambda item: item["id"])
+        seal(self.model, first)
+        contract["initial_authorization_intent_id"] = first["id"]
+        contract["initial_authorization_intent_digest"] = self.model.canonical_digest(first)
+        delivery = rebind_contract(self.model, contract, delivery)
+        delivery["authorization_intents"] = [first]
+        delivery["authorization_chain_digest"] = self.model.canonical_digest(
+            {"intent_ids": [first["id"]]})
+        return contract, delivery, first, declared
+
+    def test_slot_pr_ref_grammar_requires_the_same_output_slot(self):
+        _, _, _, declared = self.slot_pr_delivery()
+        for item in declared:
+            self.assertEqual(self.validate(item, "scope-tuple"), item)
+        for output_ref in ({"kind": "none"}, {"kind": "slot", "slot_id": "other"}):
+            bad = copy.deepcopy(declared[0])
+            bad["target"]["output_ref"] = output_ref
+            seal(self.model, bad)
+            with self.subTest(output_ref=output_ref):
+                self.assert_invalid(bad, "scope-tuple")
+        bad = copy.deepcopy(declared[0])
+        bad["target"]["pr_ref"] = {"kind": "slot", "slot_id": "reviewed", "extra": 1}
+        seal(self.model, bad)
+        self.assert_invalid(bad, "scope-tuple")
+
+    def test_slot_pr_ref_matches_only_the_slot_form(self):
+        contract, _, first, declared = self.slot_pr_delivery()
+        selected = selection(self.model, self.model.canonical_digest(contract))
+        at = {"selected_outputs": [selected], "at_time": "2026-09-21T00:00:00Z",
+              "revocation_observations": []}
+        self.assertEqual(self.model.match_scope(
+            contract, first, declared[0], **at)["reason_code"], "matched")
+        literal = copy.deepcopy(declared[0])
+        literal["target"]["pr_ref"] = {"kind": "literal", "value": "17"}
+        seal(self.model, literal)
+        self.assertEqual(self.model.match_scope(
+            contract, first, literal, **at)["reason_code"], "scope_target_mismatch")
+
+    def test_slot_pr_ref_binds_the_opened_pr_without_a_successor(self):
+        contract, delivery, _, _ = self.slot_pr_delivery()
+        observed = with_observed(self.model, contract, delivery,
+                                 ["select", "publish", "open", "merge"])
+        reduced = self.model.reduce_delivery(contract, observed, evaluation=evaluation())
+        self.assertEqual(
+            (stage_state(reduced, "open"), stage_state(reduced, "merge"),
+             post_state(reduced, "pr_merged")),
+            ("observed", "observed", "observed"))
+        self.assertEqual(len(reduced["next_delivery"]["authorization_intents"]), 1)
+
+        second = observation(self.model, contract, "pr_opened",
+                             pr_subject("pr_opened", pr=18))
+        conflicting = copy.deepcopy(observed)
+        conflicting["delivery_observations"] = sorted(
+            conflicting["delivery_observations"] + [second], key=lambda item: item["id"])
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.reduce_delivery(contract, conflicting, evaluation=evaluation())
+
+        foreign = with_observed(self.model, contract, delivery, ["select", "publish"])
+        foreign["delivery_observations"] = sorted(
+            foreign["delivery_observations"] + [observation(
+                self.model, contract, "pr_opened",
+                pr_subject("pr_opened", head="c" * 40))],
+            key=lambda item: item["id"])
+        reduced = self.model.reduce_delivery(contract, foreign, evaluation=evaluation())
+        self.assertEqual(stage_state(reduced, "open"), "pending")
 
     def test_matcher_expiry_contract_and_slot_constraints(self):
         contract, delivery = contract_and_delivery(self.model)
@@ -909,8 +985,10 @@ class DeliveryModelTest(unittest.TestCase):
         summary = no_contract["summaries"][0]
         summary.update(custody=None, owner=None, worktree=None, deadline_at=None,
                        contract_digest=None, pending_stage_ids=[], requirements=[])
-        no_contract["actions"] = []
+        # A null digest never names its issue in an action (D12, D31).
         self.assert_invalid(no_contract, "workflow-response")
+        no_contract["actions"] = []
+        self.assertEqual(self.validate(no_contract, "workflow-response"), no_contract)
         summary["requirements"] = [{"kind": "delivery_contract", "subject_id": "151",
                                     "reason_code": "delivery_contract_required",
                                     "detail_pointer": None}]
