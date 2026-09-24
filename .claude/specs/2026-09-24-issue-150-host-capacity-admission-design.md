@@ -6,7 +6,7 @@ two-owner root), the workflow-safeguards slice (its D3: the control interface
 owns capacity), the conformance engine's `host` domain (#122), and the temporary
 host-admission prep note of 2026-09-20. That note's conclusions are recorded here
 (D2, D3, D7, D9 and the honesty boundary), so the plan deletes it (D15).
-Decisions D1–D15 bind the plan.
+Decisions D1–D17 bind the plan.
 
 ## Problem
 
@@ -56,6 +56,30 @@ Discrete agent-slot admission in the lifecycle runtime:
 7. **A deterministic replay proves it and records a baseline** over the real
    runtime commands, using the measured slot shape (D12).
 
+## Terms
+
+The repo has no glossary file, so this block defines the canonical terms (D17).
+
+- **Agent slot**: capacity for one concurrent agent in a root session (the
+  controller, an owner, a worker or a reviewer). It is never CPU, memory or a
+  build job.
+- **Root session**: the top-level agent session whose agents share one declared
+  budget. For an orchestration, that is the controller's session.
+- **Host declaration**: the authored document that states each route's support
+  and its `agent_slots`.
+- **Host route**: a named way of launching owners (`claude-code`, `codex`) or
+  the reserved `direct`.
+- **Role set**: the fixed slots one owner launch needs (owner, worker,
+  reviewer).
+- **Claim**: a ledger record that a holder occupies a role set (or the
+  controller slot), from acquisition until release. _Avoid_: "reservation" as a
+  noun, "lease", "ticket".
+- **Admission**: the control-time decision to dispatch an owner only with its
+  whole role set claimed.
+- **Waiting**: an issue whose dispatch this sweep withheld for agent slots, not
+  for `max_parallel`. Its summary state is unchanged (`queued` for a fresh
+  issue).
+
 ## Decisions
 
 ### The host declaration (D2, D3, D16)
@@ -86,7 +110,9 @@ fixture. Shape, schema version 1, exact members at every level:
   declaration can admit an owner without its reviewer.
 - `claude-code` is declared at `7` = 1 controller + 2 × 3. That keeps today's
   default `max_parallel` of 2 able to run two owners, each with reserved
-  capacity. The value is host policy and can be changed in one place (D16).
+  capacity. A project that resolves a higher `maxParallel` is capped at two
+  concurrent owners until the declaration is raised. The value is host policy
+  and can be changed in one place (D16).
 - `codex` is declared `unsupported`. The route names are closed by the
   document. `direct` is a runtime-reserved route name that never appears in the
   document (D3).
@@ -96,7 +122,7 @@ fixture. Shape, schema version 1, exact members at every level:
 | Route | Who calls it | Admission |
 |---|---|---|
 | `claude-code` | Claude's `orchestrate-issues` adapter | Full admission: a controller claim plus a role-set claim per owner dispatch |
-| `direct` | `from-issue`'s explicit durable interactive acquisition (the caller *is* the one owner) | Not applicable: control requires exactly one requested issue and `max_parallel` 1, records no claims, and reports the route |
+| `direct` | `from-issue`'s explicit durable interactive acquisition (the caller *is* the one owner) | Not applicable: control requires exactly one requested issue and `max_parallel` 1, reads no declaration, records no claims, and reports the route |
 | `codex` | the Codex `orchestrate-issues` stub, through `host-route` only | Unsupported: `host-route` returns the explicit result; `control` refuses the route with no write |
 
 A run binds its route on its first control sweep under the new schema, and the
@@ -139,8 +165,10 @@ The ledger schema goes from 3 to 4. The run gains one member, `admission`:
   names its issue's current live launch. Released claims are kept as the audit
   trail the replay reads.
 
-**Release is one step at one site (D5).** Immediately before every committed
-state write, the transaction runs a single `settle` step. `settle` releases
+**Release is one step at one site (D5).** Every committed state write passes
+one boundary. Most writers reach it through the shared transaction; the
+direct-owner writer reaches it without one. At that boundary, just before the
+write, a single `settle` step runs. `settle` releases
 every held owner claim whose holder is no longer its issue's current `active`
 launch, stamps the commit's `updated_at`, and derives the event from the
 holder record:
@@ -160,11 +188,15 @@ current-launch `unavailable` owner observation releases that launch's claim
 (`owner_unavailable`), and a `finalize` response releases the controller claim
 (`finalized`).
 
-**Migration and adoption (D11).** The 3→4 step writes `admission: null`. On a
-run's first v4 control sweep, live custody with *no claim record at all* for
-its current launch (an in-flight v3 run) is adopted as held claims, even when
-that exceeds the declaration. New admission then waits until the run drains
-below it. A launch whose claim was released is never re-adopted.
+**Migration and adoption (D11).** The 3→4 step writes `admission: null`.
+Adoption happens once, in the sweep that first binds the block. At that point,
+live custody with no claim (an in-flight v3 run) is adopted as held claims,
+even when that exceeds the declaration, and new admission waits until the run
+drains below it. After binding, only a control dispatch creates an owner
+claim. A launch that `finish` records without a dispatch, such as the first
+delivery remainder of a failed-after-selection summary, holds no claim until a
+control dispatch actually launches it. A released claim is never re-acquired
+for the same launch.
 
 ### Admission inside control (D6)
 
@@ -174,8 +206,9 @@ One `control` transaction, in order:
    undeclared route, or a missing or invalid declaration, is refused as a
    `WorkflowError` with nothing written. That is the inner check; `host-route`
    gives the typed answer (D9).
-2. Bind or verify the run's route. Apply `launch_refused` observations (D7),
-   settle, release the claims of `unavailable` launches, then adopt.
+2. Bind or verify the run's route, adopting only at first binding (D11). Apply
+   `launch_refused` observations (D7), settle, then release the claims of
+   `unavailable` launches.
 3. Acquire the controller claim if the run holds none. Compute availability:
    `agent_slots` minus the roles of held claims whose holder is live at `now`.
    Expired or unavailable holders do not count, which is the same liveness
@@ -195,11 +228,11 @@ the request's issue order and the lane precedence, so the ledger holds one fact
 once. The `wait` action keeps `wake_on: [deadline, owner_notification,
 tracker_change]`. A slot frees only when an owner's custody ends, and every such
 end is either an owner exit, which the host reports as an owner notification,
-or a deadline, which the wait already arms. Waiting work always has a live
-owner holding the slots it needs. The declaration floor guarantees an empty
-run can admit one owner, so a sweep that waits for slots always has a deadline
-to arm. The only other case is refusal-gated work with no live owner, and it
-finalizes with the issue reported waiting (D7).
+or a deadline, which the wait already arms. When work waits for slots, some
+live claim is holding them, so its end will wake the adapter. A run with no
+live claim can always admit one owner, because of the declaration floor. That
+leaves one case where work waits with nothing live: refusal-gated work. That
+sweep finalizes and reports the issue as waiting (D7).
 
 ### Launch refusal (D7)
 
@@ -276,8 +309,11 @@ here only; neither skill restates it.
   Claude's skill of the same name. Its whole instruction: run `host-route --route
   codex`, return the validated result verbatim, name `/from-issue <n> --auto` per
   issue, one at a time, as the supported sequential route, and never spawn owners,
-  count threads, or retry. The project `CLAUDE.md` paragraph on skills that stay
-  out of the shared tree gains this third, Codex-side case.
+  count threads, or retry.
+- **Documentation**, written with the implementation, not before it. The project
+  `CLAUDE.md` paragraph on skills that stay out of the shared tree gains the
+  Codex-side stub. `CLAUDE.md` also records the declaration's authored home and
+  its per-root-session meaning.
 
 ### Conformance discovery (D13)
 
@@ -293,7 +329,7 @@ declaration.
 
 | Criterion | Design element | Proving evidence |
 |---|---|---|
-| Runtime schema records controller/owner/worker/reviewer claims and releases them atomically from observed lifecycle events | Schema-4 `admission` block; commit-time `settle`; control's `owner_unavailable` / `finalized` releases (D5) | CLI tests. After `finish`, one state read shows the terminal record and the claim `finished` with `released_at` = `finished_at`. Suspend, handoff, reap, reconcile, supersession, `unavailable` and `launch_refused` each release with their event. A refused write (e.g. backward time) leaves both the lifecycle record and the claim unchanged |
+| Runtime schema records controller/owner/worker/reviewer claims and releases them atomically from observed lifecycle events | Schema-4 `admission` block; commit-time `settle`; control's `owner_unavailable` / `finalized` releases (D5) | CLI tests. After `finish`, one state read shows the terminal record and the claim `finished`, with `released_at` equal to that write's `updated_at`. Suspend, handoff, reap, reconcile, supersession, `unavailable` and `launch_refused` each release with their event. A refused write (e.g. backward time) leaves both the lifecycle record and the claim unchanged |
 | Supported route reports available and reserved worker capacity before an owner launch | Interface-3 `admission` report computed after acquisition; `host-route` for the static budget (D8, D9) | The control response carrying a spawn reports that owner's claim in `reserved` and the reduced `available`. Adapter contract test: spawns execute only from that validated response |
 | Admission reasons only about declared agent slots | Declaration with only `agent_slots`; exact-member validator (D2) | Validator refuses any extra member; the runtime takes no host metric input |
 | Replay proves owner-only occupancy cannot over-admit; a `max_parallel` clamp does not satisfy it | Both limits per dispatch; `waiting` distinguishes slot-withheld work (D6, D12) | Fixture keeps `max_parallel` 2 with 4 declared slots. The first sweep admits A, and B is in `waiting` although owner occupancy 0 < 2. Same request with 7 slots admits both, so the fixture is not a hidden clamp. A mid-run tracker wake still withholds B |
@@ -381,8 +417,8 @@ simulated clock in whole minutes.
   Prior art: the delivery-model and artifact-budget boundary tests.
 - **S4 — skill contract tests** over both the source skill trees and the
   installed trees: the Claude adapter's host-route-first sequence,
-  `host_route`, `launch_refused`, no retry, no polling; the Codex stub's
-  presence in the Codex tree only; `from-issue`'s `direct` request. Prior art:
+  `host_route`, `launch_refused`, no retry, no polling; the Codex stub present
+  in the Codex tree and absent from Claude's; `from-issue`'s `direct` request. Prior art:
   the workflow-skill and dispatch-contract suites.
 - **S5 — the conformance check** through the registry and checks suites.
 
@@ -434,9 +470,10 @@ No other seam: implementers do not unit-test private helpers in place of S1/S2.
 | D8 | Control request and response move to interface 3 together (`host_route`, `admission` report computed after acquisition); summaries, actions, owner objects unchanged | Exact-member interfaces; version bumps make stale adapters fail loudly | Extend interface 2 in place (a stale adapter would silently drop capacity) |
 | D9 | `workflow-state host-route` is the one home of the typed supported/unsupported result (closed reason codes, `alternative`), validated at the workflow-response boundary; control refuses unsupported routes as the inner check | the-bar: one authoritative home, defense in depth, fail loud | Result spelled in skill prose (two homes); control-only refusal (an error string, not a typed result) |
 | D10 | Codex entry: a Codex-only `orchestrate-issues` stub linked by the Codex module that relays `host-route codex` and names `/from-issue <n> --auto` | Session case 1: a Codex user typed `@orchestrate-issues`; shared-tree skills also reach Claude | A shared-tree stub (collides with Claude's skill); a global AGENTS.md rule (hot-path prose, #99) |
-| D11 | Migration writes `admission: null`; the first v4 sweep adopts unclaimed live custody even beyond the declaration, and new admission waits for the drain; a released launch is never re-adopted | Versioned-state precedent; truthful accounting of in-flight owners | Ignore migrated owners (over-admits on upgrade); refuse v3 in-flight runs (strands live work) |
+| D11 | Migration writes `admission: null`; adoption only in the binding sweep (unclaimed live custody adopted even beyond the declaration, new admission waits for the drain); afterwards, claims come only from control dispatches, so an undispatched launch recorded by `finish` holds none | Versioned-state precedent; grill: `finish` records an `active` first remainder no dispatch launched | Ignore migrated owners (over-admits on upgrade); standing adoption (claims a phantom remainder and blocks waiting owners until its deadline) |
 | D12 | Replay: deterministic simulated host and adapter over the real CLI; measured shape (4 slots including controller, 2 owners, `max_parallel` 2); four metrics defined here; baseline is a committed exact-match fixture; 7-slot, scripted-refusal and 3-slot variants | Retrospective acceptance; issue: baseline without a percentage target | A live host replay (not deterministic); percentage targets; replaying the Codex transcript (not the supported route) |
 | D13 | One optional `host`-domain conformance check reports declaration validity and route support through the runtime's library; it never touches claims | Issue decisions cite #122; prep note: conformance discovers, never owns claims | No conformance surface (drops the host-truth domain the issue names); conformance-owned claims (not atomic, timeless reports) |
 | D14 | Honesty boundary: `claude-code` "supported" = admitted-only launches, completion signal, bounded refusal; in-owner subagents not individually claimed; per-run accounting; no live-host evidence claimed | Prep note's closing warning; the-bar: truthful terminal states | Claim a supported native capacity integration the evidence cannot show |
 | D15 | The plan deletes the 2026-09-20 host-admission prep note; its conclusions live in this spec | The prep note's own durability instruction | Keep it (a temporary note outliving its purpose) |
-| D16 | `claude-code` declares 7 slots (1 controller + 2 × 3), preserving today's two-owner throughput under the default `max_parallel` | Resolved `maxParallel` default 2; declaration is host policy | 4 (would serialize every Claude run, a behavior change nobody asked for) |
+| D16 | `claude-code` declares 7 slots (1 controller + 2 × 3), preserving today's two-owner throughput under the default `max_parallel`; a project resolving more is capped at two owners until the declaration is raised | Resolved `maxParallel` default 2; retrospective: do not raise fan-out first; declaration is host policy | 4 (serializes every Claude run, a change nobody asked for); a larger value that never binds (admission would be nominal on the supported route) |
+| D17 | No glossary or ADR file is created: this repo keeps its decisions in spec ledgers and has no context map. The Terms block is canonical; `CLAUDE.md` is updated with the implementation; the out-of-scope note gains its boundary line now | grill-with-docs: follow the repo's layout and create files lazily; ADR bar (hard to reverse, surprising, a real trade-off) is not met by versioned, reversible interfaces | Start a `docs/CONTEXT.md` or `adr/` tree for one issue (imposes a new layout mid-flight) |
