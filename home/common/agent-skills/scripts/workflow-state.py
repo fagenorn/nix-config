@@ -2225,6 +2225,11 @@ def command_control(args: argparse.Namespace) -> int:
             issue_state = state["issues"].get(str(issue))
             if issue_state is None or not issue_state["attempts"]:
                 continue
+            # A delivered issue holds no custody a candidate could stand beside,
+            # so bootstrap names no recorded worktree for it and the adapter
+            # reserves an unused candidate instead (orchestrate-issues §2).
+            if runtime.delivery_complete(issue_state):
+                continue
             if "remainder" in (analysis[issue].get("custody_kind"),
                                planned.get(issue, {}).get("custody_kind")):
                 continue

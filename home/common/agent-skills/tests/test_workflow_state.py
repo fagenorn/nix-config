@@ -330,13 +330,22 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "state": state,
         }
 
-    def delivery_contract(self, issue):
+    def delivery_contract(self, issue, *, all_stages=False):
+        """The fixture contract for ``issue`` and its sealed initial intent.
+
+        ``all_stages`` declares every stage's own scope in that intent, so one
+        owner can carry the delivery from selection to merge.
+        """
         model, fixtures = self.delivery_model, self.delivery_fixtures
         contract, delivery = fixtures.contract_and_delivery(model)
         first = copy.deepcopy(delivery["authorization_intents"][0])
+        if all_stages:
+            first["scopes"] = [fixtures.stage_scope(model, contract, stage["id"])
+                               for stage in contract["stages"]]
         for declared in first["scopes"]:
             declared["target"]["issue"] = issue
             fixtures.seal(model, declared)
+        first["scopes"].sort(key=lambda item: item["id"])
         fixtures.seal(model, first)
         contract["issue"] = issue
         contract["deliverable"]["id"] = f"delivery-{issue}"
@@ -773,6 +782,83 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "report_path": None,
             "notes": "",
         }
+
+    def delivery_report(self, command, report, *, now, ok=True):
+        """Feed one owner report to ``checkpoint-delivery`` or ``finish``."""
+        self.control_request_serial += 1
+        path = self.root / f"{command}-{self.control_request_serial}.json"
+        path.write_text(json.dumps(report), encoding="utf-8")
+        flag = "--checkpoint-file" if command == "checkpoint-delivery" else "--summary-file"
+        completed = self.run_cli(command, "--repo-root", self.root, "--run-id",
+                                 self.run_id, flag, path, "--now", now, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def delivery_observations(self, contract):
+        """One observation per fixture stage, plus the delivered implementation."""
+        model, fixtures = self.delivery_model, self.delivery_fixtures
+        merged = fixtures.observation(model, contract, "pr_merged",
+                                      fixtures.pr_subject("pr_merged"))
+        selected = fixtures.selection(model, model.canonical_digest(contract))
+        return {
+            "select": fixtures.observation(model, contract, "selected_output",
+                                           {"selected_output": selected}),
+            "publish": fixtures.observation(model, contract, "branch_published", {
+                "repository_id": "sim-repo", "branch": "feature",
+                "selected_head": "a" * 40}),
+            "open": fixtures.observation(model, contract, "pr_opened",
+                                         fixtures.pr_subject("pr_opened")),
+            "merge": merged,
+            "delivered": fixtures.observation(
+                model, contract, "implementation_delivered", {
+                    "selected_subject": {"kind": "commit", "value": "a" * 40},
+                    "integration_subject": {"kind": "commit", "value": "b" * 40},
+                    "presence": {"kind": "reachability", "repository_id": "sim-repo",
+                                 "selected_value": "a" * 40,
+                                 "integration_value": "b" * 40,
+                                 "integrated_ref": "refs/heads/main",
+                                 "succeeded": True},
+                    "merge_observation_id": merged["id"],
+                    "acceptance_evidence_ids": ["accept-1"],
+                    "review_evidence_ids": ["review-1"],
+                    "test_evidence_ids": ["test-1"]}),
+        }
+
+    def checkpoint_stages(self, *, contract, intent, custody, stages, times):
+        """Checkpoint each named stage under ``custody``, allowed and observed."""
+        model, fixtures = self.delivery_model, self.delivery_fixtures
+        digest = model.canonical_digest(contract)
+        order = [stage["id"] for stage in contract["stages"]]
+        scopes = {stage["id"]: next(item for item in intent["scopes"]
+                                    if item["action"] == stage["action"])
+                  for stage in contract["stages"]}
+        observed = self.delivery_observations(contract)
+        for stage_id, now in zip(stages, times, strict=True):
+            allowed = fixtures.authority(model, contract, scopes[stage_id], custody,
+                                         verdict="allowed")
+            allowed["observed_at"] = now
+            fixtures.seal(model, allowed)
+            following = order.index(stage_id) + 1
+            self.delivery_report("checkpoint-delivery", {
+                "interface_version": 2, "issue": contract["issue"],
+                "custody": custody, "contract_digest": digest,
+                "delivery_observations": [observed[stage_id]],
+                "authority_observations": [allowed], "reevaluation_evidence": [],
+                "requested_scope": (scopes[order[following]]
+                                    if following < len(order) else None),
+                "detail_state": "none", "report_path": None, "notes": "",
+            }, now=now)
+
+    def finish_summary(self, *, contract, custody, state, historical, observations,
+                       now):
+        """Finish ``custody`` with one ``ship-summary/v2``."""
+        return self.delivery_report("finish", {
+            "interface_version": 2, "issue": contract["issue"], "state": state,
+            "custody": custody, "historical_owner_result": historical,
+            "delivery_contract_digest": self.delivery_model.canonical_digest(contract),
+            "delivery_observations": observations, "authority_observations": [],
+            "reevaluation_evidence": [], "detail_state": "none", "report_path": None,
+            "notes": "",
+        }, now=now)
 
     def concurrent_finish(self, results, *, now):
         current = self.read_state()
@@ -1441,6 +1527,160 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertIn("recorded worktree observation", completed.stderr)
         self.assertEqual(self.state_path.read_bytes(), terminal)
 
+    def spawn_delivery(self, issue, *, now):
+        """Spawn ``issue`` under an every-stage contract; return it and the custody."""
+        contract, intent = self.delivery_contract(issue, all_stages=True)
+        request = self.control_request(
+            now=now, issues=[issue], tracker=[self.tracker_fact(issue)],
+            worktrees=[self.worktree_fact(issue, candidate={
+                "path": str(self.root / f"worktree-issue-{issue}"),
+                "state": "absent"})])
+        request["delivery_contracts"][str(issue)] = contract
+        request["authorization_intents"][str(issue)] = [intent]
+        spawned = self.dispatch_action(
+            json.loads(self.control_raw(request=request).stdout), "spawn")
+        custody = {"kind": "implementation", "attempt": spawned["attempt"],
+                   "launch": 1, "action_id": spawned["id"]}
+        return contract, intent, custody
+
+    def deliver_by_owner(self, issue, *, times):
+        """One owner carries ``issue`` through every stage and finishes it delivered."""
+        contract, intent, custody = self.spawn_delivery(issue, now=times[0])
+        return self.complete_delivery(contract, intent, custody, times=times)
+
+    def deliver_by_direct_owner(self, issue, *, times):
+        """A direct owner acquires ``issue`` and delivers it; return its request."""
+        contract, intent = self.delivery_contract(issue, all_stages=True)
+        request = self.direct_request(
+            issue=issue, now=times[0], tracker=self.tracker_fact(issue),
+            worktree=self.worktree_fact(issue, candidate={
+                "path": str(self.root / f"worktree-issue-{issue}"),
+                "state": "absent"}))
+        request["delivery_contract"] = contract
+        request["authorization_intents"] = [intent]
+        owner = self.direct_owner(request=request)
+        self.assertEqual(owner["kind"], "owner")
+        self.run_id = owner["run_id"]
+        custody = {"kind": "implementation", "attempt": owner["attempt"],
+                   "launch": 1, "action_id": owner["action_id"]}
+        self.complete_delivery(contract, intent, custody, times=times)
+        return request
+
+    def complete_delivery(self, contract, intent, custody, *, times):
+        """Checkpoint every stage under ``custody``, then finish it delivered."""
+        self.checkpoint_stages(contract=contract, intent=intent, custody=custody,
+                               stages=["select", "publish", "open", "merge"],
+                               times=times[1:5])
+        finished = self.finish_summary(
+            contract=contract, custody=custody, state="delivery_complete",
+            historical=self.merged_result(contract["issue"]),
+            observations=[self.delivery_observations(contract)["delivered"]],
+            now=times[5])
+        self.assertEqual((finished["kind"], finished["state"]),
+                         ("delivery_complete", "delivery_complete"))
+        return contract
+
+    def sweep_request(self, **request_fields):
+        """A reused run's control request: an installed contract is sent as null."""
+        request = self.control_request(**request_fields)
+        installed = self.read_state()["issues"]
+        for issue in request["issues"]:
+            ledger = installed.get(str(issue))
+            if ledger is not None and ledger["delivery"]["contract"] is not None:
+                request["delivery_contracts"][str(issue)] = None
+                request["authorization_intents"][str(issue)] = []
+        return request
+
+    def test_control_ignores_an_unused_candidate_for_a_delivered_issue(self):
+        # Bootstrap omits a delivery-complete issue, so orchestrate-issues §2
+        # reserves an absent candidate for it — and control ignores unused
+        # candidates. Run orch-1635-1642 refused every sweep naming 1635 so.
+        moments = [f"2026-09-21T00:0{minute}:00Z" for minute in range(6)]
+        self.init_run(now=moments[0])
+        self.deliver_by_owner(47, times=moments)
+        self.assertEqual(self.read_state()["issues"]["47"]["attempts"][-1]["state"],
+                         "merged")
+        self.assertEqual(self.init_run(now=moments[5])["requirements"], [])
+        delivered = self.state_path.read_bytes()
+
+        response = json.loads(self.control_raw(request=self.sweep_request(
+            now="2026-09-21T00:10:00Z", issues=[47],
+            tracker=[self.tracker_fact(47, state="closed")],
+            worktrees=[self.worktree_fact(47, candidate={
+                "path": str(self.root / "worktree-issue-47-orchestrated"),
+                "state": "absent"})])).stdout)
+
+        self.assertEqual(response["deltas"], [])
+        self.assertEqual(response["actions"], [{"id": "finalize", "kind": "finalize"}])
+        self.assertEqual([(s["issue"], s["state"], s["attempt"])
+                          for s in response["summaries"]], [(47, "closed", None)])
+        self.assertEqual(self.state_path.read_bytes(), delivered)
+
+    def test_control_still_refuses_a_candidate_beside_a_live_unobserved_attempt(self):
+        moments = [f"2026-09-21T00:0{minute}:00Z" for minute in range(6)]
+        self.init_run(now=moments[0])
+        self.deliver_by_owner(47, times=moments)
+        self.spawn(issue=51, worktree=self.root / "wt-51", now=moments[5])
+        before = self.state_path.read_bytes()
+
+        refused = self.control_raw(ok=False, request=self.sweep_request(
+            now="2026-09-21T00:10:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47, state="closed"), self.tracker_fact(51)],
+            worktrees=[
+                self.worktree_fact(47, candidate={
+                    "path": str(self.root / "worktree-issue-47-orchestrated"),
+                    "state": "absent"}),
+                self.worktree_fact(51, candidate={
+                    "path": str(self.root / "worktree-issue-51-orchestrated"),
+                    "state": "absent"}),
+            ]))
+
+        self.assertEqual(refused.returncode, 2)
+        self.assertEqual(refused.stdout, "")
+        self.assertIn("current control action requires a recorded worktree observation",
+                      refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_delivered_issue_worktree_still_refuses_another_issues_candidate(self):
+        moments = [f"2026-09-21T00:0{minute}:00Z" for minute in range(6)]
+        self.init_run(now=moments[0])
+        self.deliver_by_owner(47, times=moments)
+        durable = self.read_state()["issues"]["47"]["attempts"][-1]["worktree"]
+        before = self.state_path.read_bytes()
+
+        refused = self.control_raw(ok=False, request=self.sweep_request(
+            now="2026-09-21T00:10:00Z", issues=[47, 51], max_parallel=2,
+            tracker=[self.tracker_fact(47, state="closed"), self.tracker_fact(51)],
+            worktrees=[
+                self.worktree_fact(47, candidate={
+                    "path": str(self.root / "worktree-issue-47-orchestrated"),
+                    "state": "absent"}),
+                self.worktree_fact(51, candidate={"path": durable, "state": "absent"}),
+            ]))
+
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("candidate worktree path aliases another issue", refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_direct_owner_replays_a_delivered_issue_beside_a_candidate(self):
+        # direct-owner has no unused-candidate refusal to widen: a delivered
+        # direct run is terminal before any worktree observation is read.
+        moments = [f"2026-09-21T00:0{minute}:00Z" for minute in range(6)]
+        request = self.deliver_by_direct_owner(73, times=moments)
+        delivered = self.state_path.read_bytes()
+        request.update(now="2026-09-21T00:10:00Z", delivery_contract=None,
+                       authorization_intents=[],
+                       worktree=self.worktree_fact(73, candidate={
+                           "path": str(self.root / "worktree-issue-73-orchestrated"),
+                           "state": "absent"}))
+
+        replayed = self.direct_owner(request=request)
+
+        self.assertEqual((replayed["kind"], replayed["run_id"], replayed["reason"],
+                          replayed["result"]),
+                         ("terminal", self.run_id, "merged", self.merged_result(73)))
+        self.assertEqual(self.state_path.read_bytes(), delivered)
+
     def test_control_combined_six_stage_single_ledger_replay(self):
         self.init_run(now="2026-08-19T12:00:00Z")
         paths = {issue: str(self.root / f"wt-{issue}") for issue in (47, 51, 53)}
@@ -1709,7 +1949,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual([a["kind"] for a in json.loads(repeated.stdout)["actions"]], ["wait"])
         self.finish(1, self.merged_result(47), issue=47, now="2026-08-19T12:10:00Z")
         final = self.control(
-            now="2026-08-19T12:10:00Z", issues=[47],
+            now="2026-09-21T00:10:00Z", issues=[47],
             tracker=[self.tracker_fact(47, state="closed")], worktrees=[],
         )
         self.assertEqual(final["actions"], [{"id": "finalize", "kind": "finalize"}])
