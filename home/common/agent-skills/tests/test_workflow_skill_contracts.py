@@ -396,7 +396,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         tracked = subprocess.run(
             ["git", "ls-files", "-z", "--", "AGENTS.md", "CLAUDE.md",
              ".agents/instructions", "home/common/agent-skills",
-             "home/common/claude-code", "scripts/context-map-lint.py", "tests"],
+             "home/common/claude-code", "python", "tests"],
             cwd=REPO_ROOT, check=True, capture_output=True,
         ).stdout.split(b"\0")
         text_suffixes = {".md", ".py", ".sh", ".nix", ".json", ".toml", ".yaml", ".yml"}
@@ -494,7 +494,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             REPO_ROOT / "home/common/agent-skills/scripts/resolve-project.py",
             helpers["resolve-project"],
         )
-        shutil.copyfile(REPO_ROOT / "scripts/context-map-lint.py",
+        shutil.copyfile(REPO_ROOT / "python/agent_tools/context_map_lint.py",
                         helpers["context-map-lint"])
         for helper in helpers.values():
             helper.chmod(0o755)

@@ -92,6 +92,7 @@ agent-workflow-tests:
     tests/test_agent_model_drift_scheduling.py \
     tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
+    tests/test_context_map_lint.py \
     tests/test_branch_protection.py
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
