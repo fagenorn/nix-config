@@ -219,6 +219,43 @@ CODEX_HEADER = (
 MANAGED_LINE = "@.agents/instructions/bootstrap.md"
 
 
+def make_project_root(contract: object | None = None, *,
+                      projections: bool = True) -> Path:
+    """A temp root holding a valid contract, its instruction source, and —
+    unless `projections=False` — both projection targets rendered current.
+
+    `resolve` refuses a drifted projection before it reaches anything else
+    (D10), so a root without current targets would refuse for a reason no
+    caller here means to exercise. Only the cases that must start from an
+    unwritten state opt out.
+    """
+    # `.resolve()` because the platform temp dir is reached through a
+    # symlink on macOS (/var -> /private/var) while the resolver's own
+    # root is always the physical path; without it every `str(root)`
+    # comparison below would compare two spellings of one directory.
+    root = Path(tempfile.mkdtemp()).resolve()
+    git(root, "init", "--quiet")
+    (root / "home" / "common" / "agent-skills" / "standards").mkdir(parents=True)
+    (root / ".out-of-scope").mkdir()
+    (root / ".worktrees").mkdir()
+    (root / ".agents" / "instructions").mkdir(parents=True)
+    (root / ".agents" / "instructions" / "bootstrap.md").write_text(
+        "# invariants\n", encoding="utf-8")
+    if contract is None:
+        contract = source_contract()
+    if contract is not False:
+        (root / ".agents" / "project.json").write_text(
+            json.dumps(contract), encoding="utf-8")
+    body = "# authored body\n"
+    if projections:
+        source = (root / ".agents" / "instructions" / "bootstrap.md").read_bytes()
+        (root / "AGENTS.md").write_bytes(
+            CODEX_HEADER.encode() + b"\n\n" + source)
+        body += MANAGED_LINE + "\n"
+    (root / "CLAUDE.md").write_text(body, encoding="utf-8")
+    return root
+
+
 class ResolverTestCase(unittest.TestCase):
     def setUp(self) -> None:
         # Every subcommand loads the installed manifest before it looks at the
@@ -232,39 +269,7 @@ class ResolverTestCase(unittest.TestCase):
 
     def make_root(self, contract: object | None = None, *,
                   projections: bool = True) -> Path:
-        """A temp root holding a valid contract, its instruction source, and —
-        unless `projections=False` — both projection targets rendered current.
-
-        `resolve` refuses a drifted projection before it reaches anything else
-        (D10), so a root without current targets would refuse for a reason no
-        caller here means to exercise. Only the cases that must start from an
-        unwritten state opt out.
-        """
-        # `.resolve()` because the platform temp dir is reached through a
-        # symlink on macOS (/var -> /private/var) while the resolver's own
-        # root is always the physical path; without it every `str(root)`
-        # comparison below would compare two spellings of one directory.
-        root = Path(tempfile.mkdtemp()).resolve()
-        git(root, "init", "--quiet")
-        (root / "home" / "common" / "agent-skills" / "standards").mkdir(parents=True)
-        (root / ".out-of-scope").mkdir()
-        (root / ".worktrees").mkdir()
-        (root / ".agents" / "instructions").mkdir(parents=True)
-        (root / ".agents" / "instructions" / "bootstrap.md").write_text(
-            "# invariants\n", encoding="utf-8")
-        if contract is None:
-            contract = source_contract()
-        if contract is not False:
-            (root / ".agents" / "project.json").write_text(
-                json.dumps(contract), encoding="utf-8")
-        body = "# authored body\n"
-        if projections:
-            source = (root / ".agents" / "instructions" / "bootstrap.md").read_bytes()
-            (root / "AGENTS.md").write_bytes(
-                CODEX_HEADER.encode() + b"\n\n" + source)
-            body += MANAGED_LINE + "\n"
-        (root / "CLAUDE.md").write_text(body, encoding="utf-8")
-        return root
+        return make_project_root(contract, projections=projections)
 
     def resolve(self, root: Path, *extra: str) -> tuple[int, object, str]:
         code, out, err = run("resolve", "--repo-root", str(root), *extra,

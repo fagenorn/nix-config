@@ -17,6 +17,7 @@ from ._delivery_model_fixtures import (
     contract_and_delivery_for_stage, observation, pr_subject, seal, selection,
     stage_scope,
 )
+from .test_resolve_project import make_home, make_project_root, source_contract
 
 
 ROOT = Path(__file__).parents[4]
@@ -26,6 +27,8 @@ MODEL = SCRIPTS / "delivery_model/__init__.py"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 ARTIFACT_BUDGET = SCRIPTS / "artifact_budget.py"
 NOW = "2026-09-21T00:00:00Z"
+WORKTREE_NAME = "worktree-issue-171-delivery-contract-source"
+LATER = "2026-09-21T00:10:00Z"
 
 
 class FakeProvider:
@@ -324,6 +327,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 shutil.copy2(SCRIPTS / "workflow_delivery.py", store / "workflow_delivery.py")
                 shutil.copy2(SCRIPTS / "workflow_delivery_wire.py",
                              store / "workflow_delivery_wire.py")
+                shutil.copy2(SCRIPTS / "workflow_delivery_build.py",
+                             store / "workflow_delivery_build.py")
                 shutil.copy2(SCRIPTS / "artifact_budget.py", store / "artifact_budget.py")
                 shutil.copy2(SCRIPTS / "artifact-budget", store / "artifact-budget")
                 shutil.copy2(POLICY, store / "artifact-budget-policy.json")
@@ -342,6 +347,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     (library / "workflow_delivery.py").symlink_to(store / "workflow_delivery.py")
                     (library / "workflow_delivery_wire.py").symlink_to(
                         store / "workflow_delivery_wire.py")
+                    (library / "workflow_delivery_build.py").symlink_to(
+                        store / "workflow_delivery_build.py")
                     (library / "delivery_model").symlink_to(store / "delivery_model", target_is_directory=True)
                     (share / "artifact-budget-policy.json").symlink_to(
                         store / "artifact-budget-policy.json")
@@ -379,6 +386,17 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     self.assertEqual(before, {str(path.relative_to(repo)): path.read_bytes()
                         for path in repo.rglob("*") if path.is_file()})
                     helper.write_bytes(helper_bytes)
+                builder = store / "workflow_delivery_build.py"
+                builder_bytes = builder.read_bytes()
+                for replacement in (None,
+                        b"WORKFLOW_DELIVERY_BUILD_INTERFACE_VERSION = 2\n"
+                        b"class DeliveryBuilder: pass\n"):
+                    if replacement is None: builder.unlink()
+                    else: builder.write_bytes(replacement)
+                    rejects_dependency("builder")
+                    self.assertEqual(before, {str(path.relative_to(repo)): path.read_bytes()
+                        for path in repo.rglob("*") if path.is_file()})
+                    builder.write_bytes(builder_bytes)
 
     def test_direct_checkpoint_and_failure_remainder_round_trip(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
@@ -1104,6 +1122,247 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 input=completed.stdout, capture_output=True, check=False)
             self.assertEqual((validated.returncode, validated.stderr), (0, b""))
             self.assertEqual(validated.stdout, completed.stdout)
+
+
+class BuilderHarness:
+    """One synthetic resolvable project and a CLI driver shared by builder-backed tests."""
+
+    def project(self, mutate=None):
+        self.home = make_home()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        contract = source_contract()
+        if mutate is not None:
+            mutate(contract)
+        self.root = make_project_root(contract)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.worktree = str(self.root / ".worktrees" / WORKTREE_NAME)
+        return self.root
+
+    def cli(self, *args, stdin=None, ok=True):
+        completed = subprocess.run(
+            [sys.executable, str(WORKFLOW), *map(str, args)], input=stdin,
+            capture_output=True, check=False,
+            env={**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"})
+        if ok:
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        return completed
+
+    def build(self, kind, value, *, ok=True):
+        completed = self.cli("build-delivery", "--repo-root", self.root, "--kind", kind,
+                             "--input", "-", stdin=json.dumps(value).encode(), ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def contract_input(self, **changes):
+        value = {"issue": 171, "worktree": self.worktree, "source_kind": "explicit_user",
+                 "source_reference": "invocation:/from-issue 171 --auto", "now": NOW}
+        value.update(changes)
+        return value
+
+    def control_request(self, issues, *, now=NOW, contracts=None, intents=None,
+                        worktrees=(), forge=None, max_parallel=2):
+        def keyed(value):
+            return {str(issue): copy.deepcopy(value) for issue in issues}
+        return {"interface_version": 2, "now": now, "max_parallel": max_parallel,
+            "attempt_budget_minutes": 30, "human_directed": True, "issues": list(issues),
+            "tracker": [{"issue": issue, "state": "open", "open_blockers": [],
+                         "decision_blockers": []} for issue in issues],
+            "owners": [], "worktrees": list(worktrees),
+            "forge": forge or keyed({"state": "none", "url": None, "merge_sha": None}),
+            "delivery_contracts": contracts or keyed(None),
+            "authorization_intents": intents or keyed([]),
+            "authority_observations": keyed([]), "reevaluation_evidence": keyed([]),
+            "delivery_observations": keyed([]), "requested_scopes": keyed(None),
+            "recoveries": keyed(None)}
+
+
+class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load(MODEL, "delivery_model_builder", package=True)
+
+    def validate(self, value, kind):
+        return self.model.validate_delivery_object(
+            value, expected_kind=kind, notes_max_characters=500)
+
+    def test_contract_is_deterministic_policy_derived_and_valid(self):
+        self.project()
+        raw = json.dumps(self.contract_input()).encode()
+        path = self.root / "contract-input.json"; path.write_bytes(raw)
+        first = self.cli("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                         "--input", "-", stdin=raw)
+        second = self.cli("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                          "--input", path)
+        self.assertEqual(first.stdout, second.stdout)
+        built = json.loads(first.stdout)
+        self.assertEqual(first.stdout, self.model.canonical_bytes(built))
+        self.assertEqual(set(built), {"contract", "initial_intent"})
+        contract, initial = built["contract"], built["initial_intent"]
+        self.validate(contract, "delivery-contract"); self.validate(initial, "authorization-intent")
+        self.assertEqual(contract["initial_authorization_intent_id"], initial["id"])
+        self.assertEqual(contract["initial_authorization_intent_digest"],
+                         self.model.canonical_digest(initial))
+        self.assertEqual([stage["id"] for stage in contract["stages"]], [
+            "select_reviewed_output", "publish_branch", "open_pr", "merge_pr",
+            "close_tracker", "delete_remote_branch", "remove_worktree",
+            "delete_local_branch"])
+        constraints = contract["stages"][0]["target_ref"]["constraints"]
+        self.assertEqual((constraints["branch"], constraints["base"]), (WORKTREE_NAME, "main"))
+        literals = {stage["id"]: stage["target_ref"].get("value") for stage in contract["stages"]}
+        self.assertEqual((literals["close_tracker"], literals["remove_worktree"],
+                          literals["delete_local_branch"]), ("171", self.worktree, WORKTREE_NAME))
+        self.assertEqual(set(contract["deliverable"]["obligations"].values()), {"required"})
+        self.assertEqual(len(initial["scopes"]), 8)
+        self.assertEqual((initial["source"]["kind"], initial["revocation_key"]),
+                         ("explicit_user", f"fagenorn/nix-config#171@{NOW}"))
+
+        def keep_remote(contract_value):
+            contract_value["bindings"]["vcs"]["merge"]["delete_branch"] = False
+        self.project(keep_remote)
+        stages = self.build("contract", self.contract_input())["contract"]["stages"]
+        self.assertNotIn("delete_remote_branch", [stage["id"] for stage in stages])
+
+    def test_contract_refusals_exit_two_with_empty_stdout(self):
+        def gitlab(contract_value):
+            contract_value["bindings"]["tracker"]["kind"] = "gitlab"
+        cases = (("non-github tracker", gitlab, {}, b"tracker kind"),
+                 ("foreign issue branch", None, {"worktree": "/wt/issue-172-other"},
+                  b"branch pattern"),
+                 ("unpatterned branch", None, {"worktree": "/wt/feature-171"},
+                  b"branch pattern"),
+                 ("relative worktree", None, {"worktree": "wt/" + WORKTREE_NAME},
+                  b"worktree must be absolute"),
+                 ("parent handoff", None, {"source_kind": "parent_handoff"}, b"source kind"),
+                 ("unknown key", None, {"extra": True}, b"builder input keys"))
+        for label, mutate, changes, reason in cases:
+            with self.subTest(label=label):
+                self.project(mutate)
+                refused = self.build("contract", self.contract_input(**changes), ok=False)
+                self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                self.assertIn(reason, refused.stderr)
+        self.project()
+        missing = self.contract_input(); missing.pop("now")
+        for kind, value, reason in (("contract", missing, b"builder input keys"),
+                                    ("nonsense", self.contract_input(), b"invalid choice")):
+            with self.subTest(kind=kind):
+                refused = self.build(kind, value, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                self.assertIn(reason, refused.stderr)
+
+    def test_scope_and_initial_intent_regenerate_from_the_contract(self):
+        self.project()
+        built = self.build("contract", self.contract_input())
+        contract, initial = built["contract"], built["initial_intent"]
+        self.assertEqual(self.build("initial-intent", {"contract": contract}), initial)
+        declared = {item["id"]: item for item in initial["scopes"]}
+        for stage in contract["stages"]:
+            scope = self.build("scope", {"contract": contract, "stage_id": stage["id"]})
+            with self.subTest(stage=stage["id"]):
+                self.assertEqual(declared[scope["id"]], scope)
+                self.assertEqual((scope["action"], scope["effect"], scope["risk"]),
+                                 (stage["action"], stage["effect"], stage["effect"]))
+                self.assertEqual(scope["principal"], {
+                    "kind": "issue_owner", "stable_id": "fagenorn/nix-config#171"})
+                self.assertEqual(scope["target"]["pr_ref"], (
+                    {"kind": "slot", "slot_id": "reviewed"}
+                    if stage["kind"] in {"open_pr", "merge_pr"} else {"kind": "none"}))
+        tampered = copy.deepcopy(contract)
+        tampered["provenance"]["created_at"] = "2026-09-22T00:00:00Z"
+        for kind, value, reason in (
+                ("initial-intent", {"contract": tampered}, b"derived intent"),
+                ("scope", {"contract": tampered, "stage_id": "merge_pr"}, b"derived intent"),
+                ("scope", {"contract": contract, "stage_id": "unknown"}, b"unknown stage")):
+            with self.subTest(kind=kind, stage=value.get("stage_id")):
+                refused = self.build(kind, value, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                self.assertIn(reason, refused.stderr)
+
+
+class HelperInputTest(BuilderHarness, unittest.TestCase):
+    def pipe(self, boundary, raw):
+        completed = subprocess.run(
+            [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+             boundary, "--input", "-", "--policy", str(POLICY)],
+            input=raw, capture_output=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout
+
+    def assert_parity(self, state, args, flag, raw, piped=None):
+        """The path form and the stdin form leave identical stdout and ledger bytes."""
+        before = state.read_bytes()
+        path = self.root / f"{flag.strip('-')}.json"; path.write_bytes(raw)
+        by_path = self.cli(*args, flag, path)
+        after = state.read_bytes(); state.write_bytes(before)
+        by_stdin = self.cli(*args, flag, "-", stdin=raw if piped is None else piped)
+        self.assertEqual((by_stdin.stdout, state.read_bytes()), (by_path.stdout, after))
+        return by_stdin.stdout
+
+    def test_every_input_flag_reads_stdin_and_refuses_relative_paths(self):
+        self.project()
+        run = ("--repo-root", self.root, "--run-id", "inputs")
+        for command in (("control", *run, "--request-file"),
+                        ("direct-owner", "--repo-root", self.root, "--request-file"),
+                        ("checkpoint-delivery", *run, "--now", NOW, "--checkpoint-file"),
+                        ("finish", *run, "--now", NOW, "--summary-file"),
+                        ("finish", *run, "--now", NOW, "--issue", 151, "--attempt", 1,
+                         "--result-file"),
+                        ("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                         "--input")):
+            with self.subTest(command=command[0], flag=command[-1]):
+                refused = self.cli(*command, "relative.json", ok=False)
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn(b"file path must be absolute", refused.stderr)
+
+        self.cli("init-run", *run, "--now", NOW)
+        state = self.root / ".superpowers/workflows/inputs/state.json"
+        candidate = {"issue": 151, "recorded": None, "candidate": {
+            "path": str(self.root / ".worktrees/worktree-issue-151-inputs"), "state": "absent"}}
+        stdout = self.assert_parity(state, ("control", *run), "--request-file", json.dumps(
+            self.control_request([151], worktrees=[candidate])).encode())
+        self.assertEqual(self.pipe("workflow-response", stdout), stdout)
+
+        built = self.build("contract", self.contract_input())
+        request = {"interface_version": 2, "issue": 171, "now": NOW,
+            "attempt_budget_minutes": 30, "new_run": False, "owner_unavailable": False,
+            "tracker": {"issue": 171, "state": "open", "open_blockers": [],
+                        "decision_blockers": []},
+            "worktree": {"issue": 171, "recorded": None,
+                         "candidate": {"path": self.worktree, "state": "absent"}},
+            "forge": {"state": "none", "url": None, "merge_sha": None},
+            "delivery_contract": built["contract"],
+            "authorization_intents": [built["initial_intent"]],
+            "authority_observations": [], "reevaluation_evidence": [],
+            "delivery_observations": [], "requested_scope": None, "recovery": None}
+        owner = json.loads(self.cli("direct-owner", "--repo-root", self.root,
+                                    "--request-file", "-",
+                                    stdin=json.dumps(request).encode()).stdout)
+        historical = {"issue": 171, "state": "failed", "pr_url": None, "merge_sha": None,
+            "issue_closed": False, "discussion_items": [], "detail_state": "none",
+            "report_path": None, "notes": "failed"}
+        summary = json.dumps({"interface_version": 2, "issue": 171,
+            "state": "terminal_failed", "custody": owner["custody"],
+            "historical_owner_result": historical,
+            "delivery_contract_digest": owner["contract_digest"],
+            "delivery_observations": [], "authority_observations": [],
+            "reevaluation_evidence": [], "detail_state": "none",
+            "report_path": None, "notes": "failed"}).encode()
+        direct_state = self.root / f".superpowers/workflows/{owner['run_id']}/state.json"
+        self.assert_parity(direct_state, ("finish", "--repo-root", self.root, "--run-id",
+                           owner["run_id"], "--now", LATER), "--summary-file", summary,
+                           piped=self.pipe("ship-summary", summary))
+
+        workflow = load(WORKFLOW, "workflow_state_inputs")
+        legacy = workflow.new_run_state(run_id="legacy-inputs", now=NOW, issues={})
+        legacy["schema_version"] = 2
+        legacy["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
+            workflow.new_control_attempt(issue=151, attempt_number=1,
+                worktree=str(self.root / "wt-151"), now=NOW,
+                deadline_at="2026-09-21T01:00:00Z")]}
+        legacy_state = self.root / ".superpowers/workflows/legacy-inputs/state.json"
+        legacy_state.parent.mkdir(parents=True)
+        legacy_state.write_text(json.dumps(legacy), encoding="utf-8")
+        self.assert_parity(legacy_state, ("finish", "--repo-root", self.root, "--run-id",
+                           "legacy-inputs", "--now", LATER, "--issue", 151, "--attempt", 1),
+                           "--result-file", json.dumps({**historical, "issue": 151}).encode())
 
 
 if __name__ == "__main__":

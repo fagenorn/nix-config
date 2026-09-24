@@ -1417,18 +1417,32 @@ def validate_control_request(value):
     return request, migration_contracts
 
 
-def load_json_request(path_value: str, label: str) -> Any:
-    path = Path(path_value)
+def read_input_bytes(value: str, label: str) -> bytes:
+    """Read one helper input flag: ``-`` is all of stdin, anything else an absolute path."""
+    if value == "-":
+        try:
+            return sys.stdin.buffer.read()
+        except (OSError, ValueError) as error:
+            raise WorkflowError(f"cannot read {label} file: {error}") from error
+    path = Path(value)
     if not path.is_absolute():
-        raise WorkflowError("request file path must be absolute")
+        raise WorkflowError(f"{label} file path must be absolute")
     try:
-        with path.open(encoding="utf-8") as source:
-            value = json.load(source)
+        return path.read_bytes()
+    except OSError as error:
+        raise WorkflowError(f"cannot read {label} file: {error}") from error
+
+
+def load_json_request(path_value: str, label: str) -> Any:
+    raw = read_input_bytes(path_value, label)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise WorkflowError(f"cannot read {label} file: {error}") from error
+    try:
+        return json.loads(text)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid {label} JSON: {error}") from error
-    except (OSError, UnicodeError) as error:
-        raise WorkflowError(f"cannot read {label} file: {error}") from error
-    return value
 
 
 def load_control_request(path_value):
@@ -2555,7 +2569,8 @@ def command_direct_owner(args: argparse.Namespace) -> int:
 
 def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
     value = artifact_budget_validate(
-        "validate-report", Path(path_value), boundary="ship-summary"
+        "validate-report", boundary="ship-summary",
+        input_bytes=read_input_bytes(path_value, "result"),
     )
     return validate_result(value, expected_issue=issue)
 
@@ -2563,8 +2578,9 @@ def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
 def command_checkpoint_delivery(args):
     runtime = _delivery()
     now = format_utc(parse_utc(args.now, "--now"))
-    report = artifact_budget_validate("validate-report", Path(args.checkpoint_file),
-                                      boundary="ship-checkpoint")
+    report = artifact_budget_validate(
+        "validate-report", boundary="ship-checkpoint",
+        input_bytes=read_input_bytes(args.checkpoint_file, "checkpoint"))
 
     response = transact(args.repo_root, args.run_id, lambda state: _call(
         "checkpoint transition refused", runtime.checkpoint_state,
@@ -2805,7 +2821,8 @@ def command_finish_delivery(args):
     runtime = _delivery()
     now = format_utc(parse_utc(args.now, "--now"))
     report = artifact_budget_validate(
-        "validate-report", Path(args.summary_file), boundary="ship-summary")
+        "validate-report", boundary="ship-summary",
+        input_bytes=read_input_bytes(args.summary_file, "summary"))
 
     def finish_delivery(state):
         assert state is not None
@@ -2903,6 +2920,54 @@ def command_check_launch(args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_project_argv() -> list[str]:
+    """Resolve resolve-project the way ``artifact_budget_paths`` resolves its sibling."""
+    source = Path(__file__).resolve().parent / "resolve-project.py"
+    if source.is_file():
+        return [sys.executable, str(source)]
+    installed = Path(__file__).parent / "resolve-project"
+    if not installed.is_file():
+        installed = Path.home() / ".agents/bin/resolve-project"
+    return [str(installed)]
+
+
+def resolve_project_policy(repo_root: str) -> dict[str, Any]:
+    """Run ``resolve-project resolve``; any failure is a builder refusal."""
+    try:
+        completed = subprocess.run(
+            [*resolve_project_argv(), "resolve", "--repo-root", repo_root],
+            capture_output=True, check=False, timeout=60)
+    except subprocess.TimeoutExpired as error:
+        raise WorkflowError("resolve-project timed out") from error
+    try:
+        snapshot = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        snapshot = None
+    if completed.returncode != 0:
+        code = (snapshot.get("error", {}).get("code")
+                if isinstance(snapshot, dict) and isinstance(snapshot.get("error"), dict)
+                else None)
+        raise WorkflowError(f"resolve-project refused: {code or completed.returncode}")
+    if not isinstance(snapshot, dict):
+        raise WorkflowError("resolve-project returned a non-object")
+    return snapshot
+
+
+def command_build_delivery(args: argparse.Namespace) -> int:
+    """Print one sealed delivery value; read-only (no lock, ledger, clock or write)."""
+    if not Path(args.repo_root).is_absolute():
+        raise WorkflowError("repository root path must be absolute")
+    runtime = _delivery()
+    value = load_json_request(args.input, "builder input")
+    policy = resolve_project_policy(args.repo_root) if args.kind == "contract" else None
+    try:
+        result = runtime.build_delivery(args.kind, value, policy=policy)
+    except Exception as error:
+        raise WorkflowError(f"build-delivery refused: {error}") from error
+    sys.stdout.buffer.write(runtime.model.canonical_bytes(result))
+    return 0
+
+
 def print_json(value: Any) -> None:
     json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
@@ -2944,6 +3009,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_run_arguments(checkpoint)
     checkpoint.add_argument("--checkpoint-file", required=True)
     checkpoint.set_defaults(handler=command_checkpoint_delivery)
+
+    build_delivery = subparsers.add_parser("build-delivery")
+    build_delivery.add_argument("--repo-root", required=True)
+    build_delivery.add_argument(
+        "--kind", required=True, choices=("contract", "initial-intent", "scope"))
+    build_delivery.add_argument("--input", required=True)
+    build_delivery.set_defaults(handler=command_build_delivery)
 
     suspend = subparsers.add_parser("suspend")
     add_run_arguments(suspend)

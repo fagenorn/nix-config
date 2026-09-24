@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from types import MappingProxyType
 from typing import Any
 
 from ._canonical import (canonical_bytes, canonical_digest, _boolean, _data_ref,
@@ -19,6 +20,7 @@ _STAGE_ACTIONS = {
     "remove_worktree": ("remove_worktree", "filesystem_write", "worktree_absent"),
     "delete_local_branch": ("delete_local_branch", "repository_write", "local_branch_absent"),
 }
+STAGE_ACTIONS = MappingProxyType(_STAGE_ACTIONS)
 _POSTCONDITIONS = ("implementation_delivered", "pr_merged", "tracker_closed", "cleanup_complete")
 
 

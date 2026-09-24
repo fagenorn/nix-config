@@ -20,6 +20,7 @@ class DeliveryRuntime:
             raise ValueError("invalid delivery notes limit")
         self._notes_max = notes_max_characters
         self._model = self._load_model()
+        self._builder = self._load_builder(self._model, notes_max_characters)
         self._projection = self._load_projection()
 
     @staticmethod
@@ -67,6 +68,42 @@ class DeliveryRuntime:
         except Exception:
             sys.modules.pop(name, None)
             raise
+
+    @staticmethod
+    def _load_builder(model: object, notes_max: int) -> object:
+        entry = Path(__file__).with_name("workflow_delivery_build.py")
+        if not entry.is_file():
+            raise ValueError("workflow delivery builder is unavailable")
+        name = "_workflow_delivery_build"
+        spec = importlib.util.spec_from_file_location(name, entry)
+        if spec is None or spec.loader is None:
+            raise ValueError("workflow delivery builder is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+            if getattr(module, "WORKFLOW_DELIVERY_BUILD_INTERFACE_VERSION", None) != 1:
+                raise ValueError("unsupported workflow delivery builder interface")
+            return module.DeliveryBuilder(model, notes_max_characters=notes_max)
+        except Exception:
+            sys.modules.pop(name, None)
+            raise
+
+    _BUILD_OUTPUT_KINDS = {"initial-intent": "authorization-intent", "scope": "scope-tuple"}
+
+    def build_delivery(self, kind: str, value: object, *, policy: dict[str, Any] | None
+                       ) -> object:
+        """Build one sealed delivery value and validate every object it carries."""
+        result = self._builder.build(kind, value, policy=policy)
+        if kind == "contract":
+            if not isinstance(result, dict) or set(result) != {"contract", "initial_intent"}:
+                raise ValueError("builder returned an invalid contract result")
+            self.validate(result["contract"], "delivery-contract")
+            self.validate(result["initial_intent"], "authorization-intent")
+        elif kind in self._BUILD_OUTPUT_KINDS:
+            self.validate(result, self._BUILD_OUTPUT_KINDS[kind])
+        else:
+            raise ValueError(f"unknown builder kind: {kind!r}")
+        return result
 
     @property
     def model(self) -> object:

@@ -128,7 +128,7 @@ class DeliveryModelTest(unittest.TestCase):
             self.assertEqual(set(module.__all__), {
                 "MODEL_INTERFACE_VERSION", "DeliveryModelError", "canonical_bytes",
                 "canonical_digest", "validate_delivery_object", "validate_custody_ref",
-                "match_scope", "reduce_delivery",
+                "match_scope", "reduce_delivery", "STAGE_ACTIONS",
             })
             self.assertEqual(set(Path(raw).iterdir()), before)
             self.assertFalse(hasattr(module, "main"))
