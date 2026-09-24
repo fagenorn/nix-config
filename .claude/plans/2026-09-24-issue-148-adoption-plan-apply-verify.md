@@ -44,7 +44,7 @@ table and the digest of the #121 IDs that the recovered code cites.
   `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>` and
   `Claude-Session: https://claude.ai/code/session_01XJQu22Bg2fayzv7KNKKbaA`.
 - Outside `.claude/`, the branch changes exactly the twelve slice files named in
-  Task 1. There is no Task 7–8 path (`.agents/project.json`, `.gitignore`,
+  Task 1, plus the two docstring-only test files of D11. There is no Task 7–8 path (`.agents/project.json`, `.gitignore`,
   `.out-of-scope/**`) and no #121 design or plan document (D2).
 - No closed vocabulary widens: `ADOPT_ERROR_CODES`, the outcomes, plan states,
   operation kinds, verify results, and every conformance check id and purpose
@@ -52,7 +52,7 @@ table and the digest of the #121 IDs that the recovered code cites.
 - No `just switch`, no deploy, no shim, no `CLAUDE.md` edit (D8). No change to
   `review-package` or the feasibility tooling.
 - The main-based run never writes the operator's `~/.agents/state`. It only
-  hashes the registry and `adopt/` there, before and after (D4, D5 step 9). Its
+  hashes the `fleet/` and `adopt/` trees there, before and after (D4, D5 step 9). Its
   git commands run with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` set to
   `/dev/null`.
 
@@ -74,8 +74,8 @@ seam is a plan bug:
 
 These figures are estimates from a scratch replay of the nine picks on the base.
 The final bytes come from the packager.
-- **Changed files:** 15. That is the 12 slice files, the spec, and this plan's
-  root and one member.
+- **Changed files:** 17. That is the 12 slice files, the 2 D11 docstring files,
+  the spec, and this plan's root and one member.
 - **Review package** (`git diff -U10`, whole-file first-fit, caps 524,288 total,
   8 members and 65,536 per member):
   - the slice's diff is about 287 KB across 12 files (+6,258/−4 lines);
@@ -102,12 +102,24 @@ The final bytes come from the packager.
 
 ## Task index
 
-Task 1 — Replay the nine Task 4–6 commits and prove them on the built generation — `home/common/agent-skills/default.nix`, `home/common/agent-skills/scripts/adopt-project.py`, `home/common/agent-skills/scripts/adopt_inspection.py`, `home/common/agent-skills/scripts/adopt_planning.py`, `home/common/agent-skills/scripts/adopt_apply.py`, `home/common/agent-skills/scripts/adopt_verify.py`, `home/common/agent-skills/scripts/agent_platform.py`, `home/common/agent-skills/tests/test_adopt_project.py`, `home/common/agent-skills/tests/test_adopt_project_boundaries.py`, `home/common/agent-skills/tests/test_adopt_apply.py`, `home/common/agent-skills/tests/test_adopt_verify.py`, `justfile` — full — [task-1.md](2026-09-24-issue-148-adoption-plan-apply-verify.tasks/task-1.md)
+Task 1 — Replay the nine Task 4–6 commits and prove them on the built generation — `home/common/agent-skills/default.nix`, `home/common/agent-skills/scripts/adopt-project.py`, `home/common/agent-skills/scripts/adopt_inspection.py`, `home/common/agent-skills/scripts/adopt_planning.py`, `home/common/agent-skills/scripts/adopt_apply.py`, `home/common/agent-skills/scripts/adopt_verify.py`, `home/common/agent-skills/scripts/agent_platform.py`, `home/common/agent-skills/tests/test_adopt_project.py`, `home/common/agent-skills/tests/test_adopt_project_boundaries.py`, `home/common/agent-skills/tests/test_adopt_apply.py`, `home/common/agent-skills/tests/test_adopt_verify.py`, `justfile`, `home/common/agent-skills/tests/test_resolve_project.py` and `home/common/agent-skills/tests/test_resolve_platform_status.py` (docstrings only, D11) — full — [task-1.md](2026-09-24-issue-148-adoption-plan-apply-verify.tasks/task-1.md)
 
 ## Decisions
 
-The spec's ledger holds every decision. Task 1 rests on D1–D5 and D10. The
+The spec's ledger holds every decision. Task 1 rests on D1–D5, D10 and D11. The
 fleet and conformance boundary is D6 and D7, and delivery rests on D8 and D9.
-Planning added one row: D10 (one task, and the bounds on a D3 fix).
+Planning added one row: D10 (one task, and the bounds on a D3 fix). Standards
+review added one: D11 (the docstring-only reconciliation commit).
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (native `reviewer` on Opus/high), isolated and
+  read-only. Codex `plan-review` was attempted first, and it failed because the
+  Codex account had hit its usage limit (`CODEX_REVIEW_FAILURE`). No Codex retry
+  was made.
+- Base SHA: `185cc1a46668faf960be605734b6136d9234e245`. Focus: none.
+- Findings: 0 Blocking, 1 Should-fix, 2 Discussion. Accepted: 2 (S1 as D11 and
+  Step 3a; D-1 as the Step 7 `fleet/` hash). Rejected: 0. Deferred: 0. D-2 was a
+  verification record, and it required no action.
 
 ---

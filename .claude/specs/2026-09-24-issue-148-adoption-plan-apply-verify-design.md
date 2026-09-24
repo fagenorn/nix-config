@@ -184,7 +184,7 @@ nine picks, and its failing case goes into the owning adoption suite.
      yields a report that passes `validate-report` and has no `failed` check in the
      `repository`, `compatibility` or `verification` domains. `host` checks describe
      the machine rather than the slice, so they are reported but not asserted.
-  9. The operator's `~/.agents/state/fleet/registry.json` and `~/.agents/state/adopt/`
+  9. The operator's `~/.agents/state/fleet/` (registry and lock) and `~/.agents/state/adopt/`
      are byte-identical, or equally absent, before and after the run.
 - The run happens in the plan's final task on the branch head, and again after
   ship-issue's sync with `origin/main` (#147 D10).
@@ -239,7 +239,7 @@ documents are trimmed and the recovered code is not.
 4. The main-based run of D4/D5, all nine steps, on the head and again after the sync.
 5. Provenance and boundary: `git log BASE..HEAD` carries nine `cherry picked from`
    trailers, and `git diff --name-only BASE HEAD` names only the twelve slice files,
-   this spec and the plan (plus the files of any D3 fix).
+   the two D11 docstring files, this spec and the plan (plus the files of any D3 fix).
 6. Package feasibility: run `review-package PLAN BASE HEAD` with BASE set to the
    merge-base with `origin/main`, recomputed at packaging time. It must fall within
    the review-package policy before final review (D9).
@@ -287,3 +287,4 @@ These are the existing seams, and the plan may not add others:
 | D8 | No shim and no `CLAUDE.md` change. `just switch` is a post-merge operator step, and a library/binary skew refuses through the member guard. | #147 D8; CLAUDE.md "switch only when asked"; the slice is additive | A fallback for an older library, which is a discovery ladder that #121 forbids. |
 | D9 | The spec and plan together stay within about 70 KB, with no document member over 64 KB, so the package keeps at most 8 members. The package is remeasured after each review fix, and the documents, not the code, are trimmed if it goes over. | Probe: 6 product members; simulated sets of 54–100 KB stayed within budget at 7–8 members, and a 120 KB set went over; #121 failed packaging | Unbounded planning documents, which repeat #121's packaging failure. Splitting the recovered code across two PRs, which reverses AC6's one-slice package. |
 | D10 | The plan is one full-lane task: the nine picks, any D3 fix and the D4/D5 run share one commit range and one reviewer. A D3 fix stays inside the twelve slice files, and its failing case goes into the sibling suite that owns the verb, never `test_adopt_project.py`. A fix that needs any other file is reported BLOCKED. | sdd packages and reviews each task's own commit range, so a run-only task has nothing to package. `44afaa06` records that `adopt-project.py`'s diff at picks 5–7 exceeded the 65,536-byte member cap, and `11b1e9bc` fixes branch-review findings in picks 1–4's planning and apply code. The probe measured `test_adopt_project.py`'s diff at 58,881 bytes. | Two tasks split at a pick boundary, whose first reviewer would grade code that a later pick replaces, or whose range cannot be packaged. A separate Demo task like #147's Task 2, which has no commit. A failing case added to `test_adopt_project.py`, which pushes the largest member toward the cap. |
+| D11 | One docstring-only commit after the nine picks rewrites the two base docstrings that call the registry writer future work (`test_resolve_project.py`'s `registry()` and `test_resolve_platform_status.py`'s `PlatformStatusFleetTest`), naming `adopt-project verify --register` instead. An AST check refuses any non-docstring change. This is the only file outside the twelve that the slice touches, and it narrows D10's "any other file is BLOCKED" for these two docstrings alone. | Phase-5 review S1: pick 5 lands `write_registry`, so "before it exists" and "Task 6 owns the writer" become false on merge; the bar requires prose that matches live behaviour; AC1 reconciles the slice with the landed #147 foundation. | Leaving them as historical context, which ships two docstrings that are false on merge. Editing them inside a pick, which breaks D1's patch-id proof. |

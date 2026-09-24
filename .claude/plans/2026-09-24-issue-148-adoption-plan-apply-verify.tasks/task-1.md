@@ -12,6 +12,8 @@ Per D1–D5 and D10.
   `S/tests/test_adopt_verify.py`
 - Modify: `S/scripts/agent_platform.py` (the registry writer and lock, pick 5),
   `S/default.nix` and `justfile` (the pick-1 conflict, resolved by script)
+- Modify, docstring only, in one commit of its own (Step 3a, per D11):
+  `S/tests/test_resolve_project.py`, `S/tests/test_resolve_platform_status.py`
 
 **Interfaces:**
 - Consumes: the retained commits, reachable in this repository's object store
@@ -46,8 +48,9 @@ Per D1–D5 and D10.
 - In `default.nix`, the `adopt-project` binary entry sits between the
   `conformance-checks` and `agent-model-matrix` entries. The four library entries
   follow `platform-manifest.json`. Neither file loses a line.
-- Outside `.claude/`, the branch changes exactly the twelve files above.
-- The run leaves the operator's `~/.agents/state/fleet/registry.json` and
+- Outside `.claude/`, the branch changes exactly the fourteen files above: the
+  twelve slice files and the two D11 docstring files.
+- The run leaves the operator's `~/.agents/state/fleet/` (registry and lock) and
   `~/.agents/state/adopt/` byte-identical, or equally absent.
 
 **If a gate fails (D3, D10).** Never amend, rebase, re-pick or hand-edit a pick. A
@@ -118,6 +121,69 @@ Expected: `union ok`. Then the eight remaining picks apply cleanly, and the log
 shows nine picks above the spec and plan commits. A new conflict is a stop: run
 `git cherry-pick --abort` and report BLOCKED.
 
+- [ ] **Step 3a: Point the two registry-reader docstrings at the landed writer (D11)**
+
+Pick 5 lands the registry writer, so two base docstrings stop being true: they
+still say "Task 6 owns the writer" and that the writer does not exist yet. This
+step rewrites only those clauses, and the AST check refuses anything that is not
+a docstring change.
+
+```bash
+set -euo pipefail
+python3 - <<'EOF'
+import ast, pathlib, subprocess
+T = "home/common/agent-skills/tests/"
+EDITS = {
+    T + "test_resolve_project.py": (
+        "(D18). Task 6 owns the writer; the suite\n"
+        "    stages this file by hand so the read side can be exercised before it\n"
+        "    exists.\n",
+        "(D18). `adopt-project verify --register`\n"
+        "    writes it; the suite stages this file by hand so the read side is\n"
+        "    exercised apart from its writer.\n"),
+    T + "test_resolve_platform_status.py": (
+        "    The registry is staged by hand here: Task 6 owns the writer, and this\n"
+        "    subcommand adds only the reader.\n",
+        "    The registry is staged by hand here, apart from its writer\n"
+        "    (`adopt-project verify --register`); this subcommand only reads it.\n"),
+}
+def code_only(src):
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if (isinstance(body, list) and body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            body[0].value.value = ""
+    return ast.dump(tree)
+for name, (old, new) in EDITS.items():
+    path = pathlib.Path(name); text = path.read_text()
+    assert text.count(old) == 1, name
+    path.write_text(text.replace(old, new))
+    before = subprocess.run(["git", "show", f"HEAD:{name}"], check=True,
+                            capture_output=True, text=True).stdout
+    assert code_only(before) == code_only(path.read_text()), f"{name}: not docstring-only"
+print("docstrings ok")
+EOF
+git add home/common/agent-skills/tests/test_resolve_project.py \
+  home/common/agent-skills/tests/test_resolve_platform_status.py
+git commit -F - <<'EOF'
+docs(agent-skills): point the registry-reader docstrings at the landed writer
+
+The replayed Task 4-6 slice adds agent_platform.write_registry, reached
+through adopt-project verify --register, so the two reader docstrings that
+said the writer did not exist yet now name it. Docstring-only (spec D11).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XJQu22Bg2fayzv7KNKKbaA
+EOF
+test -z "$(git status --porcelain)"
+```
+
+Expected: `docstrings ok`, then one signed commit that changes 5 lines in each
+direction across the two files. An assertion failure stops the step. In that
+case, restore the two files with `git checkout -- <file>` and report BLOCKED.
+
 - [ ] **Step 4: Verify provenance, wiring and the boundary**
 
 ```bash
@@ -169,6 +235,7 @@ printf '%s\n' $S/default.nix $S/scripts/adopt-project.py $S/scripts/adopt_apply.
   $S/scripts/adopt_inspection.py $S/scripts/adopt_planning.py $S/scripts/adopt_verify.py \
   $S/scripts/agent_platform.py $S/tests/test_adopt_apply.py $S/tests/test_adopt_project.py \
   $S/tests/test_adopt_project_boundaries.py $S/tests/test_adopt_verify.py justfile \
+  $S/tests/test_resolve_project.py $S/tests/test_resolve_platform_status.py \
   | sort | diff - <(sort "${TMPDIR:-/tmp}/t1-files.txt") && echo "boundary ok"
 ```
 
@@ -212,7 +279,7 @@ from pathlib import Path
 WT, H, D = (Path(os.environ[k]).resolve() for k in ("WT", "H", "D"))
 REAL = Path(pwd.getpwuid(os.getuid()).pw_dir)
 def operator_state():
-    paths = [REAL / ".agents/state/fleet/registry.json", REAL / ".agents/state/adopt"]
+    paths = [REAL / ".agents/state/fleet", REAL / ".agents/state/adopt"]
     found = {}
     for p in paths:
         for f in ([p] if p.is_file() else sorted(p.rglob("*")) if p.is_dir() else []):
@@ -313,7 +380,8 @@ its `incomplete` outcome describe the scratch machine, and they are not asserted
 
 - [ ] **Step 8: No commit to write**
 
-The picks are the commits, plus a D3 fix commit only if a gate forced one.
+The picks and the Step 3a docstring commit are the commits, plus a D3 fix
+commit only if a gate forced one.
 Leave the tree clean (`git status --porcelain` is empty). Report the nine new
 SHAs with their sources, the counts from Steps 5–6, and the `demo ok` line. The
 package-feasibility check is sdd's cumulative delivery gate, which runs after
