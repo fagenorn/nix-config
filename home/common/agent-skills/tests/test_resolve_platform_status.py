@@ -209,8 +209,8 @@ class PlatformStatusFleetTest(ResolverTestCase):
     """R3.4 / D18: one verdict row per registered project, ordered by
     `project_id`, and never a refusal for a project the operator did not name.
 
-    The registry is staged by hand here: Task 6 owns the writer, and this
-    subcommand adds only the reader.
+    The registry is staged by hand here, apart from its writer
+    (`adopt-project verify --register`); this subcommand only reads it.
     """
 
     def fleet(self, *args: str) -> tuple[int, object, str]:
