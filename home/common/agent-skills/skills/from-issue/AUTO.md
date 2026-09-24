@@ -3,6 +3,8 @@
 Read this file once, when you detect `--auto` in the invocation. It replaces the checkpoint
 behavior in `SKILL.md`; everything else in `SKILL.md` still applies.
 
+This included document receives the phase owner's retained `ResolvedProject`; it uses `bindings.paths.artifacts`, `bindings.tracker`, `bindings.vcs`, and `bindings.workflow` without resolving or inferring policy.
+
 The shift is *what you do at a decision point*, not *what work gets done*. Every phase still
 produces the same artifact at the same quality bar. Brainstorm still happens. Grill still happens.
 Standards review still happens. You don't get to skip thinking — you only stop waiting for the user.
@@ -108,8 +110,8 @@ Both prompts must carry, inline (the subagent starts with no context and loads n
 beyond the exceptions named below):
 
 - the Phase-0 issue summary and scope boundary,
-- the resolved bindings it needs (`specDir`, `planDir`, `docPaths.*`, `projectHints`,
-  `commit.coAuthoredBy`, `<tracker-cli>`, `unsetGithubToken`),
+- the retained fields it needs (`bindings.paths.artifacts`, `bindings.paths.context`,
+  `bindings.paths.hints`, `bindings.tracker`, `bindings.vcs`, and `bindings.workflow`),
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
 - the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
   filter, pasted verbatim from `decision-ledger.md`,
@@ -127,7 +129,7 @@ installed, it uses the inline fallback named in the corresponding `SKILL.md` pha
 <!-- agent-dispatch: id=from-issue-design-grill role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches the autonomous design-and-grill owner.
 
-One dispatch covering brainstorm and grill. It produces the design doc under `specDir`, applies the
+One dispatch covering brainstorm and grill. It produces the design doc under `bindings.paths.artifacts.specs`, applies the
 grill's refinements to it, and writes any context-doc updates and ADRs — all committed in the
 worktree. Splitting these into two dispatches would mean re-establishing the whole design in a second
 prompt for no gain.
@@ -158,7 +160,7 @@ choices stay in the spec.
 <!-- agent-dispatch: id=from-issue-planning role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches the autonomous planning owner.
 
-Writes the implementation plan package under `planDir`, committed in the worktree, with a `## Task index`
+Writes the implementation plan package under `bindings.paths.artifacts.plans`, committed in the worktree, with a `## Task index`
 carrying each task's risk lane; it cites decision-ledger rows by ID and appends new non-obvious
 plan-level decisions to the spec's ledger. Give it the validated spec artifact
 root and metrics plus notes — not a transcript. `SKILL.md`'s plan-prose ≠
@@ -248,7 +250,7 @@ the helper's own values:
   "reviewed_head_sha": "0123456789abcdef0123456789abcdef01234567",
   "spec_artifact": {
     "kind": "design-spec",
-    "path": ".claude/specs/issue-74.md",
+    "path": "<passed-spec-artifact>",
     "metrics": {
       "root_bytes": 1000,
       "total_bytes": 1000,
@@ -259,7 +261,7 @@ the helper's own values:
   },
   "plan_artifact": {
     "kind": "implementation-plan",
-    "path": ".claude/plans/issue-74.md",
+    "path": "<passed-plan-artifact>",
     "metrics": {
       "root_bytes": 2000,
       "total_bytes": 6000,
@@ -282,14 +284,14 @@ artifact blocks only:
 - no reconstructed lifecycle field; and
 - no authorization flag.
 
-Repository bindings are re-resolved in the delegated worktree.
+The fresh owner resolves once at its own phase entry and applies that retained `ResolvedProject` to these checks; it is never a member of the continuation object.
 
 #### Fresh delegated owner
 
 First pipe the continuation's `owner` object through
 `artifact-budget validate-report --boundary workflow-response --input -`; an
-invalid object stops the attempt before anything else runs. Before reading either artifact, re-resolve `branchPattern` and `worktreePrefix`
-from repository bindings in `owner.worktree`. Quote the pattern's literal bytes,
+invalid object stops the attempt before anything else runs. Before reading either artifact, use the caller-passed `bindings.vcs` branch and
+worktree naming values. Quote the pattern's literal bytes,
 substitute decimal `owner.issue` for `<num>` and
 `[a-z0-9][a-z0-9-]*` for `<slug>`, and accept exactly the resulting pattern with
 either the resolved prefix or no prefix. Take normalized `owner.worktree`'s final path component

@@ -534,7 +534,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_merge_accepts_the_exact_unset_token_prefix(self):
-        # `unsetGithubToken` repositories run the merge as
+        # A resolved exhaustive credential-name list yields the merge prefix
         # `unset GITHUB_TOKEN && gh pr merge ...` so gh falls back to the
         # keyring credential; exactly that literal prefix is grammatical.
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")

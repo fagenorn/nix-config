@@ -100,11 +100,6 @@ in
       executable = true;
     };
 
-    ".agents/bin/resolve-bindings" = {
-      source = ./scripts/resolve-bindings;
-      executable = true;
-    };
-
     ".agents/bin/diff-scope" = {
       source = ./scripts/diff-scope.py;
       executable = true;

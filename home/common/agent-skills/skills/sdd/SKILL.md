@@ -5,6 +5,12 @@ description: Execute an implementation plan with a fresh subagent per task, revi
 
 # Subagent-Driven Development
 
+The owning phase passes its retained project here; do not perform another policy
+read. For correctness review select `bindings.workflow.review.code` and route
+retained `capabilities.review.code` first: `blocked` stops and authored
+`unsupported` takes only its documented route. Only `available` dereferences
+`bindings.commands[review_id].argv` before launching it.
+
 Execute a plan by dispatching a fresh implementer per task, a lane-scoped task review after each, and one two-axis whole-branch review (conformance ∥ correctness) at the end. Subagents never inherit your session's history — you construct exactly what each needs, which also keeps your own context flat for coordination.
 
 **Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, or all-tasks-complete. Narrate at most one short line between tool calls — the ledger and tool results carry the record.

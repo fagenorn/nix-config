@@ -1,8 +1,10 @@
 # Consolidated operator gate
 
 Read this only when SKILL.md's `## Standing authorization` finds no repository
-policy or explicit user grant covering the concrete action and target. The gate
-makes the remaining external effects reviewable; it does not grant them itself,
+policy or explicit user grant covering the concrete action and target. This
+included document receives the phase owner's retained `ResolvedProject`; it uses
+passed `bindings.tracker` and `bindings.vcs` values without resolving or
+inferring policy. The gate makes the remaining external effects reviewable; it does not grant them itself,
 and the host's actual automatic approval decision still governs execution.
 
 Enter the gate *instead of* attempting the verb — never attempt a shipping verb
@@ -37,7 +39,7 @@ git push -u origin <branch>
 ```
 
 ```
-gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
+gh pr create --base <integration-branch> --title "<title>" --body "$(cat <<'EOF'
 ## Summary
 <2-4 bullets of what shipped>
 
@@ -109,8 +111,8 @@ rewriting the integration branch.
 
 On this path the session must not:
 
-- merge the feature branch into `<integrationBranch>` locally;
-- push to `<integrationBranch>`;
+- merge the feature branch into the passed `<integration-branch>` locally;
+- push to the passed `<integration-branch>`;
 - push to any remote other than `origin`;
 - pass `--admin`, `--force`, `--force-with-lease`, or any hook-bypass flag;
 - rewrite, reset or rebase any branch to change what a denied command would have

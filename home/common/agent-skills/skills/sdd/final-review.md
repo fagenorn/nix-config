@@ -3,6 +3,8 @@
 Loaded by `SKILL.md` when all tasks are complete. This gate runs for **every**
 risk lane — lanes narrow per-task review, never this one.
 
+For configured code review, copy the selected command entry, unset only its declared environment names, and execute its base argv followed exactly by `exec --sandbox read-only --model gpt-6-astra -c model_reasoning_effort="xhigh" --json --output-last-message <absolute-last-message> --ephemeral -C <absolute-worktree> -`. Keep JSONL and last-message files outside worktrees under unconditional cleanup. Validate the selected model and selected reasoning effort, then require terminal agent-message equality with the non-empty last-message before operation headings identify Codex. A capacity rejection has no retry and no native fallback; blocked stops. Authored unsupported or a completed non-capacity runtime/output failure uses the existing single native fallback and records why.
+
 Run `scripts/review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD` once, using the
 full SHA values pinned in the ledger by the cumulative delivery gate. Do not
 recompute a merge base against a local integration branch. Capture its stdout unchanged and pass those bytes through

@@ -94,9 +94,8 @@ let
       # the `unset GITHUB_TOKEN && ` form of the guarded command will use. A
       # machine with no keyring auth still fails closed at the lookup.
       GH_ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
-      # Repositories whose skills config sets `unsetGithubToken: true` run every
-      # gh call as `unset GITHUB_TOKEN && gh ...` (the exact spelling ship-issue
-      # prescribes). The merge grammar accepts that one literal prefix and
+      # A resolved exhaustive credential-name list may yield the concrete command
+      # `unset GITHUB_TOKEN && gh ...`. The merge grammar accepts that one literal prefix and
       # nothing looser; the remainder must still match the guarded merge argv in
       # full, so nothing else can ride along.
       UNSET_GITHUB_TOKEN_PREFIX = "unset GITHUB_TOKEN && "
@@ -759,8 +758,9 @@ let
           if problem is not None:
               return block(f"unsafe merge: {problem}")
           repository = context.repository
-          # The one sanctioned prefix: `unsetGithubToken` repositories run the
-          # merge as `unset GITHUB_TOKEN && gh pr merge ...`. Strip exactly that
+          # The one sanctioned prefix is derived from a resolved exhaustive
+          # credential-name list and is `unset GITHUB_TOKEN && gh pr merge ...`.
+          # Strip exactly that
           # literal and judge the remainder as the whole command, so the merge
           # still tolerates no other chaining.
           if command.startswith(UNSET_GITHUB_TOKEN_PREFIX):

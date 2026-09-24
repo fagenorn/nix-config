@@ -9,11 +9,16 @@ Counterpart to `to-issues` and `from-issue`. Take a worktree branch with the imp
 
 ## Project bindings (resolve first)
 
-Run `~/.agents/bin/resolve-bindings` from the worktree — it prints the standard binding set (`specDir`, `planDir`, branches, tracker kind/CLI, branch naming, commit flags) from `.claude/skills.config.json` plus auto-detection and the shared defaults. Helper missing → read the config and apply the defaults it documents. Verify commands: config, else the manifest (`package.json` scripts, `*.slnx`/`*.sln` → `dotnet test`, `Cargo.toml` → `cargo test`, `go.mod` → `go test`, `Makefile` → `make test`).
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery object; this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.review.code`, and `bindings.workflow.verification`; dereference verification IDs through `bindings.commands`.
 
-Degrade gracefully: never read a configured doc/hints path that doesn't exist, never hard-fail on a missing optional binding. `issueTracker.kind=none` skips every issue/PR/CI step; the sync/verify/consolidate/merge machinery still applies.
+For code review, select `bindings.workflow.review.code` and route retained
+`capabilities.review.code` first. `blocked` stops; authored `unsupported` takes
+only its documented route. Only `available` dereferences
+`bindings.commands[review_id].argv` before execution.
 
-Optional `review.criticalPaths` globs: diffs intersecting any always get Phase 5's full two-axis review; absent = the `risky` label is the only always-full trigger.
+A blocked required capability stops. An authored unsupported tracker takes the existing tracker-free route; the sync/verify/consolidate/merge machinery still applies.
+
+Retained `capabilities.review.code` governs the full review route.
 
 **Invocation paths.** From `from-issue`, treat the handoff as received stdin
 bytes: pass them through `artifact-budget validate-report --boundary
@@ -43,14 +48,14 @@ review prompt.
 
 ```
 0. Pre-flight              → worktree clean, branch pattern ok, no PR yet
-1. Sync integration branch → fetch + merge origin/<integrationBranch>, hybrid conflict policy
+1. Sync integration branch → fetch + merge origin/<integration>, hybrid conflict policy
 2. Verify locally          → lint + tests inside the worktree
 3. Consolidate learnings   → see CONSOLIDATE.md; drop most candidates
 4. Open PR                 → push -u; gh pr create with "Closes #<num>"
 5. Review the PR           → merge-delta check or full two-axis review
 6. Wait for CI             → gh pr checks --watch (one blocking call)
    Selection gate          → lifecycle identity only: select the CI-green head (## Delivery loop)
-7. Merge                   → gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<rendered mergeSubjectTemplate>"] --delete-branch (true merge commit)
+7. Merge                   → gh pr merge <pr-num> --repo <resolved-repository> --merge [--subject "<rendered subject>"] --delete-branch (true merge commit)
 8. Cleanup                 → issue closed; worktree + branches removed
                              (lifecycle identity: each 7–8 effect is one ## Delivery loop cycle)
 ```
@@ -82,7 +87,7 @@ predecessor's worktree and branch on purpose, so a superseded attempt can still
 push, open a PR and merge. Before **every write to the forge or to `origin` this
 skill makes up to and including the merge**, re-validate that the handoff's
 launch identity is still the launch the ledger entitles. The rule binds
-regardless of `issueTracker.kind`, so a `kind=none` invocation — which skips
+regardless of tracker capability, so an unsupported-tracker invocation — which skips
 Phase 4's PR but still pushes the branch — guards that bare `origin` push too:
 
 ```
@@ -136,11 +141,11 @@ environment.
 
 ## Doc-grounded escalations
 
-Before forming *any* user-facing question this skill raises mid-flow, invoke the `doc-grounded-questions` skill (if unavailable, read whichever declared `docPaths` exist). Lead with what the relevant doc says; ask only the genuinely open part.
+Before forming *any* user-facing question this skill raises mid-flow, invoke the `doc-grounded-questions` skill and read only the retained declared paths. Lead with what the relevant document says; ask only the genuinely open part.
 
 ## gh hygiene
 
-When `unsetGithubToken` is true, prefix every `gh` call with `unset GITHUB_TOKEN &&` — for harnesses whose exported token lacks access to the target org (default false). When `issueTracker.cli` is `glab`, substitute the equivalent `glab` verbs.
+Prefix a forge invocation only with the names in `bindings.tracker.credential_env.unset_before_invocation`; for example, an exhaustive list containing `GITHUB_TOKEN` yields `unset GITHUB_TOKEN && gh ...` when a harness token lacks access to the target org. When `bindings.tracker.cli` is `glab`, substitute the equivalent `glab` verbs.
 
 Throughout, follow `writing-plans`' Payload discipline: targeted `rg` over whole-file reads, bounded reads, summarized command output, logs on disk, artifacts handed over as paths.
 
@@ -149,7 +154,7 @@ Throughout, follow `writing-plans`' Payload discipline: targeted `rg` over whole
 Verify the workspace is shippable before doing anything destructive:
 
 1. `git rev-parse --git-common-dir` ≠ `git rev-parse --git-dir` — a linked worktree, not the main checkout.
-2. `git branch --show-current` matches the regex built from `branchNaming.pattern` plus optional `branchNaming.worktreePrefix` — for the defaults, `^(worktree-)?issue-<num>-<slug>$`; both forms are valid. Extract `<num>`. An argument or handoff `issue_number` wins, but verify it matches the branch.
+2. `git branch --show-current` matches the regex built from retained `bindings.vcs.branch_pattern` and `bindings.vcs.worktree.prefix`; both configured forms are valid. Extract `<num>`. An argument or handoff `issue_number` wins, but verify it matches the branch.
 3. `git status --porcelain` returns nothing.
 4. `gh pr list --head <branch> --json number,url` returns `[]` — no open PR for this branch.
 
@@ -161,37 +166,40 @@ Any failure: pause, ground, surface. Don't auto-fix the branch name or stash cha
 
 ```
 git fetch origin
-git log origin/<integrationBranch>..<integrationBranch> --oneline
+git log origin/<integration>..<integration> --oneline
 ```
 
 The load-bearing rules, in brief:
 
-- Merging `origin/<integrationBranch>` into the feature branch is safe even when the local integration branch has diverged (expected under parallel `--auto` runs). **Anything that rewrites the local integration branch — reset, rebase, push — stops and surfaces; `--auto` never auto-resolves history rewrites.**
+- Merging `origin/<integration>` into the feature branch is safe even when the local integration branch has diverged (expected under parallel `--auto` runs). **Anything that rewrites the local integration branch — reset, rebase, push — stops and surfaces; `--auto` never auto-resolves history rewrites.**
 - Foreign commits on the branch (another issue's work) → surface, never clean up silently.
 - Conflicts: the allowlist auto-resolves lockfiles, migrations and generated files, and always keeps `.claude/settings.json` out of the merge. **Everything else escalates one conflict at a time**; skipped conflicts pause the phase.
 
-Otherwise `git merge origin/<integrationBranch>`; commit the merge with the default merge-commit message. Don't squash.
+Otherwise `git merge origin/<integration>`; commit the merge with the configured merge-commit message. Don't squash.
 
 ## Phase 2 — Verify locally
 
 ```
-<verify.lint>
-<verify.test>
+<each bindings.workflow.verification command, dereferenced through bindings.commands>
 ```
 
-No command from config or manifest detection → **skip that step and note the skip in the PR body**. `docPaths.devenvTooling`, where it exists, is the source of truth if the commands have moved.
+Run every command id in retained `bindings.workflow.verification` through its
+`bindings.commands` argv and cwd. A blocked verification capability stops and
+reports its `reason_code` and `repair_id`; authored unsupported follows only its
+documented no-verification route.
 
-Lint failures: try `verify.lintFix`, re-run `verify.lint`. Still failing → pause, ground, surface.
+On a failing verification command, pause, ground, and surface; do not invent a
+fix command outside retained `bindings.commands`.
 
-Test failures: separate *environmental* (container connectivity, missing network, sandbox limits) from *real* by baselining the same project in a scratch worktree on `origin/<integrationBranch>`. Same failures → pre-existing; continue and note the baseline diff in the PR body. Different failures → real; pause, ground, surface.
+Test failures: separate *environmental* (container connectivity, missing network, sandbox limits) from *real* by baselining the same project in a scratch worktree on `origin/<integration>`. Same failures → pre-existing; continue and note the baseline diff in the PR body. Different failures → real; pause, ground, surface.
 
 ## Phase 3 — Consolidate learnings
 
-**Read [`CONSOLIDATE.md`](./CONSOLIDATE.md) first** — it owns the mining commands, rubric, destination table, and reporting format. Run its step-1 mining commands as actual tool calls *before* concluding anything: empty is a finding, not a default — earn it by mining. Promoted candidates commit as `docs(<scope>): <summary>`, following `commit.coAuthoredBy`.
+**Read [`CONSOLIDATE.md`](./CONSOLIDATE.md) first** — it owns the mining commands, rubric, destination table, and reporting format. Run its step-1 mining commands as actual tool calls *before* concluding anything: empty is a finding, not a default — earn it by mining. Promoted candidates commit as `docs(<scope>): <summary>`, following retained `bindings.vcs.commit.co_authored_by`.
 
 ## Phase 4 — Open PR
 
-Skip entirely when `issueTracker.kind=none` (push the branch and stop, or merge locally per the user's request).
+Skip entirely when the tracker capability is unsupported (push the branch and stop, or merge locally per the user's request).
 
 When `## Standing authorization` finds no existing grant for these concrete
 actions, enter Gate 1 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before running
@@ -207,7 +215,7 @@ git push -u origin <branch>
 Run `check-launch` again, then:
 
 ```
-gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
+gh pr create --base <integration> --title "<title>" --body "$(cat <<'EOF'
 ## Summary
 <2-4 bullets of what shipped>
 
@@ -224,14 +232,14 @@ EOF
 
 Title: the issue title verbatim unless the implementation deviated meaningfully. Under 70 chars; details go in the body.
 
-GitHub auto-close on merge fires only when the PR base equals the **default branch**; when `integrationBranch != defaultBranch` the real close mechanism is Phase 8's explicit `gh issue close <num>` — keep the `Closes #<num>` trailer for traceability, don't rely on it.
+GitHub auto-close on merge fires only when the PR base equals the **default branch**; when retained integration and default branches differ, the real close mechanism is Phase 8's explicit `gh issue close <num>` — keep the `Closes #<num>` trailer for traceability, don't rely on it.
 
-**Use full URLs, not bare `#N`**, in PR bodies, comments, and commit-message references (`https://github.com/<repoSlug>/issues/<n>`; `repoSlug` from config, else the origin URL) — GitHub resolves bare `#N` against the source repo context, which under cross-references lands on unrelated refs. The `Closes #<num>` trailer is the one exception.
+**Use full URLs, not bare `#N`**, in PR bodies, comments, and commit-message references (`https://github.com/<resolved-repository>/issues/<n>`) — GitHub resolves bare `#N` against the source repo context, which under cross-references lands on unrelated refs. The `Closes #<num>` trailer is the one exception.
 
 ## Phase 5 — Review the PR
 
 ```
-BASE_SHA=$(git merge-base HEAD origin/<integrationBranch>)
+BASE_SHA=$(git merge-base HEAD origin/<integration>)
 HEAD_SHA=$(git rev-parse HEAD)
 ```
 
@@ -241,8 +249,8 @@ The branch normally arrives already reviewed on two axes by sdd's final review (
 
 - `review_state` is `clean` (handoff / sdd report: both axis verdicts clean, or every residual parked-with-ruling). `unknown` never degrades.
 - The Phase-1 sync needed no manual conflict escalation (allowlist auto-resolves count as clean).
-- The branch diff is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: start with `diff-scope $BASE_SHA..$HEAD_SHA --format text --artifact-path <spec_path> --artifact-path <plan_path>`, then append one argument for each discovered plan member and any other process artifact this run wrote. Each exclusion is an individual `--artifact-path <path>` argument (executable `~/.agents/bin/diff-scope`; use the full path if the bare name does not resolve). Its first line reads `product: <lines> lines, <files> files`, after the helper drops lockfiles, generated-header files, and those exact artifacts. The gate measures PRODUCT changes, not process artifacts; never exclude `<specDir>`/`<planDir>` themselves, which hold every artifact this repo has ever accepted, and a historical artifact that is itself the requested product still counts. No measurement — helper missing, invalid plan discovery, or non-zero exit — is not a small diff: run the full two-axis review.
-- The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num> --json labels`; with `issueTracker.kind=none` the condition passes), and no path from `git diff --name-only $BASE_SHA..$HEAD_SHA` matches a `review.criticalPaths` glob.
+- The branch diff is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: start with `~/.agents/bin/diff-scope $BASE_SHA..$HEAD_SHA --format text --artifact-path <spec_path> --artifact-path <plan_path>`, then append one argument for each plan member and any other process artifact this run wrote. Each exclusion is an individual `--artifact-path <path>` argument. Its first line reads `product: <lines> lines, <files> files`, after the helper drops lockfiles, generated-header files, and those exact artifacts. The gate measures PRODUCT changes, not process artifacts; never exclude the resolved artifact directories themselves, which hold every artifact this repo has ever accepted, and a historical artifact that is itself the requested product still counts. No measurement, invalid plan discovery, or non-zero exit is not a small diff: run the full two-axis review.
+- The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num> --json labels`; with an unsupported tracker capability the condition passes), and the retained `capabilities.review.code` state permits the documented review route.
 
 **Merge-delta check (degraded path).** Scope and checklist per REVIEW.md; over exactly the non-empty merge delta, dispatch:
 
@@ -298,7 +306,7 @@ timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30
 
 ## Phase 7 — Merge
 
-(When `issueTracker.kind=none`, merge the branch into the integration branch locally per the user's instruction instead.)
+(When the tracker capability is unsupported, merge the branch into the integration branch locally per the user's instruction instead.)
 
 When `## Standing authorization` finds no existing grant for the merge and
 cleanup chain, enter Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md) before
@@ -313,17 +321,17 @@ identity the merge is the `merge_pr` cycle of `## Delivery loop`: its scope was
 checkpointed at the pre-merge selection gate, the fence is that cycle's
 `current-launch` call, and `current-launch` runs again after the merge.
 
-Use the `repoSlug` binding resolved in Phase 0. Build the subject from `mergeSubjectTemplate` (substituting `<feature>`/`<desc>`/`<num>`/`<integrationBranch>`). Emit the subject form only when the rendered result is nonempty and representable by D18's quoted-subject grammar: it contains none of double quote, dollar, backtick, backslash, NUL, LF, or CR; otherwise omit `--subject` and its value and let the forge default stand. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
+Use retained `bindings.tracker.repo_slug` and `bindings.vcs` values to build the subject. Emit the subject form only when the rendered result is nonempty and representable by D18's quoted-subject grammar: it contains none of double quote, dollar, backtick, backslash, NUL, LF, or CR; otherwise omit `--subject` and its value and let the forge choose its normal subject. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
 
 ```
-gh pr merge <pr-num> --repo <repoSlug> --merge --subject "<rendered mergeSubjectTemplate>" --delete-branch
+gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered subject>" --delete-branch
 ```
 
 **Judge success by the verify below, never by the exit code** — in a worktree checkout the merge can land on the remote while local post-merge steps fail (details: CI-MERGE.md).
 
 Verify: `gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid` means it landed.
 
-After verifying the merge, ask the REMOTE whether the branch still exists — `git ls-remote --heads origin <branch>` (actual branch name, including `branchNaming.worktreePrefix` if present); PR metadata like `headRefName` is retained after deletion and proves nothing. Non-empty output → `git push origin --delete <branch>`. Under lifecycle
+After verifying the merge, ask the REMOTE whether the branch still exists — `git ls-remote --heads origin <branch>` (the actual configured branch name); PR metadata like `headRefName` is retained after deletion and proves nothing. Non-empty output → `git push origin --delete <branch>`. Under lifecycle
 identity, when the contract has a `delete_remote_branch` stage, empty output is
 that stage's `remote_branch_absent` observation (observation-only, made true by
 `--delete-branch`), and a non-empty one makes the delete that stage's loop cycle.
@@ -348,7 +356,7 @@ close (`close_tracker`, observation-only when the merge already closed it),
 (`delete_local_branch`) — each fenced by `current-launch`, and the summary is
 the loop's `ship-summary/v2`.
 
-1. `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (the real close mechanism when `integrationBranch != defaultBranch` — see Phase 4).
+1. `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (the real close mechanism when retained integration and default branches differ — see Phase 4).
 
 2. Remove the worktree from the main repo root, never from inside the worktree:
    ```
@@ -372,7 +380,7 @@ the loop's `ship-summary/v2`.
    as its own. Remove only that one worktree's bucket — never `primary/`,
    and never another worktree's.
 
-3. If `git worktree remove` refuses on the rebased-branch case (see `docPaths.gitWorktrees`): confirm the PR landed via `gh pr view`, then retry with `ExitWorktree action: "remove", discard_changes: true` — the "discarded N commits" wording is misleading; the content is on the integration branch.
+3. If `git worktree remove` refuses on the rebased-branch case: confirm the PR landed via `gh pr view`, then retry with `ExitWorktree action: "remove", discard_changes: true` — the "discarded N commits" wording is misleading; the content is on the integration branch.
 
 4. Only after issue closure and worktree cleanup both succeed, construct the
    successful `merged` ship summary with the observed full `merge_sha`,
@@ -398,7 +406,7 @@ returns. Under implementation custody a ship owner writes only
 
 ## Notes
 
-- Merge commits, learning-doc updates, and blocker fixes fall under standing local-commit authorization. Don't re-confirm each. The `Co-Authored-By` trailer follows `commit.coAuthoredBy`.
+- Merge commits, learning-doc updates, and blocker fixes fall under standing local-commit authorization. Don't re-confirm each. The `Co-Authored-By` trailer follows retained `bindings.vcs.commit.co_authored_by`.
 - If a phase reveals an earlier one was wrong (review surfaces a misaligned spec, say), back up to the appropriate `from-issue` phase. Don't paper over.
 - Absent sibling skills (`from-issue`, `sdd`, `worktrees`) degrade to no-ops; this skill still runs.
 
@@ -506,7 +514,7 @@ from the ledger's ready stage, starting with its synchronizing null-scope
 checkpoint. When selection is pending, build it from the PR head
 (`gh pr view <pr-num> --json headRefOid`) and that head's tree with literal
 refs — `acceptance_ref` the issue URL
-(`https://github.com/<repoSlug>/issues/<num>`), `review_ref` `unknown`,
+(`https://github.com/<resolved-repository>/issues/<num>`), `review_ref` `unknown`,
 `test_ref` `checks` — so a relaunched remainder owner re-derives the identical
 selection; then build its observations. When the merge is pending, start at the merge gate: Phase 6's CI
 wait and Phase 7's gate and fence still bind. Otherwise start at the first
