@@ -17,6 +17,7 @@ list, never restated.
 `refused_examples(document_text)` is the one boundary: every sweep and every
 fixture below calls it on a document's text and nothing else produces findings.
 """
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -104,7 +105,10 @@ class Finding:
 # Fences nest: only a bare run at least as long as the innermost opener closes
 # it, so a `bash` fence inside a ````markdown template is still a shell fence.
 FENCE = re.compile(r"^\s*(`{3,})(.*)$")
-INLINE_CODE = re.compile(r"`([^`\n]+)`")
+# Applied to one prose block, so a span may close on a later line of it (D28).
+INLINE_CODE = re.compile(r"`([^`]+)`")
+# A line that starts a new list item, which starts a new prose block (D28).
+LIST_ITEM = re.compile(r"\s*(?:[-*+]|\d+[.)]) ")
 # `<pr-num>`-style placeholders: non-space edges, never across lines, so
 # `cmd < in > out` keeps both redirects.
 PLACEHOLDER = re.compile(r"<[^\s<>](?:[^<>\n]*[^\s<>])?>")
@@ -146,7 +150,7 @@ _OPERATORS = (
 
 
 class _Scan(NamedTuple):
-    firsts: dict  # form → line offset of its first operator
+    firsts: dict  # form → text index of its first operator
     is_open: bool  # the text cannot be closed as it stands
     substituted: bool  # a command substitution opened: `$(` or an opening backtick
     heredocs: list  # per heredoc operator: is it `<<` with a quoted delimiter
@@ -162,13 +166,12 @@ def _scan(text):
     heredocs = []
     pipes = []
     substituted = False
-    offset = 0
     trailing = False
     i = 0
     n = len(text)
 
     def found(form):
-        firsts.setdefault(form, offset)
+        firsts.setdefault(form, i)
 
     def result(is_open):
         return _Scan(firsts, is_open, substituted, heredocs, pipes)
@@ -177,7 +180,6 @@ def _scan(text):
         char = text[i]
         top = stack[-1]
         if char == "\n":
-            offset += 1
             i += 1
             if pending and top in _LIVE:
                 lines = text[i:].split("\n")
@@ -193,17 +195,13 @@ def _scan(text):
                 if len(lines) == consumed:
                     # The delimiter was the last line: nothing follows it.
                     i = n
-                    offset += consumed - 1
                 else:
                     i += sum(len(line) + 1 for line in lines[:consumed])
-                    offset += consumed
             continue
         if char == "\\":
             if i + 1 >= n:
                 return result(True)
-            if text[i + 1] == "\n":
-                offset += 1
-            elif top != "dquote":
+            if text[i + 1] != "\n" and top != "dquote":
                 trailing = False
             i += 2
             continue
@@ -235,7 +233,6 @@ def _scan(text):
             close = text.find("'", i + 1)
             if close == -1:
                 return result(True)
-            offset += text.count("\n", i, close)
             trailing = False
             i = close + 1
             continue
@@ -335,21 +332,29 @@ def _scan(text):
     return result(len(stack) > 1 or bool(pending) or trailing)
 
 
-def _reduced(text):
-    """The example text the scanner sees: a leading sanctioned prefix stripped when
-    a command follows it on the same line (a comment is not one), placeholders
-    substituted."""
+def _reduction(text):
+    """The example text the scanner sees, and for each of its characters the index
+    in `text` it came from: a leading sanctioned prefix stripped when a command
+    follows it on the same line (a comment is not one), placeholders substituted."""
+    begin = 0
     stripped = text.lstrip()
     if stripped.startswith(SANCTIONED_PREFIX):
         remainder = stripped[len(SANCTIONED_PREFIX):]
         same_line = remainder.split("\n", 1)[0].strip()
         if same_line and not same_line.startswith("#"):
-            text = remainder
-    return PLACEHOLDER.sub("PH", text)
+            begin = len(text) - len(remainder)
+    pieces, origins = [], []
+    for match in PLACEHOLDER.finditer(text, begin):
+        pieces += [text[begin:match.start()], "PH"]
+        origins += [*range(begin, match.start()), match.start(), match.start()]
+        begin = match.end()
+    pieces.append(text[begin:])
+    origins += range(begin, len(text))
+    return "".join(pieces), origins
 
 
 def _still_open(text):
-    return _scan(_reduced(text)).is_open
+    return _scan(_reduction(text)[0]).is_open
 
 
 def _is_lifecycle_call(reduced, scan):
@@ -363,18 +368,38 @@ def _is_lifecycle_call(reduced, scan):
     return all(command_head(reduced[start:]) in LIFECYCLE_HELPERS for start in starts)
 
 
-def _classify(numbered_lines):
-    """Findings for one example: [(line number, text), ...] → tuple of Finding."""
-    numbers = [number for number, _ in numbered_lines]
-    text = "\n".join(line for _, line in numbered_lines)
-    reduced = _reduced(text)
+class _Example(NamedTuple):
+    """One example's text and the document lines it was read from."""
+    text: str
+    starts: tuple  # text index where each document line's piece begins
+    numbers: tuple  # document line number of each piece
+
+    @classmethod
+    def joined(cls, numbered_pieces, separator):
+        """[(line number, piece), ...] joined by `separator` into one example."""
+        starts, index = [], 0
+        for _, piece in numbered_pieces:
+            starts.append(index)
+            index += len(piece) + len(separator)
+        return cls(separator.join(piece for _, piece in numbered_pieces), tuple(starts),
+                   tuple(number for number, _ in numbered_pieces))
+
+    def line_at(self, index):
+        """The document line holding the text's character at `index`."""
+        return self.numbers[bisect_right(self.starts, index) - 1]
+
+
+def _classify(example):
+    """Findings for one example: each on the document line of its operator."""
+    reduced, origins = _reduction(example.text)
     scan = _scan(reduced)
     if scan.is_open:
-        return (Finding(numbers[0], "unparseable", text),)
+        return (Finding(example.numbers[0], "unparseable", example.text),)
     forms = [form for form in FORMS if form in scan.firsts]
     if _is_lifecycle_call(reduced, scan):
         forms = [form for form in forms if form not in ("pipe", "heredoc")]
-    return tuple(Finding(numbers[scan.firsts[form]], form, text) for form in forms)
+    return tuple(Finding(example.line_at(origins[scan.firsts[form]]), form, example.text)
+                 for form in forms)
 
 
 def _calls(body, ambiguous):
@@ -408,24 +433,50 @@ def _leading_spaces(line):
     return len(line) - len(line.lstrip(" "))
 
 
+def _spans(block):
+    """Every vocabulary-headed inline code span of one prose block, paired as
+    CommonMark pairs them: a span may close on a later line of the block, and its
+    line breaks read as spaces (D28). `block` is [(line number, indent, text with
+    the indent stripped), ...]; yields ((line, column), example)."""
+    text = "\n".join(line for _, _, line in block)
+    example = _Example.joined([(number, line) for number, _, line in block], "\n")
+    for span in INLINE_CODE.finditer(text):
+        first = bisect_right(example.starts, span.start()) - 1
+        pieces = span.group(1).split("\n")
+        call = _Example.joined(list(zip(example.numbers[first:], pieces)), " ")
+        # A span holding only the sanctioned prefix names it; it runs nothing (D5, D26).
+        if call.text.strip() == SANCTIONED_PREFIX.strip():
+            continue
+        if command_head(call.text) in COMMAND_VOCABULARY:
+            column = block[first][1] + span.start() - example.starts[first]
+            yield (call.numbers[0], column), call
+
+
 def _examples(document_text):
     """Every example with its sort position, plus unclosed-fence findings.
 
-    Yields ((line, column), kind, payload): kind "call" carries the example's
-    numbered lines and whether a shell fence holds it, kind "unclosed" carries
-    a ready Finding.
+    Yields ((line, column), kind, payload): kind "call" carries the _Example and
+    whether a shell fence holds it, kind "unclosed" carries a ready Finding.
     """
     fences = []  # open _OpenFence entries, innermost last
+    block = []  # the prose block being read: (line number, indent, stripped line)
+
+    def flushed():
+        for position, call in _spans(block):
+            yield position, "call", (call, False)
+        block.clear()
+
     for number, line in enumerate(document_text.splitlines(), 1):
         fence = FENCE.match(line)
         if fence is not None:
+            yield from flushed()
             run, info = len(fence.group(1)), fence.group(2).strip()
             if fences and not info and run >= fences[-1].run:
                 closed = fences.pop()
                 if closed.info in SHELL_FENCE_INFO or closed.info in AMBIGUOUS_FENCE_INFO:
                     shell = closed.info in SHELL_FENCE_INFO
                     for call in _calls(closed.body, ambiguous=not shell):
-                        yield (call[0][0], 0), "call", (call, shell)
+                        yield (call[0][0], 0), "call", (_Example.joined(call, "\n"), shell)
             else:
                 word = info.split()[0] if info else ""
                 fences.append(_OpenFence(run, word, number, line, _leading_spaces(line), []))
@@ -435,13 +486,16 @@ def _examples(document_text):
             cut = min(innermost.indent, _leading_spaces(line))
             innermost.body.append((number, line[cut:]))
             continue
-        for span in INLINE_CODE.finditer(line):
-            example = span.group(1)
-            # A span holding only the sanctioned prefix names it; it runs nothing (D5, D26).
-            if example.strip() == SANCTIONED_PREFIX.strip():
-                continue
-            if command_head(example) in COMMAND_VOCABULARY:
-                yield (number, span.start()), "call", ([(number, example)], False)
+        # Prose blocks end at a blank line and before a new list item; a heading
+        # or a table row is a block of its own (D28).
+        stripped = line.lstrip()
+        if not stripped or LIST_ITEM.match(line) or stripped.startswith(("#", "|")):
+            yield from flushed()
+        if stripped:
+            block.append((number, len(line) - len(stripped), stripped))
+        if stripped.startswith(("#", "|")):
+            yield from flushed()
+    yield from flushed()
     for fence in fences:
         yield (fence.opener_line, 0), "unclosed", Finding(
             fence.opener_line, "unparseable", fence.opener_text)
@@ -463,7 +517,7 @@ def shell_fence_heads(document_text):
     heads = set()
     for _, kind, payload in _examples(document_text):
         if kind == "call" and payload[1]:
-            head = command_head(payload[0][0][1])
+            head = command_head(payload[0].text.split("\n", 1)[0])
             if head is not None:
                 heads.add(head)
     return frozenset(heads)
@@ -697,6 +751,37 @@ class RefusedFormFixtureTest(unittest.TestCase):
                 self.assertEqual(_lines_and_forms(document),
                                  [(first + offset, form) for offset, form in expected])
 
+    def test_a_span_pairs_across_lines_only_within_its_block(self):
+        # Offsets count lines from the block's first line (per D28).
+        cases = {
+            "wrapped pipe reds on the operator's line": (
+                "Run `git worktree\nlist | grep x` now.", [(1, "pipe")]),
+            "wrapped chain reds on the operator's line": (
+                "First `git fetch origin &&\ngit status` then.", [(0, "chain")]),
+            # The break reads as a space before placeholders are removed, so
+            # `<the pr number>` is one placeholder, not a `<` and a `>`.
+            "split placeholder without an operator": (
+                "Run `gh pr view <the pr\nnumber>` next.", []),
+            "an unclosed wrapped span is unparseable at its first line": (
+                'Then `gh pr view "$(git rev-parse\nHEAD` and stop.', [(0, "unparseable")]),
+            "a backtick open at a paragraph's end does not cross the blank line": (
+                "Prose that leaves a backtick ` open.\n\nRun `git log | head -1` now.",
+                [(2, "pipe")]),
+            "a lone backtick per table row does not pair across rows": (
+                "| step `git log --oneline |\n| then grep fix` |", []),
+            "a heading does not pair with the next line": (
+                "## Heading with `git log\nprose | grep x` here.", []),
+            "a new list item does not pair with the previous one": (
+                "- item `git log\n- next | grep x` here.", []),
+            "an ordered list item does not pair with the previous one": (
+                "1. item `git log\n2) next | grep x` here.", []),
+        }
+        for name, (block, expected) in cases.items():
+            with self.subTest(case=name):
+                document, first = _appended(self.host, block)
+                self.assertEqual(_lines_and_forms(document),
+                                 [(first + offset, form) for offset, form in expected])
+
 
 # ship-issue/SKILL.md "Delivery loop" checkpoint call, verbatim at a311fda:
 # three helper segments, a quoted heredoc feeding the first (per D23).
@@ -709,6 +794,9 @@ PATH_NAMED_CALL = ("~/.agents/bin/workflow-state init-run --repo-root <ledger_re
 LIFECYCLE_VARIANTS = (
     ("non-helper segment",
      "| artifact-budget validate-report --boundary workflow-response --input -", "| jq -r .state",
+     ("pipe", "heredoc")),
+    ("non-helper first segment",
+     "artifact-budget validate-report --boundary ship-checkpoint --input -", "cat -",
      ("pipe", "heredoc")),
     ("chain", "--boundary workflow-response --input -",
      "--boundary workflow-response --input - && git status", ("chain", "pipe", "heredoc")),
