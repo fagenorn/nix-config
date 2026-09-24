@@ -647,6 +647,20 @@ class CommitGateTest(ApplyTestCase):
                          "adopt.worktree.retained")
         self.assertTrue(self.worktree(plan_id).is_dir())
 
+    def test_the_status_gate_holds_when_the_machine_disables_renames(self):
+        """The first gate demands a rename record for every move, so it pins
+        rename detection on rather than inheriting `status.renames`, which
+        would otherwise report each move as a deletion plus an addition."""
+        root = apply_repo(self.home)
+        git(root, "config", "status.renames", "false")
+        git(root, "config", "diff.renames", "false")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        result = self.succeed(root, plan_id)
+        self.assertEqual(
+            git(root, "rev-parse", result["branch"]).strip(),
+            result["commit"])
+        self.assertFalse(self.worktree(plan_id).exists())
+
 
 # --------------------------------------------------------------------------
 # What the commit itself carries

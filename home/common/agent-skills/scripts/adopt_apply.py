@@ -196,9 +196,12 @@ def status_records(root: Path) -> list[tuple[str, tuple[str, ...]]]:
     In `-z` mode a rename or copy is two records: the status and the new path,
     then the original path. Parsed rather than pattern-matched, because the
     rename detection this reads is the whole point of the first commit gate.
+    Rename detection is turned on explicitly rather than inherited, so a move
+    reports one rename record — exactly what the gate demands — whatever
+    `status.renames` or `diff.renames` the machine carries.
     """
     fields = git_or_fail(
-        root, "status", "--porcelain", "-z",
+        root, "status", "--porcelain", "-z", "--renames",
         "--untracked-files=all").split(b"\0")
     records: list[tuple[str, tuple[str, ...]]] = []
     index = 0
