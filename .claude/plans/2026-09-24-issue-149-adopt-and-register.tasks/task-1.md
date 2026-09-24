@@ -65,9 +65,9 @@ Each edit replaces the old string with the new one, and nothing else changes.
 
 ```bash
 cd /Users/anis/tmp/nix-config/.worktrees/worktree-issue-149-orchestrated
-START=$(git rev-parse HEAD); echo "$START"
+START=$(git rev-parse HEAD)
 GATE=$(mktemp "${TMPDIR:-/tmp}/a1-gate-XXXXXX.sh")
-cat > "$GATE" <<'EOF'
+{ printf 'START=%s\n' "$START"; cat; } > "$GATE" <<'EOF'
 set -euo pipefail
 S=home/common/agent-skills
 # (1) No legacy artifact path in the living tree. The exclusions are the three trees
@@ -96,11 +96,16 @@ want=$(printf '%s\n' "1/1 CLAUDE.md" "5/5 docs/standards/agent-helpers.md" \
 test "$got" = "$want"
 echo "A1 gate ok"
 EOF
+echo "START=$START GATE=$GATE"
 ```
+
+Shell variables do not survive between separate tool calls. The gate script carries
+`START` itself, and Step 1 prints the gate's path. Later steps write that printed path in
+place of `<GATE>`.
 
 - [ ] **Step 2: Run the gate and watch it fail**
 
-Run: `START="$START" bash "$GATE"`
+Run: `bash <GATE>`
 Expected: exit 1. Check (1) lists the four files at their eight legacy references.
 
 - [ ] **Step 3: Make the four edits**
@@ -110,10 +115,10 @@ the same string. Change nothing else on any line.
 
 - [ ] **Step 4: Verify**
 
-Run: `START="$START" bash "$GATE"`
+Run: `bash <GATE>`
 Expected: `A1 gate ok`, exit 0.
 
-Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests > "$GATE.log" 2>&1; echo "exit $?"; tail -n 3 "$GATE.log"`
+Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests > <GATE>.log 2>&1; echo "exit $?"; tail -n 3 <GATE>.log`
 Expected: `exit 0` and a final `OK` line, which may be `OK (skipped=N)`.
 
 - [ ] **Step 5: Commit** (signed, with no closing keyword)
@@ -124,14 +129,15 @@ git add CLAUDE.md docs/standards/agent-helpers.md \
 git commit -F - <<'EOF'
 docs: re-point living references to the adopted artifact paths
 
-The adoption for #149 moves .claude/specs and .out-of-scope under .agents/.
-Re-point the eight living references to the classifier's destination paths,
-and name the rejection binding in the adapter contract (spec D4).
+The adoption for https://github.com/fagenorn/nix-config/issues/149 moves
+.claude/specs and .out-of-scope under .agents/. Re-point the eight living
+references to the classifier's destination paths, and name the rejection
+binding in the adapter contract (spec D4).
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01XJQu22Bg2fayzv7KNKKbaA
 EOF
-START="$START" bash "$GATE"; rm -f "$GATE" "$GATE.log"
+bash <GATE>; rm -f <GATE> <GATE>.log
 ```
 
 Expected: one signed commit, and the gate prints `A1 gate ok` again at `HEAD`.

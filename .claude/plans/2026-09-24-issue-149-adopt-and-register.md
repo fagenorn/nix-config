@@ -15,7 +15,7 @@ owner runs B8–B9 (D11). The adoption commit is the branch's last authored comm
 and `conformance`; `just build` and `just agent-workflow-tests`; `workflow-state`; `gh`.
 
 **Authority:** the spec `.claude/specs/2026-09-24-issue-149-adopt-and-register-design.md`,
-with its Stage B and `## Decision ledger` (D1–D12). From B5 on, the spec and this plan
+with its Stage B and `## Decision ledger` (D1–D14). From B5 on, the spec and this plan
 live where the migration map puts them (D7).
 
 ## Global Constraints
@@ -55,17 +55,21 @@ Task 1 — Re-point the eight living references to the adopted paths — `CLAUDE
 ## Decisions
 
 Task 1 rests on D3 and D4. The owner steps rest on D1, D2, D5–D7 and D9–D11. Planning
-added D12: Task 1 needs no generation of its own, and the operator ask stays on `main`.
+added D12: Task 1 needs no generation of its own, and the operator ask stays on `main`. Phase-5 review added D13 (owner-route hardening) and D14 (fix commits after the
+adoption).
 
 ## Owner delivery steps (not sdd tasks)
 
 Notation: `WT=/Users/anis/tmp/nix-config/.worktrees/worktree-issue-149-orchestrated`,
 `P=/Users/anis/tmp/nix-config`, `A=$HOME/.agents/bin`, and a scratch dir
 `D=$(mktemp -d "${TMPDIR:-/tmp}/i149-XXXXXX")`, created at B3 and removed after B7.
-The values carried between steps are `M`, `BASE`, `PLAN_ID`, `DIGEST` (the id without `sha256:`), `BRANCH` and
-`ADOPT`. Snippets run under `bash`, and every command runs in `$WT` unless a step names
+The values carried between steps are `D`, `M`, `BASE`, `PLAN_ID`, `DIGEST` (the id without `sha256:`), `BRANCH` and
+`ADOPT`. Shell variables do not survive between separate tool calls, so each step prints
+the values it records and later steps substitute them as literals. Snippets run under `bash`, and every command runs in `$WT` unless a step names
 `$P`. A failed assertion stops the run with the issue open, unless the step names another
-route. Task 1's three moves are these. The two specs
+route. **Back to the loop (D13):** any route that returns to the `sdd` loop at or after B5
+first runs `git reset --hard <BASE>` (local and pre-push only), then adds the new task
+and restarts Stage B at B1. Task 1's three moves are these. The two specs
 `.claude/specs/2026-09-20-issue-116-permission-guard-core-design.md` and
 `.claude/specs/2026-09-24-agent-tools-package-design.md` each go to
 `.agents/artifacts/specs/<same name>`. The rejection
@@ -75,7 +79,9 @@ route. Task 1's three moves are these. The two specs
 **B1 — Fresh base** (issue owner). Require `git status --porcelain` to be empty. Run
 `git fetch origin && git merge --no-edit origin/main`, resolving any conflict under
 ship-issue's `SYNC.md`. Then run `just build`, which must exit 0 and leaves the ignored
-`./result`. Record `M=$(git merge-base HEAD origin/main)`.
+`./result`. Record `M=$(git merge-base HEAD origin/main)`. Re-run Task 1's check (1)
+`git grep` on the synced head. A hit means a sibling added a living legacy reference, so
+the owner goes back to the loop with a new re-pointing task (D10).
 
 **B2 — Operator gate** (issue owner; D1, D12). Locate the built generation. Run
 `set -- $(nix-store --query --requisites ./result | grep -- '-home-manager-files$')`,
@@ -112,14 +118,19 @@ with the log on disk and only its tail read. If it fails and, after `git fetch o
 - the `git-mv` target of each Task 1 old path equals Task 1's new path, for all three.
 
 Record `PLAN_ID=plan.plan_id` and `BASE=plan.base_revision`. A contract or engine gap stops
-the run (#71).
+the run (#71). **Benign re-plan (D13):** the inspection counts registered worktrees into
+`evidence`, so a sibling adding or removing a worktree changes `plan_id`. If the `cmp`
+differs, or B4 refuses with `adopt.plan.inputs_changed`, while HEAD is unchanged and the
+tree clean, re-run B3 with no rebuild. Allow at most three re-plans, then stop.
 
 **B4 — Apply** (issue owner; D2, D10). Run `$A/adopt-project apply --plan-id "$PLAN_ID" >
 $D/apply.json` under the real `HOME`.
 - On exit 0, record `BRANCH=.branch`, which must equal `adopt-${DIGEST:0:12}`, and
   `ADOPT=.commit`.
-- On exit 2, read `error.code` and `repair_id`. A stale plan goes back to B1, and a stale
-  id is never re-run. A failed commit gate retains
+- On exit 2, read `error.code` and `error.repair_id`. A stale plan goes back to B1 (or to
+  B3 under the benign re-plan rule), and a stale id is never re-run.
+  `adopt.commit.failed` (signing) and `adopt.commit.unresolved_policy` are environment or
+  contract failures: stop with the issue open, with no loop task. A failed commit gate retains
   `~/.agents/state/adopt/worktrees/$DIGEST`, and its `$DIGEST.failure.json` beside it
   names the gate. For `workflow-verification-commands`, rerun `just build` or
   `just agent-workflow-tests` in that worktree to see the output. Then apply D10: return
@@ -127,7 +138,9 @@ $D/apply.json` under the real `HOME`.
   worktree.
 
 **B5 — Land** (issue owner; D7). Run `git merge --ff-only "$BRANCH"`, require
-`git rev-parse HEAD` to equal `$ADOPT`, then run `git branch -d "$BRANCH"`. From here on,
+`git rev-parse HEAD` to equal `$ADOPT`. Then, as a standalone command with no variable,
+quoting or chaining (the `PreToolUse` guard refuses anything else), run
+`git branch -d adopt-<first 12 hex of DIGEST>` with the value substituted by hand. From here on,
 name the spec and plan only by the map's `new_path` for their old paths. Those are
 `.agents/artifacts/specs/2026-09-24-issue-149-adopt-and-register-design.md` and
 `.agents/artifacts/plans/2026-09-24-issue-149-adopt-and-register.md`, and B6 asserts that
@@ -159,8 +172,8 @@ The issue owner then does the check-6 read-through. Read
 amendment, the `*\n` sentinel, `.gitignore`, the map and the record. Require
 `git cat-file -e $ADOPT:<path>` for Task 1's three new paths. Require that this prints
 nothing: `git grep -n -E '\.claude/(specs|plans)|\.out-of-scope' HEAD -- . ':!.agents/artifacts' ':!.agents/knowledge' ':!home/common/agent-skills/tests' ':!home/common/agent-skills/evals/fixture-repo' ':!home/common/agent-skills/scripts/adopt_inspection.py'`.
-A driver failure is an engine defect: stop, and it becomes a new issue. A Task 1 defect
-goes back to the loop (D10).
+A driver failure is an engine defect: stop, and it becomes a new issue. A Task 1 defect,
+or a check-6 `git grep` hit after a B7 sync, goes back to the loop by the D13 route (D10).
 
 **B7 — Pre-push verification** (issue owner; D9 check 7, D5). At the head to be pushed:
 - `just build` and `just agent-workflow-tests` exit 0.
@@ -183,39 +196,66 @@ goes back to the loop (D10).
   - Stale: run `git reset --hard $BASE` and restart at B1.
   - Not stale, but `git merge-base --is-ancestor origin/main HEAD` fails: run
     `git merge --no-edit origin/main`, then rerun B7 and the check-6 `git grep` on the
-    merged head.
+    merged head. A conflict in that merge counts as stale (D13): `git merge --abort`,
+    `git reset --hard $BASE`, and restart at B1. Never resolve it by hand.
+  - Engine drift (D13): if `git diff --name-only <M> origin/main --
+    home/common/agent-skills/scripts home/common/agent-skills/default.nix lib/agent-tools.nix python`
+    is non-empty, the deployed runtime may no longer match what B9 builds. Treat it as stale
+    before push, and restart at B1, where B2 re-gates.
 
 Then run `rm -rf "$D"`.
 
 **B8 — Ship** (issue owner hands off; ship owner acts; D5–D7, D11). The handoff names
 `spec_artifact` and `plan_artifact` by their relocated paths, re-measured there. Its
-`notes` (at most 500 characters) read: "#149 duties (spec D5, D6, D11; plan B8–B9): PR body
-`Part of https://github.com/fagenorn/nix-config/issues/149`, no closing keyword. D5 stale
-check after sync and immediately before gh pr merge; stale means stop before merge, issue
-open. Adoption commit <ADOPT> must show GitHub verification.verified true before merge.
-After pr_merged and before close_tracker, run B9 in /Users/anis/tmp/nix-config, then
-post the evidence comment, then close." The ship owner confirms
+`notes` (at most 500 characters, kept near 380 so that a durable `report_path`, when
+there is one, can be appended) read: "#149 (spec D5 D6 D11 D13 D14; plan B8-B9): PR body
+`Part of https://github.com/fagenorn/nix-config/issues/149`, no closing keyword. D5 check
+after sync and before merge; stale stops before merge. <ADOPT> needs verified=true. Fix
+commits only per D14. After pr_merged, before close_tracker: B9 in
+/Users/anis/tmp/nix-config, evidence comment, then close." The ship owner confirms
 `gh api repos/fagenorn/nix-config/commits/<ADOPT> --jq .commit.verification.verified` is
-`true` after the push (D9 check 1). It runs B7's stale check at both D5 points, and after
-a non-stale sync it reruns B7's checks.
+`true` after the push (D9 check 1). It runs B7's stale check, including the D13 conflict
+and engine-drift rules, at both D5 points. After a push nothing resets: stale there means
+stop before merge with the issue open. After a non-stale sync it reruns B7's checks. A
+ship-review fix commit may follow the adoption only under D14.
 
 **B9 — Registration** (ship owner; D6, AC4, AC5). After `pr_merged` and before
 `close_tracker`, work in `$P`:
 1. Require a clean tree on `main`, then run `git fetch origin && git merge --ff-only
    origin/main`. Never force.
 2. Run `just build` in `$P`, then B2's comparison against that `./result`. A mismatch
-   stops the run, with no suspension.
+   stops before `close_tracker` with the issue open. The ship summary is a truthful
+   stop that names the drifted files. The follow-up owner is the operator: run
+   `just switch` in `$P`, then re-run B9 (D13's pre-merge engine-drift check keeps this
+   case rare).
 3. The Task 8 steps. `git merge-base --is-ancestor <ADOPT> main` exits 0. Exactly one
    record exists under `.agents/artifacts/evidence`, and
    `git log --diff-filter=A --format=%H -- <record>` gives `<ADOPT>`. Save the registry
    bytes. `verify` reports `adopted` with `adoption_commit == <ADOPT>`. `verify
-   --register` exits 0 and adds
+   --register` exits 0, its report has `registered == true`, and it adds
    `{"project_id": "fagenorn/nix-config", "root": "/Users/anis/tmp/nix-config"}`, keeping
    every earlier entry. A
    second `--register` leaves the registry bytes identical. The
    `platform-status --repo-root $P --fleet` row reads `compatible: true`,
-   `reason_code: null` and `repair_id: null`. `conformance run --purpose adoption` passes.
+   `reason_code: null` and `repair_id: null`. `$A/conformance run --purpose adoption
+   --repo-root "$P" --offline` gives `outcome.status == "passed"`.
 4. Post one issue comment under the `current-launch` fence. It carries each command's
    verbatim output, `<ADOPT>` and the merge commit. Only then run `close_tracker`.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (a fresh read-only native reviewer). Codex `plan-review` failed at
+  launch on a usage limit, a real runtime failure, so the one-time fallback ran.
+- Base SHA `2c36848681a6ef18bee933bec966bd869b31013b`, reviewed at plan commit `37e6b97`,
+  isolated and read-only, with no focus.
+- Dispositions:
+  - Accepted 1 blocking finding: B5's guard-safe literal branch delete.
+  - Accepted 5 should-fix findings: reset before a loop return and B1's grep re-run
+    (D13), the benign re-plan (D13), B8's shorter notes, literal carried values, and CLI
+    field and flag alignment.
+  - Decided 4 discussion items: sync conflict as stale, engine drift, and B9's
+    follow-up owner (all D13); fix commits after the adoption (D14); signing and policy
+    failures in B4 stop the run.
+  - Rejected 0 and deferred 0.
