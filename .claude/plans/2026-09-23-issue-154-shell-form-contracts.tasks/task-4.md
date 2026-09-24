@@ -67,7 +67,10 @@ stop and report it rather than editing around it.
 
 1. `from-issue/SKILL.md`, the **Pre-flight** paragraph under `## Phase 0 — Investigate`: replace
    ``Then `git worktree list | grep <worktreePrefix>issue-<num>-`:`` with
-   ``Then run `git worktree list` and keep the entries whose branch — the bracketed last field of each line — starts with `<worktreePrefix>issue-<num>-`:``
+   ``Then run `git worktree list` and keep the entries whose bracketed branch field starts with `<worktreePrefix>issue-<num>-`:``
+   (not "the last field": `git worktree list` prints `locked` and `prunable`
+   annotations after the branch, and a prunable issue worktree is exactly the
+   orphan the bullets below inspect)
    (the none/one/several bullets that follow are unchanged).
 2. `ship-issue/SKILL.md`, `## Phase 4 — Open PR`: replace the whole fence that
    follows "Run `check-launch` again, then:" (the `gh pr create … "$(cat <<'EOF'`

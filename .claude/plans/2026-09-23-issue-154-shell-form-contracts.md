@@ -104,7 +104,7 @@ origin/main `185cc1a` as `a311fda`); resume at Task 2 Step 7.
 - Task 2 — Steps 1–6 committed as `d4bcfdb` (implementer DONE_WITH_CONCERNS:
   module size; the HOME-dependent failure in Global Constraints). Full-lane
   review of `5b64f90..d4bcfdb`: Spec ❌. Fix round pending — Steps 7–12 of
-  `task-2.md` fix Important-1 and Important-2 and fold D23–D26; because the
+  `task-2.md` fix Important-1 and Important-2 and fold D23–D27; because the
   round adds new classifier behavior, not only the named fixes, its range gets
   a full-lane review. Minors deferred to the final review: module size vs
   estimate; `>|` scanned as redirect plus pipe; an escaped `\|` in a
@@ -140,7 +140,9 @@ contexts; substitutions nested in them are live). The amendment after the
 origin/main merge added D23 (the lifecycle helper call sanction; Tasks 2, 3, 4,
 5), D24 (fence bodies de-indented; Tasks 2, 5) and D25 (the absolute-path
 isolation probe; Task 2), and this plan amendment D26 (the sanction's
-fail-closed edges and where the bare-prefix exemption lives; Task 2).
+fail-closed edges and where the bare-prefix exemption lives; Task 2). The
+second standards review added D27 (the prefix strip needs a same-line command;
+the sanction's heredoc and substitution edges are pinned; Task 2).
 
 ## Standards review provenance
 
@@ -152,5 +154,18 @@ verified against the live worktree and accepted, 0 rejected, 0 deferred.
 (one class-level skip; `rg` for the untracked support file); 154-S2 → Task 2
 Step 3's expected failures now include the host-appended fixtures; 154-S3 →
 Task 5's PREV_TAG fixture gains an older reachable tag.
+
+Amended plan, second review: Claude fallback (one fresh read-only native
+reviewer; Codex failed with its usage limit, no retry), base
+`185cc1a46668faf960be605734b6136d9234e245`, reviewed plan head `65d55bc`, no
+focus configured. Findings: 0 Blocking, 4 Should fix, 1 Discussion — the 4
+verified against the live worktree (S1/S2 by probing `d4bcfdb`'s classifier)
+and accepted, 0 rejected, 1 deferred. 154N-S1 and 154N-S2 → Task 2 Steps 7, 8,
+9b and 9c (D27); 154N-S3 → Task 4 Step 2's pre-flight wording (the branch is
+the bracketed field, not the last one); 154N-S4 → Task 2 Step 9b/9c removes
+the dead `None` paths and refreshes the `_reduced`/`_scan` docstrings.
+154N-D1 deferred as a follow-up outside this slice: `ship-issue/SKILL.md` and
+`from-issue/SKILL.md` keep a relative-path `--git-dir`/`--git-common-dir`
+comparison that D25's reasoning also covers; neither is a refused shell form.
 
 ---

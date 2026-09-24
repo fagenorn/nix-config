@@ -459,6 +459,14 @@ files as above minus `justfile`; the lane stays full.
                 "gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch\n```",
                 [(1, "chain")]),
             "prefix line ends the fence": (f"```bash\n{prefix_line}\n```", [(1, "unparseable")]),
+            # The literal with its trailing space, as an editor that keeps
+            # trailing whitespace would save it (per D27).
+            "spaced prefix line then a command": (
+                f"```bash\n{SANCTIONED_PREFIX}\n"
+                "gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch\n```",
+                [(1, "chain")]),
+            "spaced prefix line ends the fence": (
+                f"```bash\n{SANCTIONED_PREFIX}\n```", [(1, "unparseable")]),
         }
         for name, (block, expected) in cases.items():
             with self.subTest(case=name):
@@ -490,7 +498,12 @@ LIFECYCLE_VARIANTS = (
     ("substitution argument", "--now <utc>", '--now "$(date -u +%FT%TZ)"', ("pipe", "heredoc")),
     ("escaped delimiter", "<<'EOF'", "<<\\EOF", ("pipe", "heredoc")),
     ("stderr pipe", "<<'EOF' | workflow-state", "<<'EOF' |& workflow-state", ("pipe", "heredoc")),
+    ("dash heredoc", "<<'EOF'", "<<-'EOF'", ("pipe", "heredoc")),
+    ("here-string", "<<'EOF'", "<<< text", ("pipe", "heredoc")),
+    ("backtick argument", "--now <utc>", "--now `date -u`", ("pipe", "heredoc")),
 )
+# The same call with its delimiter double-quoted: still sanctioned (per D23, D27).
+DQUOTED_CHECKPOINT_CALL = CHECKPOINT_CALL.replace("<<'EOF'", '<<"EOF"')
 
 
 class LifecycleHelperCallTest(unittest.TestCase):
@@ -508,7 +521,8 @@ class LifecycleHelperCallTest(unittest.TestCase):
             whole_allowed_helpers('        "Bash(git fetch:*)"\n')
 
     def test_sanctioned_calls_yield_nothing_in_every_region(self):
-        for name, call in (("checkpoint", CHECKPOINT_CALL), ("path-named", PATH_NAMED_CALL)):
+        for name, call in (("checkpoint", CHECKPOINT_CALL), ("path-named", PATH_NAMED_CALL),
+                           ("double-quoted delimiter", DQUOTED_CHECKPOINT_CALL)):
             for region in _regions_for((call,)):
                 with self.subTest(call=name, region=region):
                     document, _ = _appended(self.host, _wrap(region, (call,)))
@@ -555,16 +569,17 @@ the pinned fence becomes:
 - [ ] **Step 8: Run the tests and watch them fail**
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_shell_example_contracts.py`
-Expected: `FAILED (failures=11, errors=2)`, counting subtests — errors: the two
+Expected: `FAILED (failures=16, errors=2)`, counting subtests — errors: the two
 `whole_allowed_helpers` tests (`NameError`); failures:
-`test_the_bare_prefix_keeps_a_fence_call_open` (both subtests: the committed
+`test_the_bare_prefix_keeps_a_fence_call_open` (all 4 subtests: the committed
 classifier reports nothing), `test_sanctioned_calls_yield_nothing_in_every_region`
-(all 7 subtests), `test_a_list_item_fence_scans_like_a_top_level_one`
+(all 10 subtests), `test_a_list_item_fence_scans_like_a_top_level_one`
 (`unparseable` instead of `heredoc`) and the probe pin.
 `test_a_call_missing_any_condition_is_classified_in_full` and
 `test_an_over_indented_terminator_is_unparseable` already pass: they guard
 against an over-broad fix. Verified against a copy of `d4bcfdb` with these
-tests added. Any other difference: stop and report it.
+tests added (the four subtests and three variant groups Phase-5 review added
+were probed against `d4bcfdb` too). Any other difference: stop and report it.
 
 - [ ] **Step 9: Implement**
 
@@ -575,16 +590,21 @@ a. **Helper set (D23).** Read `GUARD_SOURCE` once; `SANCTIONED_PREFIX` and the
    → `ValueError` naming `GUARD_SOURCE`. Then
    `LIFECYCLE_HELPERS = whole_allowed_helpers(<that text>)`. No helper name is
    written in the implementation.
-b. **Bare prefix (Important-1, D5, D26).** `_reduced(text)` loses its
-   bare-literal branch: it strips a leading `SANCTIONED_PREFIX`, substitutes
-   placeholders, and never returns `None`. `_still_open(text)` is the scanner's
-   open flag on `_reduced(text)`, so a fence line equal to the bare literal
-   stays open on its trailing `&&` and joins the next line; the joined text
-   does not start with the literal (its trailing space is a newline there), so
-   it is classified whole — `chain` on the prefix line, or `unparseable` when
-   the body ends first. The one exemption left moves into the inline-span
-   branch of `_examples`: a span whose stripped text equals
-   `SANCTIONED_PREFIX.strip()` is not an example.
+b. **Bare prefix (Important-1, D5, D26, D27).** `_reduced(text)` loses its
+   bare-literal branch: it strips a leading `SANCTIONED_PREFIX` only when a
+   non-blank remainder follows it on the same line, substitutes placeholders,
+   and never returns `None`. `_still_open(text)` is the scanner's open flag on
+   `_reduced(text)`, so a fence line that is the bare literal — with or
+   without its trailing space — keeps its `&&`, stays open and joins the next
+   line; nothing but blanks follows the literal on its own line, so the joined
+   text keeps the literal and is classified whole — `chain` on the prefix line,
+   or `unparseable` when the body ends first. Delete `_classify`'s
+   `if reduced is None: return ()` guard and `_still_open`'s `None` test, and
+   rewrite `_reduced`'s docstring to say what it now does (strips a leading
+   sanctioned prefix that a command follows on the same line, substitutes
+   placeholders). The one exemption left moves into the inline-span branch of
+   `_examples`: a span whose stripped text equals `SANCTIONED_PREFIX.strip()`
+   is not an example.
 c. **Lifecycle helper call (D23, D26).** `_scan` returns a private
    `NamedTuple` `_Scan(firsts, is_open, substituted, heredocs, pipes)`:
    `firsts` and `is_open` as today; `substituted` — whether any command
@@ -592,7 +612,9 @@ c. **Lifecycle helper call (D23, D26).** `_scan` returns a private
    `heredocs` — per heredoc operator, whether it is `<<` with a delimiter
    written in single or double quotes (`HEREDOC_DELIMITER` group 1 or 2), so
    `<<-`, `<<<` and a bare or `\`-escaped delimiter are all `False`; `pipes` —
-   per pipe operator, `(is a plain "|", text offset just past it)`. In `_classify`
+   per pipe operator, `(is a plain "|", text offset just past it)`. Record
+   every heredoc operator, `<<<` included, whichever branch scans it, and
+   update `_scan`'s docstring to describe the `_Scan` it returns. In `_classify`
    the open check stays first (an `unparseable` still reds). Then, when the
    example has no `chain` and no `redirect` finding, no substitution, only
    quoted `<<` heredocs, only plain `|` pipes, and `command_head` of the
