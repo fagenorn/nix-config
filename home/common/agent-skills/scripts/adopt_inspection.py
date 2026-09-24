@@ -623,11 +623,20 @@ def tracked_evidence_records(root: Path) -> list[str]:
     """
     out = git_or_fail(root, "ls-tree", "-r", "--name-only", "-z", "HEAD",
                       "--", EVIDENCE_RECORD_DIR)
+    return sorted(path for path in split_nul(out)
+                  if is_evidence_record_path(path))
+
+
+def is_evidence_record_path(relative: str) -> bool:
+    """Whether `relative` is one of the candidates D34 counts.
+
+    The one predicate both sides share: `verify` counts exactly these paths,
+    and a re-adoption plan supersedes exactly these, so the two can never
+    disagree about what "the committed evidence record" is.
+    """
     prefix = EVIDENCE_RECORD_DIR + "/"
-    return sorted(
-        path for path in split_nul(out)
-        if path.startswith(prefix) and path.endswith(".json")
-        and "/" not in path[len(prefix):])
+    return (relative.startswith(prefix) and relative.endswith(".json")
+            and "/" not in relative[len(prefix):])
 
 
 def parses_as_evidence_record(data: bytes | None) -> dict | None:
@@ -869,3 +878,19 @@ def overlap_targets(found: Candidates) -> list[str]:
             targets.add(info["target"])
     targets.update((MIGRATION_MAP_DIR, EVIDENCE_RECORD_DIR))
     return sorted(targets)
+
+
+def dirty_targets(found: Candidates) -> list[str]:
+    """The paths an uncommitted change must not sit inside at `apply`.
+
+    `overlap_targets`, plus every file whose on-disk bytes `plan` reads to
+    compute a write. The `.gitignore` amendment and the living-reference
+    rewrite are derived from the working-tree bytes rather than the committed
+    ones, and `apply` writes them into a worktree checked out at the base
+    revision, so an uncommitted edit to either would otherwise be carried into
+    the adoption commit. Kept apart from `overlap_targets` because that list
+    also scopes the untracked-overlap evidence the plan id is taken over.
+    """
+    return sorted(set(overlap_targets(found)).union(
+        (CONTRACT_FILENAME, RUNTIME_SENTINEL, GITIGNORE),
+        LEGACY_BINDING_CONFIGS))

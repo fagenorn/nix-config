@@ -97,6 +97,28 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     return root
 
 
+def readoption_repo(home: Path) -> tuple[Path, dict]:
+    """`apply_repo` adopted once through the real verbs and merged, then
+    drifted, so that it plans a second `ready` reconcile.
+
+    Returns the checkout and the first `apply`'s result, whose
+    `evidence_record` is the committed record a re-adoption has to supersede.
+    """
+    root = apply_repo(home)
+    code, out, err = run("plan", "--repo-root", str(root), home=home)
+    if code != 0:
+        raise AssertionError(f"the first plan failed: {err or out}")
+    plan_id = json.loads(out)["plan"]["plan_id"]
+    code, out, err = run("apply", "--plan-id", plan_id, home=home)
+    if code != 0:
+        raise AssertionError(f"the first apply failed: {err or out}")
+    first = json.loads(out)
+    git(root, "merge", "--ff-only", "--quiet", first["branch"])
+    write(root, "AGENTS.md", "hand-edited\n")
+    commit(root, "drift a projection")
+    return root, first
+
+
 class ApplyTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.home = make_home()
@@ -385,6 +407,24 @@ class ApplyRefusalTest(ApplyTestCase):
         write(root, "home/common/agent-skills/standards/bar.md", "# edited\n")
         self.succeed(root, plan_id)
 
+    def test_an_unstaged_edit_to_the_gitignore_is_a_dirty_worktree(self):
+        """The amendment is computed from the bytes on disk, so the edit would
+        be written into the worktree and land in the adoption commit."""
+        root = apply_repo(self.home)
+        write(root, ".gitignore", GITIGNORE_WITH_COMMENT + "local-only/\n")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        self.refuse(root, plan_id, "dirty_worktree")
+
+    def test_an_unstaged_edit_to_a_legacy_binding_config_is_dirty(self):
+        """The living-reference rewrite merges into the bytes on disk, so the
+        edit would be carried into the adoption commit the same way."""
+        root = apply_repo(self.home)
+        write(root, ".claude/skills.config.json", json.dumps(
+            {"orchestration": {"agentBudgetMinutes": 60, "maxParallel": 2}},
+            indent=2) + "\n")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        self.refuse(root, plan_id, "dirty_worktree")
+
     def test_a_retained_worktree_refuses_and_is_never_deleted(self):
         root = apply_repo(self.home)
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
@@ -476,8 +516,9 @@ class DeletionAcknowledgementTest(ApplyTestCase):
     def planted(self) -> tuple[Path, str]:
         """A stored plan carrying a `delete-file` operation.
 
-        No generator emits one, so the only way to present one to `apply` is
-        to plant it; the re-derivation then refuses the edited document, which
+        This fixture's plan emits none (only a re-adoption supersedes a
+        committed record), so the way to present one to `apply` here is to
+        plant it; the re-derivation then refuses the edited document, which
         is exactly how far the acknowledgement lets it get.
         """
         root = apply_repo(self.home)
@@ -501,6 +542,40 @@ class DeletionAcknowledgementTest(ApplyTestCase):
         root = apply_repo(self.home)
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
         self.succeed(root, plan_id, "--acknowledge-deletions")
+
+
+class ReadoptionTest(ApplyTestCase):
+    """A second adoption supersedes the first one's evidence record.
+
+    `verify` accepts exactly one committed record (D34), and every appliable
+    plan writes a new one named by its own id, so a re-adoption that left the
+    prior record behind would make its checkout permanently non-conformant.
+    The supersession is a `delete-file`, and so needs the D16 acknowledgement.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root, self.first = readoption_repo(self.home)
+        self.document = self.ready_plan(self.root)
+        self.plan_id = self.document["plan"]["plan_id"]
+
+    def test_the_prior_record_is_a_destructive_deletion_to_acknowledge(self):
+        self.assertEqual(self.document["plan"]["outcome"], "reconcile")
+        self.assertEqual(
+            [(op["sources"], op["targets"], op["approval_class"])
+             for op in self.document["changes"] if op["op"] == "delete-file"],
+            [([self.first["evidence_record"]], [], "destructive")])
+        self.refuse(self.root, self.plan_id, "unacknowledged_deletion")
+
+    def test_the_readoption_commit_leaves_exactly_one_evidence_record(self):
+        result = self.succeed(self.root, self.plan_id,
+                              "--acknowledge-deletions")
+        records = [path for path in self.branch_files(self.root,
+                                                      result["branch"])
+                   if path.startswith(".agents/artifacts/evidence/")]
+        self.assertEqual(records, [result["evidence_record"]])
+        self.assertNotEqual(result["evidence_record"],
+                            self.first["evidence_record"])
 
 
 # --------------------------------------------------------------------------

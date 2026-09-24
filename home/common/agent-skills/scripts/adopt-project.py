@@ -157,6 +157,7 @@ ADOPT_INSPECTION_MEMBERS = (
     "TARGETED_IGNORED",
     "canonical_json",
     "classify_inventory",
+    "dirty_targets",
     "evidence_entry",
     "gate_entry",
     "git_or_fail",
@@ -356,9 +357,10 @@ class Composition:
 
     `document` is what `plan` stores and prints. `contents` holds the bytes
     behind every `write-file` operation's `after` hash, and `overlap` the
-    inspected sources and planned destinations an uncommitted change must not
-    sit inside; neither belongs in the published document, and both are what
-    `apply` needs from the very derivation the plan id was taken over.
+    inspected sources, planned destinations and on-disk inputs of a planned
+    write that an uncommitted change must not sit inside; neither belongs in
+    the published document, and both are what `apply` needs from the very
+    derivation the plan id was taken over.
     """
 
     def __init__(self, document: dict, contents: dict[str, bytes],
@@ -518,7 +520,7 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
         },
     }
 
-    return Composition(document, contents, adopt_inspection.overlap_targets(
+    return Composition(document, contents, adopt_inspection.dirty_targets(
         found))
 
 

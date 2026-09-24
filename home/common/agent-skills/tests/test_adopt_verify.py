@@ -44,7 +44,7 @@ from test_adopt_project import (
     write,
     write_adoption_records,
 )
-from test_adopt_apply import apply_repo
+from test_adopt_apply import apply_repo, readoption_repo
 
 VERIFY_MEMBERS = ["adoption_commit", "blockers", "checks", "evidence_record",
                   "migration_map", "project_id", "registered", "result",
@@ -315,6 +315,26 @@ class RegistrationTest(VerifyTestCase):
             "schema_version": 1,
             "projects": [{"project_id": "fixture/target", "root": str(root)}],
         })
+
+    def test_a_merged_readoption_is_still_adopted_and_registers(self):
+        """A second adoption supersedes the first record rather than adding a
+        second one, so D34's exactly-one discovery still answers."""
+        root, first = readoption_repo(self.home)
+        code, out, err = run("plan", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        plan_id = json.loads(out)["plan"]["plan_id"]
+        code, out, err = run("apply", "--plan-id", plan_id,
+                             "--acknowledge-deletions", home=self.home)
+        self.assertEqual(code, 0, err or out)
+        second = json.loads(out)
+        git(root, "merge", "--ff-only", "--quiet", second["branch"])
+        report = self.report(root, "--register")
+        self.assertEqual(report["result"], "adopted", report["checks"])
+        self.assertEqual(report["evidence_record"], second["evidence_record"])
+        self.assertNotEqual(report["evidence_record"],
+                            first["evidence_record"])
+        self.assertEqual(report["adoption_commit"], second["commit"])
+        self.assertIs(report["registered"], True)
 
     def test_a_second_identical_registration_is_byte_identical(self):
         root = verifiable_repo(self.home)

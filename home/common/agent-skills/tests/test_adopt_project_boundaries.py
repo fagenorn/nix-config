@@ -26,6 +26,10 @@ The invariants:
    planner classifies, fingerprints and moves, not an internal failure.
 5. The library guard is only as wide as its member tuple and only as strict as
    what it checks about the module it found.
+6. An authored JSON file is rewritten only when its value changes. A contract
+   or a legacy binding config that already holds the amended value, in any
+   formatting, is not work: counting it as work would make `no_change`
+   unreachable for every hand-formatted checkout.
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ from test_adopt_project import (
     ADOPT_LIBRARIES,
     LIBRARY,
     SCRIPT,
+    adopted_repo,
     bootstrap_repo,
     commit,
     declared_members,
@@ -257,6 +262,34 @@ class PlanClaimTest(BoundaryTestCase):
         _, first = self.plan(root)
         _, second = self.plan(root)
         self.assertEqual(first, second)
+
+
+class SemanticRewriteTest(BoundaryTestCase):
+    """A rewrite is planned for a changed value, never for formatting alone."""
+
+    def assert_no_change(self, root: Path) -> None:
+        doc, _ = self.plan(root)
+        self.assertEqual(doc["plan"]["outcome"], "no_change", doc["changes"])
+        self.assertEqual(doc["plan"]["state"], "not_applicable")
+        self.assertEqual(doc["changes"], [])
+
+    def test_a_reformatted_conformant_contract_is_no_change(self):
+        root = adopted_repo(self.home)
+        write(root, CONTRACT,
+              json.dumps(self.contract_of(root), indent=4) + "\n")
+        commit(root, "reformat the contract")
+        self.assert_no_change(root)
+
+    def test_a_reformatted_legacy_config_in_agreement_is_no_change(self):
+        root = adopted_repo(self.home)
+        paths = self.contract_of(root)["bindings"]["paths"]
+        write(root, ".claude/skills.config.json", json.dumps({
+            "specDir": paths["artifacts"]["specs"],
+            "planDir": paths["artifacts"]["plans"],
+            "rejectionsDir": paths["rejections"][0],
+        }) + "\n")
+        commit(root, "a legacy config already in agreement")
+        self.assert_no_change(root)
 
 
 class UndecodablePathTest(BoundaryTestCase):

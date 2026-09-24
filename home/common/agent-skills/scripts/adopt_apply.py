@@ -360,6 +360,17 @@ def gate_worktree_status_matches(run: GateRun) -> bool:
         if record in remaining:
             remaining.remove(record)
             continue
+        # Git's rename detection is a similarity heuristic, so a planned
+        # deletion and a planned new file with similar content — a superseded
+        # evidence record and its successor — can be reported as one rename.
+        # That record is exactly the planned pair, and is accepted as such.
+        code, paths = record
+        if code == "R " and len(paths) == 2:
+            pair = [("D ", (paths[1],)), ("A ", (paths[0],))]
+            if all(entry in remaining for entry in pair):
+                for entry in pair:
+                    remaining.remove(entry)
+                continue
         if record not in optional:
             return False
     return not remaining

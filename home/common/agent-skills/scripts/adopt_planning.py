@@ -42,6 +42,7 @@ from adopt_inspection import (
     document_bytes,
     gate_entry,
     git_or_fail,
+    is_evidence_record_path,
     is_secret_path,
     object_hash,
     plan_state_is_terminal,
@@ -263,6 +264,8 @@ def legacy_binding_operations(root: Path,
     Each rewrite merges the three fixed keys into the existing JSON and leaves
     every other key exactly as authored; a file that is absent, unreadable, not
     a JSON object, or already in agreement produces no operation at all.
+    Agreement is a property of the parsed value, not of its bytes: a file that
+    already holds every merged key in its own formatting is not work.
     """
     operations: list[dict] = []
     contents: dict[str, bytes] = {}
@@ -279,13 +282,14 @@ def legacy_binding_operations(root: Path,
             continue
         if not isinstance(config, dict):
             continue
+        authored = json.loads(json.dumps(config))
         for key, route in LEGACY_BINDING_KEYS:
             value = binding_value(contract, route)
             if isinstance(value, str):
                 config[key] = value
-        after = authored_bytes(config)
-        if after == current:
+        if config == authored:
             continue
+        after = authored_bytes(config)
         operations.append(operation("write-file", [target], [target],
                                     sha256_hash(current), sha256_hash(after)))
         contents[target] = after
@@ -303,8 +307,9 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     built until the outcome is known — and the outcome is decided by whether
     this list has anything in it. The apply order is the concatenation: the
     contract amendment, the relocations sorted by old path, the runtime
-    sentinel and the `.gitignore` amendment, then the two records, then the
-    living-reference rewrite and finally the projection regenerations.
+    sentinel and the `.gitignore` amendment, then the deletion of any
+    superseded evidence record and the two records, then the living-reference
+    rewrite and finally the projection regenerations.
 
     `contents` maps each `write-file` target onto the exact bytes whose hash
     the operation publishes as `after`. The plan document carries the hash and
@@ -318,10 +323,13 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     interval = derived_interval(manifest["platform_version"])
     amended = (amended_contract(contract_source, interval, found)
                if contract_source is not None else None)
-    if amended is not None:
+    # Compared as values, never as bytes: `contract_source` is the file this
+    # parsed, so a contract the amendment leaves unchanged is no work however
+    # it happens to be formatted, and only a real change is re-serialized.
+    if amended is not None and amended != contract_source:
         current = read_bytes_bounded(root / CONTRACT_FILENAME)
         after = authored_bytes(amended)
-        if current is not None and after != current:
+        if current is not None:
             operations.append(operation(
                 "write-file", [CONTRACT_FILENAME], [CONTRACT_FILENAME],
                 sha256_hash(current), sha256_hash(after)))
@@ -403,16 +411,28 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
                            decisions: dict,
                            ready_gates: list[dict]) -> tuple[list[dict],
                                                             dict[str, bytes]]:
-    """The path-migration map and the adoption evidence record.
+    """The path-migration map and the adoption evidence record, preceded by
+    the deletion of every evidence record an earlier adoption committed.
 
     Both are named by the plan id and neither exists yet, so each is a
     `write-file` whose `before` is null; the record carries the outcome, which
     is why these two are built after routing rather than beside the moves.
 
+    `verify` discovers exactly one record (D34), so a re-adoption supersedes
+    its predecessor instead of committing a second one beside it: each prior
+    candidate is a `delete-file`, which therefore needs the D16
+    acknowledgement. Earlier migration maps stay, because they are the archive
+    of paths that did move.
+
     Returned with the same `{target: bytes}` map `build_operations` returns,
     for the same reason: `apply` writes the very bytes this hashed.
     """
     records = adoption_records(plan_id)
+    superseded = sorted(
+        (path, object_id) for info in found.groups.values()
+        for path, object_id in info["members"]
+        if is_evidence_record_path(path)
+        and path != records["evidence_record"])
     map_bytes = document_bytes({
         "schema_version": 1,
         "migration_id": plan_id,
@@ -435,6 +455,9 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
         "path_migration_map": records["migration_map"],
     })
     return [
+        operation("delete-file", [path], [], object_hash(object_id), None)
+        for path, object_id in superseded
+    ] + [
         operation("write-file", [records["migration_map"]],
                   [records["migration_map"]], None, sha256_hash(map_bytes)),
         operation("write-file", [records["evidence_record"]],
