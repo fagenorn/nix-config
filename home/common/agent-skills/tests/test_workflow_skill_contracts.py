@@ -2303,7 +2303,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             normalized(gate_1),
             "git push -u origin <branch>",
-            'gh pr create --base <integrationBranch> --title "<title>" --body',
+            'gh pr create --repo <repoSlug> --base <integrationBranch> --head <branch> --title "<title>" --body',
             "Closes #<num>",
         )
         gate_2 = self.section(

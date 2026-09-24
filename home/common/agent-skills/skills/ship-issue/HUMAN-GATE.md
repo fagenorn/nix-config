@@ -37,8 +37,7 @@ git push -u origin <branch>
 ```
 
 ```
-gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
-## Summary
+gh pr create --repo <repoSlug> --base <integrationBranch> --head <branch> --title "<title>" --body "## Summary
 <2-4 bullets of what shipped>
 
 ## Spec
@@ -47,12 +46,10 @@ gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
 ## Plan
 <plan-path>
 
-Closes #<num>
-EOF
-)"
+Closes #<num>"
 ```
 
-Present the body fully rendered — the heredoc expanded, the resolved bindings
+Present the body fully rendered — the resolved bindings
 substituted, the `Closes #<num>` trailer present. Both commands are fully
 determined at this moment, so neither needs a later correction.
 
