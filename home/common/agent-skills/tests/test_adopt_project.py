@@ -335,7 +335,7 @@ def adopted_repo(home: Path, *, records: bool = True) -> Path:
 def nix_config_shape_repo(home: Path) -> Path:
     """This repository's shape at base: a valid schema-1 contract without
     `platform`, legacy `.claude/specs`, `.claude/plans` and `.out-of-scope`
-    trees, the legacy native binding config, and no runtime sentinel."""
+    trees, a `.claude/skills.config.json`, and no runtime sentinel."""
     root = init_repo()
     contract = fixture_contract()
     contract["bindings"]["paths"]["artifacts"] = {
@@ -354,8 +354,8 @@ def nix_config_shape_repo(home: Path) -> Path:
     write(root, ".claude/specs/x.md", "# spec x\n")
     write(root, ".claude/plans/y.md", "# plan y\n")
     write(root, ".out-of-scope/z.md", "# rejected z\n")
-    write(root, ".claude/skills.config.json", json.dumps(  # policy-gate-pattern
-        {"orchestration": {"agentBudgetMinutes": 180, "maxParallel": 2}},  # policy-gate-pattern
+    write(root, ".claude/skills.config.json", json.dumps(
+        {"orchestration": {"agentBudgetMinutes": 180, "maxParallel": 2}},
         indent=2) + "\n")
     write(root, ".gitignore", GITIGNORE_WITH_COMMENT)
     git(root, "remote", "add", "origin",
@@ -1007,11 +1007,11 @@ class TypedOperationTest(AdoptTestCase):
     def test_the_legacy_binding_config_gains_the_three_keys(self):
         root = nix_config_shape_repo(self.home)
         doc = self.ready_plan(root)
-        op = self.only_write(doc, ".claude/skills.config.json")  # policy-gate-pattern
+        op = self.only_write(doc, ".claude/skills.config.json")
         config = json.loads(
             (root / ".claude" / "skills.config.json").read_text("utf-8"))
-        config["specDir"] = ".agents/artifacts/specs"  # policy-gate-pattern
-        config["planDir"] = ".agents/artifacts/plans"  # policy-gate-pattern
+        config["specDir"] = ".agents/artifacts/specs"
+        config["planDir"] = ".agents/artifacts/plans"
         config["rejectionsDir"] = ".agents/knowledge/rejections"
         expected = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
         self.assertEqual(op["after"], sha256_hash(expected.encode("utf-8")))
@@ -1019,7 +1019,7 @@ class TypedOperationTest(AdoptTestCase):
 
     def test_only_the_declared_legacy_binding_config_is_rewritten(self):
         root = nix_config_shape_repo(self.home)
-        write(root, ".claude/other.config.json", json.dumps({"specDir": "x"}))  # policy-gate-pattern
+        write(root, ".claude/other.config.json", json.dumps({"specDir": "x"}))
         commit(root, "add a second config")
         doc = self.ready_plan(root)
         for op in doc["changes"]:

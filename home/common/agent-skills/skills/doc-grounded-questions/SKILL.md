@@ -21,7 +21,7 @@ For every clarifying question or option set you're about to surface, do this pas
 
 2. **Scan decision records.** Use only decision-record paths passed through the retained `bindings.paths.context` selection and allowed by `capabilities.knowledge.*`. List each passed directory, read titles, and open relevant records. A settled decision → state it and ask only whether anything has changed since.
 
-3. **Read the standards that apply.** Use the retained `bindings.paths.standards` list and `capabilities.knowledge.*`. If a proposed option violates a rule you found, drop it or say why you're surfacing it anyway.
+3. **Read the standards that apply.** Always read the machine-global layers, which are not project policy: `~/.agents/standards/the-bar.md` and its `stacks/*.md` shards matching the change's file extensions. Then read the project deltas from the retained `bindings.paths.standards` list, as `capabilities.knowledge.*` allows. If a proposed option violates a rule you found, drop it or say why you're surfacing it anyway.
 
 4. **Read architecture** from retained `bindings.paths.architecture` if the question touches more than one component. Past ~400 lines, read by governing section, never whole.
 

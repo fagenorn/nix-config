@@ -139,7 +139,7 @@ A new repo may begin with a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md
 
 ## Linting
 
-`~/.agents/bin/context-map-lint <repo-root>` checks that every term resolves to an area file that defines it, every file is within budget, every `governs:` glob matches something, and every relative link in the map resolves.
+`~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>`, given the map selected from the retained `bindings.paths.context` list, checks that every term resolves to an area file that defines it, every file is within budget, every `governs:` glob matches something, and every relative link in the map resolves.
 
 Once `docs/areas/` exists it also enforces the layout above:
 

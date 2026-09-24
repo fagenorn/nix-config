@@ -164,10 +164,10 @@ SECRET_PREFIXES = (".env",)
 # D30: the whole living-reference sweep. Nothing outside this tuple is ever a
 # rewrite target — a repository-wide reference scan is not mechanically
 # decidable and would risk re-pointing machine-global platform source.
-LEGACY_BINDING_CONFIGS = (".claude/skills.config.json",)  # policy-gate-pattern
+LEGACY_BINDING_CONFIGS = (".claude/skills.config.json",)
 LEGACY_BINDING_KEYS = (
-    ("specDir", ("artifacts", "specs")),  # policy-gate-pattern
-    ("planDir", ("artifacts", "plans")),  # policy-gate-pattern
+    ("specDir", ("artifacts", "specs")),
+    ("planDir", ("artifacts", "plans")),
     ("rejectionsDir", ("rejections", 0)),
 )
 
@@ -193,7 +193,7 @@ CLASSIFICATION_RULES = (
      ".agents/artifacts/plans"),
     (".out-of-scope", "prefix", "canonical-tracked", "move-canonical",
      ".agents/knowledge/rejections"),
-    (".claude/skills.config.json", "exact", "legacy-native-store",  # policy-gate-pattern
+    (".claude/skills.config.json", "exact", "legacy-native-store",
      "retain-product", None),
     (".claude/settings.local.json", "exact", "legacy-native-store",
      "retain-product", None),

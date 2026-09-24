@@ -59,7 +59,7 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     """This repository's shape at base, with cheap verification commands.
 
     A valid schema-1 contract without `platform`, the three legacy artifact
-    trees, the legacy native binding config, a `.gitignore` still carrying the
+    trees, a `.claude/skills.config.json`, a `.gitignore` still carrying the
     runtime pattern, and no runtime sentinel — the `reconcile` shape whose plan
     reaches `ready`.
     """
@@ -87,8 +87,8 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     write(root, "home/common/agent-skills/standards/bar.md", "# the bar\n")
     for old in MOVED:
         write(root, old, f"# {old}\n")
-    write(root, ".claude/skills.config.json", json.dumps(  # policy-gate-pattern
-        {"orchestration": {"agentBudgetMinutes": 180, "maxParallel": 2}},  # policy-gate-pattern
+    write(root, ".claude/skills.config.json", json.dumps(
+        {"orchestration": {"agentBudgetMinutes": 180, "maxParallel": 2}},
         indent=2) + "\n")
     write(root, ".gitignore", GITIGNORE_WITH_COMMENT)
     git(root, "remote", "add", "origin",
@@ -419,8 +419,8 @@ class ApplyRefusalTest(ApplyTestCase):
         """The living-reference rewrite merges into the bytes on disk, so the
         edit would be carried into the adoption commit the same way."""
         root = apply_repo(self.home)
-        write(root, ".claude/skills.config.json", json.dumps(  # policy-gate-pattern
-            {"orchestration": {"agentBudgetMinutes": 60, "maxParallel": 2}},  # policy-gate-pattern
+        write(root, ".claude/skills.config.json", json.dumps(
+            {"orchestration": {"agentBudgetMinutes": 60, "maxParallel": 2}},
             indent=2) + "\n")
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
         self.refuse(root, plan_id, "dirty_worktree")
@@ -525,7 +525,7 @@ class DeletionAcknowledgementTest(ApplyTestCase):
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
         document = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
         document["changes"].append({
-            "op": "delete-file", "sources": [".claude/skills.config.json"],  # policy-gate-pattern
+            "op": "delete-file", "sources": [".claude/skills.config.json"],
             "targets": [], "before": "sha256:" + "0" * 64, "after": None,
             "approval_class": "destructive"})
         self.rewrite_stored_plan(plan_id, document)

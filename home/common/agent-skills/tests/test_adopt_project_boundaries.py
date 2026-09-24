@@ -283,9 +283,9 @@ class SemanticRewriteTest(BoundaryTestCase):
     def test_a_reformatted_legacy_config_in_agreement_is_no_change(self):
         root = adopted_repo(self.home)
         paths = self.contract_of(root)["bindings"]["paths"]
-        write(root, ".claude/skills.config.json", json.dumps({  # policy-gate-pattern
-            "specDir": paths["artifacts"]["specs"],  # policy-gate-pattern
-            "planDir": paths["artifacts"]["plans"],  # policy-gate-pattern
+        write(root, ".claude/skills.config.json", json.dumps({
+            "specDir": paths["artifacts"]["specs"],
+            "planDir": paths["artifacts"]["plans"],
             "rejectionsDir": paths["rejections"][0],
         }) + "\n")
         commit(root, "a legacy config already in agreement")

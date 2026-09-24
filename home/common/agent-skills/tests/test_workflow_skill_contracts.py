@@ -239,8 +239,9 @@ RETAINED_SUPPORT_CONTRACTS = {
 }
 
 # These are deliberate test patterns, not permitted policy text. The tracked
-# source scan below exempts only their declaration lines in this file so it can
-# inspect every other test line without a self-match.
+# source scan below honors the `# policy-gate-pattern` line marker only in the
+# gate test files named in POLICY_GATE_PATTERN_FILES, where the legacy names are
+# the patterns under test; anywhere else the marker exempts nothing.
 LEGACY_POLICY_SURFACE = (  # policy-gate-pattern
     "resolve-bindings", ".claude/skills.config.json", "unsetGithubToken",  # policy-gate-pattern
     "projectHints", "docPaths", "specDir", "planDir", "repoSlug",  # policy-gate-pattern
@@ -250,6 +251,33 @@ LEGACY_POLICY_SURFACE = (  # policy-gate-pattern
     "verify.lintFix", "review.criticalPaths", "mergeSubjectTemplate",  # policy-gate-pattern
     "worktreePrefix", "branchPattern", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
 )
+
+POLICY_GATE_PATTERN_FILES = frozenset({
+    "home/common/agent-skills/tests/test_resolve_project.py",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py",
+})
+
+# adopt-project (https://github.com/fagenorn/nix-config/issues/148) migrates a
+# legacy checkout onto the strict contract, so it must name the legacy store and
+# keys it reads and rewrites. Those are migration inputs, not policy consumers
+# (spec decision D12). The scan exempts exactly these tokens in exactly these
+# files, and an entry that no longer matches fails it, so the allowance cannot
+# outlive its use or widen silently.
+LEGACY_MIGRATION_INPUTS = {
+    "home/common/agent-skills/scripts/adopt_inspection.py": frozenset({
+        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
+    }),
+    "home/common/agent-skills/tests/test_adopt_apply.py": frozenset({
+        ".claude/skills.config.json", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
+    }),
+    "home/common/agent-skills/tests/test_adopt_project.py": frozenset({
+        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
+        "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
+    }),
+    "home/common/agent-skills/tests/test_adopt_project_boundaries.py": frozenset({
+        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
+    }),
+}
 
 SUPPORT_POLICY_FORBIDDEN = (
     "resolve-project resolve", *LEGACY_POLICY_SURFACE, "auto-detect",
@@ -376,6 +404,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         legacy = re.compile("|".join(
             re.escape(name) for name in LEGACY_POLICY_SURFACE))
         matches = []
+        migration_inputs_seen = {name: set() for name in LEGACY_MIGRATION_INPUTS}
         for encoded in tracked:
             if not encoded:
                 continue
@@ -392,13 +421,22 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                 "review-package", "sdd-workspace", "workflow-state",
             }:
                 continue
+            name = relative.as_posix()
+            honors_marker = name in POLICY_GATE_PATTERN_FILES
+            migration_inputs = LEGACY_MIGRATION_INPUTS.get(name, frozenset())
             for line_number, line in enumerate(
                     path.read_text(encoding="utf-8").splitlines(), 1):
-                if "# policy-gate-pattern" in line:
+                if honors_marker and "# policy-gate-pattern" in line:
                     continue
-                if legacy.search(line):
-                    matches.append(f"{relative}:{line_number}")
+                for match in legacy.finditer(line):
+                    token = match.group(0)
+                    if token in migration_inputs:
+                        migration_inputs_seen[name].add(token)
+                    else:
+                        matches.append(f"{relative}:{line_number}: {token}")
         self.assertEqual(matches, [])
+        self.assertEqual(migration_inputs_seen,
+                         {name: set(tokens) for name, tokens in LEGACY_MIGRATION_INPUTS.items()})
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
         self.assertFalse((REPO_ROOT / "home/common/agent-skills/scripts/resolve-bindings").exists())  # policy-gate-pattern
         self.assertFalse((REPO_ROOT / "home/common/agent-skills/tests/test_resolve_bindings.py").exists())  # policy-gate-pattern
@@ -581,6 +619,40 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                 "sort(", "filesystem search", "first match wins", "default map location",
             ):
                 self.assertNotIn(forbidden, contract)
+
+    def test_context_map_lint_invocations_pass_root_and_selected_map(self):
+        invocation = re.compile(r"`(?:~/\.agents/bin/)?context-map-lint( [^`]*)`")
+        found = []
+        for root in (REPO_ROOT / "home/common/agent-skills/skills",
+                     REPO_ROOT / "home/common/claude-code/skills"):
+            for path in sorted(root.rglob("*.md")):
+                for match in invocation.finditer(path.read_text(encoding="utf-8")):
+                    arguments = match.group(1)
+                    with self.subTest(path=path.relative_to(REPO_ROOT), arguments=arguments):
+                        found.append(path.relative_to(REPO_ROOT).as_posix())
+                        self.assertRegex(arguments, r"^ --repo-root \S.* --context-map \S")
+        self.assertIn("home/common/agent-skills/skills/grill-with-docs/SKILL.md", found)
+        self.assertIn("home/common/agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md", found)
+
+    def test_build_delivery_callers_name_the_sanctioned_resolution_exception(self):
+        exception = ("only sanctioned exception is `workflow-state build-delivery`, "
+                     "which performs its own sealed, read-only resolution")
+        callers = []
+        for root in (REPO_ROOT / "home/common/agent-skills/skills",
+                     REPO_ROOT / "home/common/claude-code/skills"):
+            for path in sorted(root.rglob("*.md")):
+                text = normalized(path.read_text(encoding="utf-8"))
+                if "build-delivery" not in text:
+                    continue
+                callers.append(path.relative_to(REPO_ROOT).as_posix())
+                with self.subTest(path=path.relative_to(REPO_ROOT)):
+                    self.assertIn(exception, text)
+        self.assertEqual(sorted(callers), [
+            "home/common/agent-skills/skills/from-issue/SKILL.md",
+            "home/common/agent-skills/skills/from-issue/ship-handoff.md",
+            "home/common/agent-skills/skills/ship-issue/SKILL.md",
+            "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
+        ])
 
 
 def assert_configured_code_review_pair(case, owner, support):

@@ -90,7 +90,7 @@ Two disciplines make this sustainable — both are same-commit obligations, neve
 3. Add a row to the map's `## Areas` table: name, link, one-line gist, and `governs:` globs. Narrow the old area's globs to match what it still owns.
 4. Repoint the moved terms' rows in the map's `## Terms` table, and add any new cross-area edge to `## Relationships`.
 
-Then run `~/.agents/bin/context-map-lint .` — it catches a term left pointing at the old area, a glob matching nothing, and a file still over budget.
+Then run `~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>`, where the map is the one selected from the retained `bindings.paths.context` list (no selected map means no linter run) — it catches a term left pointing at the old area, a glob matching nothing, and a file still over budget.
 
 ### Offer ADRs sparingly
 
