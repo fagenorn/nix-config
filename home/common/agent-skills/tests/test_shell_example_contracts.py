@@ -8,6 +8,11 @@ command with literal targets, so an example refuses when it carries one of the
 closed forms in FORMS: a chain, a pipe, a redirect, a heredoc, or text the
 scanner cannot close (unparseable, fail-closed). The one sanctioned chain is the
 lifecycle guard's own token-scrub prefix, read from the guard, never restated.
+The one sanctioned pipeline is a lifecycle helper call: a pipeline whose every
+segment is headed by a helper that `default.nix`'s permission allow list admits
+whole, whose heredocs are `<<` with a quoted delimiter, and which carries no
+chain, redirect or command substitution; the helpers are read from that allow
+list, never restated.
 
 `refused_examples(document_text)` is the one boundary: every sweep and every
 fixture below calls it on a document's text and nothing else produces findings.
@@ -16,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import sys
+from typing import NamedTuple
 import unittest
 
 # unittest loads suites by path, so the directory is not a package; the
@@ -67,7 +73,21 @@ def guard_prefix(nix_text):
     return matches[0]
 
 
-SANCTIONED_PREFIX = guard_prefix(GUARD_SOURCE.read_text(encoding="utf-8"))
+# A single-word allow entry admits a command whole, whatever its arguments.
+WHOLE_ALLOW_ENTRY = re.compile(r'^\s*"Bash\(([^\s()"]+):\*\)"', re.M)
+
+
+def whole_allowed_helpers(nix_text):
+    """Basenames of the guard's single-word `"Bash(<word>:*)"` allow entries."""
+    words = WHOLE_ALLOW_ENTRY.findall(nix_text)
+    if not words:
+        raise ValueError(f"expected a single-word Bash allow entry in {GUARD_SOURCE}, found none")
+    return frozenset(word.rsplit("/", 1)[-1] for word in words)
+
+
+_GUARD_TEXT = GUARD_SOURCE.read_text(encoding="utf-8")
+SANCTIONED_PREFIX = guard_prefix(_GUARD_TEXT)
+LIFECYCLE_HELPERS = whole_allowed_helpers(_GUARD_TEXT)
 
 
 @dataclass(frozen=True)
@@ -122,11 +142,23 @@ _OPERATORS = (
 )
 
 
+class _Scan(NamedTuple):
+    firsts: dict  # form → line offset of its first operator
+    is_open: bool  # the text cannot be closed as it stands
+    substituted: bool  # a command substitution opened: `$(` or an opening backtick
+    heredocs: list  # per heredoc operator: is it `<<` with a quoted delimiter
+    pipes: list  # per pipe operator: (is it a plain `|`, text offset just past it)
+
+
 def _scan(text):
-    """(form → line offset of its first operator, whether the text is still open)."""
+    """The _Scan of one example's text: its forms, open flag, substitutions,
+    heredoc quoting and pipe positions."""
     firsts = {}
     stack = ["top"]
     pending = []  # heredoc delimiters awaiting their bodies: (word, strip_tabs)
+    heredocs = []
+    pipes = []
+    substituted = False
     offset = 0
     trailing = False
     i = 0
@@ -134,6 +166,9 @@ def _scan(text):
 
     def found(form):
         firsts.setdefault(form, offset)
+
+    def result(is_open):
+        return _Scan(firsts, is_open, substituted, heredocs, pipes)
 
     while i < n:
         char = text[i]
@@ -147,7 +182,7 @@ def _scan(text):
                 while pending:
                     word, strip_tabs = pending[0]
                     if consumed >= len(lines):
-                        return firsts, True
+                        return result(True)
                     body_line = lines[consumed]
                     consumed += 1
                     if (body_line.lstrip("\t") if strip_tabs else body_line) == word:
@@ -162,7 +197,7 @@ def _scan(text):
             continue
         if char == "\\":
             if i + 1 >= n:
-                return firsts, True
+                return result(True)
             if text[i + 1] == "\n":
                 offset += 1
             elif top != "dquote":
@@ -178,12 +213,14 @@ def _scan(text):
                 i += 3
             elif text.startswith("$(", i):
                 stack.append("subst")
+                substituted = True
                 i += 2
             elif text.startswith("${", i):
                 stack.append("param")
                 i += 2
             elif char == "`":
                 stack.append("backtick")
+                substituted = True
                 i += 1
             else:
                 i += 1
@@ -194,7 +231,7 @@ def _scan(text):
         if char == "'":
             close = text.find("'", i + 1)
             if close == -1:
-                return firsts, True
+                return result(True)
             offset += text.count("\n", i, close)
             trailing = False
             i = close + 1
@@ -209,6 +246,7 @@ def _scan(text):
                 stack.pop()
             else:
                 stack.append("backtick")
+                substituted = True
             trailing = False
             i += 1
             continue
@@ -219,6 +257,7 @@ def _scan(text):
             continue
         if text.startswith("$(", i):
             stack.append("subst")
+            substituted = True
             trailing = False
             i += 2
             continue
@@ -270,35 +309,53 @@ def _scan(text):
         found(form)
         i += len(operator)
         trailing = operator in _CONTINUING
-        if operator in ("<(", ">("):
+        if form == "pipe":
+            pipes.append((operator == "|", i))
+        if operator == "<<<":
+            heredocs.append(False)
+        elif operator in ("<(", ">("):
             stack.append("procsub")
         elif operator in (">", "<", ">>") and text.startswith("&", i):
             i += 1  # `>&` and `<&` duplicate a descriptor: still one redirect
         elif operator in ("<<", "<<-"):
             delimiter = HEREDOC_DELIMITER.match(text, i)
+            heredocs.append(
+                operator == "<<" and delimiter is not None
+                and (delimiter.group(1) is not None or delimiter.group(2) is not None)
+            )
             if delimiter is None:
-                return firsts, True
+                return result(True)
             word = next(group for group in delimiter.groups() if group is not None)
             pending.append((word, operator == "<<-"))
             trailing = False
             i = delimiter.end()
-    is_open = len(stack) > 1 or bool(pending) or trailing
-    return firsts, is_open
+    return result(len(stack) > 1 or bool(pending) or trailing)
 
 
 def _reduced(text):
-    """The example text the scanner sees, or None when it is only the sanctioned prefix."""
-    if text.strip() == SANCTIONED_PREFIX.strip():
-        return None
+    """The example text the scanner sees: a leading sanctioned prefix stripped when
+    a command follows it on the same line, placeholders substituted."""
     stripped = text.lstrip()
     if stripped.startswith(SANCTIONED_PREFIX):
-        text = stripped[len(SANCTIONED_PREFIX):]
+        remainder = stripped[len(SANCTIONED_PREFIX):]
+        if remainder.split("\n", 1)[0].strip():
+            text = remainder
     return PLACEHOLDER.sub("PH", text)
 
 
 def _still_open(text):
-    reduced = _reduced(text)
-    return reduced is not None and _scan(reduced)[1]
+    return _scan(_reduced(text)).is_open
+
+
+def _is_lifecycle_call(reduced, scan):
+    """One pipeline of whole-allowed helpers fed only by quoted `<<` heredocs,
+    with no chain, redirect or command substitution (D23, D26)."""
+    if "chain" in scan.firsts or "redirect" in scan.firsts or scan.substituted:
+        return False
+    if not all(scan.heredocs) or not all(plain for plain, _ in scan.pipes):
+        return False
+    starts = [0] + [end for _, end in scan.pipes]
+    return all(command_head(reduced[start:]) in LIFECYCLE_HELPERS for start in starts)
 
 
 def _classify(numbered_lines):
@@ -306,14 +363,13 @@ def _classify(numbered_lines):
     numbers = [number for number, _ in numbered_lines]
     text = "\n".join(line for _, line in numbered_lines)
     reduced = _reduced(text)
-    if reduced is None:
-        return ()
-    firsts, is_open = _scan(reduced)
-    if is_open:
+    scan = _scan(reduced)
+    if scan.is_open:
         return (Finding(numbers[0], "unparseable", text),)
-    return tuple(
-        Finding(numbers[firsts[form]], form, text) for form in FORMS if form in firsts
-    )
+    forms = [form for form in FORMS if form in scan.firsts]
+    if _is_lifecycle_call(reduced, scan):
+        forms = [form for form in forms if form not in ("pipe", "heredoc")]
+    return tuple(Finding(numbers[scan.firsts[form]], form, text) for form in forms)
 
 
 def _calls(body, ambiguous):
@@ -334,6 +390,19 @@ def _calls(body, ambiguous):
         yield call
 
 
+class _OpenFence(NamedTuple):
+    run: int  # backtick run length of the opener
+    info: str  # first word of the opener's info string, or ""
+    opener_line: int
+    opener_text: str
+    indent: int  # leading spaces on the opener line
+    body: list  # (line number, line de-indented by up to `indent` spaces)
+
+
+def _leading_spaces(line):
+    return len(line) - len(line.lstrip(" "))
+
+
 def _examples(document_text):
     """Every example with its sort position, plus unclosed-fence findings.
 
@@ -341,29 +410,36 @@ def _examples(document_text):
     numbered lines and whether a shell fence holds it, kind "unclosed" carries
     a ready Finding.
     """
-    fences = []  # open fences: [run length, info word, opener line, opener text, body]
+    fences = []  # open _OpenFence entries, innermost last
     for number, line in enumerate(document_text.splitlines(), 1):
         fence = FENCE.match(line)
         if fence is not None:
             run, info = len(fence.group(1)), fence.group(2).strip()
-            if fences and not info and run >= fences[-1][0]:
-                _, word, _, _, body = fences.pop()
-                if word in SHELL_FENCE_INFO or word in AMBIGUOUS_FENCE_INFO:
-                    shell = word in SHELL_FENCE_INFO
-                    for call in _calls(body, ambiguous=not shell):
+            if fences and not info and run >= fences[-1].run:
+                closed = fences.pop()
+                if closed.info in SHELL_FENCE_INFO or closed.info in AMBIGUOUS_FENCE_INFO:
+                    shell = closed.info in SHELL_FENCE_INFO
+                    for call in _calls(closed.body, ambiguous=not shell):
                         yield (call[0][0], 0), "call", (call, shell)
             else:
                 word = info.split()[0] if info else ""
-                fences.append([run, word, number, line, []])
+                fences.append(_OpenFence(run, word, number, line, _leading_spaces(line), []))
             continue
         if fences:
-            fences[-1][4].append((number, line))
+            innermost = fences[-1]
+            cut = min(innermost.indent, _leading_spaces(line))
+            innermost.body.append((number, line[cut:]))
             continue
         for span in INLINE_CODE.finditer(line):
-            if command_head(span.group(1)) in COMMAND_VOCABULARY:
-                yield (number, span.start()), "call", ([(number, span.group(1))], False)
-    for _, _, opener_line, opener_text, _ in fences:
-        yield (opener_line, 0), "unclosed", Finding(opener_line, "unparseable", opener_text)
+            example = span.group(1)
+            # A span holding only the sanctioned prefix names it; it runs nothing (D5, D26).
+            if example.strip() == SANCTIONED_PREFIX.strip():
+                continue
+            if command_head(example) in COMMAND_VOCABULARY:
+                yield (number, span.start()), "call", ([(number, example)], False)
+    for fence in fences:
+        yield (fence.opener_line, 0), "unclosed", Finding(
+            fence.opener_line, "unparseable", fence.opener_text)
 
 
 def refused_examples(document_text):
@@ -585,6 +661,109 @@ class RefusedFormFixtureTest(unittest.TestCase):
         )
         self.assertEqual(_lines_and_forms(document), [(first, "chain")])
 
+    def test_the_bare_prefix_keeps_a_fence_call_open(self):
+        prefix_line = SANCTIONED_PREFIX.rstrip()
+        cases = {
+            "prefix line then a command": (
+                f"```bash\n{prefix_line}\n"
+                "gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch\n```",
+                [(1, "chain")]),
+            "prefix line ends the fence": (f"```bash\n{prefix_line}\n```", [(1, "unparseable")]),
+            # The literal with its trailing space, as an editor that keeps
+            # trailing whitespace would save it (per D27).
+            "spaced prefix line then a command": (
+                f"```bash\n{SANCTIONED_PREFIX}\n"
+                "gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch\n```",
+                [(1, "chain")]),
+            "spaced prefix line ends the fence": (
+                f"```bash\n{SANCTIONED_PREFIX}\n```", [(1, "unparseable")]),
+        }
+        for name, (block, expected) in cases.items():
+            with self.subTest(case=name):
+                document, first = _appended(self.host, block)
+                self.assertEqual(_lines_and_forms(document),
+                                 [(first + offset, form) for offset, form in expected])
+
+
+# ship-issue/SKILL.md "Delivery loop" checkpoint call, verbatim at a311fda:
+# three helper segments, a quoted heredoc feeding the first (per D23).
+CHECKPOINT_CALL = """artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
+<ship-checkpoint/v2 JSON>
+EOF"""
+PATH_NAMED_CALL = ("~/.agents/bin/workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> "
+                   "--now <utc> | ~/.agents/bin/artifact-budget validate-report --boundary workflow-response --input -")
+# Each variant misses one D23/D26 condition, so the call is classified in full.
+LIFECYCLE_VARIANTS = (
+    ("non-helper segment",
+     "| artifact-budget validate-report --boundary workflow-response --input -", "| jq -r .state",
+     ("pipe", "heredoc")),
+    ("chain", "--boundary workflow-response --input -",
+     "--boundary workflow-response --input - && git status", ("chain", "pipe", "heredoc")),
+    ("redirect", "--boundary workflow-response --input -",
+     "--boundary workflow-response --input - > reply.json", ("pipe", "redirect", "heredoc")),
+    ("unquoted delimiter", "<<'EOF'", "<<EOF", ("pipe", "heredoc")),
+    ("substitution argument", "--now <utc>", '--now "$(date -u +%FT%TZ)"', ("pipe", "heredoc")),
+    ("escaped delimiter", "<<'EOF'", "<<\\EOF", ("pipe", "heredoc")),
+    ("stderr pipe", "<<'EOF' | workflow-state", "<<'EOF' |& workflow-state", ("pipe", "heredoc")),
+    ("dash heredoc", "<<'EOF'", "<<-'EOF'", ("pipe", "heredoc")),
+    ("here-string", "<<'EOF'", "<<< text", ("pipe", "heredoc")),
+    ("backtick argument", "--now <utc>", "--now `date -u`", ("pipe", "heredoc")),
+)
+# The same call with its delimiter double-quoted: still sanctioned (per D23, D27).
+DQUOTED_CHECKPOINT_CALL = CHECKPOINT_CALL.replace("<<'EOF'", '<<"EOF"')
+
+
+class LifecycleHelperCallTest(unittest.TestCase):
+    def setUp(self):
+        self.host = _host()
+
+    def test_single_word_allow_entries_name_the_helpers_by_basename(self):
+        text = ('        "Bash(git fetch:*)"\n'
+                '        "Bash(workflow-state:*)"\n'
+                '        "Bash(~/.agents/bin/workflow-state:*)"\n')
+        self.assertEqual(whole_allowed_helpers(text), frozenset({"workflow-state"}))
+
+    def test_no_single_word_allow_entry_fails_loud(self):
+        with self.assertRaises(ValueError):
+            whole_allowed_helpers('        "Bash(git fetch:*)"\n')
+
+    def test_sanctioned_calls_yield_nothing_in_every_region(self):
+        for name, call in (("checkpoint", CHECKPOINT_CALL), ("path-named", PATH_NAMED_CALL),
+                           ("double-quoted delimiter", DQUOTED_CHECKPOINT_CALL)):
+            for region in _regions_for((call,)):
+                with self.subTest(call=name, region=region):
+                    document, _ = _appended(self.host, _wrap(region, (call,)))
+                    self.assertEqual(refused_examples(document), ())
+
+    def test_a_call_missing_any_condition_is_classified_in_full(self):
+        for name, old, new, forms in LIFECYCLE_VARIANTS:
+            self.assertEqual(CHECKPOINT_CALL.count(old), 1, name)
+            call = CHECKPOINT_CALL.replace(old, new)
+            for region in _regions_for((call,)):
+                with self.subTest(variant=name, region=region):
+                    document, first = _appended(self.host, _wrap(region, (call,)))
+                    self.assertEqual(_lines_and_forms(document),
+                                     [(first + 1, form) for form in forms])
+
+
+class FenceIndentationTest(unittest.TestCase):
+    """A fence body is read de-indented by its opener's indentation (per D24)."""
+
+    def setUp(self):
+        self.host = _host()
+
+    def test_a_list_item_fence_scans_like_a_top_level_one(self):
+        block = ("1. Commit it:\n\n   ```bash\n   git commit -F - <<'EOF'\n"
+                 "   message\n   EOF\n   git status\n   ```")
+        document, first = _appended(self.host, block)
+        self.assertEqual(_lines_and_forms(document), [(first + 3, "heredoc")])
+
+    def test_an_over_indented_terminator_is_unparseable(self):
+        block = ("1. Commit it:\n\n   ```bash\n   git commit -F - <<'EOF'\n"
+                 "   message\n     EOF\n   ```")
+        document, first = _appended(self.host, block)
+        self.assertEqual(_lines_and_forms(document), [(first + 3, "unparseable")])
+
 
 class SanctionedPrefixTest(unittest.TestCase):
     ASSIGNMENT = '      UNSET_GITHUB_TOKEN_PREFIX = "scrub && "\n'
@@ -634,8 +813,8 @@ class WorktreesGuidanceTest(unittest.TestCase):
     def test_isolation_probe_is_one_rev_parse_with_the_no_line_note(self):
         section = self.section("## Detect existing isolation")
         self.assertIn(
-            "```bash\ngit rev-parse --git-dir --git-common-dir "
-            "--show-superproject-working-tree\n```",
+            "```bash\ngit rev-parse --path-format=absolute --git-dir "
+            "--git-common-dir --show-superproject-working-tree\n```",
             section,
         )
         self.assertIn("no line at all", " ".join(section.split()))
