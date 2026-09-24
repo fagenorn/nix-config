@@ -849,7 +849,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             }, now=now)
 
     def finish_summary(self, *, contract, custody, state, historical, observations,
-                       now):
+                       now, ok=True):
         """Finish ``custody`` with one ``ship-summary/v2``."""
         return self.delivery_report("finish", {
             "interface_version": 2, "issue": contract["issue"], "state": state,
@@ -858,7 +858,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "delivery_observations": observations, "authority_observations": [],
             "reevaluation_evidence": [], "detail_state": "none", "report_path": None,
             "notes": "",
-        }, now=now)
+        }, now=now, ok=ok)
 
     def concurrent_finish(self, results, *, now):
         current = self.read_state()
@@ -1548,11 +1548,15 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         contract, intent, custody = self.spawn_delivery(issue, now=times[0])
         return self.complete_delivery(contract, intent, custody, times=times)
 
-    def deliver_by_direct_owner(self, issue, *, times):
-        """A direct owner acquires ``issue`` and delivers it; return its request."""
+    def acquire_delivery(self, issue, *, now):
+        """A direct owner acquires ``issue`` under an every-stage contract.
+
+        Returns the acquiring request, the contract, its intent and the custody;
+        the direct run becomes this test's ``run_id``.
+        """
         contract, intent = self.delivery_contract(issue, all_stages=True)
         request = self.direct_request(
-            issue=issue, now=times[0], tracker=self.tracker_fact(issue),
+            issue=issue, now=now, tracker=self.tracker_fact(issue),
             worktree=self.worktree_fact(issue, candidate={
                 "path": str(self.root / f"worktree-issue-{issue}"),
                 "state": "absent"}))
@@ -1563,17 +1567,59 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.run_id = owner["run_id"]
         custody = {"kind": "implementation", "attempt": owner["attempt"],
                    "launch": 1, "action_id": owner["action_id"]}
+        return request, contract, intent, custody
+
+    def deliver_by_direct_owner(self, issue, *, times):
+        """A direct owner acquires ``issue`` and delivers it; return its request."""
+        request, contract, intent, custody = self.acquire_delivery(issue, now=times[0])
         self.complete_delivery(contract, intent, custody, times=times)
         return request
 
-    def complete_delivery(self, contract, intent, custody, *, times):
-        """Checkpoint every stage under ``custody``, then finish it delivered."""
+    def unfinished_row(self, issue, state):
+        """The legacy row an owner reports when it ends before delivery does."""
+        return {**self.merged_result(issue), "state": state, "merge_sha": None,
+                "issue_closed": False, "notes": f"owner {state} after selection"}
+
+    def hand_to_remainder(self, contract, intent, custody, *, row, times):
+        """The owner ends with ``row`` after selection; its remainder takes every
+        other stage and is left ready to finish. Return the remainder custody."""
+        self.checkpoint_stages(contract=contract, intent=intent, custody=custody,
+                               stages=["select"], times=times[1:2])
+        handed = self.finish_summary(
+            contract=contract, custody=custody, state="terminal_failed",
+            historical=row, observations=[], now=times[2])
+        self.assertEqual(handed["kind"], "delivery_remainder")
+        remainder = handed["custody"]
+        self.checkpoint_stages(contract=contract, intent=intent, custody=remainder,
+                               stages=["publish", "open", "merge"], times=times[3:6])
+        return remainder
+
+    def deliver_through_remainder(self, contract, intent, custody, *, row, times):
+        """The owner ends with ``row`` after selection; its remainder delivers the rest."""
+        remainder = self.hand_to_remainder(contract, intent, custody, row=row,
+                                           times=times)
+        finished = self.finish_summary(
+            contract=contract, custody=remainder, state="delivery_complete",
+            historical=self.merged_result(contract["issue"]),
+            observations=[self.delivery_observations(contract)["delivered"]],
+            now=times[6])
+        self.assertEqual((finished["kind"], finished["state"]),
+                         ("delivery_complete", "delivery_complete"))
+        return remainder
+
+    def complete_delivery(self, contract, intent, custody, *, times,
+                          historical=UNOBSERVED):
+        """Checkpoint every stage under ``custody``, then finish it delivered.
+
+        ``historical`` defaults to the legacy ``merged`` row the skills send.
+        """
         self.checkpoint_stages(contract=contract, intent=intent, custody=custody,
                                stages=["select", "publish", "open", "merge"],
                                times=times[1:5])
         finished = self.finish_summary(
             contract=contract, custody=custody, state="delivery_complete",
-            historical=self.merged_result(contract["issue"]),
+            historical=(self.merged_result(contract["issue"])
+                        if historical is self.UNOBSERVED else historical),
             observations=[self.delivery_observations(contract)["delivered"]],
             now=times[5])
         self.assertEqual((finished["kind"], finished["state"]),
@@ -1679,6 +1725,134 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual((replayed["kind"], replayed["run_id"], replayed["reason"],
                           replayed["result"]),
                          ("terminal", self.run_id, "merged", self.merged_result(73)))
+        self.assertEqual(self.state_path.read_bytes(), delivered)
+
+    # ``stopped`` is run orch-1635-1642's issue 1637; ``failed`` leaves the
+    # implementation attempt retryable, so only delivery completion stops a
+    # sweep from retrying the delivered issue into its unused candidate.
+    REMAINDER_ROWS = ((47, "stopped"), (51, "failed"))
+
+    def deliver_remainder_run(self, issue, row_state):
+        """A control run whose ``issue`` a remainder delivered; return its finish time."""
+        moments = [f"2026-09-21T00:0{minute}:00Z" for minute in range(7)]
+        self.run_id = f"remainder-{row_state}"
+        self.init_run(now=moments[0])
+        contract, intent, custody = self.spawn_delivery(issue, now=moments[0])
+        self.deliver_through_remainder(
+            contract, intent, custody, row=self.unfinished_row(issue, row_state),
+            times=moments)
+        self.assertEqual(self.init_run(now=moments[6])["requirements"], [])
+        return moments[6]
+
+    def assert_delivered_sweeps_are_inert(self, issue):
+        """A free slot, an open tracker, an unused candidate and every record's
+        deadline passing all leave a delivered issue untouched."""
+        ledger = self.read_state()["issues"][str(issue)]
+        past_deadline = "2026-09-21T04:00:00Z"
+        self.assertTrue(all(record["deadline_at"] < past_deadline for record in
+                            ledger["attempts"] + ledger["delivery_remainders"]))
+        for now in ("2026-09-21T00:10:00Z", past_deadline):
+            before = self.state_path.read_bytes()
+            response = json.loads(self.control_raw(request=self.sweep_request(
+                now=now, issues=[issue], max_parallel=2,
+                tracker=[self.tracker_fact(issue)],
+                worktrees=[self.worktree_fact(issue, candidate={
+                    "path": str(self.root / f"worktree-issue-{issue}-orchestrated"),
+                    "state": "absent"})])).stdout)
+            self.assertEqual(response["deltas"], [])
+            self.assertEqual(response["actions"], [{"id": "finalize", "kind": "finalize"}])
+            self.assertEqual(response["summaries"][0]["attempt"], None)
+            self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_a_remainder_that_delivers_is_closed_and_control_leaves_it(self):
+        # Run orch-1635-1642: 1637's remainder finished delivery_complete yet
+        # stayed `active`, so the first sweep with a free slot re-planned it as
+        # `idle` in the resume pass and crashed on KeyError: 'idle'.
+        for issue, row_state in self.REMAINDER_ROWS:
+            with self.subTest(implementation_row=row_state):
+                finished_at = self.deliver_remainder_run(issue, row_state)
+                ledger = self.read_state()["issues"][str(issue)]
+                self.assertEqual(ledger["attempts"][-1]["state"], row_state)
+                closed = ledger["delivery_remainders"][-1]
+                self.assertEqual(
+                    {name: closed[name] for name in
+                     ("state", "result", "result_source", "finished_at", "blocked_on")},
+                    {"state": "merged", "result": self.merged_result(issue),
+                     "result_source": "owner", "finished_at": finished_at,
+                     "blocked_on": None})
+                self.assert_delivered_sweeps_are_inert(issue)
+
+    def test_a_delivering_remainder_summary_must_carry_its_legacy_row(self):
+        # A terminal remainder needs a result, as a failed remainder's does.
+        moments = [f"2026-09-21T00:0{minute}:00Z" for minute in range(7)]
+        self.init_run(now=moments[0])
+        contract, intent, custody = self.spawn_delivery(47, now=moments[0])
+        remainder = self.hand_to_remainder(
+            contract, intent, custody, row=self.unfinished_row(47, "stopped"),
+            times=moments)
+        before = self.state_path.read_bytes()
+        delivered = self.delivery_observations(contract)["delivered"]
+
+        refused = self.finish_summary(
+            contract=contract, custody=remainder, state="delivery_complete",
+            historical=None, observations=[delivered], now=moments[6], ok=False)
+
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertIn("delivery finish refused", refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_control_leaves_a_delivered_remainder_the_old_finish_left_active(self):
+        for issue, row_state in self.REMAINDER_ROWS:
+            with self.subTest(implementation_row=row_state):
+                self.deliver_remainder_run(issue, row_state)
+                state = self.read_state()
+                stale = state["issues"][str(issue)]["delivery_remainders"][-1]
+                stale.update(state="active", result=None, result_source=None,
+                             finished_at=None)
+                self.write_state(state)
+                self.assert_delivered_sweeps_are_inert(issue)
+
+    def test_an_owner_delivery_without_a_legacy_row_is_left_alone(self):
+        # finish accepts a delivery_complete summary with no legacy row and
+        # then leaves the owner's attempt `active`: only delivery completion
+        # keeps a sweep from reaping it and a re-entry from resuming it.
+        moments = [f"2026-09-21T00:0{minute}:00Z" for minute in range(6)]
+        self.init_run(now=moments[0])
+        contract, intent, custody = self.spawn_delivery(47, now=moments[0])
+        self.complete_delivery(contract, intent, custody, times=moments,
+                               historical=None)
+        self.assertEqual(self.read_state()["issues"]["47"]["attempts"][-1]["state"],
+                         "active")
+        self.assert_delivered_sweeps_are_inert(47)
+
+        request, contract, intent, custody = self.acquire_delivery(73, now=moments[0])
+        self.complete_delivery(contract, intent, custody, times=moments,
+                               historical=None)
+        delivered = self.state_path.read_bytes()
+        request.update(now="2026-09-21T04:00:00Z", delivery_contract=None,
+                       authorization_intents=[])
+        replayed = self.direct_owner(request=request)
+        self.assertEqual((replayed["kind"], replayed["reason"], replayed["result"]),
+                         ("terminal", "delivery_complete", None))
+        self.assertEqual(self.state_path.read_bytes(), delivered)
+
+    def test_direct_owner_replays_a_remainder_delivered_issue(self):
+        moments = [f"2026-09-21T00:0{minute}:00Z" for minute in range(7)]
+        request, contract, intent, custody = self.acquire_delivery(73, now=moments[0])
+        self.deliver_through_remainder(contract, intent, custody,
+                                       row=self.unfinished_row(73, "failed"),
+                                       times=moments)
+        delivered = self.state_path.read_bytes()
+        request.update(now="2026-09-21T04:00:00Z", delivery_contract=None,
+                       authorization_intents=[],
+                       worktree=self.worktree_fact(73, candidate={
+                           "path": str(self.root / "worktree-issue-73-orchestrated"),
+                           "state": "absent"}))
+
+        replayed = self.direct_owner(request=request)
+
+        self.assertEqual((replayed["kind"], replayed["run_id"], replayed["reason"]),
+                         ("terminal", self.run_id, "merged"))
         self.assertEqual(self.state_path.read_bytes(), delivered)
 
     def test_control_combined_six_stage_single_ledger_replay(self):

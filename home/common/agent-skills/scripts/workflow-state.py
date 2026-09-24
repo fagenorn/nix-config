@@ -2156,7 +2156,9 @@ def command_control(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     "resume control action requires a matching recorded worktree observation"
                 )
-            if result["operation"] == "contract":
+            # Only a dispatch is proposed: an `idle` here once reached the
+            # delta map below as a proposal and raised KeyError.
+            if result["operation"] not in CONTROL_DISPATCH_KINDS:
                 continue
             proposal_order.append(issue)
             capacity -= 1
@@ -2683,16 +2685,20 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     # phase, so `suspend_attempt` stopped the attempt instead
                     # (per D4). The envelope equals the next call's replay,
                     # which `direct_run_is_terminal` will route through
-                    # `direct_terminal` from the same stored fields.
+                    # `direct_terminal` from the same stored fields. A delivered
+                    # issue is terminal here too, and when its owner finished
+                    # without a legacy row no record carries a result to name.
                     assert state is not None
                     if policy["changed"]:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
                         validate_state(state, run_id=run_id)
                         atomic_write_state(run_dir, state_path, state)
+                    finished = policy["attempt"]["result"]
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
-                        reason=policy["attempt"]["result"]["state"],
+                        reason=("delivery_complete" if finished is None
+                                else finished["state"]),
                         blockers=[], result=policy["issue_state"]["outcome"],
                     )
                 elif operation == "reconcile":

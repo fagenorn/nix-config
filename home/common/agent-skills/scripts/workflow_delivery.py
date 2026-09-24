@@ -207,6 +207,8 @@ class DeliveryRuntime:
         owner_unavailable: bool, tracker_halted: bool,
         recorded_worktree: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
+        if issue_state is not None and self.delivery_complete(issue_state):
+            return self._delivered_policy(issue_state)
         try:
             recovery = self.recovery_policy(
                 issue_state, issue=issue, request=request, source_kind=source_kind,
@@ -263,6 +265,24 @@ class DeliveryRuntime:
                 request=request, source_kind=source_kind)
         except (TypeError, ValueError) as error:
             raise ValueError("remainder policy refused") from error
+
+    def _delivered_policy(self, issue_state: dict[str, Any]) -> dict[str, Any]:
+        """A delivered issue is terminal, whatever state its records were left in.
+
+        It holds no custody (``current_custody``), so nothing of it is reaped,
+        resumed, retried, recovered or reconciled. The decision reports the
+        newest record that carries a result: a ledger written before a
+        delivering remainder was closed still holds that remainder ``active``.
+        """
+        records = ([("implementation", item) for item in issue_state["attempts"]]
+                   + [("remainder", self._remainder_facade(issue_state, item))
+                      for item in issue_state["delivery_remainders"]])
+        finished = [item for item in records if item[1]["result"] is not None]
+        kind, record = (finished or records or [("implementation", None)])[-1]
+        return {"operation": "terminal", "changed": False,
+                "issue_state": issue_state, "attempt": record, "requirements": [],
+                "uses_candidate": False, "desired": "terminal", "expired": False,
+                **({"custody_kind": "remainder"} if kind == "remainder" else {})}
 
     def apply_direct_delivery(
         self, state: dict[str, Any], *, issue: int, request: dict[str, Any],
@@ -859,7 +879,15 @@ class DeliveryRuntime:
             if reduction["completion_state"] != "delivery_complete":
                 raise ValueError("delivery summary is incomplete")
             historical = report["historical_owner_result"]
-            if historical is not None and report["custody"]["kind"] == "implementation":
+            if report["custody"]["kind"] == "remainder":
+                # The remainder that delivered ends here, exactly as a failed
+                # one does below; left `active`, it stays the one record a
+                # lifecycle pass keyed on record state still plans for.
+                if historical is None:
+                    raise ValueError("remainder summary requires historical owner result")
+                record.update(state=historical["state"], result=copy.deepcopy(historical),
+                              finished_at=now, result_source="owner")
+            elif historical is not None:
                 record.update(state=historical["state"], result=copy.deepcopy(historical),
                               finished_at=now, result_source="owner")
                 issue_state["outcome"] = copy.deepcopy(historical)
