@@ -1,6 +1,6 @@
 # Task 1: Extract the guard behind a store policy and wrapper
 
-Decisions: D1–D9, D12, D13; parent D4, D9, D10. Spec sections "Files", "The
+Decisions: D1–D9, D12, D13, D15; parent D4, D9, D10. Spec sections "Files", "The
 policy file", "The registered executable", "Extracting the source", "Behaviour
 on policy defects", "Build-time check" and "Test seams". Work from the worktree
 root. Every shell block starts with these lines, which the blocks below omit:
@@ -46,8 +46,9 @@ G=home/common/claude-code/lifecycle_guard.py
 - The source contains no `${`, no `/nix/store`, and no owner or repository name.
   `default.nix` contains no line that starts with `import`, `from`, `def` or
   `class`.
-- The wrapper is exactly three lines. The source and policy each have their own
-  interpolated store path (D1, D2).
+- The wrapper is exactly three lines, and its shebang runs bash with `-p`
+  (D15). The source and policy each have their own interpolated store path
+  (D1, D2).
 - The generated `.hooks` equals base apart from store hashes, and every other
   settings key is identical to base.
 - The policy is read inside `main()`, after the hook-input checks and before
@@ -80,11 +81,13 @@ preceded by one blank line. Keep the two blank lines before
 
 ```python
     def test_hostile_interpreter_environment_is_ignored(self):
-        # Each plant exits 0 before the guard can judge: a `json` package reached
-        # through PYTHONPATH, and a .pth line reached through NIX_PYTHONPATH, which
-        # nixpkgs' sitecustomize honours even under -I. Seeing either would turn a
-        # refusal into an allow, so the registered hook must ignore both.
+        # Each plant exits 0 before the guard can judge: a BASH_ENV file that the
+        # wrapper's bash would source, a `json` package reached through PYTHONPATH,
+        # and a .pth line reached through NIX_PYTHONPATH, which nixpkgs'
+        # sitecustomize honours even under -I. Seeing any one would turn a refusal
+        # into an allow, so the registered hook must ignore all three.
         hostile = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        (hostile / "bash_env").write_text("exit 0\n", encoding="utf-8")
         (hostile / "json").mkdir()
         (hostile / "json" / "__init__.py").write_text(
             "import os\nos._exit(0)\n", encoding="utf-8"
@@ -92,7 +95,11 @@ preceded by one blank line. Keep the two blank lines before
         (hostile / "hostile.pth").write_text("import os; os._exit(0)\n", encoding="utf-8")
         result = self.invoke_command(
             "git branch -d -f topic",
-            env={"PYTHONPATH": str(hostile), "NIX_PYTHONPATH": str(hostile)},
+            env={
+                "BASH_ENV": str(hostile / "bash_env"),
+                "PYTHONPATH": str(hostile),
+                "NIX_PYTHONPATH": str(hostile),
+            },
         )
         self.assertEqual(2, result.returncode, result.stderr)
         self.assertIn("lifecycle guard: unsafe branch deletion:", result.stderr)
@@ -106,7 +113,7 @@ out="$(CLAUDE_SETTINGS_PATH="$CAP/base-settings.json" python3 tests/test_claude_
 printf '%s\n' "$out" | grep -E '^(FAIL|ERROR):|^Ran |^OK|^FAILED'
 ```
 
-Expected: `18	0	tests/test_claude_permission_guard.py`, then
+Expected: `24	0	tests/test_claude_permission_guard.py`, then
 `FAIL: test_hostile_interpreter_environment_is_ignored (…)`, `Ran 37 tests …` and
 `FAILED (failures=1)`. The shadowed `json` makes the base guard exit 0.
 
@@ -291,16 +298,16 @@ cat > "$CAP/nix-block.txt" <<'NIX'
     }
   );
 
-  # The registered hook: one argument-free store path. It runs the guard's own
-  # source isolated from PYTHONPATH, user site and NIX_PYTHON* `.pth` hooks, and
-  # `exec` lets the hook's timeout kill reach Python rather than orphan it. The
-  # check refuses to build a guard that cannot load its source or policy.
+  # The registered hook: one argument-free store path. Bash's `-p` ignores
+  # BASH_ENV and inherited functions, `-I` and the unset keep PYTHONPATH, user
+  # site and NIX_PYTHON* `.pth` hooks out, and `exec` hands the hook's timeout
+  # kill to Python. The check refuses a guard that cannot load its policy.
   lifecycleGuard = pkgs.writeTextFile {
     name = "claude-bash-lifecycle-guard";
     executable = true;
     destination = "/bin/claude-bash-lifecycle-guard";
     text = ''
-      #!${pkgs.runtimeShell}
+      #!${pkgs.runtimeShell} -p
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
       exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --policy ${lifecycleGuardPolicy} "$@"
     '';
@@ -339,7 +346,8 @@ W="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$CAP/new-settings.json")"
 mkdir -p "$CAP/variants"
 sed 's/ -I / /' "$W" > "$CAP/variants/no-isolation"
 sed '/^unset /d' "$W" > "$CAP/variants/no-unset"
-for v in no-isolation no-unset; do
+sed '1s/ -p$//' "$W" > "$CAP/variants/no-privileged"
+for v in no-isolation no-unset no-privileged; do
   if cmp -s "$W" "$CAP/variants/$v"; then echo "variant $v did not change" >&2; exit 1; fi
   chmod +x "$CAP/variants/$v"
   jq --arg c "$CAP/variants/$v" '.hooks.PreToolUse[0].hooks[0].command = $c' \
@@ -350,9 +358,11 @@ for v in no-isolation no-unset; do
 done
 ```
 
-Expected: `no-isolation: FAILED (failures=1)` and
-`no-unset: FAILED (failures=1)`. Without `-I` the shadowed `json` wins.
-Without the `unset`, the `.pth` line runs even under `-I`.
+Expected: `no-isolation: FAILED (failures=1)`,
+`no-unset: FAILED (failures=1)` and `no-privileged: FAILED (failures=1)`.
+Without `-I` the shadowed `json` wins. Without the `unset`, the `.pth` line runs
+even under `-I`. Without `-p`, bash sources the planted `BASH_ENV` and exits 0
+before Python starts (D15).
 
 - [ ] **Step 9: Verify fidelity, shape, wrapper and policy**
 
@@ -393,6 +403,7 @@ for f in base new; do
 done
 diff "$CAP/base-hooks.json" "$CAP/new-hooks.json" && diff "$CAP/base-rest.json" "$CAP/new-rest.json" && echo shape-ok
 test "$(wc -l < "$W" | tr -d ' ')" = 3
+sed -n 1p "$W" | grep -Eqx '#!/nix/store/[0-9a-z]{32}-bash-[^ /]+/bin/bash -p'
 sed -n 2p "$W" | grep -qx 'unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE'
 sed -n 3p "$W" | grep -Eqx 'exec /nix/store/[0-9a-z]{32}-python3-[^ /]+/bin/python3 -I /nix/store/[0-9a-z]{32}-lifecycle_guard\.py --policy /nix/store/[0-9a-z]{32}-claude-bash-lifecycle-guard-policy\.json "\$@"'
 jq -c 'del(.git_bin, .gh_bin, .jq_bin)' "$P"

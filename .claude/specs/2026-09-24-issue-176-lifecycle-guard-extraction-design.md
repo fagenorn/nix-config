@@ -96,7 +96,7 @@ version field. The guard accepts a document only when all of these hold:
 `destination = "/bin/claude-bash-lifecycle-guard"`. Its `text` becomes:
 
 ```sh
-#!${pkgs.runtimeShell}
+#!${pkgs.runtimeShell} -p
 unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
 exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --policy ${lifecycleGuardPolicy} "$@"
 ```
@@ -116,6 +116,14 @@ Arguments flow like this:
 
 The `exec` is load-bearing. Without it, the hook's timeout kill would reach
 bash and orphan the Python process.
+
+The `-p` is load-bearing too (per D15). A non-interactive bash sources
+`$BASH_ENV` and imports exported functions, and a function can override
+`exec` or `unset`, so without it an inherited environment could end the wrapper
+with exit 0 before Python starts. Privileged mode skips `BASH_ENV` and `ENV`,
+imports no functions, and ignores `SHELLOPTS` and `BASHOPTS`. The base hook's
+Python shebang ran no shell, so the flag keeps the wrapper from widening the
+boundary.
 
 The hook registration expression is untouched. The generated entry is still
 matcher `Bash` with one `type = "command"` hook, `timeout = 30`, no `args`, and
@@ -249,13 +257,15 @@ override flags. This spec adds no seam.
   red.
 - **New case (per D9).** `test_hostile_interpreter_environment_is_ignored` is
   a single case. It builds one fixture directory holding a `json/__init__.py`
-  that calls `os._exit(0)` and a `.pth` file whose line is
-  `import os; os._exit(0)`. It runs
-  `invoke_command("git branch -d -f topic", env={"PYTHONPATH": d, "NIX_PYTHONPATH": d})`
+  that calls `os._exit(0)`, a `.pth` file whose line is
+  `import os; os._exit(0)`, and a `bash_env` file whose line is `exit 0`. It
+  runs `invoke_command("git branch -d -f topic", env=…)` with `BASH_ENV`
+  naming that file and `PYTHONPATH` and `NIX_PYTHONPATH` naming the directory,
   and asserts exit 2 with `lifecycle guard: unsafe branch deletion:` in stderr.
   At base the case is red, because the shadowed `json` forces exit 0.
-  Dropping either `-I` or the `unset` turns it red again. Verified on 3.13.12:
-  a `NIX_PYTHONPATH` `.pth` forces exit 0 even under `-I`.
+  Dropping `-I`, the `unset` or `-p` turns it red again. Verified on 3.13.12:
+  a `NIX_PYTHONPATH` `.pth` forces exit 0 even under `-I`. Verified on bash
+  5.3: a `BASH_ENV` file forces exit 0 unless bash runs with `-p` (per D15).
 - **Run.** `just show-claude-settings > "$TMPDIR/claude-settings.json" && CLAUDE_SETTINGS_PATH="$TMPDIR/claude-settings.json" python3 tests/test_claude_permission_guard.py -v`
 
 Demonstrations are verification only and are not committed. Before the first
@@ -304,3 +314,5 @@ edit, capture the base settings and the base built guard text.
 | D12 | The new file is the base's built guard text, dedented, plus only E1–E6; it is not executable; history is followed with `git blame -w -C -C`, because there is no file to `git mv` | the-bar Moves keep their history; the issue's "behaviour identical" floor | Reformatting or tidying during the move: hides the named edits from review |
 | D13 | The lint demonstration runs `ruff check --isolated --select E4,E7,E9,F` from a scratch `devenv.nix` under `$TMPDIR` (refines D8 and the Lints row) | Planning probe: devenv 2.0.2's `-O packages:pkgs "ruff"` fails to evaluate (`undefined variable 'config'`); its ruff 0.16.6 widened the defaults and flags seven findings (I001, ISC004, FURB188, BLE001) that are all in the base's built text, while the flake pins 0.14.6; D12 forbids tidying | Bare default rules: a verdict that moves with the ruff version and is red at base. Fixing the findings: rewrites moved text, against D12 |
 | D14 | The shard sentence scopes rule 3 to its ban on import machinery and `__file__` lookups, and states that the guard runs `git`/`gh`/`jq` by the absolute paths its policy names rather than by name on `PATH` (refines D11) | Live rule 3 (#175) also says an executable outside the package "runs by its command name on `PATH`"; parent D4 (the tool paths reach the guard as policy); the-bar Defense in depth | "Only rule 3 binds it" unqualified: its `PATH` clause contradicts the pinned tool paths. Resolving the tools through `PATH`: a hostile `PATH` could stand in for `git` or `gh` on a security boundary |
+| D15 | The wrapper's shebang runs bash with `-p`, and the hostile-environment case also plants `BASH_ENV` (extends D2 and D9) | Phase-5 standards review: a non-interactive bash sources `BASH_ENV` and imports exported functions, either of which can exit 0 before Python starts; reproduced on bash 5.3 (exit 0 without `-p`, 2 with it); D2's own threat model; the base hook's Python shebang ran no shell | `env -i` or `env -u` in the shebang: shebang argument splitting differs between darwin and Linux, and `env -i` drops the variables the guard's children need. An unprotected bash: the wrapper would open a fail-open path the base did not have |
+| D16 | D9 stands: the policy shape checks are demonstrated (Task 1's defect table, Task 3's failing build) rather than regression-tested, and no `--policy` case is committed | Phase-5 review discussion; D5 (`--policy` is plumbing, not a test override); the policy's only producer is `builtins.toJSON` over typed Nix values, and the build's `checkPhase` loads every generated policy | Committing the defect table as seam-3 cases through a repeated `--policy`: turns plumbing into a test override and ties the suite to argparse keeping the last repeated value, which D5 and D9 rejected |
