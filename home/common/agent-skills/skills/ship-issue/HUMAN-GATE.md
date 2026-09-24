@@ -16,7 +16,8 @@ authorization are entered.
 
 In `--auto`, present the gate's block and then pause through whoever owns the
 ledger. A fresh ship owner launched per `from-issue/ship-handoff.md` writes no
-workflow state — the read-only `check-launch` query is its one ledger call — so
+workflow state beyond the `checkpoint-delivery` cycles of SKILL.md's
+`## Delivery loop` — it never suspends or finishes its custody — so
 it presents the block and returns the truthful `stopped` ship summary naming the
 human gate, validated through
 `artifact-budget validate-report --boundary ship-summary` like every other ship
@@ -119,3 +120,10 @@ On this path the session must not:
 - re-attempt a denied command in a re-worded or re-quoted spelling;
 - ask a subagent, another skill, or another host to run the command on its
   behalf.
+
+## Delivery interface version 2
+
+A gate grants or withholds authority; it never records delivery. Under
+lifecycle identity every effect a grant covers runs as SKILL.md's
+`## Delivery loop` cycle, and an actual denial of one is checkpointed there as
+the reducer's `human_gate` suspension. Do not synthesize authority.

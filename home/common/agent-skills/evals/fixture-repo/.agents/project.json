@@ -40,5 +40,6 @@
   "projections": [
     { "id": "codex.entry", "agent": "codex", "kind": "generated_file", "target": "AGENTS.md", "source": ".agents/instructions/bootstrap.md" },
     { "id": "claude.entry", "agent": "claude", "kind": "managed_import", "target": "CLAUDE.md", "source": ".agents/instructions/bootstrap.md" }
-  ]
+  ],
+  "platform": { "min_inclusive": "1.0.0", "max_exclusive": "2.0.0" }
 }

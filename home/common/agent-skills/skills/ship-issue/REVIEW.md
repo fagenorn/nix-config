@@ -119,3 +119,11 @@ Then keep the worktree and do not remove it; return only `stopped` or
 `failed`. Missing, unreadable, malformed,
 wrong-schema, or empty findings cannot support unpublished detail. With no
 Minor/Discussion items, use `detail_state: "none"` and a null path.
+
+## Delivery interface version 2
+
+Review fix pushes precede selection, so they are pre-selection publication:
+they run under `## Launch guard`'s `check-launch` fence, with no checkpoint.
+Everything the ledger records about delivery — the selection whose
+`review_ref` is this phase's durable report path (else the literal review
+state), and every later effect — belongs to SKILL.md's `## Delivery loop`.

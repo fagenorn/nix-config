@@ -108,7 +108,7 @@ in
               "homebrew/homebrew-cask" = homebrew-cask;
               "homebrew/homebrew-bundle" = homebrew-bundle;
               "nikitabobko/tap" = nikitabobko-tap;
-              # Local tap carrying the self-authored auto-updating palmier-pro cask
+              # Local tap carrying the self-authored palmier-pro (auto-updating) and darktable casks
               # (listed in homebrew.casks in hosts/common/darwin-common.nix).
               # builtins.path copies the dir to its OWN top-level store path so it satisfies
               # nix-homebrew's `package`-typed taps option (a bare subpath would not).
@@ -128,6 +128,7 @@ in
             trust.casks = [
               "nikitabobko/tap/aerospace"
               "fagenorn/palmier/palmier-pro"
+              "fagenorn/palmier/darktable"
             ];
           };
         }

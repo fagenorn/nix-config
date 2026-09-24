@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 from copy import deepcopy
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import unittest
 from unittest import mock
+
+from ._delivery_model_fixtures import contract_and_delivery, custody, workflow_responses
 
 
 ROOT = Path(__file__).parents[4]
@@ -43,6 +47,291 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                  "--input", str(candidate), "--policy", str(POLICY)],
                 capture_output=True, check=False,
             )
+
+    def test_workflow_response_boundary_red_accepts_valid_v2_bootstrap_shape(self):
+        """Task 2 must add this closed raw boundary, not repair this fixture."""
+        bootstrap = {
+            "interface_version": 2,
+            "kind": "workflow_bootstrap",
+            "run_id": "task-151-synthetic",
+            "requirements": [],
+        }
+        result = self.run_validate("workflow-response", bootstrap, use_stdin=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8"))
+        self.assertEqual(result.stdout, json.dumps(
+            bootstrap, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8") + b"\n")
+
+    def test_workflow_response_takes_its_own_wire_bound(self):
+        """Control responses grow with the issue set, past the phase-report bound."""
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        report_bound = policy["phase_reports"]["wire_max_bytes"]
+        response_bound = policy["workflow_responses"]["wire_max_bytes"]
+        self.assertGreater(response_bound, report_bound)
+
+        def bootstrap(count):
+            return {"interface_version": 2, "kind": "workflow_bootstrap", "run_id": "bound",
+                    "requirements": [{"issue": issue, "owner": f"{issue}:1",
+                        "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
+                                    "action_id": f"{issue}:1:1"},
+                        "recorded_worktree": f"/worktrees/issue-{issue}",
+                        "contract_digest": None}
+                        for issue in range(1, count + 1)]}
+
+        def canonical(value):
+            return json.dumps(value, sort_keys=True,
+                              separators=(",", ":")).encode("utf-8") + b"\n"
+
+        count = 1
+        while len(canonical(bootstrap(count))) <= report_bound:
+            count += 1
+        within = bootstrap(count)
+        accepted = self.run_validate("workflow-response", within, use_stdin=True)
+        self.assertEqual((accepted.returncode, accepted.stdout), (0, canonical(within)),
+                         accepted.stderr.decode("utf-8"))
+        while len(canonical(bootstrap(count))) <= response_bound:
+            count += 1
+        refused = self.run_validate("workflow-response", bootstrap(count), use_stdin=True)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", b"artifact-budget: invalid report\n"))
+
+    def test_null_digest_summary_carries_legacy_custody_and_bootstrap_reports_digest(self):
+        model = artifact_budget._delivery_model()
+        response = deepcopy(workflow_responses(model)["control"])
+        response["summaries"][0].update(contract_digest=None, pending_stage_ids=[],
+            requirements=[{"kind": "delivery_contract", "subject_id": "151",
+                           "reason_code": "delivery_contract_required",
+                           "detail_pointer": None}])
+        response["actions"] = [item for item in response["actions"] if item.get("issue") != 151]
+        self.assertIsNotNone(response["summaries"][0]["custody"])
+        accepted = self.run_validate("workflow-response", response, use_stdin=True)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        response["summaries"][0]["requirements"] = []
+        bare = self.run_validate("workflow-response", response, use_stdin=True)
+        self.assertEqual(bare.returncode, 0, bare.stderr)
+        requirement = {"issue": 151, "owner": "151:1", "custody": custody(),
+                       "recorded_worktree": "/worktree"}
+        for digest, code in ((None, 0), ("sha256:" + "a" * 64, 0), ("absent", 2)):
+            value = dict(requirement) if digest == "absent" else {**requirement, "contract_digest": digest}
+            bootstrap = {"interface_version": 2, "kind": "workflow_bootstrap",
+                         "run_id": "r", "requirements": [value]}
+            with self.subTest(digest=digest):
+                self.assertEqual(self.run_validate("workflow-response", bootstrap,
+                                                   use_stdin=True).returncode, code)
+
+    def test_ship_handoff_reads_under_the_response_wire_bound(self):
+        """A ship handoff carries the contract and intents, past the phase-report bound."""
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        report_bound = policy["phase_reports"]["wire_max_bytes"]
+        response_bound = policy["workflow_responses"]["wire_max_bytes"]
+        candidate = {**self.lifecycle(), "state": "complete",
+                     "spec_artifact": self.full("design-spec"),
+                     "plan_artifact": self.full("implementation-plan"),
+                     "head_sha": "b" * 40, "review_state": "clean",
+                     "report_path": None, "notes": "ok"}
+        within = {**candidate, "worktree_path": "/tmp/" + "w" * report_bound}
+        accepted = self.run_validate("ship-handoff", within, use_stdin=True)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr.decode("utf-8"))
+        self.assertGreater(len(accepted.stdout), report_bound)
+        beyond = {**candidate, "worktree_path": "/tmp/" + "w" * response_bound}
+        refused = self.run_validate("ship-handoff", beyond, use_stdin=True)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", b"artifact-budget: invalid report\n"))
+
+    def test_delivery_v2_boundaries_accept_closed_shapes_and_reject_hybrids(self):
+        model = artifact_budget._delivery_model()
+        contract, _ = contract_and_delivery(model)
+        digest = model.canonical_digest(contract)
+        active = custody()
+        checkpoint = {
+            "interface_version": 2, "issue": 151, "custody": active,
+            "contract_digest": digest, "delivery_observations": [],
+            "authority_observations": [], "reevaluation_evidence": [],
+            "requested_scope": None, "detail_state": "none",
+            "report_path": None, "notes": "",
+        }
+        historical = {"issue": 151, "state": "failed", "pr_url": None,
+            "merge_sha": None, "issue_closed": False, "discussion_items": [],
+            "detail_state": "none", "report_path": None, "notes": "failed"}
+        summary = {
+            "interface_version": 2, "issue": 151, "state": "terminal_failed",
+            "custody": active, "historical_owner_result": historical,
+            "delivery_contract_digest": digest, "delivery_observations": [],
+            "authority_observations": [], "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": "failed",
+        }
+        for boundary, value in (("ship-checkpoint", checkpoint),
+                                ("ship-summary", summary)):
+            accepted = self.run_validate(boundary, value, use_stdin=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertEqual(accepted.stdout, json.dumps(
+                value, sort_keys=True, separators=(",", ":")
+            ).encode() + b"\n")
+        responses = workflow_responses(model)
+        for name, response in responses.items():
+            with self.subTest(response=name):
+                accepted = self.run_validate("workflow-response", response, use_stdin=True)
+                self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        malformed = []
+        extra = deepcopy(checkpoint); extra["attempt"] = 1
+        malformed.append(("ship-checkpoint", extra))
+        missing_scope = deepcopy(responses["owner"]); missing_scope.pop("requested_scope")
+        malformed.append(("workflow-response", missing_scope))
+        hybrid = deepcopy(summary); hybrid["delivery_contract_digest"] = "not-a-digest"
+        malformed.append(("ship-summary", hybrid))
+        nested = deepcopy(responses["checkpointed"])
+        nested["requirements"] = [{"kind": "tracker"}]
+        malformed.append(("workflow-response", nested))
+        for boundary, value in malformed:
+            refused = self.run_validate(boundary, value, use_stdin=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(refused.stdout, b"")
+
+    def test_v2_boundaries_compose_legacy_result_validation(self):
+        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
+                                 if key == "_artifact_budget_delivery_model"
+                                 or key.startswith("_artifact_budget_delivery_model.")])
+        model = artifact_budget._delivery_model()
+        contract, _ = contract_and_delivery(model)
+        digest = model.canonical_digest(contract)
+        active = custody()
+        historical = {"issue": 151, "state": "failed", "pr_url": None,
+            "merge_sha": None, "issue_closed": False, "discussion_items": [],
+            "detail_state": "none", "report_path": None, "notes": "failed"}
+        summary = {"interface_version": 2, "issue": 151,
+            "state": "terminal_failed", "custody": active,
+            "historical_owner_result": historical,
+            "delivery_contract_digest": digest, "delivery_observations": [],
+            "authority_observations": [], "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": "failed"}
+        responses = workflow_responses(model)
+        responses["terminal"]["result"] = deepcopy(historical)
+        responses["control"]["summaries"][0]["result"] = deepcopy(historical)
+        specimens = [
+            ("ship-summary", summary, ("historical_owner_result",)),
+            ("workflow-response", responses["terminal"], ("result",)),
+            ("workflow-response", responses["control"], ("summaries", 0, "result")),
+        ]
+        for boundary, specimen, path in specimens:
+            accepted = self.run_validate(boundary, specimen, use_stdin=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            malformed = deepcopy(specimen)
+            target = malformed
+            for part in path[:-1]:
+                target = target[part]
+            target[path[-1]] = {"bogus": 1}
+            refused = self.run_validate(boundary, malformed, use_stdin=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(refused.stdout, b"")
+            mismatched = deepcopy(specimen)
+            target = mismatched
+            for part in path[:-1]:
+                target = target[part]
+            target[path[-1]]["issue"] = 152
+            refused = self.run_validate(boundary, mismatched, use_stdin=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(refused.stdout, b"")
+        for raw in (b'{"interface_version":2,"kind":"workflow_bootstrap",'
+                    b'"run_id":"x","requirements":[],"requirements":[]}',
+                    b'{"interface_version":2,"kind":"workflow_bootstrap",'
+                    b'"run_id":"x","requirements":[]}\xff'):
+            refused = subprocess.run(
+                [sys.executable, str(SCRIPT), "validate-report", "--boundary",
+                 "workflow-response", "--input", "-", "--policy", str(POLICY)],
+                input=raw, capture_output=True, check=False)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(refused.stdout, b"")
+
+    def test_workflow_response_uses_source_and_lexical_installed_package(self):
+        payload = {"interface_version": 2, "kind": "workflow_bootstrap",
+                   "run_id": "synthetic-loader", "requirements": []}
+        source = self.run_validate("workflow-response", payload, use_stdin=True)
+        self.assertEqual(source.returncode, 0, source.stderr)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); store = root / "store"; home = root / "home"
+            store.mkdir(); shutil.copy2(SCRIPT, store / "artifact_budget.py")
+            shutil.copytree(SCRIPT.parent / "delivery_model", store / "delivery_model")
+            lexical = home / ".agents/lib/python"; lexical.mkdir(parents=True)
+            (lexical / "artifact_budget.py").symlink_to(store / "artifact_budget.py")
+            (lexical / "delivery_model").symlink_to(store / "delivery_model", target_is_directory=True)
+            installed = subprocess.run(
+                [sys.executable, str(lexical / "artifact_budget.py"), "validate-report",
+                 "--boundary", "workflow-response", "--input", "-", "--policy", str(POLICY)],
+                input=json.dumps(payload).encode(), capture_output=True, check=False,
+                env={**os.environ, "HOME": str(home)},
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            self.assertEqual(installed.stdout, source.stdout)
+
+    def test_workflow_response_lexical_loader_refuses_closed_failures(self):
+        payload = b'{"interface_version":2,"kind":"workflow_bootstrap","requirements":[],"run_id":"x"}'
+        for variant in ("missing_entry", "missing_private", "directory_entry", "wrong_interface"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw); store = root / "store"; home = root / "home"; store.mkdir()
+                shutil.copy2(SCRIPT, store / "artifact_budget.py")
+                shutil.copytree(SCRIPT.parent / "delivery_model", store / "delivery_model")
+                package = store / "delivery_model"
+                if variant == "missing_entry": (package / "__init__.py").unlink()
+                elif variant == "missing_private": (package / "_wire.py").unlink()
+                elif variant == "directory_entry":
+                    (package / "__init__.py").unlink(); (package / "__init__.py").mkdir()
+                else: (package / "__init__.py").write_text("MODEL_INTERFACE_VERSION = 2\n")
+                lexical = home / ".agents/lib/python"; lexical.mkdir(parents=True)
+                (lexical / "artifact_budget.py").symlink_to(store / "artifact_budget.py")
+                (lexical / "delivery_model").symlink_to(package, target_is_directory=True)
+                result = subprocess.run([sys.executable, str(lexical / "artifact_budget.py"), "validate-report", "--boundary", "workflow-response", "--input", "-", "--policy", str(POLICY)], input=payload, capture_output=True, check=False, env={**os.environ, "HOME": str(home)})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, b"")
+
+    def test_workflow_response_partial_package_import_cleans_namespace(self):
+        with tempfile.TemporaryDirectory() as raw:
+            # A `scripts` parent selects the source layout, so the loader reaches the
+            # broken package below instead of whatever HOME has installed.
+            root = Path(raw) / "scripts"; script = root / "artifact_budget.py"
+            package = root / "delivery_model"
+            root.mkdir(); shutil.copy2(SCRIPT, script); package.mkdir()
+            (package / "__init__.py").write_text("from . import _broken\nMODEL_INTERFACE_VERSION = 1\n")
+            (package / "_broken.py").write_text("raise RuntimeError('boom')\n")
+            name = "artifact_budget_partial_loader_test"
+            spec = importlib.util.spec_from_file_location(name, script)
+            module = importlib.util.module_from_spec(spec); sys.modules[name] = module
+            assert spec and spec.loader; spec.loader.exec_module(module)
+            with self.assertRaises(module.ArtifactBudgetError): module._delivery_model()
+            self.assertFalse(any(key == "_artifact_budget_delivery_model" or key.startswith("_artifact_budget_delivery_model.") for key in sys.modules))
+            sys.modules.pop(name, None)
+
+    def test_source_layout_missing_model_never_falls_back_to_home(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); scripts = root / "scripts"; scripts.mkdir()
+            script = scripts / "artifact_budget.py"; shutil.copy2(SCRIPT, script)
+            home = root / "home"; installed = home / ".agents/lib/python/delivery_model"
+            installed.parent.mkdir(parents=True); shutil.copytree(SCRIPT.parent / "delivery_model", installed)
+            name = "artifact_budget_source_no_fallback"
+            spec = importlib.util.spec_from_file_location(name, script)
+            module = importlib.util.module_from_spec(spec); sys.modules[name] = module
+            assert spec and spec.loader; spec.loader.exec_module(module)
+            prior_home = os.environ.get("HOME"); os.environ["HOME"] = str(home)
+            try:
+                with self.assertRaises(module.ArtifactBudgetError): module._delivery_model()
+            finally:
+                if prior_home is None: os.environ.pop("HOME", None)
+                else: os.environ["HOME"] = prior_home
+                sys.modules.pop(name, None)
+
+    def test_successful_loader_does_not_cache_missing_private_member(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); scripts = root / "scripts"; scripts.mkdir()
+            script = scripts / "artifact_budget.py"; shutil.copy2(SCRIPT, script)
+            package = scripts / "delivery_model"; shutil.copytree(SCRIPT.parent / "delivery_model", package)
+            name = "artifact_budget_stale_private"
+            spec = importlib.util.spec_from_file_location(name, script)
+            module = importlib.util.module_from_spec(spec); sys.modules[name] = module
+            assert spec and spec.loader; spec.loader.exec_module(module)
+            self.assertEqual(module._delivery_model().MODEL_INTERFACE_VERSION, 1)
+            (package / "_wire.py").unlink()
+            with self.assertRaises(module.ArtifactBudgetError): module._delivery_model()
+            self.assertFalse(any(key == "_artifact_budget_delivery_model" or key.startswith("_artifact_budget_delivery_model.") for key in sys.modules))
+            sys.modules.pop(name, None)
 
     def test_single_file_exact_boundary_and_unicode_plus_one(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -768,6 +1057,9 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 lambda p: p.__setitem__("schema_version", True),
                 lambda p: p["phase_reports"].__setitem__("notes_max_characters", 0),
                 lambda p: p["phase_reports"].__setitem__("wire_max_bytes", 1.5),
+                lambda p: p.pop("workflow_responses"),
+                lambda p: p["workflow_responses"].__setitem__("unexpected", 1),
+                lambda p: p["workflow_responses"].__setitem__("wire_max_bytes", 0),
                 lambda p: p["artifacts"]["handoff"].__setitem__("root_max_bytes", 0),
                 lambda p: p["artifacts"]["handoff"].__setitem__("aggregate_max_bytes", 0),
                 lambda p: p["artifacts"]["handoff"].__setitem__("member_max_bytes", 1),

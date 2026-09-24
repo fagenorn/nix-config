@@ -1047,6 +1047,9 @@ let
     # The broad push, PR-create, branch-delete and PR-merge entries are usable only
     # through the lifecycle guard above, which adjudicates every one of them at the
     # command position of a segment. Bare `Agent` remains inert while defaultMode is "auto".
+    # The two lifecycle helpers are allowed whole, bare and by their ~/.agents/bin path:
+    # their only writes are validated ledger transitions under .superpowers/workflows/, and
+    # every lifecycle call is one heredoc-fed command, so each pipeline segment matches a rule.
     permissions = {
       defaultMode = "auto";
       allow = [
@@ -1067,6 +1070,10 @@ let
         "Bash(gh pr create:*)"
         "Bash(git branch -d:*)"
         "Bash(gh pr merge:*)"
+        "Bash(workflow-state:*)"
+        "Bash(~/.agents/bin/workflow-state:*)"
+        "Bash(artifact-budget:*)"
+        "Bash(~/.agents/bin/artifact-budget:*)"
         "Agent"
       ];
       ask = [ ];

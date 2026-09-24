@@ -5,6 +5,14 @@ its stdout, the seam established by test_resolve_bindings.py and
 test_workflow_state.py. The resolver is imported only by the two cases whose
 seam no subprocess run can reach — the generic failure wrapper and the
 emit-side non-finite guard — through the shared `load_module` below.
+
+This file is also the resolver family's fixture module. The platform-era cases
+live beside it — `test_resolve_platform.py` for the manifest gate and the
+contract's `platform` interval, `test_resolve_platform_status.py` for the
+`platform-status` subcommand and its fleet view — because this file is the
+review package's binding member. They import the helpers below rather than
+restating them, and no `TestCase` crosses over, so no file collects another's
+tests.
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ import copy
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -23,8 +32,14 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "resolve-project.py"
+LIBRARY = Path(__file__).resolve().parents[1] / "scripts" / "agent_platform.py"
+MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
 EVAL_FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
+
+# `install_home`'s default: copy the committed manifest verbatim. A distinct
+# sentinel because `None` already means "install no manifest at all".
+COMMITTED = object()
 
 CAPABILITY_NAMES = (
     "tracker", "worktrees", "knowledge.context", "knowledge.standards",
@@ -35,10 +50,107 @@ BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow", "deploy
 CAPABILITY_STATES = ("available", "unsupported", "blocked")
 
 
-def run(*args: str) -> tuple[int, str, str]:
+def install_home(home: Path, manifest: object = COMMITTED, *,
+                 library: bool = True) -> Path:
+    """Populate `home` as the platform installation the resolver reads (D23).
+
+    Every invocation in this suite runs under a temporary `HOME`, so the
+    library and the manifest have to be materialized there: the resolver
+    imports `agent_platform` from `$HOME/.agents/lib/python` and loads the
+    manifest from `$HOME/.agents/share`, with no fallback path either side.
+
+    `manifest` is the override hook: `COMMITTED` copies the repository's own
+    manifest byte for byte, `None` installs none at all, a `str` is written
+    verbatim (for the malformed-JSON cases) and anything else is serialized as
+    JSON. `library=False` leaves the library uninstalled, which only a script
+    run from the deployed layout can observe (see `PlatformLibraryTest`).
+    """
+    library_dir = home / ".agents" / "lib" / "python"
+    library_dir.mkdir(parents=True, exist_ok=True)
+    installed_library = library_dir / "agent_platform.py"
+    installed_library.unlink(missing_ok=True)
+    if library:
+        shutil.copy(LIBRARY, installed_library)
+    share = home / ".agents" / "share"
+    share.mkdir(parents=True, exist_ok=True)
+    target = share / "platform-manifest.json"
+    target.unlink(missing_ok=True)
+    if manifest is COMMITTED:
+        shutil.copy(MANIFEST, target)
+    elif manifest is None:
+        pass
+    elif isinstance(manifest, str):
+        target.write_text(manifest, encoding="utf-8")
+    else:
+        target.write_text(json.dumps(manifest), encoding="utf-8")
+    return home
+
+
+def make_home(manifest: object = COMMITTED, *, library: bool = True) -> Path:
+    return install_home(Path(tempfile.mkdtemp()).resolve(), manifest,
+                        library=library)
+
+
+def registry(*entries: dict) -> dict:
+    """The fleet registry document naming `entries`, in the order given.
+
+    The file's shape is the design's, not the reader's: two members, and each
+    entry exactly `{project_id, root}` (D18). Task 6 owns the writer; the suite
+    stages this file by hand so the read side can be exercised before it
+    exists.
+    """
+    return {"schema_version": 1, "projects": list(entries)}
+
+
+def install_registry(home: Path, content: object) -> Path:
+    """Write `$HOME/.agents/state/fleet/registry.json` and return its path.
+
+    A `str` is written verbatim, for the malformed cases; anything else is
+    serialized as JSON.
+    """
+    path = home / ".agents" / "state" / "fleet" / "registry.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, str):
+        path.write_text(content, encoding="utf-8")
+    else:
+        path.write_text(json.dumps(content), encoding="utf-8")
+    return path
+
+
+def library_members() -> tuple[str, ...]:
+    """The resolver's declared `PLATFORM_LIBRARY_MEMBERS`, read from its source.
+
+    Read rather than copied: a second literal here would drift from the one
+    the guard actually enforces, which is the failure this suite is about.
+    """
+    text = SCRIPT.read_text("utf-8")
+    body = text.split("PLATFORM_LIBRARY_MEMBERS = (", 1)[1].split(")", 1)[0]
+    return tuple(re.findall(r'"([^"]+)"', body))
+
+
+def committed_manifest() -> dict:
+    return json.loads(MANIFEST.read_text("utf-8"))
+
+
+def mutated_manifest(**changes: object) -> dict:
+    manifest = committed_manifest()
+    manifest.update(changes)
+    return manifest
+
+
+MANIFEST_MEMBERS = (
+    "schema_version", "platform_version", "project_schema_versions",
+    "resolved_schema_version", "migrations", "deprecations", "removals",
+)
+SUBCOMMANDS = ("resolve", "check-projections", "write-projections",
+               "platform-status")
+
+
+def run(*args: str, home: Path) -> tuple[int, str, str]:
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, timeout=60,
+        env={**os.environ, "HOME": str(home)},
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -90,7 +202,7 @@ def assert_read_only(case: unittest.TestCase, root: Path,
     git(root, "commit", "--quiet", "-m", "fixture")
     before_status = git(root, "status", "--porcelain")
     before_tree = tree_snapshot(root)
-    code, _, err = run(*args, "--repo-root", str(root))
+    code, _, err = run(*args, "--repo-root", str(root), home=case.home)
     case.assertEqual(code, expected_code, err)
     case.assertEqual(git(root, "status", "--porcelain"), before_status)
     case.assertEqual(tree_snapshot(root), before_tree)
@@ -108,45 +220,61 @@ CODEX_HEADER = (
 MANAGED_LINE = "@.agents/instructions/bootstrap.md"
 
 
+def make_project_root(contract: object | None = None, *,
+                      projections: bool = True) -> Path:
+    """A temp root holding a valid contract, its instruction source, and —
+    unless `projections=False` — both projection targets rendered current.
+
+    `resolve` refuses a drifted projection before it reaches anything else
+    (D10), so a root without current targets would refuse for a reason no
+    caller here means to exercise. Only the cases that must start from an
+    unwritten state opt out.
+    """
+    # `.resolve()` because the platform temp dir is reached through a
+    # symlink on macOS (/var -> /private/var) while the resolver's own
+    # root is always the physical path; without it every `str(root)`
+    # comparison below would compare two spellings of one directory.
+    root = Path(tempfile.mkdtemp()).resolve()
+    git(root, "init", "--quiet")
+    (root / "home" / "common" / "agent-skills" / "standards").mkdir(parents=True)
+    (root / ".out-of-scope").mkdir()
+    (root / ".worktrees").mkdir()
+    (root / ".agents" / "instructions").mkdir(parents=True)
+    (root / ".agents" / "instructions" / "bootstrap.md").write_text(
+        "# invariants\n", encoding="utf-8")
+    if contract is None:
+        contract = source_contract()
+    if contract is not False:
+        (root / ".agents" / "project.json").write_text(
+            json.dumps(contract), encoding="utf-8")
+    body = "# authored body\n"
+    if projections:
+        source = (root / ".agents" / "instructions" / "bootstrap.md").read_bytes()
+        (root / "AGENTS.md").write_bytes(
+            CODEX_HEADER.encode() + b"\n\n" + source)
+        body += MANAGED_LINE + "\n"
+    (root / "CLAUDE.md").write_text(body, encoding="utf-8")
+    return root
+
+
 class ResolverTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        # Every subcommand loads the installed manifest before it looks at the
+        # repository (R1.3), so a case without one on disk would refuse
+        # `resolver_failure` whatever else it meant to exercise.
+        self.home = make_home()
+
+    def set_manifest(self, manifest: object) -> None:
+        """Replace this case's installed manifest with the fixture given."""
+        install_home(self.home, manifest)
+
     def make_root(self, contract: object | None = None, *,
                   projections: bool = True) -> Path:
-        """A temp root holding a valid contract, its instruction source, and —
-        unless `projections=False` — both projection targets rendered current.
-
-        `resolve` refuses a drifted projection before it reaches anything else
-        (D10), so a root without current targets would refuse for a reason no
-        caller here means to exercise. Only the cases that must start from an
-        unwritten state opt out.
-        """
-        # `.resolve()` because the platform temp dir is reached through a
-        # symlink on macOS (/var -> /private/var) while the resolver's own
-        # root is always the physical path; without it every `str(root)`
-        # comparison below would compare two spellings of one directory.
-        root = Path(tempfile.mkdtemp()).resolve()
-        git(root, "init", "--quiet")
-        (root / "home" / "common" / "agent-skills" / "standards").mkdir(parents=True)
-        (root / ".out-of-scope").mkdir()
-        (root / ".worktrees").mkdir()
-        (root / ".agents" / "instructions").mkdir(parents=True)
-        (root / ".agents" / "instructions" / "bootstrap.md").write_text(
-            "# invariants\n", encoding="utf-8")
-        if contract is None:
-            contract = source_contract()
-        if contract is not False:
-            (root / ".agents" / "project.json").write_text(
-                json.dumps(contract), encoding="utf-8")
-        body = "# authored body\n"
-        if projections:
-            source = (root / ".agents" / "instructions" / "bootstrap.md").read_bytes()
-            (root / "AGENTS.md").write_bytes(
-                CODEX_HEADER.encode() + b"\n\n" + source)
-            body += MANAGED_LINE + "\n"
-        (root / "CLAUDE.md").write_text(body, encoding="utf-8")
-        return root
+        return make_project_root(contract, projections=projections)
 
     def resolve(self, root: Path, *extra: str) -> tuple[int, object, str]:
-        code, out, err = run("resolve", "--repo-root", str(root), *extra)
+        code, out, err = run("resolve", "--repo-root", str(root), *extra,
+                             home=self.home)
         try:
             payload: object = json.loads(out)
         except json.JSONDecodeError:
@@ -189,13 +317,14 @@ class SnapshotShapeTest(ResolverTestCase):
 
     def test_two_runs_emit_byte_identical_stdout(self):
         root = self.make_root()
-        first = run("resolve", "--repo-root", str(root))
-        second = run("resolve", "--repo-root", str(root))
+        first = run("resolve", "--repo-root", str(root), home=self.home)
+        second = run("resolve", "--repo-root", str(root), home=self.home)
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(first[1], second[1])
 
     def test_stdout_is_compact_sorted_json_with_a_trailing_newline(self):
-        code, out, err = run("resolve", "--repo-root", str(self.make_root()))
+        code, out, err = run("resolve", "--repo-root", str(self.make_root()),
+                             home=self.home)
         self.assertEqual(code, 0, err)
         self.assertTrue(out.endswith("\n"))
         self.assertNotIn("\n", out[:-1])
@@ -222,11 +351,29 @@ class NormalizationTest(ResolverTestCase):
                     or value.startswith(str(root.resolve()) + "/"))
 
     def test_the_source_file_keeps_its_relative_values(self):
+        """D30: exactly what the name promises, and no literal path.
+
+        The authored value stays relative — not absolute, no leading `/`, no
+        `..` segment — and the snapshot's value is that same path joined to the
+        project root. Pinning a literal directory here would instead make this
+        case fail the moment an artifact directory is relocated, which is a
+        move the contract is meant to absorb.
+        """
         root = self.make_root()
-        self.assertEqual(self.resolve(root)[0], 0)
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
         on_disk = json.loads((root / ".agents" / "project.json").read_text("utf-8"))
-        self.assertEqual(
-            on_disk["bindings"]["paths"]["artifacts"]["plans"], ".claude/plans")
+        for name in ("specs", "plans"):
+            with self.subTest(artifacts=name):
+                authored = on_disk["bindings"]["paths"]["artifacts"][name]
+                self.assertIsInstance(authored, str)
+                self.assertTrue(authored)
+                self.assertFalse(authored.startswith("/"))
+                self.assertFalse(Path(authored).is_absolute())
+                self.assertNotIn("..", Path(authored).parts)
+                self.assertEqual(
+                    snap["bindings"]["paths"]["artifacts"][name],
+                    str(root / authored))
 
     def test_non_path_binding_values_pass_through_unchanged(self):
         root = self.make_root()
@@ -249,6 +396,14 @@ class ReadOnlyTest(ResolverTestCase):
         (root / ".agents" / "project.json").write_text("{", encoding="utf-8")
         assert_read_only(self, root, 2, "resolve")
 
+    def test_platform_status_leaves_the_tree_untouched(self):
+        assert_read_only(self, self.make_root(), 0, "platform-status")
+
+    def test_a_refusing_platform_status_leaves_the_tree_untouched(self):
+        root = self.make_root()
+        (root / ".agents" / "project.json").write_text("{", encoding="utf-8")
+        assert_read_only(self, root, 2, "platform-status")
+
 
 class ErrorOutputTest(ResolverTestCase):
     def assert_refusal(self, code: int, payload: object, expected: str) -> dict:
@@ -257,7 +412,13 @@ class ErrorOutputTest(ResolverTestCase):
         self.assertEqual(sorted(payload), ["error"])
         self.assertNotIn("schema_version", payload)
         error = payload["error"]
-        self.assertEqual(sorted(error), ["code", "repair_id", "violations"])
+        # D7: `reason_code` is a member of the error object exactly when the
+        # code is `unsupported_schema`, and of no other refusal.
+        self.assertEqual(
+            sorted(error),
+            ["code", "reason_code", "repair_id", "violations"]
+            if expected == "unsupported_schema"
+            else ["code", "repair_id", "violations"])
         self.assertEqual(error["code"], expected)
         self.assertTrue(error["violations"])
         pointers = [v["pointer"] for v in error["violations"]]
@@ -362,7 +523,7 @@ class WorkflowRefusalFixtureTest(ResolverTestCase):
 
     def assert_workflow_refusal(self, root, code_name, repair_id):
         before = tree_snapshot(root)
-        code, out, err = run("resolve", "--repo-root", str(root))
+        code, out, err = run("resolve", "--repo-root", str(root), home=self.home)
         self.assertEqual(code, 2, err)
         self.assertEqual(tree_snapshot(root), before)
         payload = json.loads(out)
@@ -444,7 +605,8 @@ class NoDefaultingTest(ResolverTestCase):
     def test_a_refusal_emits_no_snapshot_member(self):
         contract = source_contract()
         del contract["bindings"]["vcs"]
-        code, out, _ = run("resolve", "--repo-root", str(self.make_root(contract)))
+        code, out, _ = run("resolve", "--repo-root", str(self.make_root(contract)),
+                           home=self.home)
         self.assertEqual(code, 2)
         for member in ("schema_version", "project", "bindings", "capabilities"):
             self.assertNotIn(f'"{member}"', out)
@@ -554,6 +716,36 @@ class OnePassCollectionTest(ResolverTestCase):
             [v["pointer"] for v in payload["error"]["violations"]],
             ["/schema_version"])
 
+    def test_every_interval_shape_violation_joins_the_same_pass(self):
+        """R2.2: the interval is validated with the rest, not on its own."""
+        source = source_contract()
+        source["platform"] = {"min_inclusive": "1.0", "max_exclusive": 7,
+                              "extra": True}
+        del source["bindings"]["deploy"]
+        code, payload, _ = self.resolve(self.make_root(source))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "invalid_contract")
+        pointers = [v["pointer"] for v in payload["error"]["violations"]]
+        for pointer in ("/bindings/deploy", "/platform/extra",
+                        "/platform/max_exclusive", "/platform/min_inclusive"):
+            self.assertIn(pointer, pointers)
+        self.assertEqual(pointers, sorted(pointers))
+
+    def test_an_inverted_interval_joins_the_same_pass(self):
+        """The ordering violation needs both bounds to parse, so it is a
+        separate case from the malformed-bound one above."""
+        source = source_contract()
+        source["platform"] = {"min_inclusive": "2.0.0",
+                              "max_exclusive": "1.0.0"}
+        del source["capabilities"]["release"]
+        code, payload, _ = self.resolve(self.make_root(source))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "invalid_contract")
+        pointers = [v["pointer"] for v in payload["error"]["violations"]]
+        self.assertIn("/capabilities/release", pointers)
+        self.assertIn("/platform/max_exclusive", pointers)
+        self.assertEqual(pointers, sorted(pointers))
+
 
 class DiscoveryTest(ResolverTestCase):
     """SF-002: the nearest-ancestor walk taken without `--repo-root`."""
@@ -561,7 +753,8 @@ class DiscoveryTest(ResolverTestCase):
     def resolve_from(self, cwd: Path) -> tuple[int, object, str]:
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "resolve"],
-            capture_output=True, text=True, timeout=60, cwd=str(cwd))
+            capture_output=True, text=True, timeout=60, cwd=str(cwd),
+            env={**os.environ, "HOME": str(self.home)})
         try:
             payload: object = json.loads(proc.stdout)
         except json.JSONDecodeError:
@@ -596,7 +789,7 @@ class UsageErrorTest(ResolverTestCase):
     def test_an_unregistered_subcommand_exits_two_without_json(self):
         for args in ((),):
             with self.subTest(args=args):
-                code, out, err = run(*args)
+                code, out, err = run(*args, home=self.home)
                 self.assertEqual(code, 2)
                 self.assertEqual(out, "")
                 self.assertNotEqual(err, "")
@@ -607,16 +800,39 @@ def load_module():
 
     Reserved for the seams no subprocess run can reach: the generic failure
     wrapper, and the emit-side guard that the parse-side guard keeps unreachable
-    from any authored contract.
+    from any authored contract. The importing case must already have pointed
+    `HOME` at an installed platform, because the module resolves
+    `agent_platform` from `$HOME/.agents/lib/python` as it loads.
     """
     import importlib.util
+    # `agent_platform` caches in `sys.modules` under its one name, while every
+    # case here runs under a temporary `HOME` of its own. The binding guard
+    # checks *which* file answered the import, so a copy left behind by the
+    # previous case's `HOME` would fail it; a deployed run has one `HOME` and
+    # imports the library once.
+    sys.modules.pop("agent_platform", None)
     spec = importlib.util.spec_from_file_location("resolve_project", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-class ResolverFailureTest(unittest.TestCase):
+class InProcessTestCase(unittest.TestCase):
+    """A temporary `HOME` for the two cases that import the resolver in process.
+
+    `HOME` is patched on this process rather than a child's environment, and
+    restored afterwards, because both the load-time library import and the
+    manifest load inside `main` read it directly.
+    """
+
+    def setUp(self) -> None:
+        self.home = make_home()
+        previous = os.environ["HOME"]
+        os.environ["HOME"] = str(self.home)
+        self.addCleanup(os.environ.__setitem__, "HOME", previous)
+
+
+class ResolverFailureTest(InProcessTestCase):
     """SF-002: the generic handler maps an unexpected exception to the closed code.
 
     No external input reaches this branch deterministically — every I/O and
@@ -646,7 +862,7 @@ class ResolverFailureTest(unittest.TestCase):
                          "the internal message must not leak the exception text")
 
 
-class EmitGuardTest(unittest.TestCase):
+class EmitGuardTest(InProcessTestCase):
     """COR-001: the writing side refuses a non-finite float on its own.
 
     The parse-side guard keeps this unreachable from any authored contract,
@@ -688,7 +904,7 @@ class CommittedContractTest(ResolverTestCase):
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
     def test_nix_activate_is_exact_and_deploy_stays_unsupported(self):
-        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT))
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
         self.assertEqual(code, 0, err or out)
         snapshot = json.loads(out)
         self.assertEqual(snapshot["bindings"]["commands"]["nix-activate"], {
@@ -704,13 +920,13 @@ class CommittedContractTest(ResolverTestCase):
         })
 
 
-def run_with_path(path_value: str, *args: str) -> tuple[int, str, str]:
+def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, str]:
     """Run the resolver with `PATH` replaced by exactly `path_value`.
 
     The interpreter is `sys.executable`, an absolute path, because `PATH` here
     holds only the stub directory and no Python (B-002).
     """
-    env = dict(os.environ, PATH=path_value)
+    env = dict(os.environ, PATH=path_value, HOME=str(home))
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, timeout=60, env=env,
@@ -731,7 +947,8 @@ def make_stub_bin(names: tuple[str, ...]) -> Path:
 class CapabilityStateTest(ResolverTestCase):
     def resolve_with_path(self, root: Path, stub: Path, *extra: str):
         code, out, err = run_with_path(
-            str(stub), "resolve", "--repo-root", str(root), *extra)
+            str(stub), "resolve", "--repo-root", str(root), *extra,
+            home=self.home)
         try:
             payload: object = json.loads(out)
         except json.JSONDecodeError:
@@ -953,7 +1170,8 @@ class RequireTest(ResolverTestCase):
         root = self.make_root()
         code, out, _ = run_with_path(
             str(make_stub_bin(("gh", "git", "just", "codex"))),
-            "resolve", "--repo-root", str(root), "--require", "release")
+            "resolve", "--repo-root", str(root), "--require", "release",
+            home=self.home)
         payload = json.loads(out)
         self.assertEqual(code, 2)
         error = payload["error"]
@@ -967,7 +1185,8 @@ class RequireTest(ResolverTestCase):
         root = self.make_root()
         code, out, _ = run_with_path(
             str(make_stub_bin(("git", "just", "codex"))),
-            "resolve", "--repo-root", str(root), "--require", "tracker")
+            "resolve", "--repo-root", str(root), "--require", "tracker",
+            home=self.home)
         error = json.loads(out)["error"]
         self.assertEqual(code, 2)
         self.assertEqual(error["code"], "capability_unavailable")
@@ -978,7 +1197,7 @@ class RequireTest(ResolverTestCase):
         code, out, _ = run_with_path(
             str(make_stub_bin(("gh", "git", "just", "codex"))),
             "resolve", "--repo-root", str(root),
-            "--require", "release", "--require", "deploy")
+            "--require", "release", "--require", "deploy", home=self.home)
         error = json.loads(out)["error"]
         self.assertEqual(code, 2)
         pointers = [v["pointer"] for v in error["violations"]]
@@ -989,14 +1208,15 @@ class RequireTest(ResolverTestCase):
         root = self.make_root()
         code, out, err = run_with_path(
             str(make_stub_bin(("gh", "git", "just", "codex"))),
-            "resolve", "--repo-root", str(root), "--require", "tracker")
+            "resolve", "--repo-root", str(root), "--require", "tracker",
+            home=self.home)
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["schema_version"], 1)
 
     def test_an_unknown_require_name_is_an_argparse_usage_error(self):
         root = self.make_root()
         code, out, err = run("resolve", "--repo-root", str(root),
-                             "--require", "orchestration")
+                             "--require", "orchestration", home=self.home)
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertIn("orchestration", err)
@@ -1007,15 +1227,29 @@ class NoSubprocessTest(ResolverTestCase):
         """An empty PATH must still produce a snapshot, not an execution error."""
         root = self.make_root()
         code, out, err = run_with_path(
-            str(make_stub_bin(())), "resolve", "--repo-root", str(root))
+            str(make_stub_bin(())), "resolve", "--repo-root", str(root),
+            home=self.home)
         self.assertEqual(code, 0, err)
         self.assertEqual(err, "")
         self.assertEqual(json.loads(out)["schema_version"], 1)
 
+    def test_platform_status_runs_no_child_process(self):
+        """R3.6: the administrative operation reads too, and starts nothing."""
+        root = self.make_root()
+        code, out, err = run_with_path(
+            str(make_stub_bin(())), "platform-status", "--repo-root", str(root),
+            "--fleet", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        payload = json.loads(out)
+        self.assertTrue(payload["compatibility"]["compatible"])
+        self.assertEqual(payload["fleet"], [])
+
 
 class WriteProjectionsTest(ResolverTestCase):
     def write(self, root: Path) -> tuple[int, object, str]:
-        code, out, err = run("write-projections", "--repo-root", str(root))
+        code, out, err = run("write-projections", "--repo-root", str(root),
+                             home=self.home)
         try:
             payload: object = json.loads(out)
         except json.JSONDecodeError:
@@ -1169,7 +1403,8 @@ class ProjectionCollisionTest(ResolverTestCase):
     def refusal(self, contract: dict) -> dict:
         root = self.make_root(contract, projections=False)
         before = tree_snapshot(root)
-        code, out, err = run("write-projections", "--repo-root", str(root))
+        code, out, err = run("write-projections", "--repo-root", str(root),
+                             home=self.home)
         self.assertEqual(code, 2, err)
         # The refusal precedes every write: nothing under the root moved.
         self.assertEqual(tree_snapshot(root), before)
@@ -1202,7 +1437,8 @@ class ProjectionCollisionTest(ResolverTestCase):
         contract = self.contract_with(
             lambda entries: entries[0].__setitem__("target", "generated/AGENTS.md"))
         root = self.make_root(contract, projections=False)
-        code, out, err = run("write-projections", "--repo-root", str(root))
+        code, out, err = run("write-projections", "--repo-root", str(root),
+                             home=self.home)
         self.assertEqual(code, 0, err)
         self.assertEqual(
             {p["id"]: p["action"] for p in json.loads(out)["projections"]},
@@ -1223,7 +1459,8 @@ class CommittedProjectionTest(ResolverTestCase):
 
 class CheckProjectionsTest(ResolverTestCase):
     def check(self, root: Path) -> tuple[int, object, str]:
-        code, out, err = run("check-projections", "--repo-root", str(root))
+        code, out, err = run("check-projections", "--repo-root", str(root),
+                             home=self.home)
         try:
             payload: object = json.loads(out)
         except json.JSONDecodeError:
@@ -1315,7 +1552,7 @@ class ResolveFreshnessTest(ResolverTestCase):
         root = self.make_root()
         with (root / "AGENTS.md").open("a", encoding="utf-8") as handle:
             handle.write("hand edit\n")
-        code, out, _ = run("resolve", "--repo-root", str(root))
+        code, out, _ = run("resolve", "--repo-root", str(root), home=self.home)
         self.assertEqual(code, 2)
         payload = json.loads(out)
         self.assertEqual(sorted(payload), ["error"])
@@ -1343,7 +1580,8 @@ class DriftGateTest(ResolverTestCase):
     """Seam 9: this repository's own committed contract must resolve."""
 
     def test_the_repository_resolves_and_its_projections_are_current(self):
-        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT))
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT),
+                             home=self.home)
         self.assertEqual(code, 0, err or out)
         snapshot = json.loads(out)
         self.assertEqual(snapshot["schema_version"], 1)
@@ -1352,13 +1590,14 @@ class DriftGateTest(ResolverTestCase):
         self.assertEqual(snapshot["project"]["root"], str(REPO_ROOT))
 
     def test_the_repository_check_projections_is_clean(self):
-        code, out, err = run("check-projections", "--repo-root", str(REPO_ROOT))
+        code, out, err = run("check-projections", "--repo-root", str(REPO_ROOT),
+                             home=self.home)
         self.assertEqual(code, 0, err or out)
         self.assertEqual({p["action"] for p in json.loads(out)["projections"]},
                          {"unchanged"})
 
     def test_eval_fixture_resolves_with_current_projections(self):
-        code, out, err = run("resolve", "--repo-root", str(EVAL_FIXTURE))
+        code, out, err = run("resolve", "--repo-root", str(EVAL_FIXTURE), home=self.home)
         self.assertEqual(code, 0, err or out)
         snapshot = json.loads(out)
         self.assertEqual(snapshot["project"]["id"], "fixture/tinytask")
@@ -1376,7 +1615,7 @@ class DriftGateTest(ResolverTestCase):
              "review.code": "unsupported", "release": "unsupported",
              "deploy": "unsupported"},
         )
-        code, out, err = run("check-projections", "--repo-root", str(EVAL_FIXTURE))
+        code, out, err = run("check-projections", "--repo-root", str(EVAL_FIXTURE), home=self.home)
         self.assertEqual(code, 0, err or out)
         self.assertEqual({entry["action"] for entry in json.loads(out)["projections"]},
                          {"unchanged"})
