@@ -10,6 +10,8 @@ import sys
 import tempfile
 import unittest
 
+from .test_workflow_state import DEFAULT_NOW, SCRIPT, LifecycleHarness, load_source_module
+
 REPO = Path(__file__).resolve().parents[4]
 SCRIPTS = REPO / "home/common/agent-skills/scripts"
 WORKFLOW = SCRIPTS / "workflow-state.py"
@@ -125,6 +127,116 @@ class HostRouteTest(unittest.TestCase):
         self.answer("claude-code")
         self.assertEqual(
             sorted(path.relative_to(self.home) for path in self.home.rglob("*")), before)
+
+
+OWNER_ROLES = {"owner": 1, "worker": 1, "reviewer": 1}
+
+
+def claim(holder, roles, at, released=None):
+    """One claim record; `released` is (released_at, event, seq) or None."""
+    released_at, event, seq = released or (None, None, None)
+    return {"holder": holder, "roles": dict(roles), "acquired_at": at,
+            "released_at": released_at, "release_event": event, "release_seq": seq}
+
+
+class ClaimLedgerTest(LifecycleHarness, unittest.TestCase):
+    """D5, D11, D19: schema 4 records claims; the commit boundary releases them."""
+
+    LATER = "2026-08-13T20:30:00Z"
+
+    def admitted(self):
+        """A v4 run: contractless issue 14 active, its launch and the controller claimed."""
+        self.init_run()
+        workflow = load_source_module(SCRIPT, "host_admission_ledger")
+        state = self.read_state()
+        attempt = workflow.new_control_attempt(
+            issue=14, attempt_number=1, worktree=str(self.root / "wt-14"),
+            now=DEFAULT_NOW, deadline_at="2026-08-13T23:00:00Z")
+        state["issues"]["14"] = {"issue": 14, "attempts": [attempt], "outcome": None,
+                                 "delivery": self.empty_delivery(),
+                                 "delivery_remainders": []}
+        state["admission"] = {"route": "claude-code", "releases": 0, "claims": [
+            claim("controller", {"controller": 1}, DEFAULT_NOW),
+            claim("14:1:1", OWNER_ROLES, DEFAULT_NOW)]}
+        self.write_state(state)
+        return state
+
+    def released(self, holder):
+        item = {c["holder"]: c for c in self.read_state()["admission"]["claims"]}[holder]
+        return item["released_at"], item["release_event"], item["release_seq"]
+
+    def finish_14(self, now, *, ok=True):
+        result = self.root / "result.json"
+        result.write_text(json.dumps(self.merged_result(14)), encoding="utf-8")
+        return self.run_cli("finish", "--repo-root", self.root, "--run-id", self.run_id,
+                            "--issue", 14, "--attempt", 1, "--result-file", result,
+                            "--now", now, ok=ok)
+
+    def test_finish_releases_the_claim_in_its_own_write(self):
+        self.admitted()
+        self.finish_14(self.LATER)
+        state = self.read_state()
+        self.assertEqual(state["issues"]["14"]["attempts"][0]["state"], "merged")
+        self.assertEqual(state["updated_at"], self.LATER)
+        self.assertEqual(self.released("14:1:1"), (self.LATER, "finished", 1))
+        self.assertEqual((state["admission"]["releases"], self.released("controller")),
+                         (1, (None, None, None)))
+
+    def test_suspend_releases_suspended(self):
+        self.admitted()
+        self.suspend(issue=14, attempt=1, blocked_on="usage_limit", now=self.LATER)
+        self.assertEqual(self.released("14:1:1"), (self.LATER, "suspended", 1))
+
+    def test_handoff_releases_handed_off(self):
+        self.admitted()
+        self.progress(turn_count=118, context_tokens=20000,
+                      handoff_path=self.write_handoff(14), now=self.LATER)
+        self.assertEqual(self.released("14:1:1"), (self.LATER, "handed_off", 1))
+
+    def test_a_refused_write_leaves_record_and_claim_unchanged(self):
+        self.admitted()
+        before = self.state_path.read_bytes()
+        refused = self.finish_14("2026-08-13T19:00:00Z", ok=False)
+        self.assertEqual((refused.returncode, self.state_path.read_bytes()), (2, before))
+
+    def test_state_validation_closes_the_admission_block(self):
+        valid = self.admitted()
+        check = ("check-launch", "--repo-root", self.root, "--run-id", self.run_id,
+                 "--action-id", "14:1:1")
+        self.assertEqual(self.run_cli(*check).returncode, 0)
+        owner = claim("14:1:1", OWNER_ROLES, DEFAULT_NOW)
+        block = lambda claims, releases=0, route="claude-code": {
+            "route": route, "releases": releases, "claims": claims}
+        for label, admission in (
+                ("stale holder", block([claim("14:1:9", OWNER_ROLES, DEFAULT_NOW)])),
+                ("two controllers", block([claim("controller", {"controller": 1},
+                                                 DEFAULT_NOW)] * 2)),
+                ("duplicate holder", block([claim("14:1:1", OWNER_ROLES, DEFAULT_NOW,
+                                                  (DEFAULT_NOW, "suspended", 1)), owner], 1)),
+                ("partial release", block([{**owner, "released_at": DEFAULT_NOW,
+                                            "release_seq": 1}], 1)),
+                ("counter mismatch", block([owner], 2)),
+                ("wrong roles", block([claim("14:1:1", {"controller": 1}, DEFAULT_NOW)])),
+                ("owner finalized", block([claim("14:1:1", OWNER_ROLES, DEFAULT_NOW,
+                                                 (DEFAULT_NOW, "finalized", 1))], 1)),
+                ("direct with claims", block([owner], route="direct")),
+                ("extra member", {**block([]), "slots": 4})):
+            with self.subTest(label):
+                self.write_state({**valid, "admission": admission})
+                self.assertEqual(self.run_cli(*check, ok=False).returncode, 2)
+
+    def test_schema_three_reads_migrate_to_a_null_admission(self):
+        self.admitted()
+        self.write_state(self._as_legacy(self.read_state(), 3))
+        self.assertEqual(self.check_launch(action_id="14:1:1")["reason"], "current")
+        self.init_run()  # a locked read persists the migration
+        state = self.read_state()
+        self.assertEqual((state["schema_version"], state["admission"]), (4, None))
+
+    def test_direct_runs_carry_no_admission(self):
+        self.acquire_direct()
+        state = json.loads(self.direct_state_path("direct-73-000001").read_text())
+        self.assertIsNone(state["admission"])
 
 
 if __name__ == "__main__":

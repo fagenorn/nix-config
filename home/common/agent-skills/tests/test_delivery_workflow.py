@@ -127,6 +127,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
     def legacy(self, version):
         value = self.state_with_attempt()
         value["schema_version"] = version
+        value.pop("admission")
         for issue in value["issues"].values():
             issue.pop("delivery"); issue.pop("delivery_remainders")
         if version == 1:
@@ -207,7 +208,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                                                    "delivery_remainder"}
                                  for item in response["actions"]))
 
-    def test_schema_three_accepts_the_legacy_finish_transport_on_a_contractless_issue(self):
+    def test_schema_four_accepts_the_legacy_finish_transport_on_a_contractless_issue(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             initialized = subprocess.run(
@@ -241,13 +242,13 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual((stored["outcome"], stored["delivery"]["contract"]),
                              (expected, None))
 
-    def test_adjacent_migration_is_detached_and_writes_only_schema_three(self):
+    def test_adjacent_migration_is_detached_and_writes_only_schema_four(self):
         contract, _ = contract_and_delivery(self.model)
         for version in (1, 2):
             legacy = self.legacy(version); original = copy.deepcopy(legacy)
             migrated = self.workflow.upgrade_state(
                 legacy, run_id="admission", migration_contracts={151: contract})
-            self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 4)
             self.assertEqual(migrated["issues"]["151"]["delivery"],
                              self.workflow._delivery().empty_delivery())
         with tempfile.TemporaryDirectory() as raw:
@@ -260,8 +261,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     str(root), "admission", lambda state: (state, False),
                     migration_contracts={151: contract})
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 3)
-            self.assertEqual(result["schema_version"], 3)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 4)
+            self.assertEqual(result["schema_version"], 4)
 
     def test_model_owns_nonempty_delivery_validation(self):
         contract, delivery = contract_and_delivery(self.model)
@@ -345,6 +346,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                              store / "workflow_delivery_wire.py")
                 shutil.copy2(SCRIPTS / "workflow_delivery_build.py",
                              store / "workflow_delivery_build.py")
+                shutil.copy2(SCRIPTS / "host_admission.py", store / "host_admission.py")
                 shutil.copy2(SCRIPTS / "artifact_budget.py", store / "artifact_budget.py")
                 shutil.copy2(SCRIPTS / "artifact-budget", store / "artifact-budget")
                 shutil.copy2(POLICY, store / "artifact-budget-policy.json")
@@ -365,6 +367,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                         store / "workflow_delivery_wire.py")
                     (library / "workflow_delivery_build.py").symlink_to(
                         store / "workflow_delivery_build.py")
+                    (library / "host_admission.py").symlink_to(store / "host_admission.py")
                     (library / "delivery_model").symlink_to(store / "delivery_model", target_is_directory=True)
                     (share / "artifact-budget-policy.json").symlink_to(
                         store / "artifact-budget-policy.json")
@@ -413,6 +416,14 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     self.assertEqual(before, {str(path.relative_to(repo)): path.read_bytes()
                         for path in repo.rglob("*") if path.is_file()})
                     builder.write_bytes(builder_bytes)
+                library_file = store / "host_admission.py"
+                library_bytes = library_file.read_bytes(); library_file.unlink()
+                refused = subprocess.run([sys.executable, str(cli), "host-route",
+                    "--route", "claude-code"], capture_output=True, text=True,
+                    env=env, check=False)
+                self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+                self.assertIn("host admission library", refused.stderr)
+                library_file.write_bytes(library_bytes)
 
     def test_direct_checkpoint_and_failure_remainder_round_trip(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
@@ -1426,6 +1437,7 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
         workflow = load(WORKFLOW, "workflow_state_inputs")
         legacy = workflow.new_run_state(run_id="legacy-inputs", now=NOW, issues={})
         legacy["schema_version"] = 2
+        legacy.pop("admission")
         legacy["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
             workflow.new_control_attempt(issue=151, attempt_number=1,
                 worktree=str(self.root / "wt-151"), now=NOW,
@@ -1649,11 +1661,13 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             "--request-file", "-", stdin=json.dumps(request).encode(), ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
-    def write_run(self, run_id, attempts, *, schema=3):
+    def write_run(self, run_id, attempts, *, schema=4):
         state = self.workflow.new_run_state(run_id=run_id, now=NOW, issues={})
+        if schema < 4:
+            state.pop("admission")
         issue = {"issue": attempts[0]["issue"], "attempts": attempts,
                  "outcome": attempts[-1]["result"]}
-        if schema == 3:
+        if schema >= 3:
             issue.update(delivery=self.workflow._delivery().empty_delivery(),
                          delivery_remainders=[])
         state["schema_version"] = schema
@@ -1915,6 +1929,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.project()
         state = self.workflow.new_run_state(run_id="survive", now=NOW, issues={})
         state["schema_version"] = 2
+        state.pop("admission")
         for issue in (151, 152):
             state["issues"][str(issue)] = {"issue": issue, "outcome": None, "attempts": [
                 self.workflow.new_control_attempt(issue=issue, attempt_number=1,
@@ -1926,7 +1941,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         boot = json.loads(self.cli("init-run", *run, "--now", NOW).stdout)
         self.assertEqual([(item["issue"], item["contract_digest"]) for item in boot["requirements"]],
                          [(151, None), (152, None)])
-        self.assertEqual(json.loads(path.read_text())["schema_version"], 3)
+        self.assertEqual(json.loads(path.read_text())["schema_version"], 4)
         swept = self.control("survive", self.control_request([151, 152]))
         self.assertEqual([action["kind"] for action in swept["actions"]], ["wait"])
         self.cli("progress", *run, "--now", LATER, "--issue", 151, "--attempt", 1,

@@ -18,7 +18,7 @@ import tempfile
 from typing import Any, Callable
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CONTROL_INTERFACE_VERSION = 2
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
@@ -68,8 +68,23 @@ PHASE_INPUT_FIELDS = (
     "remainder_self_contained",
 )
 STATE_FIELDS = frozenset(
-    {"schema_version", "run_id", "created_at", "updated_at", "prior_run", "issues"}
+    {"schema_version", "run_id", "created_at", "updated_at", "prior_run", "issues",
+     "admission"}
 )
+# The run's admission block (D5): `null` until a control sweep binds a route,
+# then the route and every claim ever acquired, released ones kept as the audit
+# trail. Claim policy lives here, never in the host admission library (D18).
+ADMISSION_FIELDS = frozenset({"route", "releases", "claims"})
+CLAIM_FIELDS = frozenset(
+    {"holder", "roles", "acquired_at", "released_at", "release_event", "release_seq"}
+)
+RELEASE_EVENTS = frozenset(
+    {"finished", "suspended", "handed_off", "superseded", "owner_unavailable",
+     "launch_refused", "finalized"}
+)
+CONTROLLER_HOLDER = "controller"
+# A custody record in one of these states has finished its launch for good.
+TERMINAL_RECORD_STATES = frozenset({"merged", "stopped", "failed", "completed"})
 ISSUE_FIELDS = frozenset({"issue", "attempts", "outcome", "delivery", "delivery_remainders"})
 ATTEMPT_FIELDS = frozenset(
     {
@@ -678,7 +693,181 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
             validate_result(issue_value["outcome"], expected_issue=issue)
             if not attempts or attempts[-1]["result"] != issue_value["outcome"]:
                 raise WorkflowError("issue outcome does not match its latest attempt")
+    validate_admission(value, library=_host_admission())
     return value
+
+
+def parse_claim_holder(holder: str) -> tuple[int, str, int, int]:
+    """Split an owner claim holder into ``(issue, kind, ordinal, launch)``.
+
+    A holder is a custody launch ``action_id``: ``issue:attempt:launch`` for an
+    implementation launch or ``issue:rN:launch`` for a delivery remainder.
+    """
+    matched = ACTION_ID_PATTERN.fullmatch(holder) if isinstance(holder, str) else None
+    if matched is None:
+        raise WorkflowError("invalid admission claim holder")
+    kind = "remainder" if matched[2] else "implementation"
+    return int(matched[1]), kind, int(matched[3]), int(matched[4])
+
+
+def current_launch_id(runtime: Any, issue: int, issue_state: dict[str, Any]) -> str | None:
+    """The issue's current ``active`` launch identity, or ``None``."""
+    custody, record = _call(None, runtime.current_custody, issue, issue_state)
+    if custody is None or record["state"] != "active":
+        return None
+    return custody["action_id"]
+
+
+def _exact_roles(roles: Any, expected: Any) -> bool:
+    return (isinstance(roles, dict) and roles == dict(expected)
+            and all(type(count) is int for count in roles.values()))
+
+
+def validate_admission(state: dict[str, Any], *, library: Any) -> None:
+    """Close the run's admission block over exact members (D5).
+
+    Any violation is a `WorkflowError`, so every read and write refuses it.
+    """
+    admission = state["admission"]
+    if admission is None:
+        return
+    if not isinstance(admission, dict) or set(admission) != ADMISSION_FIELDS:
+        raise WorkflowError("invalid admission schema")
+    route = admission["route"]
+    if not isinstance(route, str) or not (
+            route == library.DIRECT_ROUTE or library.ROUTE_NAME_PATTERN.fullmatch(route)):
+        raise WorkflowError("invalid admission route")
+    releases = admission["releases"]
+    if type(releases) is not int or releases < 0:
+        raise WorkflowError("invalid admission release counter")
+    claims = admission["claims"]
+    if not isinstance(claims, list):
+        raise WorkflowError("invalid admission claims")
+    if route == library.DIRECT_ROUTE and (claims or releases != 0):
+        raise WorkflowError("a direct route holds no claims")
+    created_at = parse_utc(state["created_at"], "run creation time")
+    updated_at = parse_utc(state["updated_at"], "run update time")
+    sequences: list[int] = []
+    owner_holders: set[str] = set()
+    held_controllers = 0
+    held_owners: list[str] = []
+    for claim in claims:
+        if not isinstance(claim, dict) or set(claim) != CLAIM_FIELDS:
+            raise WorkflowError("invalid admission claim schema")
+        holder = claim["holder"]
+        controller = holder == CONTROLLER_HOLDER
+        if controller:
+            if not _exact_roles(claim["roles"], library.CONTROLLER_ROLES):
+                raise WorkflowError("invalid controller claim roles")
+        else:
+            parse_claim_holder(holder)
+            if not _exact_roles(claim["roles"], library.OWNER_ROLE_SET):
+                raise WorkflowError("invalid owner claim roles")
+            if holder in owner_holders:
+                raise WorkflowError("duplicate admission claim holder")
+            owner_holders.add(holder)
+        acquired_at = parse_utc(claim["acquired_at"], "claim acquisition time")
+        if not created_at <= acquired_at <= updated_at:
+            raise WorkflowError("invalid claim acquisition time order")
+        release = (claim["released_at"], claim["release_event"], claim["release_seq"])
+        if all(item is None for item in release):
+            if controller:
+                held_controllers += 1
+            else:
+                held_owners.append(holder)
+            continue
+        if any(item is None for item in release):
+            raise WorkflowError("claim release fields must all be null or all be set")
+        released_at = parse_utc(claim["released_at"], "claim release time")
+        if not acquired_at <= released_at <= updated_at:
+            raise WorkflowError("invalid claim release time order")
+        event = claim["release_event"]
+        if not isinstance(event, str) or event not in RELEASE_EVENTS:
+            raise WorkflowError("invalid claim release event")
+        if (event == "finalized") != controller:
+            raise WorkflowError("only a controller claim is released finalized")
+        if type(claim["release_seq"]) is not int:
+            raise WorkflowError("invalid claim release sequence")
+        sequences.append(claim["release_seq"])
+    if sorted(sequences) != list(range(1, releases + 1)):
+        raise WorkflowError("claim release sequences do not match the release counter")
+    if held_controllers > 1:
+        raise WorkflowError("more than one held controller claim")
+    if held_owners:
+        runtime = _delivery()
+        for holder in held_owners:
+            issue = parse_claim_holder(holder)[0]
+            issue_state = state["issues"].get(str(issue))
+            if issue_state is None or current_launch_id(runtime, issue, issue_state) != holder:
+                raise WorkflowError("held owner claim is not its issue's current launch")
+
+
+def release_claim(admission: dict[str, Any], claim: dict[str, Any], *, event: str,
+                  at: str) -> None:
+    """Release one held claim at ``at``, taking the run's next release sequence."""
+    if event not in RELEASE_EVENTS or claim["released_at"] is not None:
+        raise WorkflowError("internal error: invalid claim release")
+    admission["releases"] += 1
+    claim["released_at"] = at
+    claim["release_event"] = event
+    claim["release_seq"] = admission["releases"]
+
+
+def _release_event(runtime: Any, issue_state: dict[str, Any] | None, holder: str) -> str:
+    """Derive why a held owner claim's launch is no longer current (D19)."""
+    _, kind, ordinal, launch = parse_claim_holder(holder)
+    if issue_state is not None:
+        if runtime.delivery_complete(issue_state):
+            return "finished"
+        records = (issue_state["attempts"] if kind == "implementation"
+                   else issue_state["delivery_remainders"])
+        if 1 <= ordinal <= len(records):
+            record = records[ordinal - 1]
+            if len(record["launches"]) > launch:
+                return "superseded"
+            if record["state"] in TERMINAL_RECORD_STATES:
+                return "finished"
+            if record["state"] == "suspended":
+                return ("launch_refused" if record["blocked_on"] == "host_capacity"
+                        else "suspended")
+            if record["state"] == "handed_off":
+                return "handed_off"
+    raise WorkflowError("internal error: unreleasable claim")
+
+
+def settle_admission(state: dict[str, Any], *, at: str) -> bool:
+    """Release every held owner claim whose launch is no longer current (D5, D19).
+
+    This is the only release site besides control's ``owner_unavailable`` and
+    ``finalized`` releases, and `commit_state` runs it just before every
+    committed write, so each writer releases in the same write that records its
+    transition. It does nothing when ``admission`` is ``None`` or its route is
+    ``direct``. Otherwise each held owner claim, in list order, whose holder is
+    not its issue's current ``active`` launch is released with the first
+    matching event: issue delivery complete -> ``finished``; the holder's record
+    has more launches than the holder's launch ordinal -> ``superseded``; the
+    record is terminal (merged, stopped, failed, completed) -> ``finished``;
+    ``suspended`` on ``host_capacity`` -> ``launch_refused``; any other
+    suspension -> ``suspended``; ``handed_off`` -> ``handed_off``. Anything else
+    raises. Returns whether it released anything.
+    """
+    admission = state["admission"]
+    if admission is None or admission["route"] == _host_admission().DIRECT_ROUTE:
+        return False
+    runtime = _delivery()
+    released = False
+    for claim in admission["claims"]:
+        if claim["holder"] == CONTROLLER_HOLDER or claim["released_at"] is not None:
+            continue
+        issue = parse_claim_holder(claim["holder"])[0]
+        issue_state = state["issues"].get(str(issue))
+        if (issue_state is not None
+                and current_launch_id(runtime, issue, issue_state) == claim["holder"]):
+            continue
+        event = _release_event(runtime, issue_state, claim["holder"])
+        release_claim(admission, claim, event=event, at=at)
+        released = True
+    return released
 
 
 def resolve_repo_root(repo_root_value: str) -> Path:
@@ -952,6 +1141,18 @@ def atomic_write_state(run_dir: Path, state_path: Path, state: dict[str, Any]) -
         raise
 
 
+def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
+                 run_id: str) -> None:
+    """The one write boundary every committed state write passes (D5).
+
+    It settles the admission block at the commit's ``updated_at``, validates
+    the whole state, then publishes it atomically, in that order.
+    """
+    settle_admission(state, at=state["updated_at"])
+    validate_state(state, run_id=run_id)
+    atomic_write_state(run_dir, state_path, state)
+
+
 Mutation = Callable[[dict[str, Any] | None], tuple[Any, bool]]
 
 
@@ -987,8 +1188,7 @@ def transact(
                     state = result
                 else:
                     raise WorkflowError("internal error: changed transaction has no state")
-            validate_state(state, run_id=run_id)
-            atomic_write_state(run_dir, state_path, state)
+            commit_state(run_dir, state_path, state, run_id=run_id)
         return result
 
 
@@ -1028,6 +1228,7 @@ def new_run_state(
         "updated_at": now,
         "prior_run": prior_run,
         "issues": issues,
+        "admission": None,
     }
 
 
@@ -2662,8 +2863,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         assert state is not None
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        validate_state(state, run_id=run_id)
-                        atomic_write_state(run_dir, state_path, state)
+                        commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_observe(
                         issue,
                         run_id if selected is not None and not request["new_run"]
@@ -2680,8 +2880,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
-                    validate_state(state, run_id=run_id)
-                    atomic_write_state(run_dir, state_path, state)
+                    commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="failed", blockers=[],
@@ -2692,8 +2891,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         assert state is not None
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        validate_state(state, run_id=run_id)
-                        atomic_write_state(run_dir, state_path, state)
+                        commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_terminal(
                         issue=issue,
                         run_id=(run_id if state is not None else None),
@@ -2711,8 +2909,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     if policy["changed"]:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        validate_state(state, run_id=run_id)
-                        atomic_write_state(run_dir, state_path, state)
+                        commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason=policy["attempt"]["result"]["state"],
@@ -2722,8 +2919,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
-                    validate_state(state, run_id=run_id)
-                    atomic_write_state(run_dir, state_path, state)
+                    commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="merged", blockers=[],
@@ -2757,9 +2953,10 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         state, issue=issue, request=request, policy=policy,
                         ledger_repo_root=str(repo_root), run_id=run_id,
                         reentry=reentry_command(issue))
-                    validate_state(state, run_id=run_id)
                     if changed:
-                        atomic_write_state(run_dir, state_path, state)
+                        commit_state(run_dir, state_path, state, run_id=run_id)
+                    else:
+                        validate_state(state, run_id=run_id)
                 else:
                     raise WorkflowError("invalid one-issue policy operation")
 
@@ -3075,7 +3272,7 @@ def command_check_launch(args: argparse.Namespace) -> int:
         raw_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkflowError("invalid workflow state") from error
-    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2}:
+    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3}:
         candidate = _call("invalid legacy workflow state",
             _delivery().migrate, raw_state, migration_contracts={})
         validate_state(candidate, run_id=args.run_id)

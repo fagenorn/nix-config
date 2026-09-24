@@ -28,7 +28,9 @@ def load_source_module(path, name, *, package=False):
     return module
 
 
-class WorkflowStateLifecycleTest(unittest.TestCase):
+class LifecycleHarness:
+    """The lifecycle suites' CLI runner, request builders and ledger helpers."""
+
     @classmethod
     def setUpClass(cls):
         cls.delivery_model = load_source_module(
@@ -58,7 +60,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
     def _as_legacy(state, version, *, keep_delivery=False):
         state = copy.deepcopy(state)
         state["schema_version"] = version
-        if not keep_delivery:
+        if version < 4:
+            state.pop("admission", None)
+        if version < 3 and not keep_delivery:
             for issue in state["issues"].values():
                 issue.pop("delivery", None)
                 issue.pop("delivery_remainders", None)
@@ -731,9 +735,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         holding the old `stopped`/`result_source="expiry"` shape must keep
         loading and keep driving the retry ladder and the provisional-result
         override, so the tests that pin those rules seed the record directly.
-        `prior_schema` writes it under the previous `schema_version` without the
-        suspension fields or the run lineage link — the on-disk shape a live run
-        carries across deploy.
+        `prior_schema` writes it under schema 2, without the admission block
+        and the delivery fields — the on-disk shape a live run carries across
+        deploy.
         """
         state = self.read_state()
         issue_state = state["issues"][str(issue)]
@@ -754,7 +758,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         issue_state["outcome"] = copy.deepcopy(result)
         state["updated_at"] = now
         if prior_schema:
-            state["schema_version"] = state["schema_version"] - 1
+            state["schema_version"] = 2
+            state.pop("admission")
             issue_state.pop("delivery")
             issue_state.pop("delivery_remainders")
         self.write_state(state)
@@ -834,6 +839,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             sort_keys=True, separators=(",", ":")) + "\n"
         return completed
 
+
+class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
     def test_public_cli_exposes_direct_owner_but_not_retired_commands(self):
         completed = self.run_cli("--help")
         self.assertIn("direct-owner", completed.stdout)
@@ -2195,7 +2202,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
         state = self.read_state()
         attempt = state["issues"]["14"]["attempts"][0]
-        self.assertEqual(state["schema_version"], 3)
+        self.assertEqual(state["schema_version"], 4)
         self.assertIsNone(attempt["blocked_on"])
         self.assertEqual(attempt["stalled_resumes"], 0)
         self.assertEqual(attempt["state"], "merged")
@@ -2590,9 +2597,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                     "stalled_resumes": 0,
                 }
                 expected_state = {
-                    "schema_version": 3, "run_id": run_id,
+                    "schema_version": 4, "run_id": run_id,
                     "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
-                    "prior_run": None,
+                    "prior_run": None, "admission": None,
                     "issues": {"14": {
                         "issue": 14, "attempts": [expected_attempt],
                         "outcome": None, "delivery": delivery,
@@ -2637,9 +2644,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
         }
         expected_state = {
-            "schema_version": 3, "run_id": self.run_id,
+            "schema_version": 4, "run_id": self.run_id,
             "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
-            "prior_run": None,
+            "prior_run": None, "admission": None,
             "issues": {"14": {
                 "issue": 14, "attempts": [expected_attempt], "outcome": None,
                 "delivery": delivery, "delivery_remainders": [],
@@ -4978,11 +4985,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.spawn(issue=17, worktree=worktree, budget_minutes=10)
         state = self.read_state()
         current_version = state["schema_version"]
-        state["schema_version"] = current_version - 1
-        for issue in state["issues"].values():
-            issue.pop("delivery")
-            issue.pop("delivery_remainders")
-        self.write_state(state)
+        self.write_state(self._as_legacy(state, current_version - 1))
         completed = self.suspend(
             issue=17, attempt=1, blocked_on="external",
             now="2026-08-13T20:02:00Z",
@@ -4996,17 +4999,17 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(latest["suspend_phase"], 0)
         self.assertEqual(latest["blocked_on"], "external")
 
-    def test_schema_one_migrates_through_two_to_three_with_one_atomic_write(self):
+    def test_schema_one_migrates_through_two_and_three_to_four_with_one_atomic_write(self):
         self._spawn_151()
         schema_one = self._as_legacy(self.read_state(), 1)
         original = copy.deepcopy(schema_one)
-        workflow = load_source_module(SCRIPT, "workflow_state_schema_three_test")
+        workflow = load_source_module(SCRIPT, "workflow_state_schema_four_test")
         contract, _ = self.delivery_fixtures.contract_and_delivery(self.delivery_model)
         migrated = workflow.upgrade_state(
             schema_one, run_id=self.run_id, migration_contracts={151: contract}
         )
         self.assertEqual(schema_one, original)
-        self.assertEqual(migrated["schema_version"], 3)
+        self.assertEqual(migrated["schema_version"], 4)
         self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
         issue = migrated["issues"]["151"]
         self.assertEqual(issue["delivery_remainders"], [])
@@ -5014,7 +5017,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         empty["postconditions"] = issue["delivery"]["postconditions"]
         self.assertEqual(issue["delivery"], empty)
 
-    def test_schema_one_and_two_mutations_write_only_final_schema_three_once(self):
+    def test_schema_one_and_two_mutations_write_only_final_schema_four_once(self):
         self._spawn_151()
         workflow = load_source_module(SCRIPT, "workflow_state_atomic_migration")
         baseline = self.read_state()
@@ -5027,9 +5030,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                     lambda current: (current, False), migration_contracts={},
                 )
             self.assertEqual(state, self._as_legacy(baseline, version))
-            self.assertEqual(value["schema_version"], 3)
+            self.assertEqual(value["schema_version"], 4)
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 3)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 4)
 
     def test_locked_loader_requires_keyword_migration_context(self):
         self.init_run()
@@ -5054,7 +5057,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         workflow = load_source_module(SCRIPT, "workflow_state_legacy_rows")
         migrated = workflow.upgrade_state(legacy, run_id=self.run_id,
                                           migration_contracts={})
-        self.assertEqual(migrated["schema_version"], 3)
+        self.assertEqual(migrated["schema_version"], 4)
         for key, legacy_issue in legacy_rows.items():
             migrated_issue = migrated["issues"][key]
             self.assertEqual(
