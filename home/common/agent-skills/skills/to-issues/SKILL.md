@@ -9,13 +9,13 @@ Break a plan into independently-grabbable issues using vertical slices (tracer b
 
 ## Project bindings (resolve first)
 
-This skill is project-agnostic. Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set (tracker kind/CLI, `specDir`, `planDir`, branches) from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker` and `bindings.paths`; required blocked capabilities stop, and authored unsupported takes its documented tracker-free route.
 
-Keys this skill uses: `issueTracker{kind,cli}`, `docPaths{context,contextMap}` (optional, used only for grounding; `docPaths.adrDir` is a legacy override where a repo still has a central ADR directory).
+Keys this skill uses: `bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}` and `bindings.paths`.
 
 ### Resolve the issue tracker
 
-The helper's `trackerKind`/`trackerCli` say where issues live. `kind: github` → the `cli` (default `gh`); `kind: gitlab` → `glab`; `kind: none` → there is no tracker: present the breakdown but do not publish (output the slices as a markdown list / file for the user to file manually). If neither config nor remote resolves a tracker, ask the user exactly one question: *"Where do issues live, and which CLI or MCP creates them?"* — then proceed with their answer.
+`bindings.tracker.kind` and `bindings.tracker.cli` say where issues live. An authored unsupported tracker means there is no tracker: present the breakdown but do not publish (output the slices as a markdown list / file for the user to file manually). A blocked tracker stops the dependent forge operation.
 
 ## Process
 
@@ -25,15 +25,17 @@ Work from whatever is already in the conversation context. If the user passes an
 
 ### 2. Explore the codebase (optional)
 
-If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use the project's domain vocabulary. If the project documents a domain glossary (the map's area files, else `docPaths.context`) or architectural decision records (each area's `docs/areas/<slug>/adr/`, plus `system`; legacy repos: `docPaths.adrDir`), read the relevant parts so titles and descriptions use the project's terminology and respect existing decisions in the area you're touching. If those docs are absent, skip this grounding step silently.
+If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use terminology from retained `bindings.paths.context` and the knowledge capability's passed records. An authored unsupported knowledge capability takes its documented no-knowledge route.
 
 Look for opportunities to prefactor the code to make the implementation easier — "make the change easy, then make the easy change." Prefactoring is its own leading slice, not a preamble folded into the first feature slice.
 
 ### 3. Draft vertical slices
 
-**Check the rejection KB first.** If `.out-of-scope/` exists at the repo root, read its files (one per
-consciously-rejected idea) before drafting. Never propose a slice that re-litigates a rejected
-direction — mention the rejection file instead; only the user can revive one.
+**Check the rejection KB first.** Read the retained
+`bindings.paths.rejections` entries in authored order before drafting; each entry
+records a consciously rejected idea. Never propose a slice that re-litigates a
+rejected direction — mention the retained rejection path instead; only the user
+can revive one.
 
 Break the plan into **tracer bullet** issues. Each issue is a thin vertical slice that cuts through ALL integration layers end-to-end, NOT a horizontal slice of one layer.
 
@@ -68,10 +70,10 @@ Ask the user:
 Iterate until the user approves the breakdown.
 
 **Record conscious rejections.** When the user rules a proposed direction out during this quiz (not
-merely deferring it), write one short file per rejection to `.out-of-scope/<slug>.md` — the idea in a
-line, why it was rejected, the date, and any link (spec section, wayfind ticket) — and commit them
-with the breakdown. This is the KB step 3 checks; it stops future sessions from re-proposing settled
-rejections for near-zero cost.
+merely deferring it), write one short file per rejection only to an authored
+`bindings.paths.rejections` location — the idea in a line, why it was rejected,
+the date, and any link (spec section, wayfind ticket) — and commit them with the
+breakdown. An empty or unsupported retained list has no rejection write route.
 
 ### 5. Publish the issues to the issue tracker
 

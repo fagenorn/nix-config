@@ -5,6 +5,8 @@ description: Turn an idea or issue into an approved design doc by grilling the o
 
 # Design
 
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.artifacts.specs` for the design artifact path.
+
 Turn an idea into a design doc the plan phase can execute from. You own the interview and the spec; the caller owns planning, review, and execution.
 
 ## The interview — round-batched frontier
@@ -56,7 +58,7 @@ the approved scope still returns to the caller.
 
 ## Output
 
-Write the design to `<specDir>/<YYYY-MM-DD>-<topic>-design.md` (`specDir` from `~/.agents/bin/resolve-bindings`; helper missing → `.claude/skills.config.json`, default `.claude/specs`) in the worktree you were called in — never on the integration branch.
+Write the design to `<bindings.paths.artifacts.specs>/<YYYY-MM-DD>-<topic>-design.md` in the worktree you were called in — never on the integration branch.
 
 Sections: **Problem** (from the user's perspective) · **Solution** · **Decisions** (modules and interfaces touched, schema and API contracts, behavior — no file paths or line numbers; they rot) · **Test seams** (the agreed seams and the prior art they follow) · **Out of scope** (mandatory, and real) · **Decision ledger** — the issue's single decision store, a table later phases cite by row ID instead of restating rationale:
 

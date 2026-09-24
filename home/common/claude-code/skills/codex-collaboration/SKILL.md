@@ -1,149 +1,76 @@
 ---
 name: codex-collaboration
-description: Run a private, isolated Codex pass — plan-review (from-issue Phase 5) or diff-review (the diff review's correctness axis) — and disposition its findings.
+description: Run a private, isolated Codex pass for plan-review or diff-review and disposition its findings.
 user-invocable: false
 ---
 
 # Codex Collaboration
 
-Support two operations; each owns a reference file read when that operation runs:
+`plan-review` uses [PLAN-REVIEW.md](./PLAN-REVIEW.md); `diff-review` uses
+[DIFF-REVIEW.md](./DIFF-REVIEW.md). Keep Codex review-only. The parent Claude
+agent owns plan edits and disposition.
 
-- **`plan-review`** (from-issue Phase 5) — reviews the implementation plan for
-  conformance to the issue, spec, docs, and coding bar. Packet, reviewer
-  contract, and finding disposition in [PLAN-REVIEW.md](./PLAN-REVIEW.md).
-- **`diff-review`** — the correctness axis of the two-axis diff review. The sdd
-  skill defines the axes and dispatches the parallel native conformance axis
-  itself; that axis never comes through this skill, and the correctness axis is
-  never skipped. Packet, output contract, and disposition in
-  [DIFF-REVIEW.md](./DIFF-REVIEW.md).
+## Phase entry and selection
 
-Both operations share this file's runtime contract — resolve policy, read-only
-rules, pre-flight, one foreground transport dispatch, validation, and the
-one-time native fallback. Keep Codex review-only and keep the parent Claude
-agent responsible for every plan edit and disposition.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and
+retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain
+the returned `ResolvedProject` in memory, and treat every resolver error as fatal
+before mutation or external effects. On refusal, preserve and report the
+resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never
+translate it into a partial snapshot or fallback. Do not read raw policy, infer
+Git policy, or resolve again in either support document.
 
-## Resolve policy
+For `plan-review`, select `bindings.workflow.review.plan` and
+`capabilities.review.plan`; for `diff-review`, select
+`bindings.workflow.review.code` and `capabilities.review.code`. Route that
+retained capability before dereferencing any command entry: `blocked` stops with
+its capability reason and repair ID; `unsupported` takes that operation's
+documented native route. Only for `available`, retain the selected `review_id`
+and dereference `bindings.commands[review_id]`. Do not use a default, a plugin bridge,
+or a second resolver. `bindings.paths.hints` is the only project-hint input and
+is supplied by path when it is available.
 
-Read `<repo-root>/.claude/skills.config.json` when present. Resolve
-`codex.planReview` as follows:
+## Read-only packet rules
 
-- Missing `enabled` means `true`.
-- `enabled: false` means the project has opted out of Codex review passes entirely:
-  return control so the caller uses its native reviewer flow — for either operation.
-  Do not launch Codex.
-- A non-empty `focus` adds project-specific emphasis without replacing the
-  standard review bar.
-- Continue to apply the existing `projectHints` binding when its file exists.
+Every packet says: remain read-only; do not edit files, mutate Git, create
+commits/branches/worktrees, change issues or PRs, install dependencies, or ship.
+Use read-only repository and Git inspection only, inspect live HEAD files, and
+stay in assigned scope. A limitation of your own execution environment is never
+a finding: the sandbox denies every write, so report what you could not verify
+as an unreadable artifact or unresolved unknown in the operation's existing
+unresolved unknowns field, while an artifact defect exposed by a failed command is
+still reportable; anchor it in the artifact with evidence.
 
-If this skill or the `codex:codex-reviewer` plugin agent is unavailable, the
-caller uses the native reviewer flow. This is capability fallback, not a Codex
-runtime failure.
+## Direct configured review
 
-## Read-only rules (both operations)
+Build the operation packet from its support document. Create absolute JSONL and
+last-message candidates under `${TMPDIR:-/tmp}` and remove both with `trap` or
+`finally` on every outcome. Preserve the selected command object's base argv,
+cwd, and declared env (unset only declared env names), append the exact tail,
+and send the complete packet on stdin:
 
-Include these verbatim in substance in every packet:
+```text
+bindings.commands[review_id].argv \
+  exec --sandbox read-only --model gpt-6-astra \
+  -c model_reasoning_effort="xhigh" --json \
+  --output-last-message <absolute-last-message> --ephemeral \
+  -C <absolute-worktree> -
+```
 
-- Remain read-only. Do not edit files; mutate Git; create commits, branches, or
-  worktrees; change issues or PRs; install dependencies; or perform shipping
-  actions.
-- Use read-only repository and Git inspection only. Do not transfer a Claude
-  transcript, and do not review outside the assigned scope.
-- Inspect the live files at HEAD. Paths and summaries are routing context,
-  never substitutes for reading the worktree.
-- A limitation of your own execution environment is never a finding. The sandbox
-  is `read-only` and denies every write, `TMPDIR` included, so test runners,
-  mutation checks and anything else needing scratch space cannot run here and are
-  not expected to. Report what you could not verify where you already report what
-  you could not read, and in each finding's unresolved unknowns field — never as
-  a `Blocking` / `Should fix` / `Critical` / `Important` / `Minor` item. A defect
-  in the artifact under review is still reportable when a failed command is what
-  exposed it; anchor it in the artifact with evidence, not in the transcript of
-  the denial.
+Validate every JSONL object. Require its runtime-selection event to report the
+selected model `gpt-6-astra` and selected reasoning effort `xhigh`; require
+exactly one terminal agent-message; require a non-empty last-message file whose
+UTF-8 bytes equal that terminal agent-message byte-for-byte; then validate the
+operation headings. Only that success establishes reviewer identity `Codex`.
 
-## Launch
-
-Capability pre-flight first, one sub-second call: `command -v codex-companion`. If
-the command is missing, take the capability fallback above — use the native
-reviewer flow immediately and record it as such. Never convert a missing
-runtime into a timed-out Codex attempt.
-An operation may define an additional pre-flight of its own in its reference file —
-`diff-review` defines a size pre-flight in DIFF-REVIEW.md — and that one always runs
-after this capability check.
-
-Every invocation of an operation pre-flights fresh and gets its own attempt.
-"Codex already failed earlier in this run" is not a reason to
-skip the capability pre-flight or go straight to native: the no-retry rule
-scopes to a single operation invocation, not to the pipeline or the session.
-An operator or dispatcher advisory does not narrow this contract — if skipping
-is right, the caller records the deviation as such rather than treating the
-advisory as the rule.
-
-Build the operation's packet per its reference file, then dispatch the plugin
-agent once with the complete packet using this transport selection:
-
-<!-- agent-dispatch: id=codex-review-transport role=codex-transport model=sonnet effort=medium -->
-Agent(subagent_type="codex:codex-reviewer", model="sonnet", effort="medium") transports the complete review packet to the isolated Codex runtime.
-
-Run it in the foreground, with the first two lines of the dispatch exactly, in
-this order:
-
-`WORKTREE_ROOT: <absolute worktree root>`
-`REVIEW_OPERATION: <plan-review|diff-review>`
-
-Here `<operation>` is the operation currently being invoked. The first line lets
-the bridge key runtime job state to the reviewed worktree, and the second
-preserves the operation across the detached transport. Launch mechanics live
-solely in that agent's definition. This selection changes only the Claude
-transport tier. The plugin transport pins the external reviewer to
-`gpt-6-astra`; other Codex sessions keep their own runtime model selection.
-The contract: the review runs fresh in an isolated read-only Codex runtime
-(fresh `CODEX_HOME`, approval policy `never`, sandbox `read-only`), survives the
-bridge's own lifetime, and is bounded by a per-operation runtime budget — expect
-up to roughly 28 minutes of wall clock for `plan-review` and roughly 14 minutes
-for `diff-review`. The bridge's own wait is uniform and wider than either
-budget: it returns `CODEX_REVIEW_FAILURE` only after roughly 2160 s of bounded
-waiting — four bounded 540 s calls — so a wedged worker can hold you well past
-the review's own budget. Schedule against the per-operation budget and plan for
-the ~2160 s bounded-wait figure; it bounds the bridge's own waiting, not the
-hold itself, so it is a planning figure rather than a guaranteed ceiling. The
-bridge returns the reviewer's output verbatim, or a single
-`CODEX_REVIEW_FAILURE:` line carrying the review job's recorded error.
-
-Parallel reviews are valid. A queued or active review is never a reason to use a
-Claude fallback. Wait for the requested job. The patched reviewer runtime does
-not share a broker with interactive commands or with another reviewer.
-
-Live bridge certification evidence — needed only when certifying that deployed
-bridge definitions are current — lives in [CERTIFICATION.md](./CERTIFICATION.md);
-it changes none of the contracts in this file.
-
-## Validate and fall back
-
-A valid result has the operation's required headings — a one-line axis verdict then
-`Critical` / `Important` / `Minor` for `diff-review`; `Blocking` / `Should fix` /
-`Discussion` for `plan-review` — and either `None.` or findings with evidence,
-confidence, and unknowns. Treat only these as Codex failures:
-
-- the executable is missing or authentication is unavailable;
-- the agent returns `CODEX_REVIEW_FAILURE:` — the review job ended failed,
-  cancelled, or timed out (including the runtime's hard timeout and
-  dead-worker detection), with the job's recorded error on the line;
-- the result is empty or malformed after one completed fresh run.
-
-On a real failure, dispatch exactly one fresh Claude standards reviewer with the
-same packet using:
-
-<!-- agent-dispatch: id=codex-failure-fallback-review role=reviewer model=opus effort=high -->
-Agent(subagent_type="reviewer", model="opus", effort="high") performs the one-time native standards-review fallback.
-
-Give it the read-only toolset matching from-issue Phase 5 step 3, the same
-packet, and the same read-only/output contract. Do not ask that fallback
-reviewer to imitate Codex. Record the concrete failure class and that Claude
-fallback was used. Do not retry Codex and do not fall back because of
-concurrency.
+A daemon, slot, or capacity rejection is a binding capacity rejection: surface
+it verbatim, stop, make no retry, and take no native fallback. A completed
+available-command runtime failure, malformed or mismatched metadata/output, or
+operation-schema failure uses exactly one native fallback with the same packet;
+never retry Codex. The fallback is not route-establishment evidence.
 
 ## Disposition
 
-`plan-review`: the parent Claude agent verifies and dispositions every finding
-per PLAN-REVIEW.md before returning control. `diff-review`: return the validated
-result unmodified to the calling controller per DIFF-REVIEW.md.
+For `plan-review`, the parent Claude agent verifies and dispositions every
+finding per PLAN-REVIEW.md. For `diff-review`, return the validated result
+unmodified to the calling controller per DIFF-REVIEW.md.

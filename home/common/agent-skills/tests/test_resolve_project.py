@@ -36,6 +36,7 @@ LIBRARY = Path(__file__).resolve().parents[1] / "scripts" / "agent_platform.py"
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 DECLARATION = Path(__file__).resolve().parents[1] / "host-declaration.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
+EVAL_FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
 
 # `install_home`'s default: copy the committed manifest verbatim. A distinct
 # sentinel because `None` already means "install no manifest at all".
@@ -110,9 +111,9 @@ def registry(*entries: dict) -> dict:
     """The fleet registry document naming `entries`, in the order given.
 
     The file's shape is the design's, not the reader's: two members, and each
-    entry exactly `{project_id, root}` (D18). Task 6 owns the writer; the suite
-    stages this file by hand so the read side can be exercised before it
-    exists.
+    entry exactly `{project_id, root}` (D18). `adopt-project verify --register`
+    writes it; the suite stages this file by hand so the read side is
+    exercised apart from its writer.
     """
     return {"schema_version": 1, "projects": list(entries)}
 
@@ -533,6 +534,53 @@ class ErrorOutputTest(ResolverTestCase):
         self.assertIn("/capabilities/release", pointers)
 
 
+class WorkflowRefusalFixtureTest(ResolverTestCase):
+    SNAPSHOT_MEMBERS = ("schema_version", "project", "bindings", "capabilities")
+
+    def assert_workflow_refusal(self, root, code_name, repair_id):
+        before = tree_snapshot(root)
+        code, out, err = run("resolve", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 2, err)
+        self.assertEqual(tree_snapshot(root), before)
+        payload = json.loads(out)
+        self.assertEqual(set(payload), {"error"})
+        self.assertEqual(payload["error"]["code"], code_name)
+        self.assertEqual(payload["error"]["repair_id"], repair_id)
+        self.assertTrue(payload["error"]["violations"])
+        for member in self.SNAPSHOT_MEMBERS:
+            self.assertNotIn(member, payload)
+
+    def test_missing_contract_fails_closed(self):
+        self.assert_workflow_refusal(
+            self.make_root(contract=False),
+            "not_onboarded",
+            "onboarding.contract.missing",
+        )
+
+    def test_malformed_contract_fails_closed(self):
+        root = self.make_root()
+        (root / ".agents" / "project.json").write_text("{", encoding="utf-8")
+        self.assert_workflow_refusal(root, "invalid_contract", "contract.parse")
+
+    def test_non_repository_without_contract_fails_closed(self):
+        root = Path(tempfile.mkdtemp()).resolve()
+        self.assert_workflow_refusal(
+            root,
+            "not_onboarded",
+            "onboarding.contract.missing",
+        )
+
+    def test_stale_projection_fails_closed(self):
+        root = self.make_root()
+        with (root / "AGENTS.md").open("a", encoding="utf-8") as handle:
+            handle.write("\nhand edit\n")
+        self.assert_workflow_refusal(
+            root,
+            "invalid_projection",
+            "projection.codex.entry.stale",
+        )
+
+
 class NoDefaultingTest(ResolverTestCase):
     def test_dropping_any_binding_namespace_refuses(self):
         for namespace in BINDING_NAMESPACES:
@@ -865,14 +913,27 @@ class CommittedContractTest(ResolverTestCase):
         self.assertEqual(sorted(contract["capabilities"]), sorted(CAPABILITY_NAMES))
         self.assertEqual(sorted(contract["bindings"]), sorted(BINDING_NAMESPACES))
 
-    def test_orchestration_values_match_the_legacy_config(self):
-        legacy = json.loads(
-            (REPO_ROOT / ".claude" / "skills.config.json").read_text("utf-8"))
+    def test_orchestration_values_are_committed_contract_values(self):
         orchestration = source_contract()["bindings"]["workflow"]["orchestration"]
-        self.assertEqual(orchestration["max_parallel"],
-                         legacy["orchestration"]["maxParallel"])
-        self.assertEqual(orchestration["attempt_budget_minutes"],
-                         legacy["orchestration"]["agentBudgetMinutes"])
+        self.assertEqual(orchestration["max_parallel"], 2)
+        self.assertEqual(orchestration["attempt_budget_minutes"], 180)
+        self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
+
+    def test_nix_activate_is_exact_and_deploy_stays_unsupported(self):
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        snapshot = json.loads(out)
+        self.assertEqual(snapshot["bindings"]["commands"]["nix-activate"], {
+            "argv": ["just", "switch"],
+            "cwd": str(REPO_ROOT),
+            "env": [],
+        })
+        self.assertEqual(snapshot["bindings"]["deploy"], {
+            "adapter": "none", "command": None, "config": {},
+        })
+        self.assertEqual(snapshot["capabilities"]["deploy"], {
+            "state": "unsupported", "reason_code": None, "repair_id": None,
+        })
 
 
 def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, str]:
@@ -1549,6 +1610,30 @@ class DriftGateTest(ResolverTestCase):
                              home=self.home)
         self.assertEqual(code, 0, err or out)
         self.assertEqual({p["action"] for p in json.loads(out)["projections"]},
+                         {"unchanged"})
+
+    def test_eval_fixture_resolves_with_current_projections(self):
+        code, out, err = run("resolve", "--repo-root", str(EVAL_FIXTURE), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        snapshot = json.loads(out)
+        self.assertEqual(snapshot["project"]["id"], "fixture/tinytask")
+        self.assertEqual(
+            snapshot["bindings"]["paths"]["artifacts"],
+            {"specs": str(EVAL_FIXTURE / ".claude/specs"),
+             "plans": str(EVAL_FIXTURE / ".claude/plans")},
+        )
+        self.assertEqual(
+            {name: entry["state"] for name, entry in snapshot["capabilities"].items()},
+            {"tracker": "unsupported", "worktrees": "available",
+             "knowledge.context": "available", "knowledge.standards": "available",
+             "knowledge.architecture": "available", "knowledge.hints": "unsupported",
+             "verification": "available", "review.plan": "unsupported",
+             "review.code": "unsupported", "release": "unsupported",
+             "deploy": "unsupported"},
+        )
+        code, out, err = run("check-projections", "--repo-root", str(EVAL_FIXTURE), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual({entry["action"] for entry in json.loads(out)["projections"]},
                          {"unchanged"})
 
 

@@ -12,13 +12,12 @@ unique in their directory, every ADR citation under docs/ resolves, no retired
 four-digit id survives, and the docs root stays clean. Repos on a legacy layout
 have no docs/areas/, so none of that applies to them.
 
-Usage: context-map-lint [REPO_ROOT]   (default: cwd)
-Exits 0 when clean or when the repo has no map yet, 1 on findings, 2 on misuse.
+Usage: context-map-lint --repo-root <absolute-root> --context-map <absolute-map>
+Exits 0 when clean, 1 on findings, 2 on misuse.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 from pathlib import Path
@@ -38,21 +37,6 @@ ADR_FILE_RE = re.compile(r"\A(\d{3})-[a-z0-9][a-z0-9-]*\.md\Z")
 ADR_HEADER_RE = re.compile(r"\A#\s+ADR-([a-z0-9][a-z0-9-]*)-(\d{3})\s+—\s+\S")
 CITATION_RE = re.compile(r"\bADR-([a-z0-9][a-z0-9-]*)-(\d{3})\b")
 RETIRED_ID_RE = re.compile(r"\bADR-\d{4}\b")
-
-
-def find_map(root: Path) -> Path | None:
-    config = root / ".claude" / "skills.config.json"
-    if config.is_file():
-        try:
-            configured = json.loads(config.read_text()).get("docPaths", {}).get("contextMap")
-        except (json.JSONDecodeError, AttributeError):
-            configured = None
-        if configured:
-            return root / configured
-    for candidate in (root / "docs" / "CONTEXT-MAP.md", root / "CONTEXT-MAP.md"):
-        if candidate.is_file():
-            return candidate
-    return None
 
 
 def section(text: str, heading: str) -> str | None:
@@ -191,7 +175,7 @@ def check_docs_root(docs: Path, rel) -> list[str]:
     return errors
 
 
-def check(root: Path) -> list[str]:
+def check(root: Path, map_path: Path) -> list[str]:
     def rel(path: Path) -> str:
         try:
             return str(path.resolve().relative_to(root))
@@ -200,13 +184,8 @@ def check(root: Path) -> list[str]:
 
     errors: list[str] = []
     areas_dir = (root / "docs" / "areas").resolve()
-    map_path = find_map(root)
-    if map_path is None:
-        if areas_dir.is_dir():
-            return ["docs/areas/: areas exist but no context map was found — the map is what names them"]
-        return []
     if not map_path.is_file():
-        return [f"{rel(map_path)}: configured context map does not exist"]
+        return [f"{rel(map_path)}: selected context map does not exist"]
 
     text = map_path.read_text()
     rel_map = rel(map_path)
@@ -304,15 +283,26 @@ def check(root: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) > 2:
+    if len(argv) != 5 or argv[1] != "--repo-root" or argv[3] != "--context-map":
         print(__doc__, file=sys.stderr)
         return 2
-    root = Path(argv[1] if len(argv) == 2 else ".").resolve()
+    supplied_root = Path(argv[2])
+    supplied_map = Path(argv[4])
+    if not supplied_root.is_absolute() or not supplied_map.is_absolute():
+        print("context-map-lint: --repo-root and --context-map must be absolute", file=sys.stderr)
+        return 2
+    root = supplied_root.resolve()
     if not root.is_dir():
         print(f"context-map-lint: not a directory: {root}", file=sys.stderr)
         return 2
+    map_path = supplied_map.resolve()
+    try:
+        map_path.relative_to(root)
+    except ValueError:
+        print(f"context-map-lint: context map is outside repository root: {map_path}", file=sys.stderr)
+        return 2
 
-    errors = check(root)
+    errors = check(root, map_path)
     if not errors:
         print(f"context-map-lint: {root} OK")
         return 0

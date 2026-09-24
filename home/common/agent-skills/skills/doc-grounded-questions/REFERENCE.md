@@ -1,7 +1,8 @@
 # Doc-Grounded Questions — rationale, expanded guidance, examples
 
-SKILL.md owns the pass itself; this file owns the why, the legacy fallbacks, and
-the worked examples.
+This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.paths.context` and never resolve, infer, or read project policy.
+
+SKILL.md owns the pass itself; this file owns the why and worked examples.
 
 ## Why this matters
 
@@ -24,23 +25,21 @@ skip the ones that don't apply. If a term in your question is defined in an area
 you opened, use the canonical term and don't ask the user to disambiguate it
 again.
 
-**No map?** Fall back to the legacy layout: read whichever of `docPaths.context`,
-`CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md` or a top-of-`README` domain section
-exists — whole when it is short, by governing section when it is not (see the
-long-doc rule below). Read it once, not per question.
+**No map?** Use only the retained `bindings.paths.context` list. Do not probe
+for a conventional filename or a README section; an empty retained list means
+there is no context document for this phase.
 
 ## Step 2 expanded — decision-log homes
 
 Areas own their decisions: each area in the map has an `adr/` directory beside
 its `CONTEXT.md` (`docs/areas/<slug>/adr/`), plus the reserved
-`docs/areas/system/adr/` for decisions spanning areas. Legacy fallback, for
-repos with no `docs/areas/`: `docPaths.adrDir` if configured, else whichever of
-`docs/adr/`, `docs/adrs/`, `docs/decisions/`, `adr/` exists.
+`docs/areas/system/adr/` for decisions spanning areas. With no map, use only
+the relevant retained context path; never infer a decision-log location.
 
 ## Step 3 expanded — standards layers
 
 Load a stack shard only when the change's file extensions match it. Project
-deltas live at `docPaths.standards` (a `docs/standards/` directory with a README
+deltas live at `bindings.paths.standards` (a `docs/standards/` directory with a README
 index carrying `governs:` globs, or a single `CONTRIBUTING.md` /
 `docs/coding-standards.md` in older repos). See `~/.agents/standards/README.md`
 for the precedence ladder.
@@ -74,8 +73,8 @@ as well.
 ```
 
 Never write the cache inside the working tree: a committed cache collides across
-parallel runs (observed: two `--auto` branches add/add-conflicted on
-`.claude/specs/GROUNDING.md` at merge).
+parallel runs (observed: two `--auto` branches add/add-conflicted on a
+worktree grounding cache at merge).
 
 ## The question shape
 
