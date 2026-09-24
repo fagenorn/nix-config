@@ -207,6 +207,20 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
     return value
 
 
+def _host_route(value: Any) -> dict[str, Any]:
+    _object(value, _members("interface_version kind route support agent_slots reason_code alternative"), "host route")
+    if type(value["interface_version"]) is not int or value["interface_version"] != 1: _reject()
+    _string(value["route"], "host route")
+    if value["support"] == "supported":
+        _integer(value["agent_slots"], "agent slots", minimum=4)
+        if value["reason_code"] is not None or value["alternative"] is not None: _reject()
+    elif value["support"] == "unsupported":
+        if value["agent_slots"] is not None: _reject()
+        if value["reason_code"] not in {"declared_unsupported", "route_undeclared", "declaration_missing", "declaration_invalid"}: _reject()
+        if value["alternative"] != "/from-issue <issue> --auto": _reject()
+    else: _reject()
+    return value
+
 def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if not isinstance(value, dict): _reject()
     if set(value) == {"action_id", "current", "current_action_id", "reason"}:
@@ -240,6 +254,7 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if value.get("kind") in {"delivery_checkpointed", "delivery_stalled"}: return _checkpoint_response(value, notes_max)
     if value.get("kind") in {"delivery_complete", "terminal_failed"}: return _finish_response(value)
     if "kind" not in value: return _control_response(value, notes_max)
+    if value.get("kind") == "host_route": return _host_route(value)
     _reject()
 
 

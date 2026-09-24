@@ -141,6 +141,14 @@ in
     ".agents/lib/python/agent_platform.py".source = ./scripts/agent_platform.py;
     ".agents/share/platform-manifest.json".source = ./platform-manifest.json;
 
+    # The host admission library and the host declaration it reads. The
+    # declaration is authored host policy -- per route, whether it is supported
+    # and how many agent slots one root session may hold -- read by
+    # `workflow-state` and the conformance check through that library, which is
+    # imported, never run (D2, D18).
+    ".agents/lib/python/host_admission.py".source = ./scripts/host_admission.py;
+    ".agents/share/host-declaration.json".source = ./host-declaration.json;
+
     # Claude accepts Home Manager's recursive file links, so its generated
     # multi-file skill can continue to use that layout.
     ".claude/skills/ui-ux-pro-max" = {

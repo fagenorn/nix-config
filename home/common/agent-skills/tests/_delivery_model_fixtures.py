@@ -316,6 +316,13 @@ def workflow_responses(model):
               "contract_digest": digest, "accepted_observation_ids": [],
               "pending_stage_ids": pending}
     return {
+        "host_route": {"interface_version": 1, "kind": "host_route", "route": "claude-code",
+                       "support": "supported", "agent_slots": 7, "reason_code": None,
+                       "alternative": None},
+        "host_route_unsupported": {"interface_version": 1, "kind": "host_route",
+                                   "route": "codex", "support": "unsupported",
+                                   "agent_slots": None, "reason_code": "declared_unsupported",
+                                   "alternative": "/from-issue <issue> --auto"},
         "current": {"action_id": "151:1:1", "current": True,
                     "current_action_id": "151:1:1", "reason": "current"},
         "bootstrap": {"interface_version": 2, "kind": "workflow_bootstrap",

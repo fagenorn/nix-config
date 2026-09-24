@@ -5,6 +5,7 @@ import copy
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -233,6 +234,33 @@ def _delivery():
     except Exception as exc:
         raise WorkflowError(f"delivery runtime: {exc}") from exc
 
+
+_HOST_ADMISSION = None
+
+
+def _host_admission():
+    """The host admission library, loaded once (D18).
+
+    A source sibling in the repository, the installed copy otherwise -- the
+    same resolution `_delivery()` uses.
+    """
+    global _HOST_ADMISSION
+    if _HOST_ADMISSION is not None:
+        return _HOST_ADMISSION
+    src = Path(__file__).parent
+    entry = src / "host_admission.py" if src.name == "scripts" else Path.home() / ".agents/lib/python/host_admission.py"
+    try:
+        spec = importlib.util.spec_from_file_location("_workflow_host_admission", entry)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"cannot load {entry}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if getattr(module, "HOST_ADMISSION_INTERFACE_VERSION", None) != 1:
+            raise ValueError("interface")
+    except Exception as exc:
+        raise WorkflowError(f"host admission library: {exc}") from exc
+    _HOST_ADMISSION = module
+    return module
 
 def _call(message, function, *args, **kwargs):
     try:
@@ -3144,6 +3172,43 @@ def command_build_delivery(args: argparse.Namespace) -> int:
     return 0
 
 
+def route_verdict(route: str) -> dict[str, Any]:
+    """The typed supported/unsupported answer for `route` (D9).
+
+    Every refusal is an answer, not an error: a missing or invalid
+    declaration, an undeclared route and a route declared unsupported each
+    carry their closed reason code and the one alternative entry path.
+    """
+    library = _host_admission()
+
+    def unsupported(reason_code: str) -> dict[str, Any]:
+        return {"interface_version": 1, "kind": "host_route", "route": route,
+                "support": "unsupported", "agent_slots": None,
+                "reason_code": reason_code,
+                "alternative": library.UNSUPPORTED_ALTERNATIVE}
+
+    try:
+        declaration = library.load_declaration()
+    except library.DeclarationError as error:
+        return unsupported(error.reason_code)
+    entry = declaration["routes"].get(route)
+    if entry is None:
+        return unsupported("route_undeclared")
+    if entry["support"] == "unsupported":
+        return unsupported("declared_unsupported")
+    return {"interface_version": 1, "kind": "host_route", "route": route,
+            "support": "supported", "agent_slots": entry["agent_slots"],
+            "reason_code": None, "alternative": None}
+
+
+def command_host_route(args: argparse.Namespace) -> int:
+    library = _host_admission()
+    if (not library.ROUTE_NAME_PATTERN.fullmatch(args.route)
+            or args.route == library.DIRECT_ROUTE):
+        raise WorkflowError(f"invalid route: {args.route!r}")
+    print_json(route_verdict(args.route))
+    return 0
+
 def print_json(value: Any) -> None:
     json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
@@ -3234,6 +3299,10 @@ def build_parser() -> argparse.ArgumentParser:
     current_launch.add_argument("--run-id", required=True)
     current_launch.add_argument("--action-id", required=True)
     current_launch.set_defaults(handler=command_check_launch)
+
+    host_route = subparsers.add_parser("host-route")
+    host_route.add_argument("--route", required=True)
+    host_route.set_defaults(handler=command_host_route)
 
     return parser
 
