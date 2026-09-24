@@ -35,10 +35,12 @@ class SimulatedHost:
 
     An owner runs its two tasks in order, each a worker then a distinct reviewer, so
     exactly one of its support agents is live at any minute of its run (D12, D14).
+    It refuses only scripted launches and accepts every other one, so an over-admission
+    surfaces in the replay's per-minute budget check rather than as a refusal (D32).
     """
 
-    def __init__(self, capacity, refuse=()):
-        self.capacity, self.refuse, self.refusals = capacity, set(refuse), 0
+    def __init__(self, refuse=()):
+        self.refuse, self.refusals = set(refuse), 0
         self.owners = {}  # launch action id -> (start, end)
         self.support = []  # (launch action id, role, start, end), one entry per agent
 
@@ -50,8 +52,7 @@ class SimulatedHost:
         return 1 + self.live(minute) + busy
 
     def launch(self, action_id, minute):
-        # The owner and its first support agent must both fit.
-        if action_id in self.refuse or self.agents(minute) + 2 > self.capacity:
+        if action_id in self.refuse:
             self.refuse.discard(action_id)
             self.refusals += 1
             return False
@@ -166,7 +167,7 @@ class AdmissionReplayTest(BuilderHarness, unittest.TestCase):
         built = {n: self.build("contract", self.contract_input(
             issue=n, worktree=worktrees[n], now=at(0),
             source_reference="invocation:/orchestrate-issues 12 14")) for n in ISSUES}
-        host = SimulatedHost(slots, refuse)
+        host = SimulatedHost(refuse)
         tally = dict.fromkeys(("controller_turns", "wait_producing_responses",
                                "owner_dispatches", "delivered_events"), 0)
         dispatched, finished, events = {}, set(), []
@@ -274,9 +275,26 @@ class AdmissionReplayTest(BuilderHarness, unittest.TestCase):
         self.cli("init-run", *run, "--now", at(0))
         state = self.root / ".superpowers/workflows/refused/state.json"
         before = state.read_bytes()
-        refused = self.cli("control", *run, "--request-file", "-", ok=False, stdin=json.dumps(
-            self.control_request(list(ISSUES), now=at(0))).encode())
+        # A fresh request a valid declaration admits, so the declaration is the only
+        # reason the control call can refuse (D32).
+        worktrees = {n: str(self.root / ".worktrees" / f"worktree-issue-{n}-refused")
+                     for n in ISSUES}
+        built = {n: self.build("contract", self.contract_input(
+            issue=n, worktree=worktrees[n], now=at(0),
+            source_reference="invocation:/orchestrate-issues 12 14")) for n in ISSUES}
+        request = json.dumps(self.control_request(list(ISSUES), now=at(0),
+            contracts={str(n): built[n]["contract"] for n in ISSUES},
+            intents={str(n): [built[n]["initial_intent"]] for n in ISSUES},
+            worktrees=[{"issue": n, "recorded": None,
+                        "candidate": {"path": worktrees[n], "state": "absent"}}
+                       for n in ISSUES])).encode()
+        refused = self.cli("control", *run, "--request-file", "-", ok=False, stdin=request)
         self.assertEqual((refused.returncode, state.read_bytes()), (2, before))
+        self.assertIn(b"declaration_invalid", refused.stderr)
+        self.declare(4)
+        admitted = json.loads(self.cli("control", *run, "--request-file", "-",
+                                       stdin=request).stdout)
+        self.assertEqual([a["kind"] for a in admitted["actions"]], ["spawn", "wait"])
 
 
 if __name__ == "__main__":
