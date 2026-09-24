@@ -15,7 +15,9 @@ EXPECTED_ALLOW = [
     "Bash(git worktree add:*)", "Bash(git worktree list:*)",
     "Bash(git worktree remove:*)", "Bash(git worktree prune:*)",
     "Bash(git push:*)", "Bash(gh pr create:*)",
-    "Bash(git branch -d:*)", "Bash(gh pr merge:*)", "Agent",
+    "Bash(git branch -d:*)", "Bash(gh pr merge:*)",
+    "Bash(workflow-state:*)", "Bash(~/.agents/bin/workflow-state:*)",
+    "Bash(artifact-budget:*)", "Bash(~/.agents/bin/artifact-budget:*)", "Agent",
 ]
 
 # Stand-in for `gh`. Answers the two lookups the guard makes for any slug and
@@ -192,6 +194,19 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_unrelated_bash_and_exact_branch_delete_pass(self):
         for command in ("git status --short", "git branch -d issue-30-safe"):
             with self.subTest(command=command):
+                result = self.invoke_command(command)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_single_command_lifecycle_calls_pass_the_guard(self):
+        for command in (
+            "workflow-state control --repo-root /r --run-id run --request-file - <<'JSON' "
+            "| artifact-budget validate-report --boundary workflow-response --input -\n"
+            '{"interface_version": 2}\nJSON',
+            "artifact-budget validate-report --boundary ship-summary --input - <<'JSON' "
+            "| ~/.agents/bin/workflow-state finish --repo-root /r --run-id run "
+            "--now 2026-09-24T00:00:00Z --summary-file -\n{}\nJSON",
+        ):
+            with self.subTest(command=command.split()[0]):
                 result = self.invoke_command(command)
                 self.assertEqual(0, result.returncode, result.stderr)
 
