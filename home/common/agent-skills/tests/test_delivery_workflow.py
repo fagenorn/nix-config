@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -1158,6 +1159,29 @@ class BuilderHarness:
         value.update(changes)
         return value
 
+    def direct_request(self, **changes):
+        value = {"interface_version": 2, "issue": 171, "now": NOW,
+            "attempt_budget_minutes": 30, "new_run": False, "owner_unavailable": False,
+            "tracker": None, "worktree": None, "forge": None, "delivery_contract": None,
+            "authorization_intents": [], "authority_observations": [],
+            "reevaluation_evidence": [], "delivery_observations": [],
+            "requested_scope": None, "recovery": None}
+        value.update(changes)
+        return value
+
+    def acquire(self, contract, intent):
+        request = self.direct_request(
+            tracker={"issue": 171, "state": "open", "open_blockers": [],
+                     "decision_blockers": []},
+            forge={"state": "none", "url": None, "merge_sha": None},
+            worktree={"issue": 171, "recorded": None,
+                      "candidate": {"path": self.worktree, "state": "absent"}},
+            delivery_contract=contract, authorization_intents=[intent])
+        owner = json.loads(self.cli("direct-owner", "--repo-root", self.root,
+            "--request-file", "-", stdin=json.dumps(request).encode()).stdout)
+        self.assertEqual((owner["kind"], owner["worktree"]), ("owner", self.worktree))
+        return owner
+
     def control_request(self, issues, *, now=NOW, contracts=None, intents=None,
                         worktrees=(), forge=None, max_parallel=2):
         def keyed(value):
@@ -1363,6 +1387,195 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
         self.assert_parity(legacy_state, ("finish", "--repo-root", self.root, "--run-id",
                            "legacy-inputs", "--now", LATER, "--issue", 151, "--attempt", 1),
                            "--result-file", json.dumps({**historical, "issue": 151}).encode())
+
+
+URL = "https://github.com/fagenorn/nix-config/pull/5"
+SOURCES = {"selected_output": "repository", "branch_published": "repository",
+           "pr_opened": "provider", "pr_merged": "provider", "tracker_closed": "tracker",
+           "remote_branch_absent": "repository", "worktree_absent": "filesystem",
+           "local_branch_absent": "repository", "implementation_delivered": "repository",
+           "cleanup_complete": "filesystem"}
+
+
+class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load(MODEL, "delivery_model_loop", package=True)
+
+    def observed(self, kind, **facts):
+        return self.build("observation", {"contract": self.contract, "observation_kind": kind,
+            "source_kind": SOURCES[kind], "source_reference": f"probe:{kind}",
+            "observed_at": NOW, "evidence": f"{kind} evidence", **facts})
+
+    def checkpoint(self, observations, authority, scope, *, ok=True):
+        value = {"interface_version": 2, "issue": 171, "custody": self.custody,
+            "contract_digest": self.digest,
+            "delivery_observations": sorted(observations, key=lambda item: item["id"]),
+            "authority_observations": authority, "reevaluation_evidence": [],
+            "requested_scope": scope, "detail_state": "none", "report_path": None,
+            "notes": ""}
+        completed = self.cli("checkpoint-delivery", *self.run_args, "--now", LATER,
+                             "--checkpoint-file", "-",
+                             stdin=self.validated("ship-checkpoint", value), ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def validated(self, boundary, value):
+        """Pipe one wire object through artifact-budget, as an owner must, and return its bytes."""
+        completed = subprocess.run(
+            [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+             boundary, "--input", "-", "--policy", str(POLICY)],
+            input=json.dumps(value).encode(), capture_output=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout
+
+    def handoff(self, owner, intent):
+        """The Phase-7 ship-handoff/v2 a first ship receives, with realistic artifacts."""
+        def artifact(kind, path, size):
+            return {"kind": kind, "path": path, "budget_status": "within_budget",
+                    "metrics": {"root_bytes": size, "total_bytes": size, "file_count": 1,
+                                "largest_member_bytes": size}}
+        return {"interface_version": 2, "state": "complete",
+            "ledger_repo_root": str(self.root), "run_id": owner["run_id"],
+            "owner": owner["owner"], "owner_worktree": self.worktree,
+            "custody": self.custody, "issue_number": 171, "branch": WORKTREE_NAME,
+            "worktree_path": self.worktree,
+            "spec_artifact": artifact("design-spec",
+                ".claude/specs/2026-09-23-issue-171-delivery-contract-source-design.md", 47301),
+            "plan_artifact": artifact("implementation-plan",
+                ".claude/plans/2026-09-24-issue-171-delivery-contract-source.md", 8375),
+            "head_sha": "a" * 40, "review_state": "clean", "auto": True,
+            "report_path": None, "notes": "", "delivery_contract": self.contract,
+            "delivery_contract_digest": self.digest, "authorization_intents": [intent],
+            "authorization_chain_digest": self.model.canonical_digest(
+                {"intent_ids": [intent["id"]]}),
+            "authority_observation_ids": [], "reevaluation_evidence_ids": [],
+            "authority_evaluation_consumption_ids": [],
+            "pending_stage_ids": [stage["id"] for stage in self.contract["stages"]],
+            "selected_outputs": [], "requested_scope": None}
+
+    def deliver(self, proposed):
+        """Drive one implementation custody through every stage with builder outputs only."""
+        self.project()
+        built = self.build("contract", self.contract_input())
+        self.contract = built["contract"]; self.digest = self.model.canonical_digest(self.contract)
+        owner = self.acquire(self.contract, built["initial_intent"])
+        self.custody = owner["custody"]
+        self.run_args = ("--repo-root", self.root, "--run-id", owner["run_id"])
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        handed = self.validated("ship-handoff", self.handoff(owner, built["initial_intent"]))
+        # A real handoff outgrows the phase-report bound; that is why D28 moves it.
+        self.assertGreater(len(handed), policy["phase_reports"]["wire_max_bytes"])
+        self.assertLessEqual(len(handed), policy["workflow_responses"]["wire_max_bytes"])
+        state = self.root / f".superpowers/workflows/{owner['run_id']}/state.json"
+        head, merge_sha = "a" * 40, "b" * 40
+        selection = self.build("selected-output", {"contract": self.contract, "head": head,
+            "tree": "c" * 40, "acceptance_ref": ".claude/specs/issue-171.md",
+            "review_ref": "clean", "test_ref": "checks"})
+        self.assertEqual(selection["test_evidence_ids"], [f"test:checks@{head}"])
+        facts = {"select_reviewed_output": [self.observed("selected_output", selection=selection)],
+            "publish_branch": [self.observed("branch_published", head=head)],
+            "open_pr": [self.observed("pr_opened", pr_number=5, pr_url=URL, head=head)],
+            "merge_pr": [self.observed("pr_merged", pr_number=5, pr_url=URL, head=head,
+                                       merge_sha=merge_sha)],
+            "close_tracker": [self.observed("tracker_closed", close_reason="completed",
+                                            observation_identity="github:issue:171:closed")],
+            "delete_remote_branch": [self.observed("remote_branch_absent")],
+            "remove_worktree": [self.observed("worktree_absent")],
+            "delete_local_branch": [self.observed("local_branch_absent")]}
+        pending, authority = [], []
+        for stage in self.contract["stages"]:
+            if stage["id"] in proposed:
+                scope = self.build("scope", {"contract": self.contract, "stage_id": stage["id"]})
+                echoed = self.checkpoint(pending, authority, scope)
+                self.assertEqual((echoed["kind"], echoed["requested_scope"]),
+                                 ("delivery_checkpointed", scope))
+                self.assertEqual(echoed["requirements"], [{"kind": "observation",
+                    "subject_id": scope["id"], "reason_code": "native_evaluation_required",
+                    "detail_pointer": None}])
+                pending, authority = [], [self.build("authority-observation", {
+                    "contract": self.contract, "scope_id": scope["id"],
+                    "launch_id": self.custody["action_id"], "authority_kind": "native_guard",
+                    "verdict": "allowed", "reason_code": "guard_allowed",
+                    "observed_at": LATER, "evidence": stage["id"]})]
+                if stage["id"] == "merge_pr":
+                    before = state.read_bytes()
+                    second = self.observed("pr_opened", pr_number=6, pr_url=URL + "6", head=head)
+                    refused = self.checkpoint([second], [], None, ok=False)
+                    self.assertEqual((refused.returncode, state.read_bytes()), (2, before))
+            pending += facts[stage["id"]]
+        by_kind = {item["observation_kind"]: item["id"] for items in facts.values() for item in items}
+        completing = pending + [
+            self.observed("implementation_delivered", selection=selection, merge_sha=merge_sha,
+                          integrated_ref="refs/heads/main",
+                          merge_observation_id=by_kind["pr_merged"]),
+            self.observed("cleanup_complete",
+                          remote_branch_observation_ids=[by_kind["remote_branch_absent"]],
+                          local_branch_observation_ids=[by_kind["local_branch_absent"]],
+                          worktree_observation_ids=[by_kind["worktree_absent"]],
+                          detail_pointer=".superpowers/issue-delivery/171/detail.json",
+                          read_evidence="detail read")]
+        historical = {"issue": 171, "state": "merged", "pr_url": URL, "merge_sha": merge_sha,
+            "issue_closed": True, "discussion_items": [], "detail_state": "none",
+            "report_path": None, "notes": "delivered"}
+        summary = {"interface_version": 2, "issue": 171, "state": "delivery_complete",
+            "custody": self.custody, "historical_owner_result": historical,
+            "delivery_contract_digest": self.digest,
+            "delivery_observations": sorted(completing, key=lambda item: item["id"]),
+            "authority_observations": authority, "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": "delivered"}
+        validated = self.validated("ship-summary", summary)
+        self.assertLessEqual(len(validated), policy["phase_reports"]["wire_max_bytes"])
+        finished = json.loads(self.cli("finish", *self.run_args, "--now", LATER,
+            "--summary-file", "-", stdin=validated).stdout)
+        self.assertEqual((finished["kind"], finished["pending_stage_ids"]),
+                         ("delivery_complete", []))
+        stored = json.loads(state.read_text(encoding="utf-8"))["issues"]["171"]
+        self.assertEqual(len(stored["delivery"]["authorization_intents"]), 1)
+        self.assertEqual(stored["attempts"][-1]["state"], "merged")
+
+    def test_every_builder_scope_is_covered_when_its_stage_is_ready(self):
+        self.deliver({"select_reviewed_output", "publish_branch", "open_pr", "merge_pr",
+                      "close_tracker", "delete_remote_branch", "remove_worktree",
+                      "delete_local_branch"})
+
+    def test_one_custody_completes_the_selection_gated_loop(self):
+        self.deliver({"merge_pr", "close_tracker", "remove_worktree", "delete_local_branch"})
+
+    def test_evidence_kinds_are_exact_and_closed(self):
+        self.project()
+        self.contract = self.build("contract", self.contract_input())["contract"]
+        opened = self.observed("pr_opened", pr_number=5, pr_url=URL, head="a" * 40)
+        self.assertEqual(opened["subject"], {"provider_repository_id": "fagenorn/nix-config",
+            "pr_number": 5, "pr_url": URL, "expected_head": "a" * 40, "base": "main"})
+        self.assertEqual(opened["evidence_digest"],
+            "sha256:" + hashlib.sha256(b"pr_opened evidence").hexdigest())
+        gone = self.observed("worktree_absent")["subject"]
+        self.assertEqual(gone, {"path": self.worktree, "recorded_worktree_identity":
+            self.worktree, "probe_mode": "no_follow", "absent": True})
+        base = {"contract": self.contract, "source_kind": "provider",
+                "source_reference": "probe", "observed_at": NOW, "evidence": "x"}
+        for kind, value, reason in (
+                ("observation", {**base, "observation_kind": "repository_record_proposed"},
+                 b"unsupported observation kind"),
+                ("observation", {**base, "observation_kind": "pr_opened", "pr_number": 5},
+                 b"builder input keys"),
+                ("observation", {**base, "observation_kind": "worktree_absent", "path": "/x"},
+                 b"builder input keys"),
+                ("authority-observation", {"contract": self.contract, "scope_id": "sha256:" + "0" * 64,
+                    "launch_id": "171:1:1", "authority_kind": "host", "verdict": "allowed",
+                    "reason_code": "r", "observed_at": NOW, "evidence": "x"},
+                 b"unknown scope"),
+                ("authority-observation", {"contract": self.contract,
+                    "scope_id": self.build("scope", {"contract": self.contract,
+                                                     "stage_id": "merge_pr"})["id"],
+                    "launch_id": None, "authority_kind": "intent_revocation",
+                    "verdict": "revoked", "reason_code": "r", "observed_at": NOW,
+                    "evidence": "x"},
+                 b"unsupported authority kind")):
+            with self.subTest(kind=kind, variant=value.get("observation_kind") or value.get("authority_kind")):
+                refused = self.build(kind, value, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                self.assertIn(reason, refused.stderr)
 
 
 if __name__ == "__main__":

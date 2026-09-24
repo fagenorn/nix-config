@@ -922,7 +922,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stderr.write(f"artifact-budget: invalid {label}\n")
             return 2
         wire_max = (response_wire_max if args.command == "validate-report"
-                    and args.boundary == "workflow-response" else report_wire_max)
+                    and args.boundary in {"workflow-response", "ship-handoff"}
+                    else report_wire_max)
         try:
             raw = _input_bytes(args.input, wire_max)
         except InputReadError:

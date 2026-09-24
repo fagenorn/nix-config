@@ -94,6 +94,25 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
                          (2, b"", b"artifact-budget: invalid report\n"))
 
+    def test_ship_handoff_reads_under_the_response_wire_bound(self):
+        """A ship handoff carries the contract and intents, past the phase-report bound."""
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        report_bound = policy["phase_reports"]["wire_max_bytes"]
+        response_bound = policy["workflow_responses"]["wire_max_bytes"]
+        candidate = {**self.lifecycle(), "state": "complete",
+                     "spec_artifact": self.full("design-spec"),
+                     "plan_artifact": self.full("implementation-plan"),
+                     "head_sha": "b" * 40, "review_state": "clean",
+                     "report_path": None, "notes": "ok"}
+        within = {**candidate, "worktree_path": "/tmp/" + "w" * report_bound}
+        accepted = self.run_validate("ship-handoff", within, use_stdin=True)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr.decode("utf-8"))
+        self.assertGreater(len(accepted.stdout), report_bound)
+        beyond = {**candidate, "worktree_path": "/tmp/" + "w" * response_bound}
+        refused = self.run_validate("ship-handoff", beyond, use_stdin=True)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", b"artifact-budget: invalid report\n"))
+
     def test_delivery_v2_boundaries_accept_closed_shapes_and_reject_hybrids(self):
         model = artifact_budget._delivery_model()
         contract, _ = contract_and_delivery(model)

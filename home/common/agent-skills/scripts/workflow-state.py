@@ -3013,7 +3013,9 @@ def build_parser() -> argparse.ArgumentParser:
     build_delivery = subparsers.add_parser("build-delivery")
     build_delivery.add_argument("--repo-root", required=True)
     build_delivery.add_argument(
-        "--kind", required=True, choices=("contract", "initial-intent", "scope"))
+        "--kind", required=True,
+        choices=("contract", "initial-intent", "scope", "selected-output", "observation",
+                 "authority-observation"))
     build_delivery.add_argument("--input", required=True)
     build_delivery.set_defaults(handler=command_build_delivery)
 

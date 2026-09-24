@@ -88,7 +88,10 @@ class DeliveryRuntime:
             sys.modules.pop(name, None)
             raise
 
-    _BUILD_OUTPUT_KINDS = {"initial-intent": "authorization-intent", "scope": "scope-tuple"}
+    _BUILD_OUTPUT_KINDS = {"initial-intent": "authorization-intent", "scope": "scope-tuple",
+                           "selected-output": "selected-output",
+                           "observation": "delivery-observation",
+                           "authority-observation": "authority-observation"}
 
     def build_delivery(self, kind: str, value: object, *, policy: dict[str, Any] | None
                        ) -> object:
