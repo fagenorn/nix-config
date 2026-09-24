@@ -3,7 +3,8 @@
 This private helper has no I/O, reads no clock and grants no authority.
 workflow-state resolves project policy and hands it in; every sealed object
 this module returns is validated again by DeliveryRuntime before it is printed.
-Declared scopes (in the initial intent) and actual scopes (kind ``scope``) come
+The ``authorization-chain`` kind seals the handoff's chain digest over the intents
+an owner holds. Declared scopes (in the initial intent) and actual scopes (kind ``scope``) come
 from the one ``_scope`` function, so exact matching can only disagree when the
 inputs differ. Selections and observations take only what a probe returns;
 every member the contract determines is filled from the contract, so an owner
@@ -202,6 +203,8 @@ class DeliveryBuilder:
             return self._observation(value)
         if kind == "authority-observation":
             return self._authority(value)
+        if kind == "authorization-chain":
+            return self._chain(value)
         _refuse(f"unknown builder kind: {kind!r}")
 
     def _seal(self, value: dict[str, Any]) -> dict[str, Any]:
@@ -374,6 +377,33 @@ class DeliveryBuilder:
             "opaque_host_reference": None, "revocation_subject": None,
             "evaluation_use_key": None,
         })
+
+    def _chain(self, value: object) -> dict[str, str]:
+        """Seal the digest of the intent chain an owner holds, rooted in its contract."""
+        value = _closed(value, {"contract", "authorization_intents"})
+        contract = self._checked_contract(value["contract"])
+        intents = value["authorization_intents"]
+        if not isinstance(intents, list) or not intents:
+            _refuse("authorization chain: authorization_intents must be a non-empty list")
+        for item in intents:
+            try:
+                self._model.validate_delivery_object(
+                    item, expected_kind="authorization-intent",
+                    notes_max_characters=self._notes_max)
+            except ValueError as error:
+                _refuse(f"authorization chain: intent is invalid: {error}")
+        ids = [item["id"] for item in intents]
+        if ids != sorted(set(ids)):
+            _refuse("authorization chain: intents must be sorted by id and unique")
+        roots = [item for item in intents if item["predecessor_intent_id"] is None]
+        if [(item["id"], self._model.canonical_digest(item)) for item in roots] != [(
+                contract["initial_authorization_intent_id"],
+                contract["initial_authorization_intent_digest"])]:
+            _refuse("authorization chain: the one root must be the contract's initial intent")
+        if any(item["predecessor_intent_id"] not in {None, *ids} for item in intents):
+            _refuse("authorization chain: an intent's predecessor is not held")
+        return {"authorization_chain_digest":
+                self._model.canonical_digest({"intent_ids": ids})}
 
     def _checked_contract(self, value: object) -> dict[str, Any]:
         """Validate a supplied contract and require its recorded intent to regenerate."""

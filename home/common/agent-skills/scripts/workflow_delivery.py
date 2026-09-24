@@ -102,6 +102,11 @@ class DeliveryRuntime:
                 raise ValueError("builder returned an invalid contract result")
             self.validate(result["contract"], "delivery-contract")
             self.validate(result["initial_intent"], "authorization-intent")
+        elif kind == "authorization-chain":
+            if not isinstance(result, dict) or set(result) != {"authorization_chain_digest"} \
+                    or not isinstance(result["authorization_chain_digest"], str) \
+                    or not result["authorization_chain_digest"].startswith("sha256:"):
+                raise ValueError("builder returned an invalid authorization chain")
         elif kind in self._BUILD_OUTPUT_KINDS:
             self.validate(result, self._BUILD_OUTPUT_KINDS[kind])
         else:

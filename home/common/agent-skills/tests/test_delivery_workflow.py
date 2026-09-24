@@ -1333,6 +1333,22 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
                 self.assertIn(reason, refused.stderr)
 
+    def test_authorization_chain_seals_the_handoff_chain_digest(self):
+        self.project()
+        built = self.build("contract", self.contract_input())
+        value = {"contract": built["contract"], "authorization_intents": [built["initial_intent"]]}
+        sealed = self.cli("build-delivery", "--repo-root", self.root, "--kind",
+                          "authorization-chain", "--input", "-",
+                          stdin=json.dumps(value).encode()).stdout
+        ids = ('{"intent_ids":["%s"]}\n' % built["initial_intent"]["id"]).encode()
+        self.assertEqual(sealed, b'{"authorization_chain_digest":"sha256:%s"}\n'
+                         % hashlib.sha256(ids).hexdigest().encode())
+        stray = self.build("contract", self.contract_input(now="2026-09-22T00:00:00Z"))
+        refused = self.build("authorization-chain", {**value,
+            "authorization_intents": [stray["initial_intent"]]}, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+        self.assertIn(b"authorization chain", refused.stderr)
+
 
 class HelperInputTest(BuilderHarness, unittest.TestCase):
     def pipe(self, boundary, raw):

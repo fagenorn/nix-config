@@ -3181,7 +3181,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_delivery.add_argument(
         "--kind", required=True,
         choices=("contract", "initial-intent", "scope", "selected-output", "observation",
-                 "authority-observation"))
+                 "authority-observation", "authorization-chain"))
     build_delivery.add_argument("--input", required=True)
     build_delivery.set_defaults(handler=command_build_delivery)
 
