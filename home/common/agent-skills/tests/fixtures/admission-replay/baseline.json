@@ -1,0 +1,5 @@
+{
+  "measured": {"controller_turns": 3, "declared_slots": 4, "host_refusals": 0, "makespan": 120, "max_parallel": 2, "owner_dispatches": 2, "time_to_first_useful_result": 60, "wait_producing_responses": 2, "worker_utilization": [120, 240]},
+  "scripted_refusal": {"controller_turns": 3, "declared_slots": 4, "host_refusals": 1, "makespan": 60, "max_parallel": 2, "owner_dispatches": 2, "time_to_first_useful_result": 60, "wait_producing_responses": 2, "worker_utilization": [60, 120]},
+  "seven_slots": {"controller_turns": 3, "declared_slots": 7, "host_refusals": 0, "makespan": 60, "max_parallel": 2, "owner_dispatches": 2, "time_to_first_useful_result": 60, "wait_producing_responses": 2, "worker_utilization": [120, 240]}
+}

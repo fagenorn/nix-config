@@ -60,6 +60,7 @@ agent-workflow-tests:
   python3 -m unittest -v \
     home/common/agent-skills/tests/test_workflow_state.py \
     home/common/agent-skills/tests/test_host_admission.py \
+    home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
     home/common/agent-skills/tests/test_workflow_delivery.py \
