@@ -58,8 +58,11 @@ delivery envelope: adopt it unchanged, with its `custody`, `contract`,
 `contract_digest`, `pending_stage_ids`, `requirements`, `authority_evaluation`
 and `requested_scope`. A validated `kind: delivery_remainder` object is no
 implementation owner: skip Phases 0–6 and hand it verbatim to the Phase-7
-remainder launch, then relay that remainder owner's validated `finish`
-response unchanged; this invocation writes no `finish` of its own. A partial
+remainder launch, then relay that remainder owner's validated reply
+unchanged — its `finish` response, or a `delivery_stalled` checkpoint reply —
+except that a return of only the re-entry line `/from-issue <num> --auto`
+(a checkpointed denial, which already suspended the remainder) is relayed as
+that line without validation. This invocation writes no `finish` of its own. A partial
 envelope, a missing or invalid object, or an identity mismatch fails loudly;
 this route does not perform any other acquisition.
 
@@ -167,8 +170,11 @@ follows:
    remainder mode through the existing `from-issue-ship-owner` site with
    `ship-handoff.md`'s `## Remainder owner prompt`, carrying the object
    verbatim. The remainder owner writes its own `finish --summary-file -`;
-   validate its returned bytes at the `workflow-response` boundary and relay
-   them unchanged. This invocation writes no `finish` of its own.
+   validate its returned bytes at the `workflow-response` boundary (a
+   `finish` response or a `delivery_stalled` checkpoint reply) and relay them
+   unchanged. A return of only the re-entry line `/from-issue <num> --auto`
+   means a checkpointed denial already suspended the remainder: relay that
+   line without validation. This invocation writes no `finish` of its own.
 4. **`kind: terminal`** — require exactly `interface_version`, `kind`, `issue`,
    nullable `run_id`, `source`, `reason`, `blockers`, nullable `result`, and
    `reentry`; return the compact response unchanged to the caller, stop before
@@ -195,12 +201,14 @@ Only when an interactive user explicitly requests durable standalone orchestrati
 resolve an immutable `ledger_repo_root` and stable run ID, call
 bounded `workflow-state init-run`, and consume only its bounded `requirements`
 from the validated `workflow_bootstrap`. Gather normalized tracker and forge
-facts and a verified worktree observation for this one issue. While the
-bootstrap shows no installed contract for it (no requirement, or a null
-`contract_digest`), build one with `workflow-state build-delivery --kind
-contract` (source `explicit_user`, reference `invocation:/from-issue <num>`)
-from the requirement's `recorded_worktree` when one exists, else the reserved
-candidate. Then send the interface-2 control request — orchestrate-issues' exact
+facts and a verified worktree observation for this one issue. Build its
+contract with `workflow-state build-delivery --kind contract` (source
+`explicit_user`, reference `invocation:/from-issue <num>`) under
+orchestrate-issues' per-issue contract rule: from the requirement's
+`recorded_worktree` when the bootstrap requirement's `contract_digest` is null;
+with no requirement, from the reserved candidate, on the first call only when this invocation created the run,
+and on a reused run only once a control summary carries
+`delivery_contract_required` (send null until then). Then send the interface-2 control request — orchestrate-issues' exact
 17-key shape, with `max_parallel: 1`, `human_directed: true`, the resolved
 attempt budget, the contract and `[initial_intent]` (null and `[]` once a
 contract is installed) — and call `workflow-state control` with
@@ -544,7 +552,9 @@ Read `ship-handoff.md` for the exact subagent prompt — with lifecycle identity
 After receiving the ship report, from-issue owns the terminal durable write.
 A report that is only the re-entry line `/from-issue <num> --auto` means the
 ship owner checkpointed a denial, which already suspended this attempt: relay
-that line and write nothing.
+that line and write nothing. A report that validates at `--boundary
+workflow-response` as `delivery_stalled` means the checkpoint already ended the
+custody: relay it and write nothing.
 Pipe its received bytes through `artifact-budget validate-report --boundary
 ship-summary --input -`, decode only canonical stdout, consume a durable
 `report_path` before advancing, and never inline either durable or retained

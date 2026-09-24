@@ -299,8 +299,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(set(json_block(decide)), V2_CONTROL_REQUEST_KEYS)
         for anchor in ("workflow-state build-delivery",
                        "while its latest summary carries `delivery_contract_required`",
-                       "report the refusal", "--request-file -"):
+                       "report the refusal", "--request-file -",
+                       "only when this invocation created the run"):
             self.assertIn(anchor, normalized(decide))
+        durable = self.section(self.from_issue, "### Explicit durable interactive acquisition",
+                               "The `workflow-state` executable")
+        self.assertIn("only when this invocation created the run", normalized(durable))
 
     def test_orchestrate_bootstrap_actions_and_projected_owner(self):
         observe = normalized(self.section(self.orchestrate, "## 2. Bootstrap and observe",
@@ -336,9 +340,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "`selected_output`, `branch_published` and `pr_opened`", "checkpoint-delivery",
             "equal the scope", "current-launch", "current-launch", "authority-observation",
             "observation-only", "`human_gate`", "`delivery_complete`")
+        self.assert_ordered(loop, "the denied stage's scope as `requested_scope`",
+                            "`state: suspended`", "`blocked_on: human_gate`", "fail loudly")
         remainder = normalized(self.ship_issue.split("## Remainder mode", 1)[1])
-        for anchor in ("`delivery_remainder`", "ready stage", "finish --summary-file -"):
+        for anchor in ("`delivery_remainder`", "ready stage", "finish --summary-file -",
+                       "`delivery_stalled`"):
             self.assertIn(anchor, remainder)
+        for text in (self.ship_handoff.split("## Remainder owner prompt", 1)[1],
+                     self.section(self.from_issue, "### Dispatcher-owned acquisition",
+                                  "### Direct autonomous acquisition"),
+                     self.section(self.from_issue, "3. **`kind: delivery_remainder`**",
+                                  "4. **`kind: terminal`**")):
+            self.assertIn("re-entry line", normalized(text))
         for appendix in (self.ship_review, self.ship_human_gate):
             self.assertIn("## Delivery loop", appendix)
 
@@ -365,7 +378,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
         expected = " ".join(case["expected_output"] for case in self.orchestrate_evals["evals"])
         for anchor in ("interface_version 2", "delivery_remainder", "contract_digest",
-                       "build-delivery"):
+                       "build-delivery", "only when this invocation created the run"):
             self.assertIn(anchor, expected)
         self.assertNotIn("version-1", expected)
 
@@ -1092,10 +1105,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             earlier,
             "received bytes",
-            "artifact-budget validate-report --boundary ship-summary",
+            "artifact-budget validate-report --boundary workflow-response",
             "relay the canonical bytes unchanged",
             "stop",
         )
+        self.assertNotIn("--boundary ship-summary", earlier)
         self.assertIn(
             "post-delegation action set is exactly validate, relay, and stop",
             earlier,

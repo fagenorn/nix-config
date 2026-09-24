@@ -31,9 +31,11 @@ In `ship-handoff/v2`, `custody`, `delivery_contract` and
 that contract, printed by
 `workflow-state build-delivery --repo-root <ledger_repo_root> --kind initial-intent --input -`
 over `{"contract": <installed contract>}` in a quoted heredoc.
-`authorization_chain_digest` is `sha256:` plus the SHA-256 hex of the bytes
-`{"intent_ids":["<initial intent id>"]}` and a newline; the validator refuses
-any other value. The three id arrays and `selected_outputs` are the ones this
+`authorization_chain_digest` is the value the builder seals from those held
+intents, printed by
+`workflow-state build-delivery --repo-root <ledger_repo_root> --kind authorization-chain --input -`
+over `{"contract": <installed contract>, "authorization_intents": [<initial intent>]}`
+in a quoted heredoc; never compute it by hand. The three id arrays and `selected_outputs` are the ones this
 owner actually holds — empty at a first ship — and `requested_scope` is null.
 The handoff records historical custody and grants no current-stage authority:
 the ledger, not the handoff, is current truth. A v2 handoff carries the full
@@ -85,9 +87,10 @@ With a `ship-handoff/v2`, validate a `ship-summary/v2` with exactly these keys:
 `reevaluation_evidence`, `detail_state`, `report_path`, and `notes`. Its
 `historical_owner_result` is the legacy row below, and its observation arrays
 carry the completing observations ship-issue's `## Delivery loop` names, or the
-partial ones of a failure. The one exception is a denial ship-issue's loop
-checkpointed: it has already suspended the custody, so return only the re-entry
-line ship-issue prints. Without lifecycle identity, validate that legacy row
+partial ones of a failure. Two exceptions end the loop without a summary: after
+a denial ship-issue's loop checkpointed, which already suspended the custody,
+return only the re-entry line ship-issue prints; after a `delivery_stalled`
+checkpoint reply, return that validated reply. Without lifecycle identity, validate that legacy row
 itself, with these exact keys: `issue`, `state`, `pr_url`,
 `merge_sha`, `issue_closed`, `discussion_items`, `detail_state`, `report_path`,
 and `notes`. `discussion_items: []` because non-empty details are moved to the
@@ -131,7 +134,10 @@ Your task: invoke the `ship-issue` skill via the Skill tool and follow its
 `## Remainder mode` from the ledger's ready stage. You hold this remainder
 custody, so you write its `checkpoint-delivery` cycles and your own
 `workflow-state finish --summary-file -`, then return exactly that finish's
-validated JSON stdout and nothing else.
+validated JSON stdout and nothing else. Two exceptions write no finish: after a
+denial the loop checkpointed, which already suspended this custody, return only
+the re-entry line ship-issue prints; after a `delivery_stalled` checkpoint
+reply, return that validated reply.
 
 <the two leaf-agent sentences of the ship-owner prompt above, verbatim>
 ```

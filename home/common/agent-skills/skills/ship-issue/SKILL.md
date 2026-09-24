@@ -467,12 +467,19 @@ never compose one. Validate each reply before decoding and treat its
    already made true is recorded by its observation alone, without a proposal:
    remote deletion by the merge's `--delete-branch`, and closure by a merge
    that closes the issue. Fold it into the next checkpoint.
-6. **Denials.** A guard, host or provider denial of an effect is checkpointed —
-   the `authority-observation` with verdict `rejected`, plus the observation of
-   any partial effect — and becomes the reducer's `human_gate` suspension:
-   print the canonical re-entry line `/from-issue <num> --auto` on its own
-   line as your whole return and stop. The checkpoint already suspended the
-   custody, so no summary or `finish` follows it. Never route around it.
+6. **Denials.** A guard, host or provider denial of an effect is checkpointed
+   with the denied stage's scope as `requested_scope` — the reducer weighs a
+   rejection only against a proposed scope — carrying the
+   `authority-observation` with verdict `rejected` for that scope, plus the
+   observation of any partial effect. It becomes the reducer's `human_gate`
+   suspension: require the validated reply's `state: suspended` and
+   `blocked_on: human_gate`, and fail loudly on anything else. Then print the
+   canonical re-entry line `/from-issue <num> --auto` on its own line as your
+   whole return and stop. The checkpoint already suspended the custody, so no
+   summary or `finish` follows it. Never route around it. A checkpoint reply of
+   kind `delivery_stalled` means the reducer already ended the custody: stop
+   the loop, write nothing more, and return that validated reply as your whole
+   result.
 7. **Completion.** Do not checkpoint the last cycle: once delivery is complete
    `check-launch` reports the attempt inactive, which would make the parent's
    fence refuse. Build the last stage's absence, `implementation_delivered`
@@ -497,14 +504,19 @@ Entered with a validated `delivery_remainder` object (from-issue's
 plan or reviewed head to review, so skip Phases 0–5. Run `## Delivery loop`
 from the ledger's ready stage, starting with its synchronizing null-scope
 checkpoint. When selection is pending, build it from the PR head
-(`gh pr view <pr-num> --json headRefOid`) with the same fixed refs, then its
-observations. When the merge is pending, start at the merge gate: Phase 6's CI
+(`gh pr view <pr-num> --json headRefOid`) and that head's tree with literal
+refs — `acceptance_ref` the issue URL
+(`https://github.com/<repoSlug>/issues/<num>`), `review_ref` `unknown`,
+`test_ref` `checks` — so a relaunched remainder owner re-derives the identical
+selection; then build its observations. When the merge is pending, start at the merge gate: Phase 6's CI
 wait and Phase 7's gate and fence still bind. Otherwise start at the first
 pending cleanup cycle. `## Launch guard` fences with this custody's
 `action_id`.
 
-A remainder owner holds its custody, so it writes its own
-`finish --summary-file -`. After the last cycle, validate the `ship-summary/v2` (its `historical_owner_result` is
+A denial or a `delivery_stalled` reply ends a remainder owner's loop exactly as
+step 6 of `## Delivery loop` says: its whole return is the re-entry line or that
+reply, and it writes no `finish`. Otherwise a remainder owner holds its custody,
+so it writes its own `finish --summary-file -`. After the last cycle, validate the `ship-summary/v2` (its `historical_owner_result` is
 the legacy row) and write it in one command, then return exactly the validated
 reply and nothing else:
 

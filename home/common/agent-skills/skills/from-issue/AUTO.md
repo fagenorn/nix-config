@@ -241,7 +241,7 @@ the helper's own values:
     "contract": "<the installed delivery-contract/v1 object>",
     "contract_digest": "<sha256 digest of that contract>",
     "pending_stage_ids": ["select_reviewed_output", "publish_branch", "open_pr", "merge_pr", "close_tracker", "delete_remote_branch", "remove_worktree", "delete_local_branch"],
-    "requirements": [],
+    "requirements": [{"kind": "scope_tuple", "subject_id": "select_reviewed_output", "reason_code": "scope_tuple_required", "detail_pointer": null}],
     "authority_evaluation": null,
     "requested_scope": null
   },
@@ -346,10 +346,8 @@ The earlier controller's
 post-delegation action set is exactly validate, relay, and stop. The
 received bytes are the delegated owner's durable `finish` reply, a workflow
 response, so run `artifact-budget validate-report --boundary workflow-response`
-over them — never `artifact-budget validate-report --boundary ship-summary`,
-which the delegated owner already ran on its summary before that `finish`;
-after successful validation, relay the canonical bytes unchanged to its caller
-and stop.
+over them; after successful validation, relay the canonical bytes unchanged to
+its caller and stop.
 
 The earlier controller does not invoke `sdd`.
 It does not edit implementation files.

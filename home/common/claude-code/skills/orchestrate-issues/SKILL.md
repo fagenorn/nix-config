@@ -150,9 +150,15 @@ The adapter sends `[]` for every issue's `authority_observations`,
 `requested_scopes` and `recoveries`: owners submit delivery facts through
 `checkpoint-delivery`, and this adapter never proposes a scope or a recovery.
 
-**Per-issue contract rule.** Build a delivery contract for every requested
-issue without a bootstrap requirement, and for every bootstrap requirement whose
-`contract_digest` is null, with one command:
+**Per-issue contract rule.** On the first sweep, build a delivery contract for
+every bootstrap requirement whose `contract_digest` is null, and for every
+requested issue without a bootstrap requirement only when this invocation created the run
+(it minted the run id rather than reusing one; an adapter restart counts as
+reuse). On a reused run, send null for an issue without a requirement until its
+latest summary carries `delivery_contract_required`, and build its contract
+then: bootstrap omits delivery-complete issues, and a fresh contract for one
+would differ from its installed contract and make control refuse the whole
+sweep. Build each contract with one command:
 
 ```text
 workflow-state build-delivery --repo-root <ledger_repo_root> --kind contract --input - <<'EOF'
@@ -170,13 +176,13 @@ EOF
   `standing_repository` with `sweep:<label|milestone>:<value>`.
 - On success the builder prints `{"contract": …, "initial_intent": …}`. Send
   that `contract` in `delivery_contracts` and `[initial_intent]` in
-  `authorization_intents` on the first sweep that lists the issue, then only
+  `authorization_intents` on the sweep the rule above builds it for, then only
   while its latest summary carries `delivery_contract_required`; otherwise send
   null and `[]`. A non-null summary `contract_digest` means a contract is
   installed, and from then on null means the installed contract governs.
 - The built pair is process-local request data: never persist it. After a
-  restart, the new bootstrap's null `contract_digest` values say which issues
-  still need one.
+  restart, the new bootstrap's null `contract_digest` values and each later
+  summary's `delivery_contract_required` say which issues still need one.
 - On a builder refusal (exit 2, empty stdout, the rule named on stderr), send
   null and `[]` for that issue and report the refusal in the final report; that
   issue stays lifecycle-only.
