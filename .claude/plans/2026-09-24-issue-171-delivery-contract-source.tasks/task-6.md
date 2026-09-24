@@ -1,12 +1,12 @@
 # Task 6: Control forge reconciliation and the selection-gated remainder
 
-Decisions: D13, D14, D19, D24, D25. Spec §5.
+Decisions: D13, D14, D19, D24, D25, D30. Spec §5.
 
 **Files:**
 - Modify: `S/workflow-state.py` (`_apply_one_issue_policy` reconcile guard, `command_control` forge wiring and reconcile lane)
-- Modify: `S/workflow_delivery.py` (`delivery_policy` historical path for control, `finish_outcome`)
+- Modify: `S/workflow_delivery.py` (`delivery_policy` historical path for control, `finish_outcome`, the `DeliveryRuntime` wrapper rename)
 - Modify: `S/workflow_delivery_wire.py` (`historical_direct_requested` → `historical_requested`)
-- Test: `T/test_delivery_workflow.py`, `T/test_workflow_state.py` (re-pins only)
+- Test: `T/test_delivery_workflow.py`, `T/test_workflow_state.py`, `T/test_delivery_model.py` (re-pins only)
 
 **Interfaces:**
 - Consumes: Task 4's effective contract, `"contract"` operation and
@@ -15,6 +15,8 @@ Decisions: D13, D14, D19, D24, D25. Spec §5.
 - Produces: `DeliveryProjection.historical_requested(issue_state, *, forge, contract, new_run) -> bool`
   (the old direct predicate with the forge and contract passed in, so control can
   use it with `request["forge"][str(issue)]` and the effective contract).
+  `DeliveryRuntime.historical_direct_requested` is renamed to
+  `historical_requested` with that same signature; no alias is kept (D30).
 
 **Invariants:**
 - A merged forge reconciles the latest attempt only when nobody holds live custody
@@ -31,7 +33,9 @@ Decisions: D13, D14, D19, D24, D25. Spec §5.
   then gets remainder 1 through the historical path when capacity allows, returned
   as a `delivery_remainder` action (with a `resumed` delta, as direct's historical
   remainder has); without capacity a later sweep mints it. A contractless issue
-  gets only the closeout (D24).
+  gets only the closeout (D24). The re-plan is keyed on the issue's persisted
+  state, never on this sweep's analysis result, because a later sweep's policy
+  answers `terminal` for the already-reconciled attempt (D30).
 - A `terminal_failed` summary mints remainder 1 only when every
   `select_reviewed_output` stage fact is `observed` after the summary's reduction;
   otherwise the response is `terminal_failed` and control's retry lane owns the
@@ -112,6 +116,21 @@ Add to `ContractLifecycleTest` in `T/test_delivery_workflow.py`:
         path = self.root / ".superpowers/workflows/forge-v2/state.json"
         self.assertEqual(self.latest(path)["result_source"], "superseded")
 
+    def test_reconciled_remainder_waits_for_capacity(self):
+        """A reconcile sweep without capacity persists the closeout; a later sweep mints r1."""
+```
+
+Write this test's body from the ingredients above (plan prose, not dictated
+code): it follows `test_contracted_reconciliation_mints_remainder_one` to the
+suspended contracted 171 in run `forge-wait`, then seeds issue 172 into that
+run's state with one live `active` attempt (the `attempt(172)` shape, deadline
+after `LATER`) and sweeps `forge_request(max_parallel=1)`. Assert the sweep
+returns no `delivery_remainder` and 171's latest attempt is `merged` /
+`superseded`. Then `legacy_finish("forge-wait", 172)` frees the slot and a second
+`forge_request(max_parallel=1)` sweep returns 171's `delivery_remainder` with
+`custody.action_id` `171:r1:1`. Resume the fenced block:
+
+```python
     def test_failure_before_selection_keeps_the_retry_lane(self):
         self.project()
         contract, custody_value = self.spawn_contracted("orch-fail")
@@ -143,12 +162,16 @@ Re-pins (assertions that encode "a failed finish always mints remainder 1"):
 `test_direct_checkpoint_and_failure_remainder_round_trip`,
 `test_remainder_two_requires_closed_recovery_proof_and_replays`,
 `test_control_resumes_remainder_without_spending_implementation_attempt`,
-`test_control_allocates_only_one_proven_second_remainder`, and any
+`test_control_allocates_only_one_proven_second_remainder`,
+`test_suspended_remainder_resumes_same_identity_and_deadline`, and any
 `T/test_workflow_state.py` case the suite shows minting remainder 1 from a
 `terminal_failed` summary. Each adds
 `observation(self.model, contract, "selected_output", {"selected_output": selection(self.model, digest)})`
 to that summary's `delivery_observations` (sorted by id) and drops the selection
-stage from its expected `pending_stage_ids`; nothing else changes.
+stage from its expected `pending_stage_ids`; nothing else changes. In
+`T/test_delivery_model.py`, the `runtime.historical_direct_requested(issue, value)`
+call becomes `runtime.historical_requested(...)` with the new keyword arguments
+(D30).
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
@@ -161,13 +184,23 @@ failure answers `delivery_remainder`.
 
 1. Policy: hoist the `expired`/`active_unexpired` computation above the reconcile
    branch and guard it as the invariants state; direct keeps its live-owner check.
+   Rewrite `_apply_one_issue_policy`'s docstring paragraph on `require_forge`/
+   `forge` and the "reconciliation precedes ownership" comments at the reconcile
+   branch and the reaper to the live-custody guard: control passes the forge too,
+   and a merged forge reconciles only an attempt nobody holds live custody of
+   (D30).
 2. `command_control`: pass `forge=request["forge"][str(issue)]` (with
-   `require_forge=False`) into both `_apply_one_issue_policy` calls; before the
+   `require_forge=False`) into both `_apply_one_issue_policy` calls. Before the
    recover pass, persist every analysis `"reconcile"` through
-   `apply_policy(issue, False)`; for such an issue with an installed contract,
-   incomplete delivery and no remainder, and while `capacity > 0`, re-plan it with
-   dispatch permitted so `delivery_policy`'s historical path creates remainder 1,
-   add it to `proposal_order`, and spend one slot.
+   `apply_policy(issue, False)` and write each resulting issue state back into
+   `state["issues"]` at once, since `apply_policy` deep-copies the pre-sweep
+   state and the write-back after `proposal_order` would come too late. Then, while
+   `capacity > 0`, re-plan with dispatch permitted every issue whose persisted
+   state has an installed contract, incomplete delivery, no remainder and a
+   latest attempt in the historical terminal set, and whose request forge is
+   `merged`, so `delivery_policy`'s historical path creates remainder 1; add it to
+   `proposal_order` and spend one slot. The key is the persisted state, not the
+   analysis result, so a sweep after a capacity-0 sweep still mints it (D30).
 3. `delivery_policy`: take the historical path for `control` as well as `direct`,
    reading the issue's forge from the request shape and requiring
    `dispatch_permitted` for control.
@@ -177,13 +210,13 @@ failure answers `delivery_remainder`.
 
 - [ ] **Step 4: Verify**
 
-Run: `python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -3` → `OK`.
+Run: `python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_delivery_model.py 2>&1 | tail -3` → `OK`.
 Run: `just agent-workflow-tests 2>&1 | tail -3` → `OK (skipped=1)`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add home/common/agent-skills/scripts/{workflow-state.py,workflow_delivery.py,workflow_delivery_wire.py} \
-  home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_workflow_state.py
+  home/common/agent-skills/tests/{test_delivery_workflow.py,test_workflow_state.py,test_delivery_model.py}
 git commit -m "fix(workflow-state): reconcile merged forges in control and gate remainders on selection"
 ```

@@ -23,7 +23,7 @@ rules.
 skill prose, JSON evals, Nix/Home Manager, `just`.
 
 Spec (source of truth, read whole):
-`.claude/specs/2026-09-23-issue-171-delivery-contract-source-design.md`, D1–D27.
+`.claude/specs/2026-09-23-issue-171-delivery-contract-source-design.md`, D1–D32.
 
 ## Global Constraints
 
@@ -70,30 +70,27 @@ Path abbreviations used in members: `S` = `home/common/agent-skills/scripts`,
 
 ## Delivery estimate and boundaries
 
-Estimate only: about 22 product files. New `S/workflow_delivery_build.py`
-(~350 lines); `S/workflow-state.py` (+~250/−~60); `S/workflow_delivery.py`
-(+~120); `S/workflow_delivery_wire.py` (+~20/−~20); `S/delivery_model/_objects.py`
-and `_wire.py` (+~30); tests (+~1,400 lines across five files); seven skill
-documents plus one eval file (~+450/−~300 prose lines); two `.nix` files and
-`CLAUDE.md` (a few lines each). The aggregate diff (est. 180–240 KB) exceeds one
-review-package member, so review splits along the three slices that are each
-testable on their own: builder and binding (Tasks 1–3), lifecycle policy
-(Tasks 4–6), and skills plus permissions (Tasks 7–8). Tasks run in index order;
-each depends on every earlier one.
+Estimate only: about 24 product files, the largest the new
+`S/workflow_delivery_build.py` (~350 lines), `S/workflow-state.py` (+~250/−~60)
+and tests (+~1,400 lines across seven files). The diff (est. 180–240 KB) exceeds
+one review-package member, so review splits into three independently testable
+slices: builder and binding (Tasks 1–3), lifecycle policy (Tasks 4–6), skills
+plus permissions (Tasks 7–8). Tasks run in index order; each depends on every
+earlier one.
 
 ## Task index
 
 Task 1 — Slot PR binding in the delivery model — `S/delivery_model/_objects.py`, `T/test_delivery_model.py` — full — [task-1.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-1.md)
 
-Task 2 — Stdin inputs and the builder verb's contract, intent and scope kinds — `S/workflow_delivery_build.py` (create), `S/workflow_delivery.py`, `S/workflow-state.py`, `S/delivery_model/{__init__.py,_objects.py}`, `home/common/agent-skills/default.nix`, `CLAUDE.md`, `T/test_delivery_workflow.py`, `T/test_delivery_model.py` — full — [task-2.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-2.md)
+Task 2 — Stdin inputs and the builder verb's contract, intent and scope kinds — `S/workflow_delivery_build.py` (create), `S/workflow_delivery.py`, `S/workflow-state.py`, `S/delivery_model/{__init__.py,_objects.py}`, `home/common/agent-skills/default.nix`, `CLAUDE.md`, `T/test_delivery_workflow.py`, `T/test_delivery_model.py`, `T/test_resolve_project.py` — full — [task-2.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-2.md)
 
-Task 3 — Builder evidence kinds and the end-to-end delivery loop — `S/workflow_delivery_build.py`, `S/workflow-state.py`, `CLAUDE.md`, `T/test_delivery_workflow.py` — full — [task-3.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-3.md)
+Task 3 — Builder evidence kinds and the end-to-end delivery loop — `S/workflow_delivery_build.py`, `S/workflow-state.py`, `S/artifact_budget.py`, `CLAUDE.md`, `T/test_delivery_workflow.py`, `T/test_artifact_budget.py` — full — [task-3.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-3.md)
 
 Task 4 — Contract-last acquisition and null-contract semantics — `S/workflow-state.py`, `S/workflow_delivery.py`, `S/workflow_delivery_wire.py`, `S/delivery_model/_wire.py`, `T/test_delivery_workflow.py`, `T/test_workflow_state.py`, `T/test_artifact_budget.py` — full — [task-4.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-4.md)
 
 Task 5 — Legacy finish continuity and the survival regression — `S/workflow-state.py`, `T/test_delivery_workflow.py`, `T/test_workflow_state.py` — full — [task-5.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-5.md)
 
-Task 6 — Control forge reconciliation and the selection-gated remainder — `S/workflow-state.py`, `S/workflow_delivery.py`, `S/workflow_delivery_wire.py`, `T/test_delivery_workflow.py`, `T/test_workflow_state.py` — full — [task-6.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-6.md)
+Task 6 — Control forge reconciliation and the selection-gated remainder — `S/workflow-state.py`, `S/workflow_delivery.py`, `S/workflow_delivery_wire.py`, `T/test_delivery_workflow.py`, `T/test_workflow_state.py`, `T/test_delivery_model.py` — full — [task-6.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-6.md)
 
 Task 7 — Lifecycle skills on interface 2 — `OI/SKILL.md`, `OI/evals/evals.json`, `SK/from-issue/{SKILL.md,AUTO.md,ship-handoff.md}`, `SK/ship-issue/{SKILL.md,REVIEW.md,HUMAN-GATE.md}`, `CLAUDE.md`, `T/test_workflow_skill_contracts.py` — full — [task-7.md](2026-09-24-issue-171-delivery-contract-source.tasks/task-7.md)
 
@@ -126,6 +123,28 @@ and the five rows planning added: D23 (one stdin-aware input reader, absolute
 otherwise), D24 (lifecycle-only transitions, including `refuse`, never install a
 contract), D25 (the scope of D8's worktree binding), D26 (remainder owners reuse
 existing dispatch sites) and D27 (workflow-state resolves policy, the build
-module stays pure and reads the model's `STAGE_ACTIONS` export).
+module stays pure and reads the model's `STAGE_ACTIONS` export). Phase-5 review
+added D28 (the ship-handoff boundary reads under the workflow-response wire
+bound), D29 (lifecycle post-merge effects are delivery-loop cycles; the legacy
+summary row stays), D30 (control's reconciled remainder keys on persisted state),
+D31 (a null-digest summary asks for a contract only before a would-be dispatch;
+refines D10) and D32 (refusals name their rule; the contract check's stated reach).
+
+## Standards review provenance
+
+Reviewer: Claude fallback (opus, high), because Codex hit its usage limit. Base
+`58eca39dd03641f99f0fcfa84a49fe8b7efbcc3f`, reviewed HEAD
+`a8737c4431529ac62462ec79e997009be4e94b9b`; isolated and read-only; focus none.
+Accepted 9 (B2 and Dsc2 with modification), rejected 0, deferred 0.
+
+- B1 (ship-handoff exceeds the report wire bound) — D28, Task 3.
+- B2 (post-merge exemption contradicts the loop) — D29, Task 7; the 9-key row is kept.
+- S1 (reconciled remainder never re-planned) — D30, Task 6.
+- S2 (runtime wrapper and pre-selection remainder test missed) — D30, Task 6.
+- S3 (stale reconcile docstring and comments) — D30, Task 6.
+- S4 (refusal tests assert only the exit code) — D32, Tasks 2–3.
+- S5 (harness restates the resolver fixture) — routine, Task 2.
+- Dsc1 (contract-refusal claim over-reaches) — D32, Task 2.
+- Dsc2 (terminal legacy issues asked for a contract forever) — D31, Tasks 4 and 7.
 
 ---

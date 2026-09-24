@@ -1,6 +1,6 @@
 # Task 2: Stdin inputs and the builder verb's contract, intent and scope kinds
 
-Decisions: D3, D4, D5, D6, D19, D21, D22, D23, D27. Spec §1 (the whole
+Decisions: D3, D4, D5, D6, D19, D21, D22, D23, D27, D32. Spec §1 (the whole
 "delivery builder" section) is this task's derivation contract; read it first.
 
 **Files:**
@@ -10,7 +10,7 @@ Decisions: D3, D4, D5, D6, D19, D21, D22, D23, D27. Spec §1 (the whole
 - Modify: `S/workflow-state.py` (`read_input_bytes`, every input flag, `build-delivery` verb, resolver lookup)
 - Modify: `home/common/agent-skills/default.nix` (install the build module)
 - Modify: `CLAUDE.md` (one bullet, below)
-- Test: `T/test_delivery_workflow.py`, `T/test_delivery_model.py` (facade pin), `T/test_workflow_state.py` only if a message pin moves
+- Test: `T/test_delivery_workflow.py`, `T/test_delivery_model.py` (facade pin), `T/test_resolve_project.py` (extract `make_project_root`), `T/test_workflow_state.py` only if a message pin moves
 
 **Interfaces:**
 - Consumes: Task 1's slot `pr_ref` grammar.
@@ -54,8 +54,16 @@ Decisions: D3, D4, D5, D6, D19, D21, D22, D23, D27. Spec §1 (the whole
   `~/.agents/bin/resolve-project`; a non-zero exit, timeout (60 s) or non-object
   stdout is a refusal (per D27).
 - Every kind taking a `contract` first validates it and regenerates its initial
-  intent; a different id or digest refuses. A hand-built contract is therefore
-  refused by every builder kind.
+  intent; a different intent id or digest refuses. So a contract whose
+  intent-bearing fields (those that reach a scope or the intent's source) differ
+  from the builder's derivation is refused; its other fields are model-validated,
+  not re-derived (D32).
+- Every refusal names its rule on stderr with a fixed fragment (D32): `builder
+  input keys` (an unknown, missing or mistyped input key), `tracker kind`,
+  `source kind`, `worktree must be absolute`, `branch pattern` (the worktree's
+  name does not match), `derived intent` (the contract's intent id or digest
+  differs from the regenerated one) and `unknown stage`. An unknown `--kind` is
+  argparse's `invalid choice`.
 - Identical inputs give identical bytes; declared scopes (in the intent) and actual
   scopes (kind `scope`) come from the one `_scope` function (per D5).
 
@@ -107,9 +115,14 @@ Decisions: D3, D4, D5, D6, D19, D21, D22, D23, D27. Spec §1 (the whole
 
 - [ ] **Step 1: Write the failing tests**
 
+In `T/test_resolve_project.py`, extract the body of `ResolverTestCase.make_root`
+into a module-level `make_project_root(contract=None, *, projections=True) -> Path`
+beside `make_home` (same behavior, docstring and comment moved with it);
+`make_root` becomes a one-line delegate, so its 100-odd callers are unchanged.
+
 Add to `T/test_delivery_workflow.py` imports: `from .test_resolve_project import
-CODEX_HEADER, MANAGED_LINE, git, make_home, source_contract`, then these
-module-level definitions and classes:
+make_home, make_project_root, source_contract`, then these module-level
+definitions and classes:
 
 ```python
 WORKTREE_NAME = "worktree-issue-171-delivery-contract-source"
@@ -120,21 +133,13 @@ class BuilderHarness:
     """One synthetic resolvable project and a CLI driver shared by builder-backed tests."""
 
     def project(self, mutate=None):
-        self.home = make_home(); self.root = Path(tempfile.mkdtemp()).resolve()
+        self.home = make_home()
         self.addCleanup(shutil.rmtree, self.home, True)
-        self.addCleanup(shutil.rmtree, self.root, True)
-        git(self.root, "init", "--quiet")
-        for name in ("home/common/agent-skills/standards", ".out-of-scope",
-                     ".worktrees", ".agents/instructions"):
-            (self.root / name).mkdir(parents=True)
-        source = b"# invariants\n"
-        (self.root / ".agents/instructions/bootstrap.md").write_bytes(source)
         contract = source_contract()
         if mutate is not None:
             mutate(contract)
-        (self.root / ".agents/project.json").write_text(json.dumps(contract), encoding="utf-8")
-        (self.root / "AGENTS.md").write_bytes(CODEX_HEADER.encode() + b"\n\n" + source)
-        (self.root / "CLAUDE.md").write_text(f"# authored body\n{MANAGED_LINE}\n", encoding="utf-8")
+        self.root = make_project_root(contract)
+        self.addCleanup(shutil.rmtree, self.root, True)
         self.worktree = str(self.root / ".worktrees" / WORKTREE_NAME)
         return self.root
 
@@ -224,23 +229,29 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
     def test_contract_refusals_exit_two_with_empty_stdout(self):
         def gitlab(contract_value):
             contract_value["bindings"]["tracker"]["kind"] = "gitlab"
-        cases = (("non-github tracker", gitlab, {}),
-                 ("foreign issue branch", None, {"worktree": "/wt/issue-172-other"}),
-                 ("unpatterned branch", None, {"worktree": "/wt/feature-171"}),
-                 ("relative worktree", None, {"worktree": "wt/" + WORKTREE_NAME}),
-                 ("parent handoff", None, {"source_kind": "parent_handoff"}),
-                 ("unknown key", None, {"extra": True}))
-        for label, mutate, changes in cases:
+        cases = (("non-github tracker", gitlab, {}, b"tracker kind"),
+                 ("foreign issue branch", None, {"worktree": "/wt/issue-172-other"},
+                  b"branch pattern"),
+                 ("unpatterned branch", None, {"worktree": "/wt/feature-171"},
+                  b"branch pattern"),
+                 ("relative worktree", None, {"worktree": "wt/" + WORKTREE_NAME},
+                  b"worktree must be absolute"),
+                 ("parent handoff", None, {"source_kind": "parent_handoff"}, b"source kind"),
+                 ("unknown key", None, {"extra": True}, b"builder input keys"))
+        for label, mutate, changes, reason in cases:
             with self.subTest(label=label):
                 self.project(mutate)
                 refused = self.build("contract", self.contract_input(**changes), ok=False)
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                self.assertIn(reason, refused.stderr)
         self.project()
         missing = self.contract_input(); missing.pop("now")
-        for kind, value in (("contract", missing), ("nonsense", self.contract_input())):
+        for kind, value, reason in (("contract", missing, b"builder input keys"),
+                                    ("nonsense", self.contract_input(), b"invalid choice")):
             with self.subTest(kind=kind):
                 refused = self.build(kind, value, ok=False)
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                self.assertIn(reason, refused.stderr)
 
     def test_scope_and_initial_intent_regenerate_from_the_contract(self):
         self.project()
@@ -261,12 +272,14 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
                     if stage["kind"] in {"open_pr", "merge_pr"} else {"kind": "none"}))
         tampered = copy.deepcopy(contract)
         tampered["provenance"]["created_at"] = "2026-09-22T00:00:00Z"
-        for kind, value in (("initial-intent", {"contract": tampered}),
-                            ("scope", {"contract": tampered, "stage_id": "merge_pr"}),
-                            ("scope", {"contract": contract, "stage_id": "unknown"})):
+        for kind, value, reason in (
+                ("initial-intent", {"contract": tampered}, b"derived intent"),
+                ("scope", {"contract": tampered, "stage_id": "merge_pr"}, b"derived intent"),
+                ("scope", {"contract": contract, "stage_id": "unknown"}, b"unknown stage")):
             with self.subTest(kind=kind, stage=value.get("stage_id")):
                 refused = self.build(kind, value, ok=False)
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                self.assertIn(reason, refused.stderr)
 
 
 class HelperInputTest(BuilderHarness, unittest.TestCase):
@@ -392,7 +405,8 @@ find `workflow_delivery_build.py`.
    interface"`); `__init__` loads it after the model; `build_delivery` delegates and
    validates the output kinds.
 4. `S/workflow_delivery_build.py`: the derivation above; every refusal raises
-   `ValueError` with a short reason.
+   `ValueError` with a short reason containing its Invariants fragment, and the
+   `build-delivery` handler surfaces it on stderr (D32).
 5. `default.nix`: beside the wire entry add
    `".agents/lib/python/workflow_delivery_build.py".source = ./scripts/workflow_delivery_build.py;`.
 6. `CLAUDE.md`: add a bullet under "Claude Code is declaratively managed",

@@ -1,6 +1,6 @@
 # Task 4: Contract-last acquisition and null-contract semantics
 
-Decisions: D8, D9, D10, D12, D19, D24, D25. Spec §3 and §4 ("Control and legacy
+Decisions: D8, D9, D10, D12, D19, D24, D25, D31. Spec §3 and §4 ("Control and legacy
 issues", "Wire").
 
 **Files:**
@@ -32,6 +32,8 @@ issues", "Wire").
   `[{"kind":"delivery_contract","subject_id":"<n>","reason_code":"delivery_contract_required","detail_pointer":null}]`
   and `run_id` = the selected existing run it would continue, else `null`; control
   emits no action, spends no capacity, and its summary carries that requirement.
+  Every other null-digest control summary (live custody left idle, a terminal or
+  any lifecycle-only verdict) carries no requirement (D31).
   The policy's own observation requirements (tracker, forge, recorded/candidate
   worktree) come first (D9).
 - A direct call with a null contract never creates a `direct-<n>-*` run directory.
@@ -47,9 +49,9 @@ issues", "Wire").
   resume keeps today's recorded-worktree requirement; any selected path `!= L`
   raises `WorkflowError("custody worktree does not match the delivery contract")`
   before any mutation. Without that stage, selection is exactly today's.
-- Wire (D12): a control summary with `contract_digest: null` may carry any valid
-  custody (or null) but still has `pending_stage_ids: []`, exactly the one
-  `delivery_contract` requirement, and no action naming its issue.
+- Wire (D12, D31): a control summary with `contract_digest: null` may carry any
+  valid custody (or null) but still has `pending_stage_ids: []`, either exactly
+  the one `delivery_contract` requirement or none, and no action naming its issue.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -195,7 +197,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                 response = json.loads(raw); summary = response["summaries"][0]
                 self.assertEqual((summary["state"], summary["custody"]["action_id"],
                     summary["contract_digest"], summary["pending_stage_ids"],
-                    summary["requirements"]), ("active", "171:1:1", None, [], CONTRACT_REQUIRED))
+                    summary["requirements"]), ("active", "171:1:1", None, [], []))
                 self.assertEqual([(item["kind"], item.get("deadline_at"))
                                   for item in response["actions"]],
                                  [("wait", "2026-09-21T01:00:00Z")])
@@ -212,6 +214,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             self.attempt(171, 1, result=self.workflow.terminal_result(171, "failed", "one"), **failed),
             self.attempt(171, 2, result=self.workflow.terminal_result(171, "failed", "two"), **failed)])
         response = self.control("refuse", self.control_request([171], now=LATER))
+        # A terminal contractless issue is never asked for a contract (D31).
+        self.assertEqual(response["summaries"][0]["requirements"], [])
         self.assertEqual([delta["kind"] for delta in response["deltas"]], ["retry_refused"])
         stored = json.loads(path.read_text())["issues"]["171"]
         self.assertEqual((stored["attempts"][-1]["result_source"], stored["delivery"]["contract"]),
@@ -232,6 +236,9 @@ Add to `T/test_artifact_budget.py` (`ArtifactBudgetCliTest`):
         self.assertIsNotNone(response["summaries"][0]["custody"])
         accepted = self.run_validate("workflow-response", response, use_stdin=True)
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        response["summaries"][0]["requirements"] = []
+        bare = self.run_validate("workflow-response", response, use_stdin=True)
+        self.assertEqual(bare.returncode, 0, bare.stderr)
         requirement = {"issue": 151, "owner": "151:1", "custody": custody(),
                        "recorded_worktree": "/worktree"}
         for digest, code in ((None, 0), ("sha256:" + "a" * 64, 0), ("absent", 2)):
@@ -252,9 +259,11 @@ with a null digest, and bootstrap has no `contract_digest`.
 
 - [ ] **Step 3: Implement**
 
-1. `_wire.py`: in `_control_response` drop only the `item["custody"] is not None`
-   clause of the null-digest rule; add `contract_digest` to the bootstrap
-   requirement members (`None` or `_digest`).
+1. `_wire.py`: in `_control_response` drop the `item["custody"] is not None`
+   clause of the null-digest rule and accept an empty requirement list in place
+   of the one `delivery_contract` requirement, keeping `pending_stage_ids` empty
+   (D31); add `contract_digest` to the bootstrap requirement members (`None` or
+   `_digest`).
 2. Projection: `bootstrap` adds `contract_digest`; delete `contractless_control`
    here and its `DeliveryRuntime` wrapper.
 3. Runtime: add `effective_contract`; `apply_transition` resolves the contract
@@ -267,7 +276,9 @@ with a null digest, and bootstrap has no `contract_digest`.
 5. `command_control`: under the lock, compute each issue's effective contract
    (refusing a mismatch), pass it to both policy calls, skip `"contract"` results
    in every dispatch pass, and call `control_transitions` with the issues whose
-   planned operation is spawn/resume/retry/recover.
+   planned operation is spawn/resume/retry/recover. A null-digest summary carries
+   `delivery_contract_required` exactly when its issue's planned operation is
+   `"contract"` (D31).
 6. `command_direct_owner`: delete the early null-contract return; compute the
    effective contract for the selected run; answer `"contract"` as specified; a
    contractless `refuse` persists the lifecycle verdict and replays it as

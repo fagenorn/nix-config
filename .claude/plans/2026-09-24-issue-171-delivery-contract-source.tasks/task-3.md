@@ -1,11 +1,12 @@
 # Task 3: Builder evidence kinds and the end-to-end delivery loop
 
-Decisions: D3, D5, D7, D15, D16, D19, D21, D22. Spec §1 (the kind table and "The
-observed facts per observation kind"), §6 "The delivery loop".
+Decisions: D3, D5, D7, D15, D16, D19, D21, D22, D28, D32. Spec §1 (the kind table
+and "The observed facts per observation kind"), §6 "Phase-7 handoff" and "The
+delivery loop".
 
 **Files:**
-- Modify: `S/workflow_delivery_build.py`, `S/workflow-state.py` (`--kind` choices), `CLAUDE.md` (the Task-2 bullet)
-- Test: `T/test_delivery_workflow.py`
+- Modify: `S/workflow_delivery_build.py`, `S/workflow-state.py` (`--kind` choices), `S/artifact_budget.py` (the ship-handoff wire bound, D28), `CLAUDE.md` (the Task-2 bullet)
+- Test: `T/test_delivery_workflow.py`, `T/test_artifact_budget.py`
 
 **Interfaces:**
 - Consumes: Task 2's builder, `BuilderHarness`, `WORKTREE_NAME`, `LATER`; Task 1's
@@ -54,6 +55,10 @@ observed facts per observation kind"), §6 "The delivery loop".
   `evaluation_use_key` are `null`. `intent_revocation` refuses (revocation tooling
   is out of scope).
 - The loop needs no successor intent: the stored chain keeps exactly one intent.
+- `validate-report --boundary ship-handoff` reads under
+  `workflow_responses.wire_max_bytes`, like `workflow-response`; the other
+  delivery boundaries keep the phase-report bound (D28).
+- Refusal subTests assert each case's stderr fragment (D32).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -113,8 +118,43 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
             "requested_scope": scope, "detail_state": "none", "report_path": None,
             "notes": ""}
         completed = self.cli("checkpoint-delivery", *self.run_args, "--now", LATER,
-                             "--checkpoint-file", "-", stdin=json.dumps(value).encode(), ok=ok)
+                             "--checkpoint-file", "-",
+                             stdin=self.validated("ship-checkpoint", value), ok=ok)
         return json.loads(completed.stdout) if ok else completed
+
+    def validated(self, boundary, value):
+        """Pipe one wire object through artifact-budget, as an owner must, and return its bytes."""
+        completed = subprocess.run(
+            [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+             boundary, "--input", "-", "--policy", str(POLICY)],
+            input=json.dumps(value).encode(), capture_output=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout
+
+    def handoff(self, owner, intent):
+        """The Phase-7 ship-handoff/v2 a first ship receives, with realistic artifacts."""
+        def artifact(kind, path, size):
+            return {"kind": kind, "path": path, "budget_status": "within_budget",
+                    "metrics": {"root_bytes": size, "total_bytes": size, "file_count": 1,
+                                "largest_member_bytes": size}}
+        return {"interface_version": 2, "state": "complete",
+            "ledger_repo_root": str(self.root), "run_id": owner["run_id"],
+            "owner": owner["owner"], "owner_worktree": self.worktree,
+            "custody": self.custody, "issue_number": 171, "branch": WORKTREE_NAME,
+            "worktree_path": self.worktree,
+            "spec_artifact": artifact("design-spec",
+                ".claude/specs/2026-09-23-issue-171-delivery-contract-source-design.md", 47301),
+            "plan_artifact": artifact("implementation-plan",
+                ".claude/plans/2026-09-24-issue-171-delivery-contract-source.md", 8375),
+            "head_sha": "a" * 40, "review_state": "clean", "auto": True,
+            "report_path": None, "notes": "", "delivery_contract": self.contract,
+            "delivery_contract_digest": self.digest, "authorization_intents": [intent],
+            "authorization_chain_digest": self.model.canonical_digest(
+                {"intent_ids": [intent["id"]]}),
+            "authority_observation_ids": [], "reevaluation_evidence_ids": [],
+            "authority_evaluation_consumption_ids": [],
+            "pending_stage_ids": [stage["id"] for stage in self.contract["stages"]],
+            "selected_outputs": [], "requested_scope": None}
 
     def deliver(self, proposed):
         """Drive one implementation custody through every stage with builder outputs only."""
@@ -124,6 +164,11 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         owner = self.acquire(self.contract, built["initial_intent"])
         self.custody = owner["custody"]
         self.run_args = ("--repo-root", self.root, "--run-id", owner["run_id"])
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        handed = self.validated("ship-handoff", self.handoff(owner, built["initial_intent"]))
+        # A real handoff outgrows the phase-report bound; that is why D28 moves it.
+        self.assertGreater(len(handed), policy["phase_reports"]["wire_max_bytes"])
+        self.assertLessEqual(len(handed), policy["workflow_responses"]["wire_max_bytes"])
         state = self.root / f".superpowers/workflows/{owner['run_id']}/state.json"
         head, merge_sha = "a" * 40, "b" * 40
         selection = self.build("selected-output", {"contract": self.contract, "head": head,
@@ -181,15 +226,10 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
             "delivery_observations": sorted(completing, key=lambda item: item["id"]),
             "authority_observations": authority, "reevaluation_evidence": [],
             "detail_state": "none", "report_path": None, "notes": "delivered"}
-        validated = subprocess.run(
-            [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
-             "ship-summary", "--input", "-", "--policy", str(POLICY)],
-            input=json.dumps(summary).encode(), capture_output=True, check=False)
-        self.assertEqual(validated.returncode, 0, validated.stderr)
-        policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        self.assertLessEqual(len(validated.stdout), policy["phase_reports"]["wire_max_bytes"])
+        validated = self.validated("ship-summary", summary)
+        self.assertLessEqual(len(validated), policy["phase_reports"]["wire_max_bytes"])
         finished = json.loads(self.cli("finish", *self.run_args, "--now", LATER,
-            "--summary-file", "-", stdin=validated.stdout).stdout)
+            "--summary-file", "-", stdin=validated).stdout)
         self.assertEqual((finished["kind"], finished["pending_stage_ids"]),
                          ("delivery_complete", []))
         stored = json.loads(state.read_text(encoding="utf-8"))["issues"]["171"]
@@ -217,38 +257,59 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
             self.worktree, "probe_mode": "no_follow", "absent": True})
         base = {"contract": self.contract, "source_kind": "provider",
                 "source_reference": "probe", "observed_at": NOW, "evidence": "x"}
-        for kind, value in (
-                ("observation", {**base, "observation_kind": "repository_record_proposed"}),
-                ("observation", {**base, "observation_kind": "pr_opened", "pr_number": 5}),
-                ("observation", {**base, "observation_kind": "worktree_absent", "path": "/x"}),
+        for kind, value, reason in (
+                ("observation", {**base, "observation_kind": "repository_record_proposed"},
+                 b"unsupported observation kind"),
+                ("observation", {**base, "observation_kind": "pr_opened", "pr_number": 5},
+                 b"builder input keys"),
+                ("observation", {**base, "observation_kind": "worktree_absent", "path": "/x"},
+                 b"builder input keys"),
                 ("authority-observation", {"contract": self.contract, "scope_id": "sha256:" + "0" * 64,
                     "launch_id": "171:1:1", "authority_kind": "host", "verdict": "allowed",
-                    "reason_code": "r", "observed_at": NOW, "evidence": "x"}),
+                    "reason_code": "r", "observed_at": NOW, "evidence": "x"},
+                 b"unknown scope"),
                 ("authority-observation", {"contract": self.contract,
                     "scope_id": self.build("scope", {"contract": self.contract,
                                                      "stage_id": "merge_pr"})["id"],
                     "launch_id": None, "authority_kind": "intent_revocation",
                     "verdict": "revoked", "reason_code": "r", "observed_at": NOW,
-                    "evidence": "x"})):
+                    "evidence": "x"},
+                 b"unsupported authority kind")):
             with self.subTest(kind=kind, variant=value.get("observation_kind") or value.get("authority_kind")):
                 refused = self.build(kind, value, ok=False)
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                self.assertIn(reason, refused.stderr)
 ```
 
-Add `import hashlib` to the module imports.
+Add `import hashlib` to the module imports. The reason fragments above extend
+Task 2's fixed refusal vocabulary (D32): a kind outside the closed set is
+`unsupported observation kind` or `unsupported authority kind`, a scope id the
+contract does not seal is `unknown scope`, and a missing or extra fact is Task 2's
+`builder input keys`, because a kind's facts are part of its input key set.
+
+In `T/test_artifact_budget.py`, beside `test_workflow_response_takes_its_own_wire_bound`,
+add `test_ship_handoff_reads_under_the_response_wire_bound`: the legacy candidate
+of `test_ship_handoff_residuals_requires_durable_report_path` with
+`review_state "clean"` and `notes "ok"`, its `worktree_path` padded past
+`phase_reports.wire_max_bytes`, validates on stdin with exit 0; padded past
+`workflow_responses.wire_max_bytes` it exits 2 with `artifact-budget: invalid
+report\n`.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py -k DeliveryLoopTest 2>&1 | tail -5`
 Expected: ERROR in all three — `selected-output`/`observation` are invalid
 `--kind` choices at the starting commit.
+Run: `python3 -m unittest home/common/agent-skills/tests/test_artifact_budget.py -k ship_handoff_reads 2>&1 | tail -5`
+Expected: FAIL — the padded handoff exits 2 under the phase-report bound.
 
 - [ ] **Step 3: Implement**
 
 Extend `DeliveryBuilder.build` with the three kinds exactly as the invariants
 state, each output passing `validate_delivery_object` for its kind
 (`selected-output`, `delivery-observation`, `authority-observation`) inside
-`DeliveryRuntime.build_delivery`. Observation kinds come from
+`DeliveryRuntime.build_delivery`, and each refusal naming the rule it broke with
+the Invariants' fragments. Observation kinds come from
 `STAGE_ACTIONS[*][2]` plus the three postconditions; subjects are built by one
 per-kind table in the module, not by branches spread through `build`. Extend
 `--kind` `choices`. In `CLAUDE.md`, change the Task-2 bullet's "and seals each
@@ -256,16 +317,22 @@ stage's scope." to "and seals each stage's scope, the reviewed selection, every
 delivery observation and each authority observation an owner submits, so no
 agent composes a digest."
 
+In `S/artifact_budget.py`, give `ship-handoff` the `response_wire_max` bound
+beside `workflow-response` (D28).
+
 - [ ] **Step 4: Verify**
 
 Run: `python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py 2>&1 | tail -3` → `OK`.
+Run: `python3 -m unittest home/common/agent-skills/tests/test_artifact_budget.py 2>&1 | tail -3` → `OK`.
 Run: `just agent-workflow-tests 2>&1 | tail -3` → `OK (skipped=1)`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add home/common/agent-skills/scripts/workflow_delivery_build.py \
-  home/common/agent-skills/scripts/workflow-state.py CLAUDE.md \
-  home/common/agent-skills/tests/test_delivery_workflow.py
+  home/common/agent-skills/scripts/workflow-state.py \
+  home/common/agent-skills/scripts/artifact_budget.py CLAUDE.md \
+  home/common/agent-skills/tests/test_delivery_workflow.py \
+  home/common/agent-skills/tests/test_artifact_budget.py
 git commit -m "feat(workflow-state): build selections and delivery evidence; prove the delivery loop"
 ```

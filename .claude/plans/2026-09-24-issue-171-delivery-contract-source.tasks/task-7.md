@@ -1,6 +1,6 @@
 # Task 7: Lifecycle skills on interface 2
 
-Decisions: D6, D9, D10, D14, D15, D16, D17, D21, D22, D25, D26. Spec §6 and §7
+Decisions: D6, D9, D10, D14, D15, D16, D17, D21, D22, D25, D26, D29, D31. Spec §6 and §7
 (the skill rewrite map is this task's checklist). The shapes the prose names are
 the live ones: read `S/delivery_model/_wire.py` (`_owner_action`, `_remainder`,
 `_ship_handoff`, `_ship_summary`) and Tasks 2–6's CLI rather than paraphrasing.
@@ -35,8 +35,9 @@ the live ones: read `S/delivery_model/_wire.py` (`_owner_action`, `_remainder`,
   <numbers>`, or `standing_repository` with `sweep:<label|milestone>:<value>` per
   D6) for every issue without a bootstrap requirement and every requirement whose
   `contract_digest` is null (using its `recorded_worktree`), send it with its
-  initial intent until a summary shows its digest, then null; on a builder refusal
-  send null and report the refusal. §4: the closed set `spawn`, `resume`, `retry`,
+  initial intent on the first sweep that lists the issue, then only while its
+  latest summary carries `delivery_contract_required`, and null otherwise (D31);
+  on a builder refusal send null and report the refusal. §4: the closed set `spawn`, `resume`, `retry`,
   `delivery_remainder`, `wait`, `finalize`; project a dispatch action into the
   owner object (rename `id` to `action_id` and `kind` to `launch_kind`, add
   `kind: owner`, `interface_version: 2`, `ledger_repo_root`, `run_id`) and pass it,
@@ -85,7 +86,15 @@ the live ones: read `S/delivery_model/_wire.py` (`_owner_action`, `_remainder`,
   observation, one `authority-observation` and the next scope; already-true stages
   are observation-only; a denial is checkpointed as the reducer's `human_gate`
   suspension. The completing observations ride the `ship-summary/v2`
-  (`delivery_complete`, legacy `merged` row as `historical_owner_result`). Then a
+  (`delivery_complete`, legacy `merged` row as `historical_owner_result`),
+  validated only after the last cycle. Under lifecycle identity the post-merge
+  exemption is retired (D29): merge, remote delete, issue close, `git branch -d`
+  and `git worktree remove` are loop cycles, and the flow diagram and Phases 7–8
+  show that route (ledger-free keeps today's, and "skip the guard silently"). The
+  9-key legacy summary paragraph stays as the ledger-free return and names its
+  second role, `historical_owner_result` (spec §6, D16). The skill's own
+  `## Delivery interface version 2` appendix folds into `## Delivery loop`. The
+  re-pins below fix the wording. Then a
   `## Remainder mode` section (entered with the `delivery_remainder` object; runs
   the loop from the ledger's ready stage; selection from the PR head when pending;
   writes its own `finish --summary-file -`). The writer rule replaces "A fresh
@@ -169,7 +178,8 @@ Add to `WorkflowSkillContractsTest`:
             self.assertIn(anchor, normalized(direct))
         decide = self.section(self.orchestrate, "## 3. Decide", "## 4. Execute control actions")
         self.assertEqual(set(json_block(decide)), V2_CONTROL_REQUEST_KEYS)
-        for anchor in ("workflow-state build-delivery", "until a summary shows its digest",
+        for anchor in ("workflow-state build-delivery",
+                       "while its latest summary carries `delivery_contract_required`",
                        "report the refusal", "--request-file -"):
             self.assertIn(anchor, normalized(decide))
 
@@ -241,13 +251,26 @@ Add to `WorkflowSkillContractsTest`:
         self.assertNotIn("version-1", expected)
 ```
 
-Re-pin, in the same step, only anchors that name retired interface-1 text:
-`test_dispatcher_is_a_control_adapter_not_a_policy_owner` and
-`test_direct_auto_acquires_only_through_direct_owner` (`--request-file
-<absolute-json-path>` → `--request-file -`);
-`test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner` (owner keys →
-`V2_OWNER_KEYS`). Keep every other anchor; if a kept anchor's sentence moves, keep
-its words.
+Re-pin, in the same step, exactly these tests:
+- `test_dispatcher_is_a_control_adapter_not_a_policy_owner` and
+  `test_direct_auto_acquires_only_through_direct_owner`: `--request-file
+  <absolute-json-path>` → `--request-file -`.
+- `test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner`: owner
+  keys → `V2_OWNER_KEYS`.
+- `test_ship_issue_guards_every_pre_merge_forge_write` (D29): the
+  `"after the merge is verified"` assertion becomes `assertIn("each post-merge
+  effect is a `## Delivery loop` cycle", collapsed)`; `"skip the guard silently"`
+  stays.
+- `test_merged_ship_summary_is_validated_only_after_cleanup` (D29): its ordered
+  Phase-8 anchors stay as the ledger-free ordering, and it adds
+  `assert_ordered(normalized(self.section(self.ship_issue, "## Delivery loop",
+  "## Remainder mode")), "Only after the last cycle", "validate-report --boundary
+  ship-summary")`.
+- `test_ship_issue_authorization_is_scoped_to_the_host_enforcement_model` (D29):
+  the Phase-7 ordering stays and the section also carries "the `merge_pr` cycle of
+  `## Delivery loop`" and `current-launch`.
+
+No other test changes. A kept anchor whose sentence moves keeps its words.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
