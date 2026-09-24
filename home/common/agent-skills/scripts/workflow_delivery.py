@@ -156,8 +156,14 @@ class DeliveryRuntime:
 
     def validate_control_custody(
         self, state: dict[str, Any], request: dict[str, Any],
-    ) -> set[tuple[int, str, int, int]]:
+    ) -> tuple[set[tuple[int, str, int, int]], set[tuple[int, str, int, int]]]:
+        """The current-launch identities observed ``(unavailable, launch_refused)``.
+
+        An identity naming a launch that is no longer its issue's latest is
+        stale and dropped from both sets.
+        """
         unavailable: set[tuple[int, str, int, int]] = set()
+        refused: set[tuple[int, str, int, int]] = set()
         for observation in request["owners"]:
             issue_state = state["issues"].get(str(observation["issue"]))
             if issue_state is None:
@@ -169,8 +175,9 @@ class DeliveryRuntime:
             if ordinal > len(records) or custody["launch"] > len(records[ordinal - 1]["launches"]):
                 raise ValueError("unknown owner observation identity")
             if ordinal == len(records) and custody["launch"] == len(records[-1]["launches"]):
-                unavailable.add((observation["issue"], custody["kind"], ordinal,
-                                 custody["launch"]))
+                target = unavailable if observation["state"] == "unavailable" else refused
+                target.add((observation["issue"], custody["kind"], ordinal,
+                            custody["launch"]))
         for observation in request["worktrees"]:
             recorded = observation["recorded"]
             if recorded is None:
@@ -185,7 +192,14 @@ class DeliveryRuntime:
                 current = records[-1] if records else None
             if current is None or recorded["path"] != current["worktree"]:
                 raise ValueError("recorded worktree path does not match ledger")
-        return unavailable
+        return unavailable, refused
+
+    def suspend_remainder(
+        self, issue_state: dict[str, Any], remainder: dict[str, Any], now: str, *,
+        blocked_on: str,
+    ) -> None:
+        self._projection.suspend_remainder(issue_state, remainder, now,
+                                           blocked_on=blocked_on)
 
     def owner_is_unavailable(
         self, issue_state: dict[str, Any] | None,
@@ -1174,7 +1188,7 @@ class DeliveryRuntime:
                     raise ValueError("invalid remainder launch")
             if not isinstance(value["progress_token"], str) or not value["progress_token"]:
                 raise ValueError("invalid remainder progress token")
-            if value["blocked_on"] not in {None, "human_gate", "external", "transport", "owner_unavailable", "unknown"}:
+            if value["blocked_on"] not in {None, "human_gate", "external", "transport", "owner_unavailable", "unknown", "host_capacity"}:
                 raise ValueError("invalid remainder blocker")
             if value["suspend_phase"] is not None:
                 self._integer(value["suspend_phase"])

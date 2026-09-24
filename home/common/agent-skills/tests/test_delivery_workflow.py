@@ -1017,6 +1017,66 @@ class DeliveryAdmissionTest(unittest.TestCase):
             state = json.loads((root / ".superpowers/workflows/orchestrated/state.json").read_text())
             self.assertEqual(len(state["issues"]["151"]["attempts"]), 1)
 
+    def test_a_refused_remainder_launch_parks_under_host_capacity(self):
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
+        digest = self.model.canonical_digest(contract)
+        home = make_home()
+        self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); worktree = str(root / "worktree"); run_id = "refusal"
+            def invoke(*args, stdin=None):
+                completed = subprocess.run(
+                    [sys.executable, str(WORKFLOW), *map(str, args)],
+                    input=None if stdin is None else json.dumps(stdin).encode(),
+                    capture_output=True, check=False,
+                    env={**os.environ, "HOME": str(home)})
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                return json.loads(completed.stdout)
+            run = ("--repo-root", root, "--run-id", run_id)
+            def control(now, tracker, *, recorded, owners=()):
+                request = self.control_request(contract)
+                request.update(host_route="claude-code", now=now, owners=list(owners),
+                    tracker=[{"issue": 151, "state": tracker, "open_blockers": [],
+                              "decision_blockers": []}],
+                    worktrees=[{"issue": 151,
+                        "recorded": {"path": worktree, "state": "matching_issue_branch"}
+                        if recorded else None,
+                        "candidate": None if recorded else {"path": worktree,
+                                                            "state": "absent"}}])
+                request["authorization_intents"]["151"] = delivery["authorization_intents"]
+                return invoke("control", *run, "--request-file", "-", stdin=request)
+            invoke("init-run", *run, "--now", NOW)
+            owner = control(NOW, "open", recorded=False)["actions"][0]
+            failed = self.failed_summary(owner["custody"], digest)
+            failed["delivery_observations"] = [observation(
+                self.model, contract, "selected_output",
+                {"selected_output": selection(self.model, digest)})]
+            remainder = invoke("finish", *run, "--summary-file", "-",
+                               "--now", "2026-09-21T00:00:01Z", stdin=failed)
+            denial = authority(self.model, contract, actual, remainder["custody"])
+            denial["observed_at"] = "2026-09-21T00:00:02Z"; seal(self.model, denial)
+            checkpoint = self.report_common(remainder["custody"], digest)
+            checkpoint.update(authority_observations=[denial], requested_scope=actual)
+            invoke("checkpoint-delivery", *run, "--checkpoint-file", "-",
+                   "--now", "2026-09-21T00:00:02Z", stdin=checkpoint)
+            action = next(item for item in control(
+                "2026-09-21T00:00:03Z", "closed", recorded=True)["actions"]
+                if item["kind"] == "delivery_remainder")
+            response = control("2026-09-21T00:00:04Z", "closed", recorded=True, owners=[{
+                "event_id": "refused-r1", "issue": 151, "custody": action["custody"],
+                "state": "launch_refused"}])
+            self.assertFalse(any(item["kind"] == "delivery_remainder"
+                                 for item in response["actions"]))
+            self.assertEqual(response["admission"]["waiting"], [151])
+            state = json.loads((root / f".superpowers/workflows/{run_id}/state.json")
+                               .read_text())
+            record = state["issues"]["151"]["delivery_remainders"][0]
+            self.assertEqual((record["state"], record["blocked_on"]),
+                             ("suspended", "host_capacity"))
+            claims = {c["holder"]: c for c in state["admission"]["claims"]}
+            self.assertEqual(claims[action["custody"]["action_id"]]["release_event"],
+                             "launch_refused")
+
     def test_control_allocates_only_one_proven_second_remainder(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)

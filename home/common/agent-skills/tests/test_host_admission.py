@@ -415,5 +415,102 @@ class ControlAdmissionTest(AdmissionSweeps, unittest.TestCase):
                           response["admission"]["waiting"]), (0, [15]))
 
 
+class LaunchRefusalTest(AdmissionSweeps, unittest.TestCase):
+    """D7, D22: a refused launch parks under host_capacity until another release."""
+
+    def refused(self, issue, launch=1):
+        fact = self.owner_fact(event_id=f"refused-{issue}-{launch}", issue=issue,
+                               attempt=1, launch=launch)
+        return {**fact, "state": "launch_refused"}
+
+    @staticmethod
+    def summary(response, issue):
+        return next(s for s in response["summaries"] if s["issue"] == issue)
+
+    def admitted_pair(self):
+        self.slots(7)
+        self.init_run()
+        self.sweep(T0)  # 12 and 14 spawned
+
+    def test_a_refusal_parks_the_launch_until_another_claim_is_released(self):
+        self.admitted_pair()
+        parked = self.sweep("2026-08-13T20:01:00Z", recorded=(12, 14),
+                            owners=[self.refused(14)])
+        self.assertEqual(self.kinds(parked), [("wait", None)])
+        self.assertEqual((self.summary(parked, 14)["state"],
+                          self.summary(parked, 14)["blocked_on"]),
+                         ("suspended", "host_capacity"))
+        self.assertEqual(parked["admission"]["waiting"], [14])
+        refused = self.claims()["14:1:1"]
+        self.assertEqual(refused["release_event"], "launch_refused")
+        woken = self.sweep("2026-08-13T20:02:00Z", recorded=(12, 14))
+        self.assertEqual((self.kinds(woken), woken["admission"]["waiting"]),
+                         ([("wait", None)], [14]))
+        self.suspend(issue=12, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:03:00Z")
+        resumed = self.sweep("2026-08-13T20:04:00Z", recorded=(14,), unobserved=(12,))
+        self.assertEqual(self.kinds(resumed), [("resume", 14), ("wait", None)])
+        claims = self.claims()
+        self.assertGreater(claims["12:1:1"]["release_seq"], refused["release_seq"])
+        self.assertIsNone(claims["14:1:2"]["released_at"])
+
+    def test_a_refusal_gated_finalize_resumes_on_the_next_invocation(self):
+        self.admitted_pair()
+        self.suspend(issue=12, attempt=1, blocked_on="human_gate",
+                     now="2026-08-13T20:01:00Z")
+        parked = self.sweep("2026-08-13T20:02:00Z", recorded=(14,), unobserved=(12,),
+                            owners=[self.refused(14)])
+        self.assertEqual((self.kinds(parked), parked["admission"]["waiting"]),
+                         ([("finalize", None)], [14]))
+        claims = self.claims()
+        self.assertGreater(claims["controller"]["release_seq"],
+                           claims["14:1:1"]["release_seq"])
+        again = self.sweep("2026-08-13T20:03:00Z", recorded=(14,), unobserved=(12,))
+        self.assertEqual(self.kinds(again), [("resume", 14), ("wait", None)])
+
+    def test_the_anti_zombie_bound_ends_a_launch_that_keeps_being_refused(self):
+        self.admitted_pair()
+        self.sweep("2026-08-13T20:01:00Z", recorded=(12, 14), owners=[self.refused(14)])
+        state = self.read_state()
+        state["issues"]["14"]["attempts"][0]["stalled_resumes"] = 2  # two resumes spent
+        self.write_state(state)
+        self.suspend(issue=12, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:02:00Z")
+        self.sweep("2026-08-13T20:03:00Z", recorded=(14,), unobserved=(12,))  # 14:1:2
+        final = self.sweep("2026-08-13T20:04:00Z", recorded=(14,), unobserved=(12,),
+                           owners=[self.refused(14, launch=2)])
+        self.assertEqual(self.summary(final, 14)["state"], "stopped")
+        self.assertEqual(self.claims()["14:1:2"]["release_event"], "finished")
+        self.assertFalse(any(a.get("issue") == 14 for a in final["actions"]))
+
+    def test_inapplicable_refusals_write_nothing_and_stale_ones_are_ignored(self):
+        self.admitted_pair()
+        self.sweep("2026-08-13T20:01:00Z", recorded=(12, 14), owners=[self.refused(14)])
+        before = self.state_path.read_bytes()
+        again = {**self.refused(14), "event_id": "refused-again"}
+        rejected = self.sweep("2026-08-13T20:02:00Z", recorded=(12, 14), owners=[again],
+                              ok=False)
+        self.assertEqual((rejected.returncode, self.state_path.read_bytes()), (2, before))
+        dead = self.owner_fact(event_id="12-dead", issue=12, attempt=1, launch=1)
+        self.sweep("2026-08-13T20:03:00Z", recorded=(12, 14), owners=[dead])  # 12:1:2
+        stale = self.sweep("2026-08-13T20:04:00Z", recorded=(12, 14),
+                           owners=[self.refused(12)])
+        self.assertEqual(self.summary(stale, 12)["state"], "active")
+        self.assertIsNone(self.claims()["12:1:2"]["released_at"])
+
+    def test_direct_runs_and_owners_cannot_report_host_capacity(self):
+        install_declaration(self.home, None)
+        self.init_run()
+        self.sweep(T0, issues=(12,), host_route="direct", max_parallel=1)
+        before = self.state_path.read_bytes()
+        refused = self.sweep("2026-08-13T20:01:00Z", issues=(12,), recorded=(12,),
+                             host_route="direct", max_parallel=1,
+                             owners=[self.refused(12)], ok=False)
+        self.assertEqual((refused.returncode, self.state_path.read_bytes()), (2, before))
+        usage = self.suspend(issue=12, attempt=1, blocked_on="host_capacity",
+                             now="2026-08-13T20:02:00Z", ok=False)
+        self.assertEqual((usage.returncode, self.state_path.read_bytes()), (2, before))
+
+
 if __name__ == "__main__":
     unittest.main()

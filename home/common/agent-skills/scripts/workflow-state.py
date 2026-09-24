@@ -27,11 +27,15 @@ ATTEMPT_STATES = frozenset(
 RESULT_STATES = frozenset({"merged", "stopped", "failed"})
 RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused", "stalled"})
 SYNTHETIC_RESULT_SOURCES = frozenset({"expiry", "stalled"})
+# ``host_capacity`` is written only by control, from a ``launch_refused`` owner
+# observation; it is auto-resumable, but its resume is gated until some other
+# claim is released after the refused launch's own claim (per D7, D26).
 BLOCKED_ON_VALUES = frozenset(
-    {"usage_limit", "transport", "human_gate", "external", "unknown"}
+    {"usage_limit", "transport", "human_gate", "external", "unknown", "host_capacity"}
 )
-OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown"}
-AUTO_RESUMABLE_BLOCKED_ON = frozenset({"usage_limit", "transport", "unknown"})
+OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown", "host_capacity"}
+AUTO_RESUMABLE_BLOCKED_ON = frozenset(
+    {"usage_limit", "transport", "unknown", "host_capacity"})
 STALL_LIMIT = 3
 RESULT_FIELDS = (
     "issue",
@@ -2302,7 +2306,8 @@ def command_control(args: argparse.Namespace) -> int:
             for issue in request["issues"]
         }
 
-        unavailable = _call(None, runtime.validate_control_custody, state, request)
+        unavailable, refused = _call(
+            None, runtime.validate_control_custody, state, request)
 
         # Bind the run's route at its first interface-3 sweep and adopt every
         # live custody it already holds, even beyond the declaration (D3, D11).
@@ -2321,6 +2326,28 @@ def command_control(args: argparse.Namespace) -> int:
                 f"control host route {route!r} does not match the run's bound route "
                 f"{state['admission']['route']!r}")
         admission = state["admission"]
+        # Park every refused launch on `host_capacity` before the settle below
+        # releases its claim `launch_refused` — or `finished`, when the refusal
+        # trips the anti-zombie bound (D7, D19, D22).
+        if direct and any(item["state"] == "launch_refused" for item in request["owners"]):
+            raise WorkflowError("launch_refused is not applicable under the direct route")
+        for issue, kind, ordinal, launch in sorted(refused):
+            issue_state = state["issues"][str(issue)]
+            custody, record = _call(None, runtime.current_custody, issue, issue_state)
+            if (custody is None or record is None or record["state"] != "active"
+                    or (custody["kind"], custody.get("attempt", custody.get("remainder")),
+                        custody["launch"]) != (kind, ordinal, launch)
+                    or not any(claim["holder"] == custody["action_id"]
+                               and claim["released_at"] is None
+                               for claim in admission["claims"])):
+                raise WorkflowError("launch_refused is not applicable")
+            if kind == "implementation":
+                if not suspend_attempt(record, blocked_on="host_capacity", now=now):
+                    issue_state["outcome"] = copy.deepcopy(record["result"])
+            else:
+                _call(None, runtime.suspend_remainder, issue_state, record, now,
+                      blocked_on="host_capacity")
+            admission_changed = True
         if not direct:
             releases_before = admission["releases"]
             settle_admission(state, at=now)
@@ -2378,6 +2405,30 @@ def command_control(args: argparse.Namespace) -> int:
         def slot_withheld(issue: int) -> bool:
             """Whether no whole role set is free; the skipped issue then waits (D21)."""
             if direct or available >= role_set_size:
+                return False
+            waiting.add(issue)
+            return True
+
+        def refusal_gated(issue: int) -> bool:
+            """Whether a `host_capacity` custody still awaits a later release (D7, D26).
+
+            It waits until some other claim is released after the
+            `launch_refused` claim naming its current launch.
+            """
+            issue_state = state["issues"].get(str(issue))
+            custody, record = runtime.current_custody(issue, issue_state)
+            if (record is None or record["state"] != "suspended"
+                    or record["blocked_on"] != "host_capacity"):
+                return False
+            refused_claim = next(
+                (claim for claim in admission["claims"]
+                 if claim["holder"] == custody["action_id"]
+                 and claim["release_event"] == "launch_refused"), None)
+            if refused_claim is None:
+                raise WorkflowError("internal error: refused launch holds no refused claim")
+            if any(claim is not refused_claim and claim["release_seq"] is not None
+                   and claim["release_seq"] > refused_claim["release_seq"]
+                   for claim in admission["claims"]):
                 return False
             waiting.add(issue)
             return True
@@ -2485,7 +2536,7 @@ def command_control(args: argparse.Namespace) -> int:
                 # and the next sweep resumes it. A handoff, and any worktree
                 # observed as absent or mismatched, stays a refusal (per D9).
                 continue
-            if slot_withheld(issue):
+            if refusal_gated(issue) or slot_withheld(issue):
                 continue
             result = apply_policy(issue, True)
             if result["operation"] == "observe":
