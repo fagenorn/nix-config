@@ -57,9 +57,10 @@ from agent_tools.canonical import (reject_duplicate_keys, reject_nonfinite_liter
 
 # Unsorted keys at two levels, nesting, a non-ASCII string and a float.
 GOLDEN_BODY = {"z": [1, 2.5, {"b": "é", "a": None}], "a": True}
-# sha256 over the 46 bytes {"a":true,"z":[1,2.5,{"a":null,"b":"é"}]},
-# computed outside Python. Every other digest assertion recomputes its expected
-# value with the function it checks, so only this literal catches a format drift.
+# sha256 over the 46 ASCII bytes {"a":true,"z":[1,2.5,{"a":null,"b":"\u00e9"}]}
+# (the "é" travels as the six ASCII characters \u00e9), computed outside
+# Python. Every other digest assertion recomputes its expected value with the
+# function it checks, so only this literal catches a format drift.
 GOLDEN_DIGEST = "sha256:aac12d1f6010a8c2744d12c9a15e43fe5a6c3995b75d1cc756a742da24a5b682"
 
 

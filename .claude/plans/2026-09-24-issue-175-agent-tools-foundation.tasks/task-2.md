@@ -133,7 +133,9 @@ This run is shown once, for the process pool under `-m`:
 `E=$(mktemp); just agent-costs --days 1 --top 1 >/dev/null 2>"$E" || { cat "$E"; exit 1; }; if grep "Process pool unavailable" "$E"; then exit 1; fi; rm -f "$E"; echo pool-ok`
 Expected: `pool-ok`. If the recipe still ran the old path, it would exit 2 and
 the check would fail. The spawned workers re-import the tool by module name
-through the recipe's `PYTHONPATH`. If `~/.claude/projects` is absent on the
+through the recipe's `PYTHONPATH`. Workers start only when a transcript is
+submitted, so the check proves nothing on an empty window: if the report lists
+no session, rerun it with `--days 7`. If `~/.claude/projects` is absent on the
 machine, say so and skip this check.
 
 Run: `just agent-workflow-tests 2>&1 | tail -3`

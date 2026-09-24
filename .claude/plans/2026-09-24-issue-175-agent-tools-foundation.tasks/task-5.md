@@ -142,14 +142,19 @@ class AgentToolsLauncherTest(unittest.TestCase):
                 self.assertNotIn(MARKER, completed.stdout + completed.stderr)
 
     def test_each_hostile_channel_is_live_without_the_launcher(self):
-        nix_only = {key: value for key, value in os.environ.items()
-                    if key != "PYTHONPATH"}
-        nix_only["NIX_PYTHONPATH"] = str(self.hostile)
+        # Each control opens exactly one channel, so a dead channel cannot hide
+        # behind a live one.
+        clean = {key: value for key, value in os.environ.items()
+                 if key not in ("PYTHONPATH", "NIX_PYTHONPATH")}
+        pythonpath_only = dict(clean, PYTHONPATH=str(self.hostile))
+        nix_only = dict(clean, NIX_PYTHONPATH=str(self.hostile))
         for name, (python, module) in self.launchers().items():
+            plain = [python, "-m", f"agent_tools.{module}", "--help"]
             controls = {
-                # (a) PYTHONPATH and the working directory reach a plain run.
-                "not isolated": ([python, "-m", f"agent_tools.{module}", "--help"],
-                                 self.hostile_env(), self.hostile),
+                # (a) PYTHONPATH alone reaches a plain run.
+                "not isolated, PYTHONPATH only": (plain, pythonpath_only, self.root),
+                # (a') the working directory alone reaches a plain run.
+                "not isolated, working directory only": (plain, clean, self.hostile),
                 # (b) -I alone leaves NIX_PYTHONPATH open, so the unset line
                 # is load-bearing; if nixpkgs stops honouring it, this control
                 # and that line go together (D11).
@@ -205,8 +210,8 @@ Run: `just agent-installed-skill-tests 2>&1 | grep -E "AgentToolsLauncherTest|^R
 Expected: four `AgentToolsLauncherTest` lines ending in `ok`, then `Ran <N> tests`
 and `OK`. The hostile run shows the store module answering `usage: agent-evidence …`
 with a fake `agent_tools` on `PYTHONPATH`, on `NIX_PYTHONPATH` and in the
-working directory. Controls (a) and (b) show each channel is live without the
-launcher.
+working directory. Controls (a), (a′) and (b) each open one channel and show it
+is live without the launcher.
 
 Run: `just agent-workflow-tests 2>&1 | tail -3`
 Expected: `OK (skipped=1)`, with the same count as after Task 4.

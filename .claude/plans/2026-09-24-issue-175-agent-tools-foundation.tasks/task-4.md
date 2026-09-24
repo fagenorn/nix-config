@@ -60,8 +60,9 @@ Spec sections "How each file moves (D2)", "The package and its build (D4)",
 
 - [ ] **Step 0: Record the starting commit**
 
-Run: `START=$(git rev-parse HEAD); B=$(mktemp -d); echo "$START $B"`. Keep both
-values for Step 5.
+Run: `START=$(git rev-parse HEAD); B=$(mktemp -d); echo "$START $B"`. Shell
+variables do not persist between tool calls, so record both printed values and
+substitute them literally wherever Steps 5 and 7 write `${START}` or `$B`.
 
 - [ ] **Step 1: Re-point the tests and add the composition pins**
 
@@ -187,11 +188,17 @@ let
   # -I drops every PYTHON* variable, the working directory and the user site.
   # nixpkgs' sitecustomize still reads the NIX_PYTHON* variables under -I, and
   # this environment's python3 sets none of them, so the launcher clears them.
+  # A row whose module does not exist fails evaluation rather than building a
+  # launcher that can only fail at run time (D14).
   launcher =
     name:
+    let
+      module = "agent_tools.${lib.replaceStrings [ "-" ] [ "_" ] name}";
+    in
+    assert lib.assertMsg (lib.elem module modules) "agent-tools: command ${name} has no module ${module}";
     pkgs.writeShellScript "agent-tools-${name}" ''
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${env}/bin/python3 -I -m agent_tools.${lib.replaceStrings [ "-" ] [ "_" ] name} "$@"
+      exec ${env}/bin/python3 -I -m ${module} "$@"
     '';
 in
 {

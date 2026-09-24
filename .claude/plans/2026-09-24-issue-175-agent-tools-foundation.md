@@ -131,4 +131,16 @@ gates. The darwin build passed, the installed test passed with its red proofs,
 the help and usage byte identity held, the D5 conflict failed evaluation as
 intended, and the full suite passed at 1050 tests.
 
+## Standards review provenance
+
+- Reviewer: Claude fallback (native `reviewer`, Opus). Codex `plan-review` was
+  attempted first and failed with a usage-limit error (`CODEX_REVIEW_FAILURE`),
+  so the one-time native fallback ran; Codex was not retried.
+- Base SHA `5702dfb`, plan reviewed at `08b7c93`; isolated, read-only; no focus.
+- Accepted 5, rejected 0, deferred 0. Should-fix: SF-1, single-channel controls
+  (Task 5, spec D8 text, D14); SF-2, the golden-digest comment shows the
+  escaped bytes (Task 1). Discussion, applied: D-1, the evaluation-time
+  command-table assert (Task 4, D14); D-2, the pool check widens an empty window
+  (Task 2); D-3, the recorded shell values are substituted literally (Task 4).
+
 ---
