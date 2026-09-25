@@ -45,18 +45,18 @@ AMBIGUOUS_FENCE_INFO = frozenset({"", "text"})
 # The closed set of command names the skills run: every ~/.agents/bin helper
 # plus common tools. VocabularyGuardTest keeps it honest for shell fences.
 COMMAND_VOCABULARY = frozenset({
-    "[", "agent-evidence", "agent-model-matrix", "artifact-budget", "awk",
-    "bash", "brew", "bun", "cargo", "cat", "cd", "chmod", "claude", "codex",
-    "conformance", "conformance-checks", "conformance-registry",
-    "context-map-lint", "cp", "curl", "darwin-rebuild", "devenv", "diff",
-    "diff-scope", "docker", "dotnet", "echo", "env", "eval", "export", "find",
-    "gh", "git", "glab", "go", "grep", "head", "jq", "just", "kubectl", "ls",
-    "make", "mkdir", "mktemp", "mv", "nix", "nixos-rebuild", "node", "npm",
-    "pnpm", "printf", "pytest", "python3", "railway", "resolve-bindings",
-    "resolve-project", "review-package", "rg", "rm", "sdd-workspace", "sed",
-    "sh", "sleep", "sops", "sort", "source", "ssh", "tail", "tar",
-    "task-brief", "tee", "terraform", "test", "timeout", "touch", "uv",
-    "unset", "wc", "workflow-state", "xargs", "yarn", "zsh",
+    "[", "adopt-project", "agent-evidence", "agent-model-matrix",
+    "artifact-budget", "awk", "bash", "brew", "bun", "cargo", "cat", "cd",
+    "chmod", "claude", "codex", "conformance", "conformance-checks",
+    "conformance-registry", "context-map-lint", "cp", "curl",
+    "darwin-rebuild", "devenv", "diff", "diff-scope", "docker", "dotnet",
+    "echo", "env", "eval", "export", "find", "gh", "git", "glab", "go",
+    "grep", "head", "jq", "just", "kubectl", "ls", "make", "mkdir", "mktemp",
+    "mv", "nix", "nixos-rebuild", "node", "npm", "pnpm", "printf", "pytest",
+    "python3", "railway", "resolve-project", "review-package", "rg", "rm",
+    "sdd-workspace", "sed", "sh", "sleep", "sops", "sort", "source", "ssh",
+    "tail", "tar", "task-brief", "tee", "terraform", "test", "timeout",
+    "touch", "unset", "uv", "wc", "workflow-state", "xargs", "yarn", "zsh",
 })
 
 # The one sanctioned chain lives in the lifecycle guard; it is read, never restated.
@@ -538,7 +538,7 @@ HOST = SOURCE_TREES["shared"] / "worktrees/SKILL.md"
 
 # Historical offenders, verbatim at a6ac80f (sources noted), each with the
 # operator that makes it an offender and its accepted replacement calls.
-HEREDOC_PR_CREATE = """gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
+HEREDOC_PR_CREATE = """gh pr create --base <integration-branch> --title "<title>" --body "$(cat <<'EOF'
 ## Summary
 <2-4 bullets of what shipped>
 
@@ -551,7 +551,7 @@ HEREDOC_PR_CREATE = """gh pr create --base <integrationBranch> --title "<title>"
 Closes #<num>
 EOF
 )\""""
-GUARD_FORM_PR_CREATE = """gh pr create --repo <repoSlug> --base <integrationBranch> --head <branch> --title "<title>" --body "## Summary
+GUARD_FORM_PR_CREATE = """gh pr create --repo <resolved-repository> --base <integration-branch> --head <branch> --title "<title>" --body "## Summary
 <2-4 bullets of what shipped>
 
 ## Spec
@@ -571,7 +571,7 @@ OFFENDERS = {
     ),
     # from-issue/SKILL.md:345
     "pipe": (
-        "git worktree list | grep <worktreePrefix>issue-<num>-",
+        "git worktree list | grep <bindings.vcs.worktree.prefix>issue-<num>-",
         "|",
         ("git worktree list",),
     ),
@@ -674,7 +674,7 @@ class RefusedFormFixtureTest(unittest.TestCase):
     def test_negative_controls_yield_nothing(self):
         controls = {
             "single-quoted offender":
-                "```bash\ngit commit -m 'git worktree list | grep <worktreePrefix>issue-<num>-'\n```",
+                "```bash\ngit commit -m 'git worktree list | grep <bindings.vcs.worktree.prefix>issue-<num>-'\n```",
             "comment line":
                 "```bash\n# git restore --staged a && git checkout HEAD -- a\ngit status\n```",
             "trailing comment": "```bash\ngit status # | grep x > out\n```",
@@ -685,7 +685,7 @@ class RefusedFormFixtureTest(unittest.TestCase):
             "arithmetic operators": '```bash\ngit log -n "$(( 1 << 2 ))" --skip "$(( 3 > 2 ))"\n```',
             "parameter expansion default": '```bash\ngit show "${REV:-HEAD}"\n```',
             "sanctioned prefix before a merge":
-                f"Run `{SANCTIONED_PREFIX}gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch`.",
+                f"Run `{SANCTIONED_PREFIX}gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch`.",
             "bare prefix mention": f"Prefix every call with `{SANCTIONED_PREFIX.strip()}`.",
             "placeholders are not redirects": "Run `gh pr checks <pr-num> --watch`.",
         }
@@ -716,7 +716,7 @@ class RefusedFormFixtureTest(unittest.TestCase):
     def test_any_other_token_scrub_is_a_chain(self):
         document, first = _appended(
             self.host,
-            "Run `unset GITHUB_TOKEN; gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch`.",
+            "Run `unset GITHUB_TOKEN; gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch`.",
         )
         self.assertEqual(_lines_and_forms(document), [(first, "chain")])
 
@@ -725,14 +725,14 @@ class RefusedFormFixtureTest(unittest.TestCase):
         cases = {
             "prefix line then a command": (
                 f"```bash\n{prefix_line}\n"
-                "gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch\n```",
+                "gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch\n```",
                 [(1, "chain")]),
             "prefix line ends the fence": (f"```bash\n{prefix_line}\n```", [(1, "unparseable")]),
             # The literal with its trailing space, as an editor that keeps
             # trailing whitespace would save it (per D27).
             "spaced prefix line then a command": (
                 f"```bash\n{SANCTIONED_PREFIX}\n"
-                "gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch\n```",
+                "gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch\n```",
                 [(1, "chain")]),
             "spaced prefix line ends the fence": (
                 f"```bash\n{SANCTIONED_PREFIX}\n```", [(1, "unparseable")]),
@@ -740,7 +740,7 @@ class RefusedFormFixtureTest(unittest.TestCase):
             # onto the next line (per D27).
             "prefix line with a comment, then a command": (
                 f"```bash\n{SANCTIONED_PREFIX}# scrub first\n"
-                "gh pr merge <pr-num> --repo <repoSlug> --merge --delete-branch\n```",
+                "gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch\n```",
                 [(1, "chain")]),
             "prefix line with a comment ends the fence": (
                 f"```bash\n{SANCTIONED_PREFIX}# scrub first\n```", [(1, "unparseable")]),

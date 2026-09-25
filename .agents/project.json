@@ -20,7 +20,7 @@
     "paths": {
       "artifacts": { "specs": ".claude/specs", "plans": ".claude/plans" },
       "context": [],
-      "standards": ["home/common/agent-skills/standards"],
+      "standards": ["home/common/agent-skills/standards", "docs/standards"],
       "architecture": ["CLAUDE.md"],
       "operations": [],
       "hints": [],
@@ -28,6 +28,11 @@
     },
     "commands": {
       "nix-build": { "argv": ["just", "build"], "cwd": ".", "env": [] },
+      "nix-activate": {
+        "argv": ["just", "switch"],
+        "cwd": ".",
+        "env": []
+      },
       "agent-workflow-tests": { "argv": ["just", "agent-workflow-tests"], "cwd": ".", "env": [] },
       "codex-review": { "argv": ["codex"], "cwd": ".", "env": [] }
     },

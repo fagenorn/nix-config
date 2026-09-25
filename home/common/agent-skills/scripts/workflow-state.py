@@ -1318,7 +1318,7 @@ def validate_tracker_observation(value: Any) -> dict[str, Any]:
 
 
 def issue_branch_prefix(issue: int) -> str:
-    """The stable head of one issue's branch name under ``branchNaming``.
+    """The stable head of one issue's configured branch-name policy.
 
     The pattern is ``issue-<num>-<slug>`` and the slug is the acquiring owner's
     to know, so the requirement names the prefix every candidate branch shares.

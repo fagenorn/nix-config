@@ -21,13 +21,13 @@ release ownership across cheaper transport or mechanic agents.
 
 ## Project bindings (resolve first)
 
-Read `.claude/skills.config.json` at the project root. Auto-detect absent keys: tracker = `gh` for a github.com remote (else `glab`/none); branches from the repo default. Remaining defaults: `integrationBranch=main`, `defaultBranch=main`, `commit.coAuthoredBy=true`, `unsetGithubToken=false`, `deploy.adapter=none`. Degrade gracefully — never read a configured doc/hints path that doesn't exist, never hard-fail on a missing optional binding.
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.release`, and `bindings.deploy`. A blocked required capability stops; authored unsupported takes only the existing no-capability route.
 
-`<integration>` means the resolved `integrationBranch`, `<default>` the resolved `defaultBranch`. When they're identical (the common single-branch repo) there is no PR to open: run Phases 0 **and** 1 — the pre-flight and the changelog body / bump evidence are still required — then skip Phases 2–4 and continue at Phase 4.5. The release ref is the confirmed tip of `<default>`. The two-branch flow below is the general case.
+`<integration>` and `<default>` come from `bindings.vcs.integration_branch` and `bindings.vcs.default_branch`; repository identity comes only from `bindings.tracker.repo_slug`. When they're identical there is no PR: run Phases 0 **and** 1, skip Phases 2–4, and continue at Phase 4.5. The release ref is the confirmed tip of `<default>`.
 
-Derive `repoSlug` once from `git remote get-url origin` when config doesn't set it (strip the `git@github.com:` / `https://github.com/` prefix and trailing `.git`), and reuse it for every PR/commit/release URL. **Never hardcode an owner/name.**
+Use `bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}` for all forge actions. An authored unsupported tracker takes only the existing tracker-free route; a blocked tracker stops the dependent forge operation. Never derive a repository value from Git or configuration.
 
-When `issueTracker.kind == "none"` there is no forge: run Phases 0–1, then replace Phases 2–4 with a local true merge (check out `<default>` and, only if that succeeded, `git merge --no-ff <integration>`), tag the **local merge result** — `git rev-parse <default>` *after* the merge, never `origin/<default>`, which is still the stale pre-merge tip — skip the PR / CI-wait / GitHub-Release steps, and report the merge SHA + tag.
+For the tracker-free route, run Phases 0–1, replace Phases 2–4 with a local true merge (check out `<default>` and, only if that succeeded, `git merge --no-ff <integration>`), tag the local merge result, skip forge steps, and report the merge SHA and tag.
 
 ## Durable release state
 
@@ -49,7 +49,7 @@ Write it atomically (temp file in the same dir, then `mv`) at every transition: 
 1. Changelog     → mine merges since last release; assemble the categorised PR body per CHANGELOG.md
 2. Open PR       → nothing to push; gh pr create --base <default> --head <integration>
 3. Wait for CI   → one blocking gh pr checks --watch call (no wakeup loop, no improvised polling)
-4. Merge         → gh pr merge <pr-num> --repo <repoSlug> --merge --subject "…" (NO --delete-branch — the integration branch is permanent)
+4. Merge         → gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "…" (NO --delete-branch — the integration branch is permanent)
 4.5. Tag+Release → resolve MERGE_SHA, skip-check for an existing release, THEN semver bump from the
                    CHANGELOG.md categories; tag the merge commit; gh release create
 5. Watch deploy  → only when deploy.adapter != none: poll per service until the running commit is the
@@ -68,11 +68,11 @@ Write it atomically (temp file in the same dir, then `mv`) at every transition: 
 
 ## Doc-grounded escalations
 
-Before forming any user-facing question, invoke `doc-grounded-questions` (if unavailable, read the configured doc directly when it exists). Deploy/platform questions → `docPaths.deploy` and `deploy.watchDoc`; git ops → `docPaths.gitWorktrees`; the bar → `docPaths.standards`. The silent-rollback gotcha, the latest-deployment-commit vs actually-built-commit distinction, and the stale-`FAILED` trap are platform specifics — read the configured deploy doc rather than answering from memory.
+Before forming any user-facing question, invoke `doc-grounded-questions`; use only the retained snapshot's declared context, standards, architecture, and hint paths. The silent-rollback gotcha, the latest-deployment-commit vs actually-built-commit distinction, and the stale-`FAILED` trap are platform specifics — read the applicable declared document rather than answering from memory.
 
 ## gh hygiene
 
-`GH_PREFIX` below means `unset GITHUB_TOKEN && ` when `unsetGithubToken` is true, else nothing — some harnesses inject a token scoped to the wrong org, which surfaces as an opaque `Resource not accessible by integration` that reads like a transient error. Default is OFF; do not strip the token unconditionally. When `issueTracker.cli == "glab"`, translate to `glab mr create/merge/view`, `glab ci status`, `glab release create` — the methodology is identical, only the verbs differ.
+`GH_PREFIX` below is assembled only from the exhaustive names in `bindings.tracker.credential_env.unset_before_invocation`; for example, the list containing `GITHUB_TOKEN` yields `unset GITHUB_TOKEN && `. Some harnesses inject a token scoped to the wrong org, which surfaces as an opaque `Resource not accessible by integration` that reads like a transient error. An empty list yields no prefix. When `bindings.tracker.cli == "glab"`, translate to `glab mr create/merge/view`, `glab ci status`, `glab release create` — the methodology is identical, only the verbs differ.
 
 ## Phase 0 — Pre-flight
 
@@ -103,7 +103,7 @@ Two outputs are required from this phase:
 1. **The PR body** — assembled per `CHANGELOG.md`'s template (top synthesis → Highlights → Features → Improvements → Fixes → Deploy notes → Internal → collapsible raw-PR list → Verification). Operator-facing prose, not a SHA dump.
 2. **The PR title / merge-subject seed** — one line under 70 chars from the top-of-body synthesis. It becomes `gh pr create --title` and, with `(<integration> → <default>)` appended, `gh pr merge --subject`.
 
-Also surface for the user's glance: the number of first-parent merges in the range (so they can sanity-check scope), and — only when `deploy.adapter != none` — the **deploy expectations**: match `git diff --name-only origin/<default>..origin/<integration>` against the redeploy watch-patterns in `deploy.watchDoc` / `docPaths.deploy` to say which services will actually redeploy. That feeds the **Deploy notes** section and pre-empts "I merged but nothing happened".
+Also surface for the user's glance: the number of first-parent merges in the range (so they can sanity-check scope), and — only when `deploy.adapter != none` — the **deploy expectations** from retained deploy-related documentation. That feeds the **Deploy notes** section and pre-empts "I merged but nothing happened".
 
 Don't create a tracked `CHANGELOG.md` in the repo root unless the user explicitly asks — the PR body *is* the per-release changelog, and the Releases tab is the cumulative one. The `CHANGELOG.md` above is this skill's side-file, not a repo artefact.
 
@@ -147,15 +147,15 @@ Exit codes:
 
 - **`0`** → all checks pass; continue to Phase 4.
 - **`124`** → still running. Emit one short narration turn (`CI: still pending at 5m, retry 2/8`) as the keep-alive, then re-run the identical command, up to **8 times (~40 min)**. Still pending after that → escalate: webhooks can fail to fire silently, leaving a PR on "expected — Waiting for status to be reported" forever. Prompt: "PR #<n> has been pending ~40 min with no terminal CI state. Options: (a) wait another 10 min, (b) close+reopen to re-trigger checks, (c) merge admin-only if allowed, (d) abort and investigate."
-- **any other non-zero** → a check failed. Pull `gh run view <run-id> --log-failed`, ground (lint → `docPaths.standards`, test → area spec/plan), surface. A CI failure on a release is a real blocker — the fix usually lands on the integration branch via a follow-up `ship-issue`, after which this release rebases its PR head onto the new `origin/<integration>` (close+reopen or push-update; trust whichever the user picks).
+- **any other non-zero** → a check failed. Pull `gh run view <run-id> --log-failed`, ground (lint → retained standards, test → area spec/plan), surface. A CI failure on a release is a real blocker — the fix usually lands on the integration branch via a follow-up `ship-issue`, after which this release rebases its PR head onto the new `origin/<integration>` (close+reopen or push-update; trust whichever the user picks).
 
 ## Phase 4 — Merge
 
 ```bash
-${GH_PREFIX}gh pr merge <pr-num> --repo <repoSlug> --merge --subject "merge: <integration> — <scope summary> (<integration> → <default>)"
+${GH_PREFIX}gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "merge: <integration> — <scope summary> (<integration> → <default>)"
 ```
 
-**Spell it exactly like that, on one line.** The `PreToolUse` lifecycle guard adjudicates `gh pr merge` against a fixed grammar — `gh pr merge <pr-num> --repo <repoSlug> --merge [--subject "<text>"]`, optionally behind the literal `unset GITHUB_TOKEN && ` prefix — with nothing else chained and no line continuation. The form without `--delete-branch` is the guard's *release arm*: it is accepted only when the PR's head is the repository's declared integration branch and its base is the default branch, and only when every check in the PR's rollup has completed green — which is what Phase 3 just established. The subject must contain none of `"`, `$`, backtick, backslash, or a newline.
+**Spell it exactly like that, on one line.** The `PreToolUse` lifecycle guard adjudicates `gh pr merge` against a fixed grammar — `gh pr merge <pr-num> --repo <resolved-repository> --merge [--subject "<text>"]`, optionally behind the literal `unset GITHUB_TOKEN && ` prefix — with nothing else chained and no line continuation. The form without `--delete-branch` is the guard's *release arm*: it is accepted only when the PR's head is the repository's declared integration branch and its base is the default branch, and only when every check in the PR's rollup has completed green — which is what Phase 3 just established. The subject must contain none of `"`, `$`, backtick, backslash, or a newline.
 
 **Do NOT pass `--delete-branch` when `<integration> != <default>`.** The integration branch is permanent; deleting it breaks every in-flight `ship-issue` worktree.
 
@@ -169,7 +169,7 @@ Then `git fetch origin` to refresh local refs. Don't `git push origin <default>`
 
 ## Phase 4.5 — Tag + GitHub Release
 
-Every release gets a semver tag and a GitHub Release. No flag, no opt-out: the tag is the stable anchor an operator references ("we shipped v1.4.0 last Tuesday"), the Release is the discoverable artefact with the PR body as notes. (When `issueTracker.kind == "none"`, create the local annotated tag only and skip 4.5f–4.5g.)
+Every release gets a semver tag and a GitHub Release. No flag, no opt-out: the tag is the stable anchor an operator references ("we shipped v1.4.0 last Tuesday"), the Release is the discoverable artefact with the PR body as notes. (With an unsupported tracker capability, create the local annotated tag only and skip 4.5f–4.5g.)
 
 The bump is grounded in the categorisation `CHANGELOG.md` already produced — the semver rubric lives **only** in [its "Version bump signals"](./CHANGELOG.md#version-bump-signals); read it before computing, don't re-derive it here, and don't re-litigate the categorisation.
 
@@ -279,11 +279,14 @@ Otherwise set `deployState: watching` on entry (`done` when every watched servic
 
 > **Verify the production service is actually running the merge SHA at a SUCCESS status. A health-200 is never proof.** A platform can report a deploy `FAILED` and silently keep serving an older build; a health probe against that older build still returns 200. Match the *running commit* to `MERGE_SHA` **and** require a terminal SUCCESS status before declaring the release live.
 
-Read `deploy.watchDoc` (or `docPaths.deploy`) for the platform's commands and gotchas before polling; the project hints (`projectHints` directory → its `deploy.md`) carry the concrete verbs when present. The adapter contract below is the generic shape; the docs have the specifics.
+Read the retained snapshot's explicit deploy-related context and hint paths for
+the platform's commands and gotchas before polling. The adapter contract below
+is the generic shape; the declared documents carry the specifics.
 
 ### 5a. Enumerate services
 
-Enumerate dynamically rather than hardcoding, so a new service is picked up without a skill edit. Start from `deploy.services` as the expected set and cross-check it against what the platform actually reports.
+Enumerate only the services declared in retained `bindings.deploy.config`, then
+cross-check that explicit set against what the platform actually reports.
 
 ### 5b. Decide which to watch
 
@@ -300,7 +303,7 @@ Poll at ~180s cadence via your harness's wake/poll primitive. Cadence matters be
 **Failure paths — pause, ground via the deploy doc, surface:**
 
 - **Silent rollback** (the case this skill exists for). A deployment for `MERGE_SHA` sits at `FAILED` while the currently-serving deployment is an older `SUCCESS` build. That old build can execute days-old code against a freshly-migrated schema, producing confusing errors like `relation "X" does not exist`. Pull build logs and surface. The health-200 is the trap — it's the *old* build answering.
-- **No redeploy after ~10 min**, though Phase 1 said there should be one. Causes: wrong watch-pattern analysis, a forge webhook that didn't fire, a backed-up build queue. Check `${GH_PREFIX}gh api repos/<repoSlug>/commits/$MERGE_SHA/check-runs` for a platform check-run, then either force a deploy (a modify-shared-infra action — **confirm with the user first**) or surface.
+- **No redeploy after ~10 min**, though Phase 1 said there should be one. Causes: wrong watch-pattern analysis, a forge webhook that didn't fire, a backed-up build queue. Check `${GH_PREFIX}gh api repos/<resolved-repository>/commits/$MERGE_SHA/check-runs` for a platform check-run, then either force a deploy (a modify-shared-infra action — **confirm with the user first**) or surface.
 - **Stale FAILED notification.** A dashboard can show a `FAILED` deploy prominently *after* a newer `SUCCESS` has landed. Before calling anything a silent rollback, check the chronology of the last few deployments — if the latest is `SUCCESS` at `MERGE_SHA`, the notification is stale; don't surface it as a failure.
 
 ### 5d. Adapter commands
@@ -314,7 +317,9 @@ railway deployment list --service <name> --json
 
 Read the five most recent entries of that JSON and, for each, the fields `id`, `status`, `.meta.commitHash`, `.meta.branch`, and `createdAt`. Success is the three facts in the comment above: `.meta.commitHash` starts with `MERGE_SHA`, `.meta.branch` equals `<default>`, and `.status` is `SUCCESS`.
 
-For any other adapter, follow the same 5a–5c shape using the verbs in `deploy.watchDoc`. If the adapter is unrecognised and no `watchDoc` is set, say so and skip active polling rather than guessing platform verbs.
+For any other adapter, follow the same 5a–5c shape using only retained
+`bindings.deploy` command/config values. An unrecognised adapter stops and
+surfaces its declared state rather than guessing platform verbs.
 
 ### 5e. Wakeup prompt
 
@@ -345,6 +350,6 @@ That last line is a reminder, not a phase. Don't keep polling after the report u
 ## Notes
 
 - **Standing release-publishing authorization.** Invoking this skill authorises `git tag -a`, `git push origin v*`, and `gh release create`. The proposed bump in 4.5d is the one confirmation round. Standing *local-commit* authorization does not extend to pushing `<default>`, `<integration>`, or any tag — those are the explicit Phase 4 / 4.5 operations covered here.
-- **The `Co-Authored-By` trailer follows `commit.coAuthoredBy`** (default: include). Rarely relevant — the only artefacts this skill produces are the forge's merge commit and the annotated tag.
+- **The `Co-Authored-By` trailer follows retained `bindings.vcs.commit.co_authored_by`.** Rarely relevant — the only artefacts this skill produces are the forge's merge commit and the annotated tag.
 - **A failed release's tag stays.** If Phase 5 surfaces that the merge shipped something broken, the fix is a hotfix `ship-issue` on the integration branch then a new PATCH release — not a force-redeploy of old code. The tag is a permanent record that v1.4.0 was attempted; v1.4.1 supersedes it. Don't delete tags.
 - **Invoked standalone with no argument**: infer scope from the merges in Phase 1 — the synthesised summary *is* the scope hint.

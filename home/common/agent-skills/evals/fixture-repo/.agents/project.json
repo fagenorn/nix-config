@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "project": { "id": "fixture/tinytask", "name": "tinytask" },
+  "bindings": {
+    "vcs": {
+      "kind": "git", "default_branch": "main", "integration_branch": "main",
+      "branch_pattern": "issue-<num>-<slug>",
+      "worktree": { "root": ".worktrees", "prefix": "worktree-" },
+      "commit": { "co_authored_by": true, "signed": true },
+      "merge": { "strategy": "merge", "delete_branch": true }
+    },
+    "tracker": {
+      "kind": "none", "cli": "gh", "repo_slug": "fixture/tinytask",
+      "credential_env": { "unset_before_invocation": [] }
+    },
+    "paths": {
+      "artifacts": { "specs": ".claude/specs", "plans": ".claude/plans" },
+      "context": ["docs/CONTEXT-MAP.md", "docs/areas/backlog/CONTEXT.md", "docs/areas/system/CONTEXT.md"],
+      "standards": ["docs/standards"], "architecture": ["README.md"],
+      "operations": [], "hints": [], "rejections": []
+    },
+    "commands": {
+      "test": { "argv": ["python3", "-m", "unittest", "discover"], "cwd": ".", "env": [] }
+    },
+    "workflow": {
+      "verification": ["test"],
+      "orchestration": { "max_parallel": 2, "attempt_budget_minutes": 180 },
+      "review": { "plan": null, "code": null }, "release": null
+    },
+    "deploy": { "adapter": "none", "command": null, "config": {} }
+  },
+  "capabilities": {
+    "tracker": { "support": "unsupported" }, "worktrees": { "support": "supported" },
+    "knowledge.context": { "support": "supported" }, "knowledge.standards": { "support": "supported" },
+    "knowledge.architecture": { "support": "supported" }, "knowledge.hints": { "support": "unsupported" },
+    "verification": { "support": "supported" }, "review.plan": { "support": "unsupported" },
+    "review.code": { "support": "unsupported" }, "release": { "support": "unsupported" },
+    "deploy": { "support": "unsupported" }
+  },
+  "projections": [
+    { "id": "codex.entry", "agent": "codex", "kind": "generated_file", "target": "AGENTS.md", "source": ".agents/instructions/bootstrap.md" },
+    { "id": "claude.entry", "agent": "claude", "kind": "managed_import", "target": "CLAUDE.md", "source": ".agents/instructions/bootstrap.md" }
+  ],
+  "platform": { "min_inclusive": "1.0.0", "max_exclusive": "2.0.0" }
+}

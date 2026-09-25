@@ -121,7 +121,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
         # kind == none likewise runs the prerequisites before its local merge.
         self.assert_ordered(
             bindings,
-            'issueTracker.kind == "none"',
+            "bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}",
             "run Phases 0–1",
             "git merge --no-ff",
         )
