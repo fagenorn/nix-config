@@ -26,6 +26,32 @@ def direct_policy(runtime, issue, request):
         recorded_worktree={"path": WORKTREE, "state": "matching_issue_branch"})
 
 
+def resolved_snapshot(root):
+    """A resolver-shaped snapshot rooted at `root` with this repo's authored policy.
+
+    The resolver makes only `paths` members and command `cwd`s absolute under
+    `root`, so snapshots from two roots differ only in path-shaped members.
+    """
+    return {
+        "schema_version": 1,
+        "project": {"id": "fagenorn/nix-config", "name": "nix-config", "root": root},
+        "bindings": {
+            "vcs": {"kind": "git", "default_branch": "main", "integration_branch": "main",
+                    "branch_pattern": "issue-<num>-<slug>",
+                    "worktree": {"root": ".worktrees", "prefix": "worktree-"},
+                    "commit": {"co_authored_by": True, "signed": True},
+                    "merge": {"strategy": "merge", "delete_branch": True}},
+            "tracker": {"kind": "github", "cli": "gh", "repo_slug": "fagenorn/nix-config",
+                        "credential_env": {"unset_before_invocation": []}},
+            "paths": {"artifacts": {"plans": f"{root}/.claude/plans",
+                                    "specs": f"{root}/.claude/specs"},
+                      "architecture": [f"{root}/CLAUDE.md"]},
+            "workflow": {"orchestration": {"max_parallel": 2, "attempt_budget_minutes": 180}},
+        },
+        "capabilities": {},
+    }
+
+
 class WorkflowDeliveryRuntimeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -141,6 +167,45 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply(candidate, "direct", [], wrong)
         self.assertEqual(candidate, issue)
+
+
+class WorktreePolicyCheckTest(unittest.TestCase):
+    """D4, D9: the pure sealed-policy comparison behind the worktree cross-check."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.runtime = runpy.run_path(str(ENTRY))["DeliveryRuntime"](
+            notes_max_characters=10_000)
+
+    def refusal(self, worktree_policy):
+        with self.assertRaises(ValueError) as caught:
+            self.runtime.check_worktree_policy(resolved_snapshot("/repo"), worktree_policy)
+        return str(caught.exception)
+
+    def test_equal_sealed_members_pass_whatever_the_root_and_unsealed_policy(self):
+        worktree = resolved_snapshot("/repo/.worktrees/worktree-issue-181-x")
+        worktree["bindings"]["workflow"]["orchestration"]["max_parallel"] = 5
+        self.assertIsNone(
+            self.runtime.check_worktree_policy(resolved_snapshot("/repo"), worktree))
+
+    def test_differing_members_are_named_in_table_order(self):
+        worktree = resolved_snapshot("/wt")
+        worktree["bindings"]["vcs"]["merge"]["delete_branch"] = False
+        worktree["bindings"]["vcs"]["integration_branch"] = "dev"
+        self.assertEqual(self.refusal(worktree),
+                         "worktree policy differs from repo-root policy: "
+                         "bindings.vcs.integration_branch, bindings.vcs.merge.delete_branch")
+
+    def test_a_missing_or_mistyped_worktree_member_refuses_with_the_worktree_prefix(self):
+        missing = resolved_snapshot("/wt")
+        del missing["bindings"]["tracker"]["repo_slug"]
+        mistyped = resolved_snapshot("/wt")
+        mistyped["bindings"]["vcs"]["merge"]["delete_branch"] = "true"
+        for worktree, message in (
+                (missing, "worktree policy member missing: bindings.tracker.repo_slug"),
+                (mistyped, "worktree policy member mistyped: bindings.vcs.merge.delete_branch")):
+            with self.subTest(message=message):
+                self.assertEqual(self.refusal(worktree), message)
 
 
 if __name__ == "__main__":

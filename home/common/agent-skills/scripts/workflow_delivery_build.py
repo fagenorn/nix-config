@@ -1,8 +1,10 @@
 """Pure delivery builder: contracts, intents, scopes, selections and evidence.
 
 This private helper has no I/O, reads no clock and grants no authority.
-workflow-state resolves project policy and hands it in; every sealed object
-this module returns is validated again by DeliveryRuntime before it is printed.
+workflow-state resolves project policy and hands it in, and
+``check_worktree_policy`` compares the members a contract seals across two such
+snapshots; every sealed object this module returns is validated again by
+DeliveryRuntime before it is printed.
 The ``authorization-chain`` kind seals the handoff's chain digest over the intents
 an owner holds. Declared scopes (in the initial intent) and actual scopes (kind ``scope``) come
 from the one ``_scope`` function, so exact matching can only disagree when the
@@ -168,6 +170,25 @@ def _policy_member(policy: object, path: str, kind: type) -> Any:
     return value
 
 
+# The policy members a contract seals, in one home: (provenance key, snapshot
+# path, type). Contract derivation, the provenance digest's `policy` object and
+# the worktree comparison all read this table.
+_SEALED_POLICY = (
+    ("project_id", "project.id", str),
+    ("tracker_kind", "bindings.tracker.kind", str),
+    ("repository_slug", "bindings.tracker.repo_slug", str),
+    ("branch_pattern", "bindings.vcs.branch_pattern", str),
+    ("worktree_prefix", "bindings.vcs.worktree.prefix", str),
+    ("integration_branch", "bindings.vcs.integration_branch", str),
+    ("delete_branch", "bindings.vcs.merge.delete_branch", bool),
+)
+
+
+def _sealed_policy(policy: object) -> dict[str, Any]:
+    """The sealed members by provenance key; the first bad one in table order refuses."""
+    return {key: _policy_member(policy, path, kind) for key, path, kind in _SEALED_POLICY}
+
+
 class DeliveryBuilder:
     """Derive sealed delivery objects from resolved policy and invocation facts."""
 
@@ -207,6 +228,22 @@ class DeliveryBuilder:
             return self._chain(value)
         _refuse(f"unknown builder kind: {kind!r}")
 
+    def check_worktree_policy(self, repo_root_policy: object,
+                              worktree_policy: object) -> None:
+        """Refuse unless a worktree snapshot's sealed members equal the repo root's.
+
+        Both snapshots pass the same typed accessor, so equal values are equal in
+        type too; paths and unsealed bindings never take part (D4).
+        """
+        sealed = _sealed_policy(repo_root_policy)
+        try:
+            candidate = _sealed_policy(worktree_policy)
+        except ValueError as error:
+            _refuse(f"worktree {error}")
+        differing = [path for key, path, _ in _SEALED_POLICY if candidate[key] != sealed[key]]
+        if differing:
+            _refuse("worktree policy differs from repo-root policy: " + ", ".join(differing))
+
     def _seal(self, value: dict[str, Any]) -> dict[str, Any]:
         value["id"] = ""
         value["id"] = self._model.canonical_digest(value, omit_derived="id")
@@ -225,16 +262,7 @@ class DeliveryBuilder:
             _refuse(f"source kind {value['source_kind']!r} cannot source an initial intent")
         if not os.path.isabs(worktree) or os.path.normpath(worktree) != worktree:
             _refuse("worktree must be absolute and normalized")
-        facts = {
-            "project_id": _policy_member(policy, "project.id", str),
-            "tracker_kind": _policy_member(policy, "bindings.tracker.kind", str),
-            "repository_slug": _policy_member(policy, "bindings.tracker.repo_slug", str),
-            "branch_pattern": _policy_member(policy, "bindings.vcs.branch_pattern", str),
-            "worktree_prefix": _policy_member(policy, "bindings.vcs.worktree.prefix", str),
-            "integration_branch": _policy_member(
-                policy, "bindings.vcs.integration_branch", str),
-            "delete_branch": _policy_member(policy, "bindings.vcs.merge.delete_branch", bool),
-        }
+        facts = _sealed_policy(policy)
         if facts["tracker_kind"] != "github":
             _refuse(f"tracker kind {facts['tracker_kind']!r} is unsupported")
         branch = PurePosixPath(worktree).name
@@ -282,9 +310,7 @@ class DeliveryBuilder:
             "initial_authorization_intent_id": None,
             "initial_authorization_intent_digest": None,
             "provenance": {**source, "digest": self._model.canonical_digest({
-                "policy": {name: facts[name] for name in (
-                    "project_id", "tracker_kind", "repository_slug", "branch_pattern",
-                    "worktree_prefix", "integration_branch", "delete_branch")},
+                "policy": dict(facts),
                 "issue": issue, "worktree": worktree, "source": source}),
                 "created_at": value["now"]},
         }

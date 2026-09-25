@@ -1290,6 +1290,23 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
         stages = self.build("contract", self.contract_input())["contract"]["stages"]
         self.assertNotIn("delete_remote_branch", [stage["id"] for stage in stages])
 
+    def test_provenance_digest_seals_the_seven_authored_policy_members(self):
+        self.project()
+        value = self.contract_input()
+        contract = self.build("contract", value)["contract"]
+        authored = source_contract()
+        vcs, tracker = authored["bindings"]["vcs"], authored["bindings"]["tracker"]
+        self.assertEqual(contract["provenance"]["digest"], self.model.canonical_digest({
+            "policy": {"project_id": authored["project"]["id"],
+                       "tracker_kind": tracker["kind"],
+                       "repository_slug": tracker["repo_slug"],
+                       "branch_pattern": vcs["branch_pattern"],
+                       "worktree_prefix": vcs["worktree"]["prefix"],
+                       "integration_branch": vcs["integration_branch"],
+                       "delete_branch": vcs["merge"]["delete_branch"]},
+            "issue": 171, "worktree": self.worktree,
+            "source": {"kind": value["source_kind"], "reference": value["source_reference"]}}))
+
     def test_contract_refusals_exit_two_with_empty_stdout(self):
         def gitlab(contract_value):
             contract_value["bindings"]["tracker"]["kind"] = "gitlab"
