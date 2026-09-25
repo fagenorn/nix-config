@@ -536,8 +536,10 @@ def swept_documents():
 
 HOST = SOURCE_TREES["shared"] / "worktrees/SKILL.md"
 
-# Historical offenders, verbatim at a6ac80f (sources noted), each with the
-# operator that makes it an offender and its accepted replacement calls.
+# Historical offenders, verbatim at a6ac80f (sources noted) except that their
+# placeholders take the strict resolver's retained-binding spellings (spec D29),
+# each with the operator that makes it an offender and its accepted
+# replacement calls.
 HEREDOC_PR_CREATE = """gh pr create --base <integration-branch> --title "<title>" --body "$(cat <<'EOF'
 ## Summary
 <2-4 bullets of what shipped>

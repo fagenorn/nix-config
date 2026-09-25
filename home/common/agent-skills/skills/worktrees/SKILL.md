@@ -33,7 +33,7 @@ What works instead:
 - Create files with the file-writing tool and pass them by path where the CLI takes one (`--notes-file`, `-F <file>`), or pass a body as one literal quoted argument with no substitution inside it.
 - Carry the directory inside the invocation: absolute paths under the worktree root, or the tool's own directory flag such as `git -C <path>`. A prelude that `cd`s in and chains onward is itself the refused chain.
 - Treat a non-zero exit as information — read it and decide the next call — rather than suppressing stderr.
-- One chain is sanctioned: the `unset GITHUB_TOKEN && ` prefix that `from-issue/bindings.md`'s tracker-cli hygiene prescribes, spelled exactly as there. The lifecycle guard accepts that literal and nothing looser.
+- One chain is sanctioned: the `unset GITHUB_TOKEN && ` prefix that `ship-issue/SKILL.md`'s gh hygiene derives from `bindings.tracker.credential_env.unset_before_invocation`, spelled exactly as there. The lifecycle guard accepts that literal and nothing looser.
 - One pipeline is sanctioned: a lifecycle helper call — one heredoc-fed `workflow-state` command, optionally piped into or out of `artifact-budget validate-report --input -` — stays exactly as `from-issue/SKILL.md`'s lifecycle-call rule spells it, because that rule writes no request file. The shape belongs to those whole-allowed helpers alone: never copy a pipe or heredoc into another command on its strength. Should the checker refuse one, report the refusal rather than reshape the call: that rule owns its form.
 - Refused → change the shell form, never the isolation. Rewriting the command to work outside the worktree defeats the call that put you in it.
 
