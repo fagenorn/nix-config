@@ -3175,6 +3175,21 @@ def resolve_project_policy(root: str, label: str) -> dict[str, Any]:
     return classify_resolver_outcome(completed, label)
 
 
+def check_contract_worktree(runtime: Any, policy: dict[str, Any], worktree: str) -> None:
+    """Veto a contract whose existing worktree resolves to different sealed policy (D4).
+
+    ``lexists`` counts a dangling symlink as present, so it fails closed; an
+    absent path, such as a reserved candidate, has nothing to compare.
+    """
+    if not os.path.lexists(worktree):
+        return
+    worktree_policy = resolve_project_policy(worktree, "worktree")
+    try:
+        runtime.check_worktree_policy(policy, worktree_policy)
+    except Exception as error:
+        raise WorkflowError(f"build-delivery refused: {error}") from error
+
+
 def command_build_delivery(args: argparse.Namespace) -> int:
     """Print one sealed delivery value; read-only (no lock, ledger, clock or write)."""
     if not Path(args.repo_root).is_absolute():
@@ -3186,6 +3201,9 @@ def command_build_delivery(args: argparse.Namespace) -> int:
         result = runtime.build_delivery(args.kind, value, policy=policy)
     except Exception as error:
         raise WorkflowError(f"build-delivery refused: {error}") from error
+    if args.kind == "contract":
+        # The builder has validated `worktree` as absolute and normalized (D5).
+        check_contract_worktree(runtime, policy, value["worktree"])
     sys.stdout.buffer.write(runtime.model.canonical_bytes(result))
     return 0
 
@@ -3232,8 +3250,18 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint.add_argument("--checkpoint-file", required=True)
     checkpoint.set_defaults(handler=command_checkpoint_delivery)
 
-    build_delivery = subparsers.add_parser("build-delivery")
-    build_delivery.add_argument("--repo-root", required=True)
+    build_delivery = subparsers.add_parser("build-delivery", description=(
+        "Build one sealed delivery value from --input and print it as canonical JSON. "
+        "It takes no lock, reads no ledger or clock and writes nothing. "
+        "--kind contract resolves project policy with resolve-project at --repo-root, "
+        "the ledger repository root, and seals only that policy. When the input's "
+        "worktree path already exists, it also resolves there and refuses if any "
+        "sealed policy member differs. The other kinds resolve nothing. Every refusal "
+        "after argument parsing exits 2 with empty stdout and one stderr line; when "
+        "resolve-project refuses, that line ends with the resolver's error document as "
+        "one line of canonical JSON."))
+    build_delivery.add_argument("--repo-root", required=True, help=(
+        "absolute ledger repository root; --kind contract resolves the policy it seals here"))
     build_delivery.add_argument(
         "--kind", required=True,
         choices=("contract", "initial-intent", "scope", "selected-output", "observation",

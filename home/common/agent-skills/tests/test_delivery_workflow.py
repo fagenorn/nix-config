@@ -1198,6 +1198,19 @@ class BuilderHarness:
         return (f"workflow-state: resolve-project refused at {label}: "
                 + stdout.removesuffix("\n") + "\n").encode()
 
+    def worktree_project(self, mutate=None):
+        """Lay a resolvable project at the contract input's worktree path (D8).
+
+        `make_project_root` writes the contract, instruction source and current
+        projections into a fresh temp dir. Renaming it into `.worktrees/` gives
+        the worktree resolver no unintended reason to refuse, and the root's
+        cleanup removes it.
+        """
+        contract = source_contract()
+        if mutate is not None:
+            mutate(contract)
+        return make_project_root(contract).rename(self.worktree)
+
     def contract_input(self, **changes):
         value = {"issue": 171, "worktree": self.worktree, "source_kind": "explicit_user",
                  "source_reference": "invocation:/from-issue 171 --auto", "now": NOW}
@@ -1402,6 +1415,66 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
             "authorization_intents": [stray["initial_intent"]]}, ok=False)
         self.assertEqual((refused.returncode, refused.stdout), (2, b""))
         self.assertIn(b"authorization chain", refused.stderr)
+
+
+class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
+    """D3, D4, D7: an existing contract worktree can veto a build, never supply policy."""
+
+    def contract_bytes(self, *, ok=True):
+        return self.cli("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                        "--input", "-", stdin=json.dumps(self.contract_input()).encode(),
+                        ok=ok)
+
+    def test_an_agreeing_or_unsealed_difference_builds_byte_identical_output(self):
+        def more_parallel(contract_value):
+            contract_value["bindings"]["workflow"]["orchestration"]["max_parallel"] = 5
+        for label, mutate in (("identical project", None),
+                              ("unsealed difference", more_parallel)):
+            with self.subTest(label=label):
+                self.project()
+                absent = self.contract_bytes().stdout
+                self.worktree_project(mutate)
+                self.assertEqual(self.contract_bytes().stdout, absent)
+
+    def test_a_divergent_sealed_member_refuses(self):
+        def retarget(contract_value):
+            contract_value["bindings"]["vcs"]["integration_branch"] = "dev"
+        self.project()
+        self.worktree_project(retarget)
+        refused = self.contract_bytes(ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr), (2, b"",
+            b"workflow-state: build-delivery refused: worktree policy differs from "
+            b"repo-root policy: bindings.vcs.integration_branch\n"))
+
+    def test_an_unresolvable_worktree_relays_the_resolver_refusal(self):
+        prefix = b"workflow-state: resolve-project refused at worktree: "
+        for label in ("empty directory", "dangling symlink"):
+            with self.subTest(label=label):
+                self.project()
+                if label == "empty directory":
+                    Path(self.worktree).mkdir()
+                else:
+                    Path(self.worktree).symlink_to(self.root / "missing")
+                expected = self.resolver_refusal_line(self.worktree, "worktree")
+                refused = self.contract_bytes(ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", expected))
+                self.assertEqual(
+                    json.loads(refused.stderr.removeprefix(prefix))["error"]["code"],
+                    "not_onboarded")
+
+    def test_help_states_the_contract_resolution_root(self):
+        self.project()
+        text = "".join(self.cli("build-delivery", "--help").stdout.decode().split())
+        for clause in (
+                "--kind contract resolves project policy with resolve-project at "
+                "--repo-root, the ledger repository root, and seals only that policy.",
+                "When the input's worktree path already exists, it also resolves there "
+                "and refuses if any sealed policy member differs.",
+                "when resolve-project refuses, that line ends with the resolver's error "
+                "document"):
+            with self.subTest(clause=clause[:40]):
+                self.assertIn("".join(clause.split()), text)
 
 
 class HelperInputTest(BuilderHarness, unittest.TestCase):
