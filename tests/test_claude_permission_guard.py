@@ -758,6 +758,30 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("lifecycle guard: unexpected failure:", result.stderr)
 
+    def test_hostile_interpreter_environment_is_ignored(self):
+        # Each plant exits 0 before the guard can judge: a BASH_ENV file that the
+        # wrapper's bash would source, a `json` package reached through PYTHONPATH,
+        # and a .pth line reached through NIX_PYTHONPATH, which nixpkgs'
+        # sitecustomize honours even under -I. Seeing any one would turn a refusal
+        # into an allow, so the registered hook must ignore all three.
+        hostile = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        (hostile / "bash_env").write_text("exit 0\n", encoding="utf-8")
+        (hostile / "json").mkdir()
+        (hostile / "json" / "__init__.py").write_text(
+            "import os\nos._exit(0)\n", encoding="utf-8"
+        )
+        (hostile / "hostile.pth").write_text("import os; os._exit(0)\n", encoding="utf-8")
+        result = self.invoke_command(
+            "git branch -d -f topic",
+            env={
+                "BASH_ENV": str(hostile / "bash_env"),
+                "PYTHONPATH": str(hostile),
+                "NIX_PYTHONPATH": str(hostile),
+            },
+        )
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("lifecycle guard: unsafe branch deletion:", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

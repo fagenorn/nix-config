@@ -59,16 +59,19 @@ COMMAND_VOCABULARY = frozenset({
     "touch", "unset", "uv", "wc", "workflow-state", "xargs", "yarn", "zsh",
 })
 
-# The one sanctioned chain lives in the lifecycle guard; it is read, never restated.
-GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/default.nix"
+# The one sanctioned chain lives in the lifecycle guard's own Python source; it
+# is read, never restated. The whole-allowed helpers live in the permission
+# allow list, which stays in the claude-code module (spec D30).
+GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
+ALLOW_LIST_SOURCE = REPO_ROOT / "home/common/claude-code/default.nix"
 GUARD_ASSIGNMENT = re.compile(
     r'^\s*UNSET_GITHUB_TOKEN_PREFIX = "([^"\n]*)"\s*$', re.M
 )
 
 
-def guard_prefix(nix_text):
+def guard_prefix(guard_text):
     """The literal of the guard's single UNSET_GITHUB_TOKEN_PREFIX assignment."""
-    matches = GUARD_ASSIGNMENT.findall(nix_text)
+    matches = GUARD_ASSIGNMENT.findall(guard_text)
     if len(matches) != 1:
         raise ValueError(
             f"expected exactly one UNSET_GITHUB_TOKEN_PREFIX assignment in "
@@ -82,16 +85,17 @@ WHOLE_ALLOW_ENTRY = re.compile(r'^\s*"Bash\(([^\s()"]+):\*\)"', re.M)
 
 
 def whole_allowed_helpers(nix_text):
-    """Basenames of the guard's single-word `"Bash(<word>:*)"` allow entries."""
+    """Basenames of the allow list's single-word `"Bash(<word>:*)"` entries."""
     words = WHOLE_ALLOW_ENTRY.findall(nix_text)
     if not words:
-        raise ValueError(f"expected a single-word Bash allow entry in {GUARD_SOURCE}, found none")
+        raise ValueError(
+            f"expected a single-word Bash allow entry in {ALLOW_LIST_SOURCE}, found none"
+        )
     return frozenset(word.rsplit("/", 1)[-1] for word in words)
 
 
-_GUARD_TEXT = GUARD_SOURCE.read_text(encoding="utf-8")
-SANCTIONED_PREFIX = guard_prefix(_GUARD_TEXT)
-LIFECYCLE_HELPERS = whole_allowed_helpers(_GUARD_TEXT)
+SANCTIONED_PREFIX = guard_prefix(GUARD_SOURCE.read_text(encoding="utf-8"))
+LIFECYCLE_HELPERS = whole_allowed_helpers(ALLOW_LIST_SOURCE.read_text(encoding="utf-8"))
 
 
 @dataclass(frozen=True)
@@ -869,7 +873,7 @@ class FenceIndentationTest(unittest.TestCase):
 
 
 class SanctionedPrefixTest(unittest.TestCase):
-    ASSIGNMENT = '      UNSET_GITHUB_TOKEN_PREFIX = "scrub && "\n'
+    ASSIGNMENT = 'UNSET_GITHUB_TOKEN_PREFIX = "scrub && "\n'
 
     def test_one_assignment_is_the_literal(self):
         self.assertEqual(guard_prefix("x = 1\n" + self.ASSIGNMENT), "scrub && ")
