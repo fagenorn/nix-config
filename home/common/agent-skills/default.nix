@@ -56,12 +56,6 @@ in
     # deltas) stays in each repo under docs/standards/.
     ".agents/standards".source = ./standards;
 
-    # Stable path project CIs can call without vendoring the script.
-    ".agents/bin/context-map-lint" = {
-      source = ../../../scripts/context-map-lint.py;
-      executable = true;
-    };
-
     ".agents/bin/workflow-state" = {
       source = ./scripts/workflow-state.py;
       executable = true;
@@ -92,16 +86,6 @@ in
 
     ".agents/bin/adopt-project" = {
       source = ./scripts/adopt-project.py;
-      executable = true;
-    };
-
-    ".agents/bin/agent-model-matrix" = {
-      source = ./scripts/agent-model-matrix.py;
-      executable = true;
-    };
-
-    ".agents/bin/diff-scope" = {
-      source = ./scripts/diff-scope.py;
       executable = true;
     };
 

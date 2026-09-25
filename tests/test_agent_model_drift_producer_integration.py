@@ -3,16 +3,12 @@
 import contextlib
 import io
 import json
-from pathlib import Path
 from unittest import mock
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from agent_model_drift_test_support import (DriftCliCase, agent_model_drift,
+from .agent_model_drift_test_support import (DriftCliCase, agent_model_drift,
                                              baseline_value, seal_baseline,
                                              seal_record)
-from test_agent_costs import (USAGE_1, USAGE_2, agent_result, assistant, codex_meta,
+from .test_agent_costs import (USAGE_1, USAGE_2, agent_result, assistant, codex_meta,
                               codex_turn_context, codex_usage, run_main)
 
 
