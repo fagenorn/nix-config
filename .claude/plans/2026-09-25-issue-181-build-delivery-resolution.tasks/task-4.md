@@ -150,11 +150,13 @@ grep -c 'policy at `--repo-root` (the ledger repository root, the only policy it
 grep -c "the one stderr line carries the resolver's error document unchanged\." CLAUDE.md
 grep -cx '@.agents/instructions/bootstrap.md' CLAUDE.md
 git diff --numstat -- CLAUDE.md
-if grep -n 'fails loudly\. For the duration' $FI; then exit 1; fi
+if tr -s ' \n' ' ' < $FI | grep -q 'fails loudly\. For the duration'; then exit 1; fi
 ```
 
 Expected: `OK` for the whole skill-contract file. Then `1`, `1` and `1`, then
-`1	1	CLAUDE.md`, and the `if grep` finds nothing. Summarize any failure to its
+`1	1	CLAUDE.md`, and the whitespace-normalized `tr … | grep -q` check finds
+nothing (the live sentence wraps across a line break, so a plain `grep` could
+never fail). Summarize any failure to its
 test ids.
 
 - [ ] **Step 6: Final gate**

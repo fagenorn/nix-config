@@ -200,8 +200,9 @@ Task 4's docs and the test above quote it:
         "the ledger repository root, and seals only that policy. When the input's "
         "worktree path already exists, it also resolves there and refuses if any "
         "sealed policy member differs. The other kinds resolve nothing. Every refusal "
-        "exits 2 with empty stdout and one stderr line; when resolve-project refuses, "
-        "that line ends with the resolver's error document as one line of canonical JSON."))
+        "after argument parsing exits 2 with empty stdout and one stderr line; when "
+        "resolve-project refuses, that line ends with the resolver's error document as "
+        "one line of canonical JSON."))
     build_delivery.add_argument("--repo-root", required=True, help=(
         "absolute ledger repository root; --kind contract resolves the policy it seals here"))
 ```

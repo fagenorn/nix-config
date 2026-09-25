@@ -70,7 +70,7 @@ Path abbreviations used in members: `S` = `home/common/agent-skills/scripts`,
 
 ## Delivery estimate and boundaries
 
-These figures are estimates. Nine files change and none is created. Product code
+These figures are estimates. Ten files change and none is created. Product code
 grows by about 90 lines across `S/workflow-state.py`,
 `S/workflow_delivery_build.py` and `S/workflow_delivery.py`. Tests grow by about
 230 lines across four files. The docs gain about four sentences in `CLAUDE.md`
@@ -120,3 +120,9 @@ and `OK (skipped=2)`. `just build` was not probed, since no `.nix` or tracked-fi
 set changes.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (one fresh Opus reviewer given the identical packet, isolated and read-only). The configured `codex-review` run failed on a Codex account usage limit (`turn.failed`, no agent message). That is a completed, non-capacity runtime failure, so it got the one native fallback and no retry.
+- Base SHA: `763465ff0c6d562d1a5dcd43a5fe0b47a522c57e`. No focus narrowing.
+- Findings: 0 Blocking, 2 Should fix, 3 Discussion. Accepted 4: the Task 3 help claim is limited to refusals after argument parsing; the Task 4 negative gate now uses whitespace-normalized text, because the live sentence wraps; the Task 1 docstring names the labelled refused, failed and timed-out outcomes; the file count is ten. Rejected 1: the `lexists` fail-open on an unsearchable ancestor, per spec D10. Deferred 0.

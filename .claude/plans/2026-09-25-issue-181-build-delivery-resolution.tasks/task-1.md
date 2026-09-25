@@ -242,7 +242,10 @@ def classify_resolver_outcome(completed: subprocess.CompletedProcess,
 
 
 def resolve_project_policy(root: str, label: str) -> dict[str, Any]:
-    """Run ``resolve-project resolve`` at ``root``; every other outcome is a refusal."""
+    """Run ``resolve-project resolve`` at ``root`` and return its snapshot.
+
+    Any other outcome raises its labelled refused, failed or timed-out line (D1, D2).
+    """
     try:
         completed = subprocess.run(
             [*resolve_project_argv(), "resolve", "--repo-root", root],
