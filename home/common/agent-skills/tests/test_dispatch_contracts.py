@@ -5,25 +5,21 @@ counts only inside the carrier's rendered region, the text the recipient
 actually receives, and must occur there exactly once.
 """
 from dataclasses import dataclass
-import os
 from pathlib import Path
 import re
 import unittest
 
+import sys
 
-REPO_ROOT = Path(__file__).parents[4]
-SHARED_TREE = REPO_ROOT / "home/common/agent-skills/skills"
-CLAUDE_ONLY_TREE = REPO_ROOT / "home/common/claude-code/skills"
-SOURCE_TREES = {"shared": SHARED_TREE, "claude-only": CLAUDE_ONLY_TREE}
-
-# Any directory laid out like the home home-manager populates: the built
-# home-manager-files output, or $HOME after a switch.
-INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
-INSTALLED_RECIPE = "just agent-installed-skill-tests"
-# (view, skill directory under the installed home, source trees it publishes)
-INSTALLED_VIEWS = (
-    ("claude", ".claude/skills", frozenset({"shared", "claude-only"})),
-    ("codex", ".agents/skills", frozenset({"shared"})),
+# unittest loads suites by path, so the directory is not a package; the
+# shared support module lives beside this file.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from skill_tree_support import (  # noqa: E402
+    INSTALLED_VIEWS,
+    SHARED_TREE,
+    SOURCE_TREES,
+    installed_home_or_skip,
+    installed_root_error,
 )
 
 # The one authoritative home of each clause. Carriers repeat the text because a
@@ -214,19 +210,11 @@ class SourceTreeContractsTest(unittest.TestCase):
 class InstalledTreeContractsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        root = os.environ.get(INSTALLED_HOME_ENV)
-        if root is None:
-            raise unittest.SkipTest(
-                f"{INSTALLED_HOME_ENV} is unset; run `{INSTALLED_RECIPE}` to "
-                "check the skill trees the Nix build installs"
-            )
-        cls.root = Path(root)
+        cls.root = installed_home_or_skip()
 
     def assert_contract_installed(self, contract_id):
-        self.assertTrue(
-            self.root.is_absolute() and self.root.is_dir(),
-            f"{INSTALLED_HOME_ENV}={str(self.root)!r} is not an absolute directory",
-        )
+        error = installed_root_error(self.root)
+        self.assertIsNone(error, error)
         for view, skills_dir, trees in INSTALLED_VIEWS:
             base = self.root / skills_dir
             if not base.is_dir():

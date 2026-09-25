@@ -72,6 +72,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_review_package.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
+    home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
@@ -102,7 +103,7 @@ agent-model-matrix:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix validate
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix trace representative
 
-# Check the dispatch contracts against the skill trees the Nix build installs.
+# Check the skill contracts and agent-tool launchers against what the Nix build installs.
 agent-installed-skill-tests: build
   @set -- $(nix-store --query --requisites ./result \
     | grep -- '-home-manager-files$' || true); \
@@ -112,6 +113,7 @@ agent-installed-skill-tests: build
     fi; \
     AGENT_SKILLS_INSTALLED_HOME="$1" python3 -m unittest -v \
       home/common/agent-skills/tests/test_dispatch_contracts.py \
+      home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
       tests/test_agent_tools_launchers.py
 

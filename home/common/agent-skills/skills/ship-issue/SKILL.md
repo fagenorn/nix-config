@@ -215,8 +215,7 @@ git push -u origin <branch>
 Run `check-launch` again, then:
 
 ```
-gh pr create --base <integration> --title "<title>" --body "$(cat <<'EOF'
-## Summary
+gh pr create --repo <resolved-repository> --base <integration> --head <branch> --title "<title>" --body "## Summary
 <2-4 bullets of what shipped>
 
 ## Spec
@@ -225,10 +224,10 @@ gh pr create --base <integration> --title "<title>" --body "$(cat <<'EOF'
 ## Plan
 <plan-path>
 
-Closes #<num>
-EOF
-)"
+Closes #<num>"
 ```
+
+This is the one form the lifecycle guard accepts: one command, those five flags in that order, `<resolved-repository>` the retained `bindings.tracker.repo_slug`, and the body a single double-quoted argument that may span lines but contains no `"`, `$`, backtick or backslash. A body written to a file, a heredoc or a command substitution is refused, so render the body in place.
 
 Title: the issue title verbatim unless the implementation deviated meaningfully. Under 70 chars; details go in the body.
 
@@ -278,7 +277,7 @@ If the fix changes unrelated behavior or the finding cannot be checked in that b
 
 ## Phase 6 — Wait for CI
 
-**Docs-only changes never wait for CI.** `git diff --name-only <base>..HEAD | sed 's/.*\.//' | sort -u` — every line `md` → skip straight to Phase 7 (a markdown-only diff cannot break a build); anything else → the phase runs normally.
+**Docs-only changes never wait for CI.** `git diff --name-only <base>..HEAD` — every path ends in `.md` → skip straight to Phase 7 (a markdown-only diff cannot break a build); anything else → the phase runs normally.
 
 Before blocking, verify the tip: `gh pr view <pr-num> --json headRefOid` must
 equal the reviewed `HEAD_SHA` — the value fixed in Phase 5 and re-fixed by
