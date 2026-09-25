@@ -1,16 +1,8 @@
 """Pure scheduling and accounting-context projections for drift reports."""
 from __future__ import annotations
 
-import hashlib
-import json
-
-from agent_model_drift_schema import SCHEDULING_METRICS
-
-
-def _digest(value):
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"),
-                         ensure_ascii=True)
-    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+from agent_tools.agent_model_drift_schema import SCHEDULING_METRICS
+from agent_tools.canonical import telemetry_digest
 
 
 def _merged(coverages):
@@ -30,7 +22,7 @@ def _full(metric):
 
 
 def _validate_pairs(runs, event_window):
-    window_digest = _digest(event_window)
+    window_digest = telemetry_digest(event_window)
     for run in runs:
         metrics = run["scheduling"]
         wait, covered = metrics["wait_input_tokens"], metrics["covered_input_tokens"]
@@ -67,7 +59,7 @@ def _aggregate_metric(name, runs, source_coverage):
         return {"value": None, "coverage": authoritative, "cohort_digest": None}
     digests = [metric["cohort_digest"] for metric in contributions]
     return {"value": sum(metric["value"] for metric in contributions),
-            "coverage": authoritative, "cohort_digest": _digest(sorted(digests))}
+            "coverage": authoritative, "cohort_digest": telemetry_digest(sorted(digests))}
 
 
 def _ratio(metrics, numerator, denominator):

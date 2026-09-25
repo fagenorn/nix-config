@@ -396,7 +396,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         tracked = subprocess.run(
             ["git", "ls-files", "-z", "--", "AGENTS.md", "CLAUDE.md",
              ".agents/instructions", "home/common/agent-skills",
-             "home/common/claude-code", "scripts/context-map-lint.py", "tests"],
+             "home/common/claude-code", "python", "tests"],
             cwd=REPO_ROOT, check=True, capture_output=True,
         ).stdout.split(b"\0")
         text_suffixes = {".md", ".py", ".sh", ".nix", ".json", ".toml", ".yaml", ".yml"}
@@ -494,7 +494,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             REPO_ROOT / "home/common/agent-skills/scripts/resolve-project.py",
             helpers["resolve-project"],
         )
-        shutil.copyfile(REPO_ROOT / "scripts/context-map-lint.py",
+        shutil.copyfile(REPO_ROOT / "python/agent_tools/context_map_lint.py",
                         helpers["context-map-lint"])
         for helper in helpers.values():
             helper.chmod(0o755)
@@ -2485,7 +2485,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
         # The gate states a policy and calls the helper; the accounting itself
-        # lives in diff-scope.py and is not restated here.
+        # lives in `agent_tools.diff_scope` and is not restated here.
         gate = self.section(
             self.ship_issue,
             "**Pick the path first.**",
