@@ -34,6 +34,7 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "resolve-project.py"
 LIBRARY = Path(__file__).resolve().parents[1] / "scripts" / "agent_platform.py"
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
+DECLARATION = Path(__file__).resolve().parents[1] / "host-declaration.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
 EVAL_FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
 
@@ -51,7 +52,7 @@ CAPABILITY_STATES = ("available", "unsupported", "blocked")
 
 
 def install_home(home: Path, manifest: object = COMMITTED, *,
-                 library: bool = True) -> Path:
+                 library: bool = True, declaration: object = COMMITTED) -> Path:
     """Populate `home` as the platform installation the resolver reads (D23).
 
     Every invocation in this suite runs under a temporary `HOME`, so the
@@ -64,6 +65,11 @@ def install_home(home: Path, manifest: object = COMMITTED, *,
     verbatim (for the malformed-JSON cases) and anything else is serialized as
     JSON. `library=False` leaves the library uninstalled, which only a script
     run from the deployed layout can observe (see `PlatformLibraryTest`).
+
+    `declaration` is the third hook, for the host agent-slot declaration at
+    `$HOME/.agents/share/host-declaration.json` (#150 D24), with `manifest`'s
+    semantics: `COMMITTED` copies the repository's own declaration, `None`
+    installs none, a `str` is written verbatim and anything else as JSON.
     """
     library_dir = home / ".agents" / "lib" / "python"
     library_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +89,16 @@ def install_home(home: Path, manifest: object = COMMITTED, *,
         target.write_text(manifest, encoding="utf-8")
     else:
         target.write_text(json.dumps(manifest), encoding="utf-8")
+    declared = share / "host-declaration.json"
+    declared.unlink(missing_ok=True)
+    if declaration is COMMITTED:
+        shutil.copy(DECLARATION, declared)
+    elif declaration is None:
+        pass
+    elif isinstance(declaration, str):
+        declared.write_text(declaration, encoding="utf-8")
+    else:
+        declared.write_text(json.dumps(declaration), encoding="utf-8")
     return home
 
 

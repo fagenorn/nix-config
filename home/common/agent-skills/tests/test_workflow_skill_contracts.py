@@ -96,6 +96,9 @@ V2_CONTROL_REQUEST_KEYS = {"interface_version", "now", "max_parallel",
     "worktrees", "forge", "delivery_contracts", "authorization_intents",
     "authority_observations", "reevaluation_evidence", "delivery_observations",
     "requested_scopes", "recoveries"}
+V3_CONTROL_REQUEST_KEYS = V2_CONTROL_REQUEST_KEYS | {"host_route"}
+CODEX_ORCHESTRATE = REPO_ROOT / "home/common/codex/skills/orchestrate-issues/SKILL.md"
+CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
 V2_OWNER_KEYS = {"interface_version", "kind", "ledger_repo_root", "run_id", "issue",
     "attempt", "owner", "action_id", "launch_kind", "worktree", "handoff_path",
     "deadline_at", "custody", "contract", "contract_digest", "pending_stage_ids",
@@ -790,7 +793,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                        "kind: delivery_remainder", "--request-file -"):
             self.assertIn(anchor, normalized(direct))
         decide = self.section(self.orchestrate, "## 3. Decide", "## 4. Execute control actions")
-        self.assertEqual(set(json_block(decide)), V2_CONTROL_REQUEST_KEYS)
+        request = json_block(decide)
+        self.assertEqual((set(request), request["interface_version"], request["host_route"]),
+                         (V3_CONTROL_REQUEST_KEYS, 3, "claude-code"))
         for anchor in ("workflow-state build-delivery",
                        "while its latest summary carries `delivery_contract_required`",
                        "report the refusal", "--request-file -",
@@ -799,6 +804,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         durable = self.section(self.from_issue, "### Explicit durable interactive acquisition",
                                "The `workflow-state` executable")
         self.assertIn("only when this invocation created the run", normalized(durable))
+        self.assertIn('`host_route: "direct"`', normalized(durable))
 
     def test_orchestrate_bootstrap_actions_and_projected_owner(self):
         observe = normalized(self.section(self.orchestrate, "## 2. Bootstrap and observe",
@@ -872,7 +878,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
         expected = " ".join(case["expected_output"] for case in self.orchestrate_evals["evals"])
         for anchor in ("interface_version 2", "delivery_remainder", "contract_digest",
-                       "build-delivery", "only when this invocation created the run"):
+                       "build-delivery", "only when this invocation created the run",
+                       "interface_version 3", "host-route", "launch_refused"):
             self.assertIn(anchor, expected)
         self.assertNotIn("version-1", expected)
 
@@ -884,6 +891,52 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                        "fresh proposal"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
+
+    def test_orchestrate_asks_the_host_route_first_and_never_retries_a_refusal(self):
+        resolve = normalized(self.section(self.orchestrate,
+            "## 1. Resolve issue set and bindings", "## 2. Bootstrap and observe"))
+        self.assert_ordered(resolve, "workflow-state host-route --route claude-code",
+                            "--boundary workflow-response",
+                            "`unsupported` answer ends the run", "`alternative`",
+                            '`host_route: "claude-code"`', "never calculates slots")
+        for retired in ("Treat known host capacity as a capability boundary",
+                        "This does not add reservation"):
+            self.assertNotIn(retired, normalized(self.orchestrate))
+        observe = normalized(self.section(self.orchestrate,
+            "## 2. Bootstrap and observe", "## 3. Decide"))
+        self.assertIn("`launch_refused` for an owner launch the host refused", observe)
+        decide = normalized(self.section(self.orchestrate,
+            "## 3. Decide", "## 4. Execute control actions"))
+        self.assertIn("interface_version 3 control response", decide)
+        self.assertIn("`admission`", decide)
+        execute = normalized(self.section(self.orchestrate,
+            "## 4. Execute control actions", "## 5. Final report"))
+        self.assert_ordered(execute, "host refuses an owner launch, never retry it",
+                            "exactly one control call", "`launch_refused`",
+                            "the controller's `finalized` release",
+                            "resumes on the next orchestrate invocation")
+        report = normalized(self.orchestrate.split("## 5. Final report", 1)[1])
+        self.assertIn("`admission.waiting` as queued for agent slots", report)
+        self.assertIn("bounded summaries in the same interface_version 3 control response",
+                      report)
+        self.assertNotIn("interface_version 2 summaries", report)
+
+    def test_codex_orchestrate_stub_relays_the_unsupported_route(self):
+        raw = CODEX_ORCHESTRATE.read_text(encoding="utf-8")
+        self.assertTrue(raw.startswith("---\nname: orchestrate-issues\n"))
+        text = normalized(raw)
+        self.assert_ordered(text, "workflow-state host-route --route codex",
+                            "--boundary workflow-response", "verbatim",
+                            "/from-issue <n> --auto", "one at a time")
+        self.assertIn("Never spawn owners, count threads, archive sessions, start an "
+                      "app-server, or retry", text)
+        for forbidden in ("workflow-state control", "init-run", "run_in_background",
+                          "agent-dispatch"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn('home.file.".agents/skills/orchestrate-issues".source = '
+                      './skills/orchestrate-issues;', CODEX_MODULE.read_text(encoding="utf-8"))
+        self.assertFalse((REPO_ROOT / "home/common/agent-skills/skills/orchestrate-issues")
+                         .exists())
 
     def section(self, text, heading, next_heading):
         start = text.index(heading)
@@ -3933,6 +3986,25 @@ path_unchanged_since() { return 0; }
             ).returncode,
             0,
         )
+
+
+class InstalledOrchestrateRoutesTest(unittest.TestCase):
+    """D25: each agent's installed tree holds its own orchestrate-issues."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = os.environ.get("AGENT_SKILLS_INSTALLED_HOME")
+        if root is None:
+            raise unittest.SkipTest("AGENT_SKILLS_INSTALLED_HOME is unset; run "
+                                    "`just agent-installed-skill-tests`")
+        cls.root = Path(root)
+
+    def test_codex_tree_holds_the_stub_and_claude_tree_the_adapter(self):
+        installed = lambda tree: (self.root / tree / "orchestrate-issues/SKILL.md"
+                                  ).read_text(encoding="utf-8")
+        self.assertEqual(installed(".agents/skills"),
+                         CODEX_ORCHESTRATE.read_text(encoding="utf-8"))
+        self.assertEqual(installed(".claude/skills"), ORCHESTRATE.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

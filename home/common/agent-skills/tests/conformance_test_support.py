@@ -174,15 +174,16 @@ class Rebinding:
 
 
 def platform_env(tmp: Path, manifest: object = COMMITTED, *,
-                 library: bool = True) -> dict:
+                 library: bool = True, declaration: object = COMMITTED) -> dict:
     """HERMETIC_ENV with `HOME` at a platform installation built under `tmp`.
 
-    `manifest` and `library` are `install_home`'s override hook, unchanged:
-    `COMMITTED` copies the repository's manifest, `None` installs none, any
-    other value is written as the manifest, and `library=False` leaves the
-    library uninstalled.
+    `manifest`, `library` and `declaration` are `install_home`'s override
+    hooks, unchanged: `COMMITTED` copies the repository's manifest (or host
+    declaration), `None` installs none, any other value is written in its
+    place, and `library=False` leaves the library uninstalled.
     """
-    home = install_home(tmp / "home", manifest, library=library)
+    home = install_home(tmp / "home", manifest, library=library,
+                        declaration=declaration)
     return {**HERMETIC_ENV, "HOME": str(home)}
 
 
