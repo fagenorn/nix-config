@@ -161,8 +161,14 @@ class DeliveryRuntime:
 
     def validate_control_custody(
         self, state: dict[str, Any], request: dict[str, Any],
-    ) -> set[tuple[int, str, int, int]]:
+    ) -> tuple[set[tuple[int, str, int, int]], set[tuple[int, str, int, int]]]:
+        """The current-launch identities observed ``(unavailable, launch_refused)``.
+
+        An identity naming a launch that is no longer its issue's latest is
+        stale and dropped from both sets.
+        """
         unavailable: set[tuple[int, str, int, int]] = set()
+        refused: set[tuple[int, str, int, int]] = set()
         for observation in request["owners"]:
             issue_state = state["issues"].get(str(observation["issue"]))
             if issue_state is None:
@@ -174,8 +180,9 @@ class DeliveryRuntime:
             if ordinal > len(records) or custody["launch"] > len(records[ordinal - 1]["launches"]):
                 raise ValueError("unknown owner observation identity")
             if ordinal == len(records) and custody["launch"] == len(records[-1]["launches"]):
-                unavailable.add((observation["issue"], custody["kind"], ordinal,
-                                 custody["launch"]))
+                target = unavailable if observation["state"] == "unavailable" else refused
+                target.add((observation["issue"], custody["kind"], ordinal,
+                            custody["launch"]))
         for observation in request["worktrees"]:
             recorded = observation["recorded"]
             if recorded is None:
@@ -190,7 +197,14 @@ class DeliveryRuntime:
                 current = records[-1] if records else None
             if current is None or recorded["path"] != current["worktree"]:
                 raise ValueError("recorded worktree path does not match ledger")
-        return unavailable
+        return unavailable, refused
+
+    def suspend_remainder(
+        self, issue_state: dict[str, Any], remainder: dict[str, Any], now: str, *,
+        blocked_on: str,
+    ) -> None:
+        self._projection.suspend_remainder(issue_state, remainder, now,
+                                           blocked_on=blocked_on)
 
     def owner_is_unavailable(
         self, issue_state: dict[str, Any] | None,
@@ -313,6 +327,7 @@ class DeliveryRuntime:
         candidate = self.migrate(value, migration_contracts={})
         if isinstance(value, dict) and value.get("schema_version") == 1:
             candidate["schema_version"] = 2
+            candidate.pop("admission", None)
             for issue in candidate.get("issues", {}).values():
                 issue.pop("delivery", None)
                 issue.pop("delivery_remainders", None)
@@ -588,11 +603,16 @@ class DeliveryRuntime:
     ) -> dict[str, Any]:
         return self._projection.remainder_facade(issue_state, remainder)
 
-    def occupied_count(
+    def live_launches(
         self, state: dict[str, Any], *, at_time: str,
         unavailable: set[tuple[int, str, int, int]],
-    ) -> int:
-        count = 0
+    ) -> set[str]:
+        """The current-custody ``action_id``s still occupying a launch at ``at_time``.
+
+        A launch is live when its record is ``active``, ``at_time`` is before its
+        ``deadline_at`` and its identity is not observed unavailable.
+        """
+        live: set[str] = set()
         for issue_state in state["issues"].values():
             custody, record = self.current_custody(issue_state["issue"], issue_state)
             if custody is None or record is None or record["state"] != "active":
@@ -600,8 +620,14 @@ class DeliveryRuntime:
             ordinal = custody.get("attempt", custody.get("remainder"))
             identity = (issue_state["issue"], custody["kind"], ordinal, custody["launch"])
             if self._time(at_time) < self._time(record["deadline_at"]) and identity not in unavailable:
-                count += 1
-        return count
+                live.add(custody["action_id"])
+        return live
+
+    def occupied_count(
+        self, state: dict[str, Any], *, at_time: str,
+        unavailable: set[tuple[int, str, int, int]],
+    ) -> int:
+        return len(self.live_launches(state, at_time=at_time, unavailable=unavailable))
 
     def next_deadline(self, state: dict[str, Any], issues: list[int]) -> str | None:
         values = []
@@ -1167,7 +1193,7 @@ class DeliveryRuntime:
                     raise ValueError("invalid remainder launch")
             if not isinstance(value["progress_token"], str) or not value["progress_token"]:
                 raise ValueError("invalid remainder progress token")
-            if value["blocked_on"] not in {None, "human_gate", "external", "transport", "owner_unavailable", "unknown"}:
+            if value["blocked_on"] not in {None, "human_gate", "external", "transport", "owner_unavailable", "unknown", "host_capacity"}:
                 raise ValueError("invalid remainder blocker")
             if value["suspend_phase"] is not None:
                 self._integer(value["suspend_phase"])
@@ -1216,7 +1242,7 @@ class DeliveryRuntime:
         }
 
     def migrate(self, value: object, *, migration_contracts: dict[int, object]) -> object:
-        """Compose schema 1→2→3 on a detached copy without persisting."""
+        """Compose schema 1→2→3→4 on a detached copy without persisting."""
         if not isinstance(migration_contracts, dict):
             raise ValueError("invalid migration contracts")
         for issue, contract in migration_contracts.items():
@@ -1227,19 +1253,27 @@ class DeliveryRuntime:
                     raise ValueError("migration contract issue mismatch")
         candidate = copy.deepcopy(value)
         seen: set[int] = set()
-        while isinstance(candidate, dict) and candidate.get("schema_version") != 3:
+        while isinstance(candidate, dict) and candidate.get("schema_version") != 4:
             version = candidate.get("schema_version")
-            if type(version) is not int or version in seen or version not in {1, 2}:
+            if type(version) is not int or version in seen or version not in {1, 2, 3}:
                 raise ValueError("unsupported workflow state schema version")
             seen.add(version)
             issues = candidate.get("issues")
             if not isinstance(issues, dict):
                 raise ValueError("invalid workflow issues")
-            if any(not isinstance(issue, dict)
-                   or set(issue) != {"issue", "attempts", "outcome"}
-                   for issue in issues.values()):
+            if version in {1, 2} and any(
+                    not isinstance(issue, dict)
+                    or set(issue) != {"issue", "attempts", "outcome"}
+                    for issue in issues.values()):
                 raise ValueError("invalid legacy issue schema")
-            if version == 1:
+            if version == 3:
+                # Schema 4 adds the run's admission block; a schema-3 document
+                # that already carries one is a hybrid, never a migration input.
+                if "admission" in candidate:
+                    raise ValueError("invalid schema-three admission")
+                candidate["admission"] = None
+                candidate["schema_version"] = 4
+            elif version == 1:
                 for issue in issues.values():
                     if isinstance(issue, dict) and isinstance(issue.get("attempts"), list):
                         for attempt in issue["attempts"]:

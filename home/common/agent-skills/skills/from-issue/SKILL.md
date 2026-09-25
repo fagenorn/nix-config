@@ -215,8 +215,8 @@ orchestrate-issues' per-issue contract rule: from the requirement's
 `recorded_worktree` when the bootstrap requirement's `contract_digest` is null;
 with no requirement, from the reserved candidate, on the first call only when this invocation created the run,
 and on a reused run only once a control summary carries
-`delivery_contract_required` (send null until then). Then send the interface-2 control request — orchestrate-issues' exact
-17-key shape, with `max_parallel: 1`, `human_directed: true`, the resolved
+`delivery_contract_required` (send null until then). Then send the interface-3 control request — orchestrate-issues' exact
+18-key shape, with `host_route: "direct"`, `max_parallel: 1`, `human_directed: true`, the resolved
 attempt budget, the contract and `[initial_intent]` (null and `[]` once a
 contract is installed) — and call `workflow-state control` with
 `--request-file -`. Require exactly one dispatch action and require that the

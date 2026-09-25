@@ -119,7 +119,8 @@ class DeliveryProjection:
         return value
 
     @staticmethod
-    def _owner(value: object, issues: set[int], model: object) -> tuple[str, tuple[Any, ...]]:
+    def _owner(value: object, issues: set[int],
+               model: object) -> tuple[str, tuple[Any, ...], str]:
         if not isinstance(value, dict) or set(value) != {"event_id", "issue", "custody", "state"}:
             raise ValueError("invalid owner observation fields")
         if not isinstance(value["event_id"], str) or not value["event_id"]:
@@ -127,7 +128,7 @@ class DeliveryProjection:
         issue = value["issue"]
         if type(issue) is not int or issue < 1:
             raise ValueError("invalid owner issue")
-        if value["state"] != "unavailable":
+        if value["state"] not in {"unavailable", "launch_refused"}:
             raise ValueError("invalid owner state")
         if issue not in issues:
             raise ValueError("owner observation outside requested issues")
@@ -136,7 +137,8 @@ class DeliveryProjection:
         except (TypeError, ValueError) as error:
             raise ValueError("invalid owner custody") from error
         ordinal = custody.get("attempt", custody.get("remainder"))
-        return value["event_id"], (issue, custody["kind"], ordinal, custody["launch"])
+        return (value["event_id"], (issue, custody["kind"], ordinal, custody["launch"]),
+                value["state"])
 
     def validate_control_observations(self, request: dict[str, Any], issues: set[int],
                                       model: object) -> None:
@@ -236,11 +238,19 @@ class DeliveryProjection:
         issue_state["delivery_remainders"].append(remainder)
         return remainder
 
-    @staticmethod
+    @classmethod
     def suspend_expired_remainder(
-        issue_state: dict[str, Any], remainder: dict[str, Any], now: str,
+        cls, issue_state: dict[str, Any], remainder: dict[str, Any], now: str,
     ) -> None:
-        remainder["state"], remainder["blocked_on"] = "suspended", "unknown"
+        cls.suspend_remainder(issue_state, remainder, now, blocked_on="unknown")
+
+    @staticmethod
+    def suspend_remainder(
+        issue_state: dict[str, Any], remainder: dict[str, Any], now: str, *,
+        blocked_on: str,
+    ) -> None:
+        """Park a remainder on ``blocked_on``, failing it at the stall bound."""
+        remainder["state"], remainder["blocked_on"] = "suspended", blocked_on
         remainder["stalled_resumes"] = (
             remainder["stalled_resumes"] + 1
             if remainder["suspend_phase"] is not None else 0)

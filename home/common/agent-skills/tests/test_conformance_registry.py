@@ -82,6 +82,7 @@ class RequiredCapabilitySelectionTest(unittest.TestCase):
 
 REGISTERED_CHECK_IDS = (
     "compatibility.contract.schema_supported",
+    "host.admission.declaration",
     "host.capability.required",
     "host.executor.helper_on_path",
     "host.policy_path.no_follow_readable",
@@ -121,7 +122,7 @@ PURPOSE_SELECTION = {
 
 
 class RegistryClosureTest(unittest.TestCase):
-    def test_the_registry_is_exactly_the_seventeen_declared_checks(self):
+    def test_the_registry_is_exactly_the_eighteen_declared_checks(self):
         module = load_module()
         self.assertEqual(sorted(c.id for c in module.REGISTRY),
                          sorted(REGISTERED_CHECK_IDS))

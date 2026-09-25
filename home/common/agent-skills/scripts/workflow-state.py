@@ -5,6 +5,7 @@ import copy
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,8 +18,8 @@ import tempfile
 from typing import Any, Callable
 
 
-SCHEMA_VERSION = 3
-CONTROL_INTERFACE_VERSION = 2
+SCHEMA_VERSION = 4
+CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
     {"active", "handed_off", "suspended", "stopped", "failed", "merged"}
@@ -26,11 +27,15 @@ ATTEMPT_STATES = frozenset(
 RESULT_STATES = frozenset({"merged", "stopped", "failed"})
 RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused", "stalled"})
 SYNTHETIC_RESULT_SOURCES = frozenset({"expiry", "stalled"})
+# ``host_capacity`` is written only by control, from a ``launch_refused`` owner
+# observation; it is auto-resumable, but its resume is gated until some other
+# claim is released after the refused launch's own claim (per D7, D26).
 BLOCKED_ON_VALUES = frozenset(
-    {"usage_limit", "transport", "human_gate", "external", "unknown"}
+    {"usage_limit", "transport", "human_gate", "external", "unknown", "host_capacity"}
 )
-OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown"}
-AUTO_RESUMABLE_BLOCKED_ON = frozenset({"usage_limit", "transport", "unknown"})
+OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown", "host_capacity"}
+AUTO_RESUMABLE_BLOCKED_ON = frozenset(
+    {"usage_limit", "transport", "unknown", "host_capacity"})
 STALL_LIMIT = 3
 RESULT_FIELDS = (
     "issue",
@@ -67,8 +72,23 @@ PHASE_INPUT_FIELDS = (
     "remainder_self_contained",
 )
 STATE_FIELDS = frozenset(
-    {"schema_version", "run_id", "created_at", "updated_at", "prior_run", "issues"}
+    {"schema_version", "run_id", "created_at", "updated_at", "prior_run", "issues",
+     "admission"}
 )
+# The run's admission block (D5): `null` until a control sweep binds a route,
+# then the route and every claim ever acquired, released ones kept as the audit
+# trail. Claim policy lives here, never in the host admission library (D18).
+ADMISSION_FIELDS = frozenset({"route", "releases", "claims"})
+CLAIM_FIELDS = frozenset(
+    {"holder", "roles", "acquired_at", "released_at", "release_event", "release_seq"}
+)
+RELEASE_EVENTS = frozenset(
+    {"finished", "suspended", "handed_off", "superseded", "owner_unavailable",
+     "launch_refused", "finalized"}
+)
+CONTROLLER_HOLDER = "controller"
+# A custody record in one of these states has finished its launch for good.
+TERMINAL_RECORD_STATES = frozenset({"merged", "stopped", "failed", "completed"})
 ISSUE_FIELDS = frozenset({"issue", "attempts", "outcome", "delivery", "delivery_remainders"})
 ATTEMPT_FIELDS = frozenset(
     {
@@ -109,6 +129,7 @@ BOOTSTRAP_REQUIREMENT_FIELDS = frozenset(
 CONTROL_REQUEST_FIELDS = frozenset(
     {
         "interface_version",
+        "host_route",
         "now",
         "max_parallel",
         "attempt_budget_minutes",
@@ -233,6 +254,33 @@ def _delivery():
     except Exception as exc:
         raise WorkflowError(f"delivery runtime: {exc}") from exc
 
+
+_HOST_ADMISSION = None
+
+
+def _host_admission():
+    """The host admission library, loaded once (D18).
+
+    A source sibling in the repository, the installed copy otherwise -- the
+    same resolution `_delivery()` uses.
+    """
+    global _HOST_ADMISSION
+    if _HOST_ADMISSION is not None:
+        return _HOST_ADMISSION
+    src = Path(__file__).parent
+    entry = src / "host_admission.py" if src.name == "scripts" else Path.home() / ".agents/lib/python/host_admission.py"
+    try:
+        spec = importlib.util.spec_from_file_location("_workflow_host_admission", entry)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"cannot load {entry}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if getattr(module, "HOST_ADMISSION_INTERFACE_VERSION", None) != 1:
+            raise ValueError("interface")
+    except Exception as exc:
+        raise WorkflowError(f"host admission library: {exc}") from exc
+    _HOST_ADMISSION = module
+    return module
 
 def _call(message, function, *args, **kwargs):
     try:
@@ -650,7 +698,181 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
             validate_result(issue_value["outcome"], expected_issue=issue)
             if not attempts or attempts[-1]["result"] != issue_value["outcome"]:
                 raise WorkflowError("issue outcome does not match its latest attempt")
+    validate_admission(value, library=_host_admission())
     return value
+
+
+def parse_claim_holder(holder: str) -> tuple[int, str, int, int]:
+    """Split an owner claim holder into ``(issue, kind, ordinal, launch)``.
+
+    A holder is a custody launch ``action_id``: ``issue:attempt:launch`` for an
+    implementation launch or ``issue:rN:launch`` for a delivery remainder.
+    """
+    matched = ACTION_ID_PATTERN.fullmatch(holder) if isinstance(holder, str) else None
+    if matched is None:
+        raise WorkflowError("invalid admission claim holder")
+    kind = "remainder" if matched[2] else "implementation"
+    return int(matched[1]), kind, int(matched[3]), int(matched[4])
+
+
+def current_launch_id(runtime: Any, issue: int, issue_state: dict[str, Any]) -> str | None:
+    """The issue's current ``active`` launch identity, or ``None``."""
+    custody, record = _call(None, runtime.current_custody, issue, issue_state)
+    if custody is None or record["state"] != "active":
+        return None
+    return custody["action_id"]
+
+
+def _exact_roles(roles: Any, expected: Any) -> bool:
+    return (isinstance(roles, dict) and roles == dict(expected)
+            and all(type(count) is int for count in roles.values()))
+
+
+def validate_admission(state: dict[str, Any], *, library: Any) -> None:
+    """Close the run's admission block over exact members (D5).
+
+    Any violation is a `WorkflowError`, so every read and write refuses it.
+    """
+    admission = state["admission"]
+    if admission is None:
+        return
+    if not isinstance(admission, dict) or set(admission) != ADMISSION_FIELDS:
+        raise WorkflowError("invalid admission schema")
+    route = admission["route"]
+    if not isinstance(route, str) or not (
+            route == library.DIRECT_ROUTE or library.ROUTE_NAME_PATTERN.fullmatch(route)):
+        raise WorkflowError("invalid admission route")
+    releases = admission["releases"]
+    if type(releases) is not int or releases < 0:
+        raise WorkflowError("invalid admission release counter")
+    claims = admission["claims"]
+    if not isinstance(claims, list):
+        raise WorkflowError("invalid admission claims")
+    if route == library.DIRECT_ROUTE and (claims or releases != 0):
+        raise WorkflowError("a direct route holds no claims")
+    created_at = parse_utc(state["created_at"], "run creation time")
+    updated_at = parse_utc(state["updated_at"], "run update time")
+    sequences: list[int] = []
+    owner_holders: set[str] = set()
+    held_controllers = 0
+    held_owners: list[str] = []
+    for claim in claims:
+        if not isinstance(claim, dict) or set(claim) != CLAIM_FIELDS:
+            raise WorkflowError("invalid admission claim schema")
+        holder = claim["holder"]
+        controller = holder == CONTROLLER_HOLDER
+        if controller:
+            if not _exact_roles(claim["roles"], library.CONTROLLER_ROLES):
+                raise WorkflowError("invalid controller claim roles")
+        else:
+            parse_claim_holder(holder)
+            if not _exact_roles(claim["roles"], library.OWNER_ROLE_SET):
+                raise WorkflowError("invalid owner claim roles")
+            if holder in owner_holders:
+                raise WorkflowError("duplicate admission claim holder")
+            owner_holders.add(holder)
+        acquired_at = parse_utc(claim["acquired_at"], "claim acquisition time")
+        if not created_at <= acquired_at <= updated_at:
+            raise WorkflowError("invalid claim acquisition time order")
+        release = (claim["released_at"], claim["release_event"], claim["release_seq"])
+        if all(item is None for item in release):
+            if controller:
+                held_controllers += 1
+            else:
+                held_owners.append(holder)
+            continue
+        if any(item is None for item in release):
+            raise WorkflowError("claim release fields must all be null or all be set")
+        released_at = parse_utc(claim["released_at"], "claim release time")
+        if not acquired_at <= released_at <= updated_at:
+            raise WorkflowError("invalid claim release time order")
+        event = claim["release_event"]
+        if not isinstance(event, str) or event not in RELEASE_EVENTS:
+            raise WorkflowError("invalid claim release event")
+        if (event == "finalized") != controller:
+            raise WorkflowError("only a controller claim is released finalized")
+        if type(claim["release_seq"]) is not int:
+            raise WorkflowError("invalid claim release sequence")
+        sequences.append(claim["release_seq"])
+    if sorted(sequences) != list(range(1, releases + 1)):
+        raise WorkflowError("claim release sequences do not match the release counter")
+    if held_controllers > 1:
+        raise WorkflowError("more than one held controller claim")
+    if held_owners:
+        runtime = _delivery()
+        for holder in held_owners:
+            issue = parse_claim_holder(holder)[0]
+            issue_state = state["issues"].get(str(issue))
+            if issue_state is None or current_launch_id(runtime, issue, issue_state) != holder:
+                raise WorkflowError("held owner claim is not its issue's current launch")
+
+
+def release_claim(admission: dict[str, Any], claim: dict[str, Any], *, event: str,
+                  at: str) -> None:
+    """Release one held claim at ``at``, taking the run's next release sequence."""
+    if event not in RELEASE_EVENTS or claim["released_at"] is not None:
+        raise WorkflowError("internal error: invalid claim release")
+    admission["releases"] += 1
+    claim["released_at"] = at
+    claim["release_event"] = event
+    claim["release_seq"] = admission["releases"]
+
+
+def _release_event(runtime: Any, issue_state: dict[str, Any] | None, holder: str) -> str:
+    """Derive why a held owner claim's launch is no longer current (D19)."""
+    _, kind, ordinal, launch = parse_claim_holder(holder)
+    if issue_state is not None:
+        if runtime.delivery_complete(issue_state):
+            return "finished"
+        records = (issue_state["attempts"] if kind == "implementation"
+                   else issue_state["delivery_remainders"])
+        if 1 <= ordinal <= len(records):
+            record = records[ordinal - 1]
+            if len(record["launches"]) > launch:
+                return "superseded"
+            if record["state"] in TERMINAL_RECORD_STATES:
+                return "finished"
+            if record["state"] == "suspended":
+                return ("launch_refused" if record["blocked_on"] == "host_capacity"
+                        else "suspended")
+            if record["state"] == "handed_off":
+                return "handed_off"
+    raise WorkflowError("internal error: unreleasable claim")
+
+
+def settle_admission(state: dict[str, Any], *, at: str) -> bool:
+    """Release every held owner claim whose launch is no longer current (D5, D19).
+
+    This is the only release site besides control's ``owner_unavailable`` and
+    ``finalized`` releases, and `commit_state` runs it just before every
+    committed write, so each writer releases in the same write that records its
+    transition. It does nothing when ``admission`` is ``None`` or its route is
+    ``direct``. Otherwise each held owner claim, in list order, whose holder is
+    not its issue's current ``active`` launch is released with the first
+    matching event: issue delivery complete -> ``finished``; the holder's record
+    has more launches than the holder's launch ordinal -> ``superseded``; the
+    record is terminal (merged, stopped, failed, completed) -> ``finished``;
+    ``suspended`` on ``host_capacity`` -> ``launch_refused``; any other
+    suspension -> ``suspended``; ``handed_off`` -> ``handed_off``. Anything else
+    raises. Returns whether it released anything.
+    """
+    admission = state["admission"]
+    if admission is None or admission["route"] == _host_admission().DIRECT_ROUTE:
+        return False
+    runtime = _delivery()
+    released = False
+    for claim in admission["claims"]:
+        if claim["holder"] == CONTROLLER_HOLDER or claim["released_at"] is not None:
+            continue
+        issue = parse_claim_holder(claim["holder"])[0]
+        issue_state = state["issues"].get(str(issue))
+        if (issue_state is not None
+                and current_launch_id(runtime, issue, issue_state) == claim["holder"]):
+            continue
+        event = _release_event(runtime, issue_state, claim["holder"])
+        release_claim(admission, claim, event=event, at=at)
+        released = True
+    return released
 
 
 def resolve_repo_root(repo_root_value: str) -> Path:
@@ -924,6 +1146,18 @@ def atomic_write_state(run_dir: Path, state_path: Path, state: dict[str, Any]) -
         raise
 
 
+def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
+                 run_id: str) -> None:
+    """The one write boundary every committed state write passes (D5).
+
+    It settles the admission block at the commit's ``updated_at``, validates
+    the whole state, then publishes it atomically, in that order.
+    """
+    settle_admission(state, at=state["updated_at"])
+    validate_state(state, run_id=run_id)
+    atomic_write_state(run_dir, state_path, state)
+
+
 Mutation = Callable[[dict[str, Any] | None], tuple[Any, bool]]
 
 
@@ -959,8 +1193,7 @@ def transact(
                     state = result
                 else:
                     raise WorkflowError("internal error: changed transaction has no state")
-            validate_state(state, run_id=run_id)
-            atomic_write_state(run_dir, state_path, state)
+            commit_state(run_dir, state_path, state, run_id=run_id)
         return result
 
 
@@ -1000,6 +1233,7 @@ def new_run_state(
         "updated_at": now,
         "prior_run": prior_run,
         "issues": issues,
+        "admission": None,
     }
 
 
@@ -1387,6 +1621,16 @@ def validate_control_request(value):
         if issue in seen_issues:
             raise WorkflowError("duplicate control issue")
         seen_issues.add(issue)
+
+    # `direct` is single-owner control: one issue at `max_parallel` 1 and no
+    # declaration read; any other route is a declared route name (D3, D9).
+    library = _host_admission()
+    route = request["host_route"]
+    if not isinstance(route, str) or not (
+            route == library.DIRECT_ROUTE or library.ROUTE_NAME_PATTERN.fullmatch(route)):
+        raise WorkflowError("invalid control host_route")
+    if route == library.DIRECT_ROUTE and (len(issues) != 1 or request["max_parallel"] != 1):
+        raise WorkflowError("the direct host route controls exactly one issue at max_parallel 1")
 
     tracker = request["tracker"]
     if not isinstance(tracker, list):
@@ -2028,6 +2272,23 @@ def command_control(args: argparse.Namespace) -> int:
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
     tracker_by_issue = {item["issue"]: item for item in request["tracker"]}
     worktree_by_issue = {item["issue"]: item for item in request["worktrees"]}
+    library = _host_admission()
+    route = request["host_route"]
+    direct = route == library.DIRECT_ROUTE
+    # A supported route's slots come from the declaration, read once before the
+    # transaction; any other verdict refuses the sweep with nothing written (D9).
+    declared_slots: int | None = None
+    if not direct:
+        verdict = route_verdict(route)
+        if verdict["support"] != "supported":
+            raise WorkflowError(
+                f"host route {route!r} is unsupported: {verdict['reason_code']}")
+        declared_slots = verdict["agent_slots"]
+    role_set_size = sum(library.OWNER_ROLE_SET.values())
+
+    def new_claim(holder: str, roles: Any) -> dict[str, Any]:
+        return {"holder": holder, "roles": dict(roles), "acquired_at": now,
+                "released_at": None, "release_event": None, "release_seq": None}
 
     def control(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         assert state is not None
@@ -2045,7 +2306,58 @@ def command_control(args: argparse.Namespace) -> int:
             for issue in request["issues"]
         }
 
-        unavailable = _call(None, runtime.validate_control_custody, state, request)
+        unavailable, refused = _call(
+            None, runtime.validate_control_custody, state, request)
+
+        # Bind the run's route at its first interface-3 sweep and adopt every
+        # live custody it already holds, even beyond the declaration (D3, D11).
+        admission_changed = False
+        if state["admission"] is None:
+            state["admission"] = {"route": route, "releases": 0, "claims": []}
+            admission_changed = True
+            if not direct:
+                for issue_state in state["issues"].values():
+                    holder = current_launch_id(runtime, issue_state["issue"], issue_state)
+                    if holder is not None:
+                        state["admission"]["claims"].append(
+                            new_claim(holder, library.OWNER_ROLE_SET))
+        elif state["admission"]["route"] != route:
+            raise WorkflowError(
+                f"control host route {route!r} does not match the run's bound route "
+                f"{state['admission']['route']!r}")
+        admission = state["admission"]
+        # Park every refused launch on `host_capacity` before the settle below
+        # releases its claim `launch_refused` — or `finished`, when the refusal
+        # trips the anti-zombie bound (D7, D19, D22).
+        if direct and any(item["state"] == "launch_refused" for item in request["owners"]):
+            raise WorkflowError("launch_refused is not applicable under the direct route")
+        for issue, kind, ordinal, launch in sorted(refused):
+            issue_state = state["issues"][str(issue)]
+            custody, record = _call(None, runtime.current_custody, issue, issue_state)
+            if (custody is None or record is None or record["state"] != "active"
+                    or (custody["kind"], custody.get("attempt", custody.get("remainder")),
+                        custody["launch"]) != (kind, ordinal, launch)
+                    or not any(claim["holder"] == custody["action_id"]
+                               and claim["released_at"] is None
+                               for claim in admission["claims"])):
+                raise WorkflowError("launch_refused is not applicable")
+            if kind == "implementation":
+                if not suspend_attempt(record, blocked_on="host_capacity", now=now):
+                    issue_state["outcome"] = copy.deepcopy(record["result"])
+            else:
+                _call(None, runtime.suspend_remainder, issue_state, record, now,
+                      blocked_on="host_capacity")
+            admission_changed = True
+        if not direct:
+            releases_before = admission["releases"]
+            settle_admission(state, at=now)
+            for claim in admission["claims"]:
+                if claim["holder"] == CONTROLLER_HOLDER or claim["released_at"] is not None:
+                    continue
+                issue, kind, ordinal, launch = parse_claim_holder(claim["holder"])
+                if (issue, kind, ordinal, launch) in unavailable:
+                    release_claim(admission, claim, event="owner_unavailable", at=now)
+            admission_changed = admission_changed or admission["releases"] != releases_before
 
         analysis: dict[int, dict[str, Any]] = {}
         for issue in request["issues"]:
@@ -2067,6 +2379,75 @@ def command_control(args: argparse.Namespace) -> int:
 
         occupied = runtime.occupied_count(state, at_time=now, unavailable=unavailable)
         capacity = max(0, request["max_parallel"] - occupied)
+
+        # The controller's own role, then every held claim still occupying a
+        # live launch, come off the declared slots before any lane admits (D4).
+        controller_claim = None
+        new_controller = False
+        available = 0
+        if not direct:
+            controller_claim = next(
+                (claim for claim in admission["claims"]
+                 if claim["holder"] == CONTROLLER_HOLDER and claim["released_at"] is None),
+                None)
+            if controller_claim is None:
+                controller_claim = new_claim(CONTROLLER_HOLDER, library.CONTROLLER_ROLES)
+                admission["claims"].append(controller_claim)
+                new_controller = True
+            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
+            available = declared_slots - sum(
+                sum(claim["roles"].values()) for claim in admission["claims"]
+                if claim["released_at"] is None
+                and (claim["holder"] == CONTROLLER_HOLDER or claim["holder"] in live))
+        waiting: set[int] = set()
+        acquired = False
+
+        def slot_withheld(issue: int) -> bool:
+            """Whether no whole role set is free; the skipped issue then waits (D21)."""
+            if direct or available >= role_set_size:
+                return False
+            waiting.add(issue)
+            return True
+
+        def refusal_gated(issue: int) -> bool:
+            """Whether a `host_capacity` custody still awaits a later release (D7, D26).
+
+            It waits until some other claim is released after the
+            `launch_refused` claim naming its current launch, by any event but
+            `launch_refused`: another custody's refusal frees no capacity, so two
+            refused owners never wake each other (D31).
+            """
+            issue_state = state["issues"].get(str(issue))
+            custody, record = runtime.current_custody(issue, issue_state)
+            if (record is None or record["state"] != "suspended"
+                    or record["blocked_on"] != "host_capacity"):
+                return False
+            refused_claim = next(
+                (claim for claim in admission["claims"]
+                 if claim["holder"] == custody["action_id"]
+                 and claim["release_event"] == "launch_refused"), None)
+            if refused_claim is None:
+                raise WorkflowError("internal error: refused launch holds no refused claim")
+            if any(claim["release_event"] not in (None, "launch_refused")
+                   and claim["release_seq"] > refused_claim["release_seq"]
+                   for claim in admission["claims"]):
+                return False
+            waiting.add(issue)
+            return True
+
+        def acquire(issue: int) -> None:
+            """Claim the role set of the launch this dispatch created, once (D21)."""
+            nonlocal available, acquired
+            if direct:
+                return
+            custody, record = runtime.current_custody(issue, planned[issue]["issue_state"])
+            if custody is None or record is None or record["state"] != "active":
+                return
+            if any(claim["holder"] == custody["action_id"] for claim in admission["claims"]):
+                return
+            admission["claims"].append(new_claim(custody["action_id"], library.OWNER_ROLE_SET))
+            available -= role_set_size
+            acquired = True
 
         planned: dict[int, dict[str, Any]] = {}
         proposal_order: list[int] = []
@@ -2120,10 +2501,13 @@ def command_control(args: argparse.Namespace) -> int:
                     contract=issue_state["delivery"]["contract"], new_run=False)
             ):
                 continue
+            if slot_withheld(issue):
+                continue
             result = apply_policy(issue, True)
             if result.get("custody_kind") != "remainder":
                 continue
             proposal_order.append(issue)
+            acquire(issue)
             capacity -= 1
 
         for issue in request["issues"]:
@@ -2131,9 +2515,12 @@ def command_control(args: argparse.Namespace) -> int:
                 continue
             if analysis[issue]["changed"] and capacity <= 0:
                 continue
+            if analysis[issue]["changed"] and slot_withheld(issue):
+                continue
             apply_policy(issue, True)
             proposal_order.append(issue)
             if analysis[issue]["changed"]:
+                acquire(issue)
                 capacity -= 1
 
         for issue in request["issues"]:
@@ -2151,6 +2538,8 @@ def command_control(args: argparse.Namespace) -> int:
                 # and the next sweep resumes it. A handoff, and any worktree
                 # observed as absent or mismatched, stays a refusal (per D9).
                 continue
+            if refusal_gated(issue) or slot_withheld(issue):
+                continue
             result = apply_policy(issue, True)
             if result["operation"] == "observe":
                 raise WorkflowError(
@@ -2159,6 +2548,7 @@ def command_control(args: argparse.Namespace) -> int:
             if result["operation"] == "contract":
                 continue
             proposal_order.append(issue)
+            acquire(issue)
             capacity -= 1
 
         for issue in request["issues"]:
@@ -2168,6 +2558,8 @@ def command_control(args: argparse.Namespace) -> int:
                 proposal_order.append(issue)
             elif desired == "retry":
                 if capacity > 0:
+                    if slot_withheld(issue):
+                        continue
                     result = apply_policy(issue, True)
                     if result["operation"] == "observe":
                         raise WorkflowError(
@@ -2176,6 +2568,7 @@ def command_control(args: argparse.Namespace) -> int:
                     if result["operation"] == "contract":
                         continue
                     proposal_order.append(issue)
+                    acquire(issue)
                     capacity -= 1
             elif analysis[issue]["expired"] and issue not in planned:
                 # The resume pass may already have dispatched this reap.
@@ -2188,6 +2581,8 @@ def command_control(args: argparse.Namespace) -> int:
         for issue in request["issues"]:
             if capacity <= 0 or analysis[issue]["desired"] != "spawn":
                 continue
+            if slot_withheld(issue):
+                continue
             result = apply_policy(issue, True)
             if result["operation"] == "observe":
                 raise WorkflowError(
@@ -2196,6 +2591,7 @@ def command_control(args: argparse.Namespace) -> int:
             if result["operation"] == "contract":
                 continue
             proposal_order.append(issue)
+            acquire(issue)
             capacity -= 1
 
         dispatch_results = [
@@ -2321,10 +2717,29 @@ def command_control(args: argparse.Namespace) -> int:
             "delivery transition refused", runtime.control_transitions,
             state, request, installing)
 
-        changed = (reconciled or delivery_changed
+        next_deadline=runtime.next_deadline(state,request["issues"])
+        if not direct:
+            # Release every claim whose launch this sweep ended; a sweep ending
+            # in `finalize` keeps no controller claim (D19, D20).
+            releases_before = admission["releases"]
+            settle_admission(state, at=now)
+            if next_deadline is None:
+                if new_controller:
+                    admission["claims"].remove(controller_claim)
+                    new_controller = False
+                else:
+                    release_claim(admission, controller_claim, event="finalized", at=now)
+            admission_changed = (admission_changed or acquired or new_controller
+                                 or admission["releases"] != releases_before)
+
+        changed = (reconciled or delivery_changed or admission_changed
                    or any(result["changed"] for result in planned.values()))
         if changed:
             state["updated_at"] = now
+
+        def contract_missing(issue: int) -> bool:
+            issue_state = state["issues"].get(str(issue))
+            return issue_state is None or issue_state["delivery"]["contract"] is None
 
         summaries = [
             control_summary(
@@ -2333,12 +2748,12 @@ def command_control(args: argparse.Namespace) -> int:
                 issue_state=state["issues"].get(str(issue)),
                 reduction=reductions.get(issue),
                 contract_required=(
-                    issue in planned and planned[issue]["operation"] == "contract"
+                    (issue in planned and planned[issue]["operation"] == "contract")
+                    or (issue in waiting and contract_missing(issue))
                 ),
             )
             for issue in request["issues"]
         ]
-        next_deadline=runtime.next_deadline(state,request["issues"])
 
         # A wait must name the instant it ends. With no deadline armed there is
         # nothing left for this sweep to wake up for, so control renders the
@@ -2355,6 +2770,21 @@ def command_control(args: argparse.Namespace) -> int:
         runtime.decorate_control(
             state, deltas, actions, reductions, CONTROL_DISPATCH_KINDS,
             ledger_repo_root=str(resolve_repo_root(args.repo_root)))
+        reserved = {role: 0 for role in library.ROLE_NAMES}
+        report: dict[str, Any] = {
+            "route": route, "declared_slots": None, "reserved": reserved,
+            "available": None, "waiting": []}
+        if not direct:
+            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
+            for claim in admission["claims"]:
+                if claim["released_at"] is None and (
+                        claim["holder"] == CONTROLLER_HOLDER or claim["holder"] in live):
+                    for role, count in claim["roles"].items():
+                        reserved[role] += count
+            report.update(
+                declared_slots=declared_slots,
+                available=max(0, declared_slots - sum(reserved.values())),
+                waiting=[issue for issue in request["issues"] if issue in waiting])
         return {
             "interface_version": CONTROL_INTERFACE_VERSION,
             "run_id": args.run_id,
@@ -2363,6 +2793,7 @@ def command_control(args: argparse.Namespace) -> int:
             "deltas": deltas,
             "actions": actions,
             "next_deadline": next_deadline,
+            "admission": report,
         }, changed
 
     response = transact(args.repo_root, args.run_id, control,
@@ -2634,8 +3065,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         assert state is not None
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        validate_state(state, run_id=run_id)
-                        atomic_write_state(run_dir, state_path, state)
+                        commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_observe(
                         issue,
                         run_id if selected is not None and not request["new_run"]
@@ -2652,8 +3082,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
-                    validate_state(state, run_id=run_id)
-                    atomic_write_state(run_dir, state_path, state)
+                    commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="failed", blockers=[],
@@ -2664,8 +3093,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         assert state is not None
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        validate_state(state, run_id=run_id)
-                        atomic_write_state(run_dir, state_path, state)
+                        commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_terminal(
                         issue=issue,
                         run_id=(run_id if state is not None else None),
@@ -2683,8 +3111,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     if policy["changed"]:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        validate_state(state, run_id=run_id)
-                        atomic_write_state(run_dir, state_path, state)
+                        commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason=policy["attempt"]["result"]["state"],
@@ -2694,8 +3121,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
-                    validate_state(state, run_id=run_id)
-                    atomic_write_state(run_dir, state_path, state)
+                    commit_state(run_dir, state_path, state, run_id=run_id)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="merged", blockers=[],
@@ -2729,9 +3155,10 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         state, issue=issue, request=request, policy=policy,
                         ledger_repo_root=str(repo_root), run_id=run_id,
                         reentry=reentry_command(issue))
-                    validate_state(state, run_id=run_id)
                     if changed:
-                        atomic_write_state(run_dir, state_path, state)
+                        commit_state(run_dir, state_path, state, run_id=run_id)
+                    else:
+                        validate_state(state, run_id=run_id)
                 else:
                     raise WorkflowError("invalid one-issue policy operation")
 
@@ -3047,7 +3474,7 @@ def command_check_launch(args: argparse.Namespace) -> int:
         raw_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkflowError("invalid workflow state") from error
-    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2}:
+    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3}:
         candidate = _call("invalid legacy workflow state",
             _delivery().migrate, raw_state, migration_contracts={})
         validate_state(candidate, run_id=args.run_id)
@@ -3208,6 +3635,43 @@ def command_build_delivery(args: argparse.Namespace) -> int:
     return 0
 
 
+def route_verdict(route: str) -> dict[str, Any]:
+    """The typed supported/unsupported answer for `route` (D9).
+
+    Every refusal is an answer, not an error: a missing or invalid
+    declaration, an undeclared route and a route declared unsupported each
+    carry their closed reason code and the one alternative entry path.
+    """
+    library = _host_admission()
+
+    def unsupported(reason_code: str) -> dict[str, Any]:
+        return {"interface_version": 1, "kind": "host_route", "route": route,
+                "support": "unsupported", "agent_slots": None,
+                "reason_code": reason_code,
+                "alternative": library.UNSUPPORTED_ALTERNATIVE}
+
+    try:
+        declaration = library.load_declaration()
+    except library.DeclarationError as error:
+        return unsupported(error.reason_code)
+    entry = declaration["routes"].get(route)
+    if entry is None:
+        return unsupported("route_undeclared")
+    if entry["support"] == "unsupported":
+        return unsupported("declared_unsupported")
+    return {"interface_version": 1, "kind": "host_route", "route": route,
+            "support": "supported", "agent_slots": entry["agent_slots"],
+            "reason_code": None, "alternative": None}
+
+
+def command_host_route(args: argparse.Namespace) -> int:
+    library = _host_admission()
+    if (not library.ROUTE_NAME_PATTERN.fullmatch(args.route)
+            or args.route == library.DIRECT_ROUTE):
+        raise WorkflowError(f"invalid route: {args.route!r}")
+    print_json(route_verdict(args.route))
+    return 0
+
 def print_json(value: Any) -> None:
     json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
@@ -3308,6 +3772,10 @@ def build_parser() -> argparse.ArgumentParser:
     current_launch.add_argument("--run-id", required=True)
     current_launch.add_argument("--action-id", required=True)
     current_launch.set_defaults(handler=command_check_launch)
+
+    host_route = subparsers.add_parser("host-route")
+    host_route.add_argument("--route", required=True)
+    host_route.set_defaults(handler=command_host_route)
 
     return parser
 

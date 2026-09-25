@@ -170,15 +170,16 @@ def _finish_response(value: Any) -> dict[str, Any]:
 
 
 def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
-    value = _object(value, _members("interface_version run_id now summaries deltas actions next_deadline")); _v2(value); _string(value["run_id"], "control run"); _utc(value["now"], "control now")
+    value = _object(value, _members("interface_version run_id now summaries deltas actions next_deadline admission")); _string(value["run_id"], "control run"); _utc(value["now"], "control now")
+    if type(value["interface_version"]) is not int or value["interface_version"] != 3: _reject()
     if value["next_deadline"] is not None: _utc(value["next_deadline"], "next deadline")
     if not all(isinstance(value[name], list) for name in ("summaries", "deltas", "actions")): _reject()
-    issues = set(); missing_contracts = set()
+    issues = set(); missing_contracts = set(); order = []
     for item in value["summaries"]:
         item = _object(item, _members("issue state custody owner worktree deadline_at blocked_on blockers result contract_digest pending_stage_ids requirements"))
         issue = _integer(item["issue"], "summary issue", minimum=1)
         if issue in issues or item["state"] not in {"queued", "blocked", "fogged", "active", "handed_off", "suspended", "merged", "stopped", "failed", "closed"}: _reject()
-        issues.add(issue)
+        issues.add(issue); order.append(issue)
         if item["custody"] is not None: validate_custody_ref(item["custody"], issue=issue)
         for name in ("owner", "worktree", "deadline_at", "blocked_on", "contract_digest"):
             if item[name] is not None: (_digest if name == "contract_digest" else _string)(item[name], name)
@@ -204,8 +205,42 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
         elif item["kind"] == "delivery_remainder": _remainder(item, notes_max)
         else: _reject()
     if any(action.get("issue") in missing_contracts for action in value["actions"]): _reject()
+    waiting = _admission_report(value["admission"], order)
+    if any(action.get("issue") in waiting for action in value["actions"]): _reject()
     return value
 
+
+def _admission_report(value: Any, order: list[int]) -> set[int]:
+    """The control capacity report (D8); returns its waiting issues."""
+    value = _object(value, _members("route declared_slots reserved available waiting"), "admission report")
+    _string(value["route"], "admission route")
+    reserved = _object(value["reserved"], _members("controller owner worker reviewer"), "reserved roles")
+    for count in reserved.values(): _integer(count, "reserved role", minimum=0)
+    if not isinstance(value["waiting"], list): _reject()
+    if value["route"] == "direct":
+        if (value["declared_slots"] is not None or value["available"] is not None
+                or any(reserved.values()) or value["waiting"]): _reject()
+        return set()
+    _integer(value["declared_slots"], "declared slots", minimum=4); _integer(value["available"], "available slots", minimum=0)
+    waiting = value["waiting"]
+    for issue in waiting: _integer(issue, "waiting issue", minimum=1)
+    if len(set(waiting)) != len(waiting) or waiting != [issue for issue in order if issue in waiting]: _reject()
+    return set(waiting)
+
+
+def _host_route(value: Any) -> dict[str, Any]:
+    _object(value, _members("interface_version kind route support agent_slots reason_code alternative"), "host route")
+    if type(value["interface_version"]) is not int or value["interface_version"] != 1: _reject()
+    _string(value["route"], "host route")
+    if value["support"] == "supported":
+        _integer(value["agent_slots"], "agent slots", minimum=4)
+        if value["reason_code"] is not None or value["alternative"] is not None: _reject()
+    elif value["support"] == "unsupported":
+        if value["agent_slots"] is not None: _reject()
+        if value["reason_code"] not in {"declared_unsupported", "route_undeclared", "declaration_missing", "declaration_invalid"}: _reject()
+        if value["alternative"] != "/from-issue <issue> --auto": _reject()
+    else: _reject()
+    return value
 
 def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if not isinstance(value, dict): _reject()
@@ -240,6 +275,7 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if value.get("kind") in {"delivery_checkpointed", "delivery_stalled"}: return _checkpoint_response(value, notes_max)
     if value.get("kind") in {"delivery_complete", "terminal_failed"}: return _finish_response(value)
     if "kind" not in value: return _control_response(value, notes_max)
+    if value.get("kind") == "host_route": return _host_route(value)
     _reject()
 
 
