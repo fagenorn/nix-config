@@ -1768,6 +1768,66 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "deadline_at": "2026-08-19T12:36:00Z",
         })
 
+    def test_control_passes_over_a_live_remainder_and_spawns_with_the_free_slot(self):
+        # A live owner's active, unexpired delivery remainder is analysed as
+        # desired `resume` but plans `idle`. The resume pass must pass over it
+        # the way it passes over `contract`: no delta, no action, and no slot
+        # spent, since `occupied_count` already charged the remainder its own.
+        model, fixtures = self.delivery_model, self.delivery_fixtures
+        self.init_run(now="2026-09-21T00:00:00Z")
+        paths = {i: os.path.abspath(self.root / f"wt-{i}") for i in (151, 152)}
+        self.control(
+            now="2026-09-21T00:00:00Z", issues=[151], max_parallel=2,
+            tracker=[self.tracker_fact(151)],
+            worktrees=[self.worktree_fact(
+                151, candidate={"path": paths[151], "state": "absent"})],
+        )
+        contract, _ = self.delivery_contract(151)
+        digest = model.canonical_digest(contract)
+        historical = {**self.merged_result(151), "state": "failed", "pr_url": None,
+                      "merge_sha": None, "issue_closed": False, "notes": "failed"}
+        summary = {
+            "interface_version": 2, "issue": 151, "state": "terminal_failed",
+            "custody": fixtures.custody(), "historical_owner_result": historical,
+            "delivery_contract_digest": digest,
+            "delivery_observations": [fixtures.observation(
+                model, contract, "selected_output",
+                {"selected_output": fixtures.selection(model, digest)})],
+            "authority_observations": [], "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": "failed",
+        }
+        summary_path = self.root / "summary-151.json"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        self.run_cli("finish", "--repo-root", self.root, "--run-id", self.run_id,
+                     "--summary-file", summary_path, "--now", "2026-09-21T00:01:00Z")
+        remainders = self.read_state()["issues"]["151"]["delivery_remainders"]
+        self.assertEqual([(item["remainder"], item["state"], len(item["launches"]))
+                          for item in remainders], [(1, "active", 1)])
+        live = copy.deepcopy(remainders[0])
+
+        response = self.control(
+            now="2026-09-21T00:02:00Z", issues=[151, 152], max_parallel=2,
+            tracker=[self.tracker_fact(151), self.tracker_fact(152)],
+            worktrees=[
+                self.worktree_fact(151, recorded={
+                    "path": paths[151], "state": "matching_issue_branch"}),
+                self.worktree_fact(152, candidate={
+                    "path": paths[152], "state": "absent"}),
+            ],
+        )
+
+        self.assert_control_response_shape(response)
+        self.assertEqual(response["deltas"], [
+            {"issue": 152, "attempt": 1, "kind": "spawned", "state": "active"},
+        ])
+        self.assertEqual([(action["kind"], action.get("issue"))
+                          for action in response["actions"]],
+                         [("spawn", 152), ("wait", None)])
+        state = self.read_state()["issues"]
+        self.assertEqual(state["151"]["delivery_remainders"], [live])
+        self.assertEqual([(item["attempt"], item["state"])
+                          for item in state["152"]["attempts"]], [(1, "active")])
+
     def test_control_ignores_consumed_owner_event_and_rejects_future_event_atomically(self):
         self.init_run(now="2026-08-19T12:00:00Z")
         path = str(self.root / "wt-47")

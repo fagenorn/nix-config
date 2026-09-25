@@ -2156,7 +2156,11 @@ def command_control(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     "resume control action requires a matching recorded worktree observation"
                 )
-            if result["operation"] == "contract":
+            # A live owner's active, unexpired remainder is analysed as desired
+            # `resume` but plans `idle`: it already holds its slot and needs no
+            # dispatch, so it takes neither a proposal nor capacity, and the
+            # {spawn, resume, retry} delta map below never sees it.
+            if result["operation"] in {"contract", "idle"}:
                 continue
             proposal_order.append(issue)
             capacity -= 1
