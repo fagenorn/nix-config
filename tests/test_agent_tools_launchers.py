@@ -28,6 +28,9 @@ LAUNCHER = re.compile(
 MARKER = "HOSTILE agent_tools IMPORTED"
 HOSTILE_EXIT = 97
 TIMEOUT_SECONDS = 60
+# The commands #175 and #179 accepted as launchers: a floor, not the full set,
+# which the command table in lib/agent-tools.nix owns (#175 D8).
+LAUNCHER_FLOOR = ("agent-evidence", "agent-model-matrix", "context-map-lint", "diff-scope")
 # Commands without an argparse parser answer `--help` as misuse, with the
 # module docstring on stderr and exit 2. Their CLI is promised unchanged
 # (parent D15), so the probe pins that answer by a line only the module's own
@@ -89,8 +92,11 @@ class AgentToolsLauncherTest(unittest.TestCase):
         return dict(os.environ, PYTHONPATH=str(self.hostile),
                     NIX_PYTHONPATH=str(self.hostile))
 
-    def test_the_command_table_generates_agent_evidence(self):
-        self.assertIn("agent-evidence", self.launchers())
+    def test_the_command_table_generates_each_deployed_command(self):
+        launchers = self.launchers()
+        for name in LAUNCHER_FLOOR:
+            with self.subTest(launcher=name):
+                self.assertIn(name, launchers)
 
     def test_each_launcher_is_named_for_its_module(self):
         for name, (_python, module) in self.launchers().items():
