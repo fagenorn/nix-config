@@ -1,9 +1,6 @@
 import json
-from pathlib import Path
-import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_model_drift_test_support import (
+from .agent_model_drift_test_support import (
     DriftCliCase, baseline_value, coverage, record_value, seal_baseline,
     seal_record)
 

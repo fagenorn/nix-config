@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -8,9 +7,10 @@ import sys
 import tempfile
 import unittest
 
+from agent_tools import agent_model_matrix
+
 
 REPO_ROOT = Path(__file__).parents[4]
-SCRIPT = REPO_ROOT / "home/common/agent-skills/scripts/agent-model-matrix.py"
 MATRIX = REPO_ROOT / "home/common/agent-skills/model-matrix.json"
 AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 
@@ -289,15 +289,6 @@ EXPECTED_SHIPPING_SITES = {
 }
 
 
-def load_module():
-    spec = importlib.util.spec_from_file_location("agent_model_matrix", SCRIPT)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot import {SCRIPT}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def frontmatter(path: Path) -> dict[str, str]:
     lines = path.read_text(encoding="utf-8").splitlines()
     if not lines or lines[0] != "---":
@@ -328,7 +319,7 @@ def write_fixture(root: Path, data: dict) -> None:
 
 class AgentModelMatrixTest(unittest.TestCase):
     def test_executable_subagent_type_mapping_is_exhaustive(self):
-        module = load_module()
+        module = agent_model_matrix
         self.assertEqual(module.ALLOWED_SUBAGENT_TYPES, EXPECTED_SUBAGENT_TYPES)
         self.assertEqual(set(module.ALLOWED_SUBAGENT_TYPES), set(EXPECTED_TIERS))
 
@@ -384,7 +375,7 @@ class AgentModelMatrixTest(unittest.TestCase):
             self.assertEqual(metadata["effort"], data["roles"][role]["effort"], path)
 
     def test_repository_contract_validates(self):
-        module = load_module()
+        module = agent_model_matrix
         self.assertEqual(module.validate(REPO_ROOT), [])
 
     def test_owner_design_and_research_dispatches_select_exact_tiers(self):
@@ -456,7 +447,7 @@ class AgentModelMatrixTest(unittest.TestCase):
             self.assertIn("Agent(", site["call"], site_id)
 
     def test_representative_trace_covers_every_issue_delivery_workflow_with_safe_rereviews(self):
-        module = load_module()
+        module = agent_model_matrix
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         events = data["scenarios"]["representative"]
         trace = module.trace(REPO_ROOT, "representative")
@@ -519,7 +510,7 @@ class AgentModelMatrixTest(unittest.TestCase):
             )
 
     def test_reviewer_lite_cannot_be_a_first_pass_reviewer(self):
-        module = load_module()
+        module = agent_model_matrix
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = json.loads(MATRIX.read_text(encoding="utf-8"))
@@ -554,7 +545,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         )
 
     def test_reviewer_lite_lane_verification_is_legal_without_prior_full_review(self):
-        module = load_module()
+        module = agent_model_matrix
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         sites = {site["id"]: site for site in data["dispatch_sites"]}
         lane_site = sites["sdd-lane-task-verification"]
@@ -578,7 +569,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertEqual(module.validate(REPO_ROOT), [])
 
     def test_reviewer_lite_partial_lane_requirements_fail(self):
-        module = load_module()
+        module = agent_model_matrix
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = json.loads(MATRIX.read_text(encoding="utf-8"))
@@ -613,7 +604,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         )
 
     def test_unmarked_agent_call_in_manifested_skill_fails(self):
-        module = load_module()
+        module = agent_model_matrix
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = json.loads(MATRIX.read_text(encoding="utf-8"))
@@ -667,7 +658,7 @@ class AgentModelMatrixTest(unittest.TestCase):
             write_fixture(root, data)
 
             result = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate", "--root", str(root)],
+                [sys.executable, "-m", "agent_tools.agent_model_matrix", "validate", "--root", str(root)],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -678,7 +669,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertIn("unknown role 'not-a-role'", result.stderr)
 
     def test_omitted_agent_model_fails(self):
-        module = load_module()
+        module = agent_model_matrix
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             matrix_path = root / "home/common/agent-skills/model-matrix.json"
@@ -697,7 +688,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         )
 
     def test_malformed_known_role_returns_errors_instead_of_crashing(self):
-        module = load_module()
+        module = agent_model_matrix
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = json.loads(MATRIX.read_text(encoding="utf-8"))
@@ -712,7 +703,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         )
 
     def test_malformed_reviewer_lite_requires_returns_errors_instead_of_crashing(self):
-        module = load_module()
+        module = agent_model_matrix
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = json.loads(MATRIX.read_text(encoding="utf-8"))
@@ -751,7 +742,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         )
 
     def test_duplicate_dispatch_id_marker_mismatch_and_reviewer_lite_misuse_fail(self):
-        module = load_module()
+        module = agent_model_matrix
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = json.loads(MATRIX.read_text(encoding="utf-8"))
@@ -790,7 +781,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertIn("does not match role 'reviewer'", joined)
 
     def test_marker_and_call_selection_must_match_the_dispatch_row(self):
-        module = load_module()
+        module = agent_model_matrix
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = json.loads(MATRIX.read_text(encoding="utf-8"))
@@ -826,7 +817,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertIn("call effort 'medium' must match dispatch row 'high'", joined)
 
     def test_agent_call_requires_one_known_role_compatible_subagent_type(self):
-        module = load_module()
+        module = agent_model_matrix
         cases = {
             "missing": (
                 'Agent(model="opus", effort="high") performs the review.',
@@ -877,7 +868,7 @@ class AgentModelMatrixTest(unittest.TestCase):
             self.assertIn(expected_error, "\n".join(errors), name)
 
     def test_trace_is_deterministic_and_rejects_unknown_scenario(self):
-        module = load_module()
+        module = agent_model_matrix
         first = module.trace(REPO_ROOT, "sdd")
         second = module.trace(REPO_ROOT, "sdd")
         self.assertEqual(first, second)
@@ -893,7 +884,7 @@ class AgentModelMatrixTest(unittest.TestCase):
             module.trace(REPO_ROOT, "does-not-exist")
 
     def test_improve_codebase_architecture_trace_is_standalone(self):
-        module = load_module()
+        module = agent_model_matrix
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         expected_site = {
             "id": "improve-architecture-scan-owner",
@@ -913,6 +904,15 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertEqual(data["scenarios"]["improve-codebase-architecture"], [expected_event])
         self.assertEqual(module.trace(REPO_ROOT, "improve-codebase-architecture"), [{key: expected_event[key] for key in ("workflow", "dispatch", "role", "model", "effort")}])
         self.assertEqual({event["workflow"] for event in module.trace(REPO_ROOT, "representative")}, {"orchestration", "from-issue", "sdd", "shipping"})
+
+    def test_a_duplicate_matrix_key_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "home/common/agent-skills/model-matrix.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"schema_version": 1, "schema_version": 1}', encoding="utf-8")
+            errors = agent_model_matrix.validate(root)
+        self.assertIn("duplicate JSON key 'schema_version'", "\n".join(errors))
 
 
 if __name__ == "__main__":

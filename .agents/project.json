@@ -20,7 +20,7 @@
     "paths": {
       "artifacts": { "specs": ".claude/specs", "plans": ".claude/plans" },
       "context": [],
-      "standards": ["home/common/agent-skills/standards"],
+      "standards": ["home/common/agent-skills/standards", "docs/standards"],
       "architecture": ["CLAUDE.md"],
       "operations": [],
       "hints": [],

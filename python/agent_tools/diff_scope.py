@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Measure a git range in product terms: changed lines, changed files, churn ranking."""
 
 from __future__ import annotations

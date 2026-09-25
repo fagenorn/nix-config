@@ -1,32 +1,13 @@
-#!/usr/bin/env python3
 """Evaluate strict agent-cost records against a canonical-digest baseline."""
 from __future__ import annotations
 import argparse
-import importlib.machinery
-import importlib.util
 import json
 import sys
-from pathlib import Path
 
-_loader = importlib.machinery.SourceFileLoader("agent_model_drift_schema", str(Path(__file__).with_name("agent-model-drift-schema.py")))
-_spec = importlib.util.spec_from_loader(_loader.name, _loader)
-schema = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = schema
-_loader.exec_module(schema)
-
-_routing_loader = importlib.machinery.SourceFileLoader(
-    "agent_model_drift_routing", str(Path(__file__).with_name("agent-model-drift-routing.py")))
-_routing_spec = importlib.util.spec_from_loader(_routing_loader.name, _routing_loader)
-routing_logic = importlib.util.module_from_spec(_routing_spec)
-sys.modules[_routing_spec.name] = routing_logic
-_routing_loader.exec_module(routing_logic)
-
-_scheduling_loader = importlib.machinery.SourceFileLoader(
-    "agent_model_drift_scheduling", str(Path(__file__).with_name("agent-model-drift-scheduling.py")))
-_scheduling_spec = importlib.util.spec_from_loader(_scheduling_loader.name, _scheduling_loader)
-scheduling_logic = importlib.util.module_from_spec(_scheduling_spec)
-sys.modules[_scheduling_spec.name] = scheduling_logic
-_scheduling_loader.exec_module(scheduling_logic)
+from agent_tools import agent_model_drift_routing as routing_logic
+from agent_tools import agent_model_drift_scheduling as scheduling_logic
+from agent_tools import agent_model_drift_schema as schema
+from agent_tools.canonical import telemetry_digest
 
 
 def _finding(code):
@@ -98,7 +79,7 @@ def evaluate(record, baseline, matrix, matrix_digest, now):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(prog="agent-model-drift")
     parser.add_argument("--record", required=True)
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--matrix-root", required=True)
@@ -106,7 +87,7 @@ def main(argv=None):
     try:
         args = parser.parse_args(argv)
         matrix = schema.load_validated_matrix(args.matrix_root)
-        matrix_digest = schema.canonical_digest(matrix)
+        matrix_digest = telemetry_digest(matrix)
         record = schema.validate_record(schema.load_json(args.record))
         baseline = schema.validate_baseline(schema.load_json(args.baseline), matrix, matrix_digest)
         report = evaluate(record, baseline, matrix, matrix_digest, args.now)

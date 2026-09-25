@@ -173,7 +173,7 @@ after the em dash — never between the verdict word and the dash:
 **Correctness:** Findings — scoped to <N> of <M> product files; <1–2 sentence assessment>.
 ```
 
-`agent-evidence.py` `re.fullmatch`es this line, so the position is a contract rather
+`agent-evidence` `re.fullmatch`es this line, so the position is a contract rather
 than a style: `**Correctness:** Clean (scoped: 20 of 44) — …` fails validation. A
 scoped review may not use the bare `**Correctness:** Clean` form, because that form
 has nowhere to put the coverage. An unscoped or unmeasured review keeps today's
@@ -182,7 +182,7 @@ format exactly, bare form included.
 The coverage disclosure is mandatory on a scoped dispatch — state it in the packet as
 a requirement, not a preference; a scoped result that omits it does not satisfy this
 operation's output contract. Nothing downstream catches that omission:
-`agent-evidence.py` fullmatches the shape of the first line and never sees whether
+`agent-evidence` fullmatches the shape of the first line and never sees whether
 the packet was scoped, so a bare `**Correctness:** Clean` returned from a scoped
 dispatch validates. The obligation lives in the packet and nowhere else.
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Validate and trace the repository-owned pipeline agent model matrix."""
 
 from __future__ import annotations
@@ -9,6 +8,8 @@ from pathlib import Path
 import re
 import sys
 from typing import Any
+
+from agent_tools.canonical import reject_duplicate_keys
 
 
 MATRIX_PATH = Path("home/common/agent-skills/model-matrix.json")
@@ -65,15 +66,6 @@ WORKFLOW_FAMILIES = {
 EXPECTED_SCENARIOS = {*WORKFLOW_FAMILIES, "representative"}
 
 
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key {key!r}")
-        result[key] = value
-    return result
-
-
 def _repository_root(root: str | Path | None) -> Path:
     start = Path.cwd() if root is None else Path(root)
     start = start.resolve()
@@ -91,7 +83,7 @@ def load_matrix(root: str | Path | None = None) -> dict[str, Any]:
     path = repository / MATRIX_PATH
     try:
         data = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys
+            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys
         )
     except (OSError, json.JSONDecodeError, ValueError) as error:
         raise ValueError(f"cannot load {path}: {error}") from error
@@ -537,7 +529,7 @@ def trace(root: str | Path | None, scenario: str) -> list[dict[str, str]]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="agent-model-matrix", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate_parser = subparsers.add_parser("validate", help="validate the matrix")
     validate_parser.add_argument("--root", type=Path)

@@ -1,10 +1,9 @@
-#!/usr/bin/env python3
 """Adjudicate the issue #70 agent-efficiency gate over a trials manifest.
 
 The manifest (`kind: agent-gate-trials`) declares an identity block, an
 expansion declaration and a corpus of cases; every case cites, per stratum and
 per side, the `agent-cost-record` documents produced by
-`agent-costs.py --format json`. No measurement is read from the manifest: each
+`agent-costs --format json`. No measurement is read from the manifest: each
 cited record file is loaded, its `record_id` recomputed, and the cited run
 extracted by `run_id` (D10).
 
@@ -19,7 +18,6 @@ bundle to `unmeasured`.
 
 import argparse
 import copy
-import hashlib
 import json
 import math
 import statistics
@@ -27,6 +25,9 @@ import sys
 from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
+
+from agent_tools.canonical import (reject_duplicate_keys, reject_nonfinite_literal,
+                                   telemetry_digest)
 
 SCHEMA_VERSION = 1
 TRIALS_KIND = "agent-gate-trials"
@@ -93,12 +94,6 @@ class ManifestError(Exception):
         self.diagnostics = list(diagnostics)
 
 
-def canonical_digest(body):
-    """Contract: 'sha256:' + sha256 over canonical JSON of `body` (D9, D25)."""
-    payload = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 def is_int(value):
     """A JSON integer. A Python bool *is* an int and is never a count (D34)."""
     return isinstance(value, int) and not isinstance(value, bool)
@@ -115,23 +110,10 @@ def _add(diagnostics, code, path, message):
     diagnostics.append(Diagnostic(code, path, message))
 
 
-def _reject_duplicate_keys(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key {key!r}")
-        result[key] = value
-    return result
-
-
-def _reject_constant(name):
-    raise ValueError(f"JSON constant {name} is not allowed")
-
-
 def _parse(text):
     """Strict JSON: duplicate keys and the NaN/Infinity literals are both faults."""
-    return json.loads(text, object_pairs_hook=_reject_duplicate_keys,
-                      parse_constant=_reject_constant)
+    return json.loads(text, object_pairs_hook=reject_duplicate_keys,
+                      parse_constant=reject_nonfinite_literal)
 
 
 # --- Manifest document schema (D31) -----------------------------------------
@@ -507,7 +489,7 @@ def _resolve_trial(entry, stratum, path, loader, diagnostics):
         _add(diagnostics, "RECORD_UNREADABLE", record_path,
              "record document is not a JSON object")
         return None
-    digest = canonical_digest({key: value for key, value in document.items()
+    digest = telemetry_digest({key: value for key, value in document.items()
                                if key not in ("record_id", "generated_at")})
     if digest != document.get("record_id") or digest != entry.get("record_id"):
         _add(diagnostics, "RECORD_DIGEST_MISMATCH", record_path,
@@ -918,7 +900,7 @@ def assemble_bundle(manifest, evidence, diagnostics, override, state):
     if earned != body["state"]:
         raise BundleIntegrityError(
             f"the bundle's own evidence earns {earned!r}, not {body['state']!r}")
-    return dict(body, bundle_id=canonical_digest(body),
+    return dict(body, bundle_id=telemetry_digest(body),
                 generated_at=_generated_at())
 
 
@@ -926,7 +908,7 @@ def main(argv=None):
     """Contract: one bundle to stdout and an exit code — 0 approved, 3 rejected
     or unmeasured, 2 tool failure. A non-zero exit is never an approval (D16).
     """
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(prog="agent-gate-bundle", description=__doc__)
     ap.add_argument("--trials", required=True, metavar="FILE",
                     help="agent-gate-trials manifest citing emitted cost records")
     ap.add_argument("--override", metavar="REASON",
