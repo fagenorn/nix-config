@@ -63,8 +63,11 @@ Two changes close the gaps.
   worktree is absent, as a reserved candidate is, there is nothing to compare, and
   the contract is sealed from `--repo-root` alone.
 
-The owner's root therefore never supplies sealed policy. It can only block a
-build whose sealed policy it would contradict. This meets the issue's
+"The owner's resolution root" here means the contract's `worktree`. Custody
+binds every post-acquisition owner to that exact path, and each owner resolves
+at the checkout it operates in. So the input `worktree` is the owner's root, not
+a stand-in for it. The owner's root never supplies sealed policy. It can only
+block a build whose sealed policy it would contradict. This meets the issue's
 acceptance arm "the builder refuses when the two roots' policy differs"
 (per D3, D4).
 
@@ -128,7 +131,8 @@ still takes no lock, reads no ledger, reads no clock and writes nothing.
 ### 3. Sealed-policy comparison (per D4, D5)
 
 The build module gains one authoritative home for the sealed members: an
-ordered table of the seven (label, snapshot path, type) entries, `project.id`,
+ordered table of seven entries, each a (provenance key, snapshot path, type)
+triple. The snapshot paths are `project.id`,
 `bindings.tracker.kind`, `bindings.tracker.repo_slug`,
 `bindings.vcs.branch_pattern`, `bindings.vcs.worktree.prefix`,
 `bindings.vcs.integration_branch` and `bindings.vcs.merge.delete_branch`, plus a
@@ -137,15 +141,18 @@ missing/mistyped refusals. Contract derivation, the provenance digest's
 `policy` object and the comparison all read that table, so the member list stops
 being written out twice.
 
-`DeliveryBuilder` gains a pure method, forwarded unchanged by `DeliveryRuntime`,
-that takes the `repo-root` snapshot and the `worktree` snapshot. It returns
-nothing when the seven values are equal, compared by value and type. Otherwise
-it refuses, naming the differing snapshot paths in table order:
+`DeliveryBuilder` gains a pure method, `check_worktree_policy(repo_root_policy,
+worktree_policy)`, and `DeliveryRuntime` forwards it under the same name. It
+returns nothing when the seven values are equal, compared by value and type.
+Otherwise it refuses, naming the differing snapshot paths in table order:
 `worktree policy differs from repo-root policy: bindings.vcs.integration_branch,
-bindings.vcs.merge.delete_branch`. The command reports that as
-`workflow-state: build-delivery refused: <reason>`, the existing wrapping. A
-member missing or mistyped in the worktree snapshot refuses with the accessor's
-message prefixed by `worktree `.
+bindings.vcs.merge.delete_branch`. A member missing or mistyped in the worktree
+snapshot refuses with the accessor's message prefixed by `worktree `.
+
+The command wraps the call exactly as it wraps `build_delivery`, so any exception
+becomes `workflow-state: build-delivery refused: <reason>` with exit 2. The
+builder interface version stays 1: the builder and the runtime ship as one
+unit, and the standards retire version handshakes for new code.
 
 The comparison is root-independent. None of the seven values is a path, so the
 worktree's differently rooted `bindings.paths` never count. A branch edit to
@@ -168,13 +175,20 @@ byte-identical to one built with the worktree absent.
 | present, resolver refuses (`not_onboarded`, `invalid_contract`, `invalid_projection`, …) | exit 2, empty stdout, `resolve-project refused at worktree: <document>` |
 | present, resolver fails or times out | exit 2, empty stdout, the `failed` / `timed out` line at `worktree` |
 
+Divergence can start on either side. The branch may edit a sealed member. The
+integration branch may change a sealed member after the branch was cut and
+before the branch syncs. Or the ledger root's checkout may itself be stale,
+because what gets sealed is that root's checked-out tree, not the remote
+integration branch. All three refuse the same way. The repair is to bring the
+two trees into agreement: sync the branch, land or revert the edit, or update
+the ledger root's checkout. It is never to pick one value over the other.
+
 A first attempt's contract is built for an absent candidate, and nothing
 re-checks it later. If that branch then edits a sealed member, the installed
 contract still governs its delivery, as the lifecycle already states. A retry
 or new run for that issue is built for the recorded worktree and refuses until
-the edit reaches the integration branch or is reverted. That is deliberate: it
-is exactly the divergence the issue asks the builder to refuse. It is written
-down here and in the skills, not coded around.
+the trees agree. That is deliberate: it is exactly the divergence the issue asks
+the builder to refuse. It is written down here, not coded around.
 
 ### 5. Where the root is stated (per D7)
 
@@ -215,7 +229,9 @@ down here and in the skills, not coded around.
      The parsed suffix's `violations` must have length 2 and the resolver's order.
    - *AC3, divergent worktree.* Create the harness worktree as a real directory
      inside the project root's `.worktrees/`, holding a resolvable project
-     layout whose contract changes one sealed member (for example
+     layout (contract, instruction source and current projections, as the
+     suite's project-root helper lays out, so the worktree resolver refuses for no
+     unintended reason) whose contract changes one sealed member (for example
      `bindings.vcs.integration_branch`). Assert a refusal naming that member, with
      exit 2 and empty stdout.
    - *Agreeing worktree.* Use an identical worktree project. Assert the output is
@@ -232,7 +248,8 @@ down here and in the skills, not coded around.
    non-conforming completed process (exit 1 with non-JSON stdout, and exit 0 with
    a non-object) and assert the `failed` line's exact JSON. Patch the subprocess
    call to time out and assert the `timed out` line.
-3. **CLI help seam, AC2.** `workflow-state build-delivery --help` names
+3. **CLI help seam, AC2.** `workflow-state build-delivery --help`, compared
+   with whitespace normalized because argparse re-wraps text, names
    `--repo-root` as the contract's resolution root and names the worktree
    cross-check.
 4. **Skill contract seam.** The workflow skill contract suite pins the new
@@ -263,8 +280,8 @@ command IDs.
 | D1 | A resolver refusal (exit 2 with a structurally well-formed `{"error":…}` document) becomes one stderr line, `workflow-state: resolve-project refused at <repo-root\|worktree>: ` followed by the document re-serialized canonically. That JSON is byte-identical to the resolver's stdout minus its newline. Stdout stays empty. The builder checks structure only, never the code set or the `reason_code` position. | AC1. #100's rule to preserve `error.code`, `repair_id` and ordered `violations` exactly. #171 §1 (exit 2, empty stdout). The resolver's `emit_error` is the one home of the code rules (the-bar DRY). | Printing the document on stdout, which breaks the empty-stdout contract. A prose rendering of violations, which is lossy and unparseable. Forwarding raw multi-line output, which makes the diagnostic's boundary ambiguous. Re-validating resolver codes, which gives them a second home. |
 | D2 | A non-conforming resolver outcome is reported as `resolve-project failed at <label>: {"exit","stderr","stdout"}`, and a timeout as `resolve-project timed out at <label>`. Neither is presented as a refusal. | the-bar: truthful terminal states, and the log stream is the debugger (log the failure body). Phase-0 open question 1. | Keeping the bare exit code, which drops the only pointer to the fault. Synthesizing a refusal document, which forges resolver output. |
 | D3 | `--kind contract` seals only the policy resolved at `--repo-root`, the ledger repository root, and help text, `CLAUDE.md` and the contract-building skills say so. A worktree never supplies sealed policy. It can only veto a build. | #171 §1 and D27 (resolve at `--repo-root`). #100 D10 (one sanctioned internal resolution). from-issue: once installed, the ledger's contract governs. The policy that governs delivery belongs to the integration branch, not to a branch's own proposed edit. | Resolving at the worktree or owner root when present, which lets an unreviewed branch retarget its own delivery and makes sealed policy depend on attempt timing. A `--policy-root` argument, which adds a failure site that absent candidates cannot fill. Consuming the retained snapshot, which #100 D10 rejected. Recording the root in the contract, which changes `delivery-contract/v1`. |
-| D4 | When anything exists at the validated input `worktree` (`lexists`), the builder resolves it too and compares the seven sealed members by value and type. A difference refuses and names the members in table order. A worktree refusal, failure or timeout is a builder refusal. An absent path skips the check. An agreeing worktree yields byte-identical output. | AC2's refuse-on-divergence arm. Bootstrap: no policy is defaulted. The-bar fail loud. Only the seven members reach the contract, and none of them is a path. | Comparing whole snapshots, where paths always differ and changes the contract never carries would still block. Skipping the check when the worktree refuses, which quietly defaults the comparison. Treating an absent candidate as an error, which would make every first attempt fail. |
-| D5 | Build first and cross-check second, so the second resolver run only targets a path the builder has already vetted. The sealed-member table has one home in the build module, used by derivation, the provenance digest and the comparison. The comparison is a pure `DeliveryBuilder` method forwarded by `DeliveryRuntime`. workflow-state keeps all the I/O. | #171 D27 (no I/O in the build module). The-bar DRY and single responsibility. The agent-helpers intent that the command is a thin shell with policy in importable functions. | Resolving before validation, which runs the resolver at an unvetted path and duplicates validation. Comparing in workflow-state, which makes a second copy of the member list. A resolver callback injected into the builder, which puts I/O inside the pure seam. Comparing two built contracts' digests, which is obscure and cannot name members. |
-| D6 | Accepted limitation: a first attempt's contract, built for an absent candidate, is never re-checked. A later retry of an issue whose branch edits a sealed member refuses until the edit lands on the integration branch or is reverted. This is documented, not coded around. | The issue explicitly allows refuse-on-divergence. from-issue: once installed, the contract governs. The suggested scope boundary for this issue. | Adding re-checks in ship-issue, owner phases or control, which widens the lifecycle core beyond this issue. Exempting sealed-member edits from the veto, which recreates the gap. |
+| D4 | The owner's resolution root is the contract's `worktree`, since custody binds owners to it. When anything exists at that validated path (`lexists`), the builder resolves it too and compares the seven sealed members by value and type. A difference refuses and names the members in table order. A worktree refusal, failure or timeout is a builder refusal. An absent path skips the check. An agreeing worktree yields byte-identical output. | AC2's refuse-on-divergence arm. Bootstrap: no policy is defaulted, and non-path bindings are returned exactly as authored, so the seven members do not depend on the root. The-bar fail loud. Only the seven members reach the contract. | Comparing whole snapshots, where paths always differ and changes the contract never carries would still block. Skipping the check when the worktree refuses, which quietly defaults the comparison. Treating an absent candidate as an error, which would make every first attempt fail. |
+| D5 | Build first and cross-check second, so the second resolver run only targets a path the builder has already vetted. The sealed-member table has one home in the build module, used by derivation, the provenance digest and the comparison. The comparison is a pure `DeliveryBuilder` method forwarded by `DeliveryRuntime`, and it is wrapped as a refusal. workflow-state keeps all the I/O. The builder interface version stays 1. | #171 D27 (no I/O in the build module). The-bar DRY and single responsibility. The agent-helpers intent that the command is a thin shell with policy in importable functions. agent-helpers rule 3 retires version handshakes, and the pair ships as one unit. | Resolving before validation, which runs the resolver at an unvetted path and duplicates validation. Comparing in workflow-state, which makes a second copy of the member list. A resolver callback injected into the builder, which puts I/O inside the pure seam. Comparing two built contracts' digests, which is obscure and cannot name members. |
+| D6 | Accepted limitation: a first attempt's contract, built for an absent candidate, is never re-checked. Divergence from either side (a branch edit, an unsynced integration-branch change, or a stale ledger-root checkout, since the root's checked-out tree is what gets sealed) refuses a retry or new run until the trees agree. This is documented, not coded around. | The issue explicitly allows refuse-on-divergence. from-issue: once installed, the contract governs. The suggested scope boundary for this issue. | Adding re-checks in ship-issue, owner phases or control, which widens the lifecycle core beyond this issue. Exempting sealed-member edits from the veto, which recreates the gap. |
 | D7 | Help text is the authoritative root statement. `CLAUDE.md` and the from-issue and orchestrate-issues contract steps state the root and relay the stderr line verbatim. The pinned sanctioned-exception sentence, ship-issue and ship-handoff are unchanged. The #171 and #100 specs are not edited, and this ledger refines #171 D27. | AC2 ("help text or contract"). The-bar: point-in-time records keep their text, and DRY (one home, the others link to it). | Editing accepted specs. Adding the clause to skills that build no contract. Stating the root only in prose, with no help text. |
 | D8 | Tests run at the builder CLI subprocess seam, taking their expected refusal bytes from running the real resolver on the same root and `HOME` rather than from literals. They cover a refusal with two ordered violations and a real worktree directory under `.worktrees/`. A module seam (`load_source_module` and `mock.patch.object`) covers only the non-conforming and timeout paths. Help and skill-contract pins cover AC2. | AC1 and AC3. The-bar: tests that can fail, with fixtures shaped like production output. Existing `BuilderHarness` and workflow-state module-load precedent. | Mocking the resolver for the refusal case, which tests the mock rather than the resolver's bytes. A single-violation fixture, which cannot catch reordering. Hard-coded expected JSON, which a resolver wording change would break for a reason unrelated to the builder. |
