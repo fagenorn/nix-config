@@ -1,4 +1,4 @@
-"""Installed-layout seam for the agent_tools launchers (#175 D8, D11; parent D9).
+"""Installed-layout seam for the agent_tools launchers (#175 D8, D11; #179 D8; parent D9).
 
 Run: just agent-installed-skill-tests. That recipe builds first and passes the
 built home-manager-files tree as AGENT_SKILLS_INSTALLED_HOME. Every
@@ -28,6 +28,14 @@ LAUNCHER = re.compile(
 MARKER = "HOSTILE agent_tools IMPORTED"
 HOSTILE_EXIT = 97
 TIMEOUT_SECONDS = 60
+# The commands #175 and #179 accepted as launchers: a floor, not the full set,
+# which the command table in lib/agent-tools.nix owns (#175 D8).
+LAUNCHER_FLOOR = ("agent-evidence", "agent-model-matrix", "context-map-lint", "diff-scope")
+# Commands without an argparse parser answer `--help` as misuse, with the
+# module docstring on stderr and exit 2. Their CLI is promised unchanged
+# (parent D15), so the probe pins that answer by a line only the module's own
+# docstring prints.
+MISUSE_USAGE = {"context-map-lint": "Usage: context-map-lint --repo-root "}
 
 
 class AgentToolsLauncherTest(unittest.TestCase):
@@ -84,8 +92,11 @@ class AgentToolsLauncherTest(unittest.TestCase):
         return dict(os.environ, PYTHONPATH=str(self.hostile),
                     NIX_PYTHONPATH=str(self.hostile))
 
-    def test_the_command_table_generates_agent_evidence(self):
-        self.assertIn("agent-evidence", self.launchers())
+    def test_the_command_table_generates_each_deployed_command(self):
+        launchers = self.launchers()
+        for name in LAUNCHER_FLOOR:
+            with self.subTest(launcher=name):
+                self.assertIn(name, launchers)
 
     def test_each_launcher_is_named_for_its_module(self):
         for name, (_python, module) in self.launchers().items():
@@ -98,9 +109,14 @@ class AgentToolsLauncherTest(unittest.TestCase):
                 completed = self.run_child(
                     [str(self.root / ".agents" / "bin" / name), "--help"],
                     self.hostile_env(), self.hostile)
-                self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertTrue(completed.stdout.startswith(f"usage: {name} "),
-                                completed.stdout[:200])
+                if name in MISUSE_USAGE:
+                    self.assertEqual(completed.returncode, 2, completed.stderr)
+                    self.assertEqual(completed.stdout, "")
+                    self.assertIn(MISUSE_USAGE[name], completed.stderr)
+                else:
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    self.assertTrue(completed.stdout.startswith(f"usage: {name} "),
+                                    completed.stdout[:200])
                 self.assertNotIn(MARKER, completed.stdout + completed.stderr)
 
     def test_each_hostile_channel_is_live_without_the_launcher(self):

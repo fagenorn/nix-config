@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Lint a repo's CONTEXT-MAP.md against its area glossaries.
 
 Checks that every term in the map's term table resolves to an area file that

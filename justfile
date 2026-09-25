@@ -92,12 +92,13 @@ agent-workflow-tests:
     tests/test_agent_model_drift_scheduling.py \
     tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
+    tests/test_context_map_lint.py \
     tests/test_branch_protection.py
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
 agent-model-matrix:
-  python3 home/common/agent-skills/scripts/agent-model-matrix.py validate
-  python3 home/common/agent-skills/scripts/agent-model-matrix.py trace representative
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix validate
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix trace representative
 
 # Check the dispatch contracts against the skill trees the Nix build installs.
 agent-installed-skill-tests: build
@@ -164,7 +165,7 @@ agent-costs *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_costs {{args}}
 
 agent-model-drift *args:
-  python3 scripts/agent-model-drift.py {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_drift {{args}}
 
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:

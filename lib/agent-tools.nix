@@ -36,7 +36,13 @@ let
   env = python.withPackages (_: [ package ]);
 
   # A command's module is its name with each "-" replaced by "_".
-  commands = [ "agent-evidence" ];
+  # context-map-lint is a stable path other projects' CIs call without vendoring it (parent D15).
+  commands = [
+    "agent-evidence"
+    "agent-model-matrix"
+    "context-map-lint"
+    "diff-scope"
+  ];
 
   # -I drops every PYTHON* variable, the working directory and the user site.
   # nixpkgs' sitecustomize still reads the NIX_PYTHON* variables under -I, and
