@@ -5934,6 +5934,43 @@ class ResolverOutcomeTest(unittest.TestCase):
              b'{"error":{"code":"c","repair_id":"r","violations":[{"pointer":"/a"}]}}', b"",
              r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
              r'\"violations\":[{\"pointer\":\"/a\"}]}}"}'),
+            ("non-JSON stdout on exit 0", 0, b"not json\n", b"",
+             r'{"exit":0,"stderr":"","stdout":"not json\n"}'),
+            ("non-JSON stdout on exit 2", 2, b"not json\n", b"",
+             r'{"exit":2,"stderr":"","stdout":"not json\n"}'),
+            ("a refusal document that is not an object", 2, b'["error"]', b"",
+             r'{"exit":2,"stderr":"","stdout":"[\"error\"]"}'),
+            ("an extra top-level member", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[]},"x":1}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[]},\"x\":1}"}'),
+            ("an error that is not an object", 2, b'{"error":1}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":1}"}'),
+            ("a non-string code", 2,
+             b'{"error":{"code":1,"repair_id":"r","violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":1,\"repair_id\":\"r\",'
+             r'\"violations\":[]}}"}'),
+            ("a non-string repair_id", 2,
+             b'{"error":{"code":"c","repair_id":null,"violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":null,'
+             r'\"violations\":[]}}"}'),
+            ("a non-string reason_code", 2,
+             b'{"error":{"code":"c","reason_code":2,"repair_id":"r","violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"reason_code\":2,'
+             r'\"repair_id\":\"r\",\"violations\":[]}}"}'),
+            ("violations that are not a list", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":{}}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":{}}}"}'),
+            ("a violation that is not an object", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[1]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[1]}}"}'),
+            ("a non-string violation pointer", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[{"message":"m","pointer":0}]}}',
+             b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[{\"message\":\"m\",\"pointer\":0}]}}"}'),
             ("a well-formed refusal on exit 1", 1, refusal, b"",
              r'{"exit":1,"stderr":"","stdout":"{\"error\":{\"code\":\"not_onboarded\",'
              r'\"repair_id\":\"r\",\"violations\":[{\"message\":\"m\",\"pointer\":\"\"}]}}\n"}'),
