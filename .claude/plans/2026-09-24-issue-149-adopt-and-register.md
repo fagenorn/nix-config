@@ -4,7 +4,7 @@
 > per task, reviewed between tasks. Steps use `- [ ]` checkboxes. `sdd` runs only the
 > Task index. The owner delivery steps are never `sdd` tasks.
 
-**Goal:** Re-point the living references (Task 1). Then adopt nix-config with the
+**Goal:** Re-point the living references (Tasks 1–2). Then adopt nix-config with the
 deployed `adopt-project`, land its one commit, and register it after the merge (B1–B9).
 
 **Architecture:** One hand-authored task comes before any tool output (D3, D4). After
@@ -36,16 +36,18 @@ added.
 
 ## Delivery estimate and boundaries
 
-These are estimates. Task 1 changes 8 lines in 4 files. The adoption commit has about 244
+These are estimates. Task 1 changes 8 lines in 4 files; Task 2 (D15), 1 line. The adoption commit has about 244
 `R100`, 3 `A` and 2 `M`. It is never split (D9), and the work ships as one PR.
 
 ## Task index
 
 Task 1 — Re-point the eight living references to the adopted paths — `CLAUDE.md`, `docs/standards/agent-helpers.md`, `home/common/agent-skills/README.md`, `home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md` — full — [task-1.md](2026-09-24-issue-149-adopt-and-register.tasks/task-1.md)
 
+Task 2 — Re-point the sibling-added reference — `docs/standards/agent-helpers.md` — full — [task-2.md](2026-09-24-issue-149-adopt-and-register.tasks/task-2.md)
+
 ## Decisions
 
-Task 1 rests on D3 and D4, and the owner steps on D1, D2, D5–D7 and D9–D14.
+Tasks 1–2 rest on D3 and D4 (Task 2 on D10, D15), and the owner steps on D1, D2, D5–D7 and D9–D14.
 
 ## Owner delivery steps (not sdd tasks)
 
