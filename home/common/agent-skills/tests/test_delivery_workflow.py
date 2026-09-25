@@ -18,7 +18,7 @@ from ._delivery_model_fixtures import (
     contract_and_delivery_for_stage, observation, pr_subject, seal, selection,
     stage_scope,
 )
-from .test_resolve_project import make_home, make_project_root, source_contract
+from .test_resolve_project import make_home, make_project_root, run as run_resolver, source_contract
 
 
 ROOT = Path(__file__).parents[4]
@@ -1261,6 +1261,31 @@ class BuilderHarness:
                              "--input", "-", stdin=json.dumps(value).encode(), ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
+    def resolver_refusal_line(self, root, label):
+        """The builder's exact stderr when the resolver refuses at `root` (D1, D8).
+
+        The resolver runs directly on the same root and HOME, so the expected
+        bytes are the resolver's own stdout, never a literal.
+        """
+        code, stdout, stderr = run_resolver("resolve", "--repo-root", str(root),
+                                            home=self.home)
+        self.assertEqual(code, 2, stderr)
+        return (f"workflow-state: resolve-project refused at {label}: "
+                + stdout.removesuffix("\n") + "\n").encode()
+
+    def worktree_project(self, mutate=None):
+        """Lay a resolvable project at the contract input's worktree path (D8).
+
+        `make_project_root` writes the contract, instruction source and current
+        projections into a fresh temp dir. Renaming it into `.worktrees/` gives
+        the worktree resolver no unintended reason to refuse, and the root's
+        cleanup removes it.
+        """
+        contract = source_contract()
+        if mutate is not None:
+            mutate(contract)
+        return make_project_root(contract).rename(self.worktree)
+
     def contract_input(self, **changes):
         value = {"issue": 171, "worktree": self.worktree, "source_kind": "explicit_user",
                  "source_reference": "invocation:/from-issue 171 --auto", "now": NOW}
@@ -1354,6 +1379,23 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
         stages = self.build("contract", self.contract_input())["contract"]["stages"]
         self.assertNotIn("delete_remote_branch", [stage["id"] for stage in stages])
 
+    def test_provenance_digest_seals_the_seven_authored_policy_members(self):
+        self.project()
+        value = self.contract_input()
+        contract = self.build("contract", value)["contract"]
+        authored = source_contract()
+        vcs, tracker = authored["bindings"]["vcs"], authored["bindings"]["tracker"]
+        self.assertEqual(contract["provenance"]["digest"], self.model.canonical_digest({
+            "policy": {"project_id": authored["project"]["id"],
+                       "tracker_kind": tracker["kind"],
+                       "repository_slug": tracker["repo_slug"],
+                       "branch_pattern": vcs["branch_pattern"],
+                       "worktree_prefix": vcs["worktree"]["prefix"],
+                       "integration_branch": vcs["integration_branch"],
+                       "delete_branch": vcs["merge"]["delete_branch"]},
+            "issue": 171, "worktree": self.worktree,
+            "source": {"kind": value["source_kind"], "reference": value["source_reference"]}}))
+
     def test_contract_refusals_exit_two_with_empty_stdout(self):
         def gitlab(contract_value):
             contract_value["bindings"]["tracker"]["kind"] = "gitlab"
@@ -1380,6 +1422,31 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
                 refused = self.build(kind, value, ok=False)
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
                 self.assertIn(reason, refused.stderr)
+
+    def test_resolver_refusal_relays_the_resolver_document_exactly(self):
+        def two_violations(contract_value):
+            del contract_value["bindings"]["tracker"]["repo_slug"]
+            contract_value["bindings"]["vcs"]["merge"]["delete_branch"] = "yes"
+
+        def future_schema(contract_value):
+            contract_value["schema_version"] = 2
+
+        prefix = b"workflow-state: resolve-project refused at repo-root: "
+        for label, mutate, code, pointers in (
+                ("two ordered violations", two_violations, "invalid_contract",
+                 ["/bindings/tracker/repo_slug", "/bindings/vcs/merge/delete_branch"]),
+                ("reason code", future_schema, "unsupported_schema", ["/schema_version"])):
+            with self.subTest(label=label):
+                self.project(mutate)
+                expected = self.resolver_refusal_line(self.root, "repo-root")
+                refused = self.build("contract", self.contract_input(), ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", expected))
+                error = json.loads(refused.stderr.removeprefix(prefix))["error"]
+                self.assertEqual(
+                    (error["code"], [item["pointer"] for item in error["violations"]],
+                     "reason_code" in error),
+                    (code, pointers, code == "unsupported_schema"))
 
     def test_scope_and_initial_intent_regenerate_from_the_contract(self):
         self.project()
@@ -1424,6 +1491,66 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
             "authorization_intents": [stray["initial_intent"]]}, ok=False)
         self.assertEqual((refused.returncode, refused.stdout), (2, b""))
         self.assertIn(b"authorization chain", refused.stderr)
+
+
+class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
+    """D3, D4, D7: an existing contract worktree can veto a build, never supply policy."""
+
+    def contract_bytes(self, *, ok=True):
+        return self.cli("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                        "--input", "-", stdin=json.dumps(self.contract_input()).encode(),
+                        ok=ok)
+
+    def test_an_agreeing_or_unsealed_difference_builds_byte_identical_output(self):
+        def more_parallel(contract_value):
+            contract_value["bindings"]["workflow"]["orchestration"]["max_parallel"] = 5
+        for label, mutate in (("identical project", None),
+                              ("unsealed difference", more_parallel)):
+            with self.subTest(label=label):
+                self.project()
+                absent = self.contract_bytes().stdout
+                self.worktree_project(mutate)
+                self.assertEqual(self.contract_bytes().stdout, absent)
+
+    def test_a_divergent_sealed_member_refuses(self):
+        def retarget(contract_value):
+            contract_value["bindings"]["vcs"]["integration_branch"] = "dev"
+        self.project()
+        self.worktree_project(retarget)
+        refused = self.contract_bytes(ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr), (2, b"",
+            b"workflow-state: build-delivery refused: worktree policy differs from "
+            b"repo-root policy: bindings.vcs.integration_branch\n"))
+
+    def test_an_unresolvable_worktree_relays_the_resolver_refusal(self):
+        prefix = b"workflow-state: resolve-project refused at worktree: "
+        for label in ("empty directory", "dangling symlink"):
+            with self.subTest(label=label):
+                self.project()
+                if label == "empty directory":
+                    Path(self.worktree).mkdir()
+                else:
+                    Path(self.worktree).symlink_to(self.root / "missing")
+                expected = self.resolver_refusal_line(self.worktree, "worktree")
+                refused = self.contract_bytes(ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", expected))
+                self.assertEqual(
+                    json.loads(refused.stderr.removeprefix(prefix))["error"]["code"],
+                    "not_onboarded")
+
+    def test_help_states_the_contract_resolution_root(self):
+        self.project()
+        text = "".join(self.cli("build-delivery", "--help").stdout.decode().split())
+        for clause in (
+                "--kind contract resolves project policy with resolve-project at "
+                "--repo-root, the ledger repository root, and seals only that policy.",
+                "When the input's worktree path already exists, it also resolves there "
+                "and refuses if any sealed policy member differs.",
+                "when resolve-project refuses, that line ends with the resolver's error "
+                "document"):
+            with self.subTest(clause=clause[:40]):
+                self.assertIn("".join(clause.split()), text)
 
 
 class HelperInputTest(BuilderHarness, unittest.TestCase):

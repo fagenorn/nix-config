@@ -193,7 +193,10 @@ EOF
 - `worktree` is the requirement's `recorded_worktree` when the issue has one,
   and only otherwise the candidate reserved in §2. Never build a recorded
   issue's contract from a candidate: control refuses a retry or new-run
-  contract whose worktree differs from the recorded path.
+  contract whose worktree differs from the recorded path. The builder seals
+  the policy `resolve-project` resolves at `--repo-root`, the ledger
+  repository root; when `worktree` already exists, it also resolves there and
+  refuses if any sealed policy member differs.
 - An explicit number list uses `source_kind` `explicit_user` with
   `source_reference` `invocation:/orchestrate-issues <numbers>` (the caller's
   numbers, in order, space-separated). A `--label`/`--milestone` sweep uses
@@ -209,7 +212,9 @@ EOF
   summary's `delivery_contract_required` say which issues still need one.
 - On a builder refusal (exit 2, empty stdout, the rule named on stderr), send
   null and `[]` for that issue and report the refusal in the final report; that
-  issue stays lifecycle-only.
+  issue stays lifecycle-only. For the refusal, report the builder's stderr line
+  verbatim: for a resolver refusal it carries the resolver's `error.code`,
+  `repair_id` and ordered `violations` exactly.
 
 Invoke the helper as one command that feeds the request on stdin as
 `--request-file -` and validates the response before anything decodes it.

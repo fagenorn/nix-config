@@ -113,6 +113,11 @@ class DeliveryRuntime:
             raise ValueError(f"unknown builder kind: {kind!r}")
         return result
 
+    def check_worktree_policy(self, repo_root_policy: dict[str, Any],
+                              worktree_policy: dict[str, Any]) -> None:
+        """Refuse when a contract worktree's sealed policy differs from the repo root's."""
+        self._builder.check_worktree_policy(repo_root_policy, worktree_policy)
+
     @property
     def model(self) -> object:
         """The private model dependency used by workflow-state validators."""

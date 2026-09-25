@@ -3534,26 +3534,87 @@ def resolve_project_argv() -> list[str]:
     return [str(installed)]
 
 
-def resolve_project_policy(repo_root: str) -> dict[str, Any]:
-    """Run ``resolve-project resolve``; any failure is a builder refusal."""
+RESOLVER_REFUSAL_MEMBERS = frozenset({"code", "repair_id", "violations"})
+
+
+def resolver_refusal(stdout: bytes) -> dict[str, Any] | None:
+    """The resolver's refusal document when ``stdout`` is one, else None.
+
+    Structure only (D1): the resolver's ``emit_error`` owns which codes exist
+    and where ``reason_code`` may appear, so neither is checked again here.
+    """
+    try:
+        document = json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict) or set(document) != {"error"}:
+        return None
+    error = document["error"]
+    if not isinstance(error, dict) or set(error) - {"reason_code"} != RESOLVER_REFUSAL_MEMBERS:
+        return None
+    texts = (error["code"], error["repair_id"], error.get("reason_code", ""))
+    if not all(isinstance(text, str) for text in texts) \
+            or not isinstance(error["violations"], list):
+        return None
+    for item in error["violations"]:
+        if not isinstance(item, dict) or set(item) != {"pointer", "message"} \
+                or not all(isinstance(item[name], str) for name in ("pointer", "message")):
+            return None
+    return document
+
+
+def resolver_json(value: object) -> str:
+    """Sorted, compact, ASCII-escaped JSON: the resolver's emitted form, one line."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def classify_resolver_outcome(completed: subprocess.CompletedProcess,
+                              label: str) -> dict[str, Any]:
+    """Return the snapshot, or raise the labelled refused or failed line (D1, D2)."""
+    if completed.returncode == 0:
+        try:
+            snapshot = json.loads(completed.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            snapshot = None
+        if isinstance(snapshot, dict):
+            return snapshot
+    elif completed.returncode == 2:
+        document = resolver_refusal(completed.stdout)
+        if document is not None:
+            raise WorkflowError(f"resolve-project refused at {label}: {resolver_json(document)}")
+    body = {"exit": completed.returncode,
+            "stderr": completed.stderr.decode("utf-8", errors="replace"),
+            "stdout": completed.stdout.decode("utf-8", errors="replace")}
+    raise WorkflowError(f"resolve-project failed at {label}: {resolver_json(body)}")
+
+
+def resolve_project_policy(root: str, label: str) -> dict[str, Any]:
+    """Run ``resolve-project resolve`` at ``root`` and return its snapshot.
+
+    Any other outcome raises its labelled refused, failed or timed-out line (D1, D2).
+    """
     try:
         completed = subprocess.run(
-            [*resolve_project_argv(), "resolve", "--repo-root", repo_root],
+            [*resolve_project_argv(), "resolve", "--repo-root", root],
             capture_output=True, check=False, timeout=60)
     except subprocess.TimeoutExpired as error:
-        raise WorkflowError("resolve-project timed out") from error
+        raise WorkflowError(f"resolve-project timed out at {label}") from error
+    return classify_resolver_outcome(completed, label)
+
+
+def check_contract_worktree(runtime: Any, policy: dict[str, Any], worktree: str) -> None:
+    """Veto a contract whose existing worktree resolves to different sealed policy (D4).
+
+    ``lexists`` counts a dangling symlink as present, so it fails closed; an
+    absent path, such as a reserved candidate, has nothing to compare.
+    """
+    if not os.path.lexists(worktree):
+        return
+    worktree_policy = resolve_project_policy(worktree, "worktree")
     try:
-        snapshot = json.loads(completed.stdout)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        snapshot = None
-    if completed.returncode != 0:
-        code = (snapshot.get("error", {}).get("code")
-                if isinstance(snapshot, dict) and isinstance(snapshot.get("error"), dict)
-                else None)
-        raise WorkflowError(f"resolve-project refused: {code or completed.returncode}")
-    if not isinstance(snapshot, dict):
-        raise WorkflowError("resolve-project returned a non-object")
-    return snapshot
+        runtime.check_worktree_policy(policy, worktree_policy)
+    except Exception as error:
+        raise WorkflowError(f"build-delivery refused: {error}") from error
 
 
 def command_build_delivery(args: argparse.Namespace) -> int:
@@ -3562,11 +3623,14 @@ def command_build_delivery(args: argparse.Namespace) -> int:
         raise WorkflowError("repository root path must be absolute")
     runtime = _delivery()
     value = load_json_request(args.input, "builder input")
-    policy = resolve_project_policy(args.repo_root) if args.kind == "contract" else None
+    policy = resolve_project_policy(args.repo_root, "repo-root") if args.kind == "contract" else None
     try:
         result = runtime.build_delivery(args.kind, value, policy=policy)
     except Exception as error:
         raise WorkflowError(f"build-delivery refused: {error}") from error
+    if args.kind == "contract":
+        # The builder has validated `worktree` as absolute and normalized (D5).
+        check_contract_worktree(runtime, policy, value["worktree"])
     sys.stdout.buffer.write(runtime.model.canonical_bytes(result))
     return 0
 
@@ -3650,8 +3714,18 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint.add_argument("--checkpoint-file", required=True)
     checkpoint.set_defaults(handler=command_checkpoint_delivery)
 
-    build_delivery = subparsers.add_parser("build-delivery")
-    build_delivery.add_argument("--repo-root", required=True)
+    build_delivery = subparsers.add_parser("build-delivery", description=(
+        "Build one sealed delivery value from --input and print it as canonical JSON. "
+        "It takes no lock, reads no ledger or clock and writes nothing. "
+        "--kind contract resolves project policy with resolve-project at --repo-root, "
+        "the ledger repository root, and seals only that policy. When the input's "
+        "worktree path already exists, it also resolves there and refuses if any "
+        "sealed policy member differs. The other kinds resolve nothing. Every refusal "
+        "after argument parsing exits 2 with empty stdout and one stderr line; when "
+        "resolve-project refuses, that line ends with the resolver's error document as "
+        "one line of canonical JSON."))
+    build_delivery.add_argument("--repo-root", required=True, help=(
+        "absolute ledger repository root; --kind contract resolves the policy it seals here"))
     build_delivery.add_argument(
         "--kind", required=True,
         choices=("contract", "initial-intent", "scope", "selected-output", "observation",

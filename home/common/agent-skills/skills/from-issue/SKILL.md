@@ -151,10 +151,15 @@ follows:
 
    `worktree` is the recorded worktree when the helper named one, else the
    reserved candidate: the contract binds custody to that exact path, and the
-   helper refuses a contract naming any other. Put the printed `contract` in
+   helper refuses a contract naming any other. The builder seals the policy
+   `resolve-project` resolves at `--repo-root`, the ledger repository root;
+   when `worktree` already exists, it also resolves there and refuses if any
+   sealed policy member differs. Put the printed `contract` in
    `delivery_contract` and its `initial_intent` as the only member of
    `authorization_intents`. A builder refusal (exit 2, empty stdout) fails
-   loudly. For the duration of this acquisition, retain every fact previously requested during this acquisition;
+   loudly; report the builder's stderr line verbatim: for a resolver refusal
+   it carries the resolver's `error.code`, `repair_id` and ordered
+   `violations` exactly. For the duration of this acquisition, retain every fact previously requested during this acquisition;
    carry all collected facts into each later strict request, refreshing a value
    when its external state may have changed; never send a fact kind before the helper requests it.
    Resend with every retained fact and call `direct-owner` again. Unknown,

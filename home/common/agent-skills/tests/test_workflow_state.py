@@ -5954,6 +5954,94 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
 
 
+class ResolverOutcomeTest(unittest.TestCase):
+    """D2: resolver outcomes no real resolver produces are failures, never refusals."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = load_source_module(SCRIPT, "workflow_state_resolver_outcome")
+
+    def message(self, returncode, stdout, stderr):
+        completed = subprocess.CompletedProcess(
+            ["resolve-project", "resolve"], returncode, stdout, stderr)
+        with self.assertRaises(self.workflow.WorkflowError) as caught:
+            self.workflow.classify_resolver_outcome(completed, "worktree")
+        return str(caught.exception)
+
+    def test_non_conforming_outcomes_are_failures_carrying_the_resolver_body(self):
+        refusal = (b'{"error":{"code":"not_onboarded","repair_id":"r",'
+                   b'"violations":[{"message":"m","pointer":""}]}}\n')
+        cases = (
+            ("non-JSON stdout on exit 1", 1, b"Traceback: boom\n", b"stack\n",
+             r'{"exit":1,"stderr":"stack\n","stdout":"Traceback: boom\n"}'),
+            ("a non-object on exit 0", 0, b"[1, 2]\n", b"",
+             r'{"exit":0,"stderr":"","stdout":"[1, 2]\n"}'),
+            ("a refusal missing members", 2, b'{"error":{"code":"invalid_contract"}}\n', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"invalid_contract\"}}\n"}'),
+            ("an unknown error member", 2,
+             b'{"error":{"code":"c","hint":"h","repair_id":"r","violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"hint\":\"h\",'
+             r'\"repair_id\":\"r\",\"violations\":[]}}"}'),
+            ("a violation missing its message", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[{"pointer":"/a"}]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[{\"pointer\":\"/a\"}]}}"}'),
+            ("non-JSON stdout on exit 0", 0, b"not json\n", b"",
+             r'{"exit":0,"stderr":"","stdout":"not json\n"}'),
+            ("non-JSON stdout on exit 2", 2, b"not json\n", b"",
+             r'{"exit":2,"stderr":"","stdout":"not json\n"}'),
+            ("a refusal document that is not an object", 2, b'["error"]', b"",
+             r'{"exit":2,"stderr":"","stdout":"[\"error\"]"}'),
+            ("an extra top-level member", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[]},"x":1}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[]},\"x\":1}"}'),
+            ("an error that is not an object", 2, b'{"error":1}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":1}"}'),
+            ("a non-string code", 2,
+             b'{"error":{"code":1,"repair_id":"r","violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":1,\"repair_id\":\"r\",'
+             r'\"violations\":[]}}"}'),
+            ("a non-string repair_id", 2,
+             b'{"error":{"code":"c","repair_id":null,"violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":null,'
+             r'\"violations\":[]}}"}'),
+            ("a non-string reason_code", 2,
+             b'{"error":{"code":"c","reason_code":2,"repair_id":"r","violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"reason_code\":2,'
+             r'\"repair_id\":\"r\",\"violations\":[]}}"}'),
+            ("violations that are not a list", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":{}}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":{}}}"}'),
+            ("a violation that is not an object", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[1]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[1]}}"}'),
+            ("a non-string violation pointer", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[{"message":"m","pointer":0}]}}',
+             b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[{\"message\":\"m\",\"pointer\":0}]}}"}'),
+            ("a well-formed refusal on exit 1", 1, refusal, b"",
+             r'{"exit":1,"stderr":"","stdout":"{\"error\":{\"code\":\"not_onboarded\",'
+             r'\"repair_id\":\"r\",\"violations\":[{\"message\":\"m\",\"pointer\":\"\"}]}}\n"}'),
+            ("undecodable bytes", 1, b"\xff\n", b"\xfe",
+             r'{"exit":1,"stderr":"\ufffd","stdout":"\ufffd\n"}'),
+        )
+        for label, returncode, stdout, stderr, body in cases:
+            with self.subTest(label=label):
+                self.assertEqual(self.message(returncode, stdout, stderr),
+                                 "resolve-project failed at worktree: " + body)
+
+    def test_a_timeout_is_reported_as_a_timeout_at_its_label(self):
+        expired = subprocess.TimeoutExpired(["resolve-project", "resolve"], 60)
+        with mock.patch.object(self.workflow.subprocess, "run", side_effect=expired):
+            with self.assertRaises(self.workflow.WorkflowError) as caught:
+                self.workflow.resolve_project_policy("/nonexistent/ledger", "repo-root")
+        self.assertEqual(str(caught.exception), "resolve-project timed out at repo-root")
+
+
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
     """Cover the installed layout, where the policy is a home-manager symlink."""
 
