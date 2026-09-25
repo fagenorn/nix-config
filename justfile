@@ -62,6 +62,8 @@ agent_tools_path := justfile_directory() / "python"
 agent-workflow-tests:
   PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v \
     home/common/agent-skills/tests/test_workflow_state.py \
+    home/common/agent-skills/tests/test_host_admission.py \
+    home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
     home/common/agent-skills/tests/test_workflow_delivery.py \
@@ -112,6 +114,7 @@ agent-installed-skill-tests: build
     AGENT_SKILLS_INSTALLED_HOME="$1" python3 -m unittest -v \
       home/common/agent-skills/tests/test_dispatch_contracts.py \
       home/common/agent-skills/tests/test_shell_example_contracts.py \
+      home/common/agent-skills/tests/test_workflow_skill_contracts.py \
       tests/test_agent_tools_launchers.py
 
 ## claude code

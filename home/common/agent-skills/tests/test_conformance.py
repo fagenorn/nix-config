@@ -1044,3 +1044,100 @@ class TrackerCredentialTest(ReportAssertions, unittest.TestCase):
             self.assertEqual(code, 0, err)
             self.assertNotIn(self.CHECK_ID,
                              [c["id"] for c in json.loads(out)["checks"]])
+
+
+class AdmissionDeclarationCheckTest(ReportAssertions, unittest.TestCase):
+    """#150 D13, D24: the host declaration is reported, never claimed."""
+
+    CHECK_ID = "host.admission.declaration"
+
+    def check(self, tmp, **home):
+        root = make_root(tmp)
+        env = platform_env(tmp, **home)
+        report, by_id = doctor(self, root, "--offline", env=env)
+        self.assert_validates(report)
+        self.assertFalse((root / ".superpowers").exists())
+        return by_id[self.CHECK_ID], env
+
+    def test_the_committed_declaration_passes_with_its_routes(self):
+        with fixture() as tmp:
+            check, _ = self.check(tmp)
+        self.assertEqual(
+            [check[key] for key in ("status", "domain", "subject_kind", "requirement",
+                                    "reason_code", "repair_id")],
+            ["passed", "host", "capability", "optional", None, None])
+        self.assertEqual(check["facts"], {"supported_routes": ["claude-code=7"],
+                                          "unsupported_routes": ["codex"]})
+
+    def test_missing_and_invalid_declarations_name_the_repair(self):
+        below_floor = {"schema_version": 1, "routes": {
+            "claude-code": {"support": "supported", "agent_slots": 3}}}
+        for label, value, reason in (("missing", None, "declaration_missing"),
+                                     ("below floor", below_floor, "declaration_invalid")):
+            with self.subTest(label), fixture() as tmp:
+                check, env = self.check(tmp, declaration=value)
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["repair_id"]],
+                    ["failed", reason, "host.admission.declare"])
+                self.assertEqual(check["facts"], {"declaration_path": str(
+                    Path(env["HOME"]) / ".agents/share/host-declaration.json")})
+
+    def test_local_selects_it_and_workflow_entry_does_not(self):
+        module = load_module()
+        self.assertIn(self.CHECK_ID, [c.id for c in module.select("local")])
+        self.assertNotIn(self.CHECK_ID, [c.id for c in module.select("workflow_entry")])
+
+    def deployed_run(self, tmp, library):
+        """One `local` run of the engine from a deployed layout (#150 M1).
+
+        The engine and its siblings sit in a directory not named `scripts`,
+        so the check loads the installed `~/.agents/lib/python` copy of the
+        host admission library, which `library` writes: `None` installs none,
+        `COMMITTED` the repository's own, any `str` as the file's text.
+        """
+        deployed = tmp / "deployed"
+        deployed.mkdir()
+        for name in ("conformance.py", "conformance-checks.py",
+                     "conformance-registry.py", "resolve-project.py"):
+            shutil.copy2(SCRIPT.parent / name, deployed / name)
+        env = platform_env(tmp)
+        installed = Path(env["HOME"]) / ".agents/lib/python/host_admission.py"
+        source = SCRIPT.parent / "host_admission.py"
+        if library is COMMITTED:
+            shutil.copy2(source, installed)
+        elif library is not None:
+            installed.write_text(library, encoding="utf-8")
+        code, out, err = run("run", "--purpose", "local", "--offline",
+                             "--repo-root", str(make_root(tmp)), env=env,
+                             script=deployed / "conformance.py")
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        self.assert_validates(report)
+        return report, {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+
+    def test_the_installed_library_is_loaded_from_a_deployed_layout(self):
+        with fixture() as tmp:
+            _, check = self.deployed_run(tmp, COMMITTED)
+        self.assertEqual(check["status"], "passed")
+        self.assertEqual(check["facts"], {"supported_routes": ["claude-code=7"],
+                                          "unsupported_routes": ["codex"]})
+
+    def test_an_unusable_installed_library_fails_only_this_check(self):
+        """M1: a missing, unimportable or stale-interface library is this
+        optional check's own finding, never the whole run's resolver_failure,
+        and a library `workflow-state` would refuse is never used here."""
+        current = (SCRIPT.parent / "host_admission.py").read_text(encoding="utf-8")
+        stale = current.replace("HOST_ADMISSION_INTERFACE_VERSION = 1",
+                                "HOST_ADMISSION_INTERFACE_VERSION = 2")
+        self.assertNotEqual(stale, current)
+        for label, library in (("absent", None),
+                               ("unimportable", "raise ImportError('broken')\n"),
+                               ("stale interface", stale)):
+            with self.subTest(label), fixture() as tmp:
+                report, check = self.deployed_run(tmp, library)
+                self.assertNotIn("error", report)
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["repair_id"]],
+                    ["failed", "library_unavailable", "host.admission.declare"])
+                self.assertEqual(check["facts"], {"library_path": str(
+                    Path(tmp) / "home/.agents/lib/python/host_admission.py")})
