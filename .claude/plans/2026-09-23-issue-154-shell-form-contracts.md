@@ -34,8 +34,9 @@ Spec (source of truth, read whole):
   (per D4). Command substitution is not a form (per D8).
 - The one sanctioned chain is the guard's literal, read from the single
   `UNSET_GITHUB_TOKEN_PREFIX = "…"` assignment in
-  `home/common/claude-code/default.nix`; never restated in a test, never
-  replaced by `env -u GITHUB_TOKEN` (per D5).
+  `home/common/claude-code/default.nix` (moved to
+  `home/common/claude-code/lifecycle_guard.py` by #176; spec D30); never
+  restated in a test, never replaced by `env -u GITHUB_TOKEN` (per D5).
 - The one sanctioned pipeline is a lifecycle helper call; the helpers are the
   basenames of `default.nix`'s single-word `"Bash(<word>:*)"` allow entries,
   derived, never named in a test's implementation; #171's lifecycle calls are

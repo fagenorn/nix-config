@@ -18,7 +18,7 @@ git log origin/<default>..origin/<integration> --first-parent --merges \
 
 Field separator `%x1f` (US), record separator `%x1e` (RS) — neither collides with anything in commit messages. Parse into `{sha, subject, committed_at, body}`.
 
-Single-branch (`<integration> == <default>`): the range is `${PREV:+$PREV..}origin/<default>` where `PREV=$(git describe --tags --abbrev=0 origin/<default>)` — with no tag yet that command exits non-zero and prints nothing, which means an empty `PREV` and a range of just `origin/<default>`, its whole history — and drop `--merges` — direct commits are the release units there.
+Single-branch (`<integration> == <default>`): the range is `<prev-tag>..origin/<default>`, with `<prev-tag>` the tag that `git describe --tags --abbrev=0 origin/<default>` prints written into the command, not carried in a shell variable a later call cannot see — with no tag yet that command exits non-zero and prints nothing, and the range is just `origin/<default>`, its whole history — and drop `--merges` — direct commits are the release units there.
 
 For each merge, resolve the PR only when `capabilities.tracker` permits it:
 

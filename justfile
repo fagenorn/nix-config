@@ -101,7 +101,7 @@ agent-model-matrix:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix validate
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix trace representative
 
-# Check the dispatch contracts against the skill trees the Nix build installs.
+# Check the skill contracts and agent-tool launchers against what the Nix build installs.
 agent-installed-skill-tests: build
   @set -- $(nix-store --query --requisites ./result \
     | grep -- '-home-manager-files$' || true); \
