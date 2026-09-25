@@ -18,7 +18,7 @@ from ._delivery_model_fixtures import (
     contract_and_delivery_for_stage, observation, pr_subject, seal, selection,
     stage_scope,
 )
-from .test_resolve_project import make_home, make_project_root, source_contract
+from .test_resolve_project import make_home, make_project_root, run as run_resolver, source_contract
 
 
 ROOT = Path(__file__).parents[4]
@@ -1186,6 +1186,18 @@ class BuilderHarness:
                              "--input", "-", stdin=json.dumps(value).encode(), ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
+    def resolver_refusal_line(self, root, label):
+        """The builder's exact stderr when the resolver refuses at `root` (D1, D8).
+
+        The resolver runs directly on the same root and HOME, so the expected
+        bytes are the resolver's own stdout, never a literal.
+        """
+        code, stdout, stderr = run_resolver("resolve", "--repo-root", str(root),
+                                            home=self.home)
+        self.assertEqual(code, 2, stderr)
+        return (f"workflow-state: resolve-project refused at {label}: "
+                + stdout.removesuffix("\n") + "\n").encode()
+
     def contract_input(self, **changes):
         value = {"issue": 171, "worktree": self.worktree, "source_kind": "explicit_user",
                  "source_reference": "invocation:/from-issue 171 --auto", "now": NOW}
@@ -1304,6 +1316,31 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
                 refused = self.build(kind, value, ok=False)
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
                 self.assertIn(reason, refused.stderr)
+
+    def test_resolver_refusal_relays_the_resolver_document_exactly(self):
+        def two_violations(contract_value):
+            del contract_value["bindings"]["tracker"]["repo_slug"]
+            contract_value["bindings"]["vcs"]["merge"]["delete_branch"] = "yes"
+
+        def future_schema(contract_value):
+            contract_value["schema_version"] = 2
+
+        prefix = b"workflow-state: resolve-project refused at repo-root: "
+        for label, mutate, code, pointers in (
+                ("two ordered violations", two_violations, "invalid_contract",
+                 ["/bindings/tracker/repo_slug", "/bindings/vcs/merge/delete_branch"]),
+                ("reason code", future_schema, "unsupported_schema", ["/schema_version"])):
+            with self.subTest(label=label):
+                self.project(mutate)
+                expected = self.resolver_refusal_line(self.root, "repo-root")
+                refused = self.build("contract", self.contract_input(), ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", expected))
+                error = json.loads(refused.stderr.removeprefix(prefix))["error"]
+                self.assertEqual(
+                    (error["code"], [item["pointer"] for item in error["violations"]],
+                     "reason_code" in error),
+                    (code, pointers, code == "unsupported_schema"))
 
     def test_scope_and_initial_intent_regenerate_from_the_contract(self):
         self.project()
