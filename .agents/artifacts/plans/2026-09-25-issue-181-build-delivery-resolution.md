@@ -22,7 +22,7 @@ root and relay the stderr line verbatim (Task 4).
 `unittest.mock`), Markdown skill prose, `just`.
 
 Spec (source of truth, read it whole):
-`.claude/specs/2026-09-25-issue-181-build-delivery-resolution-design.md`, D1–D9.
+`.agents/artifacts/specs/2026-09-25-issue-181-build-delivery-resolution-design.md`, D1–D9.
 
 ## Global Constraints
 

@@ -101,7 +101,7 @@ These apply to both gates.
   substitute: `check-launch` still runs before every pre-merge forge write,
   Phase 6's tip check and the CI wait still bind, and the merge still requires
   the base branch's required status check. Nothing here weakens
-  `.out-of-scope/ungated-agent-merges.md`.
+  `.agents/knowledge/rejections/ungated-agent-merges.md`.
 
 ## Never route around a denial
 
