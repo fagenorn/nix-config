@@ -83,6 +83,13 @@ LIFECYCLE_DOCS = (FROM_ISSUE, AUTO, FROM_ISSUE_DIR / "ship-handoff.md", SHIP_ISS
                   SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE, ORCHESTRATE)
 STDIN_CLAUSE = ("lifecycle call is one command that reads its input from stdin "
                 "through a quoted heredoc")
+BUILD_ROOT_CLAUSE = ("The builder seals the policy `resolve-project` resolves at "
+                     "`--repo-root`, the ledger repository root; when `worktree` already "
+                     "exists, it also resolves there and refuses if any sealed policy "
+                     "member differs.")
+BUILD_REFUSAL_RELAY = ("report the builder's stderr line verbatim: for a resolver refusal "
+                       "it carries the resolver's `error.code`, `repair_id` and ordered "
+                       "`violations` exactly.")
 WRITER_RULE = ("Under implementation custody a ship owner writes only "
                "`checkpoint-delivery`, never `finish`; a remainder owner writes its "
                "own `finish --summary-file -`.")
@@ -799,6 +806,16 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         durable = self.section(self.from_issue, "### Explicit durable interactive acquisition",
                                "The `workflow-state` executable")
         self.assertIn("only when this invocation created the run", normalized(durable))
+
+    def test_contract_builders_state_the_resolution_root_and_relay_refusals(self):
+        direct = normalized(self.section(self.from_issue, "### Direct autonomous acquisition",
+                                         "### Interactive direct acquisition"))
+        decide = normalized(self.section(self.orchestrate, "## 3. Decide",
+                                         "## 4. Execute control actions"))
+        for skill, text in (("from-issue", direct), ("orchestrate-issues", decide)):
+            with self.subTest(skill=skill):
+                self.assertIn(BUILD_ROOT_CLAUSE, text)
+                self.assertIn(BUILD_REFUSAL_RELAY, text)
 
     def test_orchestrate_bootstrap_actions_and_projected_owner(self):
         observe = normalized(self.section(self.orchestrate, "## 2. Bootstrap and observe",
