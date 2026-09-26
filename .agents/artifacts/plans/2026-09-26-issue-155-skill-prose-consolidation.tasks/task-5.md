@@ -18,6 +18,11 @@
   its signature and messages: it reads the file (an `OSError` or `ValueError`
   becomes `ValueError(f"cannot load {path}: {error}")`) and returns
   `parse_matrix(text, str(path))`.
+- Produces in `agent_model_matrix` (D33): the module constant
+  `SUBAGENT_TYPE = re.compile(r'\bsubagent_type="([^"]+)"')`, hoisted from
+  `_validate_subagent_type`, which now calls `SUBAGENT_TYPE.findall(call)`.
+  That is the same pattern, so its results and messages do not change.
+  `IL` imports it. There is one home for a site call's `subagent_type` syntax.
 - Produces in `IL`. Tasks 6 and 7 rely on these exact names:
   - Constants: `MODEL_PATH = "home/common/agent-skills/instruction-load.json"`,
     `SHARED_TREE = "home/common/agent-skills/skills"`,
@@ -60,8 +65,9 @@
   _BOUNDARY_AFTER = r"(?![A-Za-z0-9_-])"
   _BASENAME_BEFORE = r"(?<![A-Za-z0-9_.-])(?<![A-Za-z0-9_-]/)"   # not inside "<skill>/<file>"
   _MD_TOKEN = re.compile(_BASENAME_BEFORE + r"([A-Za-z0-9_-]+\.md)" + _BOUNDARY_AFTER)
-  _SUBAGENT_TYPE = re.compile(r'subagent_type="([^"]+)"')
   ```
+  A site's `subagent_type` is a `SUBAGENT_TYPE` match, imported from
+  `agent_model_matrix` (D33), never a local copy.
   Document `source` (a member spelling) names `target` when any one of these
   holds:
   1. `target` appears framed by `_BOUNDARY_BEFORE` and `_BOUNDARY_AFTER`.
@@ -116,7 +122,7 @@
      hot or conditional member, except an entry profile's own
      `<entry>/SKILL.md`. An agent definition gives
      `<m> is not the subagent_type of any of its sites` unless its name without
-     `.md` is a `_SUBAGENT_TYPE` match in one of the profile's sites' `call`. A
+     `.md` is a `SUBAGENT_TYPE` match in one of the profile's sites' `call`. A
      skill document gives
      `<m> is named by neither its prompt nor another member` unless the resolved
      prompt, or another resolved hot or conditional skill document, names it.
@@ -370,7 +376,8 @@ Expected: ERROR at import, with
 - [ ] **Step 3: Implement**
 
 1. In `agent_model_matrix.py`, extract `parse_matrix` exactly as described under
-   Interfaces, and make `load_matrix` delegate to it.
+   Interfaces, and make `load_matrix` delegate to it. Hoist `SUBAGENT_TYPE` the
+   same way.
 2. Create `IL` with the module docstring `"""Measure the instruction documents
    each agent profile loads, per host."""`. It gets the constants, `Reader`,
    the regexes above, and the seven functions under the Invariants. Keep
@@ -397,4 +404,4 @@ git add python/agent_tools/instruction_load.py python/agent_tools/agent_model_ma
 git commit -m "feat(agent-tools): validate and measure the instruction-load model (#155)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
 
-Decision IDs: D7, D11, D14, D16, D17, D18, D22, D23, D25.
+Decision IDs: D7, D11, D14, D16, D17, D18, D22, D23, D25, D33.

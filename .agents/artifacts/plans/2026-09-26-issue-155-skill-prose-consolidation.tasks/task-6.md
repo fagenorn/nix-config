@@ -85,7 +85,11 @@
      - one `` - Unread: `<m>` — <reason> `` per unread entry
 
   Every delta is signed (`+13`, `-70`, `0`). The tables use GitHub pipe syntax,
-  with a `---:` alignment for numeric columns. The preface paragraphs:
+  with a `---:` alignment for numeric columns. A row is `| ` + the cells joined
+  by ` | ` + ` |`. A Member cell is a code span (`` `demo/NEW.md` ``), and every
+  other cell is plain text. The Hosts cell joins the head-tree hosts with `, `.
+  An absent side shows `absent` in its bytes cell and `0` in its words cell.
+  The Step 1 row literals pin this (D33). The preface paragraphs:
 
   > Bytes are UTF-8 lengths and words are whitespace-separated tokens; neither is a token count. A hot member loads on every run of its profile's standard route and a conditional member only on a named branch. A shared-tree member counts on both hosts; a Claude-only-tree member or an agent definition counts on Claude only.
   >
@@ -190,12 +194,16 @@ class ReportCommandTest(unittest.TestCase):
         for heading in ("## Frame", "## Hot totals", "## Conditional totals", "## Documents",
                         "## Members by profile", "### demo-reviewer"):
             self.assertIn(heading, text)
+        lines = text.splitlines()
+        self.assertIn("| demo | claude | 38 | 51 | +13 | 7 | 9 | +2 | yes | fixture entry |", lines)
+        self.assertIn("| `demo/NEW.md` | claude, codex | absent | 9 | +9 | 0 | 2 | +2 |", lines)
 
     def test_the_output_is_a_function_of_the_two_shas(self):
         first = self.report("--base", self.base, "--head", self.head)
         (self.repo / "home/common/agent-skills/skills/demo/SKILL.md").write_bytes(b"dirty\n")
         second = self.report("--base", self.base, "--head", self.head)
         self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertTrue(first.stdout.startswith("# Instruction load: "), first.stdout[:80])
         self.assertEqual(first.stdout, second.stdout)
 
     def test_the_model_is_read_at_head_not_from_the_working_tree(self):
@@ -232,8 +240,13 @@ words, is absent at base. `solo/SKILL.md` is Claude-only.
 - [ ] **Step 2: Run the test and watch it fail**
 
 Run: `env PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_instruction_load.py -k ReportCommandTest`
-Expected: FAILED (failures=6). The module has no `main` yet, so every subprocess
-exits 0 with empty output, or 1. No assertion on SHAs or exit 2 holds.
+Expected: FAILED (failures=3, errors=3). The module has no `main` yet, so
+every subprocess exits 0 with empty stdout and writes no file. The three
+failures are the two exit-2 tests and
+`test_the_output_is_a_function_of_the_two_shas`, at its `startswith` check.
+The three errors are the two tests that end in `json.loads("")` and
+`test_markdown_file_carries_both_shas_and_the_regeneration_command`, whose
+`read_text` finds no file.
 
 - [ ] **Step 3: Implement**
 
@@ -270,4 +283,4 @@ git add python/agent_tools/instruction_load.py home/common/agent-skills/tests/te
 git commit -m "feat(agent-tools): report instruction load across two revisions (#155)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
 
-Decision IDs: D8, D9, D14, D17, D26.
+Decision IDs: D8, D9, D14, D17, D26, D33.

@@ -87,9 +87,9 @@ No installed-tree class is added (D12).
 ## Delivery estimate and boundaries
 
 All figures are estimates. About 23 files change, four of them new: the module,
-the model, its test file and the report. The skill documents lose about 1.6 KB
-in total: E1 is about 65 bytes per entry, E2 about 165 bytes per file and E3
-about 470 bytes. The module is about 520 lines. Tests grow by about 430 lines in
+the model, its test file and the report. The skill documents lose about 1.4 KB
+in total: E1 is about 65 bytes per entry, E2 about 45–65 bytes per file (D31)
+and E3 about 470 bytes. The module is about 520 lines. Tests grow by about 430 lines in
 the new file and 110 in the three contract suites. The model is about 24 KB of
 JSON, and the report is probably 40–60 KB of Markdown. The product diff exceeds
 ship-issue's 20-file degraded-review bound, so ship runs the full two-axis
@@ -148,5 +148,29 @@ and grill. Planning added D22–D30:
 - **D28:** D20's anchor move covers three tests, and E3 needs a whitespace-normalized union.
 - **D29:** ceilings are written only by scratch scripts over `measure`.
 - **D30:** Task 8 syncs by a signed merge, and a conflict is reported BLOCKED.
+
+Phase-5 standards review added D31–D33:
+
+- **D31:** E2 keeps each PATH fallback in a sentence that covers every call.
+- **D32:** the plain `agent-workflow-tests` run's pre-activation failure is recorded.
+- **D33:** the E4 pointer is conditional, the report cells are pinned, and there is one `SUBAGENT_TYPE`.
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (one fresh native `reviewer`, Opus/high), isolated and
+  read-only, against `REVIEW-CONTRACT.md`. Codex `plan-review` ran first on the
+  same packet. It completed with exit 0, but its output failed validation: no
+  JSONL event reported the selected model `gpt-6-astra` and effort `xhigh`.
+  That is a metadata mismatch, not a capacity rejection, so the one-time native
+  fallback ran, and Codex was not retried. The earlier Codex attempt, at
+  launch 4, had hit its usage limit.
+- Base `affa05e7392caeb456f92b4dad0850bbd01b4d86`, plan reviewed at `a4ccbd6`;
+  focus none.
+- Findings: 0 Blocking, 5 Should-fix, 2 Discussion. All 7 were verified against
+  the live worktree and accepted, with 0 rejected and 0 deferred. S1 is D31
+  (Task 2). S2 is D32 (Task 8). S3 fixes Task 6's determinism test and red
+  count. S4 is D33, as Task 6's row literals. S5 fixes Task 1's red-phase
+  list. D1 is D33, Task 7's two conditional members. D2 is D33, Task 5's
+  shared `SUBAGENT_TYPE`.
 
 ---

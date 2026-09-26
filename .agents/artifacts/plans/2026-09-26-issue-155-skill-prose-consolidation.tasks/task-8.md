@@ -222,6 +222,19 @@ Expected: `OK (skipped=4)`. The four skips are the `setUpClass` of
 `test_installed_policy_surface_matches_source_contract`. Before any sync, the
 planning probe ran 1341 tests in about 13 minutes.
 
+Run: `env PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k test_installed_policy_surface_matches_source_contract`
+Expected: FAILED, and every failure is a `2 != 1` from
+`assert_single_resolution_statement` over the installed roots. This is the
+pre-activation record (D32). It is the one result the configured
+`agent-workflow-tests` command, `just agent-workflow-tests` without the
+variable, shows differently until the next `just switch`. The installed trees
+keep the pre-E1 opener, and this plan never switches (D27). Any other failure
+signature here is real, so stop with BLOCKED. Ship's Phase 2 runs that
+configured command. There, this one test failing with this one signature,
+beside a green source-surface run, is this recorded pre-activation lag, not
+a regression. The ship owner notes it in the PR body with D32 and continues.
+Any other failure is real.
+
 Run: `just build`
 Expected: exit 0. The build import-checks `agent_tools.instruction_load`.
 
@@ -263,4 +276,4 @@ Expected: `3c9709ca470bd473d49b39a611ca6cab258973db`.
 Run: `git status --short`
 Expected: no output.
 
-Decision IDs: D9, D10, D14, D15, D17, D19, D26, D27, D29, D30.
+Decision IDs: D9, D10, D14, D15, D17, D19, D26, D27, D29, D30, D32.

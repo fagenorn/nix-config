@@ -77,10 +77,15 @@ Add this method to `ProjectPolicySurfaceTest`, directly before
 - [ ] **Step 2: Run the test and watch it fail**
 
 Run: `env WORKFLOW_POLICY_SURFACE=source python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k ProjectPolicySurfaceTest`
-Expected: FAIL. `test_policy_entry_rejects_a_restated_resolution` fails with
-`2 != 1`. Both `test_shared_source_phase_entries_use_one_resolved_project` and
+Expected: FAIL, in five tests, and every failure is a `2 != 1` from
+`assert_single_resolution_statement`. `test_policy_entry_rejects_a_restated_resolution`
+fails once. `test_shared_source_phase_entries_use_one_resolved_project` and
 `test_claude_source_phase_entries_use_one_resolved_project` fail with one
-`2 != 1` subtest per entry.
+subtest per entry. `test_installed_policy_surface_applies_both_support_matrices`
+and `test_installed_policy_surface_rejects_missing_and_nonexecutable_helpers`
+fail too. They copy the still-unedited source trees into a fixture home and
+run the live-home test, which now calls the helper. Any other failure is a
+defect in Step 1.
 
 - [ ] **Step 3: Make E1 in the 13 entries**
 

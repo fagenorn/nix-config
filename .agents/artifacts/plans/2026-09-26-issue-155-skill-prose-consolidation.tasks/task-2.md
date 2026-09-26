@@ -17,8 +17,14 @@
 **Invariants:**
 - The lifecycle-call rule in both files still starts with `STDIN_CLAUSE`
   ("lifecycle call is one command that reads its input from stdin through a
-  quoted heredoc"). It still names `~/.agents/bin/workflow-state`, which
+  quoted heredoc"). Each file still names `~/.agents/bin/workflow-state`, which
   `test_helper_binaries_resolve_from_bare_names` requires.
+- The PATH fallback ends up stated once per file, in a sentence that covers
+  every `workflow-state` command, including the calls that read no stdin
+  (`host-route`, `init-run`, `suspend`, `progress`). It never lives only in the
+  stdin rule, whose scope excludes those calls (D31).
+- from-issue's lifecycle-call rule stays byte-identical. It spells the
+  sanctioned call.
 - `SK/from-issue/AUTO.md` keeps its line "resuming a `suspended` attempt requires
   neither `new_run` nor `owner_unavailable` — suspension is not a terminal replay,
   so re-entry clears it with both flags left `false`." on one physical line,
@@ -30,20 +36,24 @@
 
 - [ ] **Step 1: Make E2 and E3**
 
-`SK/from-issue/SKILL.md`, in the `## Lifecycle identity` lifecycle-call rule.
+`SK/from-issue/SKILL.md`, in the `## Lifecycle identity` identity paragraph,
+whose "Every `workflow-state` command" sentence covers every call (D31).
 Replace these two lines:
 
 ```text
-`--summary-file -` or `--input -`, with the helper named bare or as
-`~/.agents/bin/workflow-state`, optionally piped into or out of
+delegated remainder uses `--repo-root <ledger_repo_root>`; never substitute the
+current checkout or owner worktree. `action_id` is the one identity field that
 ```
 
-with these three:
+with these three. Keep "Every `workflow-state` command" and
+"`--repo-root <ledger_repo_root>`" each on one physical line, since
+`test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops` asserts
+both in the raw text:
 
 ```text
-`--summary-file -` or `--input -`, with the helper named bare, or as
-`~/.agents/bin/workflow-state` when the bare name does not resolve on PATH,
-optionally piped into or out of
+delegated remainder uses `--repo-root <ledger_repo_root>`, and the full
+`~/.agents/bin/workflow-state` path when the bare name does not resolve on PATH;
+never substitute the current checkout or owner worktree. `action_id` is the one identity field that
 ```
 
 Also delete the standalone paragraph that closes the `### Explicit durable
@@ -55,26 +65,23 @@ The `workflow-state` executable is `~/.agents/bin/workflow-state`; if the bare
 name does not resolve on PATH, invoke it by that full path.
 ```
 
-`CL/orchestrate-issues/SKILL.md`. Delete the standalone paragraph after the
-intro, again two lines plus the following blank line:
-
-```text
-Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
-`workflow-state` name does not resolve on PATH, use that full path.
-```
-
-Then, in its lifecycle-call rule, replace
+`CL/orchestrate-issues/SKILL.md`. Here the standalone paragraph after the intro
+("Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the
+bare `workflow-state` name does not resolve on PATH, use that full path.") is
+the scope-general statement, and it stays byte-identical. It is the only
+statement that covers `host-route` and `init-run`, because the lifecycle-call
+rule enumerates only `control` and `build-delivery` (D31). The restatement is
+the rule's naming clause. In the lifecycle-call rule, replace these two lines:
 
 ```text
 `build-delivery`, with the helper named bare or as `~/.agents/bin/workflow-state`,
 and the call optionally piped into or out of `artifact-budget validate-report
 ```
 
-with
+with this one. The code span keeps its line break before `--input -`:
 
 ```text
-`build-delivery`, with the helper named bare, or as `~/.agents/bin/workflow-state`
-when the bare name does not resolve on PATH, and the call optionally piped into or out of `artifact-budget validate-report
+`build-delivery`, and the call optionally piped into or out of `artifact-budget validate-report
 ```
 
 `SK/from-issue/AUTO.md`. Replace the first seven lines of the paragraph after
@@ -141,12 +148,16 @@ In `T/test_workflow_skill_contracts.py`:
 Run: `env WORKFLOW_POLICY_SURFACE=source python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py`
 Expected: OK.
 
-Run: `git grep -n -F "when the bare name does not resolve on PATH" -- home/common/agent-skills/skills/from-issue/SKILL.md home/common/claude-code/skills/orchestrate-issues/SKILL.md`
-Expected: exactly two lines, one per file. At the start commit there is no
-output and the exit status is 1.
+Run: `git grep -n -e "does not resolve on PATH" -- home/common/agent-skills/skills/from-issue/SKILL.md home/common/claude-code/skills/orchestrate-issues/SKILL.md`
+Expected: exactly two lines, one per file: from-issue's identity paragraph
+and orchestrate-issues' standalone paragraph. At the start commit it also
+prints two lines, but from-issue's is its standalone paragraph, near the end
+of `## Lifecycle identity`.
 
-Run: `git grep -n -e "invoke it by that full path" -e "use that full path" -e "always includes both" -- home/common/agent-skills/skills/from-issue home/common/claude-code/skills/orchestrate-issues`
-Expected: no output and exit 1. At the start commit it prints three lines.
+Run: `git grep -n -e "invoke it by that full path" -e "always includes both" -e "helper named bare or as" -- home/common/agent-skills/skills/from-issue home/common/claude-code/skills/orchestrate-issues`
+Expected: exactly one line, from-issue's unchanged lifecycle-call rule
+(`SKILL.md`, "with the helper named bare or as"). At the start commit it prints
+four lines.
 
 - [ ] **Step 5: Commit**
 
@@ -155,4 +166,4 @@ git add home/common/agent-skills/skills/from-issue/SKILL.md home/common/claude-c
 git commit -m "refactor(skills): fold the workflow-state PATH fallback and AUTO.md's flag restatement (#155 E2, E3)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
 
-Decision IDs: D2, D20, D28.
+Decision IDs: D2, D20, D28, D31.
