@@ -110,3 +110,23 @@ failed. Across the six lifecycle, admission and delivery suites, the only
 failures under Task 2's code were the two tests Task 2 revisits. The copy's
 other errors came from files it lacked (`.agents/project.json`, `.git`).
 `just build` was not probed.
+
+## Standards review provenance
+
+- **Reviewer:** Claude fallback (native `reviewer`, isolated, read-only) after a
+  Codex `plan-review` run whose JSONL carried no runtime-selection event naming
+  model `gpt-6-astra` / effort `xhigh`, so Codex identity was not established.
+  The Codex run's one finding was still verified on its merits.
+- **Base SHA:** `d8fe6ca2f9123abcdc9bd55f94d79abedd232628`; reviewed plan HEAD `81cd303`.
+- **Accepted (5):** Codex S1 — the T1/T2 test gains `max_parallel=1` subtests
+  and an empty-`waiting` assertion (per D15); NPR194-02 — Step 2's expected
+  count becomes `failures=10`; NPR194-03 — Step 3 rewords the suspended-skip
+  comment; NPR194-06 (part) — the spec's Test seams now calls the Phase-1
+  summary contracted (per D14). NPR194-04 accepted as a decision, no code (per D16).
+- **Rejected (1):** NPR194-01 — the `itertools` use it cites was an in-flight
+  edit, replaced by an explicit tuple list before it was committed.
+- **Deferred (2):** NPR194-05 — an active-remainder reap-then-absent subcase;
+  D4's reap persistence is pinned by T4 and the remainder path's
+  `changed=reaped` is existing behaviour. NPR194-06 (rest) — the
+  orchestrate-issues "recorded worktree observed" wording stays: "on the issue
+  branch" would be wrong for the Phase-0 absent exception.

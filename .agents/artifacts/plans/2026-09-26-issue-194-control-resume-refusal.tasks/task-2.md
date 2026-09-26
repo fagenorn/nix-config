@@ -155,13 +155,18 @@ O=home/common/claude-code/skills/orchestrate-issues/SKILL.md
                self.state_path.write_bytes(before)
 
        def test_an_unresumable_suspension_refuses_only_its_own_issue(self):
-           """T1, T2 (#194): its neighbour spawns, and the refused issue is reported, unchanged."""
-           for recorded_state in ("absent", "mismatch"):
-               with self.subTest(recorded_state=recorded_state):
-                   self.run_id = f"unresumable-{recorded_state}"
+           """T1, T2 (#194): its neighbour spawns, and the refused issue is reported, unchanged.
+
+           `max_parallel=1` is the discriminating case: a refused issue that
+           took a unit would leave its neighbour unspawned.
+           """
+           for recorded_state, max_parallel in (
+                   ("absent", 1), ("absent", 2), ("mismatch", 1), ("mismatch", 2)):
+               with self.subTest(recorded_state=recorded_state, max_parallel=max_parallel):
+                   self.run_id = f"unresumable-{recorded_state}-{max_parallel}"
                    self.init_run()
-                   path = os.path.abspath(self.root / f"wt-47-{recorded_state}")
-                   spare = os.path.abspath(self.root / f"wt-51-{recorded_state}")
+                   path = os.path.abspath(self.root / f"wt-47-{recorded_state}-{max_parallel}")
+                   spare = os.path.abspath(self.root / f"wt-51-{recorded_state}-{max_parallel}")
                    self.spawn(issue=47, worktree=path)
                    self.progress(issue=47, phase=1, now="2026-08-13T20:01:00Z")
                    self.suspend(issue=47, attempt=1, blocked_on="usage_limit",
@@ -175,12 +180,13 @@ O=home/common/claude-code/skills/orchestrate-issues/SKILL.md
                                                             "state": recorded_state}),
                            self.worktree_fact(51, candidate={"path": spare,
                                                              "state": "absent"})],
-                       max_parallel=2)
+                       max_parallel=max_parallel)
                    self.assertEqual(
                        [(item["kind"], item.get("issue")) for item in response["actions"]],
                        [("spawn", 51), ("wait", None)])
                    self.assertEqual([(item["issue"], item["kind"]) for item in response["deltas"]],
                                     [(51, "spawned")])
+                   self.assertEqual(response["admission"]["waiting"], [])
                    summary = response["summaries"][0]
                    self.assertEqual((summary["issue"], summary["state"], summary["blocked_on"]),
                                     (47, "suspended", "usage_limit"))
@@ -346,8 +352,9 @@ PYTHONPATH=python python3 -m unittest $T/test_workflow_skill_contracts.py \
   -k unresumable_issue 2>&1 | grep -E '^(FAIL|ERROR):|^Ran|^OK|^FAILED'
 ```
 
-Expected. The first run is `Ran 5 tests` and `FAILED (failures=8)`. Every
-failure except the two `candidate=True` subtests is
+Expected. The first run is `Ran 5 tests` and `FAILED (failures=10)` — the
+T1/T2 test fails in all four of its `recorded_state` × `max_parallel`
+subtests (per D15). Every failure except the two `candidate=True` subtests is
 `AssertionError: 2 != 0 : workflow-state: resume control action requires a
 matching recorded worktree observation`. Those two fail because the
 `current control action ...` text is not in that same stderr. The
@@ -385,7 +392,20 @@ given because it carries D1's four conditions:
 ```
 
 Then, in the resume lane, replace its `observe` branch. Leave every line above
-it unchanged:
+it unchanged except the suspended-skip comment's last sentence, which would
+otherwise read as the old whole-sweep refusal:
+
+```python
+# before
+                # and the next sweep resumes it. A handoff, and any worktree
+                # observed as absent or mismatched, stays a refusal (per D9).
+# after
+                # and the next sweep resumes it. An unobserved handoff stays a
+                # whole-sweep error; a worktree observed as absent or mismatched
+                # refuses only its own issue, in its summary (per D9; #194 D1).
+```
+
+The `observe` branch:
 
 ```python
 # before
