@@ -6,9 +6,12 @@ workflow-state resolves project policy and hands it in, and
 snapshots; every sealed object this module returns is validated again by
 DeliveryRuntime before it is printed.
 The ``authorization-chain`` kind seals the handoff's chain digest over the intents
-an owner holds. Declared scopes (in the initial intent) and actual scopes (kind ``scope``) come
-from the one ``_scope`` function, so exact matching can only disagree when the
-inputs differ. Selections and observations take only what a probe returns;
+an owner holds. Every kind that takes a contract works from its reference
+initial intent: the one derived from the contract when it re-derives, else the
+intent a ledger installed with it, which workflow-state finds and hands in as
+``installed_intent``. Declared scopes (in that intent) and actual scopes (kind
+``scope``) come from the one reference intent, so exact matching can only
+disagree when the inputs differ. Selections and observations take only what a probe returns;
 every member the contract determines is filled from the contract, so an owner
 never composes a digest.
 """
@@ -202,31 +205,51 @@ class DeliveryBuilder:
         self._observations = {kind: _OBSERVATIONS[kind] for kind in sorted(observable)
                               if kind in _OBSERVATIONS}
 
-    def build(self, kind: str, value: object, *, policy: dict | None) -> object:
+    def build(self, kind: str, value: object, *, policy: dict | None,
+              installed_intent: object = None) -> object:
         if kind == "contract":
             return self._build_contract(value, policy)
         if kind == "initial-intent":
-            contract = self._checked_contract(_closed(value, {"contract"})["contract"])
-            return self._intent(contract)
+            _, intent = self._checked_contract(_closed(value, {"contract"})["contract"],
+                                               installed_intent)
+            return copy.deepcopy(intent)
         if kind == "scope":
             value = _closed(value, {"contract", "stage_id"})
             if not isinstance(value["stage_id"], str):
                 _refuse("builder input keys: stage_id must be a string")
-            contract = self._checked_contract(value["contract"])
+            contract, intent = self._checked_contract(value["contract"], installed_intent)
             stage = next((item for item in contract["stages"]
                           if item["id"] == value["stage_id"]), None)
             if stage is None:
                 _refuse(f"unknown stage: {value['stage_id']!r}")
-            return self._scope(contract, stage)
+            declared = [item for item in intent["scopes"]
+                        if (item["action"], item["effect"]) == (stage["action"], stage["effect"])]
+            if len(declared) != 1:
+                _refuse("the contract's initial intent declares no single scope for stage "
+                        + stage["id"])
+            return copy.deepcopy(declared[0])
         if kind == "selected-output":
-            return self._selection(value)
+            return self._selection(value, installed_intent)
         if kind == "observation":
-            return self._observation(value)
+            return self._observation(value, installed_intent)
         if kind == "authority-observation":
-            return self._authority(value)
+            return self._authority(value, installed_intent)
         if kind == "authorization-chain":
-            return self._chain(value)
+            return self._chain(value, installed_intent)
         _refuse(f"unknown builder kind: {kind!r}")
+
+    def requires_installed_intent(self, value: object) -> bool:
+        """Whether ``value`` is a model-valid contract that does not re-derive.
+
+        Only then may workflow-state look for a ledger that installed it. A
+        value the model cannot validate answers False whatever it raises (a
+        null nested member raises ``AttributeError``, not ``ValueError``), and
+        then meets its own refusal in ``build`` (per D14).
+        """
+        try:
+            return self._derivation(self._valid_contract(value))[1] is not None
+        except Exception:
+            return False
 
     def check_worktree_policy(self, repo_root_policy: object,
                               worktree_policy: object) -> None:
@@ -319,11 +342,11 @@ class DeliveryBuilder:
         contract["initial_authorization_intent_digest"] = self._model.canonical_digest(intent)
         return {"contract": contract, "initial_intent": intent}
 
-    def _selection(self, value: object) -> dict[str, Any]:
+    def _selection(self, value: object, installed_intent: object) -> dict[str, Any]:
         value = _closed(value, _SELECTION_INPUT)
         refs = {name: _text(value[name], name) for name in (
             "head", "tree", "acceptance_ref", "review_ref", "test_ref")}
-        contract = self._checked_contract(value["contract"])
+        contract, _ = self._checked_contract(value["contract"], installed_intent)
         _, _, branch, base, _ = self._contract_facts(contract)
         head = refs["head"]
         return self._seal({
@@ -341,7 +364,7 @@ class DeliveryBuilder:
             "test_evidence_ids": [f"test:{refs['test_ref']}@{head}"],
         })
 
-    def _observation(self, value: object) -> dict[str, Any]:
+    def _observation(self, value: object, installed_intent: object) -> dict[str, Any]:
         if not isinstance(value, dict) or not isinstance(value.get("observation_kind"), str):
             _refuse("builder input keys: observation_kind must be a string")
         kind = value["observation_kind"]
@@ -354,7 +377,7 @@ class DeliveryBuilder:
         reference = _text(value["source_reference"], "source_reference")
         observed_at = _utc(value["observed_at"], "observed_at")
         evidence = _evidence_digest(value["evidence"], "evidence")
-        contract = self._checked_contract(value["contract"])
+        contract, _ = self._checked_contract(value["contract"], installed_intent)
         digest = self._model.canonical_digest(contract)
         facts = {name: (self._contract_selection(value[name], digest) if check is None
                         else check(value[name], name))
@@ -380,7 +403,7 @@ class DeliveryBuilder:
             _refuse("selection contract digest does not match the contract")
         return selection
 
-    def _authority(self, value: object) -> dict[str, Any]:
+    def _authority(self, value: object, installed_intent: object) -> dict[str, Any]:
         value = _closed(value, _AUTHORITY_INPUT)
         if _text(value["authority_kind"], "authority_kind") not in _AUTHORITY_KINDS:
             _refuse(f"unsupported authority kind: {value['authority_kind']!r}")
@@ -390,8 +413,8 @@ class DeliveryBuilder:
         reason = _text(value["reason_code"], "reason_code")
         observed_at = _utc(value["observed_at"], "observed_at")
         evidence = _evidence_digest(value["evidence"], "evidence")
-        contract = self._checked_contract(value["contract"])
-        scopes = {self._scope(contract, stage)["id"] for stage in contract["stages"]}
+        contract, intent = self._checked_contract(value["contract"], installed_intent)
+        scopes = {item["id"] for item in intent["scopes"]}
         if _text(value["scope_id"], "scope_id") not in scopes:
             _refuse(f"unknown scope: {value['scope_id']!r} is not a stage scope of the contract")
         return self._seal({
@@ -404,10 +427,10 @@ class DeliveryBuilder:
             "evaluation_use_key": None,
         })
 
-    def _chain(self, value: object) -> dict[str, str]:
+    def _chain(self, value: object, installed_intent: object) -> dict[str, str]:
         """Seal the digest of the intent chain an owner holds, rooted in its contract."""
         value = _closed(value, {"contract", "authorization_intents"})
-        contract = self._checked_contract(value["contract"])
+        contract, _ = self._checked_contract(value["contract"], installed_intent)
         intents = value["authorization_intents"]
         if not isinstance(intents, list) or not intents:
             _refuse("authorization chain: authorization_intents must be a non-empty list")
@@ -431,22 +454,55 @@ class DeliveryBuilder:
         return {"authorization_chain_digest":
                 self._model.canonical_digest({"intent_ids": ids})}
 
-    def _checked_contract(self, value: object) -> dict[str, Any]:
-        """Validate a supplied contract and require its recorded intent to regenerate."""
+    def _valid_contract(self, value: object) -> dict[str, Any]:
         try:
-            contract = self._model.validate_delivery_object(
+            return self._model.validate_delivery_object(
                 value, expected_kind="delivery-contract",
                 notes_max_characters=self._notes_max)
         except ValueError as error:
             _refuse(f"contract is invalid: {error}")
+
+    def _derivation(self, contract: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+        """The intent a model-valid contract re-derives, or the reason it does not."""
         if contract["provenance"]["kind"] not in _SOURCE_KINDS:
-            _refuse("source kind of the contract cannot source an initial intent")
-        intent = self._intent(contract)
+            return None, "source kind of the contract cannot source an initial intent"
+        try:
+            intent = self._intent(contract)
+        except ValueError as error:
+            return None, str(error)
         if (intent["id"], self._model.canonical_digest(intent)) != (
                 contract["initial_authorization_intent_id"],
                 contract["initial_authorization_intent_digest"]):
-            _refuse("derived intent does not match the contract's initial intent")
-        return contract
+            return None, "derived intent does not match the contract's initial intent"
+        return intent, None
+
+    def _checked_contract(self, value: object, installed_intent: object
+                          ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Validate a supplied contract and return it with its reference initial intent.
+
+        A contract that re-derives yields its derived intent and ignores
+        ``installed_intent``. Otherwise the installed intent is the reference,
+        and it must be a valid root intent carrying the contract's recorded id
+        and digest.
+        """
+        contract = self._valid_contract(value)
+        intent, reason = self._derivation(contract)
+        if reason is None:
+            return contract, intent
+        if installed_intent is None:
+            _refuse(f"{reason}; no ledger under the repo root installs this contract")
+        try:
+            installed = self._model.validate_delivery_object(
+                installed_intent, expected_kind="authorization-intent",
+                notes_max_characters=self._notes_max)
+        except ValueError:
+            installed = None
+        if installed is None or installed["predecessor_intent_id"] is not None or (
+                installed["id"], self._model.canonical_digest(installed)) != (
+                contract["initial_authorization_intent_id"],
+                contract["initial_authorization_intent_digest"]):
+            _refuse("installed initial intent does not match the contract")
+        return contract, installed
 
     def _intent(self, contract: dict[str, Any]) -> dict[str, Any]:
         project, issue, _, _, _ = self._contract_facts(contract)
