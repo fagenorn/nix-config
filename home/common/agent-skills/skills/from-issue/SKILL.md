@@ -28,8 +28,9 @@ Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`,
 identity; never guess a missing field. Preserve the immutable ledger_repo_root
 exactly as supplied, and keep it distinct from the separate owner worktree
 recorded on the attempt. Every `workflow-state` command in this owner or its
-delegated remainder uses `--repo-root <ledger_repo_root>`; never substitute the
-current checkout or owner worktree. `action_id` is the one identity field that
+delegated remainder uses `--repo-root <ledger_repo_root>`, and the full
+`~/.agents/bin/workflow-state` path when the bare name does not resolve on PATH;
+never substitute the current checkout or owner worktree. `action_id` is the one identity field that
 changes when the attempt is relaunched; pass it through verbatim and never
 recompute it.
 
@@ -227,9 +228,6 @@ identity; do not spawn another owner. Missing,
 wrong-kind, wrong-issue, or multiple dispatch actions fail loudly before Phase
 1. The helper may also return its one trailing `wait` action; this
 already-running owner does not install the dispatcher's observer.
-
-The `workflow-state` executable is `~/.agents/bin/workflow-state`; if the bare
-name does not resolve on PATH, invoke it by that full path.
 
 ## The flow
 

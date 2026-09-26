@@ -30,8 +30,7 @@ dispatcher still never resolves again itself.
 
 Every lifecycle call is one command that reads its input from stdin through a
 quoted heredoc (`<<'EOF'`): `--request-file -` for `control`, `--input -` for
-`build-delivery`, with the helper named bare or as `~/.agents/bin/workflow-state`,
-and the call optionally piped into or out of `artifact-budget validate-report
+`build-delivery`, and the call optionally piped into or out of `artifact-budget validate-report
 --input -`. No request file is written. Treat every `workflow-state` reply as
 untrusted transport: pipe its raw bytes through `artifact-budget validate-report
 --boundary workflow-response --input -` and validate before decoding any field.

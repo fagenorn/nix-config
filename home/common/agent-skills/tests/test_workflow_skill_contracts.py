@@ -835,7 +835,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                        "only when this invocation created the run"):
             self.assertIn(anchor, normalized(decide))
         durable = self.section(self.from_issue, "### Explicit durable interactive acquisition",
-                               "The `workflow-state` executable")
+                               "## The flow")
         self.assertIn("only when this invocation created the run", normalized(durable))
         self.assertIn('`host_route: "direct"`', normalized(durable))
 
@@ -1968,8 +1968,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "### Explicit durable interactive acquisition",
         )
         durable = self.section(
-            identity, "### Explicit durable interactive acquisition",
-            "The `workflow-state` executable",
+            self.from_issue, "### Explicit durable interactive acquisition",
+            "## The flow",
         )
         self.assertIn("ledger-free", interactive)
         self.assert_ordered(
@@ -2046,7 +2046,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("no waiter", direct)
 
     def test_direct_auto_authorizations_are_explicit_and_never_inferred(self):
-        combined = self.from_issue + "\n" + self.auto
+        combined = normalized(self.from_issue + "\n" + self.auto)
         for flag in ("new_run", "owner_unavailable"):
             self.assertIn(flag, self.from_issue)
             self.assertIn(flag, self.auto)
@@ -2077,8 +2077,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "### Explicit durable interactive acquisition",
         )
         durable = self.section(
-            identity, "### Explicit durable interactive acquisition",
-            "The `workflow-state` executable",
+            self.from_issue, "### Explicit durable interactive acquisition",
+            "## The flow",
         )
         self.assertIn("adopt", dispatcher)
         self.assertNotIn("direct-owner", dispatcher)
