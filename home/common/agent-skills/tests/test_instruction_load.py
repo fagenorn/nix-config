@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -336,6 +338,129 @@ class ReportCommandTest(unittest.TestCase):
         completed = self.report("--base", self.base, "--head", broken)
         self.assertEqual(completed.returncode, 2)
         self.assertIn("matrix site demo-plugin is in no profile", completed.stderr)
+
+
+ROSTER = {
+    "from-issue-controller": ["claude", "codex"],
+    "orchestration-dispatcher": ["claude"],
+    "orchestrated-issue-owner": ["claude"],
+    "design-and-grill-owner": ["claude", "codex"],
+    "planning-owner": ["claude", "codex"],
+    "implementation-owner": ["claude", "codex"],
+    "ship-owner": ["claude", "codex"],
+    "release-owner": ["claude", "codex"],
+    "researcher": ["claude", "codex"],
+    "architecture-scan-owner": ["claude", "codex"],
+    "research": ["claude", "codex"],
+    "wayfind": ["claude", "codex"],
+    "to-issues": ["claude", "codex"],
+    "ship-release": ["claude", "codex"],
+}
+BREACH = re.compile(r"^profile (\S+) on (\S+): ")
+
+
+class LiveModelTest(unittest.TestCase):
+    def setUp(self):
+        self.read = instruction_load.tree_reader(REPO_ROOT)
+        raw = self.read(instruction_load.MODEL_PATH)
+        self.assertIsNotNone(raw, f"{instruction_load.MODEL_PATH} is missing")
+        self.model = instruction_load.load_model(raw)
+
+    def profile(self, model, profile_id):
+        return next(p for p in model["profiles"] if p["id"] == profile_id)
+
+    def test_the_live_model_validates_clean(self):
+        self.assertEqual(instruction_load.validate(self.model, self.read), [])
+
+    def test_the_roster_profiles_are_modelled_on_their_hosts(self):
+        hosts = {p["id"]: p["hosts"] for p in self.model["profiles"]}
+        for profile_id, expected in ROSTER.items():
+            with self.subTest(profile=profile_id):
+                self.assertEqual(hosts.get(profile_id), expected)
+
+    def test_each_live_mutation_yields_exactly_its_violation(self):
+        live = self.read
+
+        def with_copy(path):
+            return lambda p: live(path) if p == path.replace(
+                "agent-skills/skills", "claude-code/skills") else live(p)
+
+        def drop_site(m):
+            self.profile(m, "sdd-final-rereviewer")["launch"].remove("sdd-final-correctness-rereview")
+
+        def unknown_member(m):
+            self.profile(m, "research")["conditional"].append("from-issue/NOPE.md")
+
+        def unnamed_member(m):
+            self.profile(m, "research")["conditional"].append("to-issues/WIDE-REFACTORS.md")
+
+        def unlisted_sibling(m):
+            self.profile(m, "to-issues")["conditional"].remove("to-issues/WIDE-REFACTORS.md")
+
+        def unknown_key(m):
+            self.profile(m, "research")["extra"] = 1
+
+        def duplicate_id(m):
+            self.profile(m, "to-issues")["id"] = "research"
+
+        def ceiling_host(m):
+            del self.profile(m, "research")["ceiling_bytes"]["codex"]
+
+        def empty_note(m):
+            self.profile(m, "research")["note"] = ""
+
+        sync = "home/common/agent-skills/skills/ship-issue/SYNC.md"
+        cases = (
+            ("a matrix site dropped", drop_site, live,
+             "matrix site sdd-final-correctness-rereview is in no profile"),
+            ("an unknown member", unknown_member, live,
+             "profile research: from-issue/NOPE.md resolves to no document"),
+            ("an ambiguous member", None, with_copy(sync),
+             "profile ship-owner: ship-issue/SYNC.md resolves to 2 documents"),
+            ("an unnamed member", unnamed_member, live,
+             "profile research: to-issues/WIDE-REFACTORS.md is named by neither its "
+             "prompt nor another member"),
+            ("a named sibling left unlisted", unlisted_sibling, live,
+             "profile to-issues: to-issues/SKILL.md names to-issues/WIDE-REFACTORS.md, "
+             "which the profile does not list"),
+            ("an unknown key", unknown_key, live, "profile research: unknown key 'extra'"),
+            ("a duplicate profile id", duplicate_id, live, "profile research: duplicate id"),
+            ("a ceiling host missing", ceiling_host, live,
+             "profile research: ceiling_bytes hosts ['claude'] differ from hosts "
+             "['claude', 'codex']"),
+            ("an empty note", empty_note, live, "profile research: empty note"),
+        )
+        for label, mutate, read, expected in cases:
+            with self.subTest(mutation=label):
+                model = copy.deepcopy(self.model)
+                if mutate is not None:
+                    mutate(model)
+                self.assertEqual(instruction_load.validate(model, read), [expected])
+
+    def test_the_live_tree_breaches_no_ceiling(self):
+        measurement = instruction_load.measure(self.model, self.read)
+        self.assertEqual(instruction_load.over_ceiling(self.model, measurement), [])
+
+    def test_growing_a_hot_member_breaches_exactly_the_pairs_that_count_it(self):
+        measurement = instruction_load.measure(self.model, self.read)
+        for member in ("from-issue/AUTO.md", "agents/reviewer.md"):
+            with self.subTest(member=member):
+                counting = {
+                    (profile["id"], host)
+                    for profile in self.model["profiles"] for host in profile["hosts"]
+                    if member in measurement["profiles"][profile["id"]][host]["hot"]["members"]
+                }
+                self.assertTrue(counting)
+                slack = max(
+                    self.profile(self.model, pid)["ceiling_bytes"][host]
+                    - measurement["profiles"][pid][host]["hot"]["bytes"]
+                    for pid, host in counting)
+                path = measurement["documents"][member]["path"]
+                grown = lambda p, path=path, extra=b" " * (slack + 1): (
+                    self.read(p) + extra if p == path else self.read(p))
+                breaches = instruction_load.over_ceiling(
+                    self.model, instruction_load.measure(self.model, grown))
+                self.assertEqual({BREACH.match(b).groups() for b in breaches}, counting)
 
 
 if __name__ == "__main__":
