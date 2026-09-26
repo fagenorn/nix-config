@@ -62,7 +62,8 @@ and the ledger folds whatever it admitted. The builder only stops refusing to
 seal objects for a contract the lifecycle has already accepted. It keeps
 refusing any contract that no ledger has installed. The same fallback covers
 any future builder change that stops an installed contract from re-deriving
-(per D1, D2).
+(per D1, D2). In this spec, a *legacy contract* means exactly that: an
+installed contract that does not re-derive, whoever built it and whenever.
 
 ### Options considered
 
@@ -87,16 +88,18 @@ any future builder change that stops an installed contract from re-deriving
 A contract *re-derives* when it is model-valid, its provenance kind is in the
 builder's source kinds, and the intent the builder derives from it has exactly
 the contract's recorded id and canonical digest. The builder gains one pure
-predicate, `requires_installation(contract)`, which the runtime facade
+predicate, `requires_installed_intent(contract)`, which the runtime facade
 forwards. It is true only for a model-valid contract that does not re-derive.
 For an invalid contract it is false, so the normal `contract is invalid`
-refusal still fires with no ledger read.
+refusal still fires with no ledger read. The predicate and the contract check
+below share one private derivation check, so they cannot disagree about which
+contracts re-derive.
 
 For every kind except `contract`, if the input is an object with a `contract`
 member, the command runs the predicate on that member. Any other input goes
 straight to the build, which refuses it as it does today. Only when the
-predicate is true does the command look up the installed intent (§2). It then passes the result to the build as a value
-through one new keyword, `installed_intent`, which is absent or `None` when
+predicate is true does the command look up the installed intent (§2). It then
+passes the result to the build as a value through one new keyword, `installed_intent`, which is absent or `None` when
 nothing was found. The builder and runtime keep their no-I/O shape and
 interface version 1.
 
@@ -135,7 +138,9 @@ match the run-id pattern, and handles each `state.json` as follows:
   digest. It then returns the root intent of the delivery's
   `authorization_intents`.
 - If nothing matches, the lookup returns `None`. A root with no workflows
-  directory has nothing to match.
+  directory has nothing to match. The lookup resolves `--repo-root` the way
+  `check-launch` does, so a root that is absent, or is not a non-symlink
+  directory, refuses with that resolver's existing error.
 
 The lookup takes no lock. `atomic_write_state` publishes with `os.replace`, so
 an unlocked reader sees a whole file. Taking the lock would create
@@ -157,8 +162,10 @@ is therefore served.
 | `selected-output`, `observation` | unchanged | unchanged once the contract is served |
 
 A stage's scope is the one scope in the reference intent whose `action` and
-`effect` equal the stage's own. `STAGE_ACTIONS` gives each stage kind a
-distinct action, so a contract that re-derives always has exactly one, and it
+`effect` equal the stage record's own. The model pins those to
+`STAGE_ACTIONS`, which gives each stage kind a distinct action, and the ledger
+checks a requested scope against that same pair. So a contract that
+re-derives always has exactly one such scope, and it
 equals today's `_scope` output byte for byte. If an intent declares zero
 matching scopes, or more than one, `scope` refuses. The old claim that declared
 and actual scopes "come from the one `_scope` function" becomes "come from the
@@ -234,7 +241,8 @@ resolver relay and the worktree-policy veto from #181.
    - *AC2, no ledger entry.* Before installation, every contract-taking kind
      refuses with the not-installed clause, exit 2 and empty stdout.
    - *AC1.* After installation, `initial-intent` returns the hand-built intent
-     byte for byte. The ship handoff built from that intent validates. The full
+     byte for byte, and `authorization-chain` over it seals the digest the
+     ledger stores. The ship handoff built from that intent validates. The full
      loop then runs with builder outputs only, and `finish` returns
      `delivery_complete`. The literal PR ref means an implementation that
      re-derives a scope or a scope id fails the loop: the checkpoint parks on
@@ -288,7 +296,7 @@ derivation path. Verification uses the resolved `nix-build` and
 | D2 | Fallback only. A contract that re-derives is served exactly as today and no ledger is read. A model-valid contract that does not re-derive is served if and only if a ledger under `--repo-root` has installed it. There is no provenance allowlist and no date cutoff, so a future derivation change is covered too. | Installation (`control`/`direct-owner`) already admits any model-valid contract, and the ledger is the lifecycle's trust anchor. The builder "grants no authority". AC2. | Always consulting ledgers, which adds reads and failure modes to every call. Widening `_SOURCE_KINDS`, which serves uninstalled hand-built contracts. A cutoff date, which is arbitrary and misses later derivation changes. |
 | D3 | Find the installing ledger by scanning every run under `<repo-root>/.superpowers/workflows/`, matching the issue entry's installed contract by canonical digest. There is no new flag and no new input member. | The issue title: the stranded owners are *in flight* and re-run the invocation their loaded skill prose already fixes. The-bar token economy. The contract names its issue. | A required or optional `--run-id`, or a run id in the input. Either changes the callers' shape, and an in-flight owner on the old prose would stay refused. |
 | D4 | Read without a lock, as `check-launch` does. Non-matching, absent, non-regular or unparsable files are skipped. The first raw match, in sorted run order, is fully validated through `check-launch`'s reader, which is extracted into one shared function. An invalid match refuses and names its run. The match is re-checked on the validated state. | `check-launch` precedent (atomic `os.replace` publication, and lock creation is a write). The-bar DRY (two readers that must change together) and fail loud. The contract pins its root intent, so any match holds the same intent. | Taking the state lock, which is a write and breaks the read-only contract. Refusing on any unreadable unrelated ledger, which lets one stale run block every legacy contract. Raw-JSON trust, where an unvalidated ledger could supply the intent. |
-| D5 | Keep the builder pure. It gains `requires_installation(contract)`, forwarded by the runtime, and `build` takes the found intent as a value (`installed_intent`). workflow-state runs the predicate and does all the I/O. The builder checks the intent again (a valid root intent whose id and digest equal the contract's recorded pair). Interface version stays 1. | Builder docstring: no I/O. #181 D5 rejected a callback injected into the builder. The-bar defense in depth. agent-helpers: the command is a thin shell. | An injected lookup callable, which puts I/O inside the pure seam. A pre-read map of every ledger, which is an eager scan. An exception-driven retry in the command, which couples it to refusal classes. |
+| D5 | Keep the builder pure. It gains `requires_installed_intent(contract)`, forwarded by the runtime, and `build` takes the found intent as a value (`installed_intent`). workflow-state runs the predicate and does all the I/O. The builder checks the intent again (a valid root intent whose id and digest equal the contract's recorded pair). Interface version stays 1. | Builder docstring: no I/O. #181 D5 rejected a callback injected into the builder. The-bar defense in depth. agent-helpers: the command is a thin shell. | An injected lookup callable, which puts I/O inside the pure seam. A pre-read map of every ledger, which is an eager scan. An exception-driven retry in the command, which couples it to refusal classes. |
 | D6 | All six contract-taking kinds read the contract's *reference* initial intent, derived or installed. `initial-intent` returns it. `scope` returns its one declared scope with the stage's action and effect, and zero or several refuse. `authority-observation` admits its scope ids. Output for a contract that re-derives stays byte-identical. | The ledger's `match_scope` compares `pr_ref` and the other members against held intents, and its delivery validation requires authority scope ids to be held. ship-handoff builds `authorization_intents` from `initial-intent`. `STAGE_ACTIONS` actions are distinct. | Changing only the contract check. `scope` and `authority-observation` would still re-derive and disagree with the installed intent, parking at `merge` on `authorization_intent_required`. |
 | D7 | Every existing refusal text stays. When a contract neither re-derives nor is installed, its derivation reason gains `; no ledger under the repo root installs this contract`. There are three new texts: `installed initial intent does not match the contract`, `installing ledger <run-id> is invalid`, and `the contract's initial intent declares no single scope for stage <id>`. | Existing `assertIn(b"derived intent")` pins. The-bar: the log stream is the debugger (say why a legacy contract is refused). #171's exit-2, empty-stdout contract. | New replacement texts, which break pinned diagnostics. A silent reuse of the old text, which hides that the ledger was consulted. |
 | D8 | The regression runs at the `DeliveryLoopTest.deliver` CLI seam with a hand-built fixture: provenance `orchestrate-issues`, and PR-stage scopes that declare the literal PR ref `"5"`. That literal is completable but never builder-derived, so any implementation that re-derives fails. The seam covers the pre-install refusal, the mutated-contract refusal and an invalid-ledger refusal, and a derived build next to that invalid ledger proves the ledger-free path. | AC1 and AC2. The-bar: tests that can fail, with fixtures shaped like production. The existing end-to-end loop is the highest seam. | A pure builder test with a fake intent only, which misses the scan and the reader. A fixture whose scopes equal the builder's, which cannot detect re-derivation. |
