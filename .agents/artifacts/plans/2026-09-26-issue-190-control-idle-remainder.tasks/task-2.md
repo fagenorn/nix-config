@@ -115,7 +115,7 @@ these edits and nothing else.
    ```python
            if remainder["state"] == "failed":
                # Only this sweep's reap fails a remainder here, at the stall bound.
-               # Control's expiry fallback persists it, as it does a stalled attempt (D2).
+               # Its caller persists the changed result; control's lanes skip it (D2).
                if preview is None:
                    preview = {"next_stage_id": None}
                return result("terminal", changed=True, desired="terminal")

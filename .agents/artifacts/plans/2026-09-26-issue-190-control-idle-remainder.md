@@ -48,8 +48,9 @@ Spec (source of truth, read it whole):
   Summarize the output to the `FAIL:`/`ERROR:` ids, the `KeyError`/`AssertionError`
   lines and the `Ran`/`OK`/`FAILED` lines.
 - Commits are conventional and SSH-signed. Never disable signing, and surface a
-  signing failure. Each message ends with the trailer
-  `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>`.
+  signing failure. Each message ends with the attribution trailers the
+  executing session's rules require: `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>`
+  plus any `Claude-Session:` line they name, added as further `-m` paragraphs.
 
 Path abbreviations used in members: `S` = `home/common/agent-skills/scripts`,
 `T` = `home/common/agent-skills/tests`.
@@ -103,3 +104,17 @@ lifecycle, admission and delivery suites ran 230 tests, OK, and
 `just agent-workflow-tests` ran 1309 tests. Its only two errors were
 `git ls-files` calls, which a copy without `.git` cannot answer. `just build`
 was not probed, because no `.nix` file and no tracked-file set changes.
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (Opus), isolated and read-only, over plan HEAD
+  `53aba93` on base `affa05e`. No focus.
+- Fallback reason: the configured Codex pass (`gpt-6-astra`, `xhigh`) finished
+  with a clean verdict. Its JSONL carried no runtime-selection event naming
+  that model and effort, so reviewer identity could not be established. The
+  one native fallback ran on the same packet.
+- Findings: 4 accepted, 0 rejected, 0 deferred. None is Blocking, and none
+  adds a ledger row. S1 pins T3's `failed` summary, as D5 promises. Three
+  Discussion items were also applied: T1 checks the S3 pass-through bytes,
+  Task 2's stall comment is route-neutral, and commit trailers follow the
+  executing session's attribution rules.

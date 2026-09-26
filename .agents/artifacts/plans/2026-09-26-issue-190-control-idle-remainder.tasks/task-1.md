@@ -145,6 +145,7 @@ T3's expiry sweep is at `04:00:00Z`.
                  "workflow-response", "--input", "-", "--policy", str(POLICY)],
                 input=free, capture_output=True, check=False)
             self.assertEqual((validated.returncode, validated.stderr), (0, b""))
+            self.assertEqual(validated.stdout, free)
             # The same sweep with capacity exhausted, from the same pre-sweep ledger.
             state_path.write_bytes(ledger)
             exhausted = control("2026-09-21T00:00:04Z", max_parallel=1)
@@ -176,6 +177,9 @@ T3's expiry sweep is at `04:00:00Z`.
                 (record["state"], record["result_source"], record["stalled_resumes"]),
                 ("failed", "stalled", 3))
             self.assertEqual([item["kind"] for item in response["actions"]], ["finalize"])
+            summary = next(item for item in response["summaries"] if item["issue"] == 151)
+            self.assertEqual((summary["state"], summary["custody"]["kind"]),
+                             ("failed", "remainder"))
 
     def test_a_suspended_remainder_with_a_free_slot_resumes(self):
         """T4: baseline, a resumable human-gate remainder still resumes at a free slot."""
