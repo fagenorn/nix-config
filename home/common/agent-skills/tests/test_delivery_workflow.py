@@ -1887,6 +1887,8 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         for run_id, raw in (
                 ("-bad", matching),
                 ("a-unparsable", b"{"),
+                # Too deeply nested to parse: json.loads raises RecursionError (D14).
+                ("a-deep", b"[" * 100000),
                 ("run-blocked", b"{}"),
                 ("run-derived", json.dumps({"schema_version": 4, "issues": {"171": {
                     "delivery": {"contract_digest": self.model.canonical_digest(
@@ -1909,6 +1911,12 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                          (2, b"", invalid))
         self.assertEqual(self.build("initial-intent", {"contract": built["contract"]}),
                          built["initial_intent"])
+        # A lone surrogate has no canonical bytes, so no ledger can record it (D14).
+        uncanonical = copy.deepcopy(contract)
+        uncanonical["provenance"]["reference"] = "\ud800"
+        refused = self.build("initial-intent", {"contract": uncanonical}, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", self.NOT_INSTALLED))
         malformed = copy.deepcopy(contract)
         malformed["stages"][0]["target_ref"] = None
         refused = self.build("initial-intent", {"contract": malformed}, ok=False)

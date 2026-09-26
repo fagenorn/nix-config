@@ -495,7 +495,8 @@ class DeliveryBuilder:
             installed = self._model.validate_delivery_object(
                 installed_intent, expected_kind="authorization-intent",
                 notes_max_characters=self._notes_max)
-        except ValueError:
+        except Exception:
+            # A null nested member raises AttributeError, not ValueError (D14).
             installed = None
         if installed is None or installed["predecessor_intent_id"] is not None or (
                 installed["id"], self._model.canonical_digest(installed)) != (

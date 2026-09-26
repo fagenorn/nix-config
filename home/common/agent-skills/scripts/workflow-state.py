@@ -3480,7 +3480,8 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
     """The root intent a ledger under the repo root installed with ``contract``, or None.
 
     Read-only like check-launch: no lock, no clock and no write (#193 D3, D4).
-    Runs are scanned in sorted order. A run that is not a run-id-named
+    A contract with no canonical bytes has no digest a ledger could record, so
+    it answers None and meets the builder's own refusal. Runs are scanned in sorted order. A run that is not a run-id-named
     non-symlink directory, or whose state file is absent, not a non-symlink
     regular file, uninspectable, unreadable, unparsable, or records another
     contract digest for the issue, is skipped. The first match is re-read
@@ -3492,7 +3493,11 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
     workflows = repo_root / ".superpowers" / "workflows"
     if not all(_non_symlink(path, stat.S_ISDIR) for path in (workflows.parent, workflows)):
         return None
-    digest = runtime.model.canonical_digest(contract)
+    try:
+        digest = runtime.model.canonical_digest(contract)
+    except ValueError:
+        # A contract without canonical bytes cannot be recorded by any ledger.
+        return None
     issue = str(contract["issue"])
     for run_dir in sorted(workflows.iterdir(), key=lambda path: path.name):
         state_path = run_dir / "state.json"
@@ -3502,7 +3507,7 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
                     or not _non_symlink(state_path, stat.S_ISREG)):
                 continue
             raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         if _stored_contract_digest(raw_state, issue) != digest:
             continue

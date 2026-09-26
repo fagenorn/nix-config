@@ -308,9 +308,12 @@ class InstalledIntentTest(unittest.TestCase):
         successor = self.resealed(
             lambda value: value.update(predecessor_intent_id=intent["id"]))
         self.runtime.validate(successor, "authorization-intent")
+        nulled = copy.deepcopy(intent)
+        nulled["scopes"][0] = None
         for label, contract, installed in (
                 ("another intent", self.legacy(intent), self.derived_intent),
                 ("not an intent", self.legacy(intent), {"kind": "authorization-intent"}),
+                ("a null nested member", self.legacy(intent), nulled),
                 ("a successor", self.legacy(successor), successor)):
             with self.subTest(label=label):
                 self.assertEqual(
@@ -330,6 +333,21 @@ class InstalledIntentTest(unittest.TestCase):
             "the contract's initial intent declares no single scope for stage close_tracker")
         merge = self.build("scope", {"contract": contract, "stage_id": "merge_pr"}, intent)
         self.assertIn(merge, intent["scopes"])
+
+        def twice(value):
+            """A second merge scope for another PR: two scopes for one stage."""
+            second = copy.deepcopy(next(scope for scope in value["scopes"]
+                                        if scope["action"] == merge["action"]))
+            second["target"]["pr_ref"] = {"kind": "literal", "value": "6"}
+            value["scopes"].append(seal(self.runtime.model, second))
+            value["scopes"].sort(key=lambda item: item["id"])
+
+        doubled = self.resealed(twice)
+        self.runtime.validate(doubled, "authorization-intent")
+        self.assertEqual(
+            self.refusal("scope", {"contract": self.legacy(doubled), "stage_id": "merge_pr"},
+                         doubled),
+            "the contract's initial intent declares no single scope for stage merge_pr")
 
 
 if __name__ == "__main__":
