@@ -208,5 +208,147 @@ class WorktreePolicyCheckTest(unittest.TestCase):
                 self.assertEqual(self.refusal(worktree), message)
 
 
+class InstalledIntentTest(unittest.TestCase):
+    """#193 D5-D7, D12: the builder's own check of an installed intent, behind the facade."""
+
+    NOT_INSTALLED = "; no ledger under the repo root installs this contract"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.runtime = runpy.run_path(str(ENTRY))["DeliveryRuntime"](
+            notes_max_characters=10_000)
+        built = cls.runtime.build_delivery("contract", {
+            "issue": 193, "worktree": "/repo/.worktrees/worktree-issue-193-legacy",
+            "source_kind": "explicit_user", "source_reference": "invocation:/from-issue 193",
+            "now": NOW}, policy=resolved_snapshot("/repo"))
+        cls.derived, cls.derived_intent = built["contract"], built["initial_intent"]
+
+    def resealed(self, change):
+        """The derived intent after `change`, sealed again under a new id."""
+        intent = copy.deepcopy(self.derived_intent)
+        change(intent)
+        return seal(self.runtime.model, intent)
+
+    def legacy(self, intent):
+        """A hand-built contract: unsourced provenance kind, recording `intent`."""
+        contract = copy.deepcopy(self.derived)
+        contract["provenance"]["kind"] = "orchestrate-issues"
+        contract["initial_authorization_intent_id"] = intent["id"]
+        contract["initial_authorization_intent_digest"] = (
+            self.runtime.model.canonical_digest(intent))
+        return contract
+
+    def hand_built_intent(self):
+        return self.resealed(lambda intent: intent["source"].update(
+            reference="orchestrate-issues:orch-193"))
+
+    def tampered(self):
+        """A sourced contract whose recorded intent no longer re-derives."""
+        contract = copy.deepcopy(self.derived)
+        contract["provenance"]["created_at"] = "2026-09-22T00:00:00Z"
+        return contract
+
+    def unregenerable(self):
+        """A sourced, model-valid contract whose worktree stage is not literal.
+
+        ``_contract_facts`` rejects it, so ``_derivation`` returns the third
+        reason through its ``except ValueError`` (per D14).
+        """
+        contract = copy.deepcopy(self.derived)
+        slot = next(stage["target_ref"] for stage in contract["stages"]
+                    if stage["target_ref"].get("kind") == "slot")
+        for stage in contract["stages"]:
+            if stage["kind"] == "remove_worktree":
+                stage["target_ref"] = copy.deepcopy(slot)
+        return contract
+
+    def build(self, kind, value, installed):
+        return self.runtime.build_delivery(kind, value, policy=None,
+                                           installed_intent=installed)
+
+    def refusal(self, kind, value, installed):
+        with self.assertRaises(ValueError) as caught:
+            self.build(kind, value, installed)
+        return str(caught.exception)
+
+    def test_only_a_valid_contract_that_does_not_re_derive_needs_an_installed_intent(self):
+        invalid = copy.deepcopy(self.derived)
+        invalid["issue"] = 0
+        malformed = copy.deepcopy(self.derived)
+        malformed["stages"][0]["target_ref"] = None
+        for label, contract, expected in (
+                ("derives", self.derived, False),
+                ("hand-built", self.legacy(self.hand_built_intent()), True),
+                ("tampered", self.tampered(), True),
+                ("model-invalid", invalid, False), ("not an object", "contract", False),
+                ("null nested member", malformed, False),
+                ("unregenerable", self.unregenerable(), True)):
+            with self.subTest(label=label):
+                self.assertIs(self.runtime.requires_installed_intent(contract), expected)
+
+    def test_without_an_installed_intent_the_derivation_reason_gains_the_ledger_clause(self):
+        for label, contract, reason in (
+                ("hand-built", self.legacy(self.hand_built_intent()),
+                 "source kind of the contract cannot source an initial intent"),
+                ("tampered", self.tampered(),
+                 "derived intent does not match the contract's initial intent"),
+                ("unregenerable", self.unregenerable(),
+                 "derived intent cannot be regenerated: the contract has no "
+                 "reviewed slot or worktree stage")):
+            with self.subTest(label=label):
+                self.assertEqual(self.refusal("initial-intent", {"contract": contract}, None),
+                                 reason + self.NOT_INSTALLED)
+
+    def test_a_contract_that_re_derives_ignores_any_installed_intent(self):
+        self.assertEqual(self.build("initial-intent", {"contract": self.derived},
+                                    self.hand_built_intent()), self.derived_intent)
+
+    def test_the_installed_intent_must_be_the_contracts_valid_root(self):
+        intent = self.hand_built_intent()
+        successor = self.resealed(
+            lambda value: value.update(predecessor_intent_id=intent["id"]))
+        self.runtime.validate(successor, "authorization-intent")
+        nulled = copy.deepcopy(intent)
+        nulled["scopes"][0] = None
+        for label, contract, installed in (
+                ("another intent", self.legacy(intent), self.derived_intent),
+                ("not an intent", self.legacy(intent), {"kind": "authorization-intent"}),
+                ("a null nested member", self.legacy(intent), nulled),
+                ("a successor", self.legacy(successor), successor)):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    self.refusal("initial-intent", {"contract": contract}, installed),
+                    "installed initial intent does not match the contract")
+        self.assertEqual(self.build("initial-intent", {"contract": self.legacy(intent)},
+                                    intent), intent)
+
+    def test_scope_refuses_a_stage_the_installed_intent_does_not_declare(self):
+        action = next(stage["action"] for stage in self.derived["stages"]
+                      if stage["id"] == "close_tracker")
+        intent = self.resealed(lambda value: value.update(scopes=[
+            scope for scope in value["scopes"] if scope["action"] != action]))
+        contract = self.legacy(intent)
+        self.assertEqual(
+            self.refusal("scope", {"contract": contract, "stage_id": "close_tracker"}, intent),
+            "the contract's initial intent declares no single scope for stage close_tracker")
+        merge = self.build("scope", {"contract": contract, "stage_id": "merge_pr"}, intent)
+        self.assertIn(merge, intent["scopes"])
+
+        def twice(value):
+            """A second merge scope for another PR: two scopes for one stage."""
+            second = copy.deepcopy(next(scope for scope in value["scopes"]
+                                        if scope["action"] == merge["action"]))
+            second["target"]["pr_ref"] = {"kind": "literal", "value": "6"}
+            value["scopes"].append(seal(self.runtime.model, second))
+            value["scopes"].sort(key=lambda item: item["id"])
+
+        doubled = self.resealed(twice)
+        self.runtime.validate(doubled, "authorization-intent")
+        self.assertEqual(
+            self.refusal("scope", {"contract": self.legacy(doubled), "stage_id": "merge_pr"},
+                         doubled),
+            "the contract's initial intent declares no single scope for stage merge_pr")
+
+
 if __name__ == "__main__":
     unittest.main()

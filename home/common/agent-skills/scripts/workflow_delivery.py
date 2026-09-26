@@ -93,10 +93,11 @@ class DeliveryRuntime:
                            "observation": "delivery-observation",
                            "authority-observation": "authority-observation"}
 
-    def build_delivery(self, kind: str, value: object, *, policy: dict[str, Any] | None
-                       ) -> object:
+    def build_delivery(self, kind: str, value: object, *, policy: dict[str, Any] | None,
+                       installed_intent: object = None) -> object:
         """Build one sealed delivery value and validate every object it carries."""
-        result = self._builder.build(kind, value, policy=policy)
+        result = self._builder.build(kind, value, policy=policy,
+                                     installed_intent=installed_intent)
         if kind == "contract":
             if not isinstance(result, dict) or set(result) != {"contract", "initial_intent"}:
                 raise ValueError("builder returned an invalid contract result")
@@ -112,6 +113,10 @@ class DeliveryRuntime:
         else:
             raise ValueError(f"unknown builder kind: {kind!r}")
         return result
+
+    def requires_installed_intent(self, contract: object) -> bool:
+        """Whether ``contract`` is model-valid but does not re-derive (#193 D5)."""
+        return self._builder.requires_installed_intent(contract)
 
     def check_worktree_policy(self, repo_root_policy: dict[str, Any],
                               worktree_policy: dict[str, Any]) -> None:
