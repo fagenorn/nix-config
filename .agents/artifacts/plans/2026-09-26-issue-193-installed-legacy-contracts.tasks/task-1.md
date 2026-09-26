@@ -114,6 +114,20 @@ class InstalledIntentTest(unittest.TestCase):
         contract["provenance"]["created_at"] = "2026-09-22T00:00:00Z"
         return contract
 
+    def unregenerable(self):
+        """A sourced, model-valid contract whose worktree stage is not literal.
+
+        ``_contract_facts`` rejects it, so ``_derivation`` returns the third
+        reason through its ``except ValueError`` (per D14).
+        """
+        contract = copy.deepcopy(self.derived)
+        slot = next(stage["target_ref"] for stage in contract["stages"]
+                    if stage["target_ref"].get("kind") == "slot")
+        for stage in contract["stages"]:
+            if stage["kind"] == "remove_worktree":
+                stage["target_ref"] = copy.deepcopy(slot)
+        return contract
+
     def build(self, kind, value, installed):
         return self.runtime.build_delivery(kind, value, policy=None,
                                            installed_intent=installed)
@@ -126,11 +140,15 @@ class InstalledIntentTest(unittest.TestCase):
     def test_only_a_valid_contract_that_does_not_re_derive_needs_an_installed_intent(self):
         invalid = copy.deepcopy(self.derived)
         invalid["issue"] = 0
+        malformed = copy.deepcopy(self.derived)
+        malformed["stages"][0]["target_ref"] = None
         for label, contract, expected in (
                 ("derives", self.derived, False),
                 ("hand-built", self.legacy(self.hand_built_intent()), True),
                 ("tampered", self.tampered(), True),
-                ("model-invalid", invalid, False), ("not an object", "contract", False)):
+                ("model-invalid", invalid, False), ("not an object", "contract", False),
+                ("null nested member", malformed, False),
+                ("unregenerable", self.unregenerable(), True)):
             with self.subTest(label=label):
                 self.assertIs(self.runtime.requires_installed_intent(contract), expected)
 
@@ -139,7 +157,10 @@ class InstalledIntentTest(unittest.TestCase):
                 ("hand-built", self.legacy(self.hand_built_intent()),
                  "source kind of the contract cannot source an initial intent"),
                 ("tampered", self.tampered(),
-                 "derived intent does not match the contract's initial intent")):
+                 "derived intent does not match the contract's initial intent"),
+                ("unregenerable", self.unregenerable(),
+                 "derived intent cannot be regenerated: the contract has no "
+                 "reviewed slot or worktree stage")):
             with self.subTest(label=label):
                 self.assertEqual(self.refusal("initial-intent", {"contract": contract}, None),
                                  reason + self.NOT_INSTALLED)
@@ -189,7 +210,9 @@ PYTHONPATH=python python3 -m unittest $T/test_workflow_delivery.py -k InstalledI
   | grep -E '^(Ran|OK|FAILED)|Error:' | sort | uniq -c
 ```
 
-Expected: `Ran 5 tests` and `FAILED (errors=13)`. The errors are
+Expected: `Ran 5 tests` and `FAILED (errors=16)`: the planning probe's 13 plus
+the "null nested member" and two "unregenerable" subtests added at standards
+review (per D14). The errors are
 `TypeError: DeliveryRuntime.build_delivery() got an unexpected keyword argument 'installed_intent'`
 and `AttributeError: 'DeliveryRuntime' object has no attribute 'requires_installed_intent'`.
 A planning probe saw exactly this at `6c23e64`.
@@ -276,15 +299,20 @@ In `S/workflow_delivery_build.py`:
     def requires_installed_intent(self, value: object) -> bool:
         """Whether ``value`` is a model-valid contract that does not re-derive.
 
-        Only then may workflow-state look for a ledger that installed it; an
-        invalid contract answers False and meets its own refusal in ``build``.
+        Only then may workflow-state look for a ledger that installed it. A
+        value the model cannot validate answers False whatever it raises (a
+        null nested member raises ``AttributeError``, not ``ValueError``), and
+        then meets its own refusal in ``build`` (per D14).
         """
         try:
-            contract = self._valid_contract(value)
-        except ValueError:
+            return self._derivation(self._valid_contract(value))[1] is not None
+        except Exception:
             return False
-        return self._derivation(contract)[1] is not None
 ```
+
+   workflow-state calls this predicate outside the builder call's
+   `except Exception` boundary, so it must never raise: a malformed contract
+   that escaped as a traceback would turn today's exit-2 refusal into exit 1.
 
 4. **`build`.** Change the signature to
    `build(self, kind: str, value: object, *, policy: dict | None, installed_intent: object = None) -> object`.

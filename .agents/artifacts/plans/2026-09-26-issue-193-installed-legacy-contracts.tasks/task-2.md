@@ -177,21 +177,49 @@ Insert these two tests directly above `test_evidence_kinds_are_exact_and_closed`
         built = self.build("contract", self.contract_input())
         contract, _ = self.hand_built(built)
         workflows = self.root / ".superpowers" / "workflows"
+        matching = json.dumps({"schema_version": 4, "issues": {"171": {
+            "delivery": {"contract_digest": self.model.canonical_digest(
+                contract)}}}}).encode()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "state.json").write_bytes(matching)
         for run_id, raw in (
+                ("-bad", matching),
                 ("a-unparsable", b"{"),
+                ("run-blocked", b"{}"),
                 ("run-derived", json.dumps({"schema_version": 4, "issues": {"171": {
                     "delivery": {"contract_digest": self.model.canonical_digest(
                         built["contract"])}}}}).encode()),
-                ("run-legacy", json.dumps({"schema_version": 4, "issues": {"171": {
-                    "delivery": {"contract_digest": self.model.canonical_digest(
-                        contract)}}}}).encode())):
+                ("run-legacy", matching)):
             (workflows / run_id).mkdir(parents=True)
             (workflows / run_id / "state.json").write_bytes(raw)
+        # A symlinked run directory and a symlinked state file, both reaching the
+        # matching bytes outside the root, sort before run-legacy (D13).
+        (workflows / "run-a-linked").symlink_to(outside, target_is_directory=True)
+        (workflows / "run-b-file").mkdir()
+        (workflows / "run-b-file" / "state.json").symlink_to(outside / "state.json")
+        # No search permission: lstat(state.json) raises PermissionError (D14).
+        os.chmod(workflows / "run-blocked", 0)
+        self.addCleanup(os.chmod, workflows / "run-blocked", 0o700)
+        invalid = (b"workflow-state: build-delivery refused: installing ledger "
+                   b"run-legacy is invalid\n")
         refused = self.build("initial-intent", {"contract": contract}, ok=False)
-        self.assertEqual((refused.returncode, refused.stdout, refused.stderr), (2, b"",
-            b"workflow-state: build-delivery refused: installing ledger run-legacy is invalid\n"))
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", invalid))
         self.assertEqual(self.build("initial-intent", {"contract": built["contract"]}),
                          built["initial_intent"])
+        malformed = copy.deepcopy(contract)
+        malformed["stages"][0]["target_ref"] = None
+        refused = self.build("initial-intent", {"contract": malformed}, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+        self.assertTrue(refused.stderr.startswith(b"workflow-state: build-delivery refused: "))
+        self.assertEqual(refused.stderr.count(b"\n"), 1)
+        (workflows / "run-legacy" / "state.json").write_bytes(json.dumps({
+            "schema_version": [], "issues": {"171": {"delivery": {
+                "contract_digest": self.model.canonical_digest(contract)}}}}).encode())
+        refused = self.build("initial-intent", {"contract": contract}, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", invalid))
         self.assertEqual([path.name for path in (workflows / "run-legacy").iterdir()],
                          ["state.json"])
         (self.root / ".superpowers").rename(self.root / "elsewhere")
@@ -209,8 +237,17 @@ Insert these two tests directly above `test_evidence_kinds_are_exact_and_closed`
                          b"workflow-state: repository root does not exist\n")
 ```
 
-The skipped `a-unparsable` run sorts first, so the refusal naming `run-legacy`
-proves the skip rule. `run-derived` is invalid too, so the derived build beside
+Every other run sorts before `run-legacy`: `-bad` (its name fails
+`RUN_ID_PATTERN`), the unparsable `a-unparsable`, the symlinked `run-a-linked`,
+`run-b-file` with its symlinked `state.json`, and the uninspectable
+`run-blocked`. `-bad`, `run-a-linked` and `run-b-file` carry the matching
+digest, so dropping any one guard names that run instead, and the refusal
+naming `run-legacy` proves every skip rule (under a root user the chmod is inert
+and `run-blocked`'s `{}` is skipped as non-matching).
+The null-`target_ref` contract proves a malformed contract keeps its exit-2
+refusal instead of escaping the predicate as a traceback, and the
+`"schema_version": []` rewrite proves a match the reader raises a non-
+`WorkflowError` on still refuses by name (D14). `run-derived` is invalid too, so the derived build beside
 it proves the derivation path reads no ledger, and the absent root proves it
 resolves none (D2, D8). The lone `state.json` proves the lookup took no lock,
 and the symlinked `.superpowers` proves it is not followed (D4, D13).
@@ -283,10 +320,11 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
     Read-only like check-launch: no lock, no clock and no write (#193 D3, D4).
     Runs are scanned in sorted order. A run that is not a run-id-named
     non-symlink directory, or whose state file is absent, not a non-symlink
-    regular file, unparsable, or records another contract digest for the issue,
-    is skipped. The first match is re-read through ``read_state_unlocked``; a
-    match that fails validation, or whose validated contract does not carry the
-    digest, refuses naming its run.
+    regular file, uninspectable, unreadable, unparsable, or records another
+    contract digest for the issue, is skipped. The first match is re-read
+    through ``read_state_unlocked``; a match that fails validation in any way,
+    or whose validated contract does not carry the digest, refuses naming its
+    run (D14).
     """
     repo_root = resolve_repo_root(repo_root_value)
     workflows = repo_root / ".superpowers" / "workflows"
@@ -296,11 +334,11 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
     issue = str(contract["issue"])
     for run_dir in sorted(workflows.iterdir(), key=lambda path: path.name):
         state_path = run_dir / "state.json"
-        if (not RUN_ID_PATTERN.fullmatch(run_dir.name)
-                or not _non_symlink(run_dir, stat.S_ISDIR)
-                or not _non_symlink(state_path, stat.S_ISREG)):
-            continue
         try:
+            if (not RUN_ID_PATTERN.fullmatch(run_dir.name)
+                    or not _non_symlink(run_dir, stat.S_ISDIR)
+                    or not _non_symlink(state_path, stat.S_ISREG)):
+                continue
             raw_state = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
@@ -309,21 +347,33 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
         invalid = f"build-delivery refused: installing ledger {run_dir.name} is invalid"
         try:
             state = read_state_unlocked(state_path, run_dir.name)
-        except WorkflowError as error:
+            delivery = state["issues"][issue]["delivery"]
+            # Validation already ties contract_digest to the contract, so this
+            # only fires when the file was replaced between the two unlocked reads.
+            if runtime.model.canonical_digest(delivery["contract"]) != digest:
+                raise WorkflowError(invalid)
+            root = next(item for item in delivery["authorization_intents"]
+                        if item["predecessor_intent_id"] is None)
+        except Exception as error:
             raise WorkflowError(invalid) from error
-        entry = state["issues"].get(issue)
-        delivery = None if entry is None else entry["delivery"]
-        if delivery is None or delivery["contract"] is None \
-                or runtime.model.canonical_digest(delivery["contract"]) != digest:
-            raise WorkflowError(invalid)
-        return copy.deepcopy(next(item for item in delivery["authorization_intents"]
-                                  if item["predecessor_intent_id"] is None))
+        return copy.deepcopy(root)
     return None
 ```
 
    `ValueError` in the raw read covers both `json.JSONDecodeError` and
-   `UnicodeDecodeError`. A validated delivery's chain has exactly one root, so
-   `next` always finds it.
+   `UnicodeDecodeError`. The candidate probes sit inside that `try` because
+   `path_status` catches only `FileNotFoundError`: an unrelated run directory
+   without search permission makes `lstat(state.json)` raise `PermissionError`,
+   and D4 forbids one unreadable unrelated run blocking the scan. The re-read
+   catches `Exception`, not only `WorkflowError`, because the verbatim reader
+   can raise others on a raw document it has not validated yet (a
+   `"schema_version": []` makes its `in {1, 2, 3}` test raise `TypeError`);
+   the shared reader itself stays verbatim, so check-launch is unchanged (D13,
+   D14). The same `try` covers every access after the re-read, because for
+   schemas 1–3 the reader returns the stored document, not the validated
+   migrated copy: whatever is wrong with a matching ledger is that one named
+   refusal, never a traceback. A validated delivery's chain has exactly one
+   root, so `next` finds it for any ledger workflow-state wrote.
 
 2. **`command_check_launch`.** Replace the moved block (the three `# No lock:`
    comment lines through the `else:` branch's `validate_state` call) with
@@ -354,7 +404,10 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
    `runtime.build_delivery(args.kind, value, policy=policy)` call. The lookup
    stays outside that call's `try`, so its own refusals are not prefixed twice.
 
-4. **Help.** In the `build-delivery` subparser description, replace the string
+4. **Help.** In the `build-delivery` subparser description, replace
+   `"sealed policy member differs. The other kinds resolve nothing. Every refusal "`
+   with `"sealed policy member differs. The other kinds resolve no project policy. Every refusal "`,
+   since they may now resolve `--repo-root` for the ledger lookup. Then replace the string
    `"It takes no lock, reads no ledger or clock and writes nothing. "` with
    these four literals, in order:
 

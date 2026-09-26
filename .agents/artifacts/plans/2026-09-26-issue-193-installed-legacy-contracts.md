@@ -24,7 +24,7 @@ Markdown skill prose, `just`.
 
 Spec (source of truth, read it whole):
 `.agents/artifacts/specs/2026-09-26-issue-193-installed-legacy-contracts-design.md`,
-D1–D13.
+D1–D15.
 
 ## Global Constraints
 
@@ -35,7 +35,8 @@ D1–D13.
 - The builder and runtime do no I/O. `WORKFLOW_DELIVERY_BUILD_INTERFACE_VERSION`
   and `WORKFLOW_DELIVERY_INTERFACE_VERSION` stay 1 (D5).
 - A contract that re-derives is served byte for byte as at base, and no ledger
-  is read for it (D2).
+  is read for it (D2). The byte-identical claim covers contracts with one stage
+  per kind, which is every contract `--kind contract` builds (D15).
 - Every existing refusal text stays. The only new texts are
   `<R>; no ledger under the repo root installs this contract`,
   `installed initial intent does not match the contract`,
@@ -117,6 +118,9 @@ Planning added two rows. **D12** adds the runtime-facade seam for the builder's
 own re-check. **D13** settles the lookup details §2 leaves open: symlinked
 directories, a match that changes on re-read, the unprefixed root refusal, and
 the verbatim reader.
+Standards review added two more. **D14** keeps every new boundary a refusal,
+never a traceback, and pins each skip guard. **D15** bounds the byte-identical
+claim to contracts with one stage per kind.
 
 A planning probe applied every task's code, tests and prose, as written, to a
 scratch copy of `6c23e64`. Each watch-it-fail step failed as its member says, and
@@ -127,6 +131,23 @@ following a symlinked `.superpowers`.
 and `OK (skipped=4)`. That run used an earlier probe revision with the same
 product code, prose and test names, before four Task 2 assertions were added
 (the byte-exact served intent, no `.superpowers` before installation, no lock
-file, and the symlinked `.superpowers`). `just build` was not probed.
+file, and the symlinked `.superpowers`). `just build` was not probed. The
+standards-review edits (D14, D15) were not probed; they add subtests and
+assertions only, so the test count stays 1312.
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (`reviewer` agent, Opus), isolated and read-only,
+  over the same packet. Codex ran first (read-only, `gpt-6-astra`, `xhigh`) and
+  completed, but its JSONL carried no runtime-selection event, so its identity
+  could not be established and the one native fallback ran. Codex's findings
+  were still verified live as unestablished input.
+- Base SHA `affa05e7392caeb456f92b4dad0850bbd01b4d86`, plan at `0474034`.
+- Findings: 8 accepted, 0 rejected, 0 deferred. Codex: a malformed contract
+  escaping the predicate as a traceback, a matching ledger the reader raises a
+  non-`WorkflowError` on, and an uninspectable unrelated run aborting the scan
+  (D14). Fallback: untested skip guards and third derivation reason (D14), the
+  duplicate-kind boundary (D15), a comment on the race-only re-check, and the
+  help's "resolve nothing" wording (Task 2).
 
 ---
