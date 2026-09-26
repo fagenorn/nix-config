@@ -124,6 +124,9 @@ each targeted gate passed. Three mutants were caught: `scope` re-deriving throug
 `_scope`, the command consulting ledgers for every contract, and the lookup
 following a symlinked `.superpowers`.
 `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests` gave `Ran 1312 tests`
-and `OK (skipped=4)`. `just build` was not probed.
+and `OK (skipped=4)`. That run used an earlier probe revision with the same
+product code, prose and test names, before four Task 2 assertions were added
+(the byte-exact served intent, no `.superpowers` before installation, no lock
+file, and the symlinked `.superpowers`). `just build` was not probed.
 
 ---
