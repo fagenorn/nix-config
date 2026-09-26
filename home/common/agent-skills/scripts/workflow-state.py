@@ -2452,6 +2452,24 @@ def command_control(args: argparse.Namespace) -> int:
         planned: dict[int, dict[str, Any]] = {}
         proposal_order: list[int] = []
 
+        def admit(issue: int, result: dict[str, Any], *, charge: bool = True) -> bool:
+            """Queue ``result`` when it dispatches, charging it unless ``charge`` is false (D3).
+
+            Any operation outside ``CONTROL_DISPATCH_KINDS`` is a policy verdict,
+            not an error: it is queued nowhere, charged nothing and left in
+            ``planned``, and the call returns False (D8). A dispatch joins
+            ``proposal_order``; with ``charge`` it also claims its role set
+            through ``acquire`` and spends one ``max_parallel`` unit.
+            """
+            nonlocal capacity
+            if result["operation"] not in CONTROL_DISPATCH_KINDS:
+                return False
+            proposal_order.append(issue)
+            if charge:
+                acquire(issue)
+                capacity -= 1
+            return True
+
         def apply_policy(issue: int, dispatch_permitted: bool) -> dict[str, Any]:
             issue_state = state["issues"].get(str(issue))
             result = _apply_one_issue_policy(
@@ -2504,11 +2522,8 @@ def command_control(args: argparse.Namespace) -> int:
             if slot_withheld(issue):
                 continue
             result = apply_policy(issue, True)
-            if result.get("custody_kind") != "remainder":
-                continue
-            proposal_order.append(issue)
-            acquire(issue)
-            capacity -= 1
+            if result.get("custody_kind") == "remainder":
+                admit(issue, result)
 
         for issue in request["issues"]:
             if analysis[issue]["desired"] != "recover":
@@ -2517,11 +2532,7 @@ def command_control(args: argparse.Namespace) -> int:
                 continue
             if analysis[issue]["changed"] and slot_withheld(issue):
                 continue
-            apply_policy(issue, True)
-            proposal_order.append(issue)
-            if analysis[issue]["changed"]:
-                acquire(issue)
-                capacity -= 1
+            admit(issue, apply_policy(issue, True), charge=analysis[issue]["changed"])
 
         for issue in request["issues"]:
             if capacity <= 0 or analysis[issue]["desired"] != "resume":
@@ -2545,11 +2556,7 @@ def command_control(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     "resume control action requires a matching recorded worktree observation"
                 )
-            if result["operation"] == "contract":
-                continue
-            proposal_order.append(issue)
-            acquire(issue)
-            capacity -= 1
+            admit(issue, result)
 
         for issue in request["issues"]:
             desired = analysis[issue]["desired"]
@@ -2565,11 +2572,7 @@ def command_control(args: argparse.Namespace) -> int:
                         raise WorkflowError(
                             "retry control action requires a verified worktree observation"
                         )
-                    if result["operation"] == "contract":
-                        continue
-                    proposal_order.append(issue)
-                    acquire(issue)
-                    capacity -= 1
+                    admit(issue, result)
             elif analysis[issue]["expired"] and issue not in planned:
                 # The resume pass may already have dispatched this reap.
                 # Re-planning it with dispatch withheld would replace that
@@ -2588,11 +2591,7 @@ def command_control(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     "fresh control action requires an absent candidate worktree"
                 )
-            if result["operation"] == "contract":
-                continue
-            proposal_order.append(issue)
-            acquire(issue)
-            capacity -= 1
+            admit(issue, result)
 
         dispatch_results = [
             planned[issue] for issue in proposal_order

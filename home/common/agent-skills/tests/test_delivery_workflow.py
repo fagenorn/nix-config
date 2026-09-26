@@ -1077,6 +1077,147 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(claims[action["custody"]["action_id"]]["release_event"],
                              "launch_refused")
 
+    def remainder_sweeps(self, root, home, run_id):
+        """Drive a claude-code run until remainder r1:1 is suspended on a denial (#190).
+
+        Issue 151's owner spawns, fails after selecting its output, and an
+        authority denial parks the minted remainder on ``human_gate``. Returns
+        ``(control, checkpoint)``. ``control(now, max_parallel=1)`` sweeps with
+        the recorded worktree observed and returns the raw response bytes.
+        ``checkpoint(custody, now)`` reports that custody again without progress
+        and returns the decoded response.
+        """
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
+        digest = self.model.canonical_digest(contract)
+        worktree = str(root / "worktree"); run = ("--repo-root", root, "--run-id", run_id)
+
+        def invoke(*args, stdin=None):
+            completed = subprocess.run(
+                [sys.executable, str(WORKFLOW), *map(str, args)],
+                input=None if stdin is None else json.dumps(stdin).encode(),
+                capture_output=True, check=False, env={**os.environ, "HOME": str(home)})
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            return completed.stdout
+
+        def control(now, max_parallel=1, *, spawn=False):
+            request = self.control_request(contract)
+            request.update(host_route="claude-code", now=now, max_parallel=max_parallel,
+                tracker=[{"issue": 151, "state": "open" if spawn else "closed",
+                          "open_blockers": [], "decision_blockers": []}],
+                worktrees=[{"issue": 151,
+                    "recorded": None if spawn else {"path": worktree,
+                                                    "state": "matching_issue_branch"},
+                    "candidate": {"path": worktree, "state": "absent"} if spawn else None}])
+            request["authorization_intents"]["151"] = delivery["authorization_intents"]
+            return invoke("control", *run, "--request-file", "-", stdin=request)
+
+        def checkpoint(custody, now, denial=None):
+            report = self.report_common(custody, digest)
+            report["requested_scope"] = actual
+            if denial is not None:
+                report["authority_observations"] = [denial]
+            return json.loads(invoke("checkpoint-delivery", *run, "--checkpoint-file",
+                                     "-", "--now", now, stdin=report))
+
+        invoke("init-run", *run, "--now", NOW)
+        owner = json.loads(control(NOW, spawn=True))["actions"][0]
+        failed = self.failed_summary(owner["custody"], digest)
+        failed["delivery_observations"] = [observation(
+            self.model, contract, "selected_output",
+            {"selected_output": selection(self.model, digest)})]
+        remainder = json.loads(invoke("finish", *run, "--summary-file", "-",
+                                      "--now", "2026-09-21T00:00:01Z", stdin=failed))
+        denial = authority(self.model, contract, actual, remainder["custody"])
+        denial["observed_at"] = "2026-09-21T00:00:02Z"; seal(self.model, denial)
+        parked = checkpoint(remainder["custody"], "2026-09-21T00:00:02Z", denial)
+        self.assertEqual((parked["state"], parked["blocked_on"]), ("suspended", "human_gate"))
+        return control, checkpoint
+
+    @staticmethod
+    def remainder_launch(response):
+        """The response's one ``delivery_remainder`` action; StopIteration when absent."""
+        return next(item for item in json.loads(response)["actions"]
+                    if item["kind"] == "delivery_remainder")
+
+    def test_a_live_remainder_with_a_free_slot_matches_the_exhausted_sweep(self):
+        """T1: a live remainder takes no free slot and the sweep does not crash."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); run_id = "live-remainder"
+            control, _ = self.remainder_sweeps(root, home, run_id)
+            launch = self.remainder_launch(control("2026-09-21T00:00:03Z"))
+            self.assertEqual((launch["custody"]["remainder"], launch["custody"]["launch"]),
+                             (1, 2))
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            ledger = state_path.read_bytes()
+            free = control("2026-09-21T00:00:04Z", max_parallel=2)
+            free_ledger = state_path.read_bytes()
+            validated = subprocess.run(
+                [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+                 "workflow-response", "--input", "-", "--policy", str(POLICY)],
+                input=free, capture_output=True, check=False)
+            self.assertEqual((validated.returncode, validated.stderr), (0, b""))
+            self.assertEqual(validated.stdout, free)
+            # The same sweep with capacity exhausted, from the same pre-sweep ledger.
+            state_path.write_bytes(ledger)
+            exhausted = control("2026-09-21T00:00:04Z", max_parallel=1)
+            self.assertEqual(free, exhausted)
+            self.assertEqual(free_ledger, state_path.read_bytes())
+
+    def test_a_stall_bound_remainder_reap_persists_failed_without_a_dispatch(self):
+        """T3: the reap that crosses the stall bound fails the remainder, dispatching nothing."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); run_id = "stalled-remainder"
+            control, checkpoint = self.remainder_sweeps(root, home, run_id)
+            for launch, now, reported in (
+                    (2, "2026-09-21T00:00:03Z", "2026-09-21T00:00:04Z"),
+                    (3, "2026-09-21T00:00:05Z", "2026-09-21T00:00:06Z"),
+                    (4, "2026-09-21T00:00:07Z", None)):
+                action = self.remainder_launch(control(now))
+                self.assertEqual(action["custody"]["launch"], launch)
+                if reported is not None:
+                    self.assertEqual(checkpoint(action["custody"], reported)["state"],
+                                     "suspended")
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            record = json.loads(state_path.read_text())["issues"]["151"]["delivery_remainders"][0]
+            self.assertEqual((record["state"], record["stalled_resumes"]), ("active", 2))
+            # r1:4's deadline is 2026-09-21T03:00:01Z; this sweep lands after it.
+            response = json.loads(control("2026-09-21T04:00:00Z"))
+            record = json.loads(state_path.read_text())["issues"]["151"]["delivery_remainders"][0]
+            self.assertEqual(
+                (record["state"], record["result_source"], record["stalled_resumes"]),
+                ("failed", "stalled", 3))
+            self.assertEqual([item["kind"] for item in response["actions"]], ["finalize"])
+            summary = next(item for item in response["summaries"] if item["issue"] == 151)
+            self.assertEqual((summary["state"], summary["custody"]["kind"]),
+                             ("failed", "remainder"))
+
+    def test_a_suspended_remainder_with_a_free_slot_resumes(self):
+        """T4: baseline, a resumable human-gate remainder still resumes at a free slot."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            control, _ = self.remainder_sweeps(Path(raw), home, "suspended-remainder")
+            action = self.remainder_launch(control("2026-09-21T00:00:03Z", max_parallel=2))
+            self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
+                             (1, 2))
+
+    def test_a_live_remainder_short_of_agent_slots_is_not_waiting(self):
+        """T2: a live remainder is custody, not an issue queued for agent slots."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        # The 4-slot floor: the controller plus the claimed r1:2 fill it.
+        (home / ".agents/share/host-declaration.json").write_text(json.dumps(
+            {"schema_version": 1, "routes": {
+                "claude-code": {"support": "supported", "agent_slots": 4},
+                "codex": {"support": "unsupported"}}}), encoding="utf-8")
+        with tempfile.TemporaryDirectory() as raw:
+            control, _ = self.remainder_sweeps(Path(raw), home, "short-slots")
+            self.remainder_launch(control("2026-09-21T00:00:03Z"))
+            response = json.loads(control("2026-09-21T00:00:04Z", max_parallel=2))
+            self.assertEqual(response["admission"]["waiting"], [])
+            self.assertFalse(any(item["kind"] == "delivery_remainder"
+                                 for item in response["actions"]))
+
     def test_control_allocates_only_one_proven_second_remainder(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
