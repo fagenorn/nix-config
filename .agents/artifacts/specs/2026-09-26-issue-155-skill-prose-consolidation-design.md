@@ -8,7 +8,7 @@ contracts, [PR #166](https://github.com/fagenorn/nix-config/pull/166)),
 [PR #187](https://github.com/fagenorn/nix-config/pull/187)),
 [#100](https://github.com/fagenorn/nix-config/issues/100) (strict resolver). Base:
 `origin/main` at `affa05e`. Decisions D1–D15 bind the plan; the grill added D16–D21 and
-planning D22–D28.
+planning D22–D30.
 
 ## Problem
 
@@ -83,12 +83,12 @@ also loads. Four edits qualify; nothing else is cut.
 Each edit changes no behavior: every sentence a test asserts, every binding, path and
 flag survives; one test delimiter moves (D20).
 
-Expected effect, from a prototype of the roster below at `affa05e`: the from-issue
-controller's hot path is ≈97 KB on Claude and ≈87 KB on Codex, the implementation
-owner's ≈131 KB, the ship owner's ≈53 KB, the design-and-grill owner's ≈28 KB, the
-planning owner's ≈22 KB. E1–E3 take roughly 0.2–1 KB from each owner, under 1 % of its
-hot path; template-driven leaves do not move. The generated report is authoritative,
-and D5 and D6 say why the rest stays.
+Expected effect, from the planning probe of the roster below at `affa05e`, with D24's
+tie-breaks: the from-issue controller's hot path is ≈88 KB on both hosts, the
+implementation owner's ≈138 KB, the ship owner's ≈53 KB, the design-and-grill owner's
+≈28 KB, the planning owner's ≈22 KB. E1–E3 take roughly 0.07–0.75 KB from each owner,
+under 1 % of its hot path; template-driven leaves do not move. The generated report is
+authoritative, and D5 and D6 say why the rest stays.
 
 ### What stays repeated, and why (D5, D6)
 
@@ -365,3 +365,5 @@ provider or HTTP failure.
 | D26 | The ceiling mutation grows a member by one byte past the largest slack among the pairs that count it, so a later shrink never forces a ceiling edit; each total's `affected` mark means a counted member's bytes, words or presence differ (a same-size edit is unmarked); the no-growth gate is no positive hot delta and a negative one wherever the hot mark is set; refines seam 1, D10 and acceptance row 3 | D10 "Shrinking needs no edit"; the spec gives each table its own mark; bytes are the unit (D14) | Exactly one byte — fails the first time a counted member shrinks; "negative for every affected profile" across both tables — a conditional-only change never shrinks a hot total |
 | D27 | Gates run as `WORKFLOW_POLICY_SURFACE=source`: D13's guard fails the live-home `test_installed_policy_surface_matches_source_contract` until the next switch, while `just agent-installed-skill-tests`' built-output classes still run; refines acceptance row 4 | CI's spelling in `ci.yaml`; that test's own skip reason ("explicit pre-activation source-only verification"); sibling plans' gates | Switch before verifying — this plan never switches; keep the guard out of the live-home helper — it would then never reach an installed tree |
 | D28 | D20's anchor move covers all three tests that end the durable section at the removed sentence (`test_direct_and_control_requests_are_interface_two`, `test_from_issue_standalone_modes_use_live_lifecycle_interfaces`, `test_adjacent_from_issue_acquisition_modes_remain_unchanged`), each sectioning the whole skill to `## The flow`; for E3, `test_direct_auto_authorizations_are_explicit_and_never_inferred` reads its from-issue-plus-AUTO union whitespace-normalized, because from-issue's held copy wraps "reopened tracker" and "current user instruction explicitly authorizes"; every assertion is unchanged; refines D2 and D20 | the module's `normalized` convention ("the corpus hard-wraps ~80c"); the probe: E3 fails exactly those two phrases, raw | Keep AUTO.md's restatement for a raw substring — pins line wrapping, not the rule; drop E3 — contradicts D2 |
+| D29 | Ceilings are written only by scratch scripts over the module's public `measure` — Task 7's build and Task 8's D19 re-measure, which appends a note sentence naming the merge commit — never by a module subcommand or by hand; refines D10 and D19 | D9: the command is report-only; D10: raising a ceiling rewrites its note in the same reviewed commit; YAGNI — two writers, each run once | A `ceilings --write` subcommand — a write path in a read-only report tool that makes raising a ceiling one keystroke with no reason; hand-edited numbers — 70 values, easy to mistype |
+| D30 | Task 8 syncs by a signed merge of `origin/main` with git's default subject, a body naming what landed and the trailer; a conflicting merge is aborted and reported BLOCKED, never resolved inside the task | delivery selects the reviewed output only after main is synced; the branch-sync merge precedent (`3882c3e`, `dad2b94`); ship-issue's `SYNC.md` owns conflict handling and its escalation format | Rebase — rewrites reviewed commits and the SHAs the sdd ledger recorded; resolve conflicts in the task — an unreviewed semantic edit to E1–E4 text hidden in a merge commit |
