@@ -22,7 +22,7 @@ alone and runs every gate.
 `git`, `just`.
 
 Spec (source of truth, read it whole):
-`.agents/artifacts/specs/2026-09-26-issue-155-skill-prose-consolidation-design.md`, D1–D28.
+`.agents/artifacts/specs/2026-09-26-issue-155-skill-prose-consolidation-design.md`, D1–D30.
 
 ## Global Constraints
 
@@ -95,9 +95,11 @@ JSON, and the report is probably 40–60 KB of Markdown. The product diff exceed
 ship-issue's 20-file degraded-review bound, so ship runs the full two-axis
 review.
 
-Tasks run in index order. Tasks 1–4 are independently deliverable. Task 7's
-ceilings must follow Tasks 1–3, because they are the post-edit values. Task 8
-comes last.
+Tasks run in index order. Tasks 1–4 are independently deliverable. Task 7
+needs the module and recipe from Tasks 5–6, and its ceilings must follow
+Tasks 1–3, because they are the post-edit values. Task 8 comes last. It adds
+a merge commit when `origin/main` has moved, and a ceiling commit when that
+merge moved a measured member.
 
 The base suite at `61b9def` ran 1305 tests, OK (skipped=4), in about 700 s. A
 planning probe applied every task to a scratch clone. The four contract suites
@@ -135,7 +137,7 @@ Task 8 — Sync, generate and commit the report, final gates — `.agents/artifa
 ## Decisions
 
 The spec's `## Decision ledger` is authoritative. Tasks cite D1–D21 from design
-and grill. Planning added D22–D28:
+and grill. Planning added D22–D30:
 
 - **D22:** the matrix gets a text-level `parse_matrix`.
 - **D23:** the roster rules — prompt source and grouping — give 36 profiles.
@@ -144,5 +146,7 @@ and grill. Planning added D22–D28:
 - **D26:** ceiling-test slack and the meaning of `affected`.
 - **D27:** gates run as `WORKFLOW_POLICY_SURFACE=source`.
 - **D28:** D20's anchor move covers three tests, and E3 needs a whitespace-normalized union.
+- **D29:** ceilings are written only by scratch scripts over `measure`.
+- **D30:** Task 8 syncs by a signed merge, and a conflict is reported BLOCKED.
 
 ---

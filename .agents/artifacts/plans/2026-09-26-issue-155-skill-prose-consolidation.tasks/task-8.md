@@ -210,8 +210,10 @@ command and read only the `FAIL:`/`ERROR:` lines and the final
 `Ran`/`OK`/`FAILED` lines of its output.
 
 Run: `env WORKFLOW_POLICY_SURFACE=source PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_instruction_load.py`
-Expected: OK. The only skips are the installed classes, whose home is unset,
-and `test_installed_policy_surface_matches_source_contract`.
+Expected: `OK (skipped=4)`. The skips are the `setUpClass` of
+`InstalledOrchestrateRoutesTest`, `InstalledTreeContractsTest` and
+`InstalledTreeSweepTest`, whose home is unset, plus
+`test_installed_policy_surface_matches_source_contract`.
 
 Run: `env WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests`
 Expected: `OK (skipped=4)`. The four skips are the `setUpClass` of
