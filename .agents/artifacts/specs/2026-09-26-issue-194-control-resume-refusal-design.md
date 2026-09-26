@@ -37,6 +37,11 @@ answer or an equivalent raise:
 | Suspended delivery remainder whose next stage needs a matching worktree | `absent` | Policy answers `observe`; the lane raises |
 | Suspended delivery remainder, any next stage | `mismatch` | The remainder worktree check raises `remainder policy refused` |
 
+This design covers the first two rows, where the policy already answers
+`observe`. The third row is the policy's own refusal, raised inside the shared
+remainder check, and is out of scope with the retry and spawn lanes' refusals
+of the same kind (D10).
+
 An omitted observation is different. For a suspension, the lane already skips
 the issue as a round still owed (#133 D9). For a handoff or an
 owner-unavailable attempt, it is a caller-protocol error, because the adapter
@@ -44,45 +49,36 @@ contract never omits a recorded path.
 
 ## Solution
 
-A truthful `absent` or `mismatch` observation that blocks a resume becomes a
-per-issue verdict:
+A truthful `absent` or `mismatch` observation that makes the policy answer
+`observe` for a resume becomes a per-issue verdict. The policy itself is not
+edited (D10):
 
-1. **One refusal shape from the policy.** Every custody whose recorded
-   worktree cannot serve its resume answers `observe` with its
-   `recorded_worktree` requirement. That includes the remainder `mismatch`,
-   which raises today (D2).
-2. **The resume lane records the refusal instead of raising.** When the
+1. **The resume lane records the refusal instead of raising.** When the
    observation it was given is present and is `absent` or `mismatch`, the lane
    records the refusal and plans the issue again with dispatch withheld. Only
    what a withheld dispatch would write is persisted. The lane admits nothing
    for the issue, charges nothing, and moves on to the next one (D1, D4).
-3. **The summary reports it.** The issue's summary carries a `worktree_fact`
+2. **The summary reports it.** The issue's summary carries a `worktree_fact`
    requirement that names the worktree and the observed state (D3). The
    `workflow-response` validator accepts it under closed rules, including for
    an issue with no contract (D6).
-4. **The dispatcher reports it.** orchestrate-issues' final report lists the
-   issue as refused for that reason (D9).
+3. **The dispatcher reports it.** orchestrate-issues' final report lists the
+   issue as unable to resume, with that reason (D9, D12).
 
-Every other issue in the sweep proceeds as if the refused issue had no slot.
+Every other issue in the sweep proceeds as though the refused issue had asked
+for no dispatch.
 
 ## Decisions
 
-### Policy: one `observe` shape for an unusable recorded worktree (D2)
+### Policy: unchanged (D10)
 
-The implementation lane is unchanged. It already answers `observe` with
-`[{"kind": "recorded_worktree", "path": <attempt worktree>}]` when the
-recorded worktree is not on the issue branch, unless this is a Phase-0 pause
-observed absent (#133 D7).
-
-The remainder worktree check now treats a truthful `mismatch` as a missing
-worktree for every stage requirement (`matching_required`, `cleanup_target`
-and `not_required`). It returns the `recorded_worktree` requirement instead of
-raising. A mismatched remainder still never launches, so the set of launches
-is unchanged; only the failure changes from a raise to an answer. A recorded
-path that differs from the remainder's own path is a caller-protocol error
-and still raises. The direct owner gets the same change for free. A direct
-remainder resume on a mismatched worktree now answers `observe`, as a direct
-implementation resume on a mismatched worktree already does.
+Both custody lanes already answer `observe` with
+`[{"kind": "recorded_worktree", "path": <custody worktree>}]`. The
+implementation lane does so when the recorded worktree is not on the issue
+branch, unless this is a Phase-0 pause observed absent (#133 D7). The
+remainder lane does so when its next stage needs a matching worktree and the
+worktree is absent. Neither lane, the remainder worktree check nor the direct
+owner is edited.
 
 ### Resume lane: refuse per issue (D1, D4, D5)
 
@@ -90,7 +86,9 @@ The resume lane keeps every pre-check in its current order: the capacity
 check, the suspended-and-unobserved skip, `refusal_gated`, then
 `slot_withheld`. After those, it plans the issue with dispatch permitted. When
 that plan answers `observe`, the lane runs one check, in a nested helper
-beside `slot_withheld` and `refusal_gated`. All of these must hold:
+beside `slot_withheld` and `refusal_gated`. Its code names say
+"unresumable", never "refused" or "refusal", which already name refused
+launches and `refusal_gated` (D12). All of these must hold:
 
 - the plan's requirements are exactly one `recorded_worktree` requirement;
 - the issue's worktree observation carries a non-null `recorded`;
@@ -112,8 +110,9 @@ persist. An attempt reaped this sweep is saved as its suspension and emits its
 about the issue changes. The implementation lane's dispatch-permitted
 `observe` plan has `changed: false` even when it reaped, so keeping it in
 `planned` would drop the reap. The remainder's already carries its reap, and
-the withheld plan keeps it. Because the issue is now in `planned`, the retry lane's expiry
-fallback (`issue not in planned`) does not plan it a third time. Sweep-level
+the withheld plan keeps it. Because the issue is now in `planned`, the retry
+lane's expiry fallback (`issue not in planned`) does not plan it a third
+time. Sweep-level
 effects are unchanged, for example releasing an unavailable owner's claim.
 Today the raise discards those effects; with the refusal they persist like any
 other sweep's. The issue takes no `max_parallel` unit, no role-set claim and
@@ -150,9 +149,8 @@ For each control summary, the validator adds these checks on top of the
 generic requirement shapes:
 
 - There is at most one `worktree_fact`. Its `reason_code` is one of the two
-  codes above, its `detail_pointer` is null, its `subject_id` equals the
-  summary's non-null `worktree`, and the summary's `state` is `active`,
-  `handed_off` or `suspended`.
+  codes above, its `detail_pointer` is null, and its `subject_id` equals the
+  summary's `worktree` whenever that is non-null (D11).
 - A summary with a null `contract_digest` still admits only `[]` or
   `[delivery_contract_required]` once that refusal is removed. A contractless
   refused summary is therefore `[worktree_fact]`.
@@ -165,17 +163,16 @@ The tests use the seams #190 and #150 already use. S1 is the `workflow-state`
 CLI run as a subprocess (`control`, `spawn`, `progress`, `suspend`, `finish`,
 `checkpoint-delivery`). S3 is the `workflow-response` boundary. Multi-issue
 cases run on the `claude-code` route with a fixture declaration, because the
-`direct` route controls one issue at `max_parallel` 1. The only
-private-function seam is the existing `remainder_policy` runtime test, whose
-mismatch case flips; no new private seam is added (D8).
+`direct` route controls one issue at `max_parallel` 1. No private-function
+seam is added or changed (D8).
 
 | Test | Fixture | Assertion | At base |
 |---|---|---|---|
 | T1 acceptance | Contracted attempt suspended past Phase 0, recorded worktree observed `absent`, next to a spawnable issue; `max_parallel` 2 | Exit 0; passes `workflow-response`; one `spawn` for the other issue; no action or delta for the first; its summary carries `recorded_worktree_absent` naming its worktree; its ledger entry is unchanged; it holds no claim | Exit 2, the `matching recorded worktree` message |
 | T2 mismatch | T1 with `mismatch` | As T1, with `recorded_worktree_mismatch` | Exit 2 |
-| T3 remainder | `remainder_sweeps` `human_gate` remainder whose next stage needs a matching worktree, observed `absent`, then `mismatch` | Exit 0; no `delivery_remainder` action; summary refusal with the matching code; remainder record unchanged | `absent`: the `matching recorded worktree` message; `mismatch`: `remainder policy refused` |
+| T3 remainder | `remainder_sweeps` `human_gate` remainder whose next stage needs a matching worktree, observed `absent` | Exit 0; no `delivery_remainder` action; summary carries `recorded_worktree_absent`; remainder record unchanged | Exit 2, the `matching recorded worktree` message |
 | T4 reap persists | Handoff past Phase 0, swept after its deadline with `absent` | Exit 0; an `expired` delta; attempt persisted `suspended`; summary refusal; no dispatch | Exit 2, nothing written |
-| T5 wire | Control-response fixtures | The refusal is accepted on contracted and contractless summaries, and rejected for an unknown code, a non-null pointer, a subject other than the worktree, two refusals, a non-custody state, or an action for the issue | Contractless acceptance fails |
+| T5 wire | Control-response fixtures | The refusal is accepted on contracted and contractless summaries, and rejected for an unknown code, a non-null pointer, a subject other than a non-null summary worktree, two refusals, or an action for the issue | Contractless acceptance fails |
 
 These existing tests are changed on purpose:
 
@@ -185,8 +182,6 @@ These existing tests are changed on purpose:
   that a candidate never relocates a resume.
 - **The Phase-1 orchestrated handoff observed `absent`.** It now asserts the
   per-issue refusal on a contractless summary and passes `workflow-response`.
-- **The `remainder_policy` mismatch case.** It now asserts `observe` with the
-  `recorded_worktree` requirement and an unchanged state.
 - **The unobserved-handoff test.** It is kept as it is. An omitted observation
   is a caller-protocol error.
 
@@ -212,11 +207,12 @@ acceptance fails at base, and all of them pass after the change.
   predates this issue (#133 Out of scope). This change turns its whole-sweep
   failure into a per-issue report, but the issue still cannot resume. Direct
   owners still re-ask for the recorded worktree.
-- **Truthful-mismatch raises in the retry and spawn lanes.** The shared policy
-  raises these itself, deliberately ("refuses at once", D25/D44). Making them
-  per-issue in control would change a shared-policy refusal into a verdict for
-  direct owners too. The `worktree_fact` refusal here is the channel such a
-  follow-up would reuse.
+- **The shared policy's own truthful-mismatch refusals**: the retry and
+  spawn lanes' raises ("refuses at once", D25/D44) and the remainder worktree
+  check's `mismatch` raise (D10). They still take down the whole sweep. Making
+  them per-issue means turning a shared-policy raise into a verdict, which
+  changes direct owners too. That is a follow-up, and it would reuse this
+  design's `worktree_fact` channel.
 - **Caller-protocol raises.** An omitted handoff observation, a candidate for
   an issue that already has attempts, and a recorded path that differs from
   the ledger all stay whole-sweep errors.
@@ -237,3 +233,6 @@ acceptance fails at base, and all of them pass after the change.
 | D7 | The issue's second Expected item, closing out a delivered issue whose ledger cannot fold the delivery, is out of scope. The follow-up is #192 part 2 | Code reading: the tracker-halt terminal and the forge-merged reconcile cover implementation attempts only, and the D21 recovery allocates only remainder two; Phase 0 default | A synthetic close-out terminal here: a new lifecycle transition with its own design questions, and the stranding it cures is #192's |
 | D8 | Tests: S1 plus S3 on the `claude-code` route (T1 to T5). The owner-unavailable test is split into per-issue subtests and candidate-carrying atomic subtests. The Phase-1 handoff test and the `remainder_policy` mismatch case flip. The unobserved-handoff test is kept | #190 D6 and #150's seams; the-bar *Tests that can fail*: T4 fails if the observe plan is kept, and T5 fails if a closed rule is dropped | A new private test of the refusal helper (no seam beyond the CLI); deleting the candidate subtests (the no-relocation proof would go unpinned) |
 | D9 | Prose: one orchestrate-issues §5 sentence. A summary whose `worktree_fact` reads `recorded_worktree_absent` or `recorded_worktree_mismatch` is reported as refused for that reason, never as progressing. The Codex stub, from-issue and ship-issue are unchanged | Only the dispatcher reads control summaries; the Codex stub only relays `host-route`; owners never see summaries | No prose (the final report would show a paused issue with no reason); a §2 edit (its "mismatch refuses" wording stays true) |
+| D10 | Grill, reverses D2: the remainder worktree check keeps raising on a truthful `mismatch`, and no policy code is edited. The remainder `mismatch` joins the retry and spawn lanes' shared-policy refusals as a named follow-up; the `remainder_policy` mismatch test stays as it is | Phase 0 puts direct-owner behaviour out of scope, and D2 changed it: a direct remainder mismatch would go from a loud exit 2 to an `observe` that from-issue's resend loop answers with the same fact. That raise is the same kind as the D25/D44 refusals this spec already leaves out | D2 as written (a direct-owner change and a possible unbounded direct loop); branching on `source_kind` (two rules for one fact) |
+| D11 | Grill, refines D6: the validator matches `subject_id` to the summary's `worktree` only when that is non-null, and has no custody-state rule | Code reading: a summary names no custody once the delivery is complete, while the implementation lane can still plan a resume for that issue. A strict rule would then reject control's own truthful output at the dispatcher's boundary, after the ledger was written | Keeping the strict rules (the producer's output fails its own boundary); dropping the subject check altogether (loses the cheap path cross-check) |
+| D12 | Grill: code names say "unresumable", never "refused"/"refusal", and the orchestrate-issues sentence says "cannot resume" rather than "refused" | Existing vocabulary: control's `refused` holds refused launches, `refusal_gated` gates `host_capacity`, and `refuse`/`retry_refused` is the third-attempt verdict; the-bar *Maintainability over cleverness* (name for intent) | `refused`/`refusal` names (they collide with three existing meanings in one function) |
