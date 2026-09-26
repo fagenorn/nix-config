@@ -8,7 +8,7 @@ description: Turn a spec into a task-by-task implementation plan before touching
 Write the plan for an engineer who is skilled but has zero context for this codebase, this toolset, and this domain, and who will read exactly one task without the others. Every task names the files it touches, the exact interfaces and invariants it must satisfy, how to test it, and how to verify it. DRY. YAGNI. Test-first. Frequent commits.
 
 **Resolve once at entry.** Run `resolve-project resolve
---repo-root <the checkout you were called in>` and retain the full `ResolvedProject` in memory. Read
+--repo-root <the checkout you were called in>`. Read
 `bindings.paths.artifacts.plans` from the snapshot it prints — an absolute path,
 because the resolver normalizes every path against `project.root`. That value is
 `bindings.paths.artifacts.plans` for the rest of this skill. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Never persist the snapshot or infer a policy value.

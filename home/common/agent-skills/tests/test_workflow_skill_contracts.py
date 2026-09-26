@@ -320,6 +320,18 @@ def assert_refusal_reporting(case, text):
     case.assertIn(REFUSAL_REPORTING_SENTENCE, normalized(text))
 
 
+# RESOLUTION_SENTENCE is the one statement of the resolver rule in a policy
+# entry; an opener that restates it is the un-held copy #155 removed (D13).
+RESOLUTION_STATEMENT = "`ResolvedProject` in memory"
+
+
+def assert_single_resolution_statement(case, text):
+    case.assertEqual(
+        normalized(text).count(RESOLUTION_STATEMENT), 1,
+        "a policy entry states the resolver rule once, in RESOLUTION_SENTENCE",
+    )
+
+
 def assert_policy_entries(case, root, entries, require_refusal_reporting=False):
     actual = {str(path.relative_to(root)) for path in root.glob("*/SKILL.md")
               if "resolve-project resolve" in path.read_text(encoding="utf-8")}
@@ -329,6 +341,7 @@ def assert_policy_entries(case, root, entries, require_refusal_reporting=False):
         with case.subTest(relative=relative):
             case.assertEqual(text.count("resolve-project resolve"), 1)
             case.assertIn(RESOLUTION_SENTENCE, normalized(text))
+            assert_single_resolution_statement(case, text)
             if require_refusal_reporting:
                 assert_refusal_reporting(case, text)
             for field in fields:
@@ -383,6 +396,19 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         missing = text.replace("error.code", "error kind", 1)
         with self.assertRaises(AssertionError):
             assert_refusal_reporting(self, missing)
+
+    def test_policy_entry_rejects_a_restated_resolution(self):
+        text = normalized(DESIGN.read_text(encoding="utf-8"))
+        assert_single_resolution_statement(self, text)
+        restated = text.replace(
+            "Run `resolve-project resolve --repo-root <checkout>`.",
+            "Run `resolve-project resolve --repo-root <checkout>` once at phase "
+            "entry and retain the full `ResolvedProject` in memory.",
+            1,
+        )
+        self.assertNotEqual(restated, text)
+        with self.assertRaises(AssertionError):
+            assert_single_resolution_statement(self, restated)
 
     def test_worktree_contract_uses_retained_schema_fields_and_root(self):
         text = WORKTREES.read_text(encoding="utf-8")

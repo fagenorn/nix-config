@@ -14,8 +14,7 @@ policy. Context stays flat regardless of issue count.
 Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
 `workflow-state` name does not resolve on PATH, use that full path.
 
-Run `resolve-project resolve --repo-root <checkout>` once at phase entry and
-retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain
 the returned `ResolvedProject` in memory, and treat every resolver error as fatal
 before mutation or external effects. On refusal, preserve and report the
 resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never
