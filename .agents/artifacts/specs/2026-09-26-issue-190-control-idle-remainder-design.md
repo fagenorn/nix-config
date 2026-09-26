@@ -6,8 +6,8 @@
 When an issue's current custody is a live delivery remainder and a dispatch
 slot is free, the command exits with `KeyError: 'idle'` and writes nothing. The
 next sweep that includes the issue crashes the same way. The adapter can make
-progress only by dropping the issue from `issues`, which also drops the running
-owner from the run it belongs to.
+progress only by dropping the issue from `issues`, and then no later sweep
+tracks the running owner.
 
 Two more symptoms have the same cause. A remainder that expires at its stall
 bound crashes the sweep with `KeyError: 'terminal'`. When the declared agent
@@ -68,7 +68,7 @@ Each half gets one change, and each change becomes the only home of its rule
 
 After the change, a live remainder never enters a dispatch lane. A stalled
 remainder is persisted by the existing expiry fallback, the same way a stalled
-implementation attempt is. Nothing that is not a dispatch reaches the action
+implementation attempt is. Only dispatches and `refuse` reach the action
 loop.
 
 ## Decisions
@@ -77,9 +77,11 @@ loop.
 
 `remainder_policy` sets `desired` on every result it builds:
 
-- **`idle`**: the remainder is `active` and its current launch is not observed
-  unavailable, whether or not dispatch is permitted. The lane selector skips
-  the issue entirely. It never reaches `refusal_gated` or `slot_withheld`, it
+- **`idle`**: the remainder is live, whether or not dispatch is permitted.
+  "Live" is the `live_launches` predicate: the remainder is `active`, it has
+  not reached its deadline, and its current launch is not observed
+  unavailable. The reaper runs first, so an `active` remainder at this branch
+  has not reached its deadline. The lane selector skips the issue entirely. It never reaches `refusal_gated` or `slot_withheld`, it
   joins no `waiting` set, it is not planned again, and it takes no slot or
   claim.
 - **`terminal`**: the remainder is `failed`. The only way to reach this is the
@@ -102,9 +104,11 @@ It takes an issue and its planned result, plus a `charge` flag that defaults to
 true.
 
 - If the operation is not in `CONTROL_DISPATCH_KINDS`, it queues nothing,
-  charges nothing, and reports that it did not admit the issue. The planned
-  result stays in `planned`, so a `changed` result is still persisted and its
-  summary still reports it.
+  charges nothing, and reports that it did not admit the issue. It filters
+  rather than raises: every operation outside the dispatch kinds is a
+  legitimate policy verdict, not an error (D8). The planned result stays in
+  `planned`, so a `changed` result is still persisted and its summary still
+  reports it.
 - Otherwise it appends the issue to `proposal_order`. When `charge` is true it
   also calls `acquire` and spends one `max_parallel` unit.
 
@@ -154,7 +158,7 @@ seam") (D6).
 |---|---|---|---|
 | T1 live remainder, free slot | Remainder that control dispatched (`r1:2`, claimed), swept again at `max_parallel` 2 | Exit 0. The response passes `workflow-response`. The response bytes and the resulting ledger bytes both equal those of the same sweep at `max_parallel` 1, run from a copy of the same ledger | `KeyError: 'idle'` |
 | T2 live remainder, slots short | A 4-slot declaration (the floor), so the controller plus the claimed `r1:2` fill it; `max_parallel` 2 | `admission.waiting == []`, and there is no `delivery_remainder` action | `waiting: [151]` |
-| T3 stall-bound expiry | Denial checkpoint, then three control resumes with a no-progress checkpoint between each, which leaves `r1:4` `active` with `stalled_resumes` 2; then a sweep after its deadline | Exit 0. The remainder's `state`, `result_source` and `stalled_resumes` are `failed`, `stalled` and `3`, and there is no dispatch action | `KeyError: 'terminal'` |
+| T3 stall-bound expiry | Denial checkpoint, then three control resumes with a checkpoint between each that suspends without progress, which leaves `r1:4` `active` with `stalled_resumes` 2; then a sweep after its deadline | Exit 0. The remainder's `state`, `result_source` and `stalled_resumes` are `failed`, `stalled` and `3`, and there is no dispatch action. The test does not assert the `expired` delta's custody or state, which is a pre-existing defect (Out of scope) | `KeyError: 'terminal'` |
 | T4 suspended remainder, free slot | `human_gate` suspension, recorded worktree observed, `max_parallel` 2 | A `delivery_remainder` action for `r1:2` | Green: baseline coverage, kept because the acceptance criteria name a suspended remainder |
 
 The recover lane gets no new test: with dispatch permitted it can only yield
@@ -204,3 +208,4 @@ and Q4 by D5.
 | D5 | A live remainder with a free slot gets the byte-identical response a capacity-exhausted sweep gives. The resumable-suspended response is unchanged. A stall-bound remainder is persisted `failed` and gets no dispatch | The issue: "as they do when capacity is exhausted"; #133 D2 (same-sweep resume in the suspension lane) | A new summary field or action kind for live custody: an interface change no caller needs |
 | D6 | Test seams are S1 plus S3 in the delivery workflow suite, on `claude-code`. The short-slot case uses a 4-slot fixture declaration, and the stall bound is reached through the CLI. No private-helper tests, no new recover test, and the action loop's closed map stays the fail-loud check | #150 test seams (S1, S3, D23, "no other seam"); `direct` controls one issue at `max_parallel` 1; the-bar *Fail loud*, *Tests that can fail* | Seeding the stall counters by editing the ledger (the CLI produces the real shape); changing the delta map's `KeyError` into a `WorkflowError` (an unreachable, untested branch) |
 | D7 | Acceptance for "no longer crashes on the reproduction" is T1 (the instrumented state) plus T3 (the `r1:3` → `r1:4` sequence). The real run ledger is not rewound | Inspecting the real ledger: `r1` is `stopped` at schema 3, so the crashing custody no longer exists there | Rewinding a copy of the real ledger: it needs an eight-issue request rebuilt by hand, and gives no stronger evidence than T1 |
+| D8 | Grill: the admission step filters a non-dispatch verdict and does not raise on it. The closed-set throw stays in the action loop's delta map, and the per-lane `observe` refusals stay loud. T3 does not pin the `expired` delta's attribution | the-bar *Fail loud* applies at a dispatch site, and the step is a membership filter over closed policy verdicts, each persisted through `planned` and reported by its summary; the-bar *Tests that can fail* (a test pinned to a known defect) | Raising on anything but a dispatch or `contract` in the step: that turns each future legitimate non-dispatch verdict into this issue's crash with a better message |
