@@ -109,7 +109,7 @@ Don't create a tracked `CHANGELOG.md` in the repo root unless the user explicitl
 
 ## Phase 2 — Open PR
 
-The Phase 1 body is written to `<release-body-path>`, a path outside the working tree, with the file-writing tool and passed by path, because a heredoc into `gh` is refused by the worktree isolation checker.
+The Phase 1 body is written to `<release-body-path>`, a path outside the working tree, with the file-writing tool and passed by path — see `worktrees/SKILL.md`, `## Shell forms the isolation checker refuses`.
 
 ```bash
 ${GH_PREFIX}gh pr create \
