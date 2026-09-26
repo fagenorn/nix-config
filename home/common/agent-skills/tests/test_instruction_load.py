@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -205,6 +208,134 @@ class ModelCoreTest(unittest.TestCase):
             self.assertIsNone(read("skills/Demo/SKILL.md"))
             self.assertIsNone(read("skills/demo"))
             self.assertIsNone(read("skills/demo/ABSENT.md"))
+
+
+GIT_LOCATION_VARS = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+)
+
+
+def git_env():
+    """Hermetic git, as test_sdd_workspace.py: no user or system config, so no signing."""
+    env = dict(os.environ)
+    for name in GIT_LOCATION_VARS:
+        env.pop(name, None)
+    env.update({
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.test",
+        "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.test",
+    })
+    return env
+
+
+class ReportCommandTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name) / "repo"
+        self.repo.mkdir()
+        self.env = git_env()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "commit.gpgsign", "false")
+        self.base = self.commit(BASE_FILES, "base")
+        self.head = self.commit({**HEAD_FILES, instruction_load.MODEL_PATH:
+                                 json.dumps(fixture_model(), indent=2).encode()}, "head")
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.repo), *args], env=self.env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def commit(self, files, message):
+        for relative, data in files.items():
+            path = self.repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def report(self, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "agent_tools.instruction_load", "report",
+             "--root", str(self.repo), *args],
+            env=self.env, capture_output=True, text=True, check=False)
+
+    def json_report(self):
+        completed = self.report("--base", self.base, "--head", self.head, "--format", "json")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout)
+
+    def test_json_reports_hand_computed_deltas(self):
+        data = self.json_report()
+        self.assertEqual((data["base"], data["head"]), (self.base, self.head))
+        demo = next(p for p in data["profiles"] if p["id"] == "demo")
+        self.assertEqual(demo["hosts"]["claude"]["hot"]["base"], {"bytes": 38, "words": 7})
+        self.assertEqual(demo["hosts"]["claude"]["hot"]["head"], {"bytes": 51, "words": 9})
+        self.assertEqual(demo["hosts"]["claude"]["hot"]["delta"], {"bytes": 13, "words": 2})
+        self.assertTrue(demo["hosts"]["claude"]["hot"]["affected"])
+        self.assertEqual(demo["hosts"]["codex"]["conditional"]["delta"], {"bytes": 9, "words": 2})
+        self.assertEqual(demo["hosts"]["claude"]["conditional"]["delta"], {"bytes": 9, "words": 2})
+        self.assertEqual(demo["hosts"]["claude"]["ceiling_bytes"], 51)
+        reviewer = next(p for p in data["profiles"] if p["id"] == "demo-reviewer")
+        self.assertEqual(reviewer["hosts"]["claude"]["hot"]["delta"], {"bytes": 0, "words": 0})
+        self.assertFalse(reviewer["hosts"]["claude"]["hot"]["affected"])
+        self.assertEqual(reviewer["hosts"]["codex"]["hot"]["members"], [])
+        new = next(d for d in data["documents"] if d["member"] == "demo/NEW.md")
+        self.assertEqual(new["base"], {"bytes": 0, "words": 0, "absent": True})
+        self.assertEqual(new["head"], {"bytes": 9, "words": 2, "absent": False})
+        self.assertEqual(data["frame"]["delta"], {"bytes": 0, "words": 0})
+
+    def test_markdown_file_carries_both_shas_and_the_regeneration_command(self):
+        output = Path(self.temporary.name) / "report.md"
+        completed = self.report("--base", self.base, "--head", self.head, "--output", str(output))
+        self.assertEqual((completed.returncode, completed.stdout), (0, ""), completed.stderr)
+        text = output.read_text(encoding="utf-8")
+        self.assertIn(f"`{self.base}`", text)
+        self.assertIn(f"`{self.head}`", text)
+        self.assertIn(f"just agent-instruction-load report --base {self.base} "
+                      f"--head {self.head} --output <path>", text)
+        self.assertIn("neither is a token count", text)
+        for heading in ("## Frame", "## Hot totals", "## Conditional totals", "## Documents",
+                        "## Members by profile", "### demo-reviewer"):
+            self.assertIn(heading, text)
+        lines = text.splitlines()
+        self.assertIn("| demo | claude | 38 | 51 | +13 | 7 | 9 | +2 | yes | fixture entry |", lines)
+        self.assertIn("| `demo/NEW.md` | claude, codex | absent | 9 | +9 | 0 | 2 | +2 |", lines)
+
+    def test_the_output_is_a_function_of_the_two_shas(self):
+        first = self.report("--base", self.base, "--head", self.head)
+        (self.repo / "home/common/agent-skills/skills/demo/SKILL.md").write_bytes(b"dirty\n")
+        second = self.report("--base", self.base, "--head", self.head)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertTrue(first.stdout.startswith("# Instruction load: "), first.stdout[:80])
+        self.assertEqual(first.stdout, second.stdout)
+
+    def test_the_model_is_read_at_head_not_from_the_working_tree(self):
+        (self.repo / instruction_load.MODEL_PATH).write_text("{", encoding="utf-8")
+        self.assertEqual(self.json_report()["head"], self.head)
+        completed = self.report("--base", self.base, "--head", self.base)
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(len(completed.stderr.splitlines()), 1, completed.stderr)
+        self.assertIn(instruction_load.MODEL_PATH, completed.stderr)
+
+    def test_an_unknown_revision_exits_2_and_writes_no_file(self):
+        output = Path(self.temporary.name) / "never.md"
+        completed = self.report("--base", "no-such-revision", "--head", self.head,
+                                "--output", str(output))
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stderr.count("\n"), 1, completed.stderr)
+        self.assertTrue(completed.stderr.startswith("agent-instruction-load: "))
+        self.assertFalse(output.exists())
+
+    def test_an_invalid_model_at_head_exits_2(self):
+        model = fixture_model()
+        del model["excluded_sites"]["demo-plugin"]
+        broken = self.commit({instruction_load.MODEL_PATH: json.dumps(model).encode()}, "broken")
+        completed = self.report("--base", self.base, "--head", broken)
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("matrix site demo-plugin is in no profile", completed.stderr)
 
 
 if __name__ == "__main__":

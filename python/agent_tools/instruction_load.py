@@ -1,12 +1,15 @@
-"""Measure the instruction documents each agent profile loads, per host."""
+"""Measure the instruction documents each agent profile loads, per host, and compare two revisions."""
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 import posixpath
 import re
+import subprocess
+import sys
 from typing import Any, Callable, Optional
 
 from agent_tools.agent_model_matrix import (
@@ -38,6 +41,7 @@ PROFILE_KEYS = (
 )
 PROFILE_CHOICE_KEYS = ("entry", "launch")
 SKILL_NAME = re.compile(r"[A-Za-z0-9_-]+")
+REGENERATE = "just agent-instruction-load report --base {base} --head {head} --output <path>"
 
 Reader = Callable[[str], Optional[bytes]]
 
@@ -62,6 +66,35 @@ def tree_reader(root: Path) -> Reader:
             return None
 
     return read
+
+
+def _git(root: Path, *args: str) -> bytes:
+    completed = subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=False)
+    if completed.returncode != 0:
+        lines = completed.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise ValueError(f"git {args[0]} failed: {lines[-1] if lines else ''}")
+    return completed.stdout
+
+
+def revision_reader(root: Path, revision: str) -> tuple[str, Reader]:
+    """The full commit SHA of `revision`, and a reader over that commit's tree."""
+    try:
+        sha = _git(root, "rev-parse", "--verify", "--quiet", "--end-of-options",
+                   f"{revision}^{{commit}}").decode("ascii").strip()
+    except ValueError:
+        raise ValueError(f"unknown revision {revision!r}") from None
+    present = set(filter(None, _git(root, "ls-tree", "-r", "-z", "--name-only", sha)
+                         .decode("utf-8", "surrogateescape").split("\0")))
+    cache: dict[str, bytes] = {}
+
+    def read(path: str) -> Optional[bytes]:
+        if path not in present:
+            return None
+        if path not in cache:
+            cache[path] = _git(root, "show", f"{sha}:{path}")
+        return cache[path]
+
+    return sha, read
 
 
 def load_model(data: bytes) -> dict:
@@ -433,3 +466,209 @@ def over_ceiling(model: dict, measurement: dict) -> list[str]:
                     f"exceed ceiling {ceiling} ({listing})"
                 )
     return found
+
+
+PREFACE = (
+    "Bytes are UTF-8 lengths and words are whitespace-separated tokens; neither is a token "
+    "count. A hot member loads on every run of its profile's standard route and a conditional "
+    "member only on a named branch. A shared-tree member counts on both hosts; a "
+    "Claude-only-tree member or an agent definition counts on Claude only.",
+    "Not measured: received prompts (each profile names its prompt's source document), the "
+    "harness system prompt and skill listing, project instructions, and plugin or generated "
+    "skills. The frame, the global guidance file installed for both hosts, is reported once "
+    "and kept out of every profile total.",
+)
+SIZE_COLUMNS = ("Base bytes", "Head bytes", "Δ bytes", "Base words", "Head words", "Δ words")
+
+
+def _side(entry: dict) -> dict[str, Any]:
+    return {"bytes": entry["bytes"], "words": entry["words"], "absent": entry["absent"]}
+
+
+def _delta(base: dict, head: dict) -> dict[str, int]:
+    return {"bytes": head["bytes"] - base["bytes"], "words": head["words"] - base["words"]}
+
+
+def _compare_total(head_total: dict, base_documents: dict, head_documents: dict) -> dict:
+    members = head_total["members"]
+    base = {
+        "bytes": sum(base_documents[m]["bytes"] for m in members),
+        "words": sum(base_documents[m]["words"] for m in members),
+    }
+    head = {"bytes": head_total["bytes"], "words": head_total["words"]}
+    affected = any(_side(base_documents[m]) != _side(head_documents[m]) for m in members)
+    return {"members": members, "base": base, "head": head,
+            "delta": _delta(base, head), "affected": affected}
+
+
+def compare(model: dict, base_measurement: dict, head_measurement: dict,
+            base: str, head: str) -> dict:
+    """The report data: the frame, each document and each profile's totals at both revisions."""
+    base_documents = base_measurement["documents"]
+    head_documents = head_measurement["documents"]
+    frame_base, frame_head = _side(base_measurement["frame"]), _side(head_measurement["frame"])
+    documents = []
+    for member in sorted(head_documents):
+        side_base, side_head = _side(base_documents[member]), _side(head_documents[member])
+        tree = head_documents[member]["tree"]
+        documents.append({
+            "member": member,
+            "hosts": [host for host in HOSTS if _counts_on(tree, host)],
+            "base": side_base, "head": side_head, "delta": _delta(side_base, side_head),
+        })
+    profiles = []
+    for profile in model["profiles"]:
+        totals = head_measurement["profiles"][profile["id"]]
+        profiles.append({
+            "id": profile["id"],
+            "entry": profile.get("entry"),
+            "launch": profile.get("launch"),
+            "prompt": profile["prompt"],
+            "note": profile["note"],
+            "unread": profile["unread"],
+            "hosts": {
+                host: {
+                    **{kind: _compare_total(totals[host][kind], base_documents, head_documents)
+                       for kind in ("hot", "conditional")},
+                    "ceiling_bytes": profile["ceiling_bytes"][host],
+                }
+                for host in profile["hosts"]
+            },
+        })
+    return {
+        "base": base,
+        "head": head,
+        "frame": {"member": FRAME_MEMBER, "base": frame_base, "head": frame_head,
+                  "delta": _delta(frame_base, frame_head)},
+        "documents": documents,
+        "profiles": profiles,
+    }
+
+
+def render_json(report: dict) -> str:
+    return json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+
+
+def _signed(value: int) -> str:
+    return f"{value:+d}" if value else "0"
+
+
+def _row(cells: list[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def _table(leading: list[str], trailing: list[str], rows: list[list[str]]) -> list[str]:
+    """A pipe table whose six size columns sit between `leading` and `trailing` columns."""
+    alignment = ["---"] * len(leading) + ["---:"] * len(SIZE_COLUMNS) + ["---"] * len(trailing)
+    return [_row([*leading, *SIZE_COLUMNS, *trailing]), _row(alignment), *map(_row, rows)]
+
+
+def _sizes(base: dict, head: dict, delta: dict) -> list[str]:
+    def byte_cell(side: dict) -> str:
+        return "absent" if side.get("absent") else str(side["bytes"])
+
+    return [byte_cell(base), byte_cell(head), _signed(delta["bytes"]),
+            str(base["words"]), str(head["words"]), _signed(delta["words"])]
+
+
+def _code_list(members: list[str]) -> str:
+    return ", ".join(f"`{member}`" for member in members) or "none"
+
+
+def _profile_section(profile: dict) -> list[str]:
+    if profile["entry"] is not None:
+        launched = f"entry `{profile['entry']}`"
+    else:
+        launched = "sites " + _code_list(profile["launch"])
+    prompt = ("none (an entry)" if profile["prompt"] is None
+              else f"`{profile['prompt']}` (not measured)")
+    lines = [f"### {profile['id']}", "", f"- Launched by: {launched}", f"- Prompt: {prompt}"]
+    for host, totals in profile["hosts"].items():
+        lines.append(f"- {host} — hot: {_code_list(totals['hot']['members'])}; "
+                     f"conditional: {_code_list(totals['conditional']['members'])}")
+    lines += [f"- Unread: `{member}` — {reason}" for member, reason in profile["unread"].items()]
+    return lines
+
+
+def render_markdown(report: dict) -> str:
+    base, head = report["base"], report["head"]
+    frame = report["frame"]
+    lines = [
+        f"# Instruction load: {base[:7]} → {head[:7]}",
+        "",
+        f"- Base: `{base}`",
+        f"- Head: `{head}`",
+        f"- Regenerate: `{REGENERATE.format(base=base, head=head)}`",
+        "",
+        PREFACE[0],
+        "",
+        PREFACE[1],
+        "",
+        "## Frame",
+        "",
+        *_table(["Member"], [], [[f"`{frame['member']}`",
+                                  *_sizes(frame["base"], frame["head"], frame["delta"])]]),
+    ]
+    for kind, heading in (("hot", "## Hot totals"), ("conditional", "## Conditional totals")):
+        rows = [
+            [profile["id"], host, *_sizes(total[kind]["base"], total[kind]["head"],
+                                          total[kind]["delta"]),
+             "yes" if total[kind]["affected"] else "no", profile["note"].replace("|", "\\|")]
+            for profile in report["profiles"]
+            for host, total in profile["hosts"].items()
+        ]
+        lines += ["", heading, "", *_table(["Profile", "Host"], ["Affected", "Note"], rows)]
+    rows = [[f"`{document['member']}`", ", ".join(document["hosts"]),
+             *_sizes(document["base"], document["head"], document["delta"])]
+            for document in report["documents"]]
+    lines += ["", "## Documents", "", *_table(["Member", "Hosts"], [], rows)]
+    lines += ["", "## Members by profile"]
+    for profile in report["profiles"]:
+        lines += ["", *_profile_section(profile)]
+    return "\n".join(lines) + "\n"
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="agent-instruction-load",
+        description="Compare the instruction documents each agent profile loads at two revisions.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    report = commands.add_parser("report", help="report the load at --base against --head")
+    report.add_argument("--base", required=True, help="the base revision")
+    report.add_argument("--head", required=True, help="the head revision; the model is read here")
+    report.add_argument("--output", type=Path, help="write the report here instead of stdout")
+    report.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    report.add_argument("--root", type=Path, default=Path("."), help="the repository")
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        base, read_base = revision_reader(args.root, args.base)
+        head, read_head = revision_reader(args.root, args.head)
+        raw = read_head(MODEL_PATH)
+        if raw is None:
+            raise ValueError(f"no {MODEL_PATH} at {head}")
+        try:
+            model = load_model(raw)
+        except ValueError as error:
+            raise ValueError(f"invalid model at {head}: {error}") from None
+        violations = validate(model, read_head)
+        if violations:
+            raise ValueError(f"invalid model at {head}: " + "; ".join(violations))
+        report = compare(model, measure(model, read_base), measure(model, read_head), base, head)
+        text = render_json(report) if args.format == "json" else render_markdown(report)
+        if args.output is None:
+            sys.stdout.buffer.write(text.encode("utf-8"))
+        else:
+            args.output.write_text(text, encoding="utf-8")
+    except (ValueError, OSError) as error:
+        print(f"agent-instruction-load: {' '.join(str(error).split())}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

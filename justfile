@@ -104,6 +104,10 @@ agent-model-matrix:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix validate
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix trace representative
 
+# Compare the instruction documents each agent profile loads at two revisions (#155 D9).
+agent-instruction-load *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load {{args}}
+
 # Check the skill contracts and agent-tool launchers against what the Nix build installs.
 agent-installed-skill-tests: build
   @set -- $(nix-store --query --requisites ./result \
