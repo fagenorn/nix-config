@@ -1202,6 +1202,22 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
                              (1, 2))
 
+    def test_a_live_remainder_short_of_agent_slots_is_not_waiting(self):
+        """T2: a live remainder is custody, not an issue queued for agent slots."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        # The 4-slot floor: the controller plus the claimed r1:2 fill it.
+        (home / ".agents/share/host-declaration.json").write_text(json.dumps(
+            {"schema_version": 1, "routes": {
+                "claude-code": {"support": "supported", "agent_slots": 4},
+                "codex": {"support": "unsupported"}}}), encoding="utf-8")
+        with tempfile.TemporaryDirectory() as raw:
+            control, _ = self.remainder_sweeps(Path(raw), home, "short-slots")
+            self.remainder_launch(control("2026-09-21T00:00:03Z"))
+            response = json.loads(control("2026-09-21T00:00:04Z", max_parallel=2))
+            self.assertEqual(response["admission"]["waiting"], [])
+            self.assertFalse(any(item["kind"] == "delivery_remainder"
+                                 for item in response["actions"]))
+
     def test_control_allocates_only_one_proven_second_remainder(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)

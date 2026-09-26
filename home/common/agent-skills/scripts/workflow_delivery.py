@@ -389,20 +389,22 @@ class DeliveryRuntime:
             self._projection.suspend_expired_remainder(
                 issue_state, remainder, now)
 
-        def result(operation: str, *, changed: bool = False,
+        def result(operation: str, *, changed: bool = False, desired: str = "resume",
                    requirements: list[dict[str, Any]] | None = None) -> dict[str, Any]:
             facade = self._remainder_facade(issue_state, remainder)
             return {"operation": operation, "changed": changed,
                     "issue_state": issue_state, "attempt": facade,
                     "requirements": [] if requirements is None else requirements,
-                    "uses_candidate": False, "desired": "resume",
+                    "uses_candidate": False, "desired": desired,
                     "custody_kind": "remainder", "expired": reaped,
                     "reduction": None}
 
         if remainder["state"] == "failed":
+            # Only this sweep's reap fails a remainder here, at the stall bound.
+            # Its caller persists the changed result; control's lanes skip it (D2).
             if preview is None:
                 preview = {"next_stage_id": None}
-            return result("terminal", changed=True)
+            return result("terminal", changed=True, desired="terminal")
         if preview is None:
             if issue is None or request is None or source_kind is None:
                 raise ValueError("remainder preview inputs are required")
@@ -416,7 +418,8 @@ class DeliveryRuntime:
         if owner_unavailable and remainder["state"] != "active":
             raise ValueError("owner_unavailable is not applicable")
         if remainder["state"] == "active" and not owner_unavailable:
-            return result("idle")
+            # Live custody: control's lanes skip it, as they skip a live attempt (D2).
+            return result("idle", desired="idle")
         _ = tracker_halted
         if not dispatch_permitted:
             return result("idle", changed=reaped)
