@@ -819,11 +819,26 @@ CAPACITY_SCOPE_ANCHORS = (
 )
 
 
+# The configured-review paragraph's closing sentences: authored `unsupported`
+# is the caller's primary native route, not a fallback, and only the
+# `available` route's non-capacity failure falls back (issue 195, D15).
+CONFIGURED_REVIEW_UNSUPPORTED_ROUTE = (
+    "Authored `unsupported` takes the caller's native correctness route "
+    "directly and makes no Codex call."
+)
+CONFIGURED_REVIEW_AVAILABLE_FALLBACK = (
+    "On the `available` route, a completed non-capacity runtime/output failure "
+    "uses the existing single native fallback and records why."
+)
+
+
 def assert_configured_code_review_pair(case, owner, support):
     owner_text = normalized(owner.read_text(encoding="utf-8"))
     support_text = normalized(support.read_text(encoding="utf-8"))
     case.assert_ordered(owner_text, "bindings.workflow.review.code", "capabilities.review.code", "bindings.commands[review_id].argv")
-    case.assert_ordered(support_text, "exec", "--sandbox read-only", "--model gpt-6-astra", 'model_reasoning_effort="xhigh"', "--json", "--output-last-message", "--ephemeral", "selected model", "selected reasoning effort", "terminal agent-message", "last-message", "`blocked` stops", *CAPACITY_SCOPE_ANCHORS)
+    case.assert_ordered(support_text, "exec", "--sandbox read-only", "--model gpt-6-astra", 'model_reasoning_effort="xhigh"', "--json", "--output-last-message", "--ephemeral", "selected model", "selected reasoning effort", "terminal agent-message", "last-message", "`blocked` stops", *CAPACITY_SCOPE_ANCHORS, CONFIGURED_REVIEW_UNSUPPORTED_ROUTE, CONFIGURED_REVIEW_AVAILABLE_FALLBACK)
+    # The pre-D15 sentence called the primary `unsupported` route a fallback.
+    case.assertNotIn("Authored unsupported or a completed non-capacity", support_text)
     for text in (owner_text, support_text):
         case.assertNotIn("command -v codex-companion", text)
         case.assertNotIn('subagent_type="codex:codex-reviewer"', text)
