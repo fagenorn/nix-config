@@ -14,8 +14,7 @@ policy. Context stays flat regardless of issue count.
 Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
 `workflow-state` name does not resolve on PATH, use that full path.
 
-Run `resolve-project resolve --repo-root <checkout>` once at phase entry and
-retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain
 the returned `ResolvedProject` in memory, and treat every resolver error as fatal
 before mutation or external effects. On refusal, preserve and report the
 resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never
@@ -31,8 +30,7 @@ dispatcher still never resolves again itself.
 
 Every lifecycle call is one command that reads its input from stdin through a
 quoted heredoc (`<<'EOF'`): `--request-file -` for `control`, `--input -` for
-`build-delivery`, with the helper named bare or as `~/.agents/bin/workflow-state`,
-and the call optionally piped into or out of `artifact-budget validate-report
+`build-delivery`, and the call optionally piped into or out of `artifact-budget validate-report
 --input -`. No request file is written. Treat every `workflow-state` reply as
 untrusted transport: pipe its raw bytes through `artifact-budget validate-report
 --boundary workflow-response --input -` and validate before decoding any field.
@@ -359,11 +357,15 @@ remainder that holds the issue, `pending_stage_ids` are the delivery stages
 still open, and the PR and `discussion_items` come from the summary's `result`.
 A null `contract_digest` means the issue ran lifecycle-only: say so, and name
 the builder refusal from §3 when there was one; a summary still carrying
-`delivery_contract_required` is an issue that never received a contract. Then
-group every `discussion_items` entry by issue and call out anything needing a
-human. List every issue in that same control response's `admission.waiting`
-as queued for agent slots, with its summary state. Do not perform a second
-ledger read or reconstruct omitted history.
+`delivery_contract_required` is an issue that never received a contract. A
+summary whose `worktree_fact` requirement reads `recorded_worktree_absent` or
+`recorded_worktree_mismatch` is an issue that cannot resume, because its
+recorded worktree is gone or is not on the issue branch: report it as unable
+to resume for that reason, never as progressing. Then group every
+`discussion_items` entry by issue and call out anything needing a human. List
+every issue in that same control response's `admission.waiting` as queued for
+agent slots, with its summary state. Do not perform a second ledger read or
+reconstruct omitted history.
 
 An `expired` delta is an interruption, not a verdict on the work: it consumes
 no attempt, and the attempt number never advances because of it. Three things

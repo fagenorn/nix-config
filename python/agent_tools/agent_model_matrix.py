@@ -14,6 +14,7 @@ from agent_tools.canonical import reject_duplicate_keys
 
 MATRIX_PATH = Path("home/common/agent-skills/model-matrix.json")
 AGENTS_PATH = Path("home/common/claude-code/agents")
+SUBAGENT_TYPE = re.compile(r'\bsubagent_type="([^"]+)"')
 TOP_LEVEL_FIELDS = {"roles", "dispatch_sites", "scenarios"}
 ROLE_FIELDS = {"model", "effort", "eligible", "prohibited"}
 DISPATCH_FIELDS = {
@@ -77,19 +78,26 @@ def _repository_root(root: str | Path | None) -> Path:
     raise ValueError(f"repository root containing {MATRIX_PATH} not found from {start}")
 
 
+def parse_matrix(text: str, source: str) -> dict[str, Any]:
+    """Parse matrix text as strict JSON, rejecting duplicate object keys."""
+    try:
+        data = json.loads(text, object_pairs_hook=reject_duplicate_keys)
+    except ValueError as error:
+        raise ValueError(f"cannot load {source}: {error}") from error
+    if not isinstance(data, dict):
+        raise ValueError(f"{source}: top level must be an object")
+    return data
+
+
 def load_matrix(root: str | Path | None = None) -> dict[str, Any]:
     """Load the matrix as strict JSON, rejecting duplicate object keys."""
     repository = _repository_root(root)
     path = repository / MATRIX_PATH
     try:
-        data = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys
-        )
-    except (OSError, json.JSONDecodeError, ValueError) as error:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as error:
         raise ValueError(f"cannot load {path}: {error}") from error
-    if not isinstance(data, dict):
-        raise ValueError(f"{path}: top level must be an object")
-    return data
+    return parse_matrix(text, str(path))
 
 
 def _frontmatter(path: Path) -> tuple[dict[str, str], list[str]]:
@@ -177,7 +185,7 @@ def _validate_selection(
 
 
 def _validate_subagent_type(call: str, role: object, label: str) -> list[str]:
-    values = re.findall(r'\bsubagent_type="([^"]+)"', call)
+    values = SUBAGENT_TYPE.findall(call)
     if len(values) != 1:
         return [f"{label}: call must select exactly one subagent_type"]
     subagent_type = values[0]

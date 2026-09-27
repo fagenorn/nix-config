@@ -12,8 +12,7 @@ agent owns plan edits and disposition.
 
 ## Phase entry and selection
 
-Run `resolve-project resolve --repo-root <checkout>` once at phase entry and
-retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain
 the returned `ResolvedProject` in memory, and treat every resolver error as fatal
 before mutation or external effects. On refusal, preserve and report the
 resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never
