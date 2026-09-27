@@ -924,6 +924,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for name, text in (
             ("ship-issue/SKILL.md", self.ship_issue),
             ("from-issue/ship-handoff.md", self.ship_handoff),
+            ("from-issue/SKILL.md", self.from_issue),
         ):
             with self.subTest(document=name):
                 self.assertIn(CAPABILITY_GAP_LINE, text)
@@ -931,6 +932,44 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                     set(re.findall(r"capability_gap[^`\n]*", text)),
                     {CAPABILITY_GAP_LINE},
                 )
+
+    def test_from_issue_phase_seven_ships_inline_on_the_dispatch_gap(self):
+        # A ship owner that cannot launch reviewers returns the closed gap line
+        # from Phase 0 with nothing changed. The owner re-checks its launch,
+        # ships inline through `Skill`, and only a gap from that inline run
+        # suspends (per D2, D5, D6). The verb stays in the suspension
+        # procedure: Phase 7 never spells it (see the launch-revalidation test).
+        phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
+        self.assert_ordered(
+            normalized(phase_seven),
+            "receiving the ship report",
+            "only the re-entry line `/from-issue <num> --auto`",
+            f"only the line `{CAPABILITY_GAP_LINE}`",
+            "no subagent-launch tool",
+            "never decode or validate it",
+            "`delivery_stalled`",
+            "**Dispatch-gap fallback.**",
+            "same `check-launch` fence",
+            "the canonical re-entry line `/from-issue <num> --auto` on its own line",
+            "through your own `Skill` tool",
+            "writing only `checkpoint-delivery`",
+            "never starts a second inline run",
+            "suspension procedure with `<value>` = `agent_dispatch`",
+            "`delivery_remainder` launch",
+        )
+        self.assertNotIn("workflow-state suspend", phase_seven)
+        self.assertIn("After Phase 7 it is the ship report's summary",
+                      normalized(self.from_issue))
+
+    def test_suspension_procedure_admits_agent_dispatch(self):
+        suspension = normalized(self.section(
+            self.from_issue, "## Suspension procedure", "## Phase 0"))
+        self.assertIn("a context that cannot launch the agents a phase needs",
+                      suspension)
+        self.assert_ordered(
+            suspension, "`human_gate`", "`external`", "`agent_dispatch`",
+            "(the reaper alone owns `unknown`)",
+        )
 
     def test_auto_continuation_and_bookkeeper_are_interface_two(self):
         transfer = self.section(self.auto, "#### Mandatory transfer gate",
