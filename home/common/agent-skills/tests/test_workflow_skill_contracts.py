@@ -93,6 +93,9 @@ BUILD_REFUSAL_RELAY = ("report the builder's stderr line verbatim: for a resolve
 WRITER_RULE = ("Under implementation custody a ship owner writes only "
                "`checkpoint-delivery`, never `finish`; a remainder owner writes its "
                "own `finish --summary-file -`.")
+# The closed capability-gap line ship-issue returns when its Phase-0 probe finds
+# no subagent-launch tool, spelled once for the module (per D4).
+CAPABILITY_GAP_LINE = "capability_gap: agent_dispatch"
 INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
 V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "now", "attempt_budget_minutes",
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
@@ -871,6 +874,63 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("re-entry line", normalized(text))
         for appendix in (self.ship_review, self.ship_human_gate):
             self.assertIn("## Delivery loop", appendix)
+
+    def test_ship_issue_probes_reviewer_dispatch_before_any_write(self):
+        # The probe is Phase 0's first step, so a context that cannot launch
+        # the reviewers stops before the synchronizing checkpoint, the Phase-1
+        # sync and every other write (per D3, D13). It has one home (per D9).
+        heading = "## Phase 0 — Pre-flight"
+        phase_zero = self.section(self.ship_issue, heading, "## Phase 1")
+        body = phase_zero[len(heading):].lstrip()
+        self.assertTrue(body.startswith("**Reviewer-dispatch probe"), body[:80])
+        self.assert_ordered(
+            normalized(phase_zero),
+            "Reviewer-dispatch probe",
+            "synchronizing null-scope checkpoint",
+            "the Phase-1 sync",
+            "`ToolSearch` `select:Agent`",
+            "never a host by name",
+            "launches nothing, writes nothing",
+            "Remainder mode skips",
+            CAPABILITY_GAP_LINE,
+            "Standalone",
+            "git rev-parse --git-common-dir",
+        )
+        review = normalized(self.ship_review)
+        self.assertNotIn("nested dispatch works even inside", review)
+        self.assertNotIn("ToolSearch", review)
+        self.assertIn("Phase-0 reviewer-dispatch probe", review)
+
+    def test_ship_handoff_returns_the_gap_line_before_either_loop_exit(self):
+        # The prompt stops promising nested dispatch, points at the probe, and
+        # returns the closed gap line before the two exits that end the
+        # Delivery loop (per D4, D9).
+        self.assertNotIn("Nested Agent calls are supported.", self.ship_handoff)
+        prompt = normalized(self.ship_handoff.split("## Inline fallback", 1)[0])
+        self.assert_ordered(
+            prompt,
+            "reviewer subagents",
+            "Phase-0 reviewer-dispatch probe confirms",
+            "Return exactly canonical JSON",
+            f"return only `{CAPABILITY_GAP_LINE}`",
+            "Two exceptions end the loop without a summary",
+        )
+        remainder = self.ship_handoff.split("## Remainder owner prompt", 1)[1]
+        self.assertNotIn("capability_gap", remainder)
+
+    def test_capability_gap_line_is_spelled_identically_everywhere(self):
+        # One closed line, compared byte for byte and never decoded: every
+        # spelling in every carrier is exactly that line (per D4).
+        for name, text in (
+            ("ship-issue/SKILL.md", self.ship_issue),
+            ("from-issue/ship-handoff.md", self.ship_handoff),
+        ):
+            with self.subTest(document=name):
+                self.assertIn(CAPABILITY_GAP_LINE, text)
+                self.assertEqual(
+                    set(re.findall(r"capability_gap[^`\n]*", text)),
+                    {CAPABILITY_GAP_LINE},
+                )
 
     def test_auto_continuation_and_bookkeeper_are_interface_two(self):
         transfer = self.section(self.auto, "#### Mandatory transfer gate",

@@ -12,9 +12,9 @@ The reviewable delta is the sync-merge commit's combined diff (`git show --cc
 <merge-commit>` — conflict resolutions and scope-creep sweeps) plus any commits
 made after the head sdd reviewed. Empty → record "merge-delta empty, nothing to
 review" in the PR body and continue to Phase 6. Non-empty → dispatch SKILL.md's
-merge-delta reviewer over only that delta (nested dispatch works even inside an
-`Agent` subagent; if `Agent` isn't in your tool surface, `ToolSearch`
-`select:Agent` first), with Phase 1's scope-creep categories (retirement /
+merge-delta reviewer over only that delta (SKILL.md's Phase-0 reviewer-dispatch
+probe has already confirmed this context can launch it), with Phase 1's
+scope-creep categories (retirement /
 addition, see SYNC.md) as its checklist plus every review hint path passed in
 the retained snapshot. Findings come back Blocking / Should-fix /
 Discussion, ≤400 words, file:line anchors.
