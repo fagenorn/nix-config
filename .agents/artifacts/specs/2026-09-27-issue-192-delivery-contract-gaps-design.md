@@ -50,18 +50,18 @@ Acceptance:
   relocated, and no ledger write is made. The one prose assumption that a
   branch equals its path name, `expected_branch` in AUTO.md, reads the
   contract's branch instead.
-- **Gap 2: a sync after review selects a successor.** A selection stays
-  immutable, but a slot may now hold a chain of selections. The root is today's
-  `selected-output/v1`. Each later link is a `selected-output/v2` whose head is
-  one merge commit: its first parent is the previous head, and its second
-  parent is an integration-branch commit. The chain's tip is the slot's current
-  binding, so publish, open, merge, scope matching and delivery proof all follow
-  it, and the earlier selections stay in history. ship-issue gains a
-  post-selection sync route. The owner makes one sync merge, reviews its
-  combined diff, pushes, waits for CI and selects the successor, then records
-  `branch_published`/`pr_opened` at the new head and proposes the merge. A merge
-  the provider refuses because the PR cannot merge into its base is not an
-  authority denial, so it parks nothing.
+- **Gap 2: a sync after review is selected too.** A selection stays immutable,
+  but a slot may now hold a **selection chain**. The root is today's
+  `selected-output/v1`. Each later link is a **sync selection**, a
+  `selected-output/v2` whose head is one merge commit: its first parent is the
+  previous head, and its second parent is an integration-branch commit. The
+  chain's tip is the slot's **current selection**, so publish, open, merge,
+  scope matching and delivery proof all follow it, and the earlier selections
+  stay in history. ship-issue gains a post-selection sync route. The owner makes
+  one sync merge, reviews its combined diff, pushes, waits for CI and records
+  the sync selection, then records `branch_published`/`pr_opened` at the new
+  head and proposes the merge. A merge the provider refuses because the PR
+  cannot merge into its base is not an authority denial, so it parks nothing.
 
 ## Decisions
 
@@ -148,15 +148,18 @@ builds by rule 1. ship-issue's Phase 0 checks the live branch against the
 pattern already. The adapter and direct acquisition prose need no change: they
 already build a recorded issue's contract from its recorded path.
 
-### 4. Selection chains (per D6, D7)
+### 4. Selection chains (per D6, D7, D15, D16)
 
-`selected-output/v2` has exactly the v1 members with `schema_version: 2`, plus
-`sync`, which has exactly three members. `predecessor_id` is the digest id of
-the selection it succeeds. `first_parent` and `integration_parent` are its
-head's two parents, which must be two distinct non-empty strings, and neither
-may equal its own `subject_value`. A v2 selection's `subject_kind` is `commit`.
-v1 is unchanged and is always a chain's root, so persisted ledgers stay valid.
-The id and derived-member rules are those of v1.
+A sync selection is a `selected-output/v2`. It has exactly the v1 members with
+`schema_version: 2`, plus `sync`, which has exactly three members.
+`prior_selection_id` is the digest id of the selection it extends.
+`first_parent` and `integration_parent` are its head's two parents, which must
+be two distinct non-empty strings, and neither may equal its own
+`subject_value`. A sync selection's `subject_kind` is `commit`. v1 is unchanged
+and is always a chain's root. The id and derived-member rules are those of v1.
+The addition is additive grammar within state schema 4 and interface 2, as
+SPEC171 D12's refinements were: persisted ledgers stay valid, and an older
+helper refuses a ledger that holds a sync selection without mutating it.
 
 One private model function, `_selection_chain(selections, slot filter)`, owns
 the chain. Its slot filter is the one `_selection_for_stage` applies today:
@@ -165,14 +168,14 @@ selections that pass it, the function requires the following, and otherwise
 rejects with the existing `conflicting selected outputs`:
 
 - exactly one v1 root, or no selection at all;
-- every v2 names a predecessor in the set, and its `first_parent` equals that
-  predecessor's `subject_value`;
-- no selection has two successors;
+- every sync selection names a prior selection in the set, and its
+  `first_parent` equals that prior selection's `subject_value`;
+- no selection is the prior selection of two others;
 - every member is reachable from the root, and no head repeats;
-- each v2's three evidence arrays contain its predecessor's.
+- each sync selection's three evidence arrays contain its prior selection's.
 
-It returns the chain in order, and its tip is the slot's current binding. Every
-consumer reads the tip:
+It returns the chain in order, and its tip is the slot's current selection.
+Every consumer reads the tip:
 
 - `_selection_for_stage` returns it. Through it, stage scope matching,
   publish/open/merge observation matching, `_pr_numbers` and `_selected_head`
@@ -189,59 +192,74 @@ consumer reads the tip:
   to form a valid chain or be empty.
 - **Final once merged.** The `delivery` validator rejects a delivery in which a
   `pr_merged` observation's `expected_head` is the head of a chain member that
-  is not the tip. So no successor can follow a merge.
+  is not the tip. So no sync selection can follow a merge.
 
-Stage facts are recomputed on every fold, as today. A successor therefore makes
-the old head's `branch_published` and `pr_opened` observations stop matching,
-and those stages are pending again until observations at the new head fold.
-The route (§6) folds them in the same checkpoint as the successor. Authority
-observations stay keyed to the declared slot-form scope, which the tip still
-satisfies, so no successor intent is needed.
+Stage facts are recomputed on every fold, as today. A sync selection therefore
+makes the old head's `branch_published` and `pr_opened` observations stop
+matching, and those stages are pending again until observations at the new
+head fold. The route (§6) folds them in the same checkpoint as the sync
+selection, and a checkpoint that proposes the `merge_pr` scope without them is
+refused with no write, since `publish_branch` is then the ready stage.
+Authority observations stay keyed to the declared slot-form scope, which the
+tip still satisfies, so no successor intent is needed.
 
-### 5. The `sync-selection` builder kind (per D8)
+### 5. The `sync-selection` builder kind (per D8, D15)
 
-`build-delivery --kind sync-selection` takes exactly `contract`, `predecessor`
-(a sealed selection of that contract), `head`, `tree`, `parents`, `review_ref`
-and `test_ref`. It refuses, with one named reason each, when:
+`build-delivery --kind sync-selection` takes exactly `contract`,
+`prior_selection` (a sealed selection of that contract), `head`, `tree`,
+`parents`, `review_ref` and `test_ref`. It refuses, with one named reason each,
+when:
 
-- the predecessor is not a valid selection of this contract;
+- `prior_selection` is not a valid selection of this contract;
 - `parents` is not a list of two distinct non-empty strings;
-- `parents[0]` is not the predecessor's `subject_value`;
-- `head` equals the predecessor's head.
+- `parents[0]` is not the prior selection's `subject_value`;
+- `head` equals the prior selection's head.
 
-It seals a v2 selection:
+It seals a sync selection:
 
-- `sync`: `{predecessor_id, first_parent: parents[0], integration_parent: parents[1]}`;
+- `sync`: `{prior_selection_id, first_parent: parents[0], integration_parent: parents[1]}`;
 - data identity: `canonical_digest({"kind":"git-tree","value":<tree>})`;
-- acceptance ids: the predecessor's, inherited, because a sync does not change
-  what was accepted;
-- review ids: the predecessor's plus `review:<review_ref>@<head>`;
-- test ids: the predecessor's plus `test:<test_ref>@<head>`;
+- acceptance ids: the prior selection's, inherited, because a sync does not
+  change what was accepted;
+- review ids: the prior selection's plus `review:<review_ref>@<head>`;
+- test ids: the prior selection's plus `test:<test_ref>@<head>`;
 - `evidence_digest`: over `{head, review_ref, test_ref, sync}`.
 
 The skill fixes `review_ref` as `merge-delta-empty` or `merge-delta-clean`, and
-`test_ref` as `checks`. A relaunched owner therefore re-derives the same
-successor. The existing `observation` and `implementation_delivered` kinds
-accept a v2 selection unchanged, and the runtime validates the output as
-`selected-output`.
+`test_ref` as `checks`. A relaunched owner therefore re-derives the same sync
+selection. The contract-taking kinds reach an installed legacy contract through
+the #193 lookup unchanged. The existing `observation` and
+`implementation_delivered` kinds accept a sync selection unchanged, and the
+runtime validates the output as `selected-output`.
 
-### 6. The post-selection sync route (per D9, D10, D11, D12)
+### 6. The post-selection sync route (per D9, D10, D11, D12, D17, D18)
 
 The route belongs to whoever holds the merge gate: the ship owner under
 implementation custody, or a remainder owner. It is described once, in
-`ship-issue/CI-MERGE.md`, as a new `## Post-selection sync` section. SKILL.md's
-`## Delivery loop` (steps 3 and 6) and `## Remainder mode` point to it in one
-sentence each.
+`ship-issue/CI-MERGE.md`, as a new `## Post-selection sync` section. SKILL.md
+points to it in one sentence each from `## Delivery loop` (steps 3 and 6),
+`## Remainder mode`, and Phase 6's divergence rule. That rule's "never resolve
+it by re-pushing, resetting, re-reviewing or merging" stop gains one exception:
+a PR head the route admits.
+
+**A sync run.** A PR head is a *sync run* from the tip when its first-parent
+walk back to the tip passes only two-parent merge commits, each of whose second
+parents `git merge-base --is-ancestor <parent> origin/<integration>` confirms
+(after `git fetch origin`). Each commit in a sync run becomes one sync
+selection, oldest first, and each is reviewed on its own. All of them fold in
+one checkpoint.
 
 **Trigger.** Before the merge, the owner reads
-`gh pr view <pr> --json headRefOid,mergeable,mergeStateStatus`. The route runs
-in three cases:
+`gh pr view <pr> --json state,headRefOid,mergeable`. The route runs in three
+cases:
 
-- the PR cannot merge into its base: `mergeable` is `CONFLICTING`, or
-  `mergeStateStatus` is `DIRTY`, or `BEHIND` under an up-to-date rule;
-- the merge was refused for that reason;
-- the PR head is a two-parent merge whose first parent is the tip, which is a
-  crash after the push.
+- the PR is open with `mergeable: CONFLICTING`, or a merge was refused because
+  the head conflicts with its base or is behind it where the base requires an
+  up-to-date head. A head that is merely behind a base with no such rule is
+  merged as it is;
+- the PR is open, its head is not the tip, and the head is a sync run from the
+  tip, which is a crash after the push;
+- the PR has merged at a head that is a sync run from the tip.
 
 **Steps.**
 
@@ -250,7 +268,8 @@ in three cases:
    sweeps into that merge commit.
 2. **Verify.** Run the Phase 2 verification commands.
 3. **Review.** Run REVIEW.md's merge-delta check over that commit's combined
-   diff, `git show --cc`, through SKILL.md's merge-delta reviewer. Apply
+   diff, `git show --cc`, through SKILL.md's merge-delta reviewer (the
+   existing `ship-issue-merge-delta-review` site; no new dispatch marker). Apply
    findings by amending the unpushed merge commit, which keeps both parents.
    An empty delta is `merge-delta-empty`. A delta whose Blocking and Should-fix
    findings are all applied and re-reviewed is `merge-delta-clean`. Minor and
@@ -259,34 +278,36 @@ in three cases:
 5. **Wait for CI.** Run Phase 6's CI wait, with the reviewed head re-fixed to
    the new head.
 6. **Select.** Build `--kind sync-selection` over the tip selection, the new
-   head, its tree and its parents (`git rev-list --parents -n 1 <head>`). Then
-   build `branch_published` and `pr_opened` (the same PR) at the new head.
-   Checkpoint the three with `--kind scope` for `merge_pr`.
+   head, its tree and its parents (`git rev-list --parents -n 1 <head>`),
+   chaining one per commit of a sync run. Then build `branch_published` and
+   `pr_opened` (the same PR) at the new head. Checkpoint them all with
+   `--kind scope` for `merge_pr`.
 7. **Merge.** Continue with the merge cycle.
 
-Steps 1 to 5 precede the successor's selection. So, as with pre-selection
-publication (SPEC171 D15), they run under the guard, repository policy and the
-`check-launch` fence, with no checkpoint.
+Steps 1 to 5 precede the sync selection. So, as with pre-selection publication
+(SPEC171 D15), they run under the guard, repository policy and the
+`check-launch` fence, with no checkpoint. After a crash past step 4, the route
+resumes at step 3 for the pushed sync run, and step 5 then waits for CI.
 
-**A merge that already landed at a sync head.** If the PR has merged at a head
-whose first parent is the tip, the owner runs steps 3 and 6 without a push or
-CI wait. It adds the `pr_merged` observation at that head, then continues with
-cleanup. This is the fold #194 D7 handed to #192.
+**A merge that already landed at a sync run.** If the PR has merged at such a
+head, the owner runs step 3 for each commit, then step 6 without a push or a CI
+wait. It adds the `pr_merged` observation at that head to the same checkpoint,
+then continues with cleanup. This is the fold #194 D7 handed to #192. A
+Blocking finding here cannot be amended, so it is a stop.
 
 **Refusals and stops.** A merge the provider refuses because the PR cannot
 merge into its base is a stale-head condition, not a denial. The owner records
 no authority observation for it. Everything else stays the genuinely-blocked
 stop that Phase 6 already defines, and a human then decides:
 
-- a non-merge commit on the PR head;
-- a first parent that is not the tip;
-- an integration parent that `git merge-base --is-ancestor <parent> origin/<integration>`
-  does not confirm;
-- a Blocking finding left after the push;
+- a PR head that is not a sync run from the tip, such as a non-merge commit, a
+  first parent off the chain, or an unconfirmed integration parent;
+- a Blocking finding left once the commit is pushed;
 - red CI that needs a fix commit.
 
-Each sync is one successor. If the base moves again, the next sync makes the
-next successor.
+If the base moves again after a sync, the next sync extends the chain. From the
+first sync on, every later step's "selection" is the current selection. That
+includes the `implementation_delivered` observation Delivery loop step 7 builds.
 
 ### 7. Documentation (per D13)
 
@@ -297,7 +318,8 @@ These surfaces change:
   checkout's branch) and the `sync-selection` choice.
 - **CLAUDE.md.** The "Delivery objects are built" bullet gains one clause for
   each rule.
-- **Skills.** ship-issue's SKILL.md and CI-MERGE.md, and AUTO.md.
+- **Skills.** ship-issue's SKILL.md (the Delivery loop, Remainder mode and
+  Phase 6 pointers) and CI-MERGE.md, and AUTO.md.
 - **Instruction-load ceilings.** Every profile whose hot bytes grow is
   re-measured: `ship-owner`, and the profiles that load AUTO.md.
 
@@ -319,7 +341,9 @@ synthetic project committed so the worktree resolves.
 - **T1, build.** A linked worktree at slugless `.worktrees/worktree-issue-171`,
   on branch `worktree-issue-171-delivery-contract-source`, builds a contract
   whose slot branch and both branch-deletion literals are the live branch and
-  whose `remove_worktree` literal is the slugless path. After
+  whose `remove_worktree` literal is the slugless path, and whose provenance
+  digest is the canonical digest of `{policy, issue, worktree, source, branch}`.
+  After
   `git worktree remove`, `--kind initial-intent` returns the same bytes, and
   `--kind scope` serves every stage.
 - **T2, refusals.** The same slugless name, absent; on a detached HEAD; on
@@ -346,30 +370,35 @@ synthetic project committed so the worktree resolves.
   selection H0 with `branch_published`/`pr_opened` (PR 5) at H0 and the
   `merge_pr` scope. It then finishes `terminal_failed` with a `stopped` row,
   which returns remainder 1. The remainder's null-scope checkpoint follows. Then
-  `--kind sync-selection` builds H1 with parents `[H0, M]`, and the successor,
-  `branch_published` at H1 and `pr_opened` (PR 5, H1) are checkpointed with the
-  `merge_pr` scope. The echo requires `native_evaluation_required`. The merge
-  follows at H1, then every cleanup cycle, then `finish` with
-  `delivery_complete` and `implementation_delivered` over H1. The stored
-  delivery holds both selections, and `merge_pr`'s fact names the H1 merge.
-  Every checkpoint and reply passes `validate-report`.
-- **T8, merged-at-sync fold.** Same setup, but the remainder first checkpoints
-  a `pr_merged` at H1. It is accepted, and `merge_pr` stays pending. The
-  successor with its H1 observations then folds that merge, and the loop
-  completes.
+  `--kind sync-selection` builds H1 with parents `[H0, M]`, and the sync
+  selection, `branch_published` at H1 and `pr_opened` (PR 5, H1) are
+  checkpointed with the `merge_pr` scope. The echo requires
+  `native_evaluation_required`. The merge follows at H1, then every cleanup
+  cycle, then `finish` with `delivery_complete` and `implementation_delivered`
+  over H1. The stored delivery holds both selections, and `merge_pr`'s fact
+  names the H1 merge. Every checkpoint and reply passes `validate-report`.
+- **T8, merged-at-sync-run fold (the #150 shape).** Same setup, but the PR
+  merged out of band at H2, whose sync run is H1 = `[H0, M1]` and
+  H2 = `[H1, M2]`. The remainder first checkpoints a `pr_merged` at H2. It is
+  accepted, and `merge_pr` stays pending. Then one checkpoint carries both sync
+  selections, H2's `branch_published`/`pr_opened` and a `close_tracker` scope.
+  It folds the H2 merge, and the loop completes.
 - **T9, fold refusals.** Each of these exits 2 and leaves the ledger
-  byte-identical: a second successor of H0 (a fork); a second v1 root; a
-  successor after the merge at the tip. The builder refuses each §5 input with
-  its reason.
+  byte-identical: a second sync selection of H0 (a fork); a second v1 root; a
+  sync selection after the merge at the tip; a sync selection with a
+  `merge_pr` scope but without its H1 observations. The builder refuses each §5
+  input with its reason.
 - **T10, model facade.** The chain rules the builder never emits: a dangling
-  predecessor, a non-commit v2, evidence that is not a superset, and a
-  `pr_merged` at a superseded head. It also pins that `match_scope` binds the
-  tip's literal output and data and refuses the superseded head, and that
-  `implementation_delivered` naming H0 does not match.
-- **T11, skill pins.** CI-MERGE.md's section orders sync, verify, merge-delta
-  review, `check-launch`, push, CI, `--kind sync-selection`, then the checkpoint
-  with the `merge_pr` scope. It states the mergeability-is-not-a-denial rule,
-  and SKILL.md points to it.
+  prior selection, a non-commit sync selection, evidence that is not a
+  superset, and a `pr_merged` at a superseded head. It also pins that
+  `match_scope` binds the tip's literal output and data and refuses the
+  superseded head, and that `implementation_delivered` naming H0 does not
+  match.
+- **T11, skill pins.** CI-MERGE.md's section defines the sync run and orders
+  sync, verify, merge-delta review, `check-launch`, push, CI,
+  `--kind sync-selection`, then the checkpoint with the `merge_pr` scope. It
+  states the mergeability-is-not-a-denial rule. SKILL.md's Delivery loop,
+  Remainder mode and Phase 6 divergence rule point to it.
 
 ## Out of scope
 
@@ -382,7 +411,7 @@ synthetic project committed so the worktree resolves.
   repair, because nothing can name that branch deterministically.
 - Helper-side verification of sync parents or integration reachability. These
   are the owner's probe and review, as a v1 selection's tree is (D7).
-- Non-merge fix commits after selection, and successors of `tree`/`record`
+- Non-merge fix commits after selection, and sync selections of `tree`/`record`
   selections.
 - Any change to the review rubric: the merge-delta check is used as it is.
 - The remainder progress-token composition.
@@ -406,3 +435,7 @@ synthetic project committed so the worktree resolves.
 | D12 | The route's mechanics live in `ship-issue/CI-MERGE.md` (conditional in the ship-owner profile), and SKILL.md has only pointers. The instruction-load ceilings of every profile whose hot bytes grow are re-measured. | #155's instruction-load discipline (D19 re-measures). CI-MERGE.md owns the Phase 6–7 mechanics. | Inlining the route in SKILL.md (hot) or SYNC.md (hot): it adds hot bytes for a rare route. |
 | D13 | Documentation: `build-delivery --help`, the CLAUDE.md delivery bullet, the ship-issue skill and CI-MERGE.md, and AUTO.md. No ADR. SPEC151 and SPEC171 are not edited. | SPEC171 D21 (no ADR home). #193 D11 (help is authoritative, and point-in-time records are kept). | Editing the accepted specs. Founding an ADR tree mid-flight. |
 | D14 | Tests use only the existing seams: the builder CLI with a real git worktree fixture, the `control`/`direct-owner` round trips over migrated schema-2 ledgers, the delivery loop through `checkpoint-delivery`/`finish` with `validate-report`, the model facade for rules no builder emits, and the skill pins. | SPEC171 D19, #193 D8/D12. The bar: tests that can fail, with fixtures shaped like production (a real linked worktree). | Importing the private builder, or faking the git probe, which pins internals and misses the subprocess. |
+| D15 | Grill: the terms are *sync selection* (a `selected-output/v2`), *selection chain* and *current selection* (the tip). `sync.prior_selection_id` and the builder input `prior_selection` replace D6's `predecessor_id` and D8's `predecessor`. Refines D6 and D8. | Existing vocabulary: `predecessor_intent_id`, the `successor_intent` basis and retry "successors" already name authority and custody lineage. The `prior_attempt`/`prior_remainder` style. The bar: name for intent. | Keeping "successor"/"predecessor", which collides with three lineage meanings in one model. |
+| D16 | Grill: no state-schema or interface bump. A sync selection is additive grammar within schema 4 and interface 2, so persisted ledgers stay valid, and an older helper refuses a ledger that holds one without mutating it. | SPEC171 D12, which made additive refinements in place. SPEC151: older helpers reject newer grammar without mutation. | A schema bump: a migration with nothing to migrate, and a second compatibility surface. |
+| D17 | Grill: a PR head reached from the tip through a *sync run* yields one sync selection per merge, oldest first, each reviewed on its own, and all of them fold in one checkpoint. A sync run is a first-parent run of two-parent merges whose second parents are confirmed ancestors of `origin/<integration>`. It covers a crash after the push and an out-of-band merge at a multi-sync head. Refines D11's "one merge per successor" and "first parent is the tip". | #150 merged `main` in twice (a `justfile` conflict, then #149's move), so its landed head was two merges above the selection. Each merge's `git show --cc` is its own reviewable delta (REVIEW.md). | One level only, which strands the #150 shape. One selection spanning several merges: the per-link first-parent rule could not be checked, and each combined diff needs its own review. |
+| D18 | Grill: the route syncs proactively only on `mergeable: CONFLICTING`. A head that is merely behind is merged as it is, unless the merge is refused because the base requires an up-to-date head. Phase 6's divergence stop gains one exception, a head the route admits. Refines D11. | `.github/branch-protection.json` has `strict: false`, so a head behind `main` still merges here. Without the exception, Phase 6's "never re-review or merge a diverged head" forbids the crash-resume case. | A proactive sync on `BEHIND`: needless merges and CI cycles on bases with no up-to-date rule. Leaving Phase 6 unqualified, which contradicts the route. |
