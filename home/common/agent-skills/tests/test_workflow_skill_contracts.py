@@ -681,6 +681,73 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                         self, ship_correctness_route(ship.replace(old, new)),
                         SHIP_CORRECTNESS_TARGET)
 
+    def test_sdd_correctness_route_is_the_capability_ladder(self):
+        route = sdd_correctness_route()
+        assert_correctness_route_ladder(self, route, SDD_CORRECTNESS_TARGET)
+        route = normalized(route)
+        self.assertIn(
+            "This is the only rung that reaches Codex and the only one where a "
+            "capacity rejection binds, on the configured-review terms above.", route)
+        self.assertIn(
+            "record the routing error in the ledger beside the correctness "
+            "verdict, with the axis's reviewer identity still `native`", route)
+        # sdd words its rungs 2 and 3 and its routing-error paragraph
+        # differently from ship, so sdd pins its own sentences (D14).
+        rung_2 = route[route.index("2. `available`"):route.index("3. `unsupported`")]
+        self.assertIn(
+            "→ invoke its `diff-review` operation for this axis; that skill "
+            "solely owns the isolated Codex transport launch and one-time native "
+            "fallback, while the external Codex reviewer keeps its independently "
+            "configured model.", rung_2)
+        rung_3 = route[route.index("3. `unsupported`"):route.index("routing error")]
+        self.assertIn(
+            "→ dispatch the Opus/high native reviewer selected in "
+            f"{SDD_CORRECTNESS_TARGET} directly; `codex-collaboration` is never "
+            "invoked on this rung.", rung_3)
+        self.assertIn(
+            "A Codex call made under `unsupported` anyway is a routing error: "
+            "discard its outcome — verdict, refusal or failure —", route)
+        self.assertTrue(route.rstrip().endswith(
+            "The axis is never skipped; `blocked` stops the whole review "
+            "instead."), route)
+        # The agent-tiers bullet and the rubric header restate the same route.
+        self.assertIn(
+            "the correctness axis via `codex-collaboration`'s `diff-review` when "
+            "`capabilities.review.code` is `available` and that skill is "
+            "installed, and as `reviewer` on Opus/high when the capability is "
+            "`unsupported` or the skill is not installed (`blocked` stops)",
+            normalized(SDD.read_text(encoding="utf-8")))
+        self.assertIn(
+            "dispatched directly when `capabilities.review.code` is `unsupported` "
+            "or `codex-collaboration` is not installed. When the capability is "
+            "`available` and that skill is installed, its `diff-review` operation "
+            "carries this file",
+            normalized((SDD_DIR / "correctness-reviewer-prompt.md").read_text(
+                encoding="utf-8")))
+
+    def test_correctness_route_ladder_rejects_the_pre_fix_sdd_route(self):
+        # Putting sdd's skill-presence routing back makes the helper raise
+        # (issue 195, D3), and so does reversing rung 3's no-invocation
+        # clause, which in sdd sits after the native target (D12).
+        text = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
+        end_anchor = "`blocked` stops the whole review instead."
+        no_invocation = "is never invoked on this rung"
+        self.assertTrue(CORRECTNESS_ROUTE_OPENER in text and end_anchor in text
+                        and no_invocation in text, "sdd ladder anchors missing")
+        start = text.index(CORRECTNESS_ROUTE_OPENER)
+        end = text.index(end_anchor, start) + len(end_anchor)
+        with self.assertRaises(AssertionError):
+            assert_correctness_route_ladder(
+                self,
+                sdd_correctness_route(text[:start] + SDD_PRE_FIX_ROUTE + text[end:]),
+                SDD_CORRECTNESS_TARGET)
+        with self.assertRaises(AssertionError):
+            assert_correctness_route_ladder(
+                self,
+                sdd_correctness_route(text.replace(
+                    no_invocation, "is always invoked on this rung")),
+                SDD_CORRECTNESS_TARGET)
+
     def test_context_map_selection_uses_only_authored_order(self):
         table = (
             ([], None),
@@ -771,6 +838,25 @@ SHIP_PRE_FIX_ROUTE = (
     "`diff-review`; when that capability is unavailable, use this native "
     "first-pass dispatch instead:"
 )
+SDD_CORRECTNESS_TARGET = "[correctness-reviewer-prompt.md](correctness-reviewer-prompt.md)"
+# sdd final-review's correctness routing before issue 195, kept only so the
+# ladder helper's self-check can put it back.
+SDD_PRE_FIX_ROUTE = (
+    "When the `codex-collaboration` skill is available, invoke its `diff-review` "
+    "operation for this axis; that skill solely owns the isolated Codex transport "
+    "launch and one-time native fallback, while the external Codex reviewer keeps "
+    "its independently configured model. Unavailable → use the Opus/high native "
+    "reviewer selected in [correctness-reviewer-prompt.md]"
+    "(correctness-reviewer-prompt.md). Either way the axis is never skipped."
+)
+
+
+def sdd_correctness_route(text=None):
+    """sdd final-review's correctness-axis bullet, through its routing-error paragraph."""
+    if text is None:
+        text = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
+    start = text.index("- **Correctness axis**")
+    return text[start:text.index("Point the conformance dispatch", start)]
 
 
 def ship_correctness_route(text=None):

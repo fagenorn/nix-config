@@ -1,11 +1,13 @@
 # Correctness Reviewer Prompt Template (final review, correctness axis)
 
 The native form of the correctness axis — dispatched directly when
-`codex-collaboration` is unavailable. When that skill IS available, its `diff-review`
-operation carries this file by absolute path as the Codex reviewer's rubric, so keep
-the body reviewer-agnostic: nothing in it may assume which model is reading it.
+`capabilities.review.code` is `unsupported` or `codex-collaboration` is not
+installed. When the capability is `available` and that skill is installed, its
+`diff-review` operation carries this file by absolute path as the Codex reviewer's
+rubric, so keep the body reviewer-agnostic: nothing in it may assume which model is
+reading it.
 
-When the native fallback owns this first-pass whole-branch axis, it uses the
+When the native form owns this first-pass whole-branch axis, it uses the
 explicit full reviewer tier:
 
 <!-- agent-dispatch: id=sdd-final-correctness-review role=reviewer model=opus effort=high -->
