@@ -3,7 +3,8 @@
 Decisions: D5 (the fallback is the one departure from a rollover Phase-6
 `delegate`), D6 (a label sweep leaves `agent_dispatch` parked), D10 (the two
 closed line exceptions, and the orchestrate report's per-issue line), D14 ("the
-ship report's"). Spec §"Relays and reports". Work from the worktree root. Every
+ship report's"), D19 (Step 6's instruction-load ceilings after a sync). Spec
+§"Relays and reports". Work from the worktree root. Every
 shell block starts with `set -euo pipefail` (`set -uo pipefail` in the
 watch-it-fail steps) and these abbreviations, which the blocks below omit:
 
@@ -233,7 +234,10 @@ git status --short
 
 Expected: `Ran 1326 tests …` and `OK (skipped=4)`. That is the base count of
 1316 at `17da7f2` plus this plan's 3 workflow-state tests and 7 skill-contract
-tests, and it grows only if a sync merge adds tests.
+tests, and it grows only if a sync merge adds tests. On a head that has synced
+`origin/main`, this suite's `test_instruction_load.py` also grades the
+instruction-load ceilings. That sync resolves them per D19, and this task edits
+no ceiling.
 The four skips are the installed-tree and pre-activation checks, which this
 invocation leaves out by design. `WORKFLOW_POLICY_SURFACE=source` is the
 spelling CI uses. Without it, `test_installed_policy_surface_matches_source_contract`

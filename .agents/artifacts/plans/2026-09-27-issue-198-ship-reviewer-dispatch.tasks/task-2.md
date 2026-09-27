@@ -3,7 +3,9 @@
 Decisions: D1 (a probe where the dispatch happens), D3 (placement, check and
 exemptions), D4 (the closed line), D9 (one home, and the prose corrections), D12
 (a Phase-5 failure after a passing probe keeps today's handling), D13 (a
-capability test, never a host name). Spec §"The reviewer-dispatch probe", §"The
+capability test, never a host name), D17 (the probe reads no `review.code`
+state, so its prose below stays true after #195's Phase-5 correctness routing
+merges). Spec §"The reviewer-dispatch probe", §"The
 capability-gap line", §"Prose corrections". Work from the worktree root. Every
 shell block starts with `set -euo pipefail` (`set -uo pipefail` in the
 watch-it-fail steps) and these abbreviations, which the blocks below omit:

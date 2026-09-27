@@ -1,7 +1,11 @@
 # Task 1: workflow-state admits the `agent_dispatch` suspension cause
 
 Decisions: D6 (the new owner-reportable cause, not auto-resumable), D7 (only
-the attempt-cause set changes), D11 (seam S1). Spec §"The genuine gap: an
+the attempt-cause set changes), D11 (seam S1), D18 (the shipped engine alone
+gains the value; #117's record and the core port are #125's). The test code's
+`# per D20` follows this test file's existing citation for
+`assert_controller_finalized`, which is #150's ledger, not this spec's. Spec
+§"The genuine gap: an
 `agent_dispatch` suspension" and §"Test seams" T1–T3. Work from the worktree
 root. Every shell block starts with `set -euo pipefail` (`set -uo pipefail` in
 the watch-it-fail step) and this abbreviation, which the blocks below omit:

@@ -25,15 +25,18 @@ line, and the orchestrate report names the new cause (Task 4).
 
 Spec (source of truth, read it whole):
 `.agents/artifacts/specs/2026-09-27-issue-198-ship-reviewer-dispatch-design.md`,
-D1–D14.
+D1–D19.
 
 ## Global Constraints
 
 - Scope is exactly the spec's. Its `## Out of scope` list binds. Out: dispatch
   in Phases 2–6 from a depth-3 owner, the remainder launch at depth 3, a
   dispatcher-launched ship owner, host or host-declaration changes, retrying a
-  Phase-5 launch failure after a passing probe, and HUMAN-GATE's `stopped`
-  return (D12, D13).
+  Phase-5 launch failure after a passing probe, HUMAN-GATE's `stopped`
+  return, and carrying `agent_dispatch` into #117's record or the core, which
+  is #125's (D12, D13, D18).
+- No task merges `origin/main` or edits `instruction-load.json`. ship-issue
+  Phase 1's sync owns both, and resolves that file per D19 (D16).
 - The gap line is exactly `capability_gap: agent_dispatch`: one closed line,
   compared byte for byte, never decoded and never validated. It is never
   hard-wrapped (D4).
@@ -91,15 +94,31 @@ Path abbreviations used in members: `S` = `home/common/agent-skills/scripts`,
 
 ## Delivery estimate and boundaries
 
-These figures are estimates from the planning probe. Nine files change and none
-is created. Product prose grows by about 65 lines net across six skill files,
-and `S/workflow-state.py` by about 5. Tests grow by about 250 lines across two
-files. The unified diff should be about 33 KB, which fits one review package.
-Tasks run in index order, and each depends on every earlier one. The plan adds
-10 tests: 3 in Task 1, 3 in Task 2, 2 in Task 3 and 2 in Task 4. Task 3 and
-Task 4 each also widen Task 2's identity test by one document. The main risk is
-prose that breaks an existing ordered pin, and each task's targeted suite run
-catches that before commit.
+The tasks change nine files and create none. Product prose grows by about 65
+lines net across six skill files, and `S/workflow-state.py` by about 5. Tests
+grow by about 250 lines across two files. Tasks run in index order, and each
+depends on every earlier one. The plan adds 10 tests: 3 in Task 1, 3 in Task 2,
+2 in Task 3 and 2 in Task 4. Task 3 and Task 4 each also widen Task 2's identity
+test by one document. The main risk is prose that breaks an existing ordered
+pin, and each task's targeted suite run catches that before commit.
+
+**Execution state (run 2).** Tasks 1–4 landed as `37b829a`, `880e370`,
+`6674a5a` and `6859d0e`, and run 2 re-executes none of them (D16). Run 1's ship
+sync of `447461c` (#155) then added `5361013` and `765f598`, which change
+`home/common/agent-skills/instruction-load.json` and `T/test_instruction_load.py`
+outside every task; D19 keeps their `conditional` ship-issue members. Measured
+at `765f598` against `447461c`, the branch changes 11 files and its diff is
+about 42 KB, so one review package still holds it. The post-sync size is an
+estimate.
+
+**Ship gate after the sync.** Run 2's ship-Phase 1 merges `origin/main`
+(`6ab576e` or later), and `instruction-load.json` is its one expected conflict.
+`just agent-workflow-tests` includes `T/test_instruction_load.py`, which fails
+on the merged tree if the sync takes either side of that file, so the sync
+resolves it per D19. Both verification commands, `just build` and
+`just agent-workflow-tests`, are therefore graded on the post-sync head. D17
+leaves Task 2's probe prose true under #195's
+correctness routing, and D18 leaves #117's record to #125.
 
 ## Task index
 
@@ -126,7 +145,10 @@ Task 4 — Rollover owner, earlier controller and orchestrate report carry the n
 The spec's `## Decision ledger` is authoritative. Tasks cite D1–D13 from design
 and grill. Planning added **D14**, which names the route the dispatch-gap
 fallback and renames every "ship owner's" summary sentence an inline run would
-make false.
+make false. Plan review added D15. The run-2 re-grill added D16–D19, and none
+of them changes a task: Task 1 cites D18, Task 2 cites D17, Task 4's final gate
+cites D19, and D16 and D19 bound the delivery section above. The run-2
+re-verification added no ledger row.
 
 A planning probe applied every task's code, tests and prose, as written, to a
 scratch copy of `de7c558`. Each watch-it-fail step failed as its member says,
@@ -142,7 +164,7 @@ base 1316 plus these 10. `just build` was not probed.
 
 ## Standards review provenance
 
-- Reviewer: Claude fallback (one fresh native `reviewer`, Opus/high), isolated and
+- Run 1 (`direct-198-000001`) reviewer: Claude fallback (one fresh native `reviewer`, Opus/high), isolated and
   read-only, against `REVIEW-CONTRACT.md`. Codex `plan-review` ran first and
   completed, but its `--json` stream carried no runtime-selection event naming
   the selected model and reasoning effort. That is a metadata failure, so
