@@ -1263,11 +1263,11 @@ def reconciled_result(
     """The terminal record a merged pull request writes into a stale ledger.
 
     Only what the forge itself observed is asserted: the issue is not claimed
-    closed, because reconciliation saw a merge, not a report (per D3). That is
-    also why this record is checked against the ledger's own result schema
-    rather than the ship-summary boundary — the boundary is the contract for an
-    owner's report, where a ``merged`` row means the owner also closed the issue
-    and cleaned up.
+    closed, because reconciliation saw a merge, not a report (per D3).
+    That is also why every workflow response that relays this record checks it
+    with artifact-budget's ledger-result rule (``validate_ledger_result``), not
+    the owner-report rule: a ``merged`` owner report means the owner also closed
+    the issue and cleaned up.
 
     When ``prior_result`` is the attempt's own result and it already carries a
     delivery-detail pointer — a non-null ``report_path`` or a ``detail_state``

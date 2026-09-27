@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import sys
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 def _delivery_model() -> object:
@@ -820,6 +820,34 @@ def validate_ship_summary_report(value: Mapping[str, object], notes_max_characte
         raise ArtifactBudgetError("invalid ship summary state")
 
 
+def validate_ledger_result(value: Mapping[str, object], notes_max_characters: int) -> None:
+    """Check a result the lifecycle ledger projects onto a workflow response.
+
+    Every row the ledger holds, whether an owner reported it or the lifecycle
+    wrote it, meets the owner-report rule (``validate_ship_summary_report``)
+    except one: reconciliation's ``merged`` row with ``issue_closed`` false,
+    which asserts only the merge the forge observed. That record may carry a
+    superseded owner's detail pointer without citing it in its notes.
+    """
+    if not (isinstance(value, dict) and value.get("state") == "merged"
+            and value.get("issue_closed") is False):
+        validate_ship_summary_report(value, notes_max_characters)
+        return
+    keys = {"issue", "state", "pr_url", "merge_sha", "issue_closed", "discussion_items",
+            "detail_state", "report_path", "notes"}
+    if not _exact_keys(value, keys):
+        raise ArtifactBudgetError("invalid ledger result")
+    detail, path = value["detail_state"], value["report_path"]
+    valid = (_integer(value["issue"], minimum=1) and _string(value["pr_url"])
+             and _sha(value["merge_sha"]) and value["discussion_items"] == []
+             and _notes(value["notes"], notes_max_characters)
+             and ((detail == "none" and path is None)
+                  or (detail == "present" and _relative_path(path, durable=True))
+                  or (detail == "unpublished" and _relative_path(path, durable=False))))
+    if not valid:
+        raise ArtifactBudgetError("invalid ledger result")
+
+
 def _canonical(value: object) -> bytes:
     try:
         return (json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -836,11 +864,13 @@ def validate_workflow_response_report(value: object, notes_max_characters: int) 
             value, expected_kind="workflow-response", notes_max_characters=notes_max_characters
         )
         if isinstance(value, dict) and value.get("kind") == "terminal":
-            _validate_legacy_result_slot(value["result"], value["issue"], notes_max_characters)
+            _validate_legacy_result_slot(value["result"], value["issue"], notes_max_characters,
+                                         rule=validate_ledger_result)
         elif isinstance(value, dict) and "summaries" in value:
             for summary in value["summaries"]:
                 _validate_legacy_result_slot(
-                    summary["result"], summary["issue"], notes_max_characters
+                    summary["result"], summary["issue"], notes_max_characters,
+                    rule=validate_ledger_result,
                 )
     except Exception as exc:
         raise ArtifactBudgetError("invalid workflow response") from exc
@@ -856,21 +886,23 @@ def validate_delivery_model_report(
         )
         if boundary == "ship-summary" and isinstance(value, dict):
             _validate_legacy_result_slot(
-                value["historical_owner_result"], value["issue"], notes_max_characters
+                value["historical_owner_result"], value["issue"], notes_max_characters,
+                rule=validate_ship_summary_report,
             )
     except Exception as exc:
         raise ArtifactBudgetError(f"invalid {boundary}") from exc
 
 
 def _validate_legacy_result_slot(
-    value: object, issue: object, notes_max_characters: int
+    value: object, issue: object, notes_max_characters: int,
+    *, rule: Callable[[Mapping[str, object], int], None],
 ) -> None:
-    """Compose the legacy result validator into every nullable v2 result slot."""
+    """Apply ``rule`` to one nullable v2 result slot and match its issue."""
     if value is None:
         return
     if not isinstance(issue, int) or isinstance(issue, bool):
         raise ArtifactBudgetError("invalid legacy result issue")
-    validate_ship_summary_report(value, notes_max_characters)
+    rule(value, notes_max_characters)
     if value["issue"] != issue:
         raise ArtifactBudgetError("legacy result issue mismatch")
 

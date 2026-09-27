@@ -418,18 +418,22 @@ class LifecycleHarness:
     def control(self, **request_fields):
         return json.loads(self.control_raw(**request_fields).stdout)
 
+    def validated_response(self, stdout):
+        """Decode reply bytes the `workflow-response` boundary passes unchanged (#191 D7)."""
+        validated = subprocess.run(
+            [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+             "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
+            input=stdout, capture_output=True, text=True, check=False,
+            env=self.cli_env)
+        self.assertEqual((validated.returncode, validated.stderr), (0, ""))
+        self.assertEqual(validated.stdout, stdout)
+        return json.loads(stdout)
+
     def control_validated(self, **request_fields):
         """Sweep, returning interface-3 bytes the `workflow-response` boundary passes (#194)."""
         completed = self.control_raw(legacy=False, ok=False, **request_fields)
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        validated = subprocess.run(
-            [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
-             "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
-            input=completed.stdout, capture_output=True, text=True, check=False,
-            env=self.cli_env)
-        self.assertEqual((validated.returncode, validated.stderr), (0, ""))
-        self.assertEqual(validated.stdout, completed.stdout)
-        return json.loads(completed.stdout)
+        return self.validated_response(completed.stdout)
 
     @staticmethod
     def unresumable_fact(path, recorded_state):
@@ -6069,6 +6073,131 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertNotIn("Traceback", rejected.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
+
+
+class ReconciledReplyBoundaryTest(LifecycleHarness, unittest.TestCase):
+    """#191: every reply that projects a reconciled merge passes the boundary."""
+
+    MERGED_PR = {"state": "merged",
+                 "url": "https://github.com/fagenorn/nix-config/pull/187",
+                 "merge_sha": "bad94161012db5d285176762e4f4a9247d2f4d48"}
+    # The record run-20260923-147-153-154-150-148-149-126-155 persisted for #154.
+    RECONCILED_154 = {
+        "issue": 154, "state": "merged",
+        "pr_url": "https://github.com/fagenorn/nix-config/pull/187",
+        "merge_sha": "bad94161012db5d285176762e4f4a9247d2f4d48",
+        "issue_closed": False, "discussion_items": [],
+        "detail_state": "none", "report_path": None,
+        "notes": "reconciled from forge observation",
+    }
+
+    def contractless_sweep(self, issue, *, now, tracker_state="open"):
+        """A validated sweep of a ledger with no delivery contract, the forge merged."""
+        worktree = self.read_state()["issues"][str(issue)]["attempts"][-1]["worktree"]
+        request = self.control_request(
+            now=now, issues=[issue],
+            tracker=[self.tracker_fact(issue, state=tracker_state)],
+            worktrees=[self.worktree_fact(issue, recorded={
+                "path": worktree, "state": "matching_issue_branch"})],
+            max_parallel=1)
+        request["delivery_contracts"][str(issue)] = None
+        request["authorization_intents"][str(issue)] = []
+        request["forge"][str(issue)] = copy.deepcopy(self.MERGED_PR)
+        return self.control_validated(request=request)
+
+    def test_control_relays_a_reconciled_merge_on_every_sweep(self):
+        """Acceptance 1 (D2): reconciled, the result keeps `issue_closed` false and validates."""
+        for tracker_state in ("closed", "open"):
+            with self.subTest(tracker=tracker_state):
+                self.run_id = f"reconcile-{tracker_state}"
+                self.init_run()
+                self.spawn(issue=47, worktree=self.root / f"wt-47-{tracker_state}")
+                self.suspend(issue=47, attempt=1, blocked_on="usage_limit",
+                             now="2026-08-13T20:02:00Z")
+                state = self.read_state()
+                state["issues"]["47"]["delivery"] = self.empty_delivery()
+                self.write_state(state)
+                for now in ("2026-08-13T20:03:00Z", "2026-08-13T20:04:00Z"):
+                    summary = self.contractless_sweep(
+                        47, now=now, tracker_state=tracker_state)["summaries"][0]
+                    self.assertEqual(
+                        (summary["state"], summary["result"]["state"],
+                         summary["result"]["issue_closed"]), ("merged", "merged", False))
+                attempt = self.read_state()["issues"]["47"]["attempts"][-1]
+                self.assertEqual((attempt["state"], attempt["result_source"]),
+                                 ("merged", "superseded"))
+
+    def test_control_relays_the_persisted_154_record(self):
+        """Acceptance 2 (D4): the shape run-…-155 holds for #154 validates, unmigrated."""
+        self.run_id = "run-20260923-147-153-154-150-148-149-126-155"
+        self.init_run()
+        self.spawn(issue=154, worktree=self.root / "worktree-issue-154")
+        self.suspend(issue=154, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:02:00Z")
+        state = self.read_state()
+        issue = state["issues"]["154"]
+        attempt = issue["attempts"][-1]
+        attempt.update({"state": "merged", "blocked_on": None,
+                        "result": copy.deepcopy(self.RECONCILED_154),
+                        "finished_at": "2026-08-13T20:05:00Z",
+                        "result_source": "superseded"})
+        issue["outcome"] = copy.deepcopy(self.RECONCILED_154)
+        issue["delivery"] = self.empty_delivery()
+        self.write_state(state)
+        before = self.state_path.read_bytes()
+        response = self.contractless_sweep(154, now="2026-08-13T20:06:00Z")
+        self.assertEqual(response["summaries"][0]["result"], self.RECONCILED_154)
+        self.assertEqual(
+            json.loads(self.state_path.read_bytes())["issues"]["154"]["attempts"],
+            json.loads(before)["issues"]["154"]["attempts"])
+
+    def test_direct_replays_of_a_reconciled_merge_validate(self):
+        """Acceptance 2 (D4): raw direct replays validate, bare or carrying a superseded pointer."""
+        durable = ".superpowers/issue-delivery/154/run-1/ship-review.json"
+        retained = ".superpowers/ship-review/154/retained-detail.json"
+        for detail_state, report_path in (("none", None), ("present", durable),
+                                          ("unpublished", retained)):
+            with self.subTest(detail_state=detail_state):
+                root = self.root / f"direct-{detail_state}"
+                root.mkdir()
+                root = root.resolve()
+                self.root = root
+                owner = self.acquire_direct(issue=154)
+                if report_path is not None:
+                    verdict = {**self.RECONCILED_154, "state": "failed", "pr_url": None,
+                               "merge_sha": None, "detail_state": detail_state,
+                               "report_path": report_path,
+                               "notes": f"owner verdict; details: {report_path}"}
+                    path = self.direct_state_path(owner["run_id"])
+                    state = json.loads(path.read_text())
+                    attempt = state["issues"]["154"]["attempts"][-1]
+                    attempt.update({"state": "failed", "blocked_on": None,
+                                    "result": copy.deepcopy(verdict),
+                                    "finished_at": "2026-08-20T10:30:00Z",
+                                    "result_source": "owner"})
+                    state["issues"]["154"]["outcome"] = copy.deepcopy(verdict)
+                    path.write_text(json.dumps(state), encoding="utf-8")
+                else:
+                    self.run_id = owner["run_id"]
+                    self.suspend(issue=154, attempt=1, blocked_on="human_gate",
+                                 now="2026-08-20T10:30:00Z")
+                replies = []
+                for now, forge in (("2026-08-20T11:00:00Z", self.MERGED_PR),
+                                   ("2026-08-20T11:05:00Z", self.no_pull_request())):
+                    request = self.direct_request(
+                        issue=154, now=now, forge=copy.deepcopy(forge),
+                        worktree=self.worktree_fact(154, recorded={
+                            "path": owner["worktree"], "state": "matching_issue_branch"}))
+                    completed = self.direct_owner_at_root(root, request)
+                    replies.append(self.validated_response(completed.stdout))
+                reconciled, replayed = replies
+                self.assertEqual((replayed["kind"], replayed["reason"]), ("terminal", "merged"))
+                self.assertEqual(replayed, reconciled)
+                result = replayed["result"]
+                self.assertEqual((result["issue_closed"], result["detail_state"],
+                                  result["report_path"]), (False, detail_state, report_path))
+                if report_path is None:
+                    self.assertEqual(result, self.RECONCILED_154)
 
 
 class ResolverOutcomeTest(unittest.TestCase):

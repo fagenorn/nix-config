@@ -242,6 +242,83 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertNotEqual(refused.returncode, 0)
             self.assertEqual(refused.stdout, b"")
 
+    def test_only_response_result_slots_accept_the_reconciliation_record(self):
+        """#191 D2-D4: the ledger-result rule widens the workflow-response slots only."""
+        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
+                                 if key == "_artifact_budget_delivery_model"
+                                 or key.startswith("_artifact_budget_delivery_model.")])
+        model = artifact_budget._delivery_model()
+        contract, _ = contract_and_delivery(model)
+        digest = model.canonical_digest(contract)
+        durable = ".superpowers/issue-delivery/151/run-1/ship-review.json"
+        retained = ".superpowers/ship-review/151/retained-detail.json"
+        superseded = "reconciled from forge observation; superseded owner failed verdict"
+        bare = {"issue": 151, "state": "merged",
+                "pr_url": "https://github.com/fagenorn/nix-config/pull/187",
+                "merge_sha": "bad94161012db5d285176762e4f4a9247d2f4d48",
+                "issue_closed": False, "discussion_items": [],
+                "detail_state": "none", "report_path": None,
+                "notes": "reconciled from forge observation"}
+        records = {
+            "bare": bare,
+            "present": {**bare, "detail_state": "present", "report_path": durable,
+                        "notes": superseded},
+            "unpublished": {**bare, "detail_state": "unpublished",
+                            "report_path": retained, "notes": superseded},
+        }
+
+        def terminal(result):
+            value = deepcopy(workflow_responses(model)["terminal"])
+            value["result"] = deepcopy(result)
+            return value
+
+        def control(result):
+            value = deepcopy(workflow_responses(model)["control"])
+            value["summaries"][0]["result"] = deepcopy(result)
+            return value
+
+        def summary(result):
+            return {"interface_version": 2, "issue": 151, "state": "delivery_complete",
+                    "custody": custody(), "historical_owner_result": deepcopy(result),
+                    "delivery_contract_digest": digest, "delivery_observations": [],
+                    "authority_observations": [], "reevaluation_evidence": [],
+                    "detail_state": "none", "report_path": None, "notes": "merged"}
+
+        owner_twin = {**bare, "issue_closed": True}
+        for boundary, value in (("ship-summary", summary(owner_twin)),
+                                ("ship-summary", owner_twin)):
+            accepted = self.run_validate(boundary, value, use_stdin=True)
+            self.assertEqual((accepted.returncode, accepted.stderr), (0, b""))
+        for name, record in records.items():
+            for slot, wrap in (("terminal", terminal), ("control", control)):
+                with self.subTest(record=name, slot=slot):
+                    accepted = self.run_validate("workflow-response", wrap(record),
+                                                 use_stdin=True)
+                    self.assertEqual((accepted.returncode, accepted.stderr), (0, b""))
+            for version, value in ((2, summary(record)), (1, record)):
+                with self.subTest(record=name, ship_summary=version):
+                    refused = self.run_validate("ship-summary", value, use_stdin=True)
+                    self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+        mutations = {
+            "null PR URL": {"pr_url": None},
+            "short merge SHA": {"merge_sha": "bad9416"},
+            "discussion items": {"discussion_items": ["lost"]},
+            "none with a path": {"report_path": durable},
+            "present without a path": {"detail_state": "present"},
+            "present with a retained path": {"detail_state": "present",
+                                             "report_path": retained},
+            "unpublished with a durable path": {"detail_state": "unpublished",
+                                                "report_path": durable},
+            "notes over the policy limit": {"notes": "n" * 501},
+            "an extra member": {"result_source": "superseded"},
+        }
+        for name, change in mutations.items():
+            for slot, wrap in (("terminal", terminal), ("control", control)):
+                with self.subTest(mutation=name, slot=slot):
+                    refused = self.run_validate("workflow-response",
+                                                wrap({**bare, **change}), use_stdin=True)
+                    self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+
     def test_workflow_response_uses_source_and_lexical_installed_package(self):
         payload = {"interface_version": 2, "kind": "workflow_bootstrap",
                    "run_id": "synthetic-loader", "requirements": []}
