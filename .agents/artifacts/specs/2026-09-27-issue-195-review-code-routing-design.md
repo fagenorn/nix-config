@@ -92,24 +92,36 @@ either axis is dispatched, never from how a Codex call failed. The phrase "when
 that capability is unavailable" is removed. `diff-review` appears as a dispatch
 target only in the `available` rung. The `unsupported` rung ends at the existing
 `ship-issue-full-correctness-fallback` marker, and its text names neither
-`diff-review` nor `bindings.commands`.
+`diff-review` nor `bindings.commands`. The `available` rung calls itself the only
+rung that reaches Codex and the only one where a capacity rejection binds. It
+points to REVIEW.md for the rule's terms and does not restate them (per D9).
 
 The degraded path (the merge-delta check) is unchanged. Every agent-dispatch
 marker and its call line stay byte for byte as they are, and so do their ids,
-roles, models and efforts. Only the prose around them moves. The existing
+roles, models and efforts. Only the prose around them moves. The ids keep their
+historical names: under `unsupported`, `ship-issue-full-correctness-fallback` is
+the documented primary route, even though its id says "fallback" (per D8). The existing
 sentence that records the correctness scope when the axis came through
 `diff-review` stays.
 
-### 2. Routing error (per D2)
+### 2. Routing error (per D2, D8, D9)
 
-Right after the ladder, ship-issue and sdd's final review each state the same
-rule. A Codex call made under `unsupported`, whether through `codex-collaboration`,
-a plugin bridge or anything else, is a routing error, never a capacity rejection.
-The caller discards its outcome, whether that outcome is a verdict, a refusal or a
-failure, and none of it is the axis's verdict. The caller records the routing
-error beside the correctness verdict and runs rung 3's native dispatch. It does
-not retry, stop or suspend. The record goes where each caller already keeps
-correctness provenance: the PR body for ship-issue, the SDD ledger for sdd. The
+A Codex call made under `unsupported`, whether through `codex-collaboration`, a
+plugin bridge or anything else, is a routing error. The rule has two halves, and
+each half is written once per document family.
+
+The classification is "a routing error, never a capacity rejection". It sits
+next to each capacity rule it scopes: the shared configured-review paragraph
+(§3) and `codex-collaboration`'s capacity paragraph.
+
+The action sits at each caller's dispatch site, right after the ladder: in
+ship-issue's Phase 5 and in sdd's correctness bullet. The caller discards the
+call's outcome, whether a verdict, a refusal or a failure; none of it is the
+axis's verdict. It records the routing error beside the correctness verdict and
+runs rung 3's native dispatch. It does not retry, stop or suspend. The record
+goes where each caller already keeps correctness provenance: the PR body for
+ship-issue, the SDD ledger for sdd. In sdd the axis identity is still `native`,
+and the routing error is noted beside it, not added as a failure class. The
 routing error is not reviewer identity, so ship-issue's "records no reviewer
 identity" rule stands.
 
@@ -117,22 +129,24 @@ identity" rule stands.
 
 ship-issue's REVIEW.md and sdd's final-review.md share the configured-review
 paragraph, and the two copies stay identical. In it, the capacity sentence
-becomes "On the `available` route, a capacity rejection has no retry and no
-native fallback; blocked stops." The paragraph then adds that a Codex call under
-`unsupported` is a routing error, never a capacity rejection. The existing
-"Authored unsupported or a completed non-capacity runtime/output failure uses the
-existing single native fallback and records why" stays.
+becomes "`blocked` stops. On the `available` route, a capacity rejection has no
+retry and no native fallback." `blocked` comes first so that it cannot be read
+as limited to the `available` route. The paragraph then adds the classification
+from §2. The existing "Authored unsupported or a completed non-capacity
+runtime/output failure uses the existing single native fallback and records why"
+stays.
 
 In `codex-collaboration`'s direct-review section, the capacity paragraph gets the
 same opening, "On the `available` route, a daemon, slot, or capacity rejection is
-a binding capacity rejection …". It also gets the routing-error clause.
+a binding capacity rejection …". It also gets the classification from §2.
 
 ### 4. `codex-collaboration` under `unsupported` (per D6)
 
 The phase-entry selection sentence changes from "`unsupported` takes that
 operation's documented native route" to "`unsupported` makes no Codex call and
 returns the operation to its calling controller's documented native route". It
-still comes before the `bindings.commands[review_id]` dereference. The existing
+returns no result and no fallback verdict, so the caller's rung 3 always runs.
+It still comes before the `bindings.commands[review_id]` dereference. The existing
 ban on a default, a plugin bridge or a second resolver stays. DIFF-REVIEW's
 size-pre-flight sentence gets the same clarification: an unsupported capability
 never dispatches Codex, because the calling controller runs its own native
@@ -161,17 +175,16 @@ failure class) and its scope sentences are kept.
   gone. `codex-collaboration`'s selection clause says `unsupported` "makes no
   Codex call", ahead of its `bindings.commands[review_id]` dereference. A test
   that checks these points fails when the pre-fix sentence is put back.
-- **AC2 (available capacity still stops):** ship-issue's `available` rung reads,
-  in order, `diff-review`, "capacity rejection", "no retry", "no native
-  fallback". The shared configured-review paragraph (ship-issue REVIEW.md and sdd
-  final-review.md) and `codex-collaboration`'s capacity paragraph each put
-  "`available` route" before "capacity rejection … no retry … no native
-  fallback".
-- **AC3 (routing error):** ship-issue Phase 5, sdd's final review, the shared
-  configured-review paragraph and `codex-collaboration` each state that a Codex
-  call under `unsupported` is a "routing error", "never a capacity rejection".
-  ship-issue and sdd each discard the outcome, record the routing error beside
-  the correctness verdict, and run the native dispatch.
+- **AC2 (available capacity still stops):** ship-issue's `available` rung names
+  `diff-review` and then "capacity rejection". The shared configured-review
+  paragraph (ship-issue REVIEW.md and sdd final-review.md) and
+  `codex-collaboration`'s capacity paragraph each put "`available` route" before
+  "capacity rejection … no retry … no native fallback".
+- **AC3 (routing error):** the shared configured-review paragraph and
+  `codex-collaboration`'s capacity paragraph each state "routing error, never a
+  capacity rejection". Both callers' dispatch sites, ship-issue Phase 5 and
+  sdd's correctness bullet, name "routing error" and then the discard, the record
+  beside the correctness verdict, and the native dispatch.
 - **AC4 (sdd):** the sdd final-review correctness bullet satisfies AC1's ladder
   shape with `correctness-reviewer-prompt.md` as its rung-3 target. "When the
   `codex-collaboration` skill is available" is gone.
@@ -225,3 +238,5 @@ refusal-reporting self-check that proves a helper fails on a missing clause.
 | D5 | Use "installed" for the skill's presence and keep "available" for the capability state only. | The defect was a skill-presence word read as a capability state. | Reuse standards-review's "`codex-collaboration` available": the same ambiguity would come back. |
 | D6 | `codex-collaboration` under `unsupported` makes no Codex call and returns to the calling controller's native route. It does not run the native reviewer itself. | It never names the "documented native route" it defers to. Its ban on bridges and defaults. The caller-owned unsupported route in the plan-review precedent. | The skill runs the native reviewer itself: that moves caller-owned dispatch into a Claude-only bridge, and a Codex host loses the route. |
 | D7 | Scope the capacity rule with "On the `available` route" in the shared configured-review paragraph, kept identical in ship-issue and sdd, and in `codex-collaboration`'s paragraph. | Issue 100 D7 grounds the rule in the configured command's shared app-server daemon, which only the `available` route uses. | Drop the rule for the non-`available` routes, or re-word it per caller: that splits the copies or weakens AC2. |
+| D8 | Keep the native route's existing names. `ship-issue-full-correctness-fallback` stays the id of the documented primary route under `unsupported`. After a routing error, sdd records identity `native` with a note beside it and adds no new failure class. | model-matrix and the dispatch-contract tests pin marker ids and call lines. The issue's acceptance names that id. sdd's closed identity set, in which `fallback` means codex-collaboration's non-capacity fallback. | Rename the marker to drop "fallback", or record `fallback` + `routing error`: that churns the pinned matrix, or blurs which reviewer actually ran. |
+| D9 | Give each rule one home per document family. The capacity terms, and the routing-error classification that scopes them, live in the shared configured-review paragraph and in codex-collaboration's capacity paragraph. The callers' dispatch sites carry the ladder and the routing-error action, and ship's `available` rung points to REVIEW.md for the capacity terms. | the-bar DRY: one authoritative home, derived copies link to it. ship-issue says to read REVIEW.md before dispatching. | Restate the full capacity and routing-error text at every site: five copies that must change together. |
