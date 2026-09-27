@@ -5,6 +5,7 @@ Decision for [#192](https://github.com/fagenorn/nix-config/issues/192),
 delivery design (`2026-09-21-issue-151-delivery-reconciliation-design.md`,
 "SPEC151") and the #171 contract-source design (`2026-09-23-issue-171-…`,
 "SPEC171"). Their rows still bind, except where a row below says it refines one.
+The Phase-5 standards review sent it back once (D24), and D24–D28 amend it.
 
 ## Problem
 
@@ -57,7 +58,9 @@ Acceptance:
   previous head, and its second parent is an integration-branch commit. The
   chain's tip is the slot's **current selection**, so publish, open, merge,
   scope matching and delivery proof all follow it, and the earlier selections
-  stay in history. ship-issue gains a post-selection sync route. The owner makes
+  stay in history. An owner that did not build the current selection reads it
+  with a read-only builder kind, `current-selection`, from the ledger that
+  installed the contract. ship-issue gains a post-selection sync route. The owner makes
   one sync merge, reviews its combined diff, pushes, waits for CI and records
   the sync selection, then records `branch_published`/`pr_opened` at the new
   head and proposes the merge. A merge the provider refuses because the PR
@@ -135,13 +138,16 @@ worktree-policy veto of #181 still runs after a live-branch build. A legacy
 branch whose checkout resolves to different sealed policy is refused as it is
 today, and syncing the integration branch into it is the ordinary fix.
 
-### 3. Owner-side branch checks (per D5)
+### 3. Owner-side branch checks (per D5, D27)
 
 AUTO.md's fresh delegated owner derives `expected_branch` from the owner
 object's `contract`, as the reviewed slot's `constraints.branch`, not from the
 worktree's final path component. It still requires that value to match the
 binding-derived accepted regex, and `git -C owner.worktree branch --show-current`
-to equal it. Nothing else in the skill tree equates a branch with a path.
+to equal it. Its path check requires normalized `owner.worktree` to equal the
+literal target of the contract's `remove_worktree` stage, the path control and
+direct-owner already bind custody to. Nothing else in the skill tree equates a
+branch with a path.
 orchestrate-issues' sentence "a candidate's final path component is the branch
 its contract will carry" stays true, because a candidate is absent and so
 builds by rule 1. ship-issue's Phase 0 checks the live branch against the
@@ -191,8 +197,9 @@ Every consumer reads the tip:
   chain. The `ship-handoff` validator requires the handoff's `selected_outputs`
   to form a valid chain or be empty.
 - **Final once merged.** The `delivery` validator rejects a delivery in which a
-  `pr_merged` observation's `expected_head` is the head of a chain member that
-  is not the tip. So no sync selection can follow a merge.
+  landed merge, a `pr_merged` observation with `merged: true` of the contract's
+  repository into the slot's base, has as `expected_head` the head of a chain
+  member that is not the tip. So no sync selection can follow a merge (D28).
 
 Stage facts are recomputed on every fold, as today. A sync selection therefore
 makes the old head's `branch_published` and `pr_opened` observations stop
@@ -203,7 +210,7 @@ refused with no write, since `publish_branch` is then the ready stage.
 Authority observations stay keyed to the declared slot-form scope, which the
 tip still satisfies, so no successor intent is needed.
 
-### 5. The `sync-selection` builder kind (per D8, D15)
+### 5. The `sync-selection` and `current-selection` builder kinds (per D8, D15, D24, D25)
 
 `build-delivery --kind sync-selection` takes exactly `contract`,
 `prior_selection` (a sealed selection of that contract), `head`, `tree`,
@@ -232,7 +239,35 @@ the #193 lookup unchanged. The existing `observation` and
 `implementation_delivered` kinds accept a sync selection unchanged, and the
 runtime validates the output as `selected-output`.
 
-### 6. The post-selection sync route (per D9, D10, D11, D12, D17, D18)
+**The current selection has one source.** An owner that did not build the
+current selection cannot re-derive it: the implementation custody sealed H0
+from its spec root and review report, and a remainder uses other refs. No reply
+carries selections, and skills never read `state.json`. So
+`build-delivery --kind current-selection` takes exactly `contract` and prints,
+as sealed, the current selection of the contract's reviewed slot held by the
+ledger that installed the contract. The owner uses it as the first link's
+`prior_selection` (each later link's prior is the link it just built) and as
+the selection `implementation_delivered` names.
+
+workflow-state finds that ledger with #193's scan and skip rules, which become
+one shared generator. The intent lookup still takes the first raw match, but a
+selection can differ between ledgers where a root intent cannot, so this lookup
+refuses two raw matches:
+`the contract is installed by more than one ledger: <run>, <run>`. The one
+match is re-read through the shared validating reader, and any failure is
+`installing ledger <run-id> is invalid`. The builder stays pure. It is handed
+the validated delivery as `installed_delivery` and asks the model's new pure
+function `current_selection(delivery)`, which returns the reviewed slot's chain
+tip, or None. After the contract check, it refuses with
+`current selection: no ledger under the repo root installs this contract`,
+`current selection: the installed delivery is invalid` (another contract's
+delivery, or one the model rejects), or
+`current selection: the installing ledger holds no selection of the contract's reviewed slot`.
+`build-delivery` now reads a ledger for exactly two things it cannot derive: a
+non-re-deriving contract's installed initial intent, and the current selection.
+It still takes no lock, reads no clock and writes nothing.
+
+### 6. The post-selection sync route (per D9–D12, D17, D18, D22, D24, D26)
 
 The route belongs to whoever holds the merge gate: the ship owner under
 implementation custody, or a remainder owner. It is described once, in
@@ -261,6 +296,9 @@ cases:
   tip, which is a crash after the push;
 - the PR has merged at a head that is a sync run from the tip.
 
+`mergeable: UNKNOWN` is no trigger: the owner proceeds to the merge, and a
+refusal then takes the first case (D26).
+
 **Steps.**
 
 1. **Sync.** Make one merge of `origin/<integration>` into the tip under
@@ -270,14 +308,17 @@ cases:
 3. **Review.** Run REVIEW.md's merge-delta check over that commit's combined
    diff, `git show --cc`, through SKILL.md's merge-delta reviewer (the
    existing `ship-issue-merge-delta-review` site; no new dispatch marker). Apply
-   findings by amending the unpushed merge commit, which keeps both parents.
+   findings by amending the unpushed merge commit, which keeps both parents,
+   and re-run step 2 after every amend, before the push (D26).
    An empty delta is `merge-delta-empty`. A delta whose Blocking and Should-fix
    findings are all applied and re-reviewed is `merge-delta-clean`. Minor and
    Discussion findings are retained under REVIEW.md's durable-detail rules.
-4. **Push.** Run `check-launch`, then `git push`.
+4. **Push.** Run `check-launch`, then `git push origin <branch>`, the one form
+   the lifecycle guard admits.
 5. **Wait for CI.** Run Phase 6's CI wait, with the reviewed head re-fixed to
    the new head.
-6. **Select.** Build `--kind sync-selection` over the tip selection, the new
+6. **Select.** Build `--kind sync-selection` over the tip selection (for the
+   first link, `--kind current-selection` serves it), the new
    head, its tree and its parents (`git rev-list --parents -n 1 <head>`),
    chaining one per commit of a sync run. Then build `branch_published` and
    `pr_opened` (the same PR) at the new head. Checkpoint them all with
@@ -303,11 +344,21 @@ stop that Phase 6 already defines, and a human then decides:
 - a PR head that is not a sync run from the tip, such as a non-merge commit, a
   first parent off the chain, or an unconfirmed integration parent;
 - a Blocking finding left once the commit is pushed;
-- red CI that needs a fix commit.
+- red CI that needs a fix commit;
+- in `--auto`, a step-1 conflict that `SYNC.md` would escalate or leave paused,
+  #150's `justfile` shape. The owner runs `git merge --abort`, so the worktree
+  is back at the tip, and stops before any push (D26).
+
+Each stop makes no forge write, checkpoint or cleanup, and keeps the worktree
+and branch. Its `terminal_failed` `ship-summary/v2` carries the legacy
+`stopped` row whose notes name the cause. A ship owner returns it, and a
+remainder owner writes it with its own `finish`.
 
 If the base moves again after a sync, the next sync extends the chain. From the
 first sync on, every later step's "selection" is the current selection. That
-includes the `implementation_delivered` observation Delivery loop step 7 builds.
+includes the `implementation_delivered` observation Delivery loop step 7 builds,
+whose selection `--kind current-selection` serves to an owner that does not
+hold it.
 
 ### 7. Documentation (per D13)
 
@@ -315,13 +366,15 @@ These surfaces change:
 
 - **`build-delivery --help`.** This is authoritative, and a test pins it. It
   gains the branch rule (a worktree name that is not an issue branch takes its
-  checkout's branch) and the `sync-selection` choice.
+  checkout's branch), the `sync-selection` and `current-selection` choices, and
+  the two ledger reads that replace "the only time it reads a ledger".
 - **CLAUDE.md.** The "Delivery objects are built" bullet gains one clause for
-  each rule.
+  each rule, and its ledger-read sentence names both reads.
 - **Skills.** ship-issue's SKILL.md (the Delivery loop, Remainder mode and
-  Phase 6 pointers) and CI-MERGE.md, and AUTO.md.
+  Phase 6 pointers, and step 7's current selection) and CI-MERGE.md, and
+  AUTO.md.
 - **Instruction-load ceilings.** Every profile whose hot bytes grow is
-  re-measured: `ship-owner`, and the profiles that load AUTO.md.
+  re-measured: `ship-owner`, and the profiles that load AUTO.md hot.
 
 There is no ADR, because the repo has no ADR home (SPEC171 D21). SPEC151 and
 SPEC171 are point-in-time records and are not edited. This ledger refines them.
@@ -362,27 +415,32 @@ synthetic project committed so the worktree resolves.
   (owner verdict) at the slugless path. `direct-owner` asks for the contract,
   then returns `owner` with `launch_kind: retry`, attempt 2, at the same path.
 - **T6, skill pin.** AUTO.md's delegated-owner check takes `expected_branch`
-  from the contract's reviewed slot.
+  from the contract's reviewed slot, and requires `owner.worktree` to equal the
+  contract's `remove_worktree` literal.
 
 **A2**
 
 - **T7, remainder after a sync.** The implementation custody checkpoints
   selection H0 with `branch_published`/`pr_opened` (PR 5) at H0 and the
   `merge_pr` scope. It then finishes `terminal_failed` with a `stopped` row,
-  which returns remainder 1. The remainder's null-scope checkpoint follows. Then
-  `--kind sync-selection` builds H1 with parents `[H0, M]`, and the sync
+  which returns remainder 1. The remainder's null-scope checkpoint follows. It
+  reads H0 with `--kind current-selection`, never from memory, and
+  `--kind sync-selection` builds H1 from it with parents `[H0, M]`. The sync
   selection, `branch_published` at H1 and `pr_opened` (PR 5, H1) are
   checkpointed with the `merge_pr` scope. The echo requires
   `native_evaluation_required`. The merge follows at H1, then every cleanup
   cycle, then `finish` with `delivery_complete` and `implementation_delivered`
-  over H1. The stored delivery holds both selections, and `merge_pr`'s fact
-  names the H1 merge. Every checkpoint and reply passes `validate-report`.
+  over the current selection it reads again, H1. The stored delivery holds both
+  selections, and `merge_pr`'s fact names the H1 merge. Every checkpoint and
+  reply passes `validate-report`.
 - **T8, merged-at-sync-run fold (the #150 shape).** Same setup, but the PR
   merged out of band at H2, whose sync run is H1 = `[H0, M1]` and
-  H2 = `[H1, M2]`. The remainder first checkpoints a `pr_merged` at H2. It is
-  accepted, and `merge_pr` stays pending. Then one checkpoint carries both sync
-  selections, H2's `branch_published`/`pr_opened` and a `close_tracker` scope.
-  It folds the H2 merge, and the loop completes.
+  H2 = `[H1, M2]`. It runs twice. Once, the remainder first checkpoints a
+  `pr_merged` at H2, which is accepted while `merge_pr` stays pending. Once, the
+  `pr_merged` rides the chain's checkpoint, as CI-MERGE.md says. Either way one
+  checkpoint carries both sync selections (H1 built over `--kind
+  current-selection`), H2's `branch_published`/`pr_opened` and a
+  `close_tracker` scope. It folds the H2 merge, and the loop completes.
 - **T9, fold refusals.** Each of these exits 2 and leaves the ledger
   byte-identical: a second sync selection of H0 (a fork); a second v1 root; a
   sync selection after the merge at the tip; a sync selection with a
@@ -390,15 +448,23 @@ synthetic project committed so the worktree resolves.
   input with its reason.
 - **T10, model facade.** The chain rules the builder never emits: a dangling
   prior selection, a non-commit sync selection, evidence that is not a
-  superset, and a `pr_merged` at a superseded head. It also pins that
+  superset, and a landed `pr_merged` at a superseded head, while an unmerged
+  one, or one of another repository or base, never blocks. It also pins that
   `match_scope` binds the tip's literal output and data and refuses the
-  superseded head, and that `implementation_delivered` naming H0 does not
-  match.
-- **T11, skill pins.** CI-MERGE.md's section defines the sync run and orders
-  sync, verify, merge-delta review, `check-launch`, push, CI,
+  superseded head, that `implementation_delivered` naming H0 does not match,
+  and that `current_selection` returns None, then H0, then H1.
+- **T11, skill pins.** CI-MERGE.md's section defines the sync run and
+  `--kind current-selection`, and orders sync, verify, merge-delta review with
+  re-verification after amends, `check-launch`, `git push origin <branch>`, CI,
   `--kind sync-selection`, then the checkpoint with the `merge_pr` scope. It
-  states the mergeability-is-not-a-denial rule. SKILL.md's Delivery loop,
-  Remainder mode and Phase 6 divergence rule point to it.
+  states the mergeability-is-not-a-denial rule, `UNKNOWN`, and the conflict
+  stop with its per-custody summary. SKILL.md's Delivery loop, Remainder mode
+  and Phase 6 divergence rule point to it, and step 7 and Remainder mode name
+  the current selection.
+- **T12, current selection.** `--kind current-selection` refuses, with exit 2,
+  empty stdout and its named reason, a contract no ledger installs, an
+  installing ledger with no selection, and a contract two ledgers install. It
+  serves H0 after selection and H1 after a sync fold.
 
 ## Out of scope
 
@@ -444,3 +510,8 @@ synthetic project committed so the worktree resolves.
 | D21 | Plan: the chain binds to the contract's slot everywhere. `match_scope` computes each select stage's current selection once and gives only those tips to `_scope_mismatch`. A slot's selection outside the contract's slot tuple still answers `slot_constraint_mismatch`, and a set that is not one chain raises `conflicting selected outputs`, as the `delivery` validator does. The `sync-selection` builder requires the prior selection to be a commit selection of the contract's reviewed slot, refuses a `head` equal to the prior head before it judges `parents`, and requires both parents to differ from `head`. The final-once-merged rejection reads `a merged selection chain cannot be extended`. Refines §4 and §5. | The bar: defense in depth (the builder refuses, with a named reason, what the model would reject) and fail loud (a fork is invalid state, not a non-match). §5: "a valid selection of this contract". | Returning a mismatch reason for a fork, which hides corrupt state as an ordinary non-match. Leaving a parent equal to `head` to the runtime's generic output validation, which names no reason. |
 | D22 | Plan: a Should-fix finding on a sync merge that is already pushed or already landed stops like a Blocking one. No amend can apply it, a fix commit would leave the sync run, and neither fixed `review_ref` would then be truthful. Refines §6's stops. | The bar: truthful terminal states. D8's fixed refs, where `merge-delta-clean` means every Blocking and Should-fix finding was applied. REVIEW.md: `--auto` applies Should-fix findings, so one it cannot apply is surfaced. | Retaining it as durable detail and sealing `merge-delta-clean`, which records a false review state. A third review ref, which reopens D8. |
 | D23 | Plan: seams and scheduling. The builder's predicate and rule-2 units run at the runtime facade (`test_workflow_delivery.py`, #193 D12's seam) beside the CLI tests D14 names. No task merges `origin/main`. A task that grows a hot instruction document raises only the breached ceilings, to their measured hot bytes, and names #192 in the profile note (#155 D10). When `instruction-load.json` conflicts, ship-issue Phase 1's sync re-measures on the merged tree. | #193 D12 (the facade seam exists). #155 D10. The #198 plan's D16 and D19 (the ship sync owns `origin/main` and resolves the ceilings file). | Merging `origin/main` mid-plan, which moves the base under reviewed tasks. Pre-raising ceilings with headroom, which #155 forbids. |
+| D24 | Phase-5 back-up loop (standards review B1, Blocking): a remainder owner could not obtain the whole `prior_selection` §5 requires, nor the selection `implementation_delivered` names. No reply carries selections, skills never read `state.json`, and a remainder cannot re-derive the custody's selection (spec-root and review-report refs). A new read-only builder kind, `current-selection`, takes exactly `{contract}` and serves, as sealed, the current selection of the contract's reviewed slot from the ledger that installed the contract. The owner feeds it to the first link's `prior_selection` and to `implementation_delivered`. `build-delivery` then reads a ledger for exactly two things it cannot derive, and help and CLAUDE.md say so. Amends §5, §6 and D8 (the whole prior stays an input), and #193 D2's "only ledger read". | #193 D2/D3: the installed-ledger scan, with no new flag or input member, so an in-flight owner keeps one command form. The builder's rule: read a ledger only for what it cannot derive. #191 owns the `workflow-response` wire this cycle. T7/T8 passed only because the harness kept H0 in memory. | Naming the prior by head or id inside `sync-selection`: a sync run's second link has a prior that no ledger holds before the one checkpoint D17 requires. Projecting selections into `delivery_remainder` or checkpoint replies, a `workflow-response` change that collides with #191. Reading `state.json` from skill prose. |
+| D25 | `current-selection` mechanics. #193's scan and skip rules become one shared generator. The intent lookup keeps its first match, but this lookup refuses two raw matches, naming both runs: `the contract is installed by more than one ledger: <run>, <run>`. The one match is re-read through the shared validating reader (`installing ledger <run-id> is invalid` on any failure), and its validated delivery reaches the pure builder as `installed_delivery`. The model gains the pure, additive `current_selection(delivery)`, the reviewed slot's chain tip or None, which shares one tip helper with `match_scope`. `MODEL_INTERFACE_VERSION` stays 1. After the contract check the builder refuses `current selection: no ledger under the repo root installs this contract`, `current selection: the installed delivery is invalid`, or `current selection: the installing ledger holds no selection of the contract's reviewed slot`. | #193 D4 (the intent lookup takes the first match because any match holds the same intent), D5 (a pure builder handed values), D7 (named refusals) and D14 (never a traceback). §4's one chain home. D16 (no bump for additive grammar). | The first match, as the intent lookup takes: a stale ledger's tip then fails only at fold, as a dangling prior. Computing the tip in workflow-state or the builder, a second chain home. Reading the tip from stored stage facts, which couples the source to fact bookkeeping. |
+| D26 | Standards review: the route's prose. Step 3 re-runs the Phase 2 verification after every amend, before the push. Step 4 pushes with `git push origin <branch>`. `mergeable: UNKNOWN` is no trigger: the owner proceeds to the merge, and a refusal then takes the first trigger. In `--auto`, a step-1 conflict `SYNC.md` would escalate or leave paused is the genuinely-blocked stop before any push: `git merge --abort`, no forge write, checkpoint or cleanup, the worktree and branch kept, and a `terminal_failed` `ship-summary/v2` with the legacy `stopped` row naming the cause, which a ship owner returns and a remainder owner writes with its own `finish`. Refines §6, D9, D18 and D22. | REVIEW.md's five-step flow (verification after every fix). `lifecycle_guard.py` admits only `git push [-u] origin <branch>`. SKILL.md's Phase 6 stop and Remainder mode's `finish` rule. #150's `justfile` conflict. | Leaving conflict markers in a worktree a relaunched owner re-enters. Pushing before re-verification, which leaves CI to catch it. |
+| D27 | Standards review: AUTO.md keeps a real path check. Normalized `owner.worktree` must equal the literal target of `owner.contract`'s `remove_worktree` stage, beside the branch check D5 moves to the contract. AUTO.md grows, so Task 3 re-measures its hot profiles and raises only the breached ceilings (D23). Refines D5 and §3. | AUTO.md's own "a pattern, path, or current-branch mismatch is a contract failure". Control and direct-owner already bind custody to that literal ("custody worktree does not match the delivery contract"). | A same-size replacement, which leaves the "path" clause with no path check. |
+| D28 | Standards review: final-once-merged judges only a landed merge, a `pr_merged` with `merged` true of the contract's repository into the slot's base, at a superseded chain member's head. An unmerged observation, or another repository's or base's, never blocks a sync selection. The PR number is not compared, because the model binds it only through the current selection's intents. Refines §4, D7 and D21. | The model admits `merged: false`, and `merge_pr` matching already requires `merged is True`. The bar: truthful terminal states. | Rejecting any `pr_merged` at a superseded head, which lets an unmerged or foreign observation freeze a chain. |
