@@ -1,8 +1,8 @@
-# Instruction load: 17da7f2 → 76ef1d8
+# Instruction load: 1b92fdf → a80e5bf
 
-- Base: `17da7f2d53c33886073a107ce72627f9e1ec5ce1`
-- Head: `76ef1d8b46fee76a50278e971d739256964db863`
-- Regenerate: `just agent-instruction-load report --base 17da7f2d53c33886073a107ce72627f9e1ec5ce1 --head 76ef1d8b46fee76a50278e971d739256964db863 --output <path>`
+- Base: `1b92fdf5b98c23266329256a70eb0bc6608dd659`
+- Head: `a80e5bf91c9d8d6c4f3a0cc4abb5cddb19ec1ed7`
+- Regenerate: `just agent-instruction-load report --base 1b92fdf5b98c23266329256a70eb0bc6608dd659 --head a80e5bf91c9d8d6c4f3a0cc4abb5cddb19ec1ed7 --output <path>`
 
 Bytes are UTF-8 lengths and words are whitespace-separated tokens; neither is a token count. A hot member loads on every run of its profile's standard route and a conditional member only on a named branch. A shared-tree member counts on both hosts; a Claude-only-tree member or an agent definition counts on Claude only.
 
@@ -20,7 +20,7 @@ Not measured: received prompts (each profile names its prompt's source document)
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 | from-issue-controller | claude | 88142 | 87439 | -703 | 11912 | 11813 | -99 | yes | Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). |
 | from-issue-controller | codex | 88142 | 87439 | -703 | 11912 | 11813 | -99 | yes | Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). |
-| orchestration-dispatcher | claude | 22315 | 22182 | -133 | 3060 | 3041 | -19 | yes | One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). |
+| orchestration-dispatcher | claude | 22594 | 22461 | -133 | 3100 | 3081 | -19 | yes | One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). |
 | orchestrated-issue-owner | claude | 147326 | 146623 | -703 | 19857 | 19758 | -99 | yes | Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). |
 | design-and-grill-owner | claude | 28445 | 28256 | -189 | 4171 | 4141 | -30 | yes | Phases 2–3 from AUTO.md's prompt: design, grill-with-docs and doc-grounded-questions. Their producer-report and explorer-escalation blocks stay per skill (#155 D5). |
 | design-and-grill-owner | codex | 28445 | 28256 | -189 | 4171 | 4141 | -30 | yes | Phases 2–3 from AUTO.md's prompt: design, grill-with-docs and doc-grounded-questions. Their producer-report and explorer-escalation blocks stay per skill (#155 D5). |
@@ -95,7 +95,7 @@ Not measured: received prompts (each profile names its prompt's source document)
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 | from-issue-controller | claude | 44273 | 44137 | -136 | 6204 | 6182 | -22 | yes | Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). |
 | from-issue-controller | codex | 34273 | 34205 | -68 | 4835 | 4824 | -11 | yes | Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). |
-| orchestration-dispatcher | claude | 0 | 0 | 0 | 0 | 0 | 0 | no | One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). |
+| orchestration-dispatcher | claude | 0 | 0 | 0 | 0 | 0 | 0 | no | One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). |
 | orchestrated-issue-owner | claude | 63441 | 63305 | -136 | 9312 | 9290 | -22 | yes | Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). |
 | design-and-grill-owner | claude | 22612 | 22544 | -68 | 3460 | 3449 | -11 | yes | Phases 2–3 from AUTO.md's prompt: design, grill-with-docs and doc-grounded-questions. Their producer-report and explorer-escalation blocks stay per skill (#155 D5). |
 | design-and-grill-owner | codex | 22612 | 22544 | -68 | 3460 | 3449 | -11 | yes | Phases 2–3 from AUTO.md's prompt: design, grill-with-docs and doc-grounded-questions. Their producer-report and explorer-escalation blocks stay per skill (#155 D5). |
@@ -194,7 +194,7 @@ Not measured: received prompts (each profile names its prompt's source document)
 | `grill-with-docs/CONTEXT-FORMAT.md` | claude, codex | 10602 | 10602 | 0 | 1643 | 1643 | 0 |
 | `grill-with-docs/SKILL.md` | claude, codex | 11760 | 11692 | -68 | 1766 | 1755 | -11 |
 | `handoff/SKILL.md` | claude, codex | 7626 | 7626 | 0 | 1123 | 1123 | 0 |
-| `orchestrate-issues/SKILL.md` | claude | 22315 | 22182 | -133 | 3060 | 3041 | -19 |
+| `orchestrate-issues/SKILL.md` | claude | 22594 | 22461 | -133 | 3100 | 3081 | -19 |
 | `prototype/LOGIC.md` | claude, codex | 5594 | 5594 | 0 | 958 | 958 | 0 |
 | `prototype/SKILL.md` | claude, codex | 4836 | 4836 | 0 | 776 | 776 | 0 |
 | `prototype/UI.md` | claude, codex | 6789 | 6789 | 0 | 1103 | 1103 | 0 |
