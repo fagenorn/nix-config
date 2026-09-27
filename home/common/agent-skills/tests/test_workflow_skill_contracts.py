@@ -664,8 +664,11 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         ]
         mutants = {
             "pre-fix route": (ladder, SHIP_PRE_FIX_ROUTE + "\n\n"),
+            # Injected after rung 3's full lead, so the lead check passes and
+            # the rung's no-`diff-review` guard is what raises.
             "diff-review in rung 3": (
-                "3. `unsupported`, or", "3. `unsupported` via `diff-review`, or"),
+                "this native first-pass dispatch, directly",
+                "this native first-pass dispatch via `diff-review`, directly"),
             "capacity rule leaves rung 2": (
                 "a capacity rejection binds", "a refusal binds"),
             "routing-error outcome kept": (
