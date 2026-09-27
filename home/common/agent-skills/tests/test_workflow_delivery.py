@@ -350,5 +350,112 @@ class InstalledIntentTest(unittest.TestCase):
             "the contract's initial intent declares no single scope for stage merge_pr")
 
 
+LEGACY = "/repo/.worktrees/worktree-issue-154"
+LIVE = "worktree-issue-154-shell-checker-examples"
+
+
+def sealed_members(snapshot):
+    """The seven policy members a contract seals, keyed as its provenance digest keys them."""
+    vcs, tracker = snapshot["bindings"]["vcs"], snapshot["bindings"]["tracker"]
+    return {"project_id": snapshot["project"]["id"], "tracker_kind": tracker["kind"],
+            "repository_slug": tracker["repo_slug"], "branch_pattern": vcs["branch_pattern"],
+            "worktree_prefix": vcs["worktree"]["prefix"],
+            "integration_branch": vcs["integration_branch"],
+            "delete_branch": vcs["merge"]["delete_branch"]}
+
+
+class WorktreeBranchTest(unittest.TestCase):
+    """#192 D2-D4, D19: a live branch names the contract only where the path cannot."""
+
+    SOURCE = {"kind": "explicit_user", "reference": "invocation:/from-issue 154 --auto"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.runtime = runpy.run_path(str(ENTRY))["DeliveryRuntime"](
+            notes_max_characters=10_000)
+        cls.policy = resolved_snapshot("/repo")
+
+    def value(self, worktree=LEGACY, **changes):
+        return {"issue": 154, "worktree": worktree, "source_kind": self.SOURCE["kind"],
+                "source_reference": self.SOURCE["reference"], "now": NOW, **changes}
+
+    def build(self, value, worktree_branch=None):
+        return self.runtime.build_delivery("contract", value, policy=self.policy,
+                                           worktree_branch=worktree_branch)
+
+    def refusal(self, value, worktree_branch=None):
+        with self.assertRaises(ValueError) as caught:
+            self.build(value, worktree_branch)
+        return str(caught.exception)
+
+    def digest(self, worktree, **branch):
+        return self.runtime.model.canonical_digest({
+            "policy": sealed_members(self.policy), "issue": 154, "worktree": worktree,
+            "source": self.SOURCE, **branch})
+
+    def test_only_a_well_formed_unpatterned_input_requires_a_worktree_branch(self):
+        gitlab = copy.deepcopy(self.policy)
+        gitlab["bindings"]["tracker"]["kind"] = "gitlab"
+        unslugged = copy.deepcopy(self.policy)
+        del unslugged["bindings"]["tracker"]["repo_slug"]
+        for label, value, policy, expected in (
+                ("slugless", self.value(), self.policy, True),
+                ("another issue's branch",
+                 self.value("/repo/.worktrees/worktree-issue-155-other"), self.policy, True),
+                ("patterned", self.value(f"/repo/.worktrees/{LIVE}"), self.policy, False),
+                ("patterned without the prefix",
+                 self.value("/repo/.worktrees/issue-154-shell"), self.policy, False),
+                ("relative", self.value(".worktrees/worktree-issue-154"), self.policy, False),
+                ("unnormalized", self.value("/repo/.worktrees/../worktree-issue-154"),
+                 self.policy, False),
+                ("unknown key", self.value(extra=True), self.policy, False),
+                ("unsourced kind", self.value(source_kind="parent_handoff"), self.policy,
+                 False),
+                ("bad clock", self.value(now="today"), self.policy, False),
+                ("not an object", "contract", self.policy, False),
+                ("no policy", self.value(), None, False),
+                ("non-github tracker", self.value(), gitlab, False),
+                ("missing sealed member", self.value(), unslugged, False)):
+            with self.subTest(label=label):
+                self.assertIs(self.runtime.requires_worktree_branch(value, policy), expected)
+
+    def test_a_live_branch_names_the_contract_and_enters_its_provenance(self):
+        built = self.build(self.value(), LIVE)
+        contract = built["contract"]
+        literals = {stage["id"]: stage["target_ref"].get("value")
+                    for stage in contract["stages"]}
+        self.assertEqual({stage["target_ref"]["constraints"]["branch"]
+                          for stage in contract["stages"]
+                          if stage["target_ref"]["kind"] == "slot"}, {LIVE})
+        self.assertEqual((literals["delete_remote_branch"], literals["delete_local_branch"],
+                          literals["remove_worktree"]), (LIVE, LIVE, LEGACY))
+        self.assertEqual(contract["provenance"]["digest"], self.digest(LEGACY, branch=LIVE))
+        # Re-derivation reads the branch from the contract, never from the path.
+        self.assertEqual(self.runtime.build_delivery(
+            "initial-intent", {"contract": contract}, policy=None), built["initial_intent"])
+
+    def test_a_patterned_name_wins_and_ignores_the_worktree_branch(self):
+        patterned = self.value(f"/repo/.worktrees/{LIVE}")
+        plain = self.build(patterned)
+        self.assertEqual(
+            self.runtime.model.canonical_bytes(
+                self.build(patterned, "worktree-issue-154-elsewhere")),
+            self.runtime.model.canonical_bytes(plain))
+        self.assertEqual(plain["contract"]["provenance"]["digest"],
+                         self.digest(f"/repo/.worktrees/{LIVE}"))
+
+    def test_refusals_keep_the_pattern_prefix_and_name_their_reason(self):
+        prefix = "worktree name 'worktree-issue-154' does not match the issue branch pattern"
+        self.assertEqual(self.refusal(self.value()), prefix)
+        for branch in ("feature-x", "worktree-issue-155-other"):
+            with self.subTest(branch=branch):
+                self.assertEqual(
+                    self.refusal(self.value(), branch),
+                    f"{prefix}, and its checked-out branch {branch!r} does not match either")
+        self.assertEqual(self.runtime.worktree_pattern_refusal(LEGACY), prefix)
+        self.assertEqual(
+            self.runtime.worktree_pattern_refusal(LEGACY, "the worktree is absent"),
+            prefix + ", and the worktree is absent")
+
 if __name__ == "__main__":
     unittest.main()

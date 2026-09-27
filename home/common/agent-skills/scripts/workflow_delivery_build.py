@@ -5,6 +5,9 @@ workflow-state resolves project policy and hands it in, and
 ``check_worktree_policy`` compares the members a contract seals across two such
 snapshots; every sealed object this module returns is validated again by
 DeliveryRuntime before it is printed.
+The one observed input a contract takes is ``worktree_branch``: the branch a
+worktree whose name is not an issue branch has checked out, which
+workflow-state reads only when ``requires_worktree_branch`` says so.
 The ``authorization-chain`` kind seals the handoff's chain digest over the intents
 an owner holds. Every kind that takes a contract works from its reference
 initial intent: the one derived from the contract when it re-derives, else the
@@ -192,6 +195,36 @@ def _sealed_policy(policy: object) -> dict[str, Any]:
     return {key: _policy_member(policy, path, kind) for key, path, kind in _SEALED_POLICY}
 
 
+def _contract_input(value: object, policy: object
+                    ) -> tuple[int, str, dict[str, Any], re.Pattern[str]]:
+    """Check one contract input and derive its issue branch regex (#192 §1).
+
+    The regex is the binding's pattern with `<num>` the decimal issue and
+    `<slug>` `[a-z0-9][a-z0-9-]*`, and the worktree prefix optional. The
+    refusals, in order, are the contract build's own.
+    """
+    value = _closed(value, _CONTRACT_INPUT)
+    issue, worktree = value["issue"], value["worktree"]
+    if (type(issue) is not int or issue < 1 or not isinstance(worktree, str)
+            or not isinstance(value["source_kind"], str)
+            or not isinstance(value["source_reference"], str)
+            or not value["source_reference"] or not isinstance(value["now"], str)
+            or _UTC.fullmatch(value["now"]) is None):
+        _refuse("builder input keys: mistyped contract input")
+    if value["source_kind"] not in _SOURCE_KINDS:
+        _refuse(f"source kind {value['source_kind']!r} cannot source an initial intent")
+    if not os.path.isabs(worktree) or os.path.normpath(worktree) != worktree:
+        _refuse("worktree must be absolute and normalized")
+    facts = _sealed_policy(policy)
+    if facts["tracker_kind"] != "github":
+        _refuse(f"tracker kind {facts['tracker_kind']!r} is unsupported")
+    pattern = "".join(
+        str(issue) if part == "<num>" else _SLUG if part == "<slug>" else re.escape(part)
+        for part in _PLACEHOLDER.split(facts["branch_pattern"]))
+    return issue, worktree, facts, re.compile(
+        f"(?:{re.escape(facts['worktree_prefix'])})?{pattern}")
+
+
 class DeliveryBuilder:
     """Derive sealed delivery objects from resolved policy and invocation facts."""
 
@@ -206,9 +239,10 @@ class DeliveryBuilder:
                               if kind in _OBSERVATIONS}
 
     def build(self, kind: str, value: object, *, policy: dict | None,
-              installed_intent: object = None) -> object:
+              installed_intent: object = None,
+              worktree_branch: str | None = None) -> object:
         if kind == "contract":
-            return self._build_contract(value, policy)
+            return self._build_contract(value, policy, worktree_branch)
         if kind == "initial-intent":
             _, intent = self._checked_contract(_closed(value, {"contract"})["contract"],
                                                installed_intent)
@@ -251,6 +285,26 @@ class DeliveryBuilder:
         except Exception:
             return False
 
+    def requires_worktree_branch(self, value: object, policy: object) -> bool:
+        """Whether a contract input needs the branch its live checkout has (#192 D3).
+
+        True only for an input the build would accept up to the pattern check
+        whose worktree name the issue branch regex rejects. Anything else answers
+        False whatever it raises, and then meets its own refusal in ``build``.
+        """
+        try:
+            _, worktree, _, branch_regex = _contract_input(value, policy)
+        except Exception:
+            return False
+        return branch_regex.fullmatch(PurePosixPath(worktree).name) is None
+
+    @staticmethod
+    def worktree_pattern_refusal(worktree: str, clause: str | None = None) -> str:
+        """The kept pattern refusal for ``worktree``, plus ``, and <clause>`` (#192 D19)."""
+        refusal = (f"worktree name {PurePosixPath(worktree).name!r} "
+                   "does not match the issue branch pattern")
+        return refusal if clause is None else f"{refusal}, and {clause}"
+
     def check_worktree_policy(self, repo_root_policy: object,
                               worktree_policy: object) -> None:
         """Refuse unless a worktree snapshot's sealed members equal the repo root's.
@@ -272,28 +326,21 @@ class DeliveryBuilder:
         value["id"] = self._model.canonical_digest(value, omit_derived="id")
         return value
 
-    def _build_contract(self, value: object, policy: object) -> dict[str, Any]:
-        value = _closed(value, _CONTRACT_INPUT)
-        issue, worktree = value["issue"], value["worktree"]
-        if (type(issue) is not int or issue < 1 or not isinstance(worktree, str)
-                or not isinstance(value["source_kind"], str)
-                or not isinstance(value["source_reference"], str)
-                or not value["source_reference"] or not isinstance(value["now"], str)
-                or _UTC.fullmatch(value["now"]) is None):
-            _refuse("builder input keys: mistyped contract input")
-        if value["source_kind"] not in _SOURCE_KINDS:
-            _refuse(f"source kind {value['source_kind']!r} cannot source an initial intent")
-        if not os.path.isabs(worktree) or os.path.normpath(worktree) != worktree:
-            _refuse("worktree must be absolute and normalized")
-        facts = _sealed_policy(policy)
-        if facts["tracker_kind"] != "github":
-            _refuse(f"tracker kind {facts['tracker_kind']!r} is unsupported")
-        branch = PurePosixPath(worktree).name
-        pattern = "".join(
-            str(issue) if part == "<num>" else _SLUG if part == "<slug>" else re.escape(part)
-            for part in _PLACEHOLDER.split(facts["branch_pattern"]))
-        if re.fullmatch(f"(?:{re.escape(facts['worktree_prefix'])})?{pattern}", branch) is None:
-            _refuse(f"worktree name {branch!r} does not match the issue branch pattern")
+    def _build_contract(self, value: object, policy: object,
+                        worktree_branch: object) -> dict[str, Any]:
+        issue, worktree, facts, branch_regex = _contract_input(value, policy)
+        name = PurePosixPath(worktree).name
+        live = None
+        if branch_regex.fullmatch(name) is None:
+            if worktree_branch is None:
+                _refuse(self.worktree_pattern_refusal(worktree))
+            if (not isinstance(worktree_branch, str)
+                    or branch_regex.fullmatch(worktree_branch) is None):
+                _refuse(self.worktree_pattern_refusal(
+                    worktree,
+                    f"its checked-out branch {worktree_branch!r} does not match either"))
+            live = worktree_branch
+        branch = name if live is None else live
         slug = facts["repository_slug"]
         project = {"project_id": facts["project_id"], "provider": facts["tracker_kind"],
                    "repository_id": slug, "repository_slug": slug}
@@ -333,8 +380,8 @@ class DeliveryBuilder:
             "initial_authorization_intent_id": None,
             "initial_authorization_intent_digest": None,
             "provenance": {**source, "digest": self._model.canonical_digest({
-                "policy": dict(facts),
-                "issue": issue, "worktree": worktree, "source": source}),
+                "policy": dict(facts), "issue": issue, "worktree": worktree,
+                "source": source, **({} if live is None else {"branch": live})}),
                 "created_at": value["now"]},
         }
         intent = self._intent(contract)
