@@ -1837,11 +1837,12 @@ def control_summary(
     issue_state: dict[str, Any] | None,
     reduction=None,
     contract_required: bool = False,
+    unresumable: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return _delivery().control_summary(
         issue=issue, tracker=tracker, issue_state=issue_state, reduction=reduction,
         blockers=control_blockers(tracker), result_fields=RESULT_FIELDS,
-        contract_required=contract_required)
+        contract_required=contract_required, unresumable=unresumable)
 
 
 def _apply_one_issue_policy(
@@ -2440,6 +2441,26 @@ def command_control(args: argparse.Namespace) -> int:
             waiting.add(issue)
             return True
 
+        unresumable: dict[int, dict[str, str]] = {}
+
+        def worktree_unresumable(issue: int, result: dict[str, Any]) -> bool:
+            """Whether a truthful recorded-worktree fact ends this resume for its issue (#194 D1).
+
+            It holds when the dispatch-permitted plan asked for exactly one
+            recorded worktree and the caller reported that same path as
+            ``absent`` or ``mismatch``; the observation is kept for the issue's
+            summary. Any other ``observe`` is a caller-protocol error that the
+            resume lane still raises.
+            """
+            observation = worktree_by_issue.get(issue)
+            recorded = None if observation is None else observation["recorded"]
+            if (recorded is None or recorded["state"] not in {"absent", "mismatch"}
+                    or result["requirements"] != [{"kind": "recorded_worktree",
+                                                   "path": recorded["path"]}]):
+                return False
+            unresumable[issue] = {"path": recorded["path"], "state": recorded["state"]}
+            return True
+
         def acquire(issue: int) -> None:
             """Claim the role set of the launch this dispatch created, once (D21)."""
             nonlocal available, acquired
@@ -2551,16 +2572,22 @@ def command_control(args: argparse.Namespace) -> int:
                 # observe — it was terminal until this sweep learned to resume it
                 # — so saying nothing about its worktree is a round still owed,
                 # not a fault: the summary reports the pause and its worktree,
-                # and the next sweep resumes it. A handoff, and any worktree
-                # observed as absent or mismatched, stays a refusal (per D9).
+                # and the next sweep resumes it. An unobserved handoff stays a
+                # whole-sweep error; a worktree observed as absent or mismatched
+                # refuses only its own issue, in its summary (per D9; #194 D1).
                 continue
             if refusal_gated(issue) or slot_withheld(issue):
                 continue
             result = apply_policy(issue, True)
             if result["operation"] == "observe":
-                raise WorkflowError(
-                    "resume control action requires a matching recorded worktree observation"
-                )
+                if not worktree_unresumable(issue, result):
+                    raise WorkflowError(
+                        "resume control action requires a matching recorded worktree observation"
+                    )
+                # Persist only what a withheld dispatch would: this sweep's reap
+                # and its `expired` delta, with no admission (#194 D4).
+                apply_policy(issue, False)
+                continue
             admit(issue, result)
 
         for issue in request["issues"]:
@@ -2755,6 +2782,7 @@ def command_control(args: argparse.Namespace) -> int:
                     (issue in planned and planned[issue]["operation"] == "contract")
                     or (issue in waiting and contract_missing(issue))
                 ),
+                unresumable=unresumable.get(issue),
             )
             for issue in request["issues"]
         ]

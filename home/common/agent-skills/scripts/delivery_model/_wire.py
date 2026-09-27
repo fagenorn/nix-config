@@ -174,7 +174,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
     if type(value["interface_version"]) is not int or value["interface_version"] != 3: _reject()
     if value["next_deadline"] is not None: _utc(value["next_deadline"], "next deadline")
     if not all(isinstance(value[name], list) for name in ("summaries", "deltas", "actions")): _reject()
-    issues = set(); missing_contracts = set(); order = []
+    issues = set(); missing_contracts = set(); unresumable = set(); order = []
     for item in value["summaries"]:
         item = _object(item, _members("issue state custody owner worktree deadline_at blocked_on blockers result contract_digest pending_stage_ids requirements"))
         issue = _integer(item["issue"], "summary issue", minimum=1)
@@ -185,10 +185,18 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
             if item[name] is not None: (_digest if name == "contract_digest" else _string)(item[name], name)
         if item["result"] is not None and not isinstance(item["result"], dict): _reject()
         _blockers(item["blockers"]); _pending(item["pending_stage_ids"], None); _requirements(item["requirements"], sorted_values=True)
+        facts = [entry for entry in item["requirements"] if entry["kind"] == "worktree_fact"]
+        if facts:
+            if (len(facts) != 1
+                    or facts[0]["reason_code"] not in {"recorded_worktree_absent", "recorded_worktree_mismatch"}
+                    or facts[0]["detail_pointer"] is not None
+                    or (item["worktree"] is not None and facts[0]["subject_id"] != item["worktree"])): _reject()
+            unresumable.add(issue)
         if item["contract_digest"] is None:
             expected = {"kind": "delivery_contract", "subject_id": str(issue),
                         "reason_code": "delivery_contract_required", "detail_pointer": None}
-            if item["pending_stage_ids"] or item["requirements"] not in ([], [expected]): _reject()
+            remaining = [entry for entry in item["requirements"] if entry["kind"] != "worktree_fact"]
+            if item["pending_stage_ids"] or remaining not in ([], [expected]): _reject()
             missing_contracts.add(issue)
     for item in value["deltas"]:
         item = _object(item, _members("issue custody kind state")); issue = _integer(item["issue"], "delta issue", minimum=1)
@@ -204,7 +212,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
         elif item["kind"] == "finalize": _object(item, _members("id kind")); _string(item["id"], "finalize id")
         elif item["kind"] == "delivery_remainder": _remainder(item, notes_max)
         else: _reject()
-    if any(action.get("issue") in missing_contracts for action in value["actions"]): _reject()
+    if any(action.get("issue") in missing_contracts | unresumable for action in value["actions"]): _reject()
     waiting = _admission_report(value["admission"], order)
     if any(action.get("issue") in waiting for action in value["actions"]): _reject()
     return value

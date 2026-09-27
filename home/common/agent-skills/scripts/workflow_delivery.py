@@ -985,7 +985,12 @@ class DeliveryRuntime:
 
 
     def control_summary(self, **values: Any) -> dict[str, Any]:
-        return self._projection.control_summary(**values)
+        summary = self._projection.control_summary(**values)
+        if values.get("unresumable") is not None:
+            # The projection holds no canonical form; the fact joins the
+            # requirements in the validator's canonical-bytes order (#194 D13).
+            summary["requirements"].sort(key=self._model.canonical_bytes)
+        return summary
 
 
     def control_transitions(

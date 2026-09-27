@@ -1025,6 +1025,54 @@ class DeliveryModelTest(unittest.TestCase):
             with self.subTest(invalid_reason=reason):
                 self.assert_invalid(value, "workflow-response")
 
+    def test_control_summaries_admit_one_closed_unresumable_worktree_fact(self):
+        """T5 (#194): the per-issue resume refusal's closed rules at the control boundary."""
+        fixtures = workflow_responses(self.model)
+        fact = {"kind": "worktree_fact", "subject_id": "/worktree",
+                "reason_code": "recorded_worktree_absent", "detail_pointer": None}
+        contract_required = {"kind": "delivery_contract", "subject_id": "151",
+                             "reason_code": "delivery_contract_required",
+                             "detail_pointer": None}
+
+        def with_fact(requirements, *, contracted=True, worktree="/worktree", dispatch=False):
+            """The control fixture with issue 151 refused: no delta, only `finalize`."""
+            value = copy.deepcopy(fixtures["control"])
+            summary = value["summaries"][0]
+            summary.update(worktree=worktree, requirements=sorted(
+                copy.deepcopy(requirements), key=self.model.canonical_bytes))
+            if not contracted:
+                summary.update(contract_digest=None, pending_stage_ids=[])
+            owner = fixtures["control"]["actions"]
+            value.update(deltas=[], next_deadline=None, actions=[
+                *(copy.deepcopy(owner) if dispatch else []),
+                {"id": "finalize", "kind": "finalize"}])
+            return value
+
+        mismatch = {**fact, "reason_code": "recorded_worktree_mismatch"}
+        for name, value in {
+                "contracted_absent": with_fact([fact]),
+                "contracted_mismatch": with_fact([mismatch]),
+                "contractless": with_fact([fact], contracted=False),
+                "contractless_with_its_contract_requirement": with_fact(
+                    [contract_required, fact], contracted=False),
+                "no_summary_worktree": with_fact(
+                    [{**fact, "subject_id": "/removed"}], worktree=None),
+        }.items():
+            with self.subTest(accepted=name):
+                self.assertEqual(self.validate(value, "workflow-response"), value)
+        for name, value in {
+                "unknown_code": with_fact([{**fact, "reason_code": "recorded_worktree_gone"}]),
+                "detail_pointer": with_fact([{**fact, "detail_pointer": "/detail"}]),
+                "other_subject": with_fact([{**fact, "subject_id": "/elsewhere"}]),
+                "two_facts": with_fact([fact, mismatch]),
+                "dispatched": with_fact([fact], dispatch=True),
+                "contractless_extra": with_fact([fact, {"kind": "scope_tuple",
+                    "subject_id": "select", "reason_code": "scope_tuple_required",
+                    "detail_pointer": None}], contracted=False),
+        }.items():
+            with self.subTest(rejected=name):
+                self.assert_invalid(value, "workflow-response")
+
     def test_ship_handoff_cross_references_and_contract_order(self):
         contract, delivery = contract_and_delivery(self.model)
         handoff = ship_handoff(self.model, contract, delivery)

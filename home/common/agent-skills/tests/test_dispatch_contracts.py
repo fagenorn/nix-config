@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from skill_tree_support import (  # noqa: E402
     INSTALLED_VIEWS,
+    REPO_ROOT,
     SHARED_TREE,
     SOURCE_TREES,
     installed_home_or_skip,
@@ -187,6 +188,68 @@ def _source_path(carrier):
 
 def _live(carrier):
     return _source_path(carrier).read_text(encoding="utf-8")
+
+
+AGENT_DEFINITIONS = REPO_ROOT / "home/common/claude-code/agents"
+GLOBAL_GUIDANCE = REPO_ROOT / "home/common/agent-guidance/AGENTS.md"
+
+
+def guarded_documents():
+    """Label -> text of every document the stray-copy guard reads: each living
+    `*.md` of both source trees outside `evals/` (labelled `<tree>:<skill>/<file>`),
+    each Claude agent definition (`agents/<name>.md`) and the global guidance
+    file (`agent-guidance/AGENTS.md`)."""
+    documents = {}
+    for tree, root in SOURCE_TREES.items():
+        for path in sorted(root.rglob("*.md")):
+            relative = path.relative_to(root)
+            if "evals" not in relative.parts:
+                documents[f"{tree}:{relative.as_posix()}"] = path.read_text(encoding="utf-8")
+    for path in sorted(AGENT_DEFINITIONS.glob("*.md")):
+        documents[f"agents/{path.name}"] = path.read_text(encoding="utf-8")
+    documents["agent-guidance/AGENTS.md"] = GLOBAL_GUIDANCE.read_text(encoding="utf-8")
+    return documents
+
+
+def stray_copies(documents):
+    """`<label>: <contract id>` for each clause that occurs in a document
+    outside an enrolled carrier's rendered region, in label then contract order."""
+    carriers = {f"{carrier.tree}:{carrier.relative}": carrier for carrier in CARRIERS}
+    found = []
+    for label in sorted(documents):
+        text = documents[label]
+        carrier = carriers.get(label)
+        region = _rendered_region(carrier, text) if carrier is not None else ""
+        for contract_id, clause in CONTRACTS.items():
+            pattern = _clause_pattern(clause)
+            if len(pattern.findall(text)) > len(pattern.findall(region)):
+                found.append(f"{label}: {contract_id}")
+    return found
+
+
+class StrayCopyGuardTest(unittest.TestCase):
+    def test_no_clause_occurs_outside_an_enrolled_region(self):
+        self.assertEqual(stray_copies(guarded_documents()), [])
+
+    def test_the_guard_reads_both_trees_the_agent_definitions_and_the_guidance(self):
+        labels = set(guarded_documents())
+        for label in ("shared:worktrees/SKILL.md", "claude-only:orchestrate-issues/SKILL.md",
+                      "agents/reviewer.md", "agent-guidance/AGENTS.md"):
+            self.assertIn(label, labels)
+        self.assertFalse([label for label in labels if "/evals/" in label])
+
+    def test_a_copy_outside_a_region_names_its_document(self):
+        clause = CONTRACTS["launch-by-type"]
+        for label, mutate in (
+            ("shared:worktrees/SKILL.md", lambda text: text + "\n\n" + clause + "\n"),
+            ("shared:sdd/implementer-prompt.md", lambda text: clause + "\n\n" + text),
+            ("shared:from-issue/SKILL.md", lambda text: text + "\n\n" + clause + "\n"),
+            ("agent-guidance/AGENTS.md", lambda text: text + "\n" + clause + "\n"),
+        ):
+            with self.subTest(document=label):
+                documents = guarded_documents()
+                documents[label] = mutate(documents[label])
+                self.assertEqual(stray_copies(documents), [f"{label}: launch-by-type"])
 
 
 class SourceTreeContractsTest(unittest.TestCase):

@@ -1,0 +1,864 @@
+{
+  "frame": "agent-guidance/AGENTS.md",
+  "profiles": [
+    {
+      "id": "from-issue-controller",
+      "entry": "from-issue",
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": null,
+      "hot": [
+        "from-issue/SKILL.md",
+        "from-issue/AUTO.md",
+        "from-issue/bindings.md",
+        "from-issue/investigate.md",
+        "from-issue/grounding.md",
+        "from-issue/decision-ledger.md",
+        "from-issue/standards-review.md",
+        "doc-grounded-questions/SKILL.md",
+        "worktrees/SKILL.md"
+      ],
+      "conditional": [
+        "from-issue/ship-handoff.md",
+        "handoff/SKILL.md",
+        "wayfind/SKILL.md",
+        "wayfind/DISCIPLINE.md",
+        "doc-grounded-questions/REFERENCE.md",
+        "codex-collaboration/SKILL.md",
+        "codex-collaboration/PLAN-REVIEW.md"
+      ],
+      "unread": {
+        "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation",
+        "codex-collaboration/DIFF-REVIEW.md": "diff-review is not a Phase 0–5 operation"
+      },
+      "ceiling_bytes": {
+        "claude": 87439,
+        "codex": 87439
+      },
+      "note": "Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6)."
+    },
+    {
+      "id": "orchestration-dispatcher",
+      "entry": "orchestrate-issues",
+      "hosts": [
+        "claude"
+      ],
+      "prompt": null,
+      "hot": [
+        "orchestrate-issues/SKILL.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 22461
+      },
+      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19)."
+    },
+    {
+      "id": "orchestrated-issue-owner",
+      "launch": [
+        "orchestration-issue-owner"
+      ],
+      "hosts": [
+        "claude"
+      ],
+      "prompt": "orchestrate-issues/SKILL.md",
+      "hot": [
+        "from-issue/SKILL.md",
+        "from-issue/AUTO.md",
+        "from-issue/bindings.md",
+        "from-issue/investigate.md",
+        "from-issue/grounding.md",
+        "from-issue/decision-ledger.md",
+        "from-issue/standards-review.md",
+        "from-issue/ship-handoff.md",
+        "doc-grounded-questions/SKILL.md",
+        "worktrees/SKILL.md",
+        "sdd/SKILL.md",
+        "sdd/implementer-prompt.md",
+        "sdd/task-reviewer-prompt.md",
+        "sdd/final-review.md",
+        "sdd/conformance-reviewer-prompt.md"
+      ],
+      "conditional": [
+        "sdd/fix-loop.md",
+        "sdd/re-review-prompt.md",
+        "sdd/correctness-reviewer-prompt.md",
+        "codex-collaboration/SKILL.md",
+        "codex-collaboration/PLAN-REVIEW.md",
+        "codex-collaboration/DIFF-REVIEW.md",
+        "handoff/SKILL.md",
+        "wayfind/SKILL.md",
+        "wayfind/DISCIPLINE.md",
+        "doc-grounded-questions/REFERENCE.md"
+      ],
+      "unread": {
+        "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation"
+      },
+      "ceiling_bytes": {
+        "claude": 146623
+      },
+      "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19)."
+    },
+    {
+      "id": "design-and-grill-owner",
+      "launch": [
+        "from-issue-design-grill"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "from-issue/AUTO.md",
+      "hot": [
+        "design/SKILL.md",
+        "grill-with-docs/SKILL.md",
+        "doc-grounded-questions/SKILL.md"
+      ],
+      "conditional": [
+        "grill-with-docs/CONTEXT-FORMAT.md",
+        "grill-with-docs/ADR-FORMAT.md",
+        "doc-grounded-questions/REFERENCE.md",
+        "research/SKILL.md"
+      ],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 28256,
+        "codex": 28256
+      },
+      "note": "Phases 2–3 from AUTO.md's prompt: design, grill-with-docs and doc-grounded-questions. Their producer-report and explorer-escalation blocks stay per skill (#155 D5)."
+    },
+    {
+      "id": "planning-owner",
+      "launch": [
+        "from-issue-planning"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "from-issue/AUTO.md",
+      "hot": [
+        "writing-plans/SKILL.md",
+        "doc-grounded-questions/SKILL.md"
+      ],
+      "conditional": [
+        "doc-grounded-questions/REFERENCE.md",
+        "from-issue/REVIEW-CONTRACT.md"
+      ],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 22322,
+        "codex": 22322
+      },
+      "note": "Phase 4 from AUTO.md's prompt: writing-plans and doc-grounded-questions, plus the review contract for a mechanical-only self-grade. The producer-report block stays per skill (#155 D5)."
+    },
+    {
+      "id": "implementation-owner",
+      "launch": [
+        "from-issue-phase-delegate"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "from-issue/AUTO.md",
+      "hot": [
+        "from-issue/SKILL.md",
+        "from-issue/AUTO.md",
+        "from-issue/bindings.md",
+        "from-issue/ship-handoff.md",
+        "sdd/SKILL.md",
+        "sdd/implementer-prompt.md",
+        "sdd/task-reviewer-prompt.md",
+        "sdd/final-review.md",
+        "sdd/conformance-reviewer-prompt.md",
+        "sdd/correctness-reviewer-prompt.md",
+        "worktrees/SKILL.md"
+      ],
+      "conditional": [
+        "sdd/fix-loop.md",
+        "sdd/re-review-prompt.md",
+        "codex-collaboration/SKILL.md",
+        "codex-collaboration/DIFF-REVIEW.md",
+        "from-issue/decision-ledger.md",
+        "handoff/SKILL.md"
+      ],
+      "unread": {
+        "from-issue/investigate.md": "Phase 0 ran in the earlier controller",
+        "from-issue/grounding.md": "Phases 2–5 ran in the earlier controller",
+        "from-issue/standards-review.md": "Phase 5 ran in the earlier controller",
+        "from-issue/REVIEW-CONTRACT.md": "the Phase-5 reviewer contract, handed over by path",
+        "codex-collaboration/PLAN-REVIEW.md": "plan-review ran at Phase 5"
+      },
+      "ceiling_bytes": {
+        "claude": 137669,
+        "codex": 137669
+      },
+      "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19)."
+    },
+    {
+      "id": "ship-owner",
+      "launch": [
+        "from-issue-ship-owner"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "from-issue/ship-handoff.md",
+      "hot": [
+        "ship-issue/SKILL.md",
+        "ship-issue/SYNC.md",
+        "ship-issue/REVIEW.md",
+        "ship-issue/CONSOLIDATE.md"
+      ],
+      "conditional": [
+        "ship-issue/CI-MERGE.md",
+        "ship-issue/HUMAN-GATE.md",
+        "doc-grounded-questions/SKILL.md",
+        "doc-grounded-questions/REFERENCE.md",
+        "codex-collaboration/SKILL.md",
+        "codex-collaboration/DIFF-REVIEW.md"
+      ],
+      "unread": {
+        "codex-collaboration/PLAN-REVIEW.md": "plan-review is not a ship operation"
+      },
+      "ceiling_bytes": {
+        "claude": 52871,
+        "codex": 52871
+      },
+      "note": "ship-issue from ship-handoff.md's prompt, with its sync, review and consolidation files. The lifecycle stdin clause stays per entry (#155 D5)."
+    },
+    {
+      "id": "release-owner",
+      "launch": [
+        "ship-release-owner"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "ship-release/SKILL.md",
+      "hot": [
+        "ship-release/SKILL.md",
+        "ship-release/CHANGELOG.md"
+      ],
+      "conditional": [
+        "doc-grounded-questions/SKILL.md",
+        "doc-grounded-questions/REFERENCE.md",
+        "worktrees/SKILL.md"
+      ],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 41929,
+        "codex": 41929
+      },
+      "note": "One delegated release through ship-release and its changelog rubric."
+    },
+    {
+      "id": "researcher",
+      "launch": [
+        "research-background-researcher"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "research/SKILL.md",
+      "hot": [],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
+      "note": "The background researcher works from the job list in research's prompt and loads no skill document."
+    },
+    {
+      "id": "architecture-scan-owner",
+      "launch": [
+        "improve-architecture-scan-owner"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "improve-codebase-architecture/SKILL.md",
+      "hot": [
+        "codebase-design/SKILL.md",
+        "doc-grounded-questions/SKILL.md"
+      ],
+      "conditional": [
+        "codebase-design/DEEPENING.md",
+        "codebase-design/DESIGN-IT-TWICE.md",
+        "doc-grounded-questions/REFERENCE.md"
+      ],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 12945,
+        "codex": 12945
+      },
+      "note": "The read-only scan from improve-codebase-architecture's prompt. The codebase-design vocabulary and the grounding pass are ambiguous between caller and scan owner, so they count as hot."
+    },
+    {
+      "id": "research",
+      "entry": "research",
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": null,
+      "hot": [
+        "research/SKILL.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 3617,
+        "codex": 3617
+      },
+      "note": "A standalone research launch. It loads only its entry."
+    },
+    {
+      "id": "wayfind",
+      "entry": "wayfind",
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": null,
+      "hot": [
+        "wayfind/SKILL.md",
+        "grill-with-docs/SKILL.md"
+      ],
+      "conditional": [
+        "wayfind/DISCIPLINE.md",
+        "grill-with-docs/CONTEXT-FORMAT.md",
+        "grill-with-docs/ADR-FORMAT.md",
+        "research/SKILL.md",
+        "prototype/SKILL.md",
+        "prototype/LOGIC.md",
+        "prototype/UI.md",
+        "worktrees/SKILL.md"
+      ],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 20356,
+        "codex": 20356
+      },
+      "note": "One decision session. Grilling is the default mode; research and prototype sessions are conditional."
+    },
+    {
+      "id": "to-issues",
+      "entry": "to-issues",
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": null,
+      "hot": [
+        "to-issues/SKILL.md"
+      ],
+      "conditional": [
+        "to-issues/WIDE-REFACTORS.md"
+      ],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 9308,
+        "codex": 9308
+      },
+      "note": "One slicing run. The wide-refactor exception is conditional."
+    },
+    {
+      "id": "ship-release",
+      "entry": "ship-release",
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": null,
+      "hot": [
+        "ship-release/SKILL.md",
+        "ship-release/CHANGELOG.md"
+      ],
+      "conditional": [
+        "doc-grounded-questions/SKILL.md",
+        "doc-grounded-questions/REFERENCE.md",
+        "worktrees/SKILL.md"
+      ],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 41929,
+        "codex": 41929
+      },
+      "note": "A direct interactive release, with the current session as owner."
+    },
+    {
+      "id": "plan-reviewer",
+      "launch": [
+        "from-issue-plan-review"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "from-issue/standards-review.md",
+      "hot": [
+        "agents/reviewer.md",
+        "from-issue/REVIEW-CONTRACT.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 9854,
+        "codex": 8839
+      },
+      "note": "The Phase-5 plan reviewer: its agent definition on Claude and the review contract it is told to read. Its prompt comes from standards-review.md."
+    },
+    {
+      "id": "from-issue-mechanic",
+      "launch": [
+        "from-issue-mechanical-implementation",
+        "from-issue-ledger-remainder"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "from-issue/SKILL.md",
+      "hot": [
+        "agents/mechanic.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 679,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from from-issue/SKILL.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "from-issue-mechanical-reviewer",
+      "launch": [
+        "from-issue-mechanical-review"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "from-issue/SKILL.md",
+      "hot": [
+        "agents/reviewer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1015,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from from-issue/SKILL.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "inline-ship-reviewer",
+      "launch": [
+        "from-issue-inline-ship-review"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "from-issue/ship-handoff.md",
+      "hot": [
+        "agents/reviewer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1015,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from from-issue/ship-handoff.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "design-explorer",
+      "launch": [
+        "design-bounded-fact-lookup"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "design/SKILL.md",
+      "hot": [],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
+      "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from design/SKILL.md."
+    },
+    {
+      "id": "grill-explorer",
+      "launch": [
+        "grill-bounded-fact-lookup"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "grill-with-docs/SKILL.md",
+      "hot": [],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
+      "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from grill-with-docs/SKILL.md."
+    },
+    {
+      "id": "planning-explorer",
+      "launch": [
+        "planning-bounded-fact-lookup"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "writing-plans/SKILL.md",
+      "hot": [],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
+      "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from writing-plans/SKILL.md."
+    },
+    {
+      "id": "grounding-explorer",
+      "launch": [
+        "doc-grounded-bounded-code-lookup"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "doc-grounded-questions/SKILL.md",
+      "hot": [],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
+      "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from doc-grounded-questions/SKILL.md."
+    },
+    {
+      "id": "sdd-mechanic",
+      "launch": [
+        "sdd-mechanic-implementation"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/implementer-prompt.md",
+      "hot": [
+        "agents/mechanic.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 679,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/implementer-prompt.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-implementer",
+      "launch": [
+        "sdd-nonmechanical-implementation"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/implementer-prompt.md",
+      "hot": [
+        "agents/implementer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1089,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/implementer-prompt.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-task-reviewer",
+      "launch": [
+        "sdd-first-pass-task-review"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/task-reviewer-prompt.md",
+      "hot": [
+        "agents/reviewer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1015,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/task-reviewer-prompt.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-task-rereviewer",
+      "launch": [
+        "sdd-scoped-task-rereview"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/re-review-prompt.md",
+      "hot": [
+        "agents/reviewer-lite.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1443,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/re-review-prompt.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-lane-verifier",
+      "launch": [
+        "sdd-lane-task-verification"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/SKILL.md",
+      "hot": [
+        "agents/reviewer-lite.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1443,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/SKILL.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-fix-implementer",
+      "launch": [
+        "sdd-post-rescue-implementation",
+        "sdd-rescue-fallback-implementation",
+        "sdd-round-five-implementation"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/fix-loop.md",
+      "hot": [
+        "agents/implementer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1089,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/fix-loop.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-fix-escalation-reviewer",
+      "launch": [
+        "sdd-task-rereview-escalation"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/fix-loop.md",
+      "hot": [
+        "agents/reviewer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1015,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/fix-loop.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-conformance-reviewer",
+      "launch": [
+        "sdd-final-conformance-review"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/conformance-reviewer-prompt.md",
+      "hot": [
+        "agents/reviewer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1015,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/conformance-reviewer-prompt.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-correctness-reviewer",
+      "launch": [
+        "sdd-final-correctness-review"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/correctness-reviewer-prompt.md",
+      "hot": [
+        "agents/reviewer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1015,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/correctness-reviewer-prompt.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-final-fixer",
+      "launch": [
+        "sdd-final-review-fixer"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/final-review.md",
+      "hot": [
+        "agents/implementer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1089,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/final-review.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-final-rereviewer",
+      "launch": [
+        "sdd-final-conformance-rereview",
+        "sdd-final-correctness-rereview"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/final-review.md",
+      "hot": [
+        "agents/reviewer-lite.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1443,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/final-review.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "sdd-final-escalation-reviewer",
+      "launch": [
+        "sdd-final-rereview-escalation"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "sdd/final-review.md",
+      "hot": [
+        "agents/reviewer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1015,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/final-review.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "ship-issue-reviewer",
+      "launch": [
+        "ship-issue-merge-delta-review",
+        "ship-issue-full-conformance-review",
+        "ship-issue-full-correctness-fallback"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "ship-issue/SKILL.md",
+      "hot": [
+        "agents/reviewer.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1015,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from ship-issue/SKILL.md, whose leaf clauses #153 holds (#155 D5)."
+    },
+    {
+      "id": "ship-issue-rereviewer",
+      "launch": [
+        "ship-issue-scoped-fix-rereview"
+      ],
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "prompt": "ship-issue/SKILL.md",
+      "hot": [
+        "agents/reviewer-lite.md"
+      ],
+      "conditional": [],
+      "unread": {},
+      "ceiling_bytes": {
+        "claude": 1443,
+        "codex": 0
+      },
+      "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from ship-issue/SKILL.md, whose leaf clauses #153 holds (#155 D5)."
+    }
+  ],
+  "excluded_sites": {
+    "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
+  }
+}
