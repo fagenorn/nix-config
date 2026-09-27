@@ -160,9 +160,7 @@ every finding against live code. Accepted: 9. Rejected: 1. Deferred: 0.
   independently verified, S1, S3 and D5: D26, Task 6. S2: D27, Task 3. D1: D28,
   Task 4. D2: T8's two checkpoint shapes, Task 5. D4: Task 2's helper edit.
 - **Rejected.** D3: reusing `authored_policy()` for a test-only mapping.
-- **Re-review.** A scoped `reviewer-lite` pass over the fix diff
-  `6307110..4a6a9e0` judged all nine accepted findings resolved and raised no
-  Blocking or Should-fix finding. Its one cosmetic note, two long lines in
-  the dictated CI-MERGE.md prose, was left as is.
+- **Re-review.** A scoped pass over `6307110..4a6a9e0` found all nine
+  resolved; its cosmetic line-wrap note was left.
 
 ---
