@@ -233,5 +233,5 @@ git add home/common/agent-skills/scripts/delivery_model/_wire.py \
   home/common/agent-skills/tests/_delivery_model_fixtures.py \
   home/common/agent-skills/tests/test_delivery_model.py \
   home/common/agent-skills/tests/test_workflow_state.py
-git commit -m "fix(agent-skills): reply to suspend with a closed suspended or its terminal replay (#191)"
+git commit -m "fix(agent-skills): reply to suspend with a closed suspended or its terminal replay (#191)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```

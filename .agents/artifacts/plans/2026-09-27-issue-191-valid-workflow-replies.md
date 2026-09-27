@@ -24,7 +24,7 @@ breached instruction-load ceilings and runs the final gate.
 
 Spec (the source of truth; read it whole):
 `.agents/artifacts/specs/2026-09-27-issue-191-valid-workflow-replies-design.md`,
-decision ledger D1–D10.
+decision ledger D1–D11.
 
 ## Global Constraints
 
@@ -136,3 +136,21 @@ the design. Planning added two rows. **D9** fixes the test-seam mechanics: one
 contractless-ledger recipe. **D10** fixes the ledger-result rule's dispatch on
 the reconciliation signature and the keyword-only `rule` argument. The ceiling
 raise follows #155 D10 and D29 unchanged.
+
+## Standards review provenance
+
+- Reviewer: **Claude fallback** (native `reviewer`, Opus/high, fresh context,
+  read-only), reviewing HEAD `9c76a78` on base `6ab576e`. Codex (`codex-review`,
+  `gpt-6-astra`/`xhigh`, read-only sandbox, ephemeral) ran first and completed,
+  but its JSONL carried no runtime-selection event, so the model and effort could
+  not be verified. That is a metadata failure, which takes the one native
+  fallback with the same packet. Codex's single finding (an unpiped `just build`
+  gate) was then verified independently against the live plan and accepted.
+- Accepted 5: commit trailers in every member's commit step; the
+  `validate_ledger_result` docstring now matches D3; a note on the seam-2
+  placement (task 1); a corrected suite rationale (task 2); the unpiped build
+  gate (task 4).
+- Rejected 2: a parity test per closed-set value (per D11); rescoping SKILL.md's
+  "Suspension is NOT a terminal return." (low confidence, since the sentence
+  governs only the suspension path, and task 4 pins it byte for byte).
+- Deferred 0.

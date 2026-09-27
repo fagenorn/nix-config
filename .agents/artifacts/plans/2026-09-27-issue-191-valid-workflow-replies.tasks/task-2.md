@@ -207,7 +207,7 @@ Summarize every run with the Step 2 `grep -E` filter.
 
 1. `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_model.py home/common/agent-skills/tests/test_artifact_budget.py` → `OK`. `test_artifact_budget` validates every fixture through the CLI.
 2. `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_host_admission.py` → `OK`. This takes about 12 minutes, so run it once. Every `progress()` call is now a boundary regression.
-3. `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_workflow_delivery.py home/common/agent-skills/tests/test_admission_replay.py` → `OK`. These call `progress` through the CLI without reading its reply.
+3. `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_workflow_delivery.py home/common/agent-skills/tests/test_admission_replay.py` → `OK`. Of these, only `test_delivery_workflow.py` calls `progress` (through the CLI, without reading its reply); the other two are regression coverage of the shared delivery model and lifecycle helper.
 4. The Step 1(d) `grep` prints nothing.
 
 - [ ] **Step 5: Commit**
@@ -218,5 +218,5 @@ git add home/common/agent-skills/scripts/delivery_model/_wire.py \
   home/common/agent-skills/tests/_delivery_model_fixtures.py \
   home/common/agent-skills/tests/test_delivery_model.py \
   home/common/agent-skills/tests/test_workflow_state.py
-git commit -m "fix(agent-skills): reply to progress with a closed phase_gate (#191)"
+git commit -m "fix(agent-skills): reply to progress with a closed phase_gate (#191)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```

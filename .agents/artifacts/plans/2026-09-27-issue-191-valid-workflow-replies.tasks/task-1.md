@@ -39,7 +39,10 @@ Per D2, D3, D4, D7, D9, D10. Abbreviations: `S` = `home/common/agent-skills/scri
 - [ ] **Step 1: Write the failing tests**
 
 (a) In `T/test_artifact_budget.py`, class `ArtifactBudgetCliTest`, insert this
-method immediately before `def test_workflow_response_uses_source_and_lexical_installed_package`:
+method immediately before `def test_workflow_response_uses_source_and_lexical_installed_package`.
+It is a sibling of the spec's named seam-2 test
+`test_v2_boundaries_compose_legacy_result_validation`, not an extension of it;
+that test stays unchanged and the coverage is the same (Phase-5 review DI-3):
 
 ```python
     def test_only_response_result_slots_accept_the_reconciliation_record(self):
@@ -295,10 +298,10 @@ In `S/artifact_budget.py`:
 def validate_ledger_result(value: Mapping[str, object], notes_max_characters: int) -> None:
     """Check a result the lifecycle ledger projects onto a workflow response.
 
-    The ledger holds owner reports, which the owner-report rule
-    (``validate_ship_summary_report``) already accepts, and one record no owner
-    writes: reconciliation's ``merged`` row with ``issue_closed`` false, which
-    asserts only the merge the forge observed. That record may carry a
+    Every row the ledger holds, whether an owner reported it or the lifecycle
+    wrote it, meets the owner-report rule (``validate_ship_summary_report``)
+    except one: reconciliation's ``merged`` row with ``issue_closed`` false,
+    which asserts only the merge the forge observed. That record may carry a
     superseded owner's detail pointer without citing it in its notes.
     """
     if not (isinstance(value, dict) and value.get("state") == "merged"
@@ -382,5 +385,5 @@ git add home/common/agent-skills/scripts/artifact_budget.py \
   home/common/agent-skills/scripts/workflow-state.py \
   home/common/agent-skills/tests/test_artifact_budget.py \
   home/common/agent-skills/tests/test_workflow_state.py
-git commit -m "fix(agent-skills): validate reconciled merges with a ledger-result rule (#191)"
+git commit -m "fix(agent-skills): validate reconciled merges with a ledger-result rule (#191)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```

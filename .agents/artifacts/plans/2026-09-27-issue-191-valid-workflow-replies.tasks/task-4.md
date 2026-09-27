@@ -155,7 +155,7 @@ round-trips byte for byte through `json.dumps(indent=2, ensure_ascii=False)`, so
      The planning probe of Tasks 1–4 gave `Ran 1373 tests` and `OK (skipped=3)`:
      11 new tests over a derived base of 1362. The count is an estimate, and it
      moves with `main`. This takes about 25 minutes.
-   - `just build 2>&1 | tail -3` → exit 0. Never `just switch`.
+   - `just build`, run directly and unpiped so its own exit status is the gate → exit 0. Never `just switch`.
 
 - [ ] **Step 6: Commit**
 
@@ -163,5 +163,5 @@ round-trips byte for byte through `json.dumps(indent=2, ensure_ascii=False)`, so
 git add home/common/agent-skills/skills/from-issue/SKILL.md \
   home/common/agent-skills/tests/test_workflow_skill_contracts.py \
   home/common/agent-skills/instruction-load.json
-git commit -m "docs(from-issue): read the validated phase_gate and suspend replies (#191)"
+git commit -m "docs(from-issue): read the validated phase_gate and suspend replies (#191)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
