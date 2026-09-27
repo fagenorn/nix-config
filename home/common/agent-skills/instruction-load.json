@@ -52,9 +52,9 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 22182
+        "claude": 22461
       },
-      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5)."
+      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19)."
     },
     {
       "id": "orchestrated-issue-owner",
