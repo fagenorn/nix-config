@@ -134,7 +134,10 @@ retry and no native fallback." `blocked` comes first so that it cannot be read
 as limited to the `available` route. The paragraph then adds the classification
 from §2. The existing "Authored unsupported or a completed non-capacity
 runtime/output failure uses the existing single native fallback and records why"
-stays.
+becomes "Authored `unsupported` takes the caller's native correctness route
+directly and makes no Codex call. On the `available` route, a completed
+non-capacity runtime/output failure uses the existing single native fallback and
+records why." (per D15).
 
 In `codex-collaboration`'s direct-review section, the capacity paragraph gets the
 same opening, "On the `available` route, a daemon, slot, or capacity rejection is
@@ -245,3 +248,4 @@ refusal-reporting self-check that proves a helper fails on a missing clause.
 | D12 | Standards review: the ladder helper also asserts "`codex-collaboration` is never invoked on this rung" over the whole rung-3 text, through its dispatch, up to the routing-error paragraph. It gains one reversal mutant per caller (ship: a fifth mutant; sdd: a second check in its self-check). Extends D10. | Codex plan-review finding PR195-01. The rung-3 slice ended at the native target, so reversing the central no-invocation sentence passed, and sdd's clause sits after its target. The-bar "Tests that can fail". | Leave the clause unpinned: that reverses AC1's core promise with no failing test. |
 | D13 | Standards review: ship-issue REVIEW.md's templates paragraph calls `correctness-reviewer-prompt.md` "the native correctness form", not "fallback". SKILL.md's "fallback rubrics" stays, because it names REVIEW.md's pasted rubrics for missing sdd templates. | Native reviewer finding S1. Under `unsupported` that template is the documented primary route (D8, spec §5). Task 3 makes the same rename in the sdd header. | Leave REVIEW.md as it is: ship's prose would then call the primary route a fallback, the drift the sdd header fix removes. |
 | D14 | Task review: the ship ladder test pins every rung clause the ladder helper left unpinned — rung 1's "neither axis is dispatched", rung 2's "with `codex-collaboration` installed" lead and its non-capacity fallback sentence, and rung 3's "`available` without `codex-collaboration` installed" lead — with one mutant for the "without … installed" clause. | Global Constraint "Every quoted sentence is pinned by a test in the same task"; D3, D5. The Task-2 reviewer found that deleting any of these kept every test green. | Keep Task 2's planned test list: D5's skill-presence condition could then vanish silently. |
+| D15 | Final review: reverse §3's "stays" clause. The shared configured-review paragraph ends "Authored `unsupported` takes the caller's native correctness route directly and makes no Codex call. On the `available` route, a completed non-capacity runtime/output failure uses the existing single native fallback and records why.", identical in both copies and pinned by the pair helper. | Whole-branch correctness finding C1. Both callers' rung 3 dispatches the native form "directly"; under `unsupported` it is the documented primary route (D8, D13), and sdd's identity stays `native`. | Keep the sentence: the shared paragraph would call the primary `unsupported` route a fallback and contradict both callers. |
