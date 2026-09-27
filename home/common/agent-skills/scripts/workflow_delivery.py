@@ -93,10 +93,11 @@ class DeliveryRuntime:
                            "observation": "delivery-observation",
                            "authority-observation": "authority-observation"}
 
-    def build_delivery(self, kind: str, value: object, *, policy: dict[str, Any] | None
-                       ) -> object:
+    def build_delivery(self, kind: str, value: object, *, policy: dict[str, Any] | None,
+                       installed_intent: object = None) -> object:
         """Build one sealed delivery value and validate every object it carries."""
-        result = self._builder.build(kind, value, policy=policy)
+        result = self._builder.build(kind, value, policy=policy,
+                                     installed_intent=installed_intent)
         if kind == "contract":
             if not isinstance(result, dict) or set(result) != {"contract", "initial_intent"}:
                 raise ValueError("builder returned an invalid contract result")
@@ -112,6 +113,10 @@ class DeliveryRuntime:
         else:
             raise ValueError(f"unknown builder kind: {kind!r}")
         return result
+
+    def requires_installed_intent(self, contract: object) -> bool:
+        """Whether ``contract`` is model-valid but does not re-derive (#193 D5)."""
+        return self._builder.requires_installed_intent(contract)
 
     def check_worktree_policy(self, repo_root_policy: dict[str, Any],
                               worktree_policy: dict[str, Any]) -> None:
@@ -389,20 +394,22 @@ class DeliveryRuntime:
             self._projection.suspend_expired_remainder(
                 issue_state, remainder, now)
 
-        def result(operation: str, *, changed: bool = False,
+        def result(operation: str, *, changed: bool = False, desired: str = "resume",
                    requirements: list[dict[str, Any]] | None = None) -> dict[str, Any]:
             facade = self._remainder_facade(issue_state, remainder)
             return {"operation": operation, "changed": changed,
                     "issue_state": issue_state, "attempt": facade,
                     "requirements": [] if requirements is None else requirements,
-                    "uses_candidate": False, "desired": "resume",
+                    "uses_candidate": False, "desired": desired,
                     "custody_kind": "remainder", "expired": reaped,
                     "reduction": None}
 
         if remainder["state"] == "failed":
+            # Only this sweep's reap fails a remainder here, at the stall bound.
+            # Its caller persists the changed result; control's lanes skip it (D2).
             if preview is None:
                 preview = {"next_stage_id": None}
-            return result("terminal", changed=True)
+            return result("terminal", changed=True, desired="terminal")
         if preview is None:
             if issue is None or request is None or source_kind is None:
                 raise ValueError("remainder preview inputs are required")
@@ -416,7 +423,8 @@ class DeliveryRuntime:
         if owner_unavailable and remainder["state"] != "active":
             raise ValueError("owner_unavailable is not applicable")
         if remainder["state"] == "active" and not owner_unavailable:
-            return result("idle")
+            # Live custody: control's lanes skip it, as they skip a live attempt (D2).
+            return result("idle", desired="idle")
         _ = tracker_halted
         if not dispatch_permitted:
             return result("idle", changed=reaped)

@@ -1077,6 +1077,147 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(claims[action["custody"]["action_id"]]["release_event"],
                              "launch_refused")
 
+    def remainder_sweeps(self, root, home, run_id):
+        """Drive a claude-code run until remainder r1:1 is suspended on a denial (#190).
+
+        Issue 151's owner spawns, fails after selecting its output, and an
+        authority denial parks the minted remainder on ``human_gate``. Returns
+        ``(control, checkpoint)``. ``control(now, max_parallel=1)`` sweeps with
+        the recorded worktree observed and returns the raw response bytes.
+        ``checkpoint(custody, now)`` reports that custody again without progress
+        and returns the decoded response.
+        """
+        contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
+        digest = self.model.canonical_digest(contract)
+        worktree = str(root / "worktree"); run = ("--repo-root", root, "--run-id", run_id)
+
+        def invoke(*args, stdin=None):
+            completed = subprocess.run(
+                [sys.executable, str(WORKFLOW), *map(str, args)],
+                input=None if stdin is None else json.dumps(stdin).encode(),
+                capture_output=True, check=False, env={**os.environ, "HOME": str(home)})
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            return completed.stdout
+
+        def control(now, max_parallel=1, *, spawn=False):
+            request = self.control_request(contract)
+            request.update(host_route="claude-code", now=now, max_parallel=max_parallel,
+                tracker=[{"issue": 151, "state": "open" if spawn else "closed",
+                          "open_blockers": [], "decision_blockers": []}],
+                worktrees=[{"issue": 151,
+                    "recorded": None if spawn else {"path": worktree,
+                                                    "state": "matching_issue_branch"},
+                    "candidate": {"path": worktree, "state": "absent"} if spawn else None}])
+            request["authorization_intents"]["151"] = delivery["authorization_intents"]
+            return invoke("control", *run, "--request-file", "-", stdin=request)
+
+        def checkpoint(custody, now, denial=None):
+            report = self.report_common(custody, digest)
+            report["requested_scope"] = actual
+            if denial is not None:
+                report["authority_observations"] = [denial]
+            return json.loads(invoke("checkpoint-delivery", *run, "--checkpoint-file",
+                                     "-", "--now", now, stdin=report))
+
+        invoke("init-run", *run, "--now", NOW)
+        owner = json.loads(control(NOW, spawn=True))["actions"][0]
+        failed = self.failed_summary(owner["custody"], digest)
+        failed["delivery_observations"] = [observation(
+            self.model, contract, "selected_output",
+            {"selected_output": selection(self.model, digest)})]
+        remainder = json.loads(invoke("finish", *run, "--summary-file", "-",
+                                      "--now", "2026-09-21T00:00:01Z", stdin=failed))
+        denial = authority(self.model, contract, actual, remainder["custody"])
+        denial["observed_at"] = "2026-09-21T00:00:02Z"; seal(self.model, denial)
+        parked = checkpoint(remainder["custody"], "2026-09-21T00:00:02Z", denial)
+        self.assertEqual((parked["state"], parked["blocked_on"]), ("suspended", "human_gate"))
+        return control, checkpoint
+
+    @staticmethod
+    def remainder_launch(response):
+        """The response's one ``delivery_remainder`` action; StopIteration when absent."""
+        return next(item for item in json.loads(response)["actions"]
+                    if item["kind"] == "delivery_remainder")
+
+    def test_a_live_remainder_with_a_free_slot_matches_the_exhausted_sweep(self):
+        """T1: a live remainder takes no free slot and the sweep does not crash."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); run_id = "live-remainder"
+            control, _ = self.remainder_sweeps(root, home, run_id)
+            launch = self.remainder_launch(control("2026-09-21T00:00:03Z"))
+            self.assertEqual((launch["custody"]["remainder"], launch["custody"]["launch"]),
+                             (1, 2))
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            ledger = state_path.read_bytes()
+            free = control("2026-09-21T00:00:04Z", max_parallel=2)
+            free_ledger = state_path.read_bytes()
+            validated = subprocess.run(
+                [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+                 "workflow-response", "--input", "-", "--policy", str(POLICY)],
+                input=free, capture_output=True, check=False)
+            self.assertEqual((validated.returncode, validated.stderr), (0, b""))
+            self.assertEqual(validated.stdout, free)
+            # The same sweep with capacity exhausted, from the same pre-sweep ledger.
+            state_path.write_bytes(ledger)
+            exhausted = control("2026-09-21T00:00:04Z", max_parallel=1)
+            self.assertEqual(free, exhausted)
+            self.assertEqual(free_ledger, state_path.read_bytes())
+
+    def test_a_stall_bound_remainder_reap_persists_failed_without_a_dispatch(self):
+        """T3: the reap that crosses the stall bound fails the remainder, dispatching nothing."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); run_id = "stalled-remainder"
+            control, checkpoint = self.remainder_sweeps(root, home, run_id)
+            for launch, now, reported in (
+                    (2, "2026-09-21T00:00:03Z", "2026-09-21T00:00:04Z"),
+                    (3, "2026-09-21T00:00:05Z", "2026-09-21T00:00:06Z"),
+                    (4, "2026-09-21T00:00:07Z", None)):
+                action = self.remainder_launch(control(now))
+                self.assertEqual(action["custody"]["launch"], launch)
+                if reported is not None:
+                    self.assertEqual(checkpoint(action["custody"], reported)["state"],
+                                     "suspended")
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            record = json.loads(state_path.read_text())["issues"]["151"]["delivery_remainders"][0]
+            self.assertEqual((record["state"], record["stalled_resumes"]), ("active", 2))
+            # r1:4's deadline is 2026-09-21T03:00:01Z; this sweep lands after it.
+            response = json.loads(control("2026-09-21T04:00:00Z"))
+            record = json.loads(state_path.read_text())["issues"]["151"]["delivery_remainders"][0]
+            self.assertEqual(
+                (record["state"], record["result_source"], record["stalled_resumes"]),
+                ("failed", "stalled", 3))
+            self.assertEqual([item["kind"] for item in response["actions"]], ["finalize"])
+            summary = next(item for item in response["summaries"] if item["issue"] == 151)
+            self.assertEqual((summary["state"], summary["custody"]["kind"]),
+                             ("failed", "remainder"))
+
+    def test_a_suspended_remainder_with_a_free_slot_resumes(self):
+        """T4: baseline, a resumable human-gate remainder still resumes at a free slot."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            control, _ = self.remainder_sweeps(Path(raw), home, "suspended-remainder")
+            action = self.remainder_launch(control("2026-09-21T00:00:03Z", max_parallel=2))
+            self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
+                             (1, 2))
+
+    def test_a_live_remainder_short_of_agent_slots_is_not_waiting(self):
+        """T2: a live remainder is custody, not an issue queued for agent slots."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        # The 4-slot floor: the controller plus the claimed r1:2 fill it.
+        (home / ".agents/share/host-declaration.json").write_text(json.dumps(
+            {"schema_version": 1, "routes": {
+                "claude-code": {"support": "supported", "agent_slots": 4},
+                "codex": {"support": "unsupported"}}}), encoding="utf-8")
+        with tempfile.TemporaryDirectory() as raw:
+            control, _ = self.remainder_sweeps(Path(raw), home, "short-slots")
+            self.remainder_launch(control("2026-09-21T00:00:03Z"))
+            response = json.loads(control("2026-09-21T00:00:04Z", max_parallel=2))
+            self.assertEqual(response["admission"]["waiting"], [])
+            self.assertFalse(any(item["kind"] == "delivery_remainder"
+                                 for item in response["actions"]))
+
     def test_control_allocates_only_one_proven_second_remainder(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
@@ -1548,7 +1689,11 @@ class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
                 "When the input's worktree path already exists, it also resolves there "
                 "and refuses if any sealed policy member differs.",
                 "when resolve-project refuses, that line ends with the resolver's error "
-                "document"):
+                "document",
+                "It takes no lock, reads no clock and writes nothing.",
+                "A contract the builder cannot re-derive is served only when a ledger under "
+                "--repo-root has installed it, and then against that ledger's stored initial "
+                "intent; that is the only time it reads a ledger."):
             with self.subTest(clause=clause[:40]):
                 self.assertIn("".join(clause.split()), text)
 
@@ -1706,20 +1851,90 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
             "pending_stage_ids": [stage["id"] for stage in self.contract["stages"]],
             "selected_outputs": [], "requested_scope": None}
 
-    def deliver(self, proposed):
-        """Drive one implementation custody through every stage with builder outputs only."""
+    def hand_built(self, built):
+        """An adapter's pre-builder contract re-sealed from a built one (#193 D8).
+
+        Its provenance kind is outside the builder's source kinds, and its PR
+        stages declare the literal PR ref "5", which the builder never derives,
+        so a served contract whose scopes were re-derived cannot finish the loop.
+        """
+        contract = copy.deepcopy(built["contract"])
+        intent = copy.deepcopy(built["initial_intent"])
+        contract["provenance"]["kind"] = "orchestrate-issues"
+        intent["source"]["reference"] = "orchestrate-issues:orch-171"
+        for scope in intent["scopes"]:
+            if scope["action"] in {"open_pull_request", "merge_pull_request"}:
+                scope["target"]["pr_ref"] = {"kind": "literal", "value": "5"}
+                seal(self.model, scope)
+        intent["scopes"].sort(key=lambda item: item["id"])
+        seal(self.model, intent)
+        contract["initial_authorization_intent_id"] = intent["id"]
+        contract["initial_authorization_intent_digest"] = self.model.canonical_digest(intent)
+        return contract, intent
+
+    NOT_INSTALLED = (b"workflow-state: build-delivery refused: source kind of the contract "
+                     b"cannot source an initial intent; no ledger under the repo root "
+                     b"installs this contract\n")
+
+    def assert_not_installed(self, contract, intent):
+        """Every contract-taking kind refuses a contract no ledger installs (AC2)."""
+        common = {"observed_at": NOW, "evidence": "e"}
+        for kind, value in (
+                ("initial-intent", {"contract": contract}),
+                ("scope", {"contract": contract, "stage_id": "merge_pr"}),
+                ("selected-output", {"contract": contract, "head": "a" * 40,
+                    "tree": "c" * 40, "acceptance_ref": "spec", "review_ref": "clean",
+                    "test_ref": "checks"}),
+                ("observation", {"contract": contract, "observation_kind": "branch_published",
+                    "source_kind": "repository", "source_reference": "probe",
+                    "head": "a" * 40, **common}),
+                ("authority-observation", {"contract": contract,
+                    "scope_id": intent["scopes"][0]["id"], "launch_id": "171:1:1",
+                    "authority_kind": "native_guard", "verdict": "allowed",
+                    "reason_code": "guard_allowed", **common}),
+                ("authorization-chain", {"contract": contract,
+                                         "authorization_intents": [intent]})):
+            with self.subTest(kind=kind):
+                refused = self.build(kind, value, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", self.NOT_INSTALLED))
+        self.assertFalse(os.path.lexists(self.root / ".superpowers"))
+
+    def deliver(self, proposed, *, hand_built=False):
+        """Drive one implementation custody through every stage with builder outputs only.
+
+        With `hand_built`, the installed contract is `hand_built`'s: it is
+        refused before installation and when mutated, and served once installed.
+        """
         self.project()
         built = self.build("contract", self.contract_input())
-        self.contract = built["contract"]; self.digest = self.model.canonical_digest(self.contract)
-        owner = self.acquire(self.contract, built["initial_intent"])
+        contract, intent = (self.hand_built(built) if hand_built
+                            else (built["contract"], built["initial_intent"]))
+        self.contract = contract; self.digest = self.model.canonical_digest(self.contract)
+        if hand_built:
+            self.assert_not_installed(contract, intent)
+        owner = self.acquire(self.contract, intent)
         self.custody = owner["custody"]
         self.run_args = ("--repo-root", self.root, "--run-id", owner["run_id"])
+        state = self.root / f".superpowers/workflows/{owner['run_id']}/state.json"
+        if hand_built:
+            served = self.cli("build-delivery", "--repo-root", self.root, "--kind",
+                              "initial-intent", "--input", "-",
+                              stdin=json.dumps({"contract": contract}).encode()).stdout
+            self.assertEqual(served, self.model.canonical_bytes(intent))
+            stored = json.loads(state.read_text(encoding="utf-8"))["issues"]["171"]["delivery"]
+            self.assertEqual(self.build("authorization-chain", {"contract": contract,
+                "authorization_intents": [intent]})["authorization_chain_digest"],
+                stored["authorization_chain_digest"])
+            mutated = copy.deepcopy(contract)
+            mutated["deliverable"]["summary"] += " (edited)"
+            self.assertEqual(self.build("initial-intent", {"contract": mutated},
+                                        ok=False).stderr, self.NOT_INSTALLED)
         policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        handed = self.validated("ship-handoff", self.handoff(owner, built["initial_intent"]))
+        handed = self.validated("ship-handoff", self.handoff(owner, intent))
         # A real handoff outgrows the phase-report bound; that is why D28 moves it.
         self.assertGreater(len(handed), policy["phase_reports"]["wire_max_bytes"])
         self.assertLessEqual(len(handed), policy["workflow_responses"]["wire_max_bytes"])
-        state = self.root / f".superpowers/workflows/{owner['run_id']}/state.json"
         head, merge_sha = "a" * 40, "b" * 40
         selection = self.build("selected-output", {"contract": self.contract, "head": head,
             "tree": "c" * 40, "acceptance_ref": ".claude/specs/issue-171.md",
@@ -1750,7 +1965,7 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                     "launch_id": self.custody["action_id"], "authority_kind": "native_guard",
                     "verdict": "allowed", "reason_code": "guard_allowed",
                     "observed_at": LATER, "evidence": stage["id"]})]
-                if stage["id"] == "merge_pr":
+                if stage["id"] == "merge_pr" and not hand_built:
                     before = state.read_bytes()
                     second = self.observed("pr_opened", pr_number=6, pr_url=URL + "6", head=head)
                     refused = self.checkpoint([second], [], None, ok=False)
@@ -1793,6 +2008,83 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
 
     def test_one_custody_completes_the_selection_gated_loop(self):
         self.deliver({"merge_pr", "close_tracker", "remove_worktree", "delete_local_branch"})
+
+    def test_an_installed_hand_built_contract_completes_the_loop(self):
+        self.deliver({"select_reviewed_output", "publish_branch", "open_pr", "merge_pr",
+                      "close_tracker", "delete_remote_branch", "remove_worktree",
+                      "delete_local_branch"}, hand_built=True)
+
+    def test_only_a_contract_that_does_not_re_derive_reads_a_ledger(self):
+        self.project()
+        built = self.build("contract", self.contract_input())
+        contract, _ = self.hand_built(built)
+        workflows = self.root / ".superpowers" / "workflows"
+        matching = json.dumps({"schema_version": 4, "issues": {"171": {
+            "delivery": {"contract_digest": self.model.canonical_digest(
+                contract)}}}}).encode()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "state.json").write_bytes(matching)
+        for run_id, raw in (
+                ("-bad", matching),
+                ("a-unparsable", b"{"),
+                # Too deeply nested to parse: json.loads raises RecursionError (D14).
+                ("a-deep", b"[" * 100000),
+                ("run-blocked", b"{}"),
+                ("run-derived", json.dumps({"schema_version": 4, "issues": {"171": {
+                    "delivery": {"contract_digest": self.model.canonical_digest(
+                        built["contract"])}}}}).encode()),
+                ("run-legacy", matching)):
+            (workflows / run_id).mkdir(parents=True)
+            (workflows / run_id / "state.json").write_bytes(raw)
+        # A symlinked run directory and a symlinked state file, both reaching the
+        # matching bytes outside the root, sort before run-legacy (D13).
+        (workflows / "run-a-linked").symlink_to(outside, target_is_directory=True)
+        (workflows / "run-b-file").mkdir()
+        (workflows / "run-b-file" / "state.json").symlink_to(outside / "state.json")
+        # No search permission: lstat(state.json) raises PermissionError (D14).
+        os.chmod(workflows / "run-blocked", 0)
+        self.addCleanup(os.chmod, workflows / "run-blocked", 0o700)
+        invalid = (b"workflow-state: build-delivery refused: installing ledger "
+                   b"run-legacy is invalid\n")
+        refused = self.build("initial-intent", {"contract": contract}, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", invalid))
+        self.assertEqual(self.build("initial-intent", {"contract": built["contract"]}),
+                         built["initial_intent"])
+        # A lone surrogate has no canonical bytes, so no ledger can record it (D14).
+        uncanonical = copy.deepcopy(contract)
+        uncanonical["provenance"]["reference"] = "\ud800"
+        refused = self.build("initial-intent", {"contract": uncanonical}, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", self.NOT_INSTALLED))
+        malformed = copy.deepcopy(contract)
+        malformed["stages"][0]["target_ref"] = None
+        refused = self.build("initial-intent", {"contract": malformed}, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+        self.assertTrue(refused.stderr.startswith(b"workflow-state: build-delivery refused: "))
+        self.assertEqual(refused.stderr.count(b"\n"), 1)
+        (workflows / "run-legacy" / "state.json").write_bytes(json.dumps({
+            "schema_version": [], "issues": {"171": {"delivery": {
+                "contract_digest": self.model.canonical_digest(contract)}}}}).encode())
+        refused = self.build("initial-intent", {"contract": contract}, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, b"", invalid))
+        self.assertEqual([path.name for path in (workflows / "run-legacy").iterdir()],
+                         ["state.json"])
+        (self.root / ".superpowers").rename(self.root / "elsewhere")
+        (self.root / ".superpowers").symlink_to(self.root / "elsewhere")
+        self.assertEqual(self.build("initial-intent", {"contract": contract}, ok=False).stderr,
+                         self.NOT_INSTALLED)
+        absent = str(self.root / "absent")
+        for value, expected in ((built["contract"], 0), (contract, 2)):
+            completed = self.cli("build-delivery", "--repo-root", absent, "--kind",
+                                 "initial-intent", "--input", "-",
+                                 stdin=json.dumps({"contract": value}).encode(), ok=False)
+            with self.subTest(derives=expected == 0):
+                self.assertEqual(completed.returncode, expected)
+        self.assertEqual(completed.stderr,
+                         b"workflow-state: repository root does not exist\n")
 
     def test_evidence_kinds_are_exact_and_closed(self):
         self.project()
