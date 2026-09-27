@@ -55,7 +55,8 @@ Most orchestrated ship owners run at depth 2 and do dispatch reviewers. #149's
 two-axis review is an example. An owner cannot tell depth 1 from depth 2 by
 looking at its own tool surface, because both have `Agent`. So the route cannot
 be chosen from how the owner was launched. A probe has to decide it, at the
-place where the dispatch will happen (D1).
+place where the dispatch will happen (D1). For run 2 the orchestrator re-ran the
+probe on this host: depth 1 and depth 2 both still list `Agent`.
 
 ## Solution
 
@@ -119,6 +120,14 @@ What each owner depth sees after the change:
   delta would turn out empty and no reviewer would be needed, because the
   delta's size is not known until after the sync the probe has to precede.
   Remainder mode skips Phases 0–5, dispatches no reviewer, and is exempt.
+- **Against the correctness route (#195).** Since this spec was approved,
+  ship-Phase 5 picks the correctness axis's route from `capabilities.review.code`
+  before either axis is dispatched: `blocked` stops, `available` with
+  `codex-collaboration` reaches Codex through a command, and otherwise the
+  native reviewer runs. The conformance axis and the merge-delta reviewer are
+  native dispatches on every route, so any review that runs still needs the
+  launch tool. The probe reads no capability state and stays unconditional, and
+  a `blocked` capability keeps its own Phase-5 stop (D17).
 - **One home.** The probe is defined only in ship-issue's Phase 0. REVIEW.md,
   the ship-handoff prompt and from-issue all point to it and do not restate it
   (D9).
@@ -231,6 +240,17 @@ unchanged. The bookkeeper needs no `Agent`, so it works at any depth.
   suspension shape and no new `blocked_on` value" is about that file, and it
   stays true. `agent_dispatch` is defined in from-issue's suspension procedure
   and in workflow-state, not in the human gate.
+- **The #117 core vocabulary (D18).** The #117 decision record, merged after
+  this spec's approval, promotes the attempt suspension taxonomy to the
+  transaction core and lists its blocked-on set without `agent_dispatch` (#117
+  D4, D10). The new value fits that taxonomy's existing policy with no new rule:
+  an owner supplies it, only a human-directed re-entry resumes it (like
+  `human_gate` and `external`), it adds no terminal, and it keeps the stall
+  bound. Detecting the gap stays with the skill, as host capabilities do in
+  #117's adapter column. Until #125's cutover the shipped engine is the
+  implementation, so this issue changes only workflow-state and leaves #117's
+  record alone; that record reaches this branch only through ship-Phase 1's
+  sync. #125 carries the value when it ports the taxonomy (Out of scope).
 
 ### Relays and reports
 
@@ -335,6 +355,34 @@ keeps one unlabeled fence with both clauses once) and `test_agent_model_matrix.p
 order holds). The verification commands are `just build` and
 `just agent-workflow-tests`.
 
+## Run-2 delivery
+
+Run 1 (`direct-198-000001`) selected `765f598` as its reviewed output. Then
+`origin/main` advanced to `6ab576e` with #195 and #117, and that head now
+conflicts with main in one file, `home/common/agent-skills/instruction-load.json`.
+The delivery model has no reselection path, so run 1's merge was refused as
+`merge_conflict`. With the user's authorization, run 2 (`direct-198-000002`)
+discards run 1's delivery and re-enters ship-issue on this design: ship-Phase 1
+syncs main, Phase 5 reviews again, and the Delivery loop selects a fresh head
+(D16).
+
+The re-grill against `6ab576e` amends no D1–D15 decision; it adds D17 and D18
+above. A trial `git merge-tree` of the two heads merges every other file
+cleanly. On that merged tree the prose-contract, dispatch-contract,
+model-matrix, shell-example and workflow-state suites all pass, so S1 and S2
+hold after the sync.
+
+**The ceilings conflict (D19).** #195 and #198 both raised the same three
+profiles, `orchestrated-issue-owner`, `implementation-owner` and `ship-owner`,
+and each appended a note clause. Neither side's ceilings hold on the merged
+tree: the trial measured 151023, 142148 and 55347 hot bytes, above ours
+(149820, 140866, 54302) and theirs (147826, 138951, 53916). The sync therefore
+resolves the file by re-measuring, not by taking a side. Each conflicted
+ceiling becomes its merged measurement. Each note keeps #195's clause, then
+#198's, and records the re-measurement against the merged main commit. #198's
+`conditional` ship-issue members stay. #155's instruction-load report is not
+regenerated.
+
 ## Out of scope
 
 - **Depth-aware dispatch in Phases 2–6.** A design, plan-review, sdd or
@@ -361,6 +409,10 @@ order holds). The verification commands are `just build` and
   follow-up and is left unchanged here (D13).
 - **Retrying a Phase-5 launch failure after a passing probe.** Today's failure
   handling stays (D12).
+- **Carrying `agent_dispatch` into the core.** #125 ports the promoted
+  suspension taxonomy and must include this value. Otherwise its migration,
+  which refuses unexpected state, would refuse a ledger holding a suspended
+  `agent_dispatch` attempt. Amending #117's record belongs to that port (D18).
 - **`just switch`**, and refreshing the installed skill copies. They follow the
   normal rebuild.
 
@@ -383,3 +435,7 @@ order holds). The verification commands are `just build` and
 | D13 | Grill: the probe's check is about the dispatch capability and never tests for a host by name, so on a host without a tool search, presence in the tool surface is the whole check. The HUMAN-GATE fresh-ship-owner `stopped` return, which from-issue Phase 7 has no rule for, is recorded as a follow-up and not fixed here | The #119 codex-ship-handoff decision ("never a host name test"); from-issue Phase 7's "Phase-7 stopped/failed report" rule set against HUMAN-GATE's parent-suspends sentence; the-bar *YAGNI* | Converting the human-gate return to a closed line in this issue: it changes a second ship exit that was never part of #198's acceptance, and needs a Codex-host trace to verify |
 | D14 | Plan: the Phase-7 route is named the **dispatch-gap fallback** in from-issue Phase 7 and AUTO.md. Every sentence that calls the Phase-7 summary "the ship owner's" says "the ship report's" (or "the validated ship summary") instead: AUTO.md's three, and the terminal return procedure's one | ship-handoff.md's `## Inline fallback (no ship-issue skill)` and SKILL.md's missing-sibling "ship per the Phase-7 fallback" already own "inline fallback"; the spec's own AUTO.md rename rationale ("so that it also covers the summary an inline run produces"); the-bar *Truthful terminal states* | "Inline fallback" or "Phase-7 inline fallback", as this spec's prose says: those phrases already name the missing-skill route in the same two files, so an owner could run the wrong route. Renaming only the one AUTO.md sentence the spec names: leaves three sentences that are false after an inline run |
 | D15 | Phase 5: D14's route-neutral wording also covers from-issue Phase 7's re-entry clause ("ship-issue run checkpointed a denial") and the rollover Phase-6 gate sentence, which names the dispatch-gap fallback beside the fresh ship owner; T2 also pins that the directed sweep keeps attempt 1 | Plan review SF-1 and DI-1 (Claude fallback): those two sentences would contradict the fallback paragraph; AC2 "does not consume the attempt" and the-bar's tests that can fail | Leave both sentences as they are and check only the attempt state: the prose would describe one route while the file allows two, and the orchestrated resume path would go unpinned on the attempt count |
+| D16 | Run 2 (`direct-198-000002`) discards run 1's delivery of `765f598` and re-enters ship-issue on the unchanged D1–D15 design: ship-Phase 1 syncs `origin/main`, Phase 5 reviews again, and the Delivery loop selects a fresh head | The user's explicit authorization in this session to discard run 1's delivery and start a new run; run 1's merge refused as `merge_conflict` against `6ab576e`; the delivery model has no reselection path | Merging a conflict-resolved head outside the delivery loop: it would record a merge of a head other than the selected one. Redesigning from scratch: main's drift invalidates no D1–D15 decision |
+| D17 | Grill (#195): the probe stays unconditional and reads no `review.code` state. The correctness axis may now reach Codex through a command, but the conformance axis and the merge-delta reviewer are native dispatches on every route; `blocked` keeps its own Phase-5 stop | ship-issue Phase 5 on `6ab576e` (correctness rung chosen before dispatch; the conformance and merge-delta dispatch sites unchanged); D3; the-bar *DRY* (the probe keeps one home) | Skip the probe when correctness routes to Codex: the conformance axis would still fail at Phase 5, after the sync. Order the probe after the `review.code` choice: that choice sits at Phase 5, after every write the probe must precede |
+| D18 | Grill (#117): `agent_dispatch` joins the suspension taxonomy #117 promotes to the core as an owner-supplied, human-directed cause under its existing policy. This issue edits only workflow-state, leaves #117's record alone and names carrying the value as #125's follow-up | #117 record: its blocked-on set, "human-directed resume for other reasons", host capabilities in the adapter column, D4, D10 (#150 shipped `host_capacity` first; the record was amended at its own refresh) and D17; CLAUDE.md (the shipped engine governs until #125's cutover); #125's body; the-bar *Moves keep their history* | Editing #117's record here: it is not on this branch before ship-Phase 1's sync, and an accepted decision is amended by its own refresh. Silence: #125 would port a set without the value, and its migration would refuse such ledgers. Mapping the gap to `external`: loses the distinct outcome AC2 demands |
+| D19 | Grill: the ship sync resolves `instruction-load.json` by re-measuring on the merged tree. Each conflicted ceiling becomes its merged measurement; each note keeps #195's clause, then #198's, plus a re-measurement clause; #198's `conditional` ship-issue members stay; #155's report is not regenerated | #155 D10 (a raised ceiling rewrites its note in the same commit) and D19 (a sync re-measures and resets to the merged values); the trial merge of `765f598` and `6ab576e`, where neither side's ceilings pass the live-tree test; #195 kept the earlier clauses and appended its own | Take ours or theirs (SYNC.md's A or T): both fail `test_the_live_tree_breaches_no_ceiling`. Keep one issue's clause: erases the other's reviewed explanation. Regenerate #155's report: it is #155's point-in-time record, and #195 left it as it was |
