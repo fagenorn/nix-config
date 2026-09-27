@@ -30,9 +30,14 @@ SYNTHETIC_RESULT_SOURCES = frozenset({"expiry", "stalled"})
 # ``host_capacity`` is written only by control, from a ``launch_refused`` owner
 # observation; it is auto-resumable, but its resume is gated until some other
 # claim is released after the refused launch's own claim (per D7, D26).
-BLOCKED_ON_VALUES = frozenset(
-    {"usage_limit", "transport", "human_gate", "external", "unknown", "host_capacity"}
-)
+# ``agent_dispatch`` is written only by an owner, through ``suspend``, when its
+# own context cannot launch the agents a phase needs. It is not auto-resumable:
+# the ledger cannot see how deep a relaunch would run, and blind resumes would
+# spend ``STALL_LIMIT``, so only a human-directed re-entry clears it (per D6).
+BLOCKED_ON_VALUES = frozenset({
+    "usage_limit", "transport", "human_gate", "external", "unknown", "host_capacity",
+    "agent_dispatch",
+})
 OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown", "host_capacity"}
 AUTO_RESUMABLE_BLOCKED_ON = frozenset(
     {"usage_limit", "transport", "unknown", "host_capacity"})
@@ -1886,10 +1891,10 @@ def _apply_one_issue_policy(
     silent owner is an interruption the retry itself survives, so re-entry alone
     clears it (per D2, D9). ``human_directed`` says a person asked for this
     re-entry by name, which is the only thing that clears a
-    `human_gate`/`external` suspension: a direct owner always carries it, and an
-    orchestrated sweep carries it exactly when the caller listed the issue
-    numbers itself. A `--label`/`--milestone` sweep never does, so it leaves
-    those parked and reports them.
+    `human_gate`/`external`/`agent_dispatch` suspension: a direct owner always
+    carries it, and an orchestrated sweep carries it exactly when the caller
+    listed the issue numbers itself. A `--label`/`--milestone` sweep never does,
+    so it leaves those parked and reports them.
 
     An expired attempt is reaped before any lane predicate is derived: the
     single ``demote_expired_attempt`` call turns it into a ``suspended``
