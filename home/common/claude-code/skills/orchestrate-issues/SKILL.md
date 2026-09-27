@@ -359,11 +359,15 @@ remainder that holds the issue, `pending_stage_ids` are the delivery stages
 still open, and the PR and `discussion_items` come from the summary's `result`.
 A null `contract_digest` means the issue ran lifecycle-only: say so, and name
 the builder refusal from §3 when there was one; a summary still carrying
-`delivery_contract_required` is an issue that never received a contract. Then
-group every `discussion_items` entry by issue and call out anything needing a
-human. List every issue in that same control response's `admission.waiting`
-as queued for agent slots, with its summary state. Do not perform a second
-ledger read or reconstruct omitted history.
+`delivery_contract_required` is an issue that never received a contract. A
+summary whose `worktree_fact` requirement reads `recorded_worktree_absent` or
+`recorded_worktree_mismatch` is an issue that cannot resume, because its
+recorded worktree is gone or is not on the issue branch: report it as unable
+to resume for that reason, never as progressing. Then group every
+`discussion_items` entry by issue and call out anything needing a human. List
+every issue in that same control response's `admission.waiting` as queued for
+agent slots, with its summary state. Do not perform a second ledger read or
+reconstruct omitted history.
 
 An `expired` delta is an interruption, not a verdict on the work: it consumes
 no attempt, and the attempt number never advances because of it. Three things
