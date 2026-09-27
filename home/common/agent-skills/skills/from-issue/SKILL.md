@@ -578,7 +578,7 @@ not `ledger_repo_root` — only a `present` path is primary-checkout-relative, a
 `workflow-state finish` resolves the two the same way.
 Before that terminal write, run
 `~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
-with this owner's own `action_id`: the ship owner and this parent share one
+with this owner's own `action_id`: the ship run and this parent share one
 launch identity, so a ship report from a superseded launch means this launch is
 superseded too. On `current: false` or any helper failure, write nothing, print
 the canonical re-entry line `/from-issue <num> --auto` on its own line, and
