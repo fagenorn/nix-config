@@ -124,6 +124,9 @@ four-space class indentation.
                                        for a in directed["actions"]])
         attempt = self.read_state()["issues"]["48"]["attempts"][-1]
         self.assertEqual((attempt["state"], attempt["blocked_on"]), ("active", None))
+        # The directed sweep resumes the same attempt; none is consumed (per D15).
+        self.assertEqual(
+            [a["attempt"] for a in self.read_state()["issues"]["48"]["attempts"]], [1])
 
     def test_direct_reentry_resumes_an_agent_dispatch_suspension_in_place(self):
         # A direct owner always carries human_directed, so `/from-issue N

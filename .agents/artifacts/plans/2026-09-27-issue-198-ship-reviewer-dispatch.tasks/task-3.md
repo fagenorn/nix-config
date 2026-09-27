@@ -207,6 +207,22 @@ indentation is the file's own.
    review-bearing ship launch: a `delivery_remainder` launch runs remainder mode,
    which never probes and never returns the gap line.
    ```
+5. In `## Phase 7 — Ship`, replace exactly
+   `ship owner checkpointed a denial, which already suspended this attempt: relay`
+   with
+   `ship-issue run checkpointed a denial, which already suspended this attempt: relay`
+   — the re-entry line can now come back from the owner's own inline run too
+   (per D15).
+6. In `## Dispatch, phase-budget and attempt-budget rules`, replace exactly
+   ```
+   routes defined there: Phase-6 `delegate` launches the existing fresh ship owner,
+   ```
+   with
+   ```
+   routes defined there: Phase-6 `delegate` launches the existing fresh ship owner
+   (or, on a dispatch gap, runs Phase 7's dispatch-gap fallback),
+   ```
+   (per D15).
 
 - [ ] **Step 5: Verify**
 
@@ -216,6 +232,8 @@ T=home/common/agent-skills/tests; F=home/common/agent-skills/skills/from-issue/S
 if awk '/^## Phase 7/,/^## Notes/' $F | grep -qF 'workflow-state suspend'; then exit 1; fi
 if git diff HEAD -U0 -- $F | grep -E '^\+' | grep -qF 'Agent('; then exit 1; fi
 if grep -qF "ship owner's returned summary" $F; then exit 1; fi
+if grep -qF 'ship owner checkpointed a denial' $F; then exit 1; fi
+grep -cF '(or, on a dispatch gap, runs Phase 7'"'"'s dispatch-gap fallback),' $F
 grep -cF 'Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`.' $F
 PYTHONPATH=python python3 -m unittest $T/test_workflow_skill_contracts.py $T/test_dispatch_contracts.py \
   $T/test_shell_example_contracts.py $T/test_agent_model_matrix.py 2>&1 \
@@ -223,8 +241,8 @@ PYTHONPATH=python python3 -m unittest $T/test_workflow_skill_contracts.py $T/tes
 PYTHONPATH=python python3 -m agent_tools.agent_model_matrix validate
 ```
 
-Expected: the three prohibitions pass silently, and the dispatch line count is
-`1`. The four suites together end `OK (skipped=3)` with 2 more tests than at the
+Expected: the four prohibitions pass silently, and both counts (the Phase-6
+gate clause and the dispatch line) are `1`. The four suites together end `OK (skipped=3)` with 2 more tests than at the
 start of this task. Last comes `agent model matrix: valid`.
 
 - [ ] **Step 6: Commit**

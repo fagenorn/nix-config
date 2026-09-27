@@ -140,4 +140,19 @@ printed `agent model matrix: valid`. `WORKFLOW_POLICY_SURFACE=source just
 agent-workflow-tests` gave `Ran 1326 tests` and `OK (skipped=4)`, which is the
 base 1316 plus these 10. `just build` was not probed.
 
+## Standards review provenance
+
+- Reviewer: Claude fallback (one fresh native `reviewer`, Opus/high), isolated and
+  read-only, against `REVIEW-CONTRACT.md`. Codex `plan-review` ran first and
+  completed, but its `--json` stream carried no runtime-selection event naming
+  the selected model and reasoning effort. That is a metadata failure, so
+  Codex identity was not established, the one native fallback ran with the
+  same packet, and Codex was not retried.
+- Base `17da7f2d53c33886073a107ce72627f9e1ec5ce1`, plan reviewed at `0aacb50`;
+  no focus configured.
+- Accepted 2: SF-1 (Task 3, Step 4, items 5–6) and DI-1 (Task 1's T2
+  attempt-count assertion), both per D15. Decided without an edit: DI-2 (the
+  Phase-7 gate after an inline ship stays the spec's unchanged generic gate).
+  Rejected 0, deferred 0. No Blocking findings.
+
 ---
