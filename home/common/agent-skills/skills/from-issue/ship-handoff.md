@@ -29,8 +29,8 @@ fields, with the whole lifecycle group null:
 In `ship-handoff/v2`, `custody`, `delivery_contract` and
 `delivery_contract_digest` are the owner object's `custody`, `contract` and
 `contract_digest`, and `pending_stage_ids` is its `pending_stage_ids`.
-`authorization_intents` is the one initial intent the builder regenerates from
-that contract, printed by
+`authorization_intents` is the one initial intent the builder prints for that
+contract, printed by
 `workflow-state build-delivery --repo-root <ledger_repo_root> --kind initial-intent --input -`
 over `{"contract": <installed contract>}` in a quoted heredoc.
 `authorization_chain_digest` is the value the builder seals from those held

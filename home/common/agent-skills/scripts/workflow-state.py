@@ -3467,6 +3467,93 @@ def command_finish_delivery(args):
     return 0
 
 
+def read_state_unlocked(state_path: Path, run_id: str) -> dict[str, Any]:
+    """Read one run's state and validate it without a lock or a write (#193 D4).
+
+    check-launch and the build-delivery ledger lookup share this reader. No
+    lock: `atomic_write_state` publishes by `os.replace`, so an unlocked reader
+    sees either the whole prior file or the whole new one, never a torn one — and
+    taking the lock would mean creating `state.lock`, which is a write. Schemas
+    1–3 are migrated and validated on a detached copy; the document is returned
+    as stored.
+    """
+    try:
+        raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkflowError("invalid workflow state") from error
+    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3}:
+        candidate = _call("invalid legacy workflow state",
+            _delivery().migrate, raw_state, migration_contracts={})
+        validate_state(candidate, run_id=run_id)
+        return raw_state
+    return validate_state(raw_state, run_id=run_id)
+
+
+def _stored_contract_digest(raw_state: object, issue: str) -> object:
+    """The contract digest a raw, unvalidated state records for ``issue``, if any."""
+    issues = raw_state.get("issues") if isinstance(raw_state, dict) else None
+    entry = issues.get(issue) if isinstance(issues, dict) else None
+    delivery = entry.get("delivery") if isinstance(entry, dict) else None
+    return delivery.get("contract_digest") if isinstance(delivery, dict) else None
+
+
+def _non_symlink(path: Path, kind: Callable[[int], bool]) -> bool:
+    status = path_status(path)
+    return status is not None and not stat.S_ISLNK(status.st_mode) and kind(status.st_mode)
+
+
+def installed_initial_intent(runtime: Any, repo_root_value: str,
+                             contract: dict[str, Any]) -> dict[str, Any] | None:
+    """The root intent a ledger under the repo root installed with ``contract``, or None.
+
+    Read-only like check-launch: no lock, no clock and no write (#193 D3, D4).
+    A contract with no canonical bytes has no digest a ledger could record, so
+    it answers None and meets the builder's own refusal. Runs are scanned in sorted order. A run that is not a run-id-named
+    non-symlink directory, or whose state file is absent, not a non-symlink
+    regular file, uninspectable, unreadable, unparsable, or records another
+    contract digest for the issue, is skipped. The first match is re-read
+    through ``read_state_unlocked``; a match that fails validation in any way,
+    or whose validated contract does not carry the digest, refuses naming its
+    run (D14).
+    """
+    repo_root = resolve_repo_root(repo_root_value)
+    workflows = repo_root / ".superpowers" / "workflows"
+    if not all(_non_symlink(path, stat.S_ISDIR) for path in (workflows.parent, workflows)):
+        return None
+    try:
+        digest = runtime.model.canonical_digest(contract)
+    except ValueError:
+        # A contract without canonical bytes cannot be recorded by any ledger.
+        return None
+    issue = str(contract["issue"])
+    for run_dir in sorted(workflows.iterdir(), key=lambda path: path.name):
+        state_path = run_dir / "state.json"
+        try:
+            if (not RUN_ID_PATTERN.fullmatch(run_dir.name)
+                    or not _non_symlink(run_dir, stat.S_ISDIR)
+                    or not _non_symlink(state_path, stat.S_ISREG)):
+                continue
+            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if _stored_contract_digest(raw_state, issue) != digest:
+            continue
+        invalid = f"build-delivery refused: installing ledger {run_dir.name} is invalid"
+        try:
+            state = read_state_unlocked(state_path, run_dir.name)
+            delivery = state["issues"][issue]["delivery"]
+            # Validation already ties contract_digest to the contract, so this
+            # only fires when the file was replaced between the two unlocked reads.
+            if runtime.model.canonical_digest(delivery["contract"]) != digest:
+                raise WorkflowError(invalid)
+            root = next(item for item in delivery["authorization_intents"]
+                        if item["predecessor_intent_id"] is None)
+        except Exception as error:
+            raise WorkflowError(invalid) from error
+        return copy.deepcopy(root)
+    return None
+
+
 def command_check_launch(args: argparse.Namespace) -> int:
     """Answer whether one launch identity is an issue's current launch.
 
@@ -3494,20 +3581,7 @@ def command_check_launch(args: argparse.Namespace) -> int:
             "reason": "unknown_run",
         })
         return 0
-    # No lock: `atomic_write_state` publishes by `os.replace`, so an unlocked
-    # reader sees either the whole prior file or the whole new one, never a torn
-    # one — and taking the lock would mean creating `state.lock`, which is a write.
-    try:
-        raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise WorkflowError("invalid workflow state") from error
-    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3}:
-        candidate = _call("invalid legacy workflow state",
-            _delivery().migrate, raw_state, migration_contracts={})
-        validate_state(candidate, run_id=args.run_id)
-        state = raw_state
-    else:
-        state = validate_state(raw_state, run_id=args.run_id)
+    state = read_state_unlocked(state_path, args.run_id)
 
     issue_state = state["issues"].get(str(issue))
     records = None if issue_state is None else (
@@ -3645,14 +3719,24 @@ def check_contract_worktree(runtime: Any, policy: dict[str, Any], worktree: str)
 
 
 def command_build_delivery(args: argparse.Namespace) -> int:
-    """Print one sealed delivery value; read-only (no lock, ledger, clock or write)."""
+    """Print one sealed delivery value; read-only (no lock, clock or write).
+
+    A contract the builder cannot re-derive is served only against the initial
+    intent a ledger under --repo-root installed with it, which
+    ``installed_initial_intent`` finds; that is the only ledger read (#193 D2).
+    """
     if not Path(args.repo_root).is_absolute():
         raise WorkflowError("repository root path must be absolute")
     runtime = _delivery()
     value = load_json_request(args.input, "builder input")
     policy = resolve_project_policy(args.repo_root, "repo-root") if args.kind == "contract" else None
+    installed = None
+    if (args.kind != "contract" and isinstance(value, dict) and "contract" in value
+            and runtime.requires_installed_intent(value["contract"])):
+        installed = installed_initial_intent(runtime, args.repo_root, value["contract"])
     try:
-        result = runtime.build_delivery(args.kind, value, policy=policy)
+        result = runtime.build_delivery(args.kind, value, policy=policy,
+                                        installed_intent=installed)
     except Exception as error:
         raise WorkflowError(f"build-delivery refused: {error}") from error
     if args.kind == "contract":
@@ -3743,11 +3827,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     build_delivery = subparsers.add_parser("build-delivery", description=(
         "Build one sealed delivery value from --input and print it as canonical JSON. "
-        "It takes no lock, reads no ledger or clock and writes nothing. "
+        "It takes no lock, reads no clock and writes nothing. "
+        "A contract the builder cannot re-derive is served only when a ledger under "
+        "--repo-root has installed it, and then against that ledger's stored initial "
+        "intent; that is the only time it reads a ledger. "
         "--kind contract resolves project policy with resolve-project at --repo-root, "
         "the ledger repository root, and seals only that policy. When the input's "
         "worktree path already exists, it also resolves there and refuses if any "
-        "sealed policy member differs. The other kinds resolve nothing. Every refusal "
+        "sealed policy member differs. The other kinds resolve no project policy. Every refusal "
         "after argument parsing exits 2 with empty stdout and one stderr line; when "
         "resolve-project refuses, that line ends with the resolver's error document as "
         "one line of canonical JSON."))
