@@ -5166,21 +5166,22 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.init_run()
         worktree = str(Path(self.root) / "wt-19")
         self.spawn(issue=19, worktree=worktree, budget_minutes=10)
-        completed = self.suspend(
+        envelope = self.suspend(
             issue=19, attempt=1, blocked_on="agent_dispatch",
             now="2026-08-13T20:05:00Z",
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(json.loads(completed.stdout), {
-            "kind": "suspended", "issue": 19, "attempt": 1,
-            "blocked_on": "agent_dispatch", "stalled_resumes": 0,
-            "reentry": "/from-issue 19 --auto",
+        self.assertEqual(envelope, {
+            "interface_version": 2, "kind": "suspended", "run_id": self.run_id,
+            "issue": 19, "custody": {"kind": "implementation", "attempt": 1,
+                                     "launch": 1, "action_id": "19:1:1"},
+            "blocked_on": "agent_dispatch", "reentry": "/from-issue 19 --auto",
         })
         issue = self.read_state()["issues"]["19"]
         self.assertEqual([attempt["attempt"] for attempt in issue["attempts"]], [1])
         attempt = issue["attempts"][-1]
         self.assertEqual(attempt["state"], "suspended")
         self.assertEqual(attempt["blocked_on"], "agent_dispatch")
+        self.assertEqual(attempt["stalled_resumes"], 0)
         self.assertIsNone(attempt["result"])
         self.assertIsNone(attempt["finished_at"])
         self.assertIsNone(attempt["result_source"])
