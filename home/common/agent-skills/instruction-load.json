@@ -34,10 +34,10 @@
         "codex-collaboration/DIFF-REVIEW.md": "diff-review is not a Phase 0–5 operation"
       },
       "ceiling_bytes": {
-        "claude": 87439,
-        "codex": 87439
+        "claude": 90322,
+        "codex": 90322
       },
-      "note": "Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6)."
+      "note": "Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). Ceiling raised for #198: from-issue ships inline at Phase 7 when the ship owner cannot dispatch reviewers, and AUTO.md relays that outcome (#155 D10)."
     },
     {
       "id": "orchestration-dispatcher",
@@ -52,9 +52,9 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 22461
+        "claude": 22559
       },
-      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19)."
+      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). Ceiling raised for #198: the finalize report routes an `agent_dispatch` suspension to its re-entry line (#155 D10)."
     },
     {
       "id": "orchestrated-issue-owner",
@@ -98,9 +98,9 @@
         "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation"
       },
       "ceiling_bytes": {
-        "claude": 146623
+        "claude": 149820
       },
-      "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19)."
+      "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #198: from-issue ships inline at Phase 7 when the ship owner cannot dispatch reviewers, AUTO.md relays that outcome and the ship prompt names the gap line (#155 D10)."
     },
     {
       "id": "design-and-grill-owner",
@@ -194,10 +194,10 @@
         "codex-collaboration/PLAN-REVIEW.md": "plan-review ran at Phase 5"
       },
       "ceiling_bytes": {
-        "claude": 137669,
-        "codex": 137669
+        "claude": 140866,
+        "codex": 140866
       },
-      "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19)."
+      "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #198: from-issue ships inline at Phase 7 when the ship owner cannot dispatch reviewers, AUTO.md relays that outcome and the ship prompt names the gap line (#155 D10)."
     },
     {
       "id": "ship-owner",
@@ -227,10 +227,10 @@
         "codex-collaboration/PLAN-REVIEW.md": "plan-review is not a ship operation"
       },
       "ceiling_bytes": {
-        "claude": 52871,
-        "codex": 52871
+        "claude": 54302,
+        "codex": 54302
       },
-      "note": "ship-issue from ship-handoff.md's prompt, with its sync, review and consolidation files. The lifecycle stdin clause stays per entry (#155 D5)."
+      "note": "ship-issue from ship-handoff.md's prompt, with its sync, review and consolidation files. The lifecycle stdin clause stays per entry (#155 D5). Ceiling raised for #198: ship-issue probes reviewer dispatch before any write and returns the gap line (#155 D10)."
     },
     {
       "id": "release-owner",
