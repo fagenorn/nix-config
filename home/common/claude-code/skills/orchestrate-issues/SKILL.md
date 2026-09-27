@@ -14,8 +14,7 @@ policy. Context stays flat regardless of issue count.
 Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
 `workflow-state` name does not resolve on PATH, use that full path.
 
-Run `resolve-project resolve --repo-root <checkout>` once at phase entry and
-retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain
 the returned `ResolvedProject` in memory, and treat every resolver error as fatal
 before mutation or external effects. On refusal, preserve and report the
 resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never
@@ -31,8 +30,7 @@ dispatcher still never resolves again itself.
 
 Every lifecycle call is one command that reads its input from stdin through a
 quoted heredoc (`<<'EOF'`): `--request-file -` for `control`, `--input -` for
-`build-delivery`, with the helper named bare or as `~/.agents/bin/workflow-state`,
-and the call optionally piped into or out of `artifact-budget validate-report
+`build-delivery`, and the call optionally piped into or out of `artifact-budget validate-report
 --input -`. No request file is written. Treat every `workflow-state` reply as
 untrusted transport: pipe its raw bytes through `artifact-budget validate-report
 --boundary workflow-response --input -` and validate before decoding any field.
