@@ -761,7 +761,7 @@ class LifecycleHarness:
         )
 
     def suspend(self, *, issue, attempt, blocked_on, now, ok=True):
-        return self.run_cli(
+        completed = self.run_cli(
             "suspend",
             "--repo-root", self.root,
             "--run-id", self.run_id,
@@ -771,6 +771,7 @@ class LifecycleHarness:
             "--now", now,
             ok=ok,
         )
+        return self.validated_response(completed.stdout) if ok else completed
 
     def check_launch_raw(self, *, action_id, repo_root=None, run_id=None, ok=True):
         return self.run_cli(
@@ -5081,16 +5082,15 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.init_run()
         worktree = str(Path(self.root) / "wt-15")
         self.spawn(issue=15, worktree=worktree, budget_minutes=10)
-        completed = self.suspend(
+        envelope = self.suspend(
             issue=15, attempt=1, blocked_on="usage_limit",
             now="2026-08-13T20:05:00Z",
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        envelope = json.loads(completed.stdout)
         self.assertEqual(envelope, {
-            "kind": "suspended", "issue": 15, "attempt": 1,
-            "blocked_on": "usage_limit", "stalled_resumes": 0,
-            "reentry": "/from-issue 15 --auto",
+            "interface_version": 2, "kind": "suspended", "run_id": self.run_id,
+            "issue": 15, "custody": {"kind": "implementation", "attempt": 1,
+                                     "launch": 1, "action_id": "15:1:1"},
+            "blocked_on": "usage_limit", "reentry": "/from-issue 15 --auto",
         })
         attempt = self.read_state()["issues"]["15"]["attempts"][-1]
         self.assertEqual(attempt["state"], "suspended")
@@ -5104,13 +5104,14 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         worktree = str(Path(self.root) / "wt-16")
         self.spawn(issue=16, worktree=worktree, budget_minutes=10)
         for index in range(3):
-            completed = self.suspend(
+            envelope = self.suspend(
                 issue=16, attempt=1, blocked_on="usage_limit",
                 now=f"2026-08-13T20:0{2 * index + 1}:00Z",
             )
-            envelope = json.loads(completed.stdout)
-            self.assertEqual(envelope["kind"], "suspended")
-            self.assertEqual(envelope["stalled_resumes"], index)
+            self.assertEqual((envelope["kind"], envelope["custody"]["launch"]),
+                             ("suspended", index + 1))
+            self.assertEqual(
+                self.read_state()["issues"]["16"]["attempts"][-1]["stalled_resumes"], index)
             self.resume(
                 issue=16, worktree=worktree,
                 now=f"2026-08-13T20:0{2 * index + 2}:00Z",
@@ -5119,14 +5120,19 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             issue=16, attempt=1, blocked_on="usage_limit",
             now="2026-08-13T20:08:00Z",
         )
-        attempt = json.loads(final.stdout)
+        persisted = self.read_state()["issues"]["16"]
+        attempt = persisted["attempts"][-1]
         self.assertEqual(attempt["state"], "stopped")
         self.assertEqual(attempt["result_source"], "stalled")
         self.assertIsNone(attempt["blocked_on"])
         self.assertIn("stalled without phase progress", attempt["result"]["notes"])
-        persisted = self.read_state()["issues"]["16"]
-        self.assertEqual(persisted["attempts"][-1], attempt)
         self.assertEqual(persisted["outcome"], attempt["result"])
+        self.assertEqual(final, {
+            "interface_version": 2, "kind": "terminal", "issue": 16,
+            "run_id": self.run_id, "source": "lifecycle", "reason": "stopped",
+            "blockers": [], "result": attempt["result"],
+            "reentry": "/from-issue 16 --auto",
+        })
 
     def test_suspend_rejects_a_nonactive_attempt_and_the_reserved_cause(self):
         self.init_run()
@@ -5159,11 +5165,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         state = self.read_state()
         current_version = state["schema_version"]
         self.write_state(self._as_legacy(state, current_version - 1))
-        completed = self.suspend(
+        self.suspend(
             issue=17, attempt=1, blocked_on="external",
             now="2026-08-13T20:02:00Z",
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
         upgraded = self.read_state()
         self.assertEqual(upgraded["schema_version"], current_version)
         self.assertIsNone(upgraded["prior_run"])
@@ -6125,6 +6130,34 @@ class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):
             "issue": 191, "custody": {"kind": "implementation", "attempt": 1,
                                       "launch": 1, "action_id": "191:1:1"},
             "action": "delegate", "handoff_path": None})
+
+
+class SuspendReplyTest(LifecycleHarness, unittest.TestCase):
+    """#191 D6: `suspend` replies with `suspended`, or the replay at the stall bound."""
+
+    def test_a_direct_stall_bound_suspend_replies_with_the_next_replay(self):
+        owner = self.acquire_direct(issue=16)
+        self.run_id = owner["run_id"]
+        recorded = {"path": owner["worktree"], "state": "matching_issue_branch"}
+        for index in range(3):
+            parked = self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                                  now=f"2026-08-20T10:0{2 * index + 1}:00Z")
+            self.assertEqual(parked["custody"]["action_id"], f"16:1:{index + 1}")
+            resumed = self.direct_owner(
+                issue=16, now=f"2026-08-20T10:0{2 * index + 2}:00Z",
+                worktree=self.worktree_fact(16, recorded=recorded))
+            self.assertEqual(resumed["launch_kind"], "resume")
+        stalled = self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                               now="2026-08-20T10:08:00Z")
+        replay = self.direct_owner_at_root(
+            self.root, self.direct_request(issue=16, now="2026-08-20T10:09:00Z"))
+        self.assertEqual(stalled, self.validated_response(replay.stdout))
+        self.assertEqual((stalled["kind"], stalled["source"], stalled["reason"]),
+                         ("terminal", "lifecycle", "stopped"))
+        persisted = json.loads(
+            self.direct_state_path(owner["run_id"]).read_text())["issues"]["16"]
+        self.assertEqual((persisted["attempts"][-1]["result_source"], persisted["outcome"]),
+                         ("stalled", stalled["result"]))
 
 
 class ReconciledReplyBoundaryTest(LifecycleHarness, unittest.TestCase):

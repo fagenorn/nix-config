@@ -603,7 +603,7 @@ class DeliveryModelTest(unittest.TestCase):
         fixtures = workflow_responses(self.model)
         self.assertEqual(set(fixtures), {"current", "bootstrap", "control", "observe", "owner",
             "terminal", "remainder", "checkpointed", "stalled", "complete", "failed",
-            "host_route", "host_route_unsupported", "phase_gate"})
+            "host_route", "host_route_unsupported", "phase_gate", "suspended"})
         for name, value in fixtures.items():
             with self.subTest(name=name):
                 self.assertEqual(self.validate(value, "workflow-response"), value)
@@ -1005,6 +1005,32 @@ class DeliveryModelTest(unittest.TestCase):
             "handoff path on continue": {**copy.deepcopy(gate), "action": "continue"},
             "empty handoff path": {**copy.deepcopy(gate), "handoff_path": ""},
             "null run": {**copy.deepcopy(gate), "run_id": None},
+        }.items():
+            with self.subTest(invalid=name):
+                self.assert_invalid(bad, "workflow-response")
+
+    def test_suspended_reply_is_closed_and_names_an_owner_cause(self):
+        """#191 D6: a granted suspension replies with one closed v2 `suspended`."""
+        suspended = workflow_responses(self.model)["suspended"]
+        for cause in ("usage_limit", "transport", "human_gate", "external"):
+            value = {**copy.deepcopy(suspended), "blocked_on": cause}
+            with self.subTest(blocked_on=cause):
+                self.assertEqual(self.validate(value, "workflow-response"), value)
+        missing = copy.deepcopy(suspended)
+        del missing["reentry"]
+        for name, bad in {
+            "the unversioned reply": {"kind": "suspended", "issue": 151, "attempt": 1,
+                                      "blocked_on": "usage_limit", "stalled_resumes": 0,
+                                      "reentry": "/from-issue 151 --auto"},
+            "extra member": {**copy.deepcopy(suspended), "stalled_resumes": 0},
+            "missing member": missing,
+            "interface 1": {**copy.deepcopy(suspended), "interface_version": 1},
+            "remainder custody": {**copy.deepcopy(suspended), "custody": custody("remainder")},
+            "another issue's custody": {**copy.deepcopy(suspended), "issue": 152},
+            "the reaper's cause": {**copy.deepcopy(suspended), "blocked_on": "unknown"},
+            "control's cause": {**copy.deepcopy(suspended), "blocked_on": "host_capacity"},
+            "empty reentry": {**copy.deepcopy(suspended), "reentry": ""},
+            "null run": {**copy.deepcopy(suspended), "run_id": None},
         }.items():
             with self.subTest(invalid=name):
                 self.assert_invalid(bad, "workflow-response")

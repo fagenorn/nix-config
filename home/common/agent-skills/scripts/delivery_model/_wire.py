@@ -286,6 +286,13 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
         if value["action"] not in {"continue", "fresh_start", "handoff", "delegate"}: _reject()
         if value["handoff_path"] is not None and (value["action"] != "handoff" or not isinstance(value["handoff_path"], str) or not value["handoff_path"]): _reject()
         return value
+    if value.get("kind") == "suspended":
+        _object(value, _members("interface_version kind run_id issue custody blocked_on reentry")); _v2(value); _string(value["run_id"], "suspended run")
+        issue = _integer(value["issue"], "suspended issue", minimum=1)
+        if validate_custody_ref(value["custody"], issue=issue)["kind"] != "implementation": _reject()
+        if value["blocked_on"] not in {"usage_limit", "transport", "human_gate", "external"}: _reject()
+        _string(value["reentry"], "reentry")
+        return value
     if value.get("kind") == "delivery_remainder": return _remainder(value, notes_max)
     if value.get("kind") in {"delivery_checkpointed", "delivery_stalled"}: return _checkpoint_response(value, notes_max)
     if value.get("kind") in {"delivery_complete", "terminal_failed"}: return _finish_response(value)
