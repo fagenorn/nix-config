@@ -643,8 +643,11 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             "A completed non-capacity failure takes that skill's one native "
             "fallback.", rung_2)
         self.assertIn(
-            "record the routing error in the PR body beside the correctness "
-            "verdict", route)
+            "A Codex call made under `unsupported` anyway is a routing error: "
+            "discard its outcome — verdict, refusal or failure — record the "
+            "routing error in the PR body beside the correctness verdict, and "
+            "run the rung-3 native dispatch, with no retry, stop or suspension.",
+            route)
         # REVIEW.md names the rung-3 template as the native form, not a
         # fallback (D13).
         self.assertIn(
@@ -672,6 +675,8 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             "rung 3 drops available without the skill": (
                 ", or `available` without `codex-collaboration` installed →",
                 " →"),
+            "routing error skips the native dispatch": (
+                "run the rung-3 native dispatch", "skip the rung-3 native dispatch"),
         }
         for name, (old, new) in mutants.items():
             with self.subTest(mutant=name):
@@ -689,8 +694,11 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             "This is the only rung that reaches Codex and the only one where a "
             "capacity rejection binds, on the configured-review terms above.", route)
         self.assertIn(
-            "record the routing error in the ledger beside the correctness "
-            "verdict, with the axis's reviewer identity still `native`", route)
+            "A Codex call made under `unsupported` anyway is a routing error: "
+            "discard its outcome — verdict, refusal or failure — record the "
+            "routing error in the ledger beside the correctness verdict, with the "
+            "axis's reviewer identity still `native`, and run the rung-3 native "
+            "dispatch, with no retry, stop or suspension.", route)
         # sdd words its rungs 2 and 3 and its routing-error paragraph
         # differently from ship, so sdd pins its own sentences (D14).
         rung_2 = route[route.index("2. `available`"):route.index("3. `unsupported`")]
@@ -704,9 +712,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             "→ dispatch the Opus/high native reviewer selected in "
             f"{SDD_CORRECTNESS_TARGET} directly; `codex-collaboration` is never "
             "invoked on this rung.", rung_3)
-        self.assertIn(
-            "A Codex call made under `unsupported` anyway is a routing error: "
-            "discard its outcome — verdict, refusal or failure —", route)
         self.assertTrue(route.rstrip().endswith(
             "The axis is never skipped; `blocked` stops the whole review "
             "instead."), route)
@@ -910,6 +915,10 @@ def assert_correctness_route_ladder(case, route, native_target):
         unsupported_at:route.index("routing error", unsupported_at)]
     case.assertIn(
         "`codex-collaboration` is never invoked on this rung", unsupported_rung)
+    # The routing-error action's tail, which both callers word identically.
+    case.assertIn(
+        ", and run the rung-3 native dispatch, with no retry, stop or "
+        "suspension.", route[route.index("routing error", unsupported_at):])
     case.assertEqual(route.count("diff-review"), available.count("diff-review"))
     case.assertNotIn("unavailable", route.lower())
     case.assertNotIn("skill is available", route)
