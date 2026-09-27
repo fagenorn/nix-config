@@ -4,7 +4,8 @@ Decisions: D1 (sdd changes in this issue), D2 (the routing-error action and
 where it is recorded), D4 and D5 (the ladder and "installed"), D8 (the axis
 identity stays `native`, and no failure class is added), D9 (rung 2 points to
 the configured-review paragraph above), D10 (the tiers and header pins and the
-sdd self-check), D11 (sdd eval 2 stays as it is). Spec §5, AC3, AC4 and AC5.
+sdd self-check), D11 (sdd eval 2 stays as it is), D12 (the sdd no-invocation
+mutant). Spec §5, AC3, AC4 and AC5.
 Work from the worktree root. Every shell block starts with `set -euo pipefail`
 and these abbreviations, which the blocks below omit:
 
@@ -120,17 +121,25 @@ def sdd_correctness_route(text=None):
 
     def test_correctness_route_ladder_rejects_the_pre_fix_sdd_route(self):
         # Putting sdd's skill-presence routing back makes the helper raise
-        # (issue 195, D3).
+        # (issue 195, D3), and so does reversing rung 3's no-invocation
+        # clause, which in sdd sits after the native target (D12).
         text = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
         end_anchor = "`blocked` stops the whole review instead."
-        self.assertTrue(CORRECTNESS_ROUTE_OPENER in text and end_anchor in text,
-                        "sdd ladder anchors missing")
+        no_invocation = "is never invoked on this rung"
+        self.assertTrue(CORRECTNESS_ROUTE_OPENER in text and end_anchor in text
+                        and no_invocation in text, "sdd ladder anchors missing")
         start = text.index(CORRECTNESS_ROUTE_OPENER)
         end = text.index(end_anchor, start) + len(end_anchor)
         with self.assertRaises(AssertionError):
             assert_correctness_route_ladder(
                 self,
                 sdd_correctness_route(text[:start] + SDD_PRE_FIX_ROUTE + text[end:]),
+                SDD_CORRECTNESS_TARGET)
+        with self.assertRaises(AssertionError):
+            assert_correctness_route_ladder(
+                self,
+                sdd_correctness_route(text.replace(
+                    no_invocation, "is always invoked on this rung")),
                 SDD_CORRECTNESS_TARGET)
 ```
 

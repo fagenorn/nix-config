@@ -83,7 +83,7 @@ Path abbreviations used in members: `T` =
 
 These figures are estimates. They come from a planning probe that applied every
 member, as written, to a scratch copy of `87ad07e`. Eight files change and none
-is created. In seven skill documents, about 38 lines are added and 21 removed.
+is created. In seven skill documents, about 39 lines are added and 22 removed.
 In `T`, about 182 lines are added and 3 removed. The diff fits one review
 package. Tasks run in index order. Task 3 uses Task 2's helper, and Task 3's
 final gate covers all three. The plan adds 5 tests: 1 in Task 1, 2 in Task 2 and
@@ -95,7 +95,7 @@ before and after.
 
 Task 1 — Scope the capacity rule to the `available` route, and make `codex-collaboration` make no Codex call under `unsupported` — `SK/ship-issue/REVIEW.md`, `SK/sdd/final-review.md`, `CC/SKILL.md`, `CC/DIFF-REVIEW.md`, `T` — full — [task-1.md](2026-09-27-issue-195-review-code-routing.tasks/task-1.md)
 
-Task 2 — ship-issue Phase 5 routes the correctness axis on `capabilities.review.code` — `SK/ship-issue/SKILL.md`, `T` — full — [task-2.md](2026-09-27-issue-195-review-code-routing.tasks/task-2.md)
+Task 2 — ship-issue Phase 5 routes the correctness axis on `capabilities.review.code` — `SK/ship-issue/SKILL.md`, `SK/ship-issue/REVIEW.md`, `T` — full — [task-2.md](2026-09-27-issue-195-review-code-routing.tasks/task-2.md)
 
 Task 3 — sdd's final review routes the correctness axis the same way, then the final gate runs — `SK/sdd/final-review.md`, `SK/sdd/SKILL.md`, `SK/sdd/correctness-reviewer-prompt.md`, `T` — full — [task-3.md](2026-09-27-issue-195-review-code-routing.tasks/task-3.md)
 
@@ -122,7 +122,9 @@ The spec's `## Decision ledger` is authoritative, and the tasks cite D1–D9 fro
 the design. Planning added two rows. **D10** pins every reworded routing
 sentence and the byte identity of the shared paragraph, and fixes the ladder
 helper's anchors and self-checks. **D11** leaves the eval corpus untouched and
-records why the existing evals still grade correctly.
+records why the existing evals still grade correctly. Standards review added
+**D12** (the helper pins rung 3's no-invocation clause, with one mutant per
+caller) and **D13** (REVIEW.md's template line says "native correctness form").
 
 The probe applied every member to a scratch copy of `87ad07e`. Each
 watch-it-fail step failed as its member says, and each targeted gate passed.
@@ -130,6 +132,30 @@ Every ship mutant in Task 2's self-check was confirmed to raise on the clause it
 names. The four contract suites ran 222 tests, all `OK (skipped=3)`. The probe
 ran `just agent-workflow-tests` twice. At base it gave `Ran 1316 tests` and
 `OK (skipped=3)`. With all three tasks applied it gave `Ran 1321 tests` and
-`OK (skipped=3)`. The probe did not run `just build`.
+`OK (skipped=3)`. The probe did not run `just build`. The standards-review
+edits (D12, D13) came after the probe. They add one assertion to the helper, one
+`assertIn` and one mutant subtest in Task 2, one mutant in Task 3, and a one-word
+REVIEW.md edit. Their expected counts are derived, not probed, and test totals
+do not change.
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (one fresh native `reviewer`, Opus, read-only,
+  against `REVIEW-CONTRACT.md`). Codex `plan-review` ran first and completed,
+  but its JSONL carried no runtime-selection event naming the selected model
+  and reasoning effort, so Codex identity was not established. That is a
+  metadata failure, so the one-time native fallback ran with the same packet.
+  Codex was not retried. Its completed finding was verified against the live
+  worktree like any other finding.
+- Base `17da7f2`, plan reviewed at `312f01c`; no focus configured.
+- Findings: 0 Blocking. Should fix: 2 accepted. The rung-3 no-invocation
+  clause was unpinned (Tasks 2 and 3, D12). REVIEW.md's stale "native
+  correctness fallback" was changed (Task 2, D13); its `SKILL.md` "fallback
+  rubrics" half was rejected, because that phrase names the template-fallback
+  rubrics. Discussion: 2. The conformance launch precedes the ladder in reading
+  order: declined, because ship's phase-entry preamble already stops `blocked`
+  and the markers stay where they are (D8). The sdd self-check was weaker than
+  ship's: covered by D12's sdd mutant. Accepted 3, rejected 1 (the half-finding),
+  deferred 0.
 
 ---
