@@ -401,6 +401,18 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                 lookup = text.index("bindings.commands[review_id].argv")
                 self.assertLess(capability, lookup)
                 self.assertIn("unsupported", text[capability:lookup])
+        # codex-collaboration's own side (issue 195, D6): `unsupported` makes no
+        # Codex call, and says so before the command entry is dereferenced.
+        self.assert_ordered(
+            normalized(COLLABORATION.read_text(encoding="utf-8")),
+            "capabilities.review.code", "`unsupported` makes no Codex call",
+            "dereference `bindings.commands[review_id]`",
+        )
+        self.assertIn(
+            "An unsupported capability never dispatches Codex, because the "
+            "calling controller runs its own native correctness route",
+            normalized(DIFF_REVIEW.read_text(encoding="utf-8")),
+        )
 
     def test_living_source_has_no_legacy_policy_surface(self):
         tracked = subprocess.run(
@@ -595,6 +607,16 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_ship_issue_configured_review_pair_is_complete(self):
         assert_configured_code_review_pair(self, SHIP_ISSUE, SHIP_ISSUE_REVIEW)
 
+    def test_configured_review_paragraph_copies_stay_identical(self):
+        # ship-issue REVIEW.md and sdd final-review.md share one configured-review
+        # paragraph, so its capacity scope changes in both at once (issue 195, D7).
+        def paragraph(path):
+            text = path.read_text(encoding="utf-8")
+            start = text.index("For configured code review,")
+            return text[start:text.index("\n", start)]
+        self.assertEqual(paragraph(SHIP_ISSUE_REVIEW),
+                         paragraph(SDD_DIR / "final-review.md"))
+
     def test_codex_plan_review_owner_and_support_are_complete(self):
         assert_codex_operation_pair(
             self, CODEX_PLAN_REVIEW, "bindings.workflow.review.plan",
@@ -665,11 +687,19 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         ])
 
 
+# The capacity rule binds only on the `available` route, and a Codex call made
+# under `unsupported` is classified beside it (issue 195, D7, D9).
+CAPACITY_SCOPE_ANCHORS = (
+    "`available` route", "capacity rejection", "no retry", "no native fallback",
+    "routing error, never a capacity rejection",
+)
+
+
 def assert_configured_code_review_pair(case, owner, support):
     owner_text = normalized(owner.read_text(encoding="utf-8"))
     support_text = normalized(support.read_text(encoding="utf-8"))
     case.assert_ordered(owner_text, "bindings.workflow.review.code", "capabilities.review.code", "bindings.commands[review_id].argv")
-    case.assert_ordered(support_text, "exec", "--sandbox read-only", "--model gpt-6-astra", 'model_reasoning_effort="xhigh"', "--json", "--output-last-message", "--ephemeral", "selected model", "selected reasoning effort", "terminal agent-message", "last-message", "capacity rejection", "no retry", "no native fallback")
+    case.assert_ordered(support_text, "exec", "--sandbox read-only", "--model gpt-6-astra", 'model_reasoning_effort="xhigh"', "--json", "--output-last-message", "--ephemeral", "selected model", "selected reasoning effort", "terminal agent-message", "last-message", "`blocked` stops", *CAPACITY_SCOPE_ANCHORS)
     for text in (owner_text, support_text):
         case.assertNotIn("command -v codex-companion", text)
         case.assertNotIn('subagent_type="codex:codex-reviewer"', text)
@@ -685,8 +715,7 @@ def assert_codex_operation_pair(case, support, review_field, headings):
         'model_reasoning_effort="xhigh"', "--json",
         "--output-last-message", "--ephemeral",
         "selected model", "selected reasoning effort",
-        "terminal agent-message", "last-message", "capacity rejection",
-        "no retry", "no native fallback",
+        "terminal agent-message", "last-message", *CAPACITY_SCOPE_ANCHORS,
     )
     case.assertIn("retained `ResolvedProject`", support_text)
     case.assertIn(review_field, support_text)

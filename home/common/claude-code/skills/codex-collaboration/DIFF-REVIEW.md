@@ -11,8 +11,9 @@ pre-flight below after the operation selection.
 ## Size pre-flight
 
 The retained `capabilities.review.code` selection runs first; this size pre-flight
-runs after it, never before. An unsupported capability takes the documented native
-route and never dispatches, so measuring first would be wasted work.
+runs after it, never before. An unsupported capability never dispatches Codex,
+because the calling controller runs its own native correctness route, so
+measuring first would be wasted work.
 
 Measure the range in product terms before building the packet. Run it from the
 worktree root (the helper is `~/.agents/bin/diff-scope`; use the full path if the
