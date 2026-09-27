@@ -241,9 +241,8 @@ In `workflow_delivery_build.py`:
    branch = name if live is None else live
    ```
 
-   Everything after is unchanged. It keeps reading `source_kind`,
-   `source_reference` and `now` from `value`. The one other change is that the
-   provenance digest input becomes
+   Everything after is unchanged, except that the provenance digest input
+   becomes
    `{"policy": dict(facts), "issue": issue, "worktree": worktree, "source": source}`,
    plus `"branch": live` only when `live` is not None.
 

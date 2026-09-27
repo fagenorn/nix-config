@@ -1,15 +1,14 @@
 # Task 4: The delivery model follows one selection chain per slot
 
-Spec §4 and T10, per D6, D7, D15, D16, D20, D21. A selection stays immutable,
-but a slot may now hold a chain: one v1 root, then sync selections
-(`selected-output/v2`). The chain's tip is the slot's **current selection**, and
-every slot use reads it. The builder kind that seals links comes in Task 5, so
-this task's tests build links with a fixture.
+Spec §4, §5 and T10, per D6, D7, D15, D16, D20, D21, D25, D28. A slot may hold
+a chain: one v1 root, then sync selections (`selected-output/v2`), whose tip is
+the **current selection**. Tests build links with a fixture.
 
 **Files:**
 - Modify: `home/common/agent-skills/scripts/delivery_model/_objects.py`
 - Modify: `home/common/agent-skills/scripts/delivery_model/_wire.py`
 - Modify: `home/common/agent-skills/scripts/delivery_model/_reconcile.py`
+- Modify: `home/common/agent-skills/scripts/delivery_model/__init__.py`
 - Test: `home/common/agent-skills/tests/_delivery_model_fixtures.py`
 - Test: `home/common/agent-skills/tests/test_delivery_model.py`
 
@@ -23,34 +22,34 @@ this task's tests build links with a fixture.
     (root first, tip last) and `_objects._selection_chains(contract, contract_digest, selections) -> list[list[dict]]`.
   - The `delivery` validator's rejection text
     `a merged selection chain cannot be extended` (D21).
+  - `_objects._current_selections(contract, contract_digest, selections) -> list[dict]`
+    (each select stage's tip, deduplicated by id), and the public, pure
+    `current_selection(delivery: object) -> dict | None`, exported from the
+    package: the reviewed slot's chain tip, or None (D25).
   - Fixtures `sync_selection(model, prior, *, head, integration_parent, review_ref="merge-delta-clean")`
     and `at_head(model, contract, selected)`.
-- The public model seams (`validate_delivery_object`, `match_scope`,
-  `reduce_delivery`, `MODEL_INTERFACE_VERSION`) keep their signatures.
+- The public model seams keep their signatures. `current_selection` is
+  additive: `MODEL_INTERFACE_VERSION` stays 1, and only the `__all__` pin
+  changes (D25).
 
 **Invariants:**
 - v1 grammar is unchanged, and a v1 is always a chain's root. A v2's
   `subject_kind` is `commit`. Its two parents are distinct non-empty strings,
   and neither equals its `subject_value`. Its `prior_selection_id` is a digest.
   Its id is derived exactly as v1's.
-- One chain rule home, `_selection_chain`. Over the selections that pass the slot
-  filter (contract digest, slot, subject kind, repository, branch, base), it
-  requires exactly one v1 root. Every link must extend the selection its
-  `prior_selection_id` names, with `first_parent` equal to that selection's
-  head. No selection may be extended twice, every member must be reachable from
-  the root, no head may repeat, and each link's three evidence arrays must
-  contain its prior's. Anything else rejects `conflicting selected outputs`.
-- Every consumer reads the tip. That covers `_selection_for_stage`, and through
-  it stage scope matching, publish/open/merge observation matching,
-  `_pr_numbers` and `_selected_head`. It also covers `match_scope`,
-  `_scope_mismatch`, and the `implementation_delivered` postcondition, which
-  matches only the tip.
+- One chain rule home, `_selection_chain`, whose docstring in step 4 states
+  §4's rules. Anything else rejects `conflicting selected outputs`.
+- Every consumer reads the tip: `_selection_for_stage` (and through it stage
+  scope and observation matching, `_pr_numbers`, `_selected_head`),
+  `match_scope`, `_scope_mismatch`, and `implementation_delivered`.
 - The `delivery` and `ship-handoff` validators accept a selection only as a
   member of a select stage's chain. The `delivery` validator also rejects a
-  `pr_merged` observation whose `expected_head` is a non-tip member's head
-  (final once merged).
+  landed merge at a non-tip member's head: a `pr_merged` with `merged` true
+  whose repository, base and `expected_head` are that member's (final once
+  merged, D28). An unmerged or foreign `pr_merged` never blocks.
 - A delivery with no sync selection behaves exactly as at base. Every existing
-  model, runtime and loop test stays green unchanged.
+  model, runtime and loop test stays green unchanged, except the exact
+  `__all__` pin, which gains `current_selection`.
 - `reduce_delivery` validates the merged delivery with pending facts, then
   recomputes facts and postconditions exactly as today (D20).
 
@@ -93,7 +92,9 @@ def at_head(model, contract, selected):
 - [ ] **Step 2: Write the failing tests**
 
 In `home/common/agent-skills/tests/test_delivery_model.py`, add `sync_selection`
-and `at_head` to the fixture import list. Then add these members to
+and `at_head` to the fixture import list. In
+`test_import_is_pure_and_interface_is_exact`, add `"current_selection",` to the
+expected `__all__` set, after `"match_scope",`. Then add these members to
 `DeliveryModelTest`, after `test_ship_handoff_cross_references_and_contract_order`:
 
 ```python
@@ -200,6 +201,17 @@ and `at_head` to the fixture import list. Then add these members to
             self.model, contract, "pr_merged", pr_subject("pr_merged", head=self.SYNC_H2))])
         self.assertEqual((early["next_stage_id"], post_state(early, "pr_merged")),
                          ("merge", "pending"))
+        # Only a landed merge of this repository into the slot's base is final (D28).
+        for label, subject in (
+                ("not merged", pr_subject("pr_merged", merged=False)),
+                ("another repository", pr_subject("pr_merged", repository="other-repo")),
+                ("another base", pr_subject("pr_merged", base="release"))):
+            with self.subTest(label=label):
+                stray = self.fold(contract, delivery, [
+                    observation(self.model, contract, "pr_merged", subject)])
+                extended = self.fold(contract, stray["next_delivery"], at_head(
+                    self.model, contract, self.link(h0, self.SYNC_H1, self.INTEGRATION_1)))
+                self.assertEqual(extended["next_stage_id"], "merge")
 
     def test_match_scope_binds_the_tip_and_refuses_a_superseded_head(self):
         contract, delivery, declared = contract_and_delivery_for_stage(self.model, "merge")
@@ -243,6 +255,17 @@ and `at_head` to the fixture import list. Then add these members to
         current = self.fold(contract, opened, [merge, delivered(h1)])
         self.assertEqual(post_state(current, "implementation_delivered"), "observed")
 
+    def test_current_selection_is_the_reviewed_slot_tip(self):
+        _, empty = contract_and_delivery(self.model)
+        self.assertIsNone(self.model.current_selection(empty))
+        contract, delivery, h0 = self.selected_at_h0()
+        self.assertEqual(self.model.current_selection(delivery), h0)
+        h1 = self.link(h0, self.SYNC_H1, self.INTEGRATION_1)
+        synced = self.fold(contract, delivery, at_head(self.model, contract, h1))
+        self.assertEqual(self.model.current_selection(synced["next_delivery"]), h1)
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.current_selection({**synced["next_delivery"], "selected_outputs": [h1]})
+
     def test_a_handoff_carries_a_whole_selection_chain_or_none(self):
         contract, delivery = contract_and_delivery(self.model)
         h0 = selection(self.model, self.model.canonical_digest(contract))
@@ -263,10 +286,12 @@ and `at_head` to the fixture import list. Then add these members to
 
 - [ ] **Step 3: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_model.py -k sync_selection_is -k tip -k not_one_chain -k merge_at_the_tip -k current_selection_is -k whole_selection_chain`
+Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_model.py -k sync_selection_is -k tip -k not_one_chain -k merge_at_the_tip -k current_selection_is -k whole_selection_chain -k interface_is_exact`
 Expected: `FAILED`. Every test that builds a v2 fails, because v1 grammar rejects
 `sync`. The one exception is the "second v1 root" subtest, which already raises
-`conflicting selected outputs`.
+`conflicting selected outputs`. The `__all__` pin and
+`test_current_selection_is_the_reviewed_slot_tip` fail, because the model has
+no `current_selection`.
 
 - [ ] **Step 4: Implement the chain**
 
@@ -343,6 +368,19 @@ def _selection_chains(contract: dict[str, Any], contract_digest: str,
     return chains
 ```
 
+   Add the one tip helper beside them, used by `match_scope` and
+   `current_selection` (D25):
+
+```python
+def _current_selections(contract: dict[str, Any], contract_digest: str,
+                        selections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each select stage's current selection, deduplicated by id, in stage order."""
+    delivery = {"contract_digest": contract_digest, "selected_outputs": selections}
+    tips = (_selection_for_stage(contract, delivery, stage) for stage in contract["stages"]
+            if stage["kind"] == "select_reviewed_output")
+    return list({tip["id"]: tip for tip in tips if tip is not None}.values())
+```
+
 3. `_selection_for_stage` keeps its signature and its `None` for a non-slot
    target. Its body becomes the tip of
    `_selection_chain(delivery["selected_outputs"], contract_digest=delivery["contract_digest"], target=target)`,
@@ -365,10 +403,13 @@ def _selection_chains(contract: dict[str, Any], contract_digest: str,
 
 ```python
     chains = _selection_chains(contract, digest, value["selected_outputs"])
-    superseded = {item["subject_value"] for chain in chains for item in chain[:-1]}
-    if any(item["observation_kind"] == "pr_merged"
-           and item["subject"]["expected_head"] in superseded
+    superseded = {(item["repository_id"], item["base"], item["subject_value"])
+                  for chain in chains for item in chain[:-1]}
+    if any(item["observation_kind"] == "pr_merged" and item["subject"]["merged"] is True
+           and (item["subject"]["provider_repository_id"], item["subject"]["base"],
+                item["subject"]["expected_head"]) in superseded
            for item in value["delivery_observations"]):
+        # Only a landed merge of this repository into the slot's base is final (D28).
         _reject("a merged selection chain cannot be extended")
 ```
 
@@ -379,18 +420,11 @@ def _selection_chains(contract: dict[str, Any], contract_digest: str,
 
 `_reconcile.py`:
 
-8. Import `_selection_for_stage` from `._objects`.
+8. Import `_current_selections` from `._objects`.
 
 9. In `match_scope`, after the `intent_revoked` early return, compute each
-   select stage's tip once, deduplicated by id:
-
-```python
-    current = list({tip["id"]: tip for tip in (
-        _selection_for_stage(c, {"contract_digest": canonical_digest(c),
-                                 "selected_outputs": selections}, stage)
-        for stage in c["stages"] if stage["kind"] == "select_reviewed_output")
-        if tip is not None}.values())
-```
+   select stage's tip once:
+   `current = _current_selections(c, canonical_digest(c), selections)`.
 
    In the slot block, `bound` stays the selections with that `slot_id`.
    `len(bound) != 1` becomes `not bound`, and the `actual != expected` tuple
@@ -439,10 +473,23 @@ def _pending_postconditions(contract: dict[str, Any]) -> dict[str, dict[str, Any
    `not_applicable` in the matching loop. The facts and postconditions it
    produces are byte-identical to base.
 
+11. Add the public reader after `match_scope`, and export it: in `__init__.py`,
+    import it with `match_scope` and `reduce_delivery` and add
+    `"current_selection"` to `__all__` (D25):
+
+```python
+def current_selection(delivery: object) -> dict[str, Any] | None:
+    """The current selection of a delivery's reviewed slot: its chain's tip, or None (#192 D25)."""
+    d = validate_delivery_object(delivery, expected_kind="delivery", notes_max_characters=1_000_000)
+    tips = _current_selections(d["contract"], d["contract_digest"], d["selected_outputs"])
+    if len(tips) > 1: _reject("conflicting selected outputs")
+    return copy.deepcopy(tips[0]) if tips else None
+```
+
 - [ ] **Step 5: Verify**
 
 Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_model.py`
-Expected: `OK`, 7 tests more than at base, no `FAIL:`/`ERROR:`.
+Expected: `OK`, 8 tests more than at base, no `FAIL:`/`ERROR:`.
 
 Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_delivery.py home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_admission_replay.py home/common/agent-skills/tests/test_artifact_budget.py home/common/agent-skills/tests/test_workflow_state.py`
 Expected: `OK`. Every single-selection delivery, handoff, checkpoint and summary
@@ -454,6 +501,6 @@ Expected: `wire-reads-chains`.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add home/common/agent-skills/scripts/delivery_model/_objects.py home/common/agent-skills/scripts/delivery_model/_wire.py home/common/agent-skills/scripts/delivery_model/_reconcile.py home/common/agent-skills/tests/_delivery_model_fixtures.py home/common/agent-skills/tests/test_delivery_model.py
+git add home/common/agent-skills/scripts/delivery_model/_objects.py home/common/agent-skills/scripts/delivery_model/_wire.py home/common/agent-skills/scripts/delivery_model/_reconcile.py home/common/agent-skills/scripts/delivery_model/__init__.py home/common/agent-skills/tests/_delivery_model_fixtures.py home/common/agent-skills/tests/test_delivery_model.py
 git commit -m "feat(delivery-model): follow one selection chain per slot (#192)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```

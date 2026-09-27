@@ -1,11 +1,11 @@
 # Task 6: ship-issue's post-selection sync route, then the final gate
 
-Spec §6–§7 and T11, per D9, D10, D11, D12, D17, D18, D22, D23. The route is
+Spec §6–§7 and T11, per D9–D12, D17, D18, D22–D24, D26. The route is
 described once, in `CI-MERGE.md` (conditional in the ship-owner profile).
 `SKILL.md` gains four one-sentence pointers: the Delivery loop's steps 3 and 6,
-Remainder mode, and Phase 6's divergence rule. The route uses Task 5's
-`--kind sync-selection` and Task 4's chain. It adds no review rubric and no
-dispatch marker.
+Remainder mode, and Phase 6's divergence rule. Step 7 and Remainder mode also
+name the current selection (D24). It adds no review rubric and no dispatch
+marker.
 
 **Files:**
 - Modify: `home/common/agent-skills/skills/ship-issue/CI-MERGE.md`
@@ -15,7 +15,8 @@ dispatch marker.
 
 **Interfaces:**
 - Consumes: `build-delivery --kind sync-selection` and its input keys
-  `contract, prior_selection, head, tree, parents, review_ref, test_ref` (Task 5).
+  `contract, prior_selection, head, tree, parents, review_ref, test_ref`, and
+  `--kind current-selection`, whose input is exactly `{contract}` (Task 5).
   The chain semantics: the tip is the current selection, a sync fold re-opens
   `publish_branch` and `open_pr` until the tip's observations fold, and a merge
   is final for its chain (Task 4).
@@ -28,11 +29,12 @@ dispatch marker.
   further forge write", "keep the worktree", "`stopped` ship summary", "both
   SHAs" and "unreviewed commits". So do every existing Delivery loop and
   Remainder mode anchor.
-- No new text contains `Agent(`. Every new inline command is one plain command.
-- CI-MERGE.md never spells `build-delivery`. Step 6 makes the Delivery loop's
-  builder call by its kind, so the caller list that
+- No new text contains `Agent(`. Every new inline command is one plain command,
+  and the push is `git push origin <branch>`, the lifecycle guard's form.
+- Every amend of the sync merge is re-verified before the push (D26).
+- CI-MERGE.md never spells `build-delivery`, so the caller list
   `test_build_delivery_callers_name_the_sanctioned_resolution_exception` pins
-  stays exactly its four files.
+  stays its four files.
 - Only breached ceilings move, each to its measured hot bytes, with #192 named
   in the note (D23). ship-owner is expected to be the only breach.
 
@@ -54,31 +56,36 @@ this test after `test_ship_issue_writer_rule_delivery_loop_and_remainder_mode`:
         """#192 T11: CI-MERGE.md owns the route; SKILL.md points to it from four places."""
         route = normalized(self.ship_ci_merge.split("## Post-selection sync", 1)[1])
         self.assert_ordered(route, "**sync selection**", "whoever holds the merge gate",
-            "**current selection**", "`implementation_delivered`", "*sync run*",
+            "**current selection**", "`--kind current-selection`",
+            "`implementation_delivered`", "*sync run*",
             "`git merge-base --is-ancestor", "one sync selection, oldest first",
             "`gh pr view <pr-num> --json state,headRefOid,mergeable`",
             "`mergeable: CONFLICTING`", "merely behind", "resume at step 3",
+            "`mergeable: UNKNOWN`", "proceed to the merge",
             "not an authority denial", "no `authority-observation`")
         self.assert_ordered(route, "**Sync.**", "[`SYNC.md`](./SYNC.md)", "**Verify.**",
             "Phase 2 verification", "**Review.**", "`git show --cc", "merge-delta reviewer",
+            "re-run the Phase 2 verification commands before the push",
             "`merge-delta-empty`", "`merge-delta-clean`", "**Push.**", "`check-launch`",
-            "`git push`", "**Wait for CI.**", "Phase 6's CI wait", "**Select.**",
-            "--kind sync-selection", "`git rev-list --parents -n 1", "`test_ref` `checks`",
-            "`branch_published` and `pr_opened`", "`--kind scope` for `merge_pr`",
-            "**Merge.**")
+            "`git push origin <branch>`", "**Wait for CI.**", "Phase 6's CI wait",
+            "**Select.**", "--kind sync-selection", "`git rev-list --parents -n 1",
+            "`test_ref` `checks`", "`branch_published` and `pr_opened`",
+            "`--kind scope` for `merge_pr`", "**Merge.**")
         self.assert_ordered(route, "**A merge that already landed.**",
             "without a push or a CI wait", "`pr_merged` observation", "**Stops.**",
-            "Should-fix", "genuinely-blocked stop")
+            "genuinely-blocked stop", "In `--auto`, a step-1 conflict", "`git merge --abort`",
+            "Should-fix", "`terminal_failed` `ship-summary/v2`", "`stopped` row",
+            "its own `finish`")
         self.assertNotIn("Agent(", self.ship_ci_merge)
         self.assertEqual(self.ship_issue.count("`## Post-selection sync`"), 4)
         loop = normalized(self.section(self.ship_issue, "## Delivery loop", "## Remainder mode"))
         self.assert_ordered(loop, "**The pre-merge selection gate.**",
             "`## Post-selection sync`", "**Denials.**", "cannot merge into its base",
             "no authority observation", "`## Post-selection sync`",
-            "A guard, host or provider denial")
+            "A guard, host or provider denial", "the current selection, merge SHA")
         remainder = normalized(self.ship_issue.split("## Remainder mode", 1)[1])
         self.assert_ordered(remainder, "start at the merge gate", "`## Post-selection sync`",
-                            "already landed")
+                            "already landed", "`--kind current-selection`")
         phase_six = normalized(self.section(self.ship_issue, "## Phase 6 — Wait for CI",
                                             "## Phase 7 — Merge"))
         self.assert_ordered(phase_six, "unreviewed commits", "`## Post-selection sync`",
@@ -106,9 +113,12 @@ Under lifecycle identity a selection is immutable, so a PR that needs the
 integration branch after selection gets a **sync selection** that extends it and
 never replaces it. The route belongs to whoever holds the merge gate: the ship
 owner under implementation custody, or a remainder owner. The **current
-selection** is the newest link of the ledger's selection chain. From the first
-sync on, every later step's "selection" is the current selection, including the
-`implementation_delivered` observation that `## Delivery loop` step 7 builds.
+selection** is the newest link of the ledger's selection chain. An owner that
+does not hold it reads it from the ledger with `## Delivery loop`'s builder call
+and `--kind current-selection`, fed only the installed `contract`. From the
+first sync on, every later step's "selection" is the current selection,
+including the `implementation_delivered` observation that `## Delivery loop`
+step 7 builds.
 
 **Sync run.** After `git fetch origin`, a PR head is a *sync run* from the
 current selection when its first-parent walk back to that selection's head
@@ -129,6 +139,10 @@ first, and each is reviewed on its own.
 - the PR has merged at a head that is a sync run from the current selection:
   see **A merge that already landed**.
 
+`mergeable: UNKNOWN` means the provider has not computed it yet. It is no
+trigger: proceed to the merge, and if the merge is then refused, the first case
+applies.
+
 A merge the provider refuses because the PR cannot merge into its base is a
 stale head, not an authority denial: record no `authority-observation` for it.
 
@@ -141,11 +155,13 @@ stale head, not an authority denial: record no `authority-observation` for it.
 3. **Review.** Run REVIEW.md's merge-delta check over that commit's combined
    diff, `git show --cc <merge-sha>`, through SKILL.md's merge-delta reviewer.
    Apply findings by amending the unpushed merge commit, which keeps both
-   parents. The link's `review_ref` is `merge-delta-empty` for an empty delta,
-   and `merge-delta-clean` once every Blocking and Should-fix finding is applied
+   parents, and after every amend re-run the Phase 2 verification commands before the push.
+   The link's `review_ref` is `merge-delta-empty` for an empty delta, and
+   `merge-delta-clean` once every Blocking and Should-fix finding is applied
    and re-reviewed. Retain Minor and Discussion findings under REVIEW.md's
    durable-detail rules.
-4. **Push.** Run `check-launch` (SKILL.md's `## Launch guard`), then `git push`.
+4. **Push.** Run `check-launch` (SKILL.md's `## Launch guard`), then
+   `git push origin <branch>`.
 5. **Wait for CI.** Run Phase 6's CI wait, with the reviewed head re-fixed to
    the pushed head.
 6. **Select.** For each merge of the sync run, oldest first, make
@@ -154,7 +170,7 @@ stale head, not an authority denial: record no `authority-observation` for it.
    merge's `head`, its `tree` (`git rev-parse <merge-sha>^{tree}`), its
    `parents` (`git rev-list --parents -n 1 <merge-sha>`, first parent first),
    the `review_ref` from step 3, and `test_ref` `checks`. Each result is the
-   next one's `prior_selection`. Build each link's `selected_output` observation,
+   next one's `prior_selection`, and the first one's is the current selection. Build each link's `selected_output` observation,
    then `branch_published` and `pr_opened` (the same PR) at the newest head, and
    checkpoint them all with the `--kind scope` for `merge_pr`.
 7. **Merge.** Continue with `## Delivery loop`'s merge cycle.
@@ -171,15 +187,21 @@ or a CI wait. Add the `pr_merged` observation at that head to the same
 checkpoint, and give it the next pending stage's `--kind scope` instead of
 `merge_pr`'s. Then continue with the cleanup cycles.
 
-**Stops.** A Blocking or Should-fix finding on a merge that is already pushed or
-already landed cannot be amended, so it is a stop. Everything outside the route
-stays Phase 6's genuinely-blocked stop, and a human decides. That covers a PR
-head that is not a sync run from the current selection (a non-merge commit, a
-first parent off the chain, or an unconfirmed integration parent), and red CI
-that needs a fix commit.
+**Stops.** Each stop is Phase 6's genuinely-blocked stop: make no further forge
+write, checkpoint nothing, run no cleanup, keep the worktree and the branch,
+and a human decides. In `--auto`, a step-1 conflict that `SYNC.md` would
+escalate or leave paused is one, taken before any push: note the conflicted
+paths, then run `git merge --abort` so the worktree is back at the current
+selection's head. So is a Blocking or Should-fix finding on a merge that is
+already pushed or already landed, which no amend can apply, a PR head that is
+not a sync run from the current selection (a non-merge commit, a first parent
+off the chain, or an unconfirmed integration parent), and red CI that needs a
+fix commit. The ship owner returns a `terminal_failed` `ship-summary/v2` whose
+legacy `stopped` row's notes name the cause; a remainder owner writes that
+summary with its own `finish`, as `## Remainder mode` says.
 ````
 
-In `SKILL.md`, make these four edits, and nothing else:
+In `SKILL.md`, make these five edits, and nothing else:
 
 1. Phase 6: replace
    `resolve it by re-pushing, resetting, re-reviewing or merging. In `--auto` this`
@@ -200,14 +222,19 @@ In `SKILL.md`, make these four edits, and nothing else:
    an effect is checkpointed
 ```
 
-4. `## Remainder mode`: replace
+4. `## Delivery loop` step 7: replace `(the selection, merge SHA,` with
+   `(the current selection, merge SHA,`.
+5. `## Remainder mode`: replace
    `wait and Phase 7's gate and fence still bind. Otherwise start at the first`
-   with these three lines:
+   with these six lines:
 
 ```text
 wait and Phase 7's gate and fence still bind, and so does CI-MERGE.md's
 `## Post-selection sync`, which also folds a merge that already landed at a
-sync run. Otherwise start at the first
+sync run. A selection this owner did not build, such as that route's first
+`prior_selection` or the one `implementation_delivered` names, is the ledger's
+current selection: read it with `--kind current-selection`, fed the installed
+contract. Otherwise start at the first
 ```
 
 Keep each inline code span on one line.
@@ -217,7 +244,8 @@ Keep each inline code span on one line.
 Run: `PYTHONPATH=python python3 -c 'from pathlib import Path; from agent_tools import instruction_load as il; r = il.tree_reader(Path(".")); m = il.load_model(r(il.MODEL_PATH)); print("\n".join(il.over_ceiling(m, il.measure(m, r))) or "no breach")'`
 Expected: exactly two lines,
 `profile ship-owner on claude: hot <N> bytes exceed ceiling 53916 (...)` and the
-same for `codex`. `<N>` was 54480 in the planning probe.
+same for `codex`, since Task 3 already raised the AUTO.md profiles. `<N>` was
+54720 in the planning probe.
 
 In `instruction-load.json`, set the `ship-owner` profile's `ceiling_bytes`
 `claude` and `codex` to that measured `<N>`. Append this sentence to its
@@ -247,7 +275,7 @@ Run: `if git diff --quiet 6ab576e -- home/common/agent-skills/scripts/artifact_b
 Expected: `artifact-budget-untouched`, since #191 owns that file.
 
 Run: `just agent-workflow-tests > "${TMPDIR:-/tmp}/issue-192-suite.log" 2>&1; echo "exit=$?"; grep -E '^(FAIL|ERROR):|^Ran |^OK|^FAILED' "${TMPDIR:-/tmp}/issue-192-suite.log"`
-Expected: `exit=0`, then `Ran 1383 tests` (the base's 1362 plus this plan's 21)
+Expected: `exit=0`, then `Ran 1386 tests` (the base's 1362 plus this plan's 24)
 and `OK (skipped=3)`, with no `FAIL:`/`ERROR:` line.
 
 Run: `just build > "${TMPDIR:-/tmp}/issue-192-build.log" 2>&1; echo "exit=$?"; tail -n 5 "${TMPDIR:-/tmp}/issue-192-build.log"`

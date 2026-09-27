@@ -28,19 +28,11 @@ bind a contract by its `remove_worktree` path, not by its branch.
   is true, and only through `git -C <path> rev-parse --show-toplevel` and
   `git -C <path> symbolic-ref --quiet --short HEAD`. Both run by name on PATH
   with a 60-second timeout. No lock is taken and nothing is written.
-- The probe maps each outcome to exactly one clause, in this order:
-
-  | Condition | Clause |
-  |---|---|
-  | `os.path.lexists(path)` is false | `the worktree is absent` |
-  | not a non-symlink directory (`_non_symlink(Path(path), stat.S_ISDIR)`) | `it is not a directory` |
-  | `rev-parse` cannot start, times out or exits non-zero | `git failed: <detail>` |
-  | `realpath` of its output ≠ `realpath(path)` | `it is not the top level of a git worktree` |
-  | `symbolic-ref` exits 1 with empty stderr | `its HEAD is detached` |
-  | `symbolic-ref` cannot start, times out, exits otherwise, or prints no single line | `git failed: <detail>` |
-
-  `<detail>` is the first non-empty stderr line (stripped), else `exit <code>`.
-  For a start failure it is `str(error)`, and for a timeout it is
+- The probe maps each outcome to exactly one clause, in the order
+  `live_worktree_branch` in step 3 checks them: absent, not a directory, a
+  `rev-parse` failure, not the top level, detached, then a `symbolic-ref`
+  failure. A failure's `git failed: <detail>` is the first non-empty stderr
+  line, else `exit <code>`, `str(error)` for a start failure, or
   `timed out after 60 seconds` (D19).
 - A probe failure raises
   `WorkflowError("build-delivery refused: " + runtime.worktree_pattern_refusal(worktree, clause))`
@@ -209,9 +201,8 @@ class LegacyWorktreeTest(BuilderHarness, unittest.TestCase):
 ```
 
 6. `ContractLifecycleTest.attempt` must build the attempt at the path it is
-   given, because an attempt's launch event records the same worktree, and a
-   later `update` of `worktree` alone fails `invalid launch identity`. Change its
-   first two lines to:
+   given, since its launch event records that worktree. Replace its signature
+   and its `new_control_attempt(...)` call, its first three lines, with:
 
 ```python
     def attempt(self, issue, number=1, *, worktree=None, **changes):
