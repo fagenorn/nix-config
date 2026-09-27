@@ -3276,6 +3276,7 @@ def command_progress(args: argparse.Namespace) -> int:
     if args.handoff_path is not None and action != "handoff":
         raise WorkflowError("handoff path is only valid for a handoff action")
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
+    runtime = _delivery()
 
     def progress(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         assert state is not None
@@ -3307,10 +3308,12 @@ def command_progress(args: argparse.Namespace) -> int:
             attempt["state"] = "handed_off"
             attempt["handoff_path"] = handoff_path
         state["updated_at"] = now
-        return attempt, True
+        return {"interface_version": 2, "kind": "phase_gate", "run_id": args.run_id,
+                "issue": args.issue,
+                "custody": runtime.custody_for_record(args.issue, "implementation", attempt),
+                "action": action, "handoff_path": handoff_path}, True
 
-    persisted = transact(args.repo_root, args.run_id, progress)
-    print_json(persisted)
+    print_json(transact(args.repo_root, args.run_id, progress))
     return 0
 
 

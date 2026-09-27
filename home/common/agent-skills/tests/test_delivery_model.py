@@ -603,7 +603,7 @@ class DeliveryModelTest(unittest.TestCase):
         fixtures = workflow_responses(self.model)
         self.assertEqual(set(fixtures), {"current", "bootstrap", "control", "observe", "owner",
             "terminal", "remainder", "checkpointed", "stalled", "complete", "failed",
-            "host_route", "host_route_unsupported"})
+            "host_route", "host_route_unsupported", "phase_gate"})
         for name, value in fixtures.items():
             with self.subTest(name=name):
                 self.assertEqual(self.validate(value, "workflow-response"), value)
@@ -985,6 +985,29 @@ class DeliveryModelTest(unittest.TestCase):
             next(stage for stage in bad["stages"] if stage["id"] == stage_id)["depends_on"] = ["merge"]
             with self.subTest(cleanup=stage_id):
                 self.assert_invalid(bad, "delivery-contract")
+
+    def test_phase_gate_reply_is_closed_and_bound_to_its_issue(self):
+        """#191 D5: `progress` replies with one closed v2 `phase_gate`."""
+        gate = workflow_responses(self.model)["phase_gate"]
+        for action in ("continue", "fresh_start", "handoff", "delegate"):
+            value = {**copy.deepcopy(gate), "action": action, "handoff_path": None}
+            with self.subTest(action=action):
+                self.assertEqual(self.validate(value, "workflow-response"), value)
+        missing = copy.deepcopy(gate)
+        del missing["handoff_path"]
+        for name, bad in {
+            "extra member": {**copy.deepcopy(gate), "phase_action": "handoff"},
+            "missing member": missing,
+            "interface 1": {**copy.deepcopy(gate), "interface_version": 1},
+            "remainder custody": {**copy.deepcopy(gate), "custody": custody("remainder")},
+            "another issue's custody": {**copy.deepcopy(gate), "issue": 152},
+            "unknown action": {**copy.deepcopy(gate), "action": "retry"},
+            "handoff path on continue": {**copy.deepcopy(gate), "action": "continue"},
+            "empty handoff path": {**copy.deepcopy(gate), "handoff_path": ""},
+            "null run": {**copy.deepcopy(gate), "run_id": None},
+        }.items():
+            with self.subTest(invalid=name):
+                self.assert_invalid(bad, "workflow-response")
 
     def test_current_launch_and_null_contract_correlations_are_exact(self):
         fixtures = workflow_responses(self.model)

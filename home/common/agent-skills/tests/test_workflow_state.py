@@ -257,7 +257,7 @@ class LifecycleHarness:
         if handoff_path is not None:
             args.extend(("--handoff-path", handoff_path))
         completed = self.run_cli(*args, ok=ok)
-        return json.loads(completed.stdout) if ok else completed
+        return self.validated_response(completed.stdout) if ok else completed
 
     def write_handoff(self, issue, contents="durable handoff\n"):
         handoffs = self.workflows_dir / self.run_id / "handoffs"
@@ -2493,7 +2493,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             context_tokens=20000,
             handoff_path=handoff_path,
         )
-        self.assertEqual(handed_off["state"], "handed_off")
+        self.assertEqual(handed_off["handoff_path"], str(handoff_path))
+        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][0]["state"], "handed_off")
         before = self.state_path.read_bytes()
         rejected = self.finish(1, self.merged_result(), ok=False)
         self.assertNotEqual(rejected.returncode, 0)
@@ -2679,7 +2680,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 ),
             }
             with self.subTest(expected_action=expected_action):
-                self.assertEqual(result["phase_action"], expected_action)
+                self.assertEqual(result["action"], expected_action)
                 self.assertEqual(persisted["phase_action"], expected_action)
                 self.assertEqual(persisted["phase"], index)
                 self.assertEqual(persisted["last_progress_at"], DEFAULT_NOW)
@@ -2721,7 +2722,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 attempt = json.loads(
                     self.direct_state_path(owner["run_id"]).read_text()
                 )["issues"][str(offset)]["attempts"][0]
-                self.assertEqual(result["phase_action"], expected)
+                self.assertEqual(result["action"], expected)
                 self.assertEqual(attempt["phase_action"], expected)
                 self.assertEqual(attempt["phase_inputs"]["remainder_self_contained"],
                                  overrides.get("remainder_self_contained", False))
@@ -2774,7 +2775,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 expected_bytes = (json.dumps(
                     expected_state, sort_keys=True, separators=(",", ":")
                 ) + "\n").encode()
-                self.assertEqual(result, expected_attempt)
+                self.assertEqual(result, {"interface_version": 2, "kind": "phase_gate", "run_id": run_id, "issue": 14, "custody": {"kind": "implementation", "attempt": 1, "launch": 1, "action_id": "14:1:1"}, "action": "handoff", "handoff_path": None})
                 self.assertEqual(self.state_path.read_bytes(), expected_bytes)
 
     def test_zero_sequence_direct_shaped_dispatcher_keeps_non_direct_progress_and_reopen_bytes(self):
@@ -2820,7 +2821,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         expected_bytes = (json.dumps(
             expected_state, sort_keys=True, separators=(",", ":")
         ) + "\n").encode()
-        self.assertEqual(result, expected_attempt)
+        self.assertEqual(result, {"interface_version": 2, "kind": "phase_gate", "run_id": "direct-14-000000", "issue": 14, "custody": {"kind": "implementation", "attempt": 1, "launch": 1, "action_id": "14:1:1"}, "action": "handoff", "handoff_path": None})
         self.assertEqual(self.state_path.read_bytes(), expected_bytes)
 
         reopened = self.control_raw(
@@ -2881,7 +2882,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             artifacts_sufficient=False,
             remainder_self_contained=True,
         )
-        self.assertEqual(delegated["phase_action"], "delegate")
+        self.assertEqual(delegated["action"], "delegate")
 
         unknown_usage = self.progress(
             issue=14,
@@ -2894,7 +2895,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             artifacts_sufficient=False,
             remainder_self_contained=True,
         )
-        self.assertEqual(unknown_usage["phase_action"], "continue")
+        self.assertEqual(unknown_usage["action"], "continue")
 
         at_context_ceiling = self.progress(
             issue=14,
@@ -2907,7 +2908,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             artifacts_sufficient=False,
             remainder_self_contained=True,
         )
-        self.assertEqual(at_context_ceiling["phase_action"], "handoff")
+        self.assertEqual(at_context_ceiling["action"], "handoff")
 
         at_turn_ceiling = self.progress(
             issue=14,
@@ -2920,7 +2921,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             artifacts_sufficient=False,
             remainder_self_contained=True,
         )
-        self.assertEqual(at_turn_ceiling["phase_action"], "handoff")
+        self.assertEqual(at_turn_ceiling["action"], "handoff")
 
     def test_unknown_usage_continues_a_dispatched_run_across_phase_gates(self):
         """A harness with no context-token count must not pin a run to handoff.
@@ -2945,7 +2946,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             )
             with self.subTest(phase=phase):
                 self.assertEqual(
-                    (decision["phase_action"], decision["state"]),
+                    (decision["action"], self.read_state()["issues"]["14"]["attempts"][0]["state"]),
                     ("continue", "active"),
                 )
 
@@ -2955,7 +2956,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             turn_count=118, context_tokens=None, next_needs_context=True,
             artifacts_sufficient=False, remainder_self_contained=False,
         )
-        self.assertEqual(at_ceiling["phase_action"], "handoff")
+        self.assertEqual(at_ceiling["action"], "handoff")
 
     def test_durable_handoff_requires_safe_file_and_resumes_same_attempt(self):
         self.init_run()
@@ -2963,7 +2964,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         launched = self.spawn(issue=14, worktree=worktree)
         decision = self.progress(turn_count=118, context_tokens=20000)
         self.assertEqual(
-            (decision["phase_action"], decision["state"]), ("handoff", "active")
+            (decision["action"], self.read_state()["issues"]["14"]["attempts"][0]["state"]), ("handoff", "active")
         )
         self.assertIsNone(decision["handoff_path"])
 
@@ -2987,7 +2988,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         finalized = self.progress(
             turn_count=118, context_tokens=20000, handoff_path=handoff_path
         )
-        self.assertEqual(finalized["state"], "handed_off")
+        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][0]["state"], "handed_off")
         self.assertEqual(finalized["handoff_path"], str(handoff_path))
 
         before = self.state_path.read_bytes()
@@ -3020,8 +3021,9 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             turn_count=10,
             context_tokens=20000,
         )
-        self.assertEqual((continued["phase_action"], continued["state"]), ("continue", "active"))
-        self.assertEqual(continued["handoff_path"], str(handoff_path))
+        self.assertEqual((continued["action"], continued["handoff_path"], continued["custody"]["action_id"]), ("continue", None, "14:1:2"))
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["handoff_path"]), ("active", str(handoff_path)))
 
     def test_control_revalidates_handoff_before_resume(self):
         self.init_run()
@@ -3118,11 +3120,11 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.init_run()
         self.spawn(issue=14, worktree=self.root / "wt-a")
         at_turn_threshold = self.progress(turn_count=118, context_tokens=20000)
-        self.assertEqual(at_turn_threshold["phase_action"], "handoff")
+        self.assertEqual(at_turn_threshold["action"], "handoff")
         at_context_threshold = self.progress(
             phase=2, turn_count=10, context_tokens=140000
         )
-        self.assertEqual(at_context_threshold["phase_action"], "handoff")
+        self.assertEqual(at_context_threshold["action"], "handoff")
 
         for args in (
             ("--next-needs-context", "yes"),
@@ -3198,7 +3200,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             turn_count=10,
             context_tokens=140000,
         )
-        self.assertEqual(decision["phase_action"], "handoff")
+        self.assertEqual(decision["action"], "handoff")
         handoff_path = self.write_handoff(16)
         self.progress(
             issue=16,
@@ -4134,9 +4136,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 issue=73, phase=1, now="2026-08-20T10:03:00Z",
                 turn_count=10, context_tokens=20000,
             )
-            self.assertEqual(progressed["phase"], 1)
+            self.assertEqual(progressed["custody"]["action_id"], "73:1:2")
             state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
             attempts = state["issues"]["73"]["attempts"]
+            self.assertEqual(attempts[0]["phase"], 1)
             self.assertEqual(len(attempts), 1)
             self.assertEqual(len(attempts[0]["launches"]), 2)
             self.assertEqual(attempts[0]["worktree"], str(worktree))
@@ -4324,7 +4327,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.direct_state_path(run_id).read_bytes(), before)
         self.run_id = owner["run_id"]
         progress = self.progress(issue=73, now="2026-08-20T10:01:00Z")
-        self.assertEqual(progress["phase_action"], "continue")
+        self.assertEqual(progress["action"], "continue")
         finished = self.finish(
             1, self.merged_result(73), issue=73, now="2026-08-20T10:02:00Z",
         )
@@ -4659,7 +4662,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertFalse(self.direct_state_path("direct-73-000002").exists())
         # The window is fresh, not merely restated: the resumed owner can work.
         self.assertEqual(
-            self.progress(issue=73, now="2026-08-20T15:30:00Z")["phase_action"],
+            self.progress(issue=73, now="2026-08-20T15:30:00Z")["action"],
             "continue",
         )
 
@@ -6073,6 +6076,55 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertNotIn("Traceback", rejected.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
+
+
+class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):
+    """#191 D5: `progress` replies with one closed, validated `phase_gate`."""
+
+    def test_each_action_names_its_custody_and_only_this_calls_handoff(self):
+        self.init_run()
+        worktree = self.root / "wt-14"
+        self.spawn(issue=14, worktree=worktree)
+        gate = {"interface_version": 2, "kind": "phase_gate", "run_id": self.run_id,
+                "issue": 14, "custody": {"kind": "implementation", "attempt": 1,
+                                         "launch": 1, "action_id": "14:1:1"},
+                "handoff_path": None}
+        for phase, overrides, action in (
+                (1, {}, "continue"),
+                (2, {"next_needs_context": False, "artifacts_sufficient": True}, "fresh_start"),
+                (3, {"turn_count": 118}, "handoff"),
+                (4, {"remainder_self_contained": True}, "delegate")):
+            with self.subTest(action=action):
+                reply = self.progress(phase=phase, now=f"2026-08-13T20:0{phase}:00Z",
+                                      **overrides)
+                self.assertEqual(reply, {**gate, "action": action})
+                attempt = self.read_state()["issues"]["14"]["attempts"][0]
+                self.assertEqual((attempt["phase"], attempt["phase_action"], attempt["state"]),
+                                 (phase, action, "active"))
+        handoff = self.write_handoff(14)
+        finalized = self.progress(phase=5, now="2026-08-13T20:05:00Z", turn_count=118,
+                                  handoff_path=handoff)
+        self.assertEqual(finalized, {**gate, "action": "handoff", "handoff_path": str(handoff)})
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["handoff_path"]),
+                         ("handed_off", str(handoff)))
+        self.resume(issue=14, worktree=worktree, now="2026-08-13T20:06:00Z")
+        resumed = self.progress(phase=6, now="2026-08-13T20:07:00Z")
+        self.assertEqual(resumed, {**gate, "action": "continue", "custody": {
+            "kind": "implementation", "attempt": 1, "launch": 2, "action_id": "14:1:2"}})
+        self.assertEqual(
+            self.read_state()["issues"]["14"]["attempts"][0]["handoff_path"], str(handoff))
+
+    def test_a_direct_run_replies_with_its_own_run_and_issue(self):
+        owner = self.acquire_direct(issue=191)
+        self.run_id = owner["run_id"]
+        reply = self.progress(issue=191, phase=1, now="2026-08-20T10:05:00Z",
+                              remainder_self_contained=True)
+        self.assertEqual(reply, {
+            "interface_version": 2, "kind": "phase_gate", "run_id": "direct-191-000001",
+            "issue": 191, "custody": {"kind": "implementation", "attempt": 1,
+                                      "launch": 1, "action_id": "191:1:1"},
+            "action": "delegate", "handoff_path": None})
 
 
 class ReconciledReplyBoundaryTest(LifecycleHarness, unittest.TestCase):
