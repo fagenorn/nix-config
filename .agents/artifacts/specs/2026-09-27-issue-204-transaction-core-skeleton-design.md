@@ -127,7 +127,9 @@ types exist, both closed:
   equals the fold before it, `reason` is a non-empty string, `external_state` is `"known"`,
   `"unknown"` or null, and must be `"known"` when `to` is a terminal.
 
-`seq` runs 1..n without gaps; `at` is a UTC timestamp `YYYY-MM-DDTHH:MM:SS.mmmZ`; no event may
+`seq` runs 1..n without gaps and alone orders history; `at` is not required to be monotonic,
+because the wall clock may step back. `reason` is caller-supplied and must be secret-free (#72),
+as must `subject`; the core stores both verbatim. `at` is a UTC timestamp `YYYY-MM-DDTHH:MM:SS.mmmZ`; no event may
 follow one whose `to` is a terminal. `state`, `parked_from` and `revision` are a projection: the
 validator folds the events and requires the stored projection to match, so a hand-edited `state`
 cannot disagree with history. Loading uses the strict JSON hooks `reject_duplicate_keys` and
@@ -149,7 +151,11 @@ history, validate the candidate — including that the prior events are its exac
 check of append-only — then write a temporary file in the transaction directory, `fsync` it,
 `os.replace` it over `state.json` and `fsync` the directory. This mirrors the shipped
 workflow-state write path. `load` takes no lock and creates nothing: atomic replace guarantees it
-sees a whole file, and it validates what it reads.
+sees a whole file, and it validates what it reads. Only `create` makes new paths: `advance` opens
+the existing lock file without `O_CREAT`, so an id with no transaction directory is
+`UnknownTransaction` and a directory holding state but no lock file is `StateInvalid`; neither call
+ever leaves a stray file or directory behind (D13). Every error message names the transaction id
+or path and the rule that failed, so a refusal is diagnosable from its text alone.
 
 ### Creation and deduplication
 
@@ -158,8 +164,9 @@ contention) and then:
 
 1. If the key's index entry exists, validate it (closed object: `schema`
    `transaction-creation-key/v1`, `creation_key`, `transaction_id`, with the entry's key equal to
-   the requested one). If that transaction's `state.json` exists, compare its subject to the
-   requested subject by canonical equality: equal returns the existing transaction and writes
+   the requested one). If that transaction's `state.json` exists, validate it fully and compare
+   its subject to the requested subject by `agent_tools.canonical.telemetry_digest`, the package's
+   one canonical-JSON home, so `1`, `1.0` and `true` stay distinct: equal returns the existing transaction and writes
    nothing, so no second `created` event exists; different raises `CreationConflict`. If the state
    is missing, a previous create crashed after writing the index; finish that creation under the
    indexed id.
@@ -298,7 +305,7 @@ receipt-backed predicates); cross-repository parent transactions (deferred rejec
 | D1 | One library module `agent_tools.transaction_core` named for transactions, not releases, with no command-table row; the Nix build's recursive import check covers it. | agent-helpers rules 1–2; `lib/agent-tools.nix` walks every module; #117 makes attempts the first consumer; YAGNI. | A command row or `release_*` naming: no caller exists, and "release" misnames the first consumer. |
 | D2 | The store takes an absolute, pre-existing root and writes only beneath it; it never derives, creates or searches for a root and leaves the #72 sentinel to the caller. | #72 explicit ledger roots and owning-module sentinel; #204 "the core never derives one". | Creating missing roots or defaulting to `.agents/runtime/...`: derives policy the caller owns and can scatter state. |
 | D3 | Hand-rolled RFC 9562 UUIDv7 from wall-clock ms plus `secrets` randomness, no intra-millisecond counter, validated (pattern, version, variant) before any path join. | #82 `rel_` + UUIDv7; stdlib has no UUIDv7; the-bar defense in depth. | A monotonic counter (ordering is the event sequence's job) or trusting the id string (path traversal). |
-| D4 | Dedup through a root-level creation lock and `creation-keys/<sha256>.json` index written before the state; a repeat create with the same subject returns the existing id writing nothing, a different subject is `CreationConflict`, and an index without state completes under the indexed id. | #82 creation_key dedup and immutable subject; #117 "state module's index"; crash-safety. | Scanning every transaction directory (O(n), racy) or state-before-index (a crash leaves an orphan and a second id). |
+| D4 | Dedup through a root-level creation lock and `creation-keys/<sha256>.json` index written before the state; a repeat create with the same subject (equal `telemetry_digest`) returns the existing id writing nothing, a different subject is `CreationConflict`, and an index without state completes under the indexed id. | #82 creation_key dedup and immutable subject; #117 "state module's index"; crash-safety. | Scanning every transaction directory (O(n), racy) or state-before-index (a crash leaves an orphan and a second id). |
 | D5 | History lives inside `state.json` (schema `transaction-state/v1`), with `state`/`parked_from`/`revision` a validated projection of the event fold; v1 carries only `created` and `transitioned` events and later slices extend by new schema versions. | #82 "state contains … typed append-only events … validates the event fold, rebuilds the projection"; the-bar single home. | A separate `events.jsonl` append file (two files cannot be replaced atomically together) or #82's full field set now (unused fields, no invariants to check them). |
 | D6 | The sweep reaches the core through a test-only fixture executor over the store's public API, porting the prototype's world and all four shapes whole but only the `success` scenario; the prototype's lease/retry/recovery logic is not ported. | #204 "fixtures, not production code" and "this slice asserts the success row"; the-bar YAGNI and no unasserted placeholders. | Porting the whole `Run` engine (drags out-of-scope slices in) or all fourteen scenarios now (inert, unasserted data). |
 | D7 | `TRANSITIONS` is an explicit closed edge table: forward chain plus `published → proving`, every forward state and `recovering` may park, a park resumes only to its recorded `parked_from` or `recovering`, `abandoned` only from pre-publication states or a parking, `failed` only from a parking, `rolled_back` only from `recovering`, `succeeded` only from `proving`. | #82 lifecycle and terminal grounds; prototype's activation-`none` path; the-bar fail loud. | A permissive any-to-any table checked only for terminals (lets a park skip phases and lets `failed` or `succeeded` be reached from anywhere). |
@@ -307,3 +314,4 @@ receipt-backed predicates); cross-repository parent transactions (deferred rejec
 | D10 | Advisory `fcntl.flock` taken non-blocking; contention raises `TransactionBusy` at once and the caller owns any retry; reads are lock-free. | #204 "a concurrent writer holding the lock is refused before any write"; the-bar no sleep to paper over races; workflow-state atomic-replace precedent. | A blocking lock (a stuck holder hangs every caller) or a timed retry loop (policy and sleeps inside the core). |
 | D11 | The neutrality check is a test-side checker that strips comments via `tokenize` and docstrings via `ast`, matches whole lowercase words against three closed lists, and proves itself with a planted-code and a planted-comment case. | #123/#204 neutrality criterion; prototype README invariant; the-bar tests that can fail. | The prototype's substring match (flags `oci` in `associated`) or stripping every triple-quoted string (hides real string literals). |
 | D12 | Add the two test files to `agent-workflow-tests` and one CLAUDE.md sentence naming the module as a caller-less first slice; no Nix change. | justfile lists files explicitly; the-bar "a deliberate stub is named in the architecture doc". | Leaving CLAUDE.md silent (an unused core module reads as dead code) or a new recipe (the demo belongs in the existing suite). |
+| D13 | Only `create` makes paths; `advance` opens the lock without creating it and `load` is a pure read, so an unknown id is `UnknownTransaction` and state without its lock file is `StateInvalid`, with nothing left behind. | #72 state-based cleanup (no stray residue); #132's read-only query precedent; the-bar defense in depth. | Lazily creating the lock or directory on advance (manufactures residue for ids that never existed). |
