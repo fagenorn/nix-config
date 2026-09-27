@@ -331,7 +331,8 @@ Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger
 For the direct-autonomous Phase-5 `delegate` case, the
 mandatory direct-autonomous Phase-5 rollover in `AUTO.md` replaces the generic delegation
 behavior above. Its post-rollover Phase-6 and Phase-7 gates also use the narrow
-routes defined there: Phase-6 `delegate` launches the existing fresh ship owner,
+routes defined there: Phase-6 `delegate` launches the existing fresh ship owner
+(or, on a dispatch gap, runs Phase 7's dispatch-gap fallback),
 and Phase-7 `delegate` launches only the ledger-only finish bookkeeper. The
 behavior for all other acquisition modes retains the existing generic action
 semantics unchanged.
@@ -374,7 +375,7 @@ Without lifecycle identity, apply the same action order locally with the
 Use this one procedure for Phase-0 content stops, attempt budget stops, execution
 failure, and Phase-7 success whenever lifecycle identity exists. The terminal
 result is one `ship-summary/v2` bound to the exact current custody and
-contract digest. After Phase 7 it is the ship owner's returned summary, which
+contract digest. After Phase 7 it is the ship report's summary, which
 carries the fresh delivery, authority, and reevaluation observations that establish the
 reported delivery state (`delivery_complete` with the legacy `merged` row as
 `historical_owner_result`, or `terminal_failed` with a `stopped`/`failed` row
@@ -418,17 +419,18 @@ Without lifecycle identity, send the same compact schema directly.
 
 Suspend — do not finish — when an environmental interruption pauses the work
 rather than resolving it: an imminent quota or session limit, a repeated
-transport failure, a permission prompt only a human can approve, or an external
-wait. A suspension parks the attempt without ending it — it consumes no attempt,
-needs no authorization phrase, and re-entry resumes it in place. Call:
+transport failure, a permission prompt only a human can approve, an external
+wait, or a context that cannot launch the agents a phase needs. A suspension
+parks the attempt without ending it — it consumes no attempt, needs no
+authorization phrase, and re-entry resumes it in place. Call:
 
 ```text
 workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --issue <n> --attempt <k> --blocked-on <value>
 ```
 
-with `<value>` one of `usage_limit`, `transport`, `human_gate`, or `external`
-(the reaper alone owns `unknown`). Then print the canonical line as the final
-user-facing output:
+with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, or
+`agent_dispatch` (the reaper alone owns `unknown`). Then print the canonical
+line as the final user-facing output:
 
 ```text
 Suspended (blocked_on=<value>). Resume: <reentry from the envelope>
@@ -556,8 +558,14 @@ Read `ship-handoff.md` for the exact subagent prompt — with lifecycle identity
 
 After receiving the ship report, from-issue owns the terminal durable write.
 A report that is only the re-entry line `/from-issue <num> --auto` means the
-ship owner checkpointed a denial, which already suspended this attempt: relay
-that line and write nothing. A report that validates at `--boundary
+ship-issue run checkpointed a denial, which already suspended this attempt: relay
+that line and write nothing. A report that is only the line
+`capability_gap: agent_dispatch` means ship-issue's Phase-0 reviewer-dispatch
+probe found that the ship owner's context cannot launch its reviewers, before
+anything was launched or written. A `from-issue-ship-owner` launch this context
+cannot make, because it has no subagent-launch tool, counts as that same line.
+Compare it byte for byte, never decode or validate it, and take the
+dispatch-gap fallback below. A report that validates at `--boundary
 workflow-response` as `delivery_stalled` means the checkpoint already ended the
 custody: relay it and write nothing.
 Pipe its received bytes through `artifact-budget validate-report --boundary
@@ -570,7 +578,7 @@ not `ledger_repo_root` — only a `present` path is primary-checkout-relative, a
 `workflow-state finish` resolves the two the same way.
 Before that terminal write, run
 `~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
-with this owner's own `action_id`: the ship owner and this parent share one
+with this owner's own `action_id`: the ship run and this parent share one
 launch identity, so a ship report from a superseded launch means this launch is
 superseded too. On `current: false` or any helper failure, write nothing, print
 the canonical re-entry line `/from-issue <num> --auto` on its own line, and
@@ -579,6 +587,29 @@ stop. Then call `workflow-state finish --summary-file -` with the validated
 validate its raw response before sending the canonical JSON unchanged. A fresh
 ship agent writes only `checkpoint-delivery` under this custody, never the owner's final ledger result. Apply the same procedure to any Phase-6 execution
 failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating so the two sequences stay distinguishable.
+
+**Dispatch-gap fallback.** This is the one exception to shipping through a
+fresh ship owner, and the one allowed departure from a rollover Phase-6
+`delegate`. With lifecycle identity, first run the same `check-launch` fence
+with this owner's own `action_id`; on `current: false` or any helper failure,
+write nothing, print the canonical re-entry line `/from-issue <num> --auto` on
+its own line, and stop. Ledger-free there is no launch identity, so skip the
+fence. Then invoke `ship-issue` through your own `Skill` tool with the same
+validated handoff bytes — nothing was changed, so they are still accurate, and
+ship-issue re-validates them on entry — and carry out the ship-owner prompt's
+task list yourself: every phase, the auto-mode rules and, with a
+`ship-handoff/v2`, the `## Delivery loop`, writing only `checkpoint-delivery`
+inside it. Its reviewers run as leaves one level below you. Feed its return
+back into the report handling above: the re-entry line, a `delivery_stalled`
+reply and a `ship-summary/v2` are handled exactly as a fresh ship owner's are,
+and a human gate reached inside the run is `ship-issue/HUMAN-GATE.md`'s case of
+an owner running that path itself. A `capability_gap: agent_dispatch` line
+returned by the inline run is the genuine gap and never starts a second inline
+run: with lifecycle identity follow the suspension procedure with `<value>` =
+`agent_dispatch`, making no `finish` call; ledger-free, report the gap to the
+user and stop, keeping the worktree. The fallback covers only the
+review-bearing ship launch: a `delivery_remainder` launch runs remainder mode,
+which never probes and never returns the gap line.
 
 ## Notes
 
