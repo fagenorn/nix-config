@@ -209,8 +209,9 @@ Host admission is #150's shipped mechanism (per D10). The host declaration gives
 support and, when supported, its `agent_slots` per root session. `workflow-state control` claims
 the whole fixed role set (owner, worker and independent reviewer) in the step that creates a
 launch, beside one controller claim per run. It dispatches only when both `max_parallel` and a free
-role set allow; otherwise the issue is `waiting`, recomputed each sweep, and no launch or attempt is
-spent. One commit-time settle releases a claim in the write that ends its custody, and the
+role set allow. With `max_parallel` exhausted the issue is simply not dispatched this sweep; only a
+role-set shortfall reports it `waiting`, recomputed each sweep. Neither spends a launch or attempt.
+One commit-time settle releases a claim in the write that ends its custody, and the
 owner-exit notification wakes the next sweep. A host-refused launch parks as `host_capacity`,
 releases its claim and resumes only after a later non-refusal release, within the stall bound.
 `host-route` returns the typed supported/unsupported answer: `claude-code` is supported and `codex`
@@ -227,8 +228,10 @@ digest, issue time, optional expiry, revocation key and exact `scope-tuple/v1` s
 action, effect, target, endpoint, data, risk, spend), bound to the contract's deliverable. The
 ledger holds the chain append-only. `ship-handoff/v2` carries it with a builder-sealed chain digest;
 a requested scope crosses a handoff only as a historical echo, never inherited. `build-delivery`
-derives every scope from the contract stage, never from the intent, and the principal is stable
-across attempts and remainders, so an unchanged authorized task matches exactly without re-asking.
+selects each stage's scope by action and effect from the contract's initial intent (re-derived from
+the contract, or the ledger's installed intent for an installed contract that no longer re-derives),
+never from a requested scope, and the principal is stable across attempts and remainders, so an
+unchanged authorized task matches exactly without re-asking.
 The intent is not an executable grant and survives custody loss only as durable evidence of intent,
 subject to its own validity limits.
 
