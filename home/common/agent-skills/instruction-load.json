@@ -34,10 +34,10 @@
         "codex-collaboration/DIFF-REVIEW.md": "diff-review is not a Phase 0–5 operation"
       },
       "ceiling_bytes": {
-        "claude": 87439,
-        "codex": 87439
+        "claude": 87550,
+        "codex": 87550
       },
-      "note": "Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6)."
+      "note": "Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10)."
     },
     {
       "id": "orchestration-dispatcher",
@@ -98,9 +98,9 @@
         "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation"
       },
       "ceiling_bytes": {
-        "claude": 147826
+        "claude": 147937
       },
-      "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md` and `sdd/final-review.md` (#155 D10)."
+      "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10)."
     },
     {
       "id": "design-and-grill-owner",
@@ -194,10 +194,10 @@
         "codex-collaboration/PLAN-REVIEW.md": "plan-review ran at Phase 5"
       },
       "ceiling_bytes": {
-        "claude": 138951,
-        "codex": 138951
+        "claude": 139062,
+        "codex": 139062
       },
-      "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md`, `sdd/correctness-reviewer-prompt.md` and `sdd/final-review.md` (#155 D10)."
+      "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md`, `sdd/correctness-reviewer-prompt.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10)."
     },
     {
       "id": "ship-owner",

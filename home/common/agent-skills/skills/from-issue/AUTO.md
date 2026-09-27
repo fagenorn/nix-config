@@ -288,9 +288,10 @@ invalid object stops the attempt before anything else runs. Before reading eithe
 worktree naming values. Quote the pattern's literal bytes,
 substitute decimal `owner.issue` for `<num>` and
 `[a-z0-9][a-z0-9-]*` for `<slug>`, and accept exactly the resulting pattern with
-either the resolved prefix or no prefix. Take normalized `owner.worktree`'s final path component
-and require it to match that binding-derived accepted branch regex; that component
-is the deterministic `expected_branch`. Require
+either the resolved prefix or no prefix. Take `owner.contract`'s reviewed-slot `constraints.branch`
+and require it to match that binding-derived accepted branch regex; that branch
+is the deterministic `expected_branch`. Require normalized `owner.worktree` to
+equal the literal target of `owner.contract`'s `remove_worktree` stage. Require
 `git -C owner.worktree branch --show-current` to equal `expected_branch`. A
 pattern, path, or current-branch mismatch is a contract failure before either
 artifact root is read. Only after that branch check, verify the current clean HEAD.

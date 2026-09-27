@@ -1930,14 +1930,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "Before reading either artifact",
             "caller-passed `bindings.vcs` branch and",
             "decimal `owner.issue`",
-            "final path component",
+            "`owner.contract`'s reviewed-slot `constraints.branch`",
             "binding-derived accepted branch regex",
             "`expected_branch`",
+            "normalized `owner.worktree` to",
+            "`remove_worktree` stage",
             "`git -C owner.worktree branch --show-current`",
             "equal `expected_branch`",
             "mismatch is a contract failure",
             "both roots are tracked",
         )
+        self.assertNotIn("final path component", delegated)
         self.assert_ordered(
             delegated,
             "mismatch is a contract failure",
