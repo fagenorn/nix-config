@@ -1268,11 +1268,11 @@ def reconciled_result(
     """The terminal record a merged pull request writes into a stale ledger.
 
     Only what the forge itself observed is asserted: the issue is not claimed
-    closed, because reconciliation saw a merge, not a report (per D3). That is
-    also why this record is checked against the ledger's own result schema
-    rather than the ship-summary boundary — the boundary is the contract for an
-    owner's report, where a ``merged`` row means the owner also closed the issue
-    and cleaned up.
+    closed, because reconciliation saw a merge, not a report (per D3).
+    That is also why every workflow response that relays this record checks it
+    with artifact-budget's ledger-result rule (``validate_ledger_result``), not
+    the owner-report rule: a ``merged`` owner report means the owner also closed
+    the issue and cleaned up.
 
     When ``prior_result`` is the attempt's own result and it already carries a
     delivery-detail pointer — a non-null ``report_path`` or a ``detail_state``
@@ -3281,6 +3281,7 @@ def command_progress(args: argparse.Namespace) -> int:
     if args.handoff_path is not None and action != "handoff":
         raise WorkflowError("handoff path is only valid for a handoff action")
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
+    runtime = _delivery()
 
     def progress(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         assert state is not None
@@ -3312,10 +3313,12 @@ def command_progress(args: argparse.Namespace) -> int:
             attempt["state"] = "handed_off"
             attempt["handoff_path"] = handoff_path
         state["updated_at"] = now
-        return attempt, True
+        return {"interface_version": 2, "kind": "phase_gate", "run_id": args.run_id,
+                "issue": args.issue,
+                "custody": runtime.custody_for_record(args.issue, "implementation", attempt),
+                "action": action, "handoff_path": handoff_path}, True
 
-    persisted = transact(args.repo_root, args.run_id, progress)
-    print_json(persisted)
+    print_json(transact(args.repo_root, args.run_id, progress))
     return 0
 
 
@@ -3328,6 +3331,7 @@ def command_suspend(args: argparse.Namespace) -> int:
     """
     now_value = parse_utc(args.now, "--now")
     now = format_utc(now_value)
+    runtime = _delivery()
 
     def suspend(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         assert state is not None
@@ -3347,14 +3351,17 @@ def command_suspend(args: argparse.Namespace) -> int:
         state["updated_at"] = now
         if not suspended:
             issue_state["outcome"] = copy.deepcopy(attempt["result"])
-            return attempt, True
+            return direct_terminal(
+                issue=args.issue, run_id=args.run_id, source="lifecycle",
+                reason=attempt["result"]["state"], blockers=[],
+                result=issue_state["outcome"],
+            ), True
         return {
-            "kind": "suspended",
-            "issue": attempt["issue"],
-            "attempt": attempt["attempt"],
+            "interface_version": 2, "kind": "suspended", "run_id": args.run_id,
+            "issue": args.issue,
+            "custody": runtime.custody_for_record(args.issue, "implementation", attempt),
             "blocked_on": attempt["blocked_on"],
-            "stalled_resumes": attempt["stalled_resumes"],
-            "reentry": reentry_command(attempt["issue"]),
+            "reentry": reentry_command(args.issue),
         }, True
 
     print_json(transact(args.repo_root, args.run_id, suspend))

@@ -2554,6 +2554,35 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             suspension, "workflow-state suspend", "Suspended (blocked_on=", "stop",
         )
 
+    def test_phase_gate_obeys_the_validated_phase_gate_action(self):
+        """#191 D8: the obeyed action is the validated `phase_gate` reply's `action`."""
+        self.assertIn(
+            "Obey the returned action exactly: it is the `action` of the validated "
+            "`phase_gate` reply, and the closed set is "
+            "`continue | fresh_start | handoff | delegate`:",
+            normalized(self.from_issue))
+
+    def test_suspension_validates_its_reply_and_replays_a_stall_bound_terminal(self):
+        """#191 D6, D8: suspend's reply is validated; a `terminal` reply is a replay."""
+        suspension = self.section(
+            self.from_issue, "## Suspension procedure", "## Phase 0"
+        )
+        self.assertIn(
+            "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--now <utc> --issue <n> --attempt <k> --blocked-on <value> "
+            "| artifact-budget validate-report --boundary workflow-response --input -\n",
+            suspension,
+        )
+        self.assert_ordered(
+            normalized(suspension),
+            "A validated `kind: terminal` reply means the anti-zombie bound ended "
+            "the attempt instead: handle it as the terminal replay in the terminal "
+            "return procedure — print its `reentry`, relay it, and write no "
+            "`finish` — and stop.",
+            "Otherwise the reply is `kind: suspended`; print the canonical line",
+            "Suspended (blocked_on=<value>). Resume: <reentry from the envelope>",
+        )
+
     def test_terminal_replay_relays_reentry(self):
         terminal = self.section(
             self.from_issue,
