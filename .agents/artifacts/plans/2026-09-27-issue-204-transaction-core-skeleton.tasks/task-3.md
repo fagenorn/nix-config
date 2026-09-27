@@ -108,7 +108,7 @@ class SweepTableTest(unittest.TestCase):
                 self.assertEqual({e["external_state"] for e in persisted.events[1:]},
                                  {"known"})
 
-    def test_driving_a_cell_twice_reuses_the_transaction(self):
+    def test_recreating_a_driven_cell_returns_its_transaction(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TransactionStore(Path(tmp))
             first = drive(store, "library", "success")

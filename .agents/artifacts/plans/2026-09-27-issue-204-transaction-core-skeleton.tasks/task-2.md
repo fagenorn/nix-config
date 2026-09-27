@@ -56,9 +56,10 @@ class AdvanceCase(StoreCase):
     def assertRefusedUnchanged(self, error, transaction_id, target, **kwargs):
         raw = self.state_path(transaction_id).read_bytes()
         listing = self.tree()
-        with self.assertRaises(error):
+        with self.assertRaises(error) as caught:
             self.store.advance(transaction_id, target, reason=kwargs.pop("reason", "try"),
                                **kwargs)
+        self.assertIn(transaction_id, str(caught.exception))
         self.assertEqual(self.state_path(transaction_id).read_bytes(), raw)
         self.assertEqual(self.tree(), listing)
 
@@ -168,6 +169,23 @@ class LockAndSchemaGuardTest(AdvanceCase):
         (self.root / transaction_id / "lock").unlink()
         self.assertRefusedUnchanged(StateInvalid, transaction_id, "awaiting_verification")
         self.assertFalse((self.root / transaction_id / "lock").exists())
+
+    def test_a_symlinked_transaction_directory_is_never_followed(self):
+        transaction_id = self.reach("k", ())
+        with tempfile.TemporaryDirectory() as outside:
+            moved = Path(outside) / "moved"
+            (self.root / transaction_id).rename(moved)
+            (self.root / transaction_id).symlink_to(moved, target_is_directory=True)
+            raw = (moved / "state.json").read_bytes()
+            listing = sorted(p.name for p in moved.iterdir())
+            for call in (lambda: self.store.load(transaction_id),
+                         lambda: self.store.advance(transaction_id, "awaiting_verification",
+                                                    reason="x", external_state="known")):
+                with self.assertRaises(UnknownTransaction) as caught:
+                    call()
+                self.assertIn(transaction_id, str(caught.exception))
+            self.assertEqual((moved / "state.json").read_bytes(), raw)
+            self.assertEqual(sorted(p.name for p in moved.iterdir()), listing)
 ```
 
 - [ ] **Step 2: Run the tests and watch them fail**
@@ -178,12 +196,13 @@ Expected: FAIL — `AttributeError: 'TransactionStore' object has no attribute '
 
 - [ ] **Step 3: Write the minimal implementation** — add `TransactionStore.advance`:
 
-1. First, with no path created: id fails Task 1's id pattern or `root/id` is not a
-   directory → `UnknownTransaction` (D16). Share this check with `_validated_document`
+1. First, with no path created: id fails Task 1's id pattern or `os.lstat(root/id)` is missing,
+   a symlink or not a directory → `UnknownTransaction` (D16). Share this check with `_validated_document`
    rather than copying it.
-2. `fd = os.open(root/id/"lock", os.O_RDWR)` — no `O_CREAT`; `FileNotFoundError` →
-   `StateInvalid` naming the missing lock file (D13). Refuse a non-regular lock file as
-   Task 1's reader does. Close `fd` in a `finally`.
+2. `fd = os.open(root/id/"lock", os.O_RDWR | os.O_NOFOLLOW)` — no `O_CREAT`; `FileNotFoundError` →
+   `StateInvalid` naming the missing lock file (D13). Refuse a symlinked or non-regular lock file
+   (by `lstat` first; any other `OSError` from the open, e.g. `IsADirectoryError` or `ELOOP`)
+   as `StateInvalid`, never a raw `OSError`. Close `fd` in a `finally`.
 3. `fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)`; `BlockingIOError` →
    `TransactionBusy` (D10). No retry and no sleep.
 4. `prior = self._validated_document(transaction_id)` (raises `StateInvalid`).
@@ -197,7 +216,7 @@ Expected: FAIL — `AttributeError: 'TransactionStore' object has no attribute '
    reason, "external_state": external_state}`; set `parked_from` to the source when
    `target == "attention_required"`, to `None` when leaving `attention_required`, else
    unchanged; `state = target`; `revision = len(events)`.
-7. Assert `candidate["events"][:-1] == prior["events"]`, then `_validate_state(candidate,
+7. Check `candidate["events"][:-1] == prior["events"]` with an explicit `if … raise StateInvalid` (never an `assert` statement, which `-O` strips), then `_validate_state(candidate,
    transaction_id, self.root)`; a failure here is `StateInvalid` (a core defect, not a
    caller error) and nothing is written.
 8. `_atomic_write(root/id, root/id/"state.json", candidate)`; return
@@ -206,7 +225,7 @@ Expected: FAIL — `AttributeError: 'TransactionStore' object has no attribute '
 - [ ] **Step 4: Verify**
 
 Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_core.py 2>&1 | tail -3`
-Expected: `OK` (25 tests).
+Expected: `OK` (26 tests).
 
 Run: `just agent-workflow-tests 2>&1 | tail -3` — Expected: `OK`.
 

@@ -88,3 +88,9 @@ D8, D9, D10, D13, D15, D16 (Task 1); D7, D8, D9, D10, D13, D15, D16 (Task 2); D6
 (Task 3); D11, D12, D14 (Task 4). Planning added D14–D17.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (Opus reviewer, isolated, read-only). Codex ran (read-only sandbox) but its JSONL carried no runtime-selection event naming the model and effort, so its result was discarded unused and the one native fallback took the same packet.
+- Base SHA: b31c6e28e74cdd6048c05df4841ca41b22ceb017. Focus: none.
+- Counts: 9 accepted (SF-1..SF-5, D-1..D-4), 0 rejected, 0 deferred. SF-2 and D-3 are recorded as D18; the rest are routine corrections: the `STATES` union, `re.fullmatch` ids, message assertions on refusals, UTF-8 key validation, an explicit append-only check, the snapshot docstring scope and a test rename.

@@ -21,7 +21,7 @@
     `transaction_id: str`, `creation_key: str`, `subject: Mapping[str, Any]`,
     `state: str`, `parked_from: str | None`, `revision: int`,
     `events: tuple[Mapping[str, Any], ...]`. `subject` and each event are
-    `types.MappingProxyType` over deep copies.
+    `types.MappingProxyType` over deep copies; only the top level is read-only (nested values stay mutable but cannot reach disk, because they are copies) — say exactly that in the class docstring.
   - `class TransactionStore` with `__init__(self, root: pathlib.Path)`,
     `create(self, creation_key: str, subject: dict) -> Transaction`,
     `load(self, transaction_id: str) -> Transaction`, and a `root` attribute.
@@ -222,7 +222,7 @@ class CreateTest(StoreCase):
     def test_arguments_that_cannot_form_a_v1_state_are_refused_before_anything_exists(self):
         for key, subject in (("", SUBJECT), ("k", ["not", "an", "object"]),
                              ("k", {"x": float("nan")}), ("k", {1: "int key"}),
-                             ("k", {"t": (1, 2)})):
+                             ("k", {"t": (1, 2)}), ("\ud800", SUBJECT)):
             with self.subTest(key=key, subject=subject), self.assertRaises(StateInvalid):
                 self.store.create(key, subject)
         self.assertEqual(self.tree(), [])
@@ -243,7 +243,8 @@ class LoadTest(StoreCase):
         self.store.create("k", SUBJECT)
         before = self.tree()
         for transaction_id in ("rel_0190f0e0-0000-7000-8000-000000000000", "rel_../../etc",
-                               "rel_0190F0E0-0000-7000-8000-000000000000", "creation-keys"):
+                               "rel_0190F0E0-0000-7000-8000-000000000000", "creation-keys",
+                               "rel_0190f0e0-0000-7000-8000-000000000000\n"):
             with self.subTest(id=transaction_id), self.assertRaises(UnknownTransaction):
                 self.store.load(transaction_id)
         self.assertEqual(self.tree(), before)
@@ -288,8 +289,9 @@ class LoadTest(StoreCase):
             with self.subTest(case=name):
                 self.write(transaction_id, mutate(copy.deepcopy(base)))
                 raw = self.state_path(transaction_id).read_bytes()
-                with self.assertRaises(StateInvalid):
+                with self.assertRaises(StateInvalid) as caught:
                     self.store.load(transaction_id)
+                self.assertIn(transaction_id, str(caught.exception))
                 self.assertEqual(self.state_path(transaction_id).read_bytes(), raw)
 
     def test_duplicate_keys_and_nonfinite_literals_are_state_invalid(self):
@@ -337,7 +339,7 @@ store of closed-schema transactions with a closed lifecycle — and that it has 
 and no caller yet. Keep it free of the D11 words even though docstrings are exempt.
 
 Vocabulary: `FORWARD` (the seven in order), `PARKINGS = ("attention_required",
-"recovering")`, `TERMINALS`, `STATES = frozenset(FORWARD) | PARKINGS | TERMINALS`.
+"recovering")`, `TERMINALS`, `STATES = frozenset(FORWARD) | frozenset(PARKINGS) | TERMINALS` (a bare tuple `|` a frozenset raises `TypeError`).
 `TRANSITIONS = MappingProxyType({...})` exactly `EXPECTED_EDGES` above, as frozensets
 (per D7, D15). One edge predicate shared by the validator's fold and Task 2's `advance`:
 
@@ -354,14 +356,14 @@ def _edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
 
 Identity (per D3): mint with `ms = time.time_ns() // 1_000_000`,
 `value = (ms & ((1 << 48) - 1)) << 80 | 0x7 << 76 | secrets.randbits(12) << 64 | 0b10 << 62 | secrets.randbits(62)`,
-id `"rel_" + str(uuid.UUID(int=value))`. The id regex above is the only id check.
+id `"rel_" + str(uuid.UUID(int=value))`. The id regex above is the only id check, applied with `re.fullmatch` (never `re.match` with `$`, which accepts a trailing newline).
 
 Serialization: `_serialize` is the Global Constraints expression. `_timestamp()` returns
 UTC now as `YYYY-MM-DDTHH:MM:SS.mmmZ`; the validator accepts `at` only when it matches
 `AT_PATTERN` and `datetime.strptime(at, "%Y-%m-%dT%H:%M:%S.%fZ")` parses it.
 
-Strict read (`_read_json(path) -> Any`): refuse (StateInvalid) when `path.is_symlink()` or
-not `path.is_file()`; decode UTF-8; `json.loads(text, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite_literal)`;
+Strict read (`_read_json(path) -> Any`): refuse (StateInvalid) when `os.lstat(path)` is a symlink or
+not a regular file (`stat.S_ISREG`); decode UTF-8; `json.loads(text, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite_literal)`;
 map `UnicodeDecodeError`/`ValueError` to `StateInvalid` naming the path.
 
 `_atomic_write(directory, path, document)`: mirror
@@ -387,8 +389,8 @@ it; finally `state`, `parked_from` and `revision` (`type(...) is int`) equal the
 `len(events)`.
 
 `_validated_document(transaction_id)` (per D13, D16): id fails the pattern →
-`UnknownTransaction`; `root / id` not a directory → `UnknownTransaction`; lock file
-missing or not a regular file → `StateInvalid`; `state.json` via `_read_json` (missing →
+`UnknownTransaction`; `os.lstat(root / id)` missing, a symlink or not a directory → `UnknownTransaction`; lock file
+missing, a symlink or not a regular file (by `lstat`) → `StateInvalid`; `state.json` via `_read_json` (missing →
 `StateInvalid`); `_validate_state`; return the dict.
 
 `_snapshot(document)`: builds `Transaction` with `MappingProxyType(copy.deepcopy(...))`
@@ -400,18 +402,20 @@ for `subject` and each event.
 `load(id)`: `_snapshot(self._validated_document(id))`.
 
 `create(creation_key, subject)` (per D4, D10, D16):
-1. Before touching disk: `creation_key` must be a non-empty `str`; `type(subject) is
+1. Before touching disk: `creation_key` must be a non-empty `str` that `creation_key.encode("utf-8")` accepts (a lone surrogate is `StateInvalid`); `type(subject) is
    dict`; `_serialize(subject)` must not raise and must round-trip through the strict
    loader to a value `== subject` whose `telemetry_digest` equals the subject's; any
    failure → `StateInvalid`.
-2. Open `root/"creation.lock"` with `os.open(path, os.O_RDWR | os.O_CREAT, 0o600)`;
+2. Open `root/"creation.lock"` with `os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)` (a symlinked or non-regular lock, found by `lstat` or `OSError` from the open, → `StateInvalid`);
    `fcntl.flock(fd, LOCK_EX | LOCK_NB)`; `BlockingIOError` → `TransactionBusy`. Close
    the descriptor in a `finally`.
 3. Index at `root/"creation-keys"/<sha256 hex of key utf-8>.json`. If it exists
    (`_read_json`, exact keys, schema, key equal, id pattern) take its id; else mint an id,
-   `mkdir(exist_ok=True)` the index directory and `_atomic_write` the entry.
-4. Complete: `mkdir(exist_ok=True)` `root/id`; open `root/id/"lock"` with `O_RDWR |
-   O_CREAT` and take it non-blocking (`TransactionBusy` on contention); if `state.json`
+   `mkdir(exist_ok=True)` the index directory (refusing, by `lstat`, a symlinked or non-directory
+   `creation-keys` with `StateInvalid`), fsync `root` when the directory was new, and `_atomic_write` the entry.
+4. Complete: `mkdir(exist_ok=True)` `root/id` (then refuse, by `lstat`, a symlinked or non-directory
+   `root/id` with `StateInvalid`; fsync `root` when the directory was new); open `root/id/"lock"` with `O_RDWR |
+   O_CREAT | O_NOFOLLOW` and take it non-blocking (`TransactionBusy` on contention); if `state.json`
    exists, `_validated_document(id)` and compare `telemetry_digest` of stored vs requested
    subject: equal → return its snapshot, unequal → `CreationConflict`; else build the
    initial document (`state: "created"`, `parked_from: None`, `revision: 1`, one created
