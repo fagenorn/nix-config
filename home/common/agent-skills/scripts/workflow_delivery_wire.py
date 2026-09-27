@@ -339,7 +339,8 @@ class DeliveryProjection:
                         reduction: dict[str, Any] | None,
                         blockers: list[dict[str, Any]],
                         result_fields: tuple[str, ...],
-                        contract_required: bool) -> dict[str, Any]:
+                        contract_required: bool,
+                        unresumable: dict[str, str] | None) -> dict[str, Any]:
         latest_kind = None
         latest = None
         if issue_state is not None:
@@ -365,6 +366,12 @@ class DeliveryProjection:
         missing = [{"kind": "delivery_contract", "subject_id": str(issue),
                     "reason_code": "delivery_contract_required",
                     "detail_pointer": None}] if contract_required else []
+        requirements = (missing if delivery is None or delivery["contract"] is None
+                        else ([] if reduction is None else copy.deepcopy(reduction["requirements"])))
+        if unresumable is not None:
+            requirements.append({"kind": "worktree_fact", "subject_id": unresumable["path"],
+                                 "reason_code": "recorded_worktree_" + unresumable["state"],
+                                 "detail_pointer": None})
         return {"issue": issue, "state": state_name, "custody": custody,
             "owner": None if latest is None else latest["owner"],
             "worktree": None if latest is None else latest["worktree"],
@@ -373,8 +380,7 @@ class DeliveryProjection:
             "blockers": blockers, "result": result,
             "contract_digest": None if delivery is None else delivery["contract_digest"],
             "pending_stage_ids": [] if reduction is None else copy.deepcopy(reduction["pending_stage_ids"]),
-            "requirements": (missing if delivery is None or delivery["contract"] is None
-                             else ([] if reduction is None else copy.deepcopy(reduction["requirements"])))}
+            "requirements": requirements}
 
     def decorate_control(self, state: dict[str, Any], deltas: list[dict[str, Any]],
                          actions: list[dict[str, Any]], reductions: dict[int, dict[str, Any]],

@@ -1158,6 +1158,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn("never `retried` and never `retry_refused`", collapsed)
 
+    def test_final_report_names_an_unresumable_issue(self):
+        # A resume its recorded worktree ended is reported with that reason,
+        # never as progressing (#194 D9, D12).
+        collapsed = normalized(self.section(
+            self.orchestrate, "## 5. Final report", "## Notes"))
+        self.assert_ordered(
+            collapsed, "`worktree_fact`", "`recorded_worktree_absent`",
+            "`recorded_worktree_mismatch`", "cannot resume", "never as progressing")
+
     def test_background_dispatch_flag_appears_only_in_orchestrate_issues(self):
         self.assertIn("run_in_background=true", self.orchestrate)
         for path, text in nested_workflow_documents():
