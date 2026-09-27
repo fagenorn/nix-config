@@ -636,6 +636,12 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         self.assertIn(
             "This is the only rung that reaches Codex and the only one where a "
             "capacity rejection binds, on the terms in REVIEW.md.", route)
+        # sdd words its rung 2 differently, so ship pins its own
+        # non-capacity sentence inside rung 2 (D14).
+        rung_2 = route[route.index("2. `available`"):route.index("3. `unsupported`")]
+        self.assertIn(
+            "A completed non-capacity failure takes that skill's one native "
+            "fallback.", rung_2)
         self.assertIn(
             "record the routing error in the PR body beside the correctness "
             "verdict", route)
@@ -663,6 +669,9 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                 "discard its outcome", "keep its outcome"),
             "rung 3 invokes codex-collaboration": (
                 "is never invoked on this rung", "is always invoked on this rung"),
+            "rung 3 drops available without the skill": (
+                ", or `available` without `codex-collaboration` installed →",
+                " →"),
         }
         for name, (old, new) in mutants.items():
             with self.subTest(mutant=name):
@@ -776,7 +785,8 @@ def assert_correctness_route_ladder(case, route, native_target):
     """Pin one caller's correctness-axis route (issue 195, D2, D4, D5).
 
     The route opens with CORRECTNESS_ROUTE_OPENER and numbers the `blocked`,
-    `available` and `unsupported` rungs in that order. Only the `available` rung
+    `available` and `unsupported` rungs in that order, each with its full lead
+    clause (D14). Only the `available` rung
     names `diff-review`, and it names the capacity rejection after it. The
     `unsupported` rung reaches `native_target` without naming `diff-review` or
     `bindings.commands`, and before the routing-error paragraph it says that
@@ -790,10 +800,21 @@ def assert_correctness_route_ladder(case, route, native_target):
         "beside the correctness verdict", "rung-3 native dispatch",
         "no retry, stop or suspension",
     )
+    blocked_at = route.index("1. `blocked`")
     available_at = route.index("2. `available`")
     unsupported_at = route.index("3. `unsupported`")
     available = route[available_at:unsupported_at]
     unsupported = route[unsupported_at:route.index(native_target, unsupported_at)]
+    # Each rung's lead, which both callers word identically. The two
+    # skill-presence clauses are D5's routing condition (D14).
+    case.assertIn(
+        "1. `blocked` stops with its capability reason and repair ID; "
+        "neither axis is dispatched.", route[blocked_at:available_at])
+    case.assertTrue(available.startswith(
+        "2. `available`, with `codex-collaboration` installed →"), available)
+    case.assertTrue(unsupported.startswith(
+        "3. `unsupported`, or `available` without `codex-collaboration` "
+        "installed →"), unsupported)
     case.assert_ordered(available, "`diff-review`", "capacity rejection")
     for absent in ("diff-review", "bindings.commands"):
         case.assertNotIn(absent, unsupported)
