@@ -14,6 +14,8 @@ from unittest import mock
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
 MODEL = Path(__file__).parents[1] / "scripts" / "delivery_model" / "__init__.py"
 MODEL_FIXTURES = Path(__file__).with_name("_delivery_model_fixtures.py")
+ARTIFACT_BUDGET = Path(__file__).parents[1] / "scripts" / "artifact_budget.py"
+BUDGET_POLICY = Path(__file__).parents[1] / "artifact-budget-policy.json"
 DEFAULT_NOW = "2026-08-13T20:00:00Z"
 
 
@@ -415,6 +417,26 @@ class LifecycleHarness:
 
     def control(self, **request_fields):
         return json.loads(self.control_raw(**request_fields).stdout)
+
+    def control_validated(self, **request_fields):
+        """Sweep, returning interface-3 bytes the `workflow-response` boundary passes (#194)."""
+        completed = self.control_raw(legacy=False, ok=False, **request_fields)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        validated = subprocess.run(
+            [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+             "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
+            input=completed.stdout, capture_output=True, text=True, check=False,
+            env=self.cli_env)
+        self.assertEqual((validated.returncode, validated.stderr), (0, ""))
+        self.assertEqual(validated.stdout, completed.stdout)
+        return json.loads(completed.stdout)
+
+    @staticmethod
+    def unresumable_fact(path, recorded_state):
+        """The summary requirement of a resume its recorded worktree ended (#194 D3)."""
+        return {"kind": "worktree_fact", "subject_id": path,
+                "reason_code": f"recorded_worktree_{recorded_state}",
+                "detail_pointer": None}
 
     UNOBSERVED = object()
 
@@ -1304,7 +1326,13 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             [candidate_paths[47], candidate_paths[51]],
         )
 
-    def test_control_requires_matching_recorded_state_for_resume_atomically(self):
+    def test_an_unmatched_resume_refuses_its_issue_unless_a_candidate_would_move_it(self):
+        """An unavailable owner's resume on an absent or mismatched worktree (#194 D8).
+
+        Without a candidate only the issue is refused, in its summary, and the
+        sweep's claim release persists. A candidate never relocates a resume,
+        so it still refuses the whole sweep, at the current-action check.
+        """
         self.init_run(now="2026-08-19T12:00:00Z")
         path = str(self.root / "wt-47")
         replacement = str(self.root / "replacement-47")
@@ -1316,21 +1344,106 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         )
         before = self.state_path.read_bytes()
         for recorded_state in ("absent", "mismatch"):
-            with self.subTest(recorded_state=recorded_state):
+            request = {"now": "2026-08-19T12:01:00Z", "issues": [47],
+                       "tracker": [self.tracker_fact(47)],
+                       "owners": [self.owner_fact(event_id=f"47-{recorded_state}",
+                                                  issue=47, attempt=1, launch=1)]}
+            recorded = {"path": path, "state": recorded_state}
+            with self.subTest(recorded_state=recorded_state, candidate=True):
                 rejected = self.control_raw(
-                    now="2026-08-19T12:01:00Z", issues=[47],
-                    tracker=[self.tracker_fact(47)],
-                    owners=[self.owner_fact(event_id=f"47-{recorded_state}", issue=47,
-                                            attempt=1, launch=1)],
-                    worktrees=[self.worktree_fact(
-                        47,
-                        recorded={"path": path, "state": recorded_state},
-                        candidate={"path": replacement, "state": "absent"},
-                    )],
-                    ok=False,
-                )
-                self.assertIn("matching recorded worktree", rejected.stderr)
+                    **request, ok=False, worktrees=[self.worktree_fact(
+                        47, recorded=recorded,
+                        candidate={"path": replacement, "state": "absent"})])
+                self.assertEqual((rejected.returncode, rejected.stdout), (2, ""))
+                self.assertIn(
+                    "current control action requires a recorded worktree observation",
+                    rejected.stderr)
                 self.assertEqual(self.state_path.read_bytes(), before)
+            with self.subTest(recorded_state=recorded_state, candidate=False):
+                response = self.control_validated(
+                    **request, worktrees=[self.worktree_fact(47, recorded=recorded)])
+                self.assertEqual([item["kind"] for item in response["actions"]], ["wait"])
+                self.assertEqual(response["deltas"], [])
+                summary = response["summaries"][0]
+                self.assertEqual(summary["state"], "active")
+                self.assertIn(self.unresumable_fact(path, recorded_state),
+                              summary["requirements"])
+                state = self.read_state()
+                self.assertEqual(state["issues"]["47"], json.loads(before)["issues"]["47"])
+                self.assertEqual(
+                    [(claim["holder"], claim["release_event"])
+                     for claim in state["admission"]["claims"]],
+                    [("controller", None), ("47:1:1", "owner_unavailable")])
+            self.state_path.write_bytes(before)
+
+    def test_an_unresumable_suspension_refuses_only_its_own_issue(self):
+        """T1, T2 (#194): its neighbour spawns, and the refused issue is reported, unchanged.
+
+        `max_parallel=1` is the discriminating case: a refused issue that
+        took a unit would leave its neighbour unspawned.
+        """
+        for recorded_state, max_parallel in (
+                ("absent", 1), ("absent", 2), ("mismatch", 1), ("mismatch", 2)):
+            with self.subTest(recorded_state=recorded_state, max_parallel=max_parallel):
+                self.run_id = f"unresumable-{recorded_state}-{max_parallel}"
+                self.init_run()
+                path = os.path.abspath(self.root / f"wt-47-{recorded_state}-{max_parallel}")
+                spare = os.path.abspath(self.root / f"wt-51-{recorded_state}-{max_parallel}")
+                self.spawn(issue=47, worktree=path)
+                self.progress(issue=47, phase=1, now="2026-08-13T20:01:00Z")
+                self.suspend(issue=47, attempt=1, blocked_on="usage_limit",
+                             now="2026-08-13T20:02:00Z")
+                before = self.read_state()["issues"]["47"]
+                response = self.control_validated(
+                    now="2026-08-13T20:03:00Z", issues=[47, 51],
+                    tracker=[self.tracker_fact(47), self.tracker_fact(51)],
+                    worktrees=[
+                        self.worktree_fact(47, recorded={"path": path,
+                                                         "state": recorded_state}),
+                        self.worktree_fact(51, candidate={"path": spare,
+                                                          "state": "absent"})],
+                    max_parallel=max_parallel)
+                self.assertEqual(
+                    [(item["kind"], item.get("issue")) for item in response["actions"]],
+                    [("spawn", 51), ("wait", None)])
+                self.assertEqual([(item["issue"], item["kind"]) for item in response["deltas"]],
+                                 [(51, "spawned")])
+                self.assertEqual(response["admission"]["waiting"], [])
+                summary = response["summaries"][0]
+                self.assertEqual((summary["issue"], summary["state"], summary["blocked_on"]),
+                                 (47, "suspended", "usage_limit"))
+                self.assertIn(self.unresumable_fact(path, recorded_state),
+                              summary["requirements"])
+                state = self.read_state()
+                self.assertEqual(state["issues"]["47"], before)
+                self.assertFalse(any(
+                    claim["holder"].startswith("47:") and claim["released_at"] is None
+                    for claim in state["admission"]["claims"]))
+
+    def test_an_unresumable_expired_handoff_still_persists_its_reap(self):
+        """T4 (#194): the refused issue keeps this sweep's reap and its `expired` delta."""
+        self.init_run()
+        path = os.path.abspath(self.root / "wt-48")
+        self.spawn(issue=48, worktree=path)
+        handoff = self.write_handoff(48)
+        self.progress(issue=48, phase=1, now="2026-08-13T20:01:00Z",
+                      turn_count=118, handoff_path=handoff)
+        attempt = self.read_state()["issues"]["48"]["attempts"][-1]
+        self.assertEqual((attempt["state"], attempt["deadline_at"]),
+                         ("handed_off", "2026-08-13T20:30:00Z"))
+        response = self.control_validated(
+            now="2026-08-13T21:00:00Z", issues=[48],
+            tracker=[self.tracker_fact(48)],
+            worktrees=[self.worktree_fact(48, recorded={"path": path, "state": "absent"})],
+            max_parallel=1)
+        self.assertEqual(response["actions"], [{"id": "finalize", "kind": "finalize"}])
+        self.assertEqual(
+            [(item["issue"], item["kind"], item["state"]) for item in response["deltas"]],
+            [(48, "expired", "suspended")])
+        self.assertIn(self.unresumable_fact(path, "absent"),
+                      response["summaries"][0]["requirements"])
+        attempt = self.read_state()["issues"]["48"]["attempts"][-1]
+        self.assertEqual((attempt["state"], attempt["blocked_on"]), ("suspended", "unknown"))
 
     def test_control_rejects_candidate_path_aliases_atomically(self):
         self.init_run(now="2026-08-19T12:00:00Z")
@@ -3905,7 +4018,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
 
         # The exception is bounded by the phase, not by who dispatches: an
-        # orchestrated handoff past Phase 0 owns a worktree it must still show.
+        # orchestrated handoff past Phase 0 owns a worktree it must still show,
+        # so its absence refuses that issue alone, in its summary (#194).
         self.run_id = "dispatcher-phase-one"
         self.init_run(now="2026-08-20T10:00:00Z")
         dispatched = self.spawn(
@@ -3918,14 +4032,17 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             turn_count=118, handoff_path=handoff,
         )
         before = self.state_path.read_bytes()
-        rejected = self.control_raw(
+        response = self.control_validated(
             now="2026-08-20T10:02:00Z", issues=[77],
             tracker=[self.tracker_fact(77)],
             worktrees=[self.worktree_fact(77, recorded={
                 "path": dispatched["worktree"], "state": "absent",
-            })], max_parallel=1, ok=False,
+            })], max_parallel=1,
         )
-        self.assertIn("matching recorded worktree", rejected.stderr)
+        self.assertEqual([item["kind"] for item in response["actions"]], ["wait"])
+        self.assertEqual(response["summaries"][0]["state"], "handed_off")
+        self.assertIn(self.unresumable_fact(dispatched["worktree"], "absent"),
+                      response["summaries"][0]["requirements"])
         self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_zero_sequence_direct_shaped_dispatcher_resumes_an_absent_reservation(self):

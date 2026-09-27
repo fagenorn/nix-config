@@ -959,6 +959,34 @@ class WorktreesGuidanceTest(unittest.TestCase):
 
 
 GUIDANCE_POINTER = "see worktrees/SKILL.md, ## Shell forms the isolation checker refuses"
+GUIDANCE_HOME = "worktrees/SKILL.md"
+CHECKER_MENTION = re.compile(r"isolation\s+checker", re.I)
+
+
+def lacks_guidance_pointer(document_text):
+    """True when a document mentions the isolation checker without naming its
+    guidance home. A paraphrase that avoids the term is outside this check."""
+    return (CHECKER_MENTION.search(document_text) is not None
+            and GUIDANCE_HOME not in document_text)
+
+
+class GuidancePointerTest(unittest.TestCase):
+    def test_every_checker_mention_names_the_guidance_home(self):
+        for tree, relative in swept_documents():
+            if (tree, relative) == ("shared", GUIDANCE_HOME):
+                continue
+            with self.subTest(document=f"{tree}:{relative}"):
+                text = (SOURCE_TREES[tree] / relative).read_text(encoding="utf-8")
+                self.assertFalse(
+                    lacks_guidance_pointer(text),
+                    f"{tree}:{relative} mentions the isolation checker without "
+                    f"naming {GUIDANCE_HOME}",
+                )
+
+    def test_a_mention_without_the_pointer_is_reported(self):
+        text = (SOURCE_TREES["shared"] / "ship-release/SKILL.md").read_text(encoding="utf-8")
+        self.assertFalse(lacks_guidance_pointer(text))
+        self.assertTrue(lacks_guidance_pointer(text.replace(GUIDANCE_HOME, "")))
 
 
 def findings_report(document, findings):

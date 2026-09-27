@@ -1083,7 +1083,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         Issue 151's owner spawns, fails after selecting its output, and an
         authority denial parks the minted remainder on ``human_gate``. Returns
         ``(control, checkpoint)``. ``control(now, max_parallel=1)`` sweeps with
-        the recorded worktree observed and returns the raw response bytes.
+        the recorded worktree observed as ``recorded`` (``matching_issue_branch``
+        unless given) and returns the raw response bytes.
         ``checkpoint(custody, now)`` reports that custody again without progress
         and returns the decoded response.
         """
@@ -1099,14 +1100,13 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
             return completed.stdout
 
-        def control(now, max_parallel=1, *, spawn=False):
+        def control(now, max_parallel=1, *, spawn=False, recorded="matching_issue_branch"):
             request = self.control_request(contract)
             request.update(host_route="claude-code", now=now, max_parallel=max_parallel,
                 tracker=[{"issue": 151, "state": "open" if spawn else "closed",
                           "open_blockers": [], "decision_blockers": []}],
                 worktrees=[{"issue": 151,
-                    "recorded": None if spawn else {"path": worktree,
-                                                    "state": "matching_issue_branch"},
+                    "recorded": None if spawn else {"path": worktree, "state": recorded},
                     "candidate": {"path": worktree, "state": "absent"} if spawn else None}])
             request["authorization_intents"]["151"] = delivery["authorization_intents"]
             return invoke("control", *run, "--request-file", "-", stdin=request)
@@ -1201,6 +1201,32 @@ class DeliveryAdmissionTest(unittest.TestCase):
             action = self.remainder_launch(control("2026-09-21T00:00:03Z", max_parallel=2))
             self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
                              (1, 2))
+
+    def test_an_absent_remainder_worktree_refuses_only_the_remainder(self):
+        """T3 (#194): a resumable remainder on an absent worktree is reported, not raised."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); run_id = "absent-remainder"
+            control, _ = self.remainder_sweeps(root, home, run_id)
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            before = json.loads(state_path.read_text())["issues"]["151"]
+            response = control("2026-09-21T00:00:03Z", max_parallel=2, recorded="absent")
+            validated = subprocess.run(
+                [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+                 "workflow-response", "--input", "-", "--policy", str(POLICY)],
+                input=response, capture_output=True, check=False)
+            self.assertEqual((validated.returncode, validated.stderr), (0, b""))
+            self.assertEqual(validated.stdout, response)
+            value = json.loads(response)
+            self.assertEqual([item["kind"] for item in value["actions"]], ["finalize"])
+            summary = value["summaries"][0]
+            self.assertEqual(
+                (summary["state"], summary["blocked_on"], summary["custody"]["kind"]),
+                ("suspended", "human_gate", "remainder"))
+            self.assertIn({"kind": "worktree_fact", "subject_id": str(root / "worktree"),
+                           "reason_code": "recorded_worktree_absent",
+                           "detail_pointer": None}, summary["requirements"])
+            self.assertEqual(json.loads(state_path.read_text())["issues"]["151"], before)
 
     def test_a_live_remainder_short_of_agent_slots_is_not_waiting(self):
         """T2: a live remainder is custody, not an issue queued for agent slots."""
