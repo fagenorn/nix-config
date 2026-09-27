@@ -263,10 +263,16 @@ An empty delta is recorded in the PR body ("merge-delta empty, nothing to review
 <!-- agent-dispatch: id=ship-issue-full-conformance-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs the full conformance review.
 
-Run it in parallel with the correctness axis via `codex-collaboration`'s `diff-review`; when that capability is unavailable, use this native first-pass dispatch instead:
+Run it in parallel with the correctness axis. Choose the correctness route from the retained `capabilities.review.code` state before either axis is dispatched, never from how a Codex call failed:
+
+1. `blocked` stops with its capability reason and repair ID; neither axis is dispatched.
+2. `available`, with `codex-collaboration` installed → its `diff-review` operation. This is the only rung that reaches Codex and the only one where a capacity rejection binds, on the terms in REVIEW.md. A completed non-capacity failure takes that skill's one native fallback.
+3. `unsupported`, or `available` without `codex-collaboration` installed → this native first-pass dispatch, directly; `codex-collaboration` is never invoked on this rung:
 
 <!-- agent-dispatch: id=ship-issue-full-correctness-fallback role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs the full correctness fallback review.
+
+A Codex call made under `unsupported` anyway is a routing error: discard its outcome — verdict, refusal or failure — record the routing error in the PR body beside the correctness verdict, and run the rung-3 native dispatch, with no retry, stop or suspension.
 
 Axis reports are never merged, and when the correctness axis came through `diff-review`, its scope is recorded in the PR body per REVIEW.md. Apply findings through REVIEW.md's severity mapping and five-step apply/push flow. After the fix lands, re-review only a named finding and the bounded fix diff — never as a first-pass, merge-delta, or whole-branch review:
 
