@@ -103,7 +103,10 @@ test by one document. The main risk is prose that breaks an existing ordered
 pin, and each task's targeted suite run catches that before commit.
 
 **Execution state (run 2).** Tasks 1–4 landed as `37b829a`, `880e370`,
-`6674a5a` and `6859d0e`, and run 2 re-executes none of them (D16). Run 1's ship
+`6674a5a` and `6859d0e`, and run 2 re-executes none of them (D16). Before
+invoking `sdd`, the Phase-6 owner recovers sdd's ledger from `git log` with
+those four commits, so `sdd` resumes past Task 4 and runs only its cumulative
+gate and final review (D20). Run 1's ship
 sync of `447461c` (#155) then added `5361013` and `765f598`, which change
 `home/common/agent-skills/instruction-load.json` and `T/test_instruction_load.py`
 outside every task; D19 keeps their `conditional` ship-issue members. Measured
@@ -118,7 +121,9 @@ on the merged tree if the sync takes either side of that file, so the sync
 resolves it per D19. Both verification commands, `just build` and
 `just agent-workflow-tests`, are therefore graded on the post-sync head. D17
 leaves Task 2's probe prose true under #195's
-correctness routing, and D18 leaves #117's record to #125.
+correctness routing, and D18 leaves #117's record to #125. Run 2 adopts the
+open PR #201 instead of opening another (D21), and the Phase-7 handoff `notes`
+cite D19 and D21 so the ship owner applies both without rediscovering them.
 
 ## Task index
 
@@ -148,7 +153,9 @@ fallback and renames every "ship owner's" summary sentence an inline run would
 make false. Plan review added D15. The run-2 re-grill added D16–D19, and none
 of them changes a task: Task 1 cites D18, Task 2 cites D17, Task 4's final gate
 cites D19, and D16 and D19 bound the delivery section above. The run-2
-re-verification added no ledger row.
+re-verification added no ledger row. Run 2's plan review added D20–D22, and
+none of them changes a task either: D20 and D21 bound the delivery section, and
+D22 only rewords the spec's Out-of-scope bullet.
 
 A planning probe applied every task's code, tests and prose, as written, to a
 scratch copy of `de7c558`. Each watch-it-fail step failed as its member says,
@@ -176,5 +183,14 @@ base 1316 plus these 10. `just build` was not probed.
   attempt-count assertion), both per D15. Decided without an edit: DI-2 (the
   Phase-7 gate after an inline ship stays the spec's unchanged generic gate).
   Rejected 0, deferred 0. No Blocking findings.
+- Run 2 (`direct-198-000002`) reviewer: Claude fallback (one fresh native
+  `reviewer`, Opus/high), isolated and read-only, against `REVIEW-CONTRACT.md`,
+  base `447461cb3ce65aaaebe58b21fd01ae4889e9ff72`, plan reviewed at `f3d8055`;
+  no focus configured. Codex `plan-review` ran first and completed, but its
+  `--json` stream again carried no runtime-selection event, so Codex identity was
+  not established; the one native fallback ran with the same packet, and Codex
+  was not retried. Accepted 3: B1 (D20), B2 with SF1 (D21; the unvalidated Codex
+  pass raised the same PR gap). Decided with a spec edit: DI1 (D22). Rejected 0,
+  deferred 0.
 
 ---

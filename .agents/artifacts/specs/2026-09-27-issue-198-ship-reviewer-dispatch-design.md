@@ -383,14 +383,36 @@ ceiling becomes its merged measurement. Each note keeps #195's clause, then
 `conditional` ship-issue members stay. #155's instruction-load report is not
 regenerated.
 
+**Phase 6 (D20).** Run 2 re-executes no task, but `sdd` skips only the tasks its
+ledger marks complete, and this checkout's `sdd` workspace is empty. Before
+invoking `sdd`, the Phase-6 owner therefore recovers that ledger from `git log`
+under sdd's own recovery rule. It writes `progress.md` in the workspace that
+`sdd-workspace` prints for the plan, with the identity line and `Task 1:
+complete` through `Task 4: complete` naming `37b829a`, `880e370`, `6674a5a` and
+`6859d0e`. `sdd` then resumes past Task 4, so only its cumulative delivery gate
+and final review run, and they produce Phase 7's `review_state` and
+`report_path`.
+
+**The open PR (D21).** PR #201 is this issue's own run-1 PR: head
+`worktree-issue-198-nested-ship-owner`, base `main`, body `Closes #198`. Run 2
+adopts it rather than opening another. ship-Phase 0's check 4 accepts it as this
+delivery's own PR, not a competing one. Phase 4 pushes the synced head with
+`git push origin <branch>` and runs no `gh pr create`. After the fresh review the
+ship owner refreshes #201's review section with `gh pr edit`. The selection
+gate's `pr_opened` observation names #201 at the selected head. The Phase-7
+handoff's `notes` cite D19 and D21, so the ship owner applies both without
+rediscovering them.
+
 ## Out of scope
 
 - **Depth-aware dispatch in Phases 2–6.** A design, plan-review, sdd or
-  mechanical dispatch from an owner at depth 3 still fails the way it does
-  today. So does the Phase-5 rollover launch of a direct controller that is
-  itself at depth 2. This is a named follow-up issue: "phase dispatch from a
-  depth-3 owner". It is not designed here. `agent_dispatch` is the value it
-  would most likely reuse.
+  mechanical dispatch from an owner at depth 3 gets no designed route: nothing
+  probes for the gap there or recovers from it. Neither does the Phase-5
+  rollover launch of a direct controller that is itself at depth 2. The
+  suspension procedure's generic cause still lets such an owner suspend on
+  `agent_dispatch` instead of failing (D22). This is a named follow-up issue:
+  "phase dispatch from a depth-3 owner". It is not designed here.
+  `agent_dispatch` is the value it would most likely reuse.
 - **The remainder launch at depth 3.** A from-issue invocation with no launch
   tool cannot launch a remainder owner. Remainder mode needs no reviewers, so
   it could run inline, but that would move the remainder's own `finish` into a
@@ -439,3 +461,6 @@ regenerated.
 | D17 | Grill (#195): the probe stays unconditional and reads no `review.code` state. The correctness axis may now reach Codex through a command, but the conformance axis and the merge-delta reviewer are native dispatches on every route; `blocked` keeps its own Phase-5 stop | ship-issue Phase 5 on `6ab576e` (correctness rung chosen before dispatch; the conformance and merge-delta dispatch sites unchanged); D3; the-bar *DRY* (the probe keeps one home) | Skip the probe when correctness routes to Codex: the conformance axis would still fail at Phase 5, after the sync. Order the probe after the `review.code` choice: that choice sits at Phase 5, after every write the probe must precede |
 | D18 | Grill (#117): `agent_dispatch` joins the suspension taxonomy #117 promotes to the core as an owner-supplied, human-directed cause under its existing policy. This issue edits only workflow-state, leaves #117's record alone and names carrying the value as #125's follow-up | #117 record: its blocked-on set, "human-directed resume for other reasons", host capabilities in the adapter column, D4, D10 (#150 shipped `host_capacity` first; the record was amended at its own refresh) and D17; CLAUDE.md (the shipped engine governs until #125's cutover); #125's body; the-bar *Moves keep their history* | Editing #117's record here: it is not on this branch before ship-Phase 1's sync, and an accepted decision is amended by its own refresh. Silence: #125 would port a set without the value, and its migration would refuse such ledgers. Mapping the gap to `external`: loses the distinct outcome AC2 demands |
 | D19 | Grill: the ship sync resolves `instruction-load.json` by re-measuring on the merged tree. Each conflicted ceiling becomes its merged measurement; each note keeps #195's clause, then #198's, plus a re-measurement clause; #198's `conditional` ship-issue members stay; #155's report is not regenerated | #155 D10 (a raised ceiling rewrites its note in the same commit) and D19 (a sync re-measures and resets to the merged values); the trial merge of `765f598` and `6ab576e`, where neither side's ceilings pass the live-tree test; #195 kept the earlier clauses and appended its own | Take ours or theirs (SYNC.md's A or T): both fail `test_the_live_tree_breaches_no_ceiling`. Keep one issue's clause: erases the other's reviewed explanation. Regenerate #155's report: it is #155's point-in-time record, and #195 left it as it was |
+| D20 | Phase 5 (run 2): before `sdd`, the Phase-6 owner recovers the sdd ledger from `git log`. `progress.md` gets the plan identity line and `Task 1`–`Task 4: complete` at `37b829a`, `880e370`, `6674a5a` and `6859d0e`, so `sdd` resumes past Task 4 and runs only its cumulative gate and final review | Plan review B1 (Claude fallback): `sdd` skips only ledger-marked tasks, and this checkout's workspace is empty; sdd's "trust the ledger and `git log`… recover from `git log`"; the members' watch-it-fail steps no longer hold at HEAD | Re-execute the tasks: their red-state steps contradict HEAD, and following them would add duplicate test methods that shadow silently. Reuse run 1's SDD report: it reviewed a package without D16–D19, under a discarded delivery |
+| D21 | Phase 5 (run 2): run 2 adopts open PR #201. ship-Phase 0 check 4 accepts it as this delivery's own PR; Phase 4 pushes with `git push origin <branch>` and skips `gh pr create`; the ship owner refreshes #201's review section with `gh pr edit`; `pr_opened` names #201 at the selected head. The Phase-7 handoff `notes` cite D19 and D21 | Plan review B2 and SF1 (Claude fallback; the unvalidated Codex pass raised the same PR gap); investigate.md's open-PR rule ("resume its worktree and shipping path; do not rebuild it"); run 1's resumed ship owner recorded `pr_opened` for #201; SYNC.md's auto-resolve allowlist omits `instruction-load.json` | Close #201 and let ship-Phase 4 open a fresh PR: an extra outward-facing effect that discards #201's history for no contract gain, since `open_pr` binds a PR number and head, not the run that opened it. Leave D19 to the ship owner's own grounding: SYNC's A and T choices both fail the live-tree test |
+| D22 | Phase 5 (run 2): the suspension procedure keeps the generic cause "a context that cannot launch the agents a phase needs" as the Decisions section specifies. The Out-of-scope bullet now says Phases 2–6 get no designed route, which that cause does not contradict | Plan review DI1 (Claude fallback): the Decisions section requires that wording; a suspension is resumable and consumes no attempt (AC2) | Narrow the clause to Phase 7: a code change in run 2 for no behavioural gain, and a depth-3 owner in Phases 2–6 would fail where it could park |
