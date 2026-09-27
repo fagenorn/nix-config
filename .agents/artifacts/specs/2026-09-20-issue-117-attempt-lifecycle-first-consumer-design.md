@@ -210,7 +210,8 @@ support and, when supported, its `agent_slots` per root session. `workflow-state
 the whole fixed role set (owner, worker and independent reviewer) in the step that creates a
 launch, beside one controller claim per run. It dispatches only when both `max_parallel` and a free
 role set allow. With `max_parallel` exhausted the issue is simply not dispatched this sweep; only a
-role-set shortfall reports it `waiting`, recomputed each sweep. Neither spends a launch or attempt.
+role-set shortfall, or a `host_capacity` refusal gate still awaiting a later non-refusal release,
+reports it `waiting`, recomputed each sweep. None of these spends a launch or attempt.
 One commit-time settle releases a claim in the write that ends its custody, and the
 owner-exit notification wakes the next sweep. A host-refused launch parks as `host_capacity`,
 releases its claim and resumes only after a later non-refusal release, within the stall bound.
