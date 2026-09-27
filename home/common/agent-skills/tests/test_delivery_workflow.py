@@ -18,7 +18,7 @@ from ._delivery_model_fixtures import (
     contract_and_delivery_for_stage, observation, pr_subject, seal, selection,
     stage_scope,
 )
-from .test_resolve_project import make_home, make_project_root, run as run_resolver, source_contract
+from .test_resolve_project import git, make_home, make_project_root, run as run_resolver, source_contract
 
 
 ROOT = Path(__file__).parents[4]
@@ -30,6 +30,18 @@ ARTIFACT_BUDGET = SCRIPTS / "artifact_budget.py"
 NOW = "2026-09-21T00:00:00Z"
 WORKTREE_NAME = "worktree-issue-171-delivery-contract-source"
 LATER = "2026-09-21T00:10:00Z"
+SLUGLESS = "worktree-issue-171"
+
+
+def authored_policy():
+    """The seven sealed members of this repo's authored contract, by provenance key."""
+    authored = source_contract()
+    vcs, tracker = authored["bindings"]["vcs"], authored["bindings"]["tracker"]
+    return {"project_id": authored["project"]["id"], "tracker_kind": tracker["kind"],
+            "repository_slug": tracker["repo_slug"], "branch_pattern": vcs["branch_pattern"],
+            "worktree_prefix": vcs["worktree"]["prefix"],
+            "integration_branch": vcs["integration_branch"],
+            "delete_branch": vcs["merge"]["delete_branch"]}
 
 
 class FakeProvider:
@@ -1453,6 +1465,21 @@ class BuilderHarness:
             mutate(contract)
         return make_project_root(contract).rename(self.worktree)
 
+    def linked_worktree(self, name, branch):
+        """A real `git worktree add` of the committed synthetic project (#192 D14).
+
+        The project is committed once per root with the hermetic `git` helper,
+        so the worktree carries `.agents/project.json` and resolves exactly as
+        the root does. Returns the worktree's absolute path.
+        """
+        if getattr(self, "committed_root", None) != self.root:
+            git(self.root, "add", "-A")
+            git(self.root, "commit", "--quiet", "-m", "synthetic project")
+            self.committed_root = self.root
+        path = self.root / ".worktrees" / name
+        git(self.root, "worktree", "add", "--quiet", "-b", branch, str(path))
+        return str(path)
+
     def contract_input(self, **changes):
         value = {"issue": 171, "worktree": self.worktree, "source_kind": "explicit_user",
                  "source_reference": "invocation:/from-issue 171 --auto", "now": NOW}
@@ -1719,9 +1746,116 @@ class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
                 "It takes no lock, reads no clock and writes nothing.",
                 "A contract the builder cannot re-derive is served only when a ledger under "
                 "--repo-root has installed it, and then against that ledger's stored initial "
-                "intent; that is the only time it reads a ledger."):
+                "intent; that is the only time it reads a ledger.",
+                "The contract's branch is the worktree path's final component when that "
+                "name matches the issue branch pattern; otherwise it is the branch "
+                "checked out at that path, which must be the top level of a git "
+                "worktree, and that branch must match the pattern."):
             with self.subTest(clause=clause[:40]):
                 self.assertIn("".join(clause.split()), text)
+
+
+class LegacyWorktreeTest(BuilderHarness, unittest.TestCase):
+    """#192 A1, T1-T3: a slugless worktree takes its contract branch from its checkout."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load(MODEL, "delivery_model_legacy_worktree", package=True)
+
+    def slugless_input(self):
+        return self.contract_input(worktree=str(self.root / ".worktrees" / SLUGLESS))
+
+    def refusal(self, clause):
+        return (b"workflow-state: build-delivery refused: worktree name "
+                b"'worktree-issue-171' does not match the issue branch pattern, and "
+                + clause + b"\n")
+
+    def test_a_slugless_worktree_builds_from_its_live_branch(self):
+        self.project()
+        path = self.linked_worktree(SLUGLESS, WORKTREE_NAME)
+        value = self.slugless_input()
+        self.assertEqual(value["worktree"], path)
+        built = self.build("contract", value)
+        contract = built["contract"]
+        literals = {stage["id"]: stage["target_ref"].get("value")
+                    for stage in contract["stages"]}
+        self.assertEqual(contract["stages"][0]["target_ref"]["constraints"]["branch"],
+                         WORKTREE_NAME)
+        self.assertEqual((literals["delete_remote_branch"], literals["delete_local_branch"],
+                          literals["remove_worktree"]), (WORKTREE_NAME, WORKTREE_NAME, path))
+        self.assertEqual(contract["provenance"]["digest"], self.model.canonical_digest({
+            "policy": authored_policy(), "issue": 171, "worktree": path,
+            "source": {"kind": value["source_kind"], "reference": value["source_reference"]},
+            "branch": WORKTREE_NAME}))
+        git(self.root, "worktree", "remove", path)
+        self.assertFalse(os.path.lexists(path))
+        served = self.cli("build-delivery", "--repo-root", self.root, "--kind",
+                          "initial-intent", "--input", "-",
+                          stdin=json.dumps({"contract": contract}).encode()).stdout
+        self.assertEqual(served, self.model.canonical_bytes(built["initial_intent"]))
+        declared = {item["id"]: item for item in built["initial_intent"]["scopes"]}
+        for stage in contract["stages"]:
+            with self.subTest(stage=stage["id"]):
+                scope = self.build("scope", {"contract": contract, "stage_id": stage["id"]})
+                self.assertEqual(declared[scope["id"]], scope)
+
+    def test_a_slugless_worktree_without_a_patterned_live_branch_refuses(self):
+        def regular_file(path):
+            Path(path).write_text("not a worktree\n", encoding="utf-8")
+
+        def symlink(path):
+            Path(path).symlink_to(self.linked_worktree("linked", WORKTREE_NAME),
+                                  target_is_directory=True)
+
+        def plain_directory(path):
+            Path(path).mkdir()
+
+        def detached(path):
+            self.linked_worktree(SLUGLESS, WORKTREE_NAME)
+            git(Path(path), "checkout", "--quiet", "--detach")
+
+        def feature_branch(path):
+            self.linked_worktree(SLUGLESS, "feature-x")
+
+        def broken_gitdir(path):
+            Path(path).mkdir()
+            (Path(path) / ".git").write_text(f"gitdir: {self.root / 'missing'}\n",
+                                             encoding="utf-8")
+
+        for label, arrange, clause in (
+                ("absent", None, lambda: b"the worktree is absent"),
+                ("regular file", regular_file, lambda: b"it is not a directory"),
+                ("symlink to a worktree", symlink, lambda: b"it is not a directory"),
+                ("plain subdirectory of the checkout", plain_directory,
+                 lambda: b"it is not the top level of a git worktree"),
+                ("detached HEAD", detached, lambda: b"its HEAD is detached"),
+                ("unpatterned branch", feature_branch,
+                 lambda: b"its checked-out branch 'feature-x' does not match either"),
+                ("git failure", broken_gitdir,
+                 lambda: b"git failed: fatal: not a git repository: "
+                         + str(self.root / "missing").encode())):
+            with self.subTest(label=label):
+                self.project()
+                value = self.slugless_input()
+                if arrange is not None:
+                    arrange(value["worktree"])
+                refused = self.build("contract", value, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", self.refusal(clause())))
+
+    def test_a_patterned_name_reads_no_git(self):
+        """T3: rule 1 never runs git, so a patterned directory with broken git builds."""
+        self.project()
+        raw = json.dumps(self.contract_input()).encode()
+        absent = self.cli("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                          "--input", "-", stdin=raw).stdout
+        self.worktree_project()
+        shutil.rmtree(Path(self.worktree) / ".git")
+        (Path(self.worktree) / ".git").write_text(f"gitdir: {self.root / 'missing'}\n",
+                                                  encoding="utf-8")
+        present = self.cli("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                           "--input", "-", stdin=raw).stdout
+        self.assertEqual(present, absent)
 
 
 class HelperInputTest(BuilderHarness, unittest.TestCase):
@@ -2203,9 +2337,9 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             "route": "claude-code", "releases": 0, "claims": claims})
         self.assertEqual(json.loads(path.read_bytes()), expected)
 
-    def attempt(self, issue, number=1, **changes):
+    def attempt(self, issue, number=1, *, worktree=None, **changes):
         value = self.workflow.new_control_attempt(issue=issue, attempt_number=number,
-            worktree=self.worktree, now=NOW, deadline_at="2026-09-21T01:00:00Z")
+            worktree=worktree or self.worktree, now=NOW, deadline_at="2026-09-21T01:00:00Z")
         value.update(changes)
         return value
 
@@ -2385,6 +2519,50 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                             authorization_intents=[built["initial_intent"]], **facts)
         self.assertEqual((owner["kind"], owner["launch_kind"], owner["attempt"],
                           owner["worktree"]), ("owner", "retry", 2, self.worktree))
+
+    def test_control_resumes_a_legacy_slugless_attempt_with_its_built_contract(self):
+        """T4: a suspended schema-2 attempt at a slugless live worktree resumes in place."""
+        self.project()
+        path = self.linked_worktree(SLUGLESS, WORKTREE_NAME)
+        suspended = self.attempt(171, worktree=path)
+        self.workflow.suspend_attempt(suspended, blocked_on="external", now=NOW)
+        state = self.write_run("legacy", [suspended], schema=2)
+        recorded = [{"issue": 171, "recorded": {"path": path,
+                     "state": "matching_issue_branch"}, "candidate": None}]
+        asked = self.control("legacy", self.control_request([171], now=LATER,
+                                                            worktrees=recorded))
+        self.assertEqual((asked["summaries"][0]["contract_digest"],
+                          asked["summaries"][0]["requirements"]), (None, CONTRACT_REQUIRED))
+        self.assertEqual([item for item in asked["actions"] if item.get("issue") == 171], [])
+        built = self.build("contract", self.contract_input(worktree=path))
+        digest = self.model.canonical_digest(built["contract"])
+        resumed = self.control("legacy", self.control_request([171], now=LATER,
+            worktrees=recorded, contracts={"171": built["contract"]},
+            intents={"171": [built["initial_intent"]]}))
+        action = resumed["actions"][0]
+        self.assertEqual((action["kind"], action["worktree"], action["contract_digest"]),
+                         ("resume", path, digest))
+        self.assertEqual(
+            json.loads(state.read_text())["issues"]["171"]["delivery"]["contract_digest"],
+            digest)
+
+    def test_direct_retries_a_legacy_slugless_attempt_in_place(self):
+        """T5: a failed schema-2 direct attempt at a slugless live worktree retries in place."""
+        self.project()
+        path = self.linked_worktree(SLUGLESS, WORKTREE_NAME)
+        self.write_run("direct-171-000001", [self.attempt(
+            171, worktree=path, state="failed", result_source="owner", finished_at=NOW,
+            result=self.workflow.terminal_result(171, "failed", "one"))], schema=2)
+        facts = {"tracker": TRACKER, "forge": NO_PR, "worktree": {"issue": 171,
+                 "recorded": {"path": path, "state": "matching_issue_branch"},
+                 "candidate": None}}
+        self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
+            "issue": 171, "run_id": "direct-171-000001", "requirements": CONTRACT_REQUIRED})
+        built = self.build("contract", self.contract_input(worktree=path))
+        owner = self.direct(delivery_contract=built["contract"],
+                            authorization_intents=[built["initial_intent"]], **facts)
+        self.assertEqual((owner["kind"], owner["launch_kind"], owner["attempt"],
+                          owner["worktree"]), ("owner", "retry", 2, path))
 
     def mismatched(self, candidate):
         other = {"path": str(self.root / ".worktrees/worktree-issue-171-other"), "state": "absent"}
