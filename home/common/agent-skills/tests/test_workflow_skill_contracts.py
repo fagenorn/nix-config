@@ -925,6 +925,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             ("ship-issue/SKILL.md", self.ship_issue),
             ("from-issue/ship-handoff.md", self.ship_handoff),
             ("from-issue/SKILL.md", self.from_issue),
+            ("from-issue/AUTO.md", self.auto),
         ):
             with self.subTest(document=name):
                 self.assertIn(CAPABILITY_GAP_LINE, text)
@@ -970,6 +971,55 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             suspension, "`human_gate`", "`external`", "`agent_dispatch`",
             "(the reaper alone owns `unknown`)",
         )
+
+    def test_auto_names_the_dispatch_gap_fallback_and_relays_closed_lines(self):
+        # The rollover owner keeps its fresh Phase-7 ship owner and names the
+        # one departure after it; the earlier controller relays a delegated
+        # owner's re-entry or suspension line instead of mistaking it for a
+        # dispatch failure (per D5, D10).
+        delegated = normalized(self.section(
+            self.auto, "#### Fresh delegated owner", "#### Earlier controller stop"))
+        self.assert_ordered(
+            delegated,
+            "fresh Phase-7 ship owner",
+            "must not dispatch a second issue owner",
+            "Phase-7 dispatch-gap fallback",
+            f"`{CAPABILITY_GAP_LINE}`",
+            "After validating the ship report's `ship-summary/v2` bytes",
+            "completed Phase 7",
+            "with the validated ship summary inline",
+        )
+        self.assertNotIn("ship owner's `ship-summary/v2`", self.auto)
+        self.assertNotIn("ship owner's validated summary", self.auto)
+        earlier = normalized(self.section(
+            self.auto, "#### Earlier controller stop", "### Other Phase 5–7 routes"))
+        self.assert_ordered(
+            earlier,
+            "exactly validate, relay, and stop",
+            "only the canonical re-entry line `/from-issue <num> --auto`",
+            "only a canonical `Suspended (blocked_on=<value>). Resume: "
+            "/from-issue <num> --auto` line",
+            "relayed unchanged to its caller with no validation",
+            "writes nothing",
+            "Neither line is a dispatch failure.",
+            "received bytes",
+            "artifact-budget validate-report --boundary workflow-response",
+            "relay the canonical bytes unchanged",
+        )
+
+    def test_orchestrate_report_names_every_cause_a_label_sweep_leaves_parked(self):
+        # A label or milestone sweep never resumes these causes, so the
+        # per-issue re-entry line is the instruction that works (per D10).
+        final = normalized(self.section(
+            self.orchestrate, "## 5. Final report", "## Notes"))
+        self.assert_ordered(
+            final,
+            "`/from-issue <issue> --auto` for an issue suspended on a cause",
+            "`--label` or `--milestone` sweep does not resume",
+            "`human_gate`", "`external`", "`agent_dispatch`",
+            "the orchestrate re-invocation itself",
+        )
+        self.assertNotIn("for an issue suspended on a human gate", final)
 
     def test_auto_continuation_and_bookkeeper_are_interface_two(self):
         transfer = self.section(self.auto, "#### Mandatory transfer gate",

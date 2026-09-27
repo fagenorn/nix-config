@@ -315,9 +315,12 @@ with truthful available usage and `next_needs_context=false`,
 `artifacts_sufficient=true`, and `remainder_self_contained=true`. Require the
 persisted action `delegate`. For this already-delegated implementation owner,
 that Phase-6 delegate is fulfilled by the existing fresh Phase-7 ship owner with
-`auto: true`; it must not dispatch a second issue owner.
+`auto: true`; it must not dispatch a second issue owner. The one allowed
+departure is `SKILL.md`'s Phase-7 dispatch-gap fallback: when that ship owner
+returns `capability_gap: agent_dispatch`, or this context cannot launch it,
+ship inline exactly as Phase 7 says, including its suspension on a genuine gap.
 
-After validating the ship owner's `ship-summary/v2` bytes, call
+After validating the ship report's `ship-summary/v2` bytes, call
 `workflow-state progress` for completed Phase 7. Make the finish invocation,
 fed those validated summary bytes on stdin, the ledger-only remainder; use
 truthful available usage and the same three gate values, require persisted
@@ -326,7 +329,7 @@ Give the bookkeeper an exact two-command sequence and nothing else: first
 `~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
 with this owner's own `action_id`, then the exact `workflow-state finish` command,
 `workflow-state finish --summary-file - --repo-root <ledger_repo_root> --run-id <run-id> --now <utc>`,
-with the ship owner's validated summary inline in its quoted heredoc and its
+with the validated ship summary inline in its quoted heredoc and its
 reply piped through `artifact-budget validate-report --boundary workflow-response --input -`.
 It executes exactly that sequence and relays the `finish` stdout; it decides
 nothing and edits nothing. It runs `finish` only after a `current: true` answer
@@ -345,9 +348,14 @@ ledger-only progress, and terminal sequence.
 #### Earlier controller stop
 
 The earlier controller's
-post-delegation action set is exactly validate, relay, and stop. The
-received bytes are the delegated owner's durable `finish` reply, a workflow
-response, so run `artifact-budget validate-report --boundary workflow-response`
+post-delegation action set is exactly validate, relay, and stop. Two closed
+line exceptions are matched byte for byte first: a return that is only the
+canonical re-entry line `/from-issue <num> --auto`, and a return that is only a
+canonical `Suspended (blocked_on=<value>). Resume: /from-issue <num> --auto`
+line. Each is relayed unchanged to its caller with no validation, the earlier
+controller writes nothing, and it stops. Neither line is a dispatch failure.
+Otherwise the received bytes are the delegated owner's durable `finish` reply,
+a workflow response, so run `artifact-budget validate-report --boundary workflow-response`
 over them; after successful validation, relay the canonical bytes unchanged to
 its caller and stop.
 
@@ -387,7 +395,7 @@ stops the action and is never routed around.
 ## Interface_version 2 delivery relay
 
 Every relay here carries a validated object unchanged: the interface-2 `owner`
-object in the continuation, the ship owner's `ship-summary/v2` into `finish`,
+object in the continuation, the ship report's `ship-summary/v2` into `finish`,
 and each `workflow-state` reply after `artifact-budget validate-report
 --boundary workflow-response`. Delivery effects, scopes and observations belong
 to ship-issue's `## Delivery loop`; a returned `delivery_remainder` launches
