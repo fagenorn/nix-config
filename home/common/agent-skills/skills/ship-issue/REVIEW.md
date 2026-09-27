@@ -24,7 +24,7 @@ Discussion, ≤400 words, file:line anchors.
 Same machinery and rubrics as sdd's final review, over the post-sync range
 `$BASE_SHA..$HEAD_SHA`. The conformance axis uses sdd's
 `conformance-reviewer-prompt.md`, deployed beside its SKILL.md; the native
-correctness fallback uses `correctness-reviewer-prompt.md`. At ship there is no
+correctness form uses `correctness-reviewer-prompt.md`. At ship there is no
 sdd ledger or diff package: omit the ledger-triage placeholder and let each
 reviewer fetch the range per its template's fallback. Verdicts ≤400 words each,
 Critical/Important/Minor, never merged.

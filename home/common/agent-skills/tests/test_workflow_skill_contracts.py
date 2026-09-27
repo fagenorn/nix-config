@@ -629,6 +629,49 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             ("Critical", "Important", "Minor"),
         )
 
+    def test_ship_correctness_route_is_the_capability_ladder(self):
+        route = ship_correctness_route()
+        assert_correctness_route_ladder(self, route, SHIP_CORRECTNESS_TARGET)
+        route = normalized(route)
+        self.assertIn(
+            "This is the only rung that reaches Codex and the only one where a "
+            "capacity rejection binds, on the terms in REVIEW.md.", route)
+        self.assertIn(
+            "record the routing error in the PR body beside the correctness "
+            "verdict", route)
+        # REVIEW.md names the rung-3 template as the native form, not a
+        # fallback (D13).
+        self.assertIn(
+            "the native correctness form uses `correctness-reviewer-prompt.md`",
+            normalized(SHIP_ISSUE_REVIEW.read_text(encoding="utf-8")))
+
+    def test_correctness_route_ladder_rejects_each_broken_route(self):
+        # The helper is not vacuous: putting the pre-fix route back, or breaking
+        # one clause of the ladder, makes it raise (issue 195, D3).
+        ship = SHIP_ISSUE.read_text(encoding="utf-8")
+        ladder = ship[
+            ship.index("Run it in parallel with the correctness axis"):
+            ship.index("<!-- agent-dispatch: id=ship-issue-full-correctness-fallback")
+        ]
+        mutants = {
+            "pre-fix route": (ladder, SHIP_PRE_FIX_ROUTE + "\n\n"),
+            "diff-review in rung 3": (
+                "3. `unsupported`, or", "3. `unsupported` via `diff-review`, or"),
+            "capacity rule leaves rung 2": (
+                "a capacity rejection binds", "a refusal binds"),
+            "routing-error outcome kept": (
+                "discard its outcome", "keep its outcome"),
+            "rung 3 invokes codex-collaboration": (
+                "is never invoked on this rung", "is always invoked on this rung"),
+        }
+        for name, (old, new) in mutants.items():
+            with self.subTest(mutant=name):
+                self.assertTrue(old in ship, f"mutant anchor missing: {old!r}")
+                with self.assertRaises(AssertionError):
+                    assert_correctness_route_ladder(
+                        self, ship_correctness_route(ship.replace(old, new)),
+                        SHIP_CORRECTNESS_TARGET)
+
     def test_context_map_selection_uses_only_authored_order(self):
         table = (
             ([], None),
@@ -703,6 +746,66 @@ def assert_configured_code_review_pair(case, owner, support):
     for text in (owner_text, support_text):
         case.assertNotIn("command -v codex-companion", text)
         case.assertNotIn('subagent_type="codex:codex-reviewer"', text)
+
+
+# Both correctness-axis callers open their route with this sentence and then
+# number the three rungs (issue 195, D4, D5).
+CORRECTNESS_ROUTE_OPENER = (
+    "Choose the correctness route from the retained `capabilities.review.code` "
+    "state before either axis is dispatched, never from how a Codex call failed:"
+)
+SHIP_CORRECTNESS_TARGET = "id=ship-issue-full-correctness-fallback"
+# ship-issue Phase 5's correctness sentence before issue 195, kept only so the
+# ladder helper's self-check can put it back.
+SHIP_PRE_FIX_ROUTE = (
+    "Run it in parallel with the correctness axis via `codex-collaboration`'s "
+    "`diff-review`; when that capability is unavailable, use this native "
+    "first-pass dispatch instead:"
+)
+
+
+def ship_correctness_route(text=None):
+    """ship-issue Phase 5's full-review text, up to its scope-recording sentence."""
+    if text is None:
+        text = SHIP_ISSUE.read_text(encoding="utf-8")
+    start = text.index("**Full two-axis review.**")
+    return text[start:text.index("Axis reports are never merged", start)]
+
+
+def assert_correctness_route_ladder(case, route, native_target):
+    """Pin one caller's correctness-axis route (issue 195, D2, D4, D5).
+
+    The route opens with CORRECTNESS_ROUTE_OPENER and numbers the `blocked`,
+    `available` and `unsupported` rungs in that order. Only the `available` rung
+    names `diff-review`, and it names the capacity rejection after it. The
+    `unsupported` rung reaches `native_target` without naming `diff-review` or
+    `bindings.commands`, and before the routing-error paragraph it says that
+    `codex-collaboration` is never invoked on that rung. The routing-error
+    action follows the ladder, and no skill-presence wording survives.
+    """
+    route = normalized(route)
+    case.assert_ordered(
+        route, CORRECTNESS_ROUTE_OPENER, "1. `blocked`", "2. `available`",
+        "3. `unsupported`", native_target, "routing error", "discard its outcome",
+        "beside the correctness verdict", "rung-3 native dispatch",
+        "no retry, stop or suspension",
+    )
+    available_at = route.index("2. `available`")
+    unsupported_at = route.index("3. `unsupported`")
+    available = route[available_at:unsupported_at]
+    unsupported = route[unsupported_at:route.index(native_target, unsupported_at)]
+    case.assert_ordered(available, "`diff-review`", "capacity rejection")
+    for absent in ("diff-review", "bindings.commands"):
+        case.assertNotIn(absent, unsupported)
+    # The whole rung, through its dispatch, up to the routing-error paragraph:
+    # sdd's no-invocation clause sits after its native target (D12).
+    unsupported_rung = route[
+        unsupported_at:route.index("routing error", unsupported_at)]
+    case.assertIn(
+        "`codex-collaboration` is never invoked on this rung", unsupported_rung)
+    case.assertEqual(route.count("diff-review"), available.count("diff-review"))
+    case.assertNotIn("unavailable", route.lower())
+    case.assertNotIn("skill is available", route)
 
 
 def assert_codex_operation_pair(case, support, review_field, headings):
