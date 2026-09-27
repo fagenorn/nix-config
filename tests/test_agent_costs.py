@@ -1,29 +1,26 @@
-"""Offline tests for scripts/agent-costs.py against tiny synthetic transcripts.
+"""Offline tests for agent_tools.agent_costs against tiny synthetic transcripts.
 
 Covers the load-bearing counting rules (message-ID usage dedup, the tool-use-ID
 and tool-result-ID guards), token accounting, model/effort extraction, peak
 per-turn context, outcome derivation, the proceed-nudge matcher, and the
 artifact pass. Runs entirely offline: fixtures are built in a temp dir.
 
-Run: python3 -m unittest -v tests/test_agent_costs.py
+Run: just agent-workflow-tests
 """
 
 import contextlib
-import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "agent-costs.py"
-
-_spec = importlib.util.spec_from_file_location("agent_costs", SCRIPT)
-agent_costs = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(agent_costs)
+from agent_tools import agent_costs
+from agent_tools.canonical import telemetry_digest
 
 
 def record(rec):
@@ -1377,7 +1374,7 @@ class ExecutionTelemetrySchedulingTest(unittest.TestCase):
         token_digest = agent_costs.cohort_digest([("toolu-1",)])
         for name, value in (("wait_input_tokens", 1), ("covered_input_tokens", 2)):
             metrics[name] = {"value": value, "coverage": full, "cohort_digest": token_digest}
-        slot_digest = agent_costs.canonical_digest(event_window)
+        slot_digest = telemetry_digest(event_window)
         self.assertNotEqual(slot_digest, agent_costs.cohort_digest([tuple(event_window.values())]))
         for name, value in (("slot_capacity_seconds", 10), ("claimed_slot_seconds", 5)):
             metrics[name] = {"value": value, "coverage": full, "cohort_digest": slot_digest}
@@ -1458,7 +1455,7 @@ class BuildRecordTest(unittest.TestCase):
         rec = agent_costs.build_record(self.strata(), self.window())
         body = {k: v for k, v in rec.items()
                 if k not in ("record_id", "generated_at")}
-        self.assertEqual(rec["record_id"], agent_costs.canonical_digest(body))
+        self.assertEqual(rec["record_id"], telemetry_digest(body))
         self.assertTrue(rec["record_id"].startswith("sha256:"))
         self.assertEqual(len(rec["record_id"]), 71)
         again = agent_costs.build_record(self.strata(), self.window())
@@ -1626,6 +1623,18 @@ class StrataCliTest(unittest.TestCase):
                              "--format", "json")
         self.assertIsNone(code)
         self.assertEqual(json.loads(raw)["strata"]["claude"]["runs"], [])
+
+
+class ModuleEntryPointTest(unittest.TestCase):
+    """The recipe runs the tool with `-m`; every other test calls main() in process."""
+
+    def test_the_module_run_reaches_main_under_the_command_name(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "agent_tools.agent_costs", "--help"],
+            capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.startswith("usage: agent-costs "),
+                        completed.stdout[:200])
 
 
 if __name__ == "__main__":

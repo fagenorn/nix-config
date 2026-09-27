@@ -96,6 +96,11 @@ Subagent (the explicitly selected implementer or mechanic above):
     report file: what changed, the covering tests, the command, the output.
     Reviewers will not re-run tests — your report is the test evidence.
 
+    Launch any subagent by type only, never by name: a subagent cannot spawn a
+    named teammate, and a named launch returns an error instead of work. Read an
+    existing file before writing to it: overwriting content you have not read
+    destroys work you cannot see.
+
     ## Report Format
 
     Write your full report to [REPORT_FILE]: what you implemented, what you

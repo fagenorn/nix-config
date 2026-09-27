@@ -2,10 +2,7 @@ import contextlib
 import copy
 import io
 import json
-from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_model_drift_test_support import (DriftCliCase, agent_model_drift,
+from .agent_model_drift_test_support import (DriftCliCase, agent_model_drift,
     baseline_value, coverage, legacy_record_value, record_value, seal_baseline,
     seal_record)
 
@@ -111,6 +108,7 @@ class BaselineLifecycleTest(DriftCliCase):
         with contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr):
             code=agent_model_drift.main(["--record",str(self.write("record.json",record_value())),"--baseline",str(duplicate),"--matrix-root",str(self.matrix_root),"--now","2026-09-20T12:00:00Z"])
         self.assertEqual(code,2); self.assertEqual(stdout.getvalue(),""); self.assertTrue(stderr.getvalue())
+        self.assertEqual(stderr.getvalue(), "cannot load JSON input\n")
 
     def test_coverage_metric_and_window_boundaries_exit_two(self):
         record=record_value(); route=record["execution_telemetry"]["runs"][0]["routing"]["coverage"]; route.update(eligible_events=1,paired_events=0)

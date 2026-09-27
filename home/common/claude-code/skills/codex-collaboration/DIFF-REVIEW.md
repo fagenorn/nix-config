@@ -1,24 +1,18 @@
 # Operation: `diff-review`
 
 Read this when running `diff-review` — the correctness axis of the two-axis diff
-review (the sdd skill defines the axes and owns dispatching the parallel native
-conformance axis — that axis never comes through this skill). SKILL.md owns the
-shared runtime contract: resolve policy, capability pre-flight, packet by paths,
-exact ordered first lines `WORKTREE_ROOT: <absolute path>` then
-`REVIEW_OPERATION: diff-review`, one foreground `codex:codex-reviewer` dispatch,
-validation, one-time native `reviewer` fallback on a real Codex failure, never a
-retry, concurrency never a fallback reason. The axis is never skipped. This
-operation adds one pre-flight of its own — the size pre-flight below — which runs
-after that capability check.
+review. It consumes SKILL.md's retained `ResolvedProject` and validated direct-command
+result; it does not resolve, read policy, infer a path, or supply a default. This
+operation uses `bindings.workflow.review.code` and validates the `Critical`,
+`Important`, and `Minor` headings. The sdd skill owns the parallel native
+conformance axis. The axis is never skipped. This operation adds the size
+pre-flight below after the operation selection.
 
 ## Size pre-flight
 
-SKILL.md's `command -v codex-companion` check is the capability pre-flight and runs
-first; this size pre-flight runs after it, never before. A missing capability takes
-the native flow and never dispatches, so measuring first would be wasted work, and
-the native path is unscoped by construction. The separate capability fallback — this
-skill or the bridge agent unavailable, so the controller dispatches the native
-correctness reviewer itself — never reaches this pre-flight and is never scoped.
+The retained `capabilities.review.code` selection runs first; this size pre-flight
+runs after it, never before. An unsupported capability takes the documented native
+route and never dispatches, so measuring first would be wasted work.
 
 Measure the range in product terms before building the packet. Run it from the
 worktree root (the helper is `~/.agents/bin/diff-scope`; use the full path if the
@@ -27,14 +21,12 @@ bare name does not resolve on PATH):
 ```
 diff-scope <base-sha>..<head-sha> \
   --root <absolute worktree root> \
-  --artifact-path <specDir> --artifact-path <planDir> \
+  --artifact-path <specification-directory> --artifact-path <plan-directory> \
   --format json
 ```
 
-`<specDir>` and `<planDir>` are the caller's already-resolved bindings, passed
-repository-relative. A dispatcher that has none passes the documented defaults
-`.claude/specs` and `.claude/plans` rather than omitting the flags, so the run's own
-spec and plan never consume review budget.
+The specification and plan directories are paths passed from the caller's retained snapshot,
+without fallback locations.
 
 Read exactly three fields from the JSON:
 
@@ -100,7 +92,7 @@ not that packet plus tweaks. It contains exactly:
    `docs/standards/` shards whose globs intersect).
 
 Nothing else rides along: no issue investigation, no spec, no domain docs, no
-`codex.planReview.focus`, no `REVIEW-CONTRACT.md`. The light packet is what keeps
+no separate review-focus setting and no `REVIEW-CONTRACT.md`. The light packet is what keeps
 Codex inside its runtime budget; domain conformance belongs to the other axis.
 
 ### When the range is over budget
@@ -181,7 +173,7 @@ after the em dash — never between the verdict word and the dash:
 **Correctness:** Findings — scoped to <N> of <M> product files; <1–2 sentence assessment>.
 ```
 
-`agent-evidence.py` `re.fullmatch`es this line, so the position is a contract rather
+`agent-evidence` `re.fullmatch`es this line, so the position is a contract rather
 than a style: `**Correctness:** Clean (scoped: 20 of 44) — …` fails validation. A
 scoped review may not use the bare `**Correctness:** Clean` form, because that form
 has nowhere to put the coverage. An unscoped or unmeasured review keeps today's
@@ -190,7 +182,7 @@ format exactly, bare form included.
 The coverage disclosure is mandatory on a scoped dispatch — state it in the packet as
 a requirement, not a preference; a scoped result that omits it does not satisfy this
 operation's output contract. Nothing downstream catches that omission:
-`agent-evidence.py` fullmatches the shape of the first line and never sees whether
+`agent-evidence` fullmatches the shape of the first line and never sees whether
 the packet was scoped, so a bare `**Correctness:** Clean` returned from a scoped
 dispatch validates. The obligation lives in the packet and nowhere else.
 

@@ -5,6 +5,12 @@ description: Execute an implementation plan with a fresh subagent per task, revi
 
 # Subagent-Driven Development
 
+The owning phase passes its retained project here; do not perform another policy
+read. For correctness review select `bindings.workflow.review.code` and route
+retained `capabilities.review.code` first: `blocked` stops and authored
+`unsupported` takes only its documented route. Only `available` dereferences
+`bindings.commands[review_id].argv` before launching it.
+
 Execute a plan by dispatching a fresh implementer per task, a lane-scoped task review after each, and one two-axis whole-branch review (conformance ∥ correctness) at the end. Subagents never inherit your session's history — you construct exactly what each needs, which also keeps your own context flat for coordination.
 
 **Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, or all-tasks-complete. Narrate at most one short line between tool calls — the ledger and tool results carry the record.
@@ -74,6 +80,10 @@ Dispatch by agent type — the definitions carry the model and effort tier; neve
 - **Stuck tasks escalate across models, not just tiers** — see the fix loop's round 4.
 
 Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi-step work and costs more overall. Unsure between mechanic and implementer → pick implementer.
+
+**Leaf-agent clauses.** Every prompt this skill composes for an `Agent` dispatch — here, in [fix-loop.md](fix-loop.md) or in [final-review.md](final-review.md) — carries these two sentences verbatim, as a paragraph of their own; a prompt built from one of the `*-prompt.md` templates already carries them:
+
+> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see.
 
 ## The task loop
 

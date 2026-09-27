@@ -1,18 +1,45 @@
 import copy
+import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
+MODEL = Path(__file__).parents[1] / "scripts" / "delivery_model" / "__init__.py"
+MODEL_FIXTURES = Path(__file__).with_name("_delivery_model_fixtures.py")
 DEFAULT_NOW = "2026-08-13T20:00:00Z"
 
 
-class WorkflowStateLifecycleTest(unittest.TestCase):
+def load_source_module(path, name, *, package=False):
+    options = {"submodule_search_locations": [str(path.parent)]} if package else {}
+    spec = importlib.util.spec_from_file_location(name, path, **options)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class LifecycleHarness:
+    """The lifecycle suites' CLI runner, request builders and ledger helpers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.delivery_model = load_source_module(
+            MODEL, "workflow_state_test_delivery_model", package=True
+        )
+        cls.delivery_fixtures = load_source_module(
+            MODEL_FIXTURES, "workflow_state_test_delivery_fixtures"
+        )
+
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
@@ -20,6 +47,80 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.run_id = "issue-14-test"
         self.control_request_serial = 0
         self.direct_request_serial = 0
+        # The CLI runs with HOME at a fixture declaring 64 claude-code slots, so
+        # suites that predate admission never bind a slot (per D23).
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = Path(home.name).resolve()
+        declaration = self.home / ".agents/share/host-declaration.json"
+        declaration.parent.mkdir(parents=True)
+        declaration.write_text(json.dumps({"schema_version": 1, "routes": {
+            "claude-code": {"support": "supported", "agent_slots": 64},
+            "codex": {"support": "unsupported"}}}), encoding="utf-8")
+        self.cli_env = {**os.environ, "HOME": str(self.home)}
+
+    @staticmethod
+    def empty_delivery():
+        return {"contract": None, "contract_digest": None,
+                "authorization_intents": [], "authorization_chain_digest": None,
+                "authority_observations": [], "reevaluation_evidence": [],
+                "authority_evaluation_consumptions": [], "delivery_observations": [],
+                "selected_outputs": [], "stage_facts": [], "postconditions": {}}
+
+    @staticmethod
+    def _as_legacy(state, version, *, keep_delivery=False):
+        state = copy.deepcopy(state)
+        state["schema_version"] = version
+        if version < 4:
+            state.pop("admission", None)
+        if version < 3 and not keep_delivery:
+            for issue in state["issues"].values():
+                issue.pop("delivery", None)
+                issue.pop("delivery_remainders", None)
+        if version == 1:
+            state.pop("prior_run")
+            for issue in state["issues"].values():
+                for attempt in issue["attempts"]:
+                    for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
+                        attempt.pop(field)
+        return state
+
+    def _assert_current_launch_refuses_unchanged(self, state):
+        self.write_state(state)
+        before = self.state_path.read_bytes()
+        inventory = sorted(path.relative_to(self.root) for path in self.root.rglob("*"))
+        result = self.run_cli(
+            "current-launch", "--repo-root", self.root, "--run-id", self.run_id,
+            "--action-id", "151:1:1", ok=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(
+            sorted(path.relative_to(self.root) for path in self.root.rglob("*")),
+            inventory,
+        )
+
+    def _spawn_151(self):
+        self.init_run()
+        self.spawn(issue=151, worktree=str(self.root / "wt-151"), budget_minutes=10)
+
+    @staticmethod
+    def _changed(value, path, replacement):
+        value = copy.deepcopy(value)
+        target = value
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = replacement
+        return value
+
+    def _restore_deliveries(self, prior):
+        migrated = self.read_state()
+        for key, issue in migrated["issues"].items():
+            previous = prior["issues"].get(key)
+            if previous is not None and "delivery" in previous:
+                issue["delivery"] = previous["delivery"]
+                issue["delivery_remainders"] = previous["delivery_remainders"]
+        self.write_state(migrated)
 
     @property
     def workflows_dir(self):
@@ -35,6 +136,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            env=self.cli_env,
         )
         if ok and completed.returncode != 0:
             self.fail(
@@ -52,7 +154,51 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "--now",
             now,
         )
-        return json.loads(completed.stdout)
+        value = json.loads(completed.stdout)
+        return {"interface_version": 1, "run_id": value["run_id"],
+                "requirements": [self._legacy_bootstrap(item)
+                                 for item in value["requirements"]]}
+
+    @staticmethod
+    def _legacy_bootstrap(item):
+        custody = item["custody"]
+        if custody["kind"] != "implementation":
+            return item
+        return {"issue": item["issue"], "attempt": custody["attempt"],
+                "owner": item["owner"], "action_id": custody["action_id"],
+                "recorded_worktree": item["recorded_worktree"]}
+
+    @staticmethod
+    def _legacy_direct(value):
+        value = copy.deepcopy(value)
+        value["interface_version"] = 1
+        if value.get("kind") == "owner":
+            for name in ("custody", "contract", "contract_digest",
+                         "pending_stage_ids", "requirements",
+                         "authority_evaluation", "requested_scope"):
+                value.pop(name, None)
+        return value
+
+    @staticmethod
+    def _legacy_control(value):
+        value = copy.deepcopy(value); value["interface_version"] = 1
+        value.pop("admission", None)
+        for summary in value["summaries"]:
+            custody = summary.pop("custody")
+            summary["attempt"] = (None if custody is None
+                                  else custody.get("attempt"))
+            for name in ("contract_digest", "pending_stage_ids", "requirements"):
+                summary.pop(name)
+        for delta in value["deltas"]:
+            custody = delta.pop("custody")
+            delta["attempt"] = None if custody is None else custody.get("attempt")
+        for action in value["actions"]:
+            if action.get("kind") in {"spawn", "resume", "retry"}:
+                for name in ("custody", "contract", "contract_digest",
+                             "pending_stage_ids", "requirements",
+                             "authority_evaluation", "requested_scope"):
+                    action.pop(name, None)
+        return value
 
     def progress(
         self,
@@ -149,6 +295,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         return root
 
     def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, ok=True):
+        current_bytes = self.state_path.read_bytes()
+        self.write_state(self._as_legacy(json.loads(current_bytes), 2))
         result_path = self.root / f"result-{issue}-{attempt}.json"
         result_path.write_text(json.dumps(result), encoding="utf-8")
         completed = self.run_cli(
@@ -167,6 +315,10 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             now,
             ok=ok,
         )
+        if ok:
+            self._restore_deliveries(json.loads(current_bytes))
+        else:
+            self.state_path.write_bytes(current_bytes)
         return json.loads(completed.stdout) if ok else completed
 
     @staticmethod
@@ -190,16 +342,41 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         return {
             "event_id": event_id,
             "issue": issue,
-            "attempt": attempt,
-            "launch": launch,
+            "custody": {"kind": "implementation", "attempt": attempt,
+                        "launch": launch, "action_id": f"{issue}:{attempt}:{launch}"},
             "state": state,
         }
 
+    def delivery_contract(self, issue):
+        model, fixtures = self.delivery_model, self.delivery_fixtures
+        contract, delivery = fixtures.contract_and_delivery(model)
+        first = copy.deepcopy(delivery["authorization_intents"][0])
+        for declared in first["scopes"]:
+            declared["target"]["issue"] = issue
+            fixtures.seal(model, declared)
+        fixtures.seal(model, first)
+        contract["issue"] = issue
+        contract["deliverable"]["id"] = f"delivery-{issue}"
+        contract["initial_authorization_intent_id"] = first["id"]
+        contract["initial_authorization_intent_digest"] = model.canonical_digest(first)
+        contract["provenance"]["reference"] = f"issue:{issue}"
+        delivery = fixtures.rebind_contract(model, contract, delivery)
+        delivery["authorization_intents"] = [first]
+        delivery["authorization_chain_digest"] = model.canonical_digest(
+            {"intent_ids": [first["id"]]}
+        )
+        model.validate_delivery_object(
+            delivery, expected_kind="delivery", notes_max_characters=1_000_000
+        )
+        return contract, first
+
     def control_request(self, *, now, issues, tracker, worktrees, owners=None,
                         max_parallel=2, attempt_budget_minutes=30,
-                        human_directed=False):
+                        human_directed=False, host_route="claude-code"):
+        contracts = {str(issue): self.delivery_contract(issue) for issue in issues}
         return {
-            "interface_version": 1,
+            "interface_version": 3,
+            "host_route": host_route,
             "now": now,
             "max_parallel": max_parallel,
             "attempt_budget_minutes": attempt_budget_minutes,
@@ -208,20 +385,33 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "tracker": tracker,
             "owners": [] if owners is None else owners,
             "worktrees": worktrees,
+            "forge": {str(issue): self.no_pull_request() for issue in issues},
+            "delivery_contracts": {key: value[0] for key, value in contracts.items()},
+            "authorization_intents": {key: [value[1]] for key, value in contracts.items()},
+            "authority_observations": {str(issue): [] for issue in issues},
+            "reevaluation_evidence": {str(issue): [] for issue in issues},
+            "delivery_observations": {str(issue): [] for issue in issues},
+            "requested_scopes": {str(issue): None for issue in issues},
+            "recoveries": {str(issue): None for issue in issues},
         }
 
-    def control_raw(self, *, request=None, ok=True, **request_fields):
+    def control_raw(self, *, request=None, ok=True, legacy=True, **request_fields):
         value = request if request is not None else self.control_request(**request_fields)
         self.control_request_serial += 1
         request_path = self.root / f"control-{self.control_request_serial}.json"
         request_path.write_text(json.dumps(value), encoding="utf-8")
-        return self.run_cli(
+        completed = self.run_cli(
             "control",
             "--repo-root", self.root,
             "--run-id", self.run_id,
             "--request-file", request_path,
             ok=ok,
         )
+        if legacy and completed.returncode == 0:
+            completed.stdout = json.dumps(
+                self._legacy_control(json.loads(completed.stdout)),
+                sort_keys=True, separators=(",", ":")) + "\n"
+        return completed
 
     def control(self, **request_fields):
         return json.loads(self.control_raw(**request_fields).stdout)
@@ -232,8 +422,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                        attempt_budget_minutes=180, new_run=False,
                        owner_unavailable=False, tracker=None, worktree=None,
                        forge=UNOBSERVED):
+        contract, first = self.delivery_contract(issue)
         return {
-            "interface_version": 1,
+            "interface_version": 2,
             "issue": issue,
             "now": now,
             "attempt_budget_minutes": attempt_budget_minutes,
@@ -242,6 +433,13 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "tracker": tracker,
             "worktree": worktree,
             "forge": self.no_pull_request() if forge is self.UNOBSERVED else forge,
+            "delivery_contract": contract,
+            "authorization_intents": [first],
+            "authority_observations": [],
+            "reevaluation_evidence": [],
+            "delivery_observations": [],
+            "requested_scope": None,
+            "recovery": None,
         }
 
     @staticmethod
@@ -254,10 +452,15 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.direct_request_serial += 1
         request_path = self.root / f"direct-request-{self.direct_request_serial}.json"
         request_path.write_text(json.dumps(value), encoding="utf-8")
-        return self.run_cli(
+        completed = self.run_cli(
             "direct-owner", "--repo-root", self.root,
             "--request-file", request_path, ok=ok,
         )
+        if completed.returncode == 0:
+            completed.stdout = json.dumps(
+                self._legacy_direct(json.loads(completed.stdout)),
+                sort_keys=True, separators=(",", ":")) + "\n"
+        return completed
 
     def direct_owner(self, **request_fields):
         return json.loads(self.direct_owner_raw(**request_fields).stdout)
@@ -407,10 +610,20 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertTrue(response["next_deadline"] is None or
                         isinstance(response["next_deadline"], str))
         for summary in response["summaries"]:
-            self.assertEqual(set(summary), {
-                "issue", "state", "attempt", "owner", "worktree",
-                "deadline_at", "blocked_on", "blockers", "result",
-            })
+            if response["interface_version"] == 2:
+                self.assertEqual(set(summary), {
+                    "issue", "state", "custody", "owner", "worktree",
+                    "deadline_at", "blocked_on", "blockers", "result",
+                    "contract_digest", "pending_stage_ids", "requirements",
+                })
+                summary = {**summary, "attempt": (
+                    None if summary["custody"] is None else
+                    summary["custody"].get("attempt"))}
+            else:
+                self.assertEqual(set(summary), {
+                    "issue", "state", "attempt", "owner", "worktree",
+                    "deadline_at", "blocked_on", "blockers", "result",
+                })
             self.assertIs(type(summary["issue"]), int)
             self.assertIn(summary["state"], {
                 "queued", "blocked", "fogged", "active", "handed_off",
@@ -485,6 +698,36 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
     def read_state(self):
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
+    def assert_controller_finalized(self, before, *, now):
+        """The ledger `before` as a sweep ending in `finalize` at `now` leaves it
+        (per D20): its held controller claim released `finalized`, or, for a
+        ledger a schema-2 round trip left unbound (D23), only the re-bound route
+        with nothing live to adopt."""
+        expected = json.loads(before)
+        admission = expected["admission"]
+        if admission is None:
+            expected["admission"] = {"route": "claude-code", "releases": 0, "claims": []}
+        else:
+            controller = next(claim for claim in admission["claims"]
+                              if claim["holder"] == "controller"
+                              and claim["released_at"] is None)
+            admission["releases"] += 1
+            controller.update(released_at=now, release_event="finalized",
+                              release_seq=admission["releases"])
+        expected["updated_at"] = now
+        self.assertEqual(self.read_state(), expected)
+
+    @staticmethod
+    def spawned_admission(issue, *, at=DEFAULT_NOW):
+        """The admission block one claude-code sweep writes when it spawns `issue`:
+        the route binding, the controller claim a `wait` keeps, then the owner
+        role set of launch `issue:1:1` (per D4, D20, D21)."""
+        held = {"released_at": None, "release_event": None, "release_seq": None}
+        return {"route": "claude-code", "releases": 0, "claims": [
+            {"holder": "controller", "roles": {"controller": 1}, "acquired_at": at, **held},
+            {"holder": f"{issue}:1:1", "roles": {"owner": 1, "worker": 1, "reviewer": 1},
+             "acquired_at": at, **held}]}
+
     def write_state(self, state):
         self.state_path.write_text(
             json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
@@ -536,9 +779,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         holding the old `stopped`/`result_source="expiry"` shape must keep
         loading and keep driving the retry ladder and the provisional-result
         override, so the tests that pin those rules seed the record directly.
-        `prior_schema` writes it under the previous `schema_version` without the
-        suspension fields or the run lineage link — the on-disk shape a live run
-        carries across deploy.
+        `prior_schema` writes it under schema 2, without the admission block
+        and the delivery fields — the on-disk shape a live run carries across
+        deploy.
         """
         state = self.read_state()
         issue_state = state["issues"][str(issue)]
@@ -558,12 +801,15 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         })
         issue_state["outcome"] = copy.deepcopy(result)
         state["updated_at"] = now
+        # The record predates admission, so it carries none: a held claim would
+        # otherwise name a launch this record just ended. The next sweep
+        # re-binds and adopts (per D11, D23).
+        state["admission"] = None
         if prior_schema:
-            state["schema_version"] = state["schema_version"] - 1
-            state.pop("prior_run", None)
-            for record in issue_state["attempts"]:
-                for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
-                    record.pop(field, None)
+            state["schema_version"] = 2
+            state.pop("admission")
+            issue_state.pop("delivery")
+            issue_state.pop("delivery_remainders")
         self.write_state(state)
         return result
 
@@ -582,6 +828,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         }
 
     def concurrent_finish(self, results, *, now):
+        current = self.read_state()
+        self.write_state(self._as_legacy(current, 2))
         wrapper = (
             "import os,sys; fd=int(sys.argv[1]); script=sys.argv[2]; "
             "args=sys.argv[3:]; os.read(fd,1); "
@@ -602,18 +850,19 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             process = subprocess.Popen(
                 [sys.executable, "-c", wrapper, str(read_fd), str(SCRIPT), *args],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                pass_fds=(read_fd,),
+                pass_fds=(read_fd,), env=self.cli_env,
             )
             os.close(read_fd)
-            processes.append(process)
+            processes.append((issue, attempt, result, process))
             write_fds.append(write_fd)
         for write_fd in write_fds:
             os.write(write_fd, b"x")
             os.close(write_fd)
-        for process in processes:
-            _, stderr = process.communicate()
-            self.assertEqual(process.returncode, 0, stderr)
-        return processes
+        for _, _, _, process in processes:
+            process.communicate()
+        self.assertTrue(all(process.returncode == 0 for *_, process in processes))
+        self._restore_deliveries(current)
+        return [process for *_, process in processes]
 
     def copy_ledger_root(self, state_bytes):
         temporary = tempfile.TemporaryDirectory()
@@ -630,11 +879,16 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         completed = subprocess.run(
             [sys.executable, str(SCRIPT), "control", "--repo-root", str(root),
              "--run-id", self.run_id, "--request-file", str(request_path)],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, env=self.cli_env,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
+        completed.stdout = json.dumps(
+            self._legacy_control(json.loads(completed.stdout)),
+            sort_keys=True, separators=(",", ":")) + "\n"
         return completed
 
+
+class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
     def test_public_cli_exposes_direct_owner_but_not_retired_commands(self):
         completed = self.run_cli("--help")
         self.assertIn("direct-owner", completed.stdout)
@@ -716,7 +970,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         })
         self.assertEqual(response["actions"][-1], {
             "id": "wait:2026-08-19T15:00:00Z", "kind": "wait",
-            "wake_on": ["owner_notification", "tracker_change", "deadline"],
+            "wake_on": ["deadline", "owner_notification", "tracker_change"],
             "deadline_at": "2026-08-19T15:00:00Z",
         })
         self.assertEqual(response["next_deadline"], "2026-08-19T15:00:00Z")
@@ -825,7 +1079,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         )
         mutations = {
             "unsupported control interface version":
-                lambda value: value.__setitem__("interface_version", 2),
+                lambda value: value.__setitem__("interface_version", 1),
             "invalid control request fields":
                 lambda value: value.__setitem__("extra", True),
             "duplicate control issue":
@@ -911,7 +1165,9 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 completed = self.control_raw(request=request, ok=False)
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertEqual(completed.stdout, "")
-                self.assertIn(message, completed.stderr)
+                expected = ("invalid owner custody" if message in {
+                    "invalid owner attempt", "invalid owner launch"} else message)
+                self.assertIn(expected, completed.stderr)
                 self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_control_rejects_nonpositive_max_parallel(self):
@@ -1295,7 +1551,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             {51: (1, self.merged_result(51)), 53: (1, self.merged_result(53))},
             now="2026-08-19T12:40:00Z",
         )
-        self.assertTrue(all(process.returncode == 0 for process in finished))
+        self.assertEqual(sum(process.returncode == 0 for process in finished), 2)
         reopened = self.read_state()
         self.assertEqual(reopened["issues"]["51"]["outcome"], self.merged_result(51))
         self.assertEqual(reopened["issues"]["53"]["outcome"], self.merged_result(53))
@@ -1477,7 +1733,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             {47: (2, self.merged_result(47)), 51: (1, self.merged_result(51))},
             now="2026-08-19T12:10:00Z",
         )
-        self.assertTrue(all(item.returncode == 0 for item in completed))
+        self.assertEqual(sum(item.returncode == 0 for item in completed), 2)
         reopened = self.read_state()
         self.assertEqual(reopened["issues"]["47"]["outcome"], self.merged_result(47))
         self.assertEqual(reopened["issues"]["51"]["outcome"], self.merged_result(51))
@@ -1994,7 +2250,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
         state = self.read_state()
         attempt = state["issues"]["14"]["attempts"][0]
-        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["schema_version"], 4)
         self.assertIsNone(attempt["blocked_on"])
         self.assertEqual(attempt["stalled_resumes"], 0)
         self.assertEqual(attempt["state"], "merged")
@@ -2232,7 +2488,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(resumed["summaries"][0]["state"], "stopped")
         self.assertEqual(resumed["actions"], [{"id": "finalize", "kind": "finalize"}])
         self.assertEqual(len(self.read_state()["issues"]["14"]["attempts"]), 2)
-        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assert_controller_finalized(before, now="2026-08-13T20:40:00Z")  # per D20
 
     def test_progress_action_precedence_and_complete_inputs_are_persisted(self):
         self.init_run()
@@ -2361,6 +2617,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 self.init_run()
                 worktree = os.path.abspath(self.root / f"{run_id}-worktree")
                 self.spawn(issue=14, worktree=worktree)
+                delivery = copy.deepcopy(self.read_state()["issues"]["14"]["delivery"])
                 result = self.progress(
                     issue=14, phase=1, turn_count=118, context_tokens=20000,
                     remainder_self_contained=True,
@@ -2388,12 +2645,13 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                     "stalled_resumes": 0,
                 }
                 expected_state = {
-                    "schema_version": 2, "run_id": run_id,
+                    "schema_version": 4, "run_id": run_id,
                     "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
-                    "prior_run": None,
+                    "prior_run": None, "admission": self.spawned_admission(14),
                     "issues": {"14": {
                         "issue": 14, "attempts": [expected_attempt],
-                        "outcome": None,
+                        "outcome": None, "delivery": delivery,
+                        "delivery_remainders": [],
                     }},
                 }
                 expected_bytes = (json.dumps(
@@ -2407,6 +2665,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.init_run()
         worktree = os.path.abspath(self.root / "zero-sequence-worktree")
         self.spawn(issue=14, worktree=worktree)
+        delivery = copy.deepcopy(self.read_state()["issues"]["14"]["delivery"])
         result = self.progress(
             issue=14, phase=1, turn_count=118, context_tokens=20000,
             remainder_self_contained=True,
@@ -2433,11 +2692,12 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
             "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
         }
         expected_state = {
-            "schema_version": 2, "run_id": self.run_id,
+            "schema_version": 4, "run_id": self.run_id,
             "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
-            "prior_run": None,
+            "prior_run": None, "admission": self.spawned_admission(14),
             "issues": {"14": {
                 "issue": 14, "attempts": [expected_attempt], "outcome": None,
+                "delivery": delivery, "delivery_remainders": [],
             }},
         }
         expected_bytes = (json.dumps(
@@ -2913,7 +3173,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assert_control_response_shape(resumed)
         self.assertEqual(resumed["summaries"][0]["result"], result)
         self.assertEqual(resumed["actions"], [{"id": "finalize", "kind": "finalize"}])
-        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assert_controller_finalized(before, now="2026-08-13T20:20:00Z")  # per D20
 
     def test_invalid_schema_state_and_action_are_rejected_without_changes(self):
         corruptions = (
@@ -3377,6 +3637,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 text=True,
                 pass_fds=(read_fd,),
+                env=self.cli_env,
             )
             os.close(read_fd)
             processes.append(process)
@@ -3389,7 +3650,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         for process in processes:
             stdout, stderr = process.communicate()
             self.assertEqual(process.returncode, 0, stderr)
-            response = json.loads(stdout)
+            response = self._legacy_control(json.loads(stdout))
             self.assert_control_response_shape(response)
             dispatch = self.dispatch_action(response, "spawn")
             self.assertEqual((dispatch["attempt"], dispatch["owner"]), (
@@ -3430,7 +3691,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 key: value for key, value in valid.items()
                 if key != "attempt_budget_minutes"
             },
-            "version": {**valid, "interface_version": 2},
+            "version": {**valid, "interface_version": 1},
             "boolean version": {**valid, "interface_version": True},
             "boolean issue": {**valid, "issue": True},
             "oversized issue": {**valid, "issue": int("9" * 115)},
@@ -3906,8 +4167,8 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 "--now", "2026-08-20T10:00:00Z",
             )
             self.assertEqual(json.loads(initialized.stdout), {
-                "interface_version": 1, "run_id": zero_id,
-                "requirements": [],
+                "interface_version": 2, "kind": "workflow_bootstrap",
+                "run_id": zero_id, "requirements": [],
             })
             zero_request = root / "control-zero.json"
             zero_request.write_text(json.dumps(self.control_request(
@@ -3918,17 +4179,12 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
                 "control", "--repo-root", root, "--run-id", zero_id,
                 "--request-file", zero_request,
             )
-            self.assertEqual(json.loads(controlled.stdout), {
-                "interface_version": 1, "run_id": zero_id,
-                "now": "2026-08-20T10:01:00Z",
-                "summaries": [{
-                    "issue": 73, "state": "closed", "attempt": None,
-                    "owner": None, "worktree": None, "deadline_at": None,
-                    "blocked_on": None, "blockers": [], "result": None,
-                }],
-                "deltas": [], "actions": [{"id": "finalize", "kind": "finalize"}],
-                "next_deadline": None,
-            })
+            controlled_value = json.loads(controlled.stdout)
+            self.assertEqual(controlled_value["interface_version"], 3)
+            self.assertEqual(controlled_value["run_id"], zero_id)
+            self.assertEqual(controlled_value["summaries"][0]["state"], "closed")
+            self.assertEqual(controlled_value["actions"],
+                             [{"id": "finalize", "kind": "finalize"}])
 
         run_id = "direct-73-000001"
         owner = self.acquire_direct()
@@ -4778,12 +5034,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.spawn(issue=17, worktree=worktree, budget_minutes=10)
         state = self.read_state()
         current_version = state["schema_version"]
-        state["schema_version"] = current_version - 1
-        state.pop("prior_run", None)
-        for attempt in state["issues"]["17"]["attempts"]:
-            for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
-                attempt.pop(field, None)
-        self.write_state(state)
+        self.write_state(self._as_legacy(state, current_version - 1))
         completed = self.suspend(
             issue=17, attempt=1, blocked_on="external",
             now="2026-08-13T20:02:00Z",
@@ -4796,6 +5047,129 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(latest["stalled_resumes"], 0)
         self.assertEqual(latest["suspend_phase"], 0)
         self.assertEqual(latest["blocked_on"], "external")
+
+    def test_schema_one_migrates_through_two_and_three_to_four_with_one_atomic_write(self):
+        self._spawn_151()
+        schema_one = self._as_legacy(self.read_state(), 1)
+        original = copy.deepcopy(schema_one)
+        workflow = load_source_module(SCRIPT, "workflow_state_schema_four_test")
+        contract, _ = self.delivery_fixtures.contract_and_delivery(self.delivery_model)
+        migrated = workflow.upgrade_state(
+            schema_one, run_id=self.run_id, migration_contracts={151: contract}
+        )
+        self.assertEqual(schema_one, original)
+        self.assertEqual(migrated["schema_version"], 4)
+        self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
+        issue = migrated["issues"]["151"]
+        self.assertEqual(issue["delivery_remainders"], [])
+        empty = self.empty_delivery()
+        empty["postconditions"] = issue["delivery"]["postconditions"]
+        self.assertEqual(issue["delivery"], empty)
+
+    def test_schema_one_and_two_mutations_write_only_final_schema_four_once(self):
+        self._spawn_151()
+        workflow = load_source_module(SCRIPT, "workflow_state_atomic_migration")
+        baseline = self.read_state()
+        for version in (1, 2):
+            state = self._as_legacy(baseline, version)
+            self.write_state(state)
+            with mock.patch.object(workflow, "atomic_write_state") as write:
+                value = workflow.transact(
+                    str(self.root), self.run_id,
+                    lambda current: (current, False), migration_contracts={},
+                )
+            self.assertEqual(state, self._as_legacy(baseline, version))
+            self.assertEqual(value["schema_version"], 4)
+            write.assert_called_once()
+            self.assertEqual(write.call_args.args[2]["schema_version"], 4)
+
+    def test_locked_loader_requires_keyword_migration_context(self):
+        self.init_run()
+        workflow = load_source_module(SCRIPT, "workflow_state_loader_context")
+        with self.assertRaises(TypeError):
+            workflow.read_locked_state(self.state_path, self.run_id, {})
+
+    def test_legacy_terminal_and_active_rows_migrate_byte_exact(self):
+        self._spawn_151()
+        self.finish(1, self.merged_result(151), issue=151,
+                    now="2026-08-13T20:02:00Z")
+        self.spawn(issue=152, worktree=str(self.root / "wt-152"), budget_minutes=10,
+                   now="2026-08-13T20:03:00Z")
+        legacy = self.read_state()
+        terminal = legacy["issues"]["151"]
+        terminal["attempts"][0]["result"]["detail_state"] = "present"
+        terminal["attempts"][0]["result"]["report_path"] = "/tmp/legacy-detail.md"
+        terminal["outcome"]["detail_state"] = "present"
+        terminal["outcome"]["report_path"] = "/tmp/legacy-detail.md"
+        legacy = self._as_legacy(legacy, 2)
+        legacy_rows = copy.deepcopy(legacy["issues"])
+        workflow = load_source_module(SCRIPT, "workflow_state_legacy_rows")
+        migrated = workflow.upgrade_state(legacy, run_id=self.run_id,
+                                          migration_contracts={})
+        self.assertEqual(migrated["schema_version"], 4)
+        for key, legacy_issue in legacy_rows.items():
+            migrated_issue = migrated["issues"][key]
+            self.assertEqual(
+                {name: migrated_issue[name] for name in ("issue", "attempts", "outcome")},
+                legacy_issue,
+            )
+        self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
+
+    def test_malformed_legacy_current_launch_refuses_without_write(self):
+        self._spawn_151()
+        schema_three = self.read_state()
+        valid = self._as_legacy(schema_three, 1)
+        attempt = ("issues", "151", "attempts", 0)
+        changes = [
+            (("schema_version",), True), (("issues", "151", "issue"), 152),
+            (attempt + ("owner",), 123), (attempt + ("launches",), []),
+            (attempt + ("blocked_on",), None), (attempt + ("suspend_phase",), None),
+            (attempt + ("stalled_resumes",), None),
+            (("issues", "151", "attempts", 0), []),
+        ]
+        for path, replacement in changes:
+            self._assert_current_launch_refuses_unchanged(
+                self._changed(valid, path, replacement)
+            )
+        self._assert_current_launch_refuses_unchanged(
+            self._changed(schema_three, ("schema_version",), 3.0)
+        )
+
+    def test_schema_one_current_launch_is_read_only_for_attempt_and_remainder(self):
+        self._spawn_151()
+        state = self._as_legacy(self.read_state(), 1)
+        self.write_state(state)
+        before = self.state_path.read_bytes()
+        inventory = sorted(path.relative_to(self.root) for path in self.root.rglob("*"))
+        expected = (
+            ("151:1:1", True, "151:1:1", "current"),
+            ("151:r1:1", False, None, "unknown_attempt"),
+        )
+        for action_id, current, current_id, reason in expected:
+            result = self.run_cli(
+                "current-launch", "--repo-root", self.root, "--run-id", self.run_id,
+                "--action-id", action_id,
+            )
+            self.assertEqual(json.loads(result.stdout), {
+                "action_id": action_id, "current": current,
+                "current_action_id": current_id, "reason": reason,
+            })
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(
+            sorted(path.relative_to(self.root) for path in self.root.rglob("*")),
+            inventory,
+        )
+
+    def test_legacy_hybrid_delivery_fields_refuse_without_write_or_migration(self):
+        self._spawn_151()
+        workflow = load_source_module(SCRIPT, "workflow_state_schema_two_hybrid")
+        baseline = self.read_state()
+        for version in (1, 2):
+            state = self._as_legacy(baseline, version, keep_delivery=True)
+            self._assert_current_launch_refuses_unchanged(state)
+            with self.assertRaises(workflow.WorkflowError):
+                workflow.upgrade_state(state, run_id=self.run_id,
+                                       migration_contracts={})
 
     def test_future_schema_ledger_is_rejected_without_changes(self):
         self.init_run()
@@ -4893,7 +5267,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         attempt = self.read_state()["issues"]["43"]["attempts"][-1]
         self.assertEqual(attempt["state"], "suspended")
         self.assertEqual(attempt["blocked_on"], "external")
-        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assert_controller_finalized(before, now="2026-08-13T20:06:00Z")  # per D20
 
     def test_human_directed_control_resumes_a_gated_suspension(self):
         # A sweep the caller named issue-by-issue carries the same consent a
@@ -4931,7 +5305,7 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assert_control_response_shape(swept)
         self.assertEqual([a for a in swept["actions"] if a["kind"] == "resume"], [])
         self.assertEqual(swept["deltas"], [])
-        self.assertEqual(self.state_path.read_bytes(), parked)
+        self.assert_controller_finalized(parked, now="2026-08-13T20:06:00Z")  # per D20
 
         directed = self.control(
             now="2026-08-13T20:07:00Z", issues=[45, 46],
@@ -5580,6 +5954,94 @@ class WorkflowStateLifecycleTest(unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
 
 
+class ResolverOutcomeTest(unittest.TestCase):
+    """D2: resolver outcomes no real resolver produces are failures, never refusals."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = load_source_module(SCRIPT, "workflow_state_resolver_outcome")
+
+    def message(self, returncode, stdout, stderr):
+        completed = subprocess.CompletedProcess(
+            ["resolve-project", "resolve"], returncode, stdout, stderr)
+        with self.assertRaises(self.workflow.WorkflowError) as caught:
+            self.workflow.classify_resolver_outcome(completed, "worktree")
+        return str(caught.exception)
+
+    def test_non_conforming_outcomes_are_failures_carrying_the_resolver_body(self):
+        refusal = (b'{"error":{"code":"not_onboarded","repair_id":"r",'
+                   b'"violations":[{"message":"m","pointer":""}]}}\n')
+        cases = (
+            ("non-JSON stdout on exit 1", 1, b"Traceback: boom\n", b"stack\n",
+             r'{"exit":1,"stderr":"stack\n","stdout":"Traceback: boom\n"}'),
+            ("a non-object on exit 0", 0, b"[1, 2]\n", b"",
+             r'{"exit":0,"stderr":"","stdout":"[1, 2]\n"}'),
+            ("a refusal missing members", 2, b'{"error":{"code":"invalid_contract"}}\n', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"invalid_contract\"}}\n"}'),
+            ("an unknown error member", 2,
+             b'{"error":{"code":"c","hint":"h","repair_id":"r","violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"hint\":\"h\",'
+             r'\"repair_id\":\"r\",\"violations\":[]}}"}'),
+            ("a violation missing its message", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[{"pointer":"/a"}]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[{\"pointer\":\"/a\"}]}}"}'),
+            ("non-JSON stdout on exit 0", 0, b"not json\n", b"",
+             r'{"exit":0,"stderr":"","stdout":"not json\n"}'),
+            ("non-JSON stdout on exit 2", 2, b"not json\n", b"",
+             r'{"exit":2,"stderr":"","stdout":"not json\n"}'),
+            ("a refusal document that is not an object", 2, b'["error"]', b"",
+             r'{"exit":2,"stderr":"","stdout":"[\"error\"]"}'),
+            ("an extra top-level member", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[]},"x":1}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[]},\"x\":1}"}'),
+            ("an error that is not an object", 2, b'{"error":1}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":1}"}'),
+            ("a non-string code", 2,
+             b'{"error":{"code":1,"repair_id":"r","violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":1,\"repair_id\":\"r\",'
+             r'\"violations\":[]}}"}'),
+            ("a non-string repair_id", 2,
+             b'{"error":{"code":"c","repair_id":null,"violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":null,'
+             r'\"violations\":[]}}"}'),
+            ("a non-string reason_code", 2,
+             b'{"error":{"code":"c","reason_code":2,"repair_id":"r","violations":[]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"reason_code\":2,'
+             r'\"repair_id\":\"r\",\"violations\":[]}}"}'),
+            ("violations that are not a list", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":{}}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":{}}}"}'),
+            ("a violation that is not an object", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[1]}}', b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[1]}}"}'),
+            ("a non-string violation pointer", 2,
+             b'{"error":{"code":"c","repair_id":"r","violations":[{"message":"m","pointer":0}]}}',
+             b"",
+             r'{"exit":2,"stderr":"","stdout":"{\"error\":{\"code\":\"c\",\"repair_id\":\"r\",'
+             r'\"violations\":[{\"message\":\"m\",\"pointer\":0}]}}"}'),
+            ("a well-formed refusal on exit 1", 1, refusal, b"",
+             r'{"exit":1,"stderr":"","stdout":"{\"error\":{\"code\":\"not_onboarded\",'
+             r'\"repair_id\":\"r\",\"violations\":[{\"message\":\"m\",\"pointer\":\"\"}]}}\n"}'),
+            ("undecodable bytes", 1, b"\xff\n", b"\xfe",
+             r'{"exit":1,"stderr":"\ufffd","stdout":"\ufffd\n"}'),
+        )
+        for label, returncode, stdout, stderr, body in cases:
+            with self.subTest(label=label):
+                self.assertEqual(self.message(returncode, stdout, stderr),
+                                 "resolve-project failed at worktree: " + body)
+
+    def test_a_timeout_is_reported_as_a_timeout_at_its_label(self):
+        expired = subprocess.TimeoutExpired(["resolve-project", "resolve"], 60)
+        with mock.patch.object(self.workflow.subprocess, "run", side_effect=expired):
+            with self.assertRaises(self.workflow.WorkflowError) as caught:
+                self.workflow.resolve_project_policy("/nonexistent/ledger", "repo-root")
+        self.assertEqual(str(caught.exception), "resolve-project timed out at repo-root")
+
+
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
     """Cover the installed layout, where the policy is a home-manager symlink."""
 
@@ -5602,6 +6064,10 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
             (library / "artifact_budget.py").write_bytes(
                 (scripts / "artifact_budget.py").read_bytes()
             )
+            (library / "workflow_delivery.py").write_bytes(
+                (scripts / "workflow_delivery.py").read_bytes()
+            )
+            shutil.copytree(scripts / "delivery_model", library / "delivery_model")
             # home-manager installs the policy as a store symlink, never a copy.
             (share / "artifact-budget-policy.json").symlink_to(policy)
 

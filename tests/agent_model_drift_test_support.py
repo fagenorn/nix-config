@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import copy
 import hashlib
-import importlib.util
 import io
 import json
 import shutil
@@ -12,14 +11,10 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
+from agent_tools import agent_costs, agent_model_drift
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "scripts/agent-model-drift.py"
-COST_SCRIPT = REPO_ROOT / "scripts/agent-costs.py"
 MATRIX = REPO_ROOT / "home/common/agent-skills/model-matrix.json"
-_spec = importlib.util.spec_from_file_location("agent_model_drift", SCRIPT)
-agent_model_drift = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(agent_model_drift)
-_cost = importlib.util.spec_from_file_location("agent_costs_fixture", COST_SCRIPT)
-agent_costs = importlib.util.module_from_spec(_cost); _cost.loader.exec_module(agent_costs)
 
 def digest(value):
     return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -51,7 +46,7 @@ def seal_record(value):
 def legacy_record_value():
     value=record_value(); value.pop("execution_telemetry"); return seal_record(value)
 def matrix_fixture(root):
-    data=json.loads(MATRIX.read_text()); paths=[Path("home/common/agent-skills/model-matrix.json"),Path("home/common/agent-skills/scripts/agent-model-matrix.py")]+[Path(x["path"]) for x in data["dispatch_sites"]]+[x.relative_to(REPO_ROOT) for x in (REPO_ROOT/"home/common/claude-code/agents").glob("*.md")]
+    data=json.loads(MATRIX.read_text()); paths=[Path("home/common/agent-skills/model-matrix.json")]+[Path(x["path"]) for x in data["dispatch_sites"]]+[x.relative_to(REPO_ROOT) for x in (REPO_ROOT/"home/common/claude-code/agents").glob("*.md")]
     for path in sorted(set(paths)):
         target=root/path; target.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(REPO_ROOT/path,target)
     return data

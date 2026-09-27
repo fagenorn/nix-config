@@ -74,7 +74,14 @@ in
   homebrew = {
     enable = true;
     onActivation = {
-      cleanup = "zap";
+      # Homebrew 7 removed `brew bundle install --cleanup` ("Calling the `--cleanup`
+      # switch is disabled"), but nix-darwin 25.11 still emits `--cleanup --zap` for
+      # cleanup = "zap". nix-darwin master fixed this on 2026-06-01 (bb9c29c1: it now
+      # passes `--zap --force-cleanup`) and it was never backported to 25.11. Keep the
+      # zap semantics by passing Homebrew 7's spelling through extraFlags instead;
+      # drop this shim once nix-darwin is bumped past that commit.
+      cleanup = "none";
+      extraFlags = [ "--zap" "--force-cleanup" ];
       autoUpdate = true;
       upgrade = true;
     };
@@ -150,7 +157,10 @@ in
       # "screenflow"         # Screen recording and video editing (Paid)
       # "vlc"                # Versatile cross-platform media player
       # Graphics, 3D Printing & Design
-      "adobe-creative-cloud" # Manager for Adobe Creative Cloud suite
+      # darktable replaced Adobe Creative Cloud / Lightroom (2026-09-20). Served from the
+      # self-authored fagenorn/palmier tap because the upstream cask is disabled
+      # (fails_gatekeeper_check); see homebrew/palmier-tap/Casks/darktable.rb.
+      "fagenorn/palmier/darktable" # Raw photo developer (open-source Lightroom replacement)
       # "bambu-studio",       # Slicer software for Bambu Lab 3D printers
       # "prusaslicer",        # Slicer software for Prusa and other 3D printers
       # Screen Capture
@@ -214,8 +224,9 @@ in
         greedy = true;
         # No `no_quarantine` arg: Homebrew 6 removed `--no-quarantine` entirely
         # (Homebrew/brew#23363), and bundle passes unknown args through verbatim, so the
-        # install dies with "invalid option". Quarantine suppression already comes from
-        # the system-wide LSQuarantine = false preference.
+        # install dies with "invalid option". The app stays quarantined: Homebrew stamps
+        # com.apple.quarantine on cask apps regardless of the system-wide
+        # LSQuarantine = false preference, so Gatekeeper checks each fresh copy on launch.
       }
     ];
     masApps = {
@@ -265,6 +276,36 @@ in
       #"Teleprompter" = 1533078079;   # Teleprompter application
     };
   };
+
+  # Homebrew 7 made `brew bundle` upgrade `auto_updates` casks (WhatsApp, Chrome, Slack, ...)
+  # by default: it quits the running app, swaps the bundle, then `open -b`s the new,
+  # quarantined copy mid-activation. On 2026-09-23 that reopen raised a Gatekeeper prompt
+  # and one click on it moved the fresh WhatsApp.app to the Trash. These apps update
+  # themselves, so leave them to it, and never quit/reopen a running app from a switch.
+  # Read by every `brew` invocation, including the activation's `brew bundle`.
+  environment.etc."homebrew/brew.env".text = ''
+    HOMEBREW_NO_UPGRADE_AUTO_UPDATES_CASKS=1
+    HOMEBREW_NO_UPGRADE_QUIT_CASKS=1
+  '';
+
+  # `brew bundle` trusts the Caskroom record, not /Applications: once an app is trashed or
+  # deleted out from under Homebrew, the cask stays "installed" and no switch restores it.
+  # Every installed app cask keeps a Caskroom/<token>/<version>/<App>.app symlink to its
+  # target, so a dangling one means the app is gone. Forget those casks so the bundle step
+  # that follows reinstalls them. Ordered after nix-homebrew's prefix setup (mkBefore) and
+  # before nix-darwin's bundle (default priority); never fails the activation.
+  system.activationScripts.homebrew.text = lib.mkOrder 750 ''
+    if [ -x ${config.homebrew.brewPrefix}/brew ] && [ -d ${dirOf config.homebrew.brewPrefix}/Caskroom ]; then
+      for link in ${dirOf config.homebrew.brewPrefix}/Caskroom/*/*/*.app; do
+        [ -L "$link" ] && [ ! -e "$link" ] || continue
+        token=$(basename "$(dirname "$(dirname "$link")")")
+        echo >&2 "Homebrew: $token is installed but $(readlink "$link") is missing; reinstalling"
+        sudo --user=${lib.escapeShellArg config.homebrew.user} --set-home \
+          ${config.homebrew.brewPrefix}/brew uninstall --cask --force "$token" \
+          || echo >&2 "Homebrew: could not reset $token; reinstall it by hand"
+      done
+    fi
+  '';
 
   # Keyboard
   system.keyboard.enableKeyMapping = true;

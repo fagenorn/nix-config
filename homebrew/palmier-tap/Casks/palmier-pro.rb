@@ -5,8 +5,7 @@ cask "palmier-pro" do
   version :latest
   sha256 :no_check
 
-  url "https://github.com/palmier-io/palmier-pro/releases/latest/download/PalmierPro.dmg",
-      verified: "github.com/palmier-io/palmier-pro/"
+  url "https://github.com/palmier-io/palmier-pro/releases/latest/download/PalmierPro.dmg"
   name "Palmier Pro"
   desc "AI-native macOS video editor with an embedded HTTP MCP server (127.0.0.1:19789)"
   homepage "https://github.com/palmier-io/palmier-pro"

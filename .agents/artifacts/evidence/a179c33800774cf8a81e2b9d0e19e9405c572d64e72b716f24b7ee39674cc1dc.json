@@ -1,0 +1,122 @@
+{
+  "base_revision": "4784c9ce83902985aacaafd8b6b762b9772af839",
+  "checks": [
+    {
+      "id": "contract-valid-after-amendment",
+      "status": "passed"
+    },
+    {
+      "id": "no-needs-decision",
+      "status": "passed"
+    },
+    {
+      "id": "no-open-decisions",
+      "status": "passed"
+    },
+    {
+      "id": "no-untracked-overlap",
+      "status": "passed"
+    },
+    {
+      "id": "no-existing-destination",
+      "status": "passed"
+    },
+    {
+      "id": "move-sources-tracked",
+      "status": "passed"
+    },
+    {
+      "id": "no-secret-path-in-moves",
+      "status": "passed"
+    }
+  ],
+  "decisions_accepted": [],
+  "outcome": "reconcile",
+  "path_migration_map": ".agents/knowledge/archive/path-migrations/a179c33800774cf8a81e2b9d0e19e9405c572d64e72b716f24b7ee39674cc1dc.json",
+  "plan_id": "sha256:a179c33800774cf8a81e2b9d0e19e9405c572d64e72b716f24b7ee39674cc1dc",
+  "platform": {
+    "platform_version": "1.0.0",
+    "project_schema_versions": [
+      1
+    ],
+    "resolved_schema_version": 1
+  },
+  "schema_version": 1,
+  "sources": [
+    {
+      "after": ".agents/project.json",
+      "before": "sha256:7f03e05f64abb871b07e10bd514be5594eb4a6619b3c14d17896e64d73841c9e",
+      "path": ".agents/project.json"
+    },
+    {
+      "after": null,
+      "before": "sha256:2e2689dd912f53c279547e6a5c69d023f42e68e4bad103258e6fa6cbb7afbcf0",
+      "path": ".agents/instructions"
+    },
+    {
+      "after": ".agents/artifacts/specs",
+      "before": "sha256:45a2d89eff9e66790ef2f997b6ce329847c796eb4e8795294a1208a1f37f2045",
+      "path": ".claude/specs"
+    },
+    {
+      "after": ".agents/artifacts/plans",
+      "before": "sha256:0e5e05a27d3dac46857ecbb45ce6bc95209a30a24eb25df4b31bdb66f6f2d057",
+      "path": ".claude/plans"
+    },
+    {
+      "after": ".agents/knowledge/rejections",
+      "before": "sha256:5e5d8553ec735c46866a37d4d1858c35d6e1347959c23790a9af4e4ec982ba3d",
+      "path": ".out-of-scope"
+    },
+    {
+      "after": "CLAUDE.md",
+      "before": "sha256:388aabcf6908a9acef5e3405cc82a57c3b02052d0ef76c20000414053a96e778",
+      "path": "CLAUDE.md"
+    },
+    {
+      "after": "AGENTS.md",
+      "before": "sha256:962f09d97c5925f0d02dc96a06e700fd40db802136a8639fcc2269a0743ffee1",
+      "path": "AGENTS.md"
+    },
+    {
+      "after": null,
+      "before": "sha256:7c8fae7b4ad0056a1278275a0e55df0005f735a421137af990f320c9dc885110",
+      "path": "home/common/agent-skills"
+    },
+    {
+      "after": null,
+      "before": "sha256:d4b3ffdd481441f9e0a276b080d3a8038eaade11c1f86e91c94e0c81e794017b",
+      "path": "home/common/agent-guidance"
+    },
+    {
+      "after": null,
+      "before": "sha256:8f849b9af6b62a4764febcf8c48a2ceea0305c8ad081c286a22ba9b2a20cf4f9",
+      "path": "home/common/claude-code"
+    },
+    {
+      "after": null,
+      "before": "sha256:e4cac4e1b6549614b7122e6cf4a41b9ec44b90325653cd91f99afae5a3e17cef",
+      "path": "patches/agent-plugins"
+    },
+    {
+      "after": null,
+      "before": "sha256:b82410c5120cfaa67f91e4d5bbad207c94eb78efec8f155b943f75dc4e6ee87a",
+      "path": "lib/agent-plugins.nix"
+    },
+    {
+      "after": null,
+      "before": "sha256:5abdc6ccfac38ed6d880741c891753491b1add409bd300712d887ffdfdc26a02",
+      "path": "justfile"
+    },
+    {
+      "after": null,
+      "before": "sha256:cfbec9d31c3eee3945c68a4934416ca825d4f5b356637bfa7cf8575f2a01e827",
+      "path": ".github"
+    },
+    {
+      "after": null,
+      "before": null,
+      "path": ".git/worktrees"
+    }
+  ]
+}

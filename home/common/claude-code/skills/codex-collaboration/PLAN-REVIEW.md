@@ -1,8 +1,11 @@
 # Operation: `plan-review`
 
-Read this when running `plan-review`. SKILL.md owns the shared runtime contract
-(resolve policy, pre-flight, transport dispatch, validation, one-time fallback);
-this file owns the packet, the reviewer contract, and the disposition.
+Read this when running `plan-review`. It consumes SKILL.md's retained
+`ResolvedProject` and its validated direct-command result; it does not resolve,
+read policy, infer a path, or supply a default. This operation uses
+`bindings.workflow.review.plan` and validates the `Blocking`, `Should fix`, and
+`Discussion` headings. This file owns the packet, reviewer contract, and
+disposition.
 
 ## Caller input gate
 
@@ -33,26 +36,24 @@ workspace/worktree root. Build one self-contained delegation prompt containing:
    `largest_member_bytes`. Supply no member list or plan content.
 4. Every applicable `AGENTS.md` and `CLAUDE.md` from the invocation directory up
    through the worktree root.
-5. `.claude/skills.config.json` and `projectHints` when present, plus domain
-   docs selected map-first, all by path, skipping absent files: the context map
-   (`docPaths.contextMap`, else `docs/CONTEXT-MAP.md`, else legacy root
-   `CONTEXT-MAP.md`) and only the area
-   `CONTEXT.md` files whose `governs:` globs intersect the plan's touched paths
-   or whose terms appear in the issue; ADRs only when cited by the issue, spec,
-   plan, or a selected area file; the standards layers that apply —
+5. Available `bindings.paths.hints` paths, plus domain docs selected from the
+   retained snapshot's available context, standards, and architecture paths:
+   the context map and only the area `CONTEXT.md` files whose `governs:` globs
+   intersect the plan's touched paths or whose terms appear in the issue; ADRs
+   only when cited by the issue, spec, plan, or a selected area file; the
+   standards layers that apply —
    `~/.agents/standards/the-bar.md`, its `stacks/` shards matching the diff's
    file types, and the project's `docs/standards/` shards whose globs
    intersect. A worktree `GROUNDING.md` is a routing hint for this selection,
    never a substitute for it. Only when the project has no map, fall back to
-   the `docPaths.{context,standards,architecture}` whole-doc paths.
-6. Relevant manifests and inferred verification commands, labelled in the packet
-   as context describing how this work is verified elsewhere — explicitly not a
-   request to execute anything. Item 3's four metrics are supplied so the
+   the retained `bindings.paths.{context,standards,architecture}` paths.
+6. Relevant manifests and retained `bindings.workflow.verification` command
+   entries, labelled in the packet as context describing how this work is
+   verified elsewhere — explicitly not a request to execute anything. Item 3's four metrics are supplied so the
    reviewer need not re-measure them, and the caller has already validated them
    at its own input gate; a reviewer shelling out to `artifact-budget` is
    exceeding its contract, not filling a gap in it.
-7. The configured `codex.planReview.focus`, when non-empty.
-8. The absolute path to the caller's review contract (`REVIEW-CONTRACT.md`) —
+7. The absolute path to the caller's review contract (`REVIEW-CONTRACT.md`) —
    the common-miss checklist and coding bar travel by path, with concrete
    values supplied for every placeholder the contract names.
 

@@ -1,11 +1,10 @@
 import copy
 import json
-from pathlib import Path
+import subprocess
 import sys
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_model_drift_test_support import (
+from .agent_model_drift_test_support import (
     REPO_ROOT, DriftCliCase, coverage, digest, legacy_record_value, record_value,
     seal_record)
 
@@ -267,5 +266,15 @@ class SchedulingProjectionTest(DriftCliCase):
 class RepositoryWiringTest(unittest.TestCase):
     def test_justfile_wires_new_suite_without_dropping_issue_100_boundaries(self):
         text = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
-        for required in ("home/common/agent-skills/tests/test_ship_release_contracts.py", "home/common/agent-skills/tests/test_agent_model_matrix.py", "home/common/agent-skills/tests/test_resolve_project.py", "tests/test_agent_costs.py", "tests/test_agent_model_drift_schema.py", "tests/test_agent_model_drift_routing.py", "tests/test_agent_model_drift_scheduling.py", "tests/test_agent_gate_bundle.py", "agent-model-drift *args:", "python3 scripts/agent-model-drift.py {{args}}"):
+        for required in ("home/common/agent-skills/tests/test_ship_release_contracts.py", "home/common/agent-skills/tests/test_agent_model_matrix.py", "home/common/agent-skills/tests/test_resolve_project.py", "tests/test_agent_costs.py", "tests/test_agent_model_drift_schema.py", "tests/test_agent_model_drift_routing.py", "tests/test_agent_model_drift_scheduling.py", "tests/test_agent_gate_bundle.py", "agent-model-drift *args:", 'PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_drift {{args}}'):
             self.assertIn(required, text)
+
+    def test_the_module_run_reaches_main_under_the_command_name(self):
+        # The recipe runs the reporter with `-m`; every other drift test calls
+        # main() in process (#179 D6).
+        completed = subprocess.run(
+            [sys.executable, "-m", "agent_tools.agent_model_drift", "--help"],
+            capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.startswith("usage: agent-model-drift "),
+                        completed.stdout[:200])

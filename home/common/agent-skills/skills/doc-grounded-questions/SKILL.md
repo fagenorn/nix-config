@@ -5,25 +5,25 @@ description: Invoke before asking a design question, presenting options, or open
 
 # Doc-Grounded Questions
 
-Before asking the user a design question or presenting options during a planning/brainstorming phase, ground the question in the project's docs and code. Rationale, legacy fallbacks, and worked examples live in [REFERENCE.md](./REFERENCE.md); load it when a step below points there.
+Before asking the user a design question or presenting options during a planning/brainstorming phase, ground the question in the project's docs and code. Rationale and worked examples live in [REFERENCE.md](./REFERENCE.md); load it when a step below points there.
 
 ## Project bindings (resolve first)
 
-Run `~/.agents/bin/resolve-bindings` from the project — it prints the standard binding set from `.claude/skills.config.json` plus auto-detection and the shared defaults; helper missing → read the config and apply the same defaults. Degrade gracefully: skip any configured-but-absent doc path, sibling skill, or hints file silently; never hard-fail on a missing optional binding.
+Run `resolve-project resolve --repo-root <checkout>` once and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.context`, `bindings.paths.standards`, `bindings.paths.architecture`, and `bindings.paths.hints`; a required blocked capability stops, while authored unsupported takes its documented no-capability route.
 
-**Keys this skill uses:** `docPaths.{contextMap,context,standards,architecture}`, `docPaths.adrDir` (legacy override only — ADR homes normally come from the map), and `projectHints` (optional vocab / review-hints appendix). All optional — none configured → discovery below.
+**Keys this skill uses:** `bindings.paths.{context,standards,architecture,hints}` and `capabilities.knowledge.*`.
 
 ## The grounding pass
 
-For every clarifying question or option set you're about to surface, do this pass first. Ground **discovery-first**: read whichever sources actually exist; skip absent ones silently.
+For every clarifying question or option set you're about to surface, do this pass first. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter invocation, one selects that absolute path, and multiple matches are an invalid caller contract that stops before invocation. Never probe the filesystem, sort the list, take a first match, or infer a location.
 
-1. **Read the context map, then only the areas you need.** `docPaths.contextMap` if configured, otherwise `docs/CONTEXT-MAP.md` (or legacy root `CONTEXT-MAP.md`). Always read the map in full — it is capped at 150 lines. Then open an area's `CONTEXT.md` **only** when its `governs:` globs intersect the paths the issue touches, or one of its terms (per the map's term table) appears in the issue or your question. Use canonical terms without re-asking. No map → legacy single-doc fallback (REFERENCE.md).
+1. **Read the selected context map, then only the areas you need.** Always read the selected map in full — it is capped at 150 lines. Then open an area's `CONTEXT.md` only when its `governs:` globs intersect the paths the issue touches, or one of its terms appears in the issue or your question. With no selected map, use only the retained `bindings.paths.context` entries passed by the owner.
 
-2. **Scan the decision log.** The `adr/` dirs of the areas you opened in step 1, plus `docs/areas/system/adr/` always (legacy ADR homes: REFERENCE.md). List the directory, read the titles, open any that look relevant. A settled decision → state it and ask only whether anything has *changed* since.
+2. **Scan decision records.** Use only decision-record paths passed through the retained `bindings.paths.context` selection and allowed by `capabilities.knowledge.*`. List each passed directory, read titles, and open relevant records. A settled decision → state it and ask only whether anything has changed since.
 
-3. **Read the standards that apply.** `~/.agents/standards/the-bar.md`, its `stacks/*.md` shards matching the change's file extensions, and project deltas at `docPaths.standards` (layer detail: REFERENCE.md). If a proposed option violates a rule you found, drop it or say why you're surfacing it anyway.
+3. **Read the standards that apply.** Always read the machine-global layers, which are not project policy: `~/.agents/standards/the-bar.md` and its `stacks/*.md` shards matching the change's file extensions. Then read the project deltas from the retained `bindings.paths.standards` list, as `capabilities.knowledge.*` allows. If a proposed option violates a rule you found, drop it or say why you're surfacing it anyway.
 
-4. **Read the architecture doc** if the question touches more than one component (`docPaths.architecture`, else `ARCHITECTURE.md` / `docs/architecture.md` / a README section) for cross-tier invariants. Past ~400 lines, read by governing section, never whole — the rule for every long doc this pass sends you to, map excepted (why: REFERENCE.md).
+4. **Read architecture** from retained `bindings.paths.architecture` if the question touches more than one component. Past ~400 lines, read by governing section, never whole.
 
 5. **Grep the codebase** for the central concept. Keep a small direct grep inline; when the result set needs a sharply bounded read-only exploration pass, use the explicit explorer dispatch instead:
 
@@ -32,7 +32,7 @@ Agent(subagent_type="Explore", model="haiku", effort="medium") performs one shar
 
    If the codebase already commits to a pattern, the default option should be "match the existing pattern" and you must justify any divergence. If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the caller's existing ledger or fixed-schema report.
 
-If `projectHints` is configured and present (a directory → its `review.md`; a single file → itself), read it too.
+Use retained `bindings.paths.hints` only when the knowledge capability documents that route.
 
 ## Ground once per phase, cache the result
 

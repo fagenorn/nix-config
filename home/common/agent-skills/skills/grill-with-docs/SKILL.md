@@ -5,6 +5,8 @@ description: Stress-test a spec or design against the project's domain docs — 
 
 <what-to-do>
 
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Read `bindings.paths.context` and `capabilities.knowledge.*`. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter invocation, one selects that absolute path, and multiple matches are an invalid caller contract that stops before invocation. Never probe the filesystem, sort the list, take a first match, or infer a location.
+
 Interview me relentlessly about every aspect of this spec (the design under discussion — `from-issue` invokes this skill on the spec, not the plan) until we reach a shared understanding. Model the design as a tree of decisions; the **frontier** is every question whose prerequisites are already settled.
 
 Ask the whole frontier as one numbered round of `❓ question / ➡️ recommended answer` pairs. A question whose answer depends on another question still open in this round belongs to a later round. The round's answers reshape the tree — recompute the frontier and ask the next round; done when it's empty.
@@ -36,17 +38,20 @@ During codebase exploration, also look for existing documentation. Read a long o
 
 **Detect the layout before writing anything**, in this order:
 
-1. **The standard** — `docs/CONTEXT-MAP.md` plus `docs/areas/`. Areas and their decisions live under `docs/areas/<slug>/`; that is the tree below and the one to create in a repo that has nothing yet.
-2. **Legacy conventions** — a root `CONTEXT-MAP.md` with area files beside the code, or flat `docs/<slug>/` areas beside a central `docs/adr/`. For a glossary: `CONTEXT.md`, `GLOSSARY.md`, `DOMAIN.md`, `docs/CONTEXT.md`, `docs/glossary.md`. For decisions: `docs/adr/`, `docs/decisions/`, `doc/adr/`, `adr/`, `RFCs/`. Follow what the repo has; don't impose the standard tree on it mid-flight.
-3. **`.claude/skills.config.json`** may name paths explicitly under `docPaths` (e.g. `docPaths.context`, `docPaths.contextMap`) — prefer those when present. `docPaths.adrDir` is a legacy override: where the map has areas, each area owns its own `adr/`.
+1. **The selected map** — the retained selected context-map path plus its passed area paths. Areas and decisions live only where those retained paths name them.
+2. The retained `bindings.paths.context` list names documentation sources; each selected area owns its passed decision records.
 
 ### File structure
 
 The steady state is contained in `docs/`: a map plus one directory per area under `areas/` — the full tree, reserved directories, and budgets live in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md); read it before creating any doc file. ADR numbering is **per directory** (`ADR-<slug>-NNN`), so an area's records never collide with another's.
 
-A young repo may still be a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md`) with no map; that is fine, and the first split creates the map.
+With no selected map, use only passed context paths and do not create or discover a map.
 
-Create files lazily — only when you have something to write. If no glossary exists, create one when the first term resolves (named to match the project's convention, `CONTEXT.md` by default). If no decision-record directory exists, create it when the first ADR is needed.
+Create files lazily — only when you have something to write. With a selected
+context map, create a glossary or decision-record directory only where that
+selected map and its passed area paths authorize it. With no selected map, use
+only a passed writable context path; an empty or unsupported path set has no
+documentation write route.
 
 > The Order / Invoice / Customer / Fulfillment names used throughout these docs are illustrative DDD samples — substitute your project's actual domain terms.
 
@@ -85,7 +90,7 @@ Two disciplines make this sustainable — both are same-commit obligations, neve
 3. Add a row to the map's `## Areas` table: name, link, one-line gist, and `governs:` globs. Narrow the old area's globs to match what it still owns.
 4. Repoint the moved terms' rows in the map's `## Terms` table, and add any new cross-area edge to `## Relationships`.
 
-Then run `~/.agents/bin/context-map-lint .` — it catches a term left pointing at the old area, a glob matching nothing, and a file still over budget.
+Then run `~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>`, where the map is the one selected from the retained `bindings.paths.context` list (no selected map means no linter run) — it catches a term left pointing at the old area, a glob matching nothing, and a file still over budget.
 
 ### Offer ADRs sparingly
 

@@ -3,9 +3,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -23,9 +25,6 @@ DESIGN = REPO_ROOT / "home/common/agent-skills/skills/design/SKILL.md"
 GRILL = REPO_ROOT / "home/common/agent-skills/skills/grill-with-docs/SKILL.md"
 COLLABORATION = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md"
-)
-CERTIFICATION = (
-    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/CERTIFICATION.md"
 )
 DIFF_REVIEW = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/DIFF-REVIEW.md"
@@ -80,20 +79,48 @@ REPORT_CANDIDATE_CLAUSE = (
     "`EXIT HUP INT TERM`, or the equivalent `finally`"
 )
 
-# One literal for all three lifecycle request-file prescriptions (D17).
-REQUEST_FILE_HOME = "a new absolute temporary request file beneath `${TMPDIR:-/tmp}`"
-REQUEST_FILE_INVOCATION = "--request-file <absolute-json-path>"
-
-# The terminal result file is the same class of control-plane scratch, so it
-# shares that home; unlike the request file the helper consumes within the call,
-# it outlives its own validation and carries the report candidate's cleanup.
-RESULT_FILE_HOME = (
-    "a new absolute temporary result file beneath `${TMPDIR:-/tmp}`, removed "
-    "under an unconditional cleanup that runs on every outcome, including "
-    "validation rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, "
-    "or the equivalent `finally`"
-)
-RESULT_FILE_INVOCATION = "--result-file <path>"
+LIFECYCLE_DOCS = (FROM_ISSUE, AUTO, FROM_ISSUE_DIR / "ship-handoff.md", SHIP_ISSUE,
+                  SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE, ORCHESTRATE)
+STDIN_CLAUSE = ("lifecycle call is one command that reads its input from stdin "
+                "through a quoted heredoc")
+BUILD_ROOT_CLAUSE = ("The builder seals the policy `resolve-project` resolves at "
+                     "`--repo-root`, the ledger repository root; when `worktree` already "
+                     "exists, it also resolves there and refuses if any sealed policy "
+                     "member differs.")
+BUILD_REFUSAL_RELAY = ("report the builder's stderr line verbatim: for a resolver refusal "
+                       "it carries the resolver's `error.code`, `repair_id` and ordered "
+                       "`violations` exactly.")
+WRITER_RULE = ("Under implementation custody a ship owner writes only "
+               "`checkpoint-delivery`, never `finish`; a remainder owner writes its "
+               "own `finish --summary-file -`.")
+INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
+V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "now", "attempt_budget_minutes",
+    "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
+    "authorization_intents", "authority_observations", "reevaluation_evidence",
+    "delivery_observations", "requested_scope", "recovery"}
+V2_CONTROL_REQUEST_KEYS = {"interface_version", "now", "max_parallel",
+    "attempt_budget_minutes", "human_directed", "issues", "tracker", "owners",
+    "worktrees", "forge", "delivery_contracts", "authorization_intents",
+    "authority_observations", "reevaluation_evidence", "delivery_observations",
+    "requested_scopes", "recoveries"}
+V3_CONTROL_REQUEST_KEYS = V2_CONTROL_REQUEST_KEYS | {"host_route"}
+CODEX_ORCHESTRATE = REPO_ROOT / "home/common/codex/skills/orchestrate-issues/SKILL.md"
+CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
+V2_OWNER_KEYS = {"interface_version", "kind", "ledger_repo_root", "run_id", "issue",
+    "attempt", "owner", "action_id", "launch_kind", "worktree", "handoff_path",
+    "deadline_at", "custody", "contract", "contract_digest", "pending_stage_ids",
+    "requirements", "authority_evaluation", "requested_scope"}
+SHIP_HANDOFF_V2_KEYS = {"interface_version", "state", "ledger_repo_root", "run_id",
+    "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path",
+    "spec_artifact", "plan_artifact", "head_sha", "review_state", "auto", "report_path",
+    "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents",
+    "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids",
+    "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs",
+    "requested_scope"}
+SHIP_SUMMARY_V2_KEYS = {"interface_version", "issue", "state", "custody",
+    "historical_owner_result", "delivery_contract_digest", "delivery_observations",
+    "authority_observations", "reevaluation_evidence", "detail_state", "report_path",
+    "notes"}
 
 # "sibling <=2 words> candidate" — the in-working-tree prescription being
 # removed. The bounded gap keeps it off handoff's legitimate
@@ -172,6 +199,502 @@ def normalized(text):
     return re.sub(r"\s+", " ", text)
 
 
+SHARED_POLICY_ENTRIES = {
+    "design/SKILL.md": ("bindings.paths.artifacts.specs",),
+    "doc-grounded-questions/SKILL.md": ("bindings.paths.context", "bindings.paths.standards", "bindings.paths.architecture", "bindings.paths.hints"),
+    "from-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
+    "grill-with-docs/SKILL.md": ("bindings.paths.context",),
+    "research/SKILL.md": ("bindings.paths.artifacts.specs",),
+    "ship-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.review.code", "bindings.workflow.verification"),
+    "ship-release/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.release", "bindings.deploy"),
+    "to-issues/SKILL.md": ("bindings.tracker", "bindings.paths"),
+    "wayfind/SKILL.md": ("bindings.tracker",),
+    "worktrees/SKILL.md": ("bindings.vcs",),
+    "writing-plans/SKILL.md": ("bindings.paths.artifacts.plans",),
+}
+
+CLAUDE_POLICY_ENTRIES = {
+    "codex-collaboration/SKILL.md": (
+        "bindings.workflow.review.plan", "bindings.workflow.review.code",
+        "bindings.commands", "capabilities.review.plan",
+        "capabilities.review.code", "bindings.paths.hints",
+    ),
+    "orchestrate-issues/SKILL.md": (
+        "bindings.tracker", "bindings.vcs",
+        "bindings.workflow.orchestration.attempt_budget_minutes",
+        "bindings.workflow.orchestration.max_parallel",
+    ),
+}
+
+SHARED_POLICY_SUPPORT = {
+    "doc-grounded-questions/REFERENCE.md": ("bindings.paths.context",),
+    "from-issue/grounding.md": ("bindings.paths.context", "bindings.paths.standards"),
+    "from-issue/investigate.md": ("bindings.tracker", "bindings.vcs"),
+    "from-issue/ship-handoff.md": ("bindings.vcs", "bindings.workflow"),
+    "from-issue/standards-review.md": ("bindings.paths.standards",),
+    "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
+    "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
+}
+
+RETAINED_SUPPORT_CONTRACTS = {
+    "from-issue/bindings.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
+    "from-issue/AUTO.md": ("bindings.paths.artifacts", "bindings.tracker", "bindings.vcs", "bindings.workflow"),
+    "from-issue/REVIEW-CONTRACT.md": ("bindings.workflow.review", "bindings.commands"),
+    "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
+    "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
+    "ship-issue/CONSOLIDATE.md": ("bindings.paths", "bindings.vcs"),
+    "ship-issue/HUMAN-GATE.md": ("bindings.vcs", "bindings.tracker"),
+    "ship-issue/SYNC.md": ("bindings.vcs", "bindings.paths.hints"),
+    "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
+}
+
+# These are deliberate test patterns, not permitted policy text. The tracked
+# source scan below honors the `# policy-gate-pattern` line marker only in the
+# gate test files named in POLICY_GATE_PATTERN_FILES, where the legacy names are
+# the patterns under test; anywhere else the marker exempts nothing.
+LEGACY_POLICY_SURFACE = (  # policy-gate-pattern
+    "resolve-bindings", ".claude/skills.config.json", "unsetGithubToken",  # policy-gate-pattern
+    "projectHints", "docPaths", "specDir", "planDir", "repoSlug",  # policy-gate-pattern
+    "issueTracker", "branchNaming", "integrationBranch", "defaultBranch",  # policy-gate-pattern
+    "codex.planReview", "codex.codeReview", "commit.coAuthoredBy",  # policy-gate-pattern
+    "deploy.services", "deploy.watchDoc", "verify.lint", "verify.test",  # policy-gate-pattern
+    "verify.lintFix", "review.criticalPaths", "mergeSubjectTemplate",  # policy-gate-pattern
+    "worktreePrefix", "branchPattern", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
+)
+
+POLICY_GATE_PATTERN_FILES = frozenset({
+    "home/common/agent-skills/tests/test_resolve_project.py",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py",
+})
+
+# adopt-project (https://github.com/fagenorn/nix-config/issues/148) migrates a
+# legacy checkout onto the strict contract, so it must name the legacy store and
+# keys it reads and rewrites. Those are migration inputs, not policy consumers
+# (spec decision D12). The scan exempts exactly these tokens in exactly these
+# files, and an entry that no longer matches fails it, so the allowance cannot
+# outlive its use or widen silently.
+LEGACY_MIGRATION_INPUTS = {
+    "home/common/agent-skills/scripts/adopt_inspection.py": frozenset({
+        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
+    }),
+    "home/common/agent-skills/tests/test_adopt_apply.py": frozenset({
+        ".claude/skills.config.json", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
+    }),
+    "home/common/agent-skills/tests/test_adopt_project.py": frozenset({
+        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
+        "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
+    }),
+    "home/common/agent-skills/tests/test_adopt_project_boundaries.py": frozenset({
+        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
+    }),
+}
+
+SUPPORT_POLICY_FORBIDDEN = (
+    "resolve-project resolve", *LEGACY_POLICY_SURFACE, "auto-detect",
+    "helper missing", "not_onboarded", ".claude/specs", ".claude/plans",
+    "docs/CONTEXT-MAP.md",
+)
+
+CONTEXT_MAP_SELECTION_CONTRACT = (
+    "Select context maps only from the retained `bindings.paths.context` list in "
+    "authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; "
+    "zero means no map and no linter invocation, one selects that absolute path, "
+    "and multiple matches are an invalid caller contract that stops before invocation. "
+    "Never probe the filesystem, sort the list, take a first match, or infer a location."
+)
+
+RESOLUTION_SENTENCE = (
+    "Resolve once at phase entry, retain the returned `ResolvedProject` in "
+    "memory, and treat every resolver error as fatal before mutation or "
+    "external effects."
+)
+
+REFUSAL_REPORTING_SENTENCE = (
+    "On refusal, preserve and report the resolver's `error.code`, `repair_id`, "
+    "and ordered `violations` exactly; never translate it into a partial snapshot "
+    "or fallback."
+)
+
+
+def assert_refusal_reporting(case, text):
+    case.assertIn(REFUSAL_REPORTING_SENTENCE, normalized(text))
+
+
+def assert_policy_entries(case, root, entries, require_refusal_reporting=False):
+    actual = {str(path.relative_to(root)) for path in root.glob("*/SKILL.md")
+              if "resolve-project resolve" in path.read_text(encoding="utf-8")}
+    case.assertEqual(actual, set(entries))
+    for relative, fields in entries.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        with case.subTest(relative=relative):
+            case.assertEqual(text.count("resolve-project resolve"), 1)
+            case.assertIn(RESOLUTION_SENTENCE, normalized(text))
+            if require_refusal_reporting:
+                assert_refusal_reporting(case, text)
+            for field in fields:
+                case.assertIn(field, text)
+            for forbidden in ("resolve-bindings", ".claude/skills.config.json", "helper missing", "not_onboarded", "auto-detect", "default `"):  # policy-gate-pattern
+                case.assertNotIn(forbidden, text)
+
+
+def assert_retained_policy_support(case, root, documents, forbidden=SUPPORT_POLICY_FORBIDDEN):
+    for relative, fields in documents.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        with case.subTest(relative=relative):
+            case.assertEqual(text.count("resolve-project resolve"), 0)
+            case.assertIn("retained `ResolvedProject`", text)
+            for field in fields:
+                case.assertIn(field, text)
+            for prohibited in forbidden:
+                case.assertNotIn(prohibited, text)
+
+
+def select_context_map(paths):
+    matches = [path for path in paths if Path(path).name == "CONTEXT-MAP.md"]
+    if len(matches) > 1:
+        raise ValueError("invalid caller contract")
+    return matches[0] if matches else None
+
+
+class ProjectPolicySurfaceTest(unittest.TestCase):
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    def test_shared_source_phase_entries_use_one_resolved_project(self):
+        assert_policy_entries(
+            self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_ENTRIES,
+            require_refusal_reporting=True,
+        )
+
+    def test_claude_source_phase_entries_use_one_resolved_project(self):
+        assert_policy_entries(
+            self,
+            REPO_ROOT / "home/common/claude-code/skills",
+            CLAUDE_POLICY_ENTRIES,
+            require_refusal_reporting=True,
+        )
+
+    def test_refusal_reporting_matrix_rejects_a_missing_clause(self):
+        text = COLLABORATION.read_text(encoding="utf-8")
+        missing = text.replace("error.code", "error kind", 1)
+        with self.assertRaises(AssertionError):
+            assert_refusal_reporting(self, missing)
+
+    def test_worktree_contract_uses_retained_schema_fields_and_root(self):
+        text = WORKTREES.read_text(encoding="utf-8")
+        self.assertIn("bindings.vcs.branch_pattern", text)
+        self.assertIn("bindings.vcs.worktree.prefix", text)
+        self.assertIn("bindings.vcs.worktree.root", text)
+        self.assertIn("against `project.root`", text)
+        self.assertNotIn("bindings.vcs.branch_naming", text)
+        self.assertNotIn("Put worktrees in `.worktrees/`", text)
+
+    def test_review_capability_routes_before_command_lookup(self):
+        for path in (COLLABORATION, SHIP_ISSUE, SDD):
+            text = normalized(path.read_text(encoding="utf-8"))
+            with self.subTest(path=path):
+                capability = text.index("capabilities.review.code")
+                lookup = text.index("bindings.commands[review_id].argv")
+                self.assertLess(capability, lookup)
+                self.assertIn("unsupported", text[capability:lookup])
+
+    def test_living_source_has_no_legacy_policy_surface(self):
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--", "AGENTS.md", "CLAUDE.md",
+             ".agents/instructions", "home/common/agent-skills",
+             "home/common/claude-code", "python", "tests"],
+            cwd=REPO_ROOT, check=True, capture_output=True,
+        ).stdout.split(b"\0")
+        text_suffixes = {".md", ".py", ".sh", ".nix", ".json", ".toml", ".yaml", ".yml"}
+        historical_prefixes = (Path(".claude/specs"), Path(".claude/plans"))
+        legacy = re.compile("|".join(
+            re.escape(name) for name in LEGACY_POLICY_SURFACE))
+        matches = []
+        migration_inputs_seen = {name: set() for name in LEGACY_MIGRATION_INPUTS}
+        for encoded in tracked:
+            if not encoded:
+                continue
+            relative = Path(os.fsdecode(encoded))
+            if any(relative == prefix or prefix in relative.parents
+                   for prefix in historical_prefixes):
+                continue
+            path = REPO_ROOT / relative
+            if not path.is_file():
+                continue
+            if path.suffix not in text_suffixes and path.name not in {
+                "resolve-project", "context-map-lint", "artifact-budget",
+                "agent-evidence", "agent-model-matrix", "diff-scope",
+                "review-package", "sdd-workspace", "workflow-state",
+            }:
+                continue
+            name = relative.as_posix()
+            honors_marker = name in POLICY_GATE_PATTERN_FILES
+            migration_inputs = LEGACY_MIGRATION_INPUTS.get(name, frozenset())
+            for line_number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1):
+                if honors_marker and "# policy-gate-pattern" in line:
+                    continue
+                for match in legacy.finditer(line):
+                    token = match.group(0)
+                    if token in migration_inputs:
+                        migration_inputs_seen[name].add(token)
+                    else:
+                        matches.append(f"{relative}:{line_number}: {token}")
+        self.assertEqual(matches, [])
+        self.assertEqual(migration_inputs_seen,
+                         {name: set(tokens) for name, tokens in LEGACY_MIGRATION_INPUTS.items()})
+        self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
+        self.assertFalse((REPO_ROOT / "home/common/agent-skills/scripts/resolve-bindings").exists())  # policy-gate-pattern
+        self.assertFalse((REPO_ROOT / "home/common/agent-skills/tests/test_resolve_bindings.py").exists())  # policy-gate-pattern
+        self.assertFalse((REPO_ROOT / "home/common/agent-skills/evals/fixture-repo" /
+                          ".claude" / "skills.config.json").exists())  # policy-gate-pattern
+
+    def test_installed_policy_surface_matches_source_contract(self):
+        if os.environ.get("WORKFLOW_POLICY_SURFACE") == "source":
+            self.skipTest("explicit pre-activation source-only verification")
+        agents_root = Path.home() / ".agents/skills"
+        claude_root = Path.home() / ".claude/skills"
+        self.assertTrue(agents_root.is_dir(), "managed shared skill root is absent")
+        self.assertTrue(claude_root.is_dir(), "managed Claude skill root is absent")
+        assert_policy_entries(self, agents_root, SHARED_POLICY_ENTRIES,
+                              require_refusal_reporting=True)
+        assert_policy_entries(self, claude_root,
+                              SHARED_POLICY_ENTRIES | CLAUDE_POLICY_ENTRIES,
+                              require_refusal_reporting=True)
+        assert_retained_policy_support(self, agents_root, SHARED_POLICY_SUPPORT)
+        assert_retained_policy_support(self, agents_root, RETAINED_SUPPORT_CONTRACTS)
+        self.assertFalse((Path.home() / ".agents/bin/resolve-bindings").exists())  # policy-gate-pattern
+        installed_resolver = Path.home() / ".agents/bin/resolve-project"
+        self.assertTrue(installed_resolver.is_file())
+        self.assertTrue(os.access(installed_resolver, os.X_OK))
+        installed_linter = Path.home() / ".agents/bin/context-map-lint"
+        self.assertTrue(installed_linter.is_file())
+        self.assertTrue(os.access(installed_linter, os.X_OK))
+        installed_legacy = re.compile("|".join(re.escape(name) for name in (
+            "resolve-bindings", ".claude/skills.config.json", "unsetGithubToken",  # policy-gate-pattern
+        )))
+        self.assertIsNone(installed_legacy.search(
+            installed_linter.read_text(encoding="utf-8")))
+
+    def test_installed_policy_surface_refuses_when_managed_roots_are_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.dict(os.environ, {"WORKFLOW_POLICY_SURFACE": ""}, clear=False):
+                with mock.patch("pathlib.Path.home", return_value=Path(temporary)):
+                    with self.assertRaisesRegex(AssertionError, "managed shared skill root is absent"):
+                        self.test_installed_policy_surface_matches_source_contract()
+
+    def _install_policy_surface_fixture(self, home):
+        agents_root = home / ".agents/skills"
+        claude_root = home / ".claude/skills"
+        shared_source = REPO_ROOT / "home/common/agent-skills/skills"
+        claude_source = REPO_ROOT / "home/common/claude-code/skills"
+        shutil.copytree(shared_source, agents_root)
+        shutil.copytree(shared_source, claude_root)
+        shutil.copytree(claude_source, claude_root, dirs_exist_ok=True)
+        helpers = {
+            "resolve-project": home / ".agents/bin/resolve-project",
+            "context-map-lint": home / ".agents/bin/context-map-lint",
+        }
+        helpers["context-map-lint"].parent.mkdir(parents=True)
+        shutil.copy2(
+            REPO_ROOT / "home/common/agent-skills/scripts/resolve-project.py",
+            helpers["resolve-project"],
+        )
+        shutil.copyfile(REPO_ROOT / "python/agent_tools/context_map_lint.py",
+                        helpers["context-map-lint"])
+        for helper in helpers.values():
+            helper.chmod(0o755)
+        return helpers
+
+    def _assert_installed_policy_surface(self, home):
+        with mock.patch.dict(os.environ, {"WORKFLOW_POLICY_SURFACE": ""}, clear=False):
+            with mock.patch("pathlib.Path.home", return_value=home):
+                self.test_installed_policy_surface_matches_source_contract()
+
+    def test_installed_policy_surface_applies_both_support_matrices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            self._install_policy_surface_fixture(home)
+            self._assert_installed_policy_surface(home)
+
+    def test_installed_policy_surface_rejects_missing_and_nonexecutable_helpers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            helpers = self._install_policy_surface_fixture(home)
+            self._assert_installed_policy_surface(home)
+            for name, helper in helpers.items():
+                contents = helper.read_bytes()
+                mode = helper.stat().st_mode
+                with self.subTest(helper=name, case="missing"):
+                    helper.unlink()
+                    with self.assertRaisesRegex(AssertionError, "False is not true"):
+                        self._assert_installed_policy_surface(home)
+                    helper.write_bytes(contents)
+                    helper.chmod(mode)
+                with self.subTest(helper=name, case="non-executable"):
+                    helper.chmod(mode & ~0o111)
+                    with self.assertRaisesRegex(AssertionError, "False is not true"):
+                        self._assert_installed_policy_surface(home)
+                    helper.chmod(mode)
+                self._assert_installed_policy_surface(home)
+
+    def test_eval_runner_reports_a_resolver_refusal_without_a_second_resolution(self):
+        runner = (REPO_ROOT / "home/common/agent-skills/evals/run-eval.sh").read_text(
+            encoding="utf-8")
+        self.assertEqual(runner.count("resolve-project resolve --repo-root \"$REPO\""), 1)
+        self.assertIn(
+            'if ! RESOLVED_PROJECT=$(resolve-project resolve --repo-root "$REPO"); then\n'
+            "    printf '%s\\n' \"$RESOLVED_PROJECT\" >&2\n"
+            '    die "resolver refused the initialized fixture"\n'
+            "  fi",
+            runner,
+        )
+
+    def test_live_evals_grade_strict_policy_and_direct_review(self):
+        paths = (
+            REPO_ROOT / "home/common/agent-skills/skills/from-issue/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/sdd/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/ship-release/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/wayfind/evals/evals.json",
+            REPO_ROOT / "home/common/agent-skills/skills/writing-plans/evals/evals.json",
+            REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/evals/evals.json",
+            REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/evals/evals.json",
+        )
+        corpus = "\n".join(
+            str(json.loads(path.read_text(encoding="utf-8"))) for path in paths
+        )
+        for forbidden in (
+            "resolve-bindings", ".claude/skills.config.json", "unsetGithubToken",  # policy-gate-pattern
+            "helper missing", "auto-detect absent", "default GitHub",
+        ):
+            self.assertNotIn(forbidden, corpus)
+        for required in (
+            "ResolvedProject", "bindings.workflow.review.code",
+            "bindings.commands", "gpt-6-astra", 'model_reasoning_effort="xhigh"',
+            "selected model", "last-message",
+        ):
+            self.assertIn(required, corpus)
+
+    def test_shared_support_documents_reuse_the_retained_snapshot(self):
+        assert_retained_policy_support(
+            self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_SUPPORT,
+            ("resolve-bindings", "skills.config.json", "helper missing", "not_onboarded", "auto-detect", ".claude/specs", ".claude/plans", "docs/CONTEXT-MAP.md"),  # policy-gate-pattern
+        )
+
+    def test_listed_support_documents_reuse_only_passed_snapshot_fields(self):
+        assert_retained_policy_support(self, REPO_ROOT / "home/common/agent-skills/skills", RETAINED_SUPPORT_CONTRACTS)
+
+    def test_sdd_configured_review_pair_is_complete(self):
+        assert_configured_code_review_pair(self, SDD, SDD_DIR / "final-review.md")
+
+    def test_ship_issue_configured_review_pair_is_complete(self):
+        assert_configured_code_review_pair(self, SHIP_ISSUE, SHIP_ISSUE_REVIEW)
+
+    def test_codex_plan_review_owner_and_support_are_complete(self):
+        assert_codex_operation_pair(
+            self, CODEX_PLAN_REVIEW, "bindings.workflow.review.plan",
+            ("Blocking", "Should fix", "Discussion"),
+        )
+
+    def test_codex_diff_review_owner_and_support_are_complete(self):
+        assert_codex_operation_pair(
+            self, DIFF_REVIEW, "bindings.workflow.review.code",
+            ("Critical", "Important", "Minor"),
+        )
+
+    def test_context_map_selection_uses_only_authored_order(self):
+        table = (
+            ([], None),
+            (["/repo/CONTEXT.md"], None),
+            (["/repo/other.md", "/repo/CONTEXT-MAP.md", "/repo/end.md"], "/repo/CONTEXT-MAP.md"),
+        )
+        for paths, expected in table:
+            with self.subTest(paths=paths):
+                self.assertEqual(select_context_map(paths), expected)
+        with self.assertRaisesRegex(ValueError, "invalid caller contract"):
+            select_context_map(["/repo/a/CONTEXT-MAP.md", "/repo/b/CONTEXT-MAP.md"])
+
+    def test_context_map_consumers_forbid_discovery(self):
+        for relative in ("doc-grounded-questions/SKILL.md", "grill-with-docs/SKILL.md", "grill-with-docs/CONTEXT-FORMAT.md"):
+            text = (REPO_ROOT / "home/common/agent-skills/skills" / relative).read_text(encoding="utf-8")
+            contract = normalized(text)
+            self.assertIn(CONTEXT_MAP_SELECTION_CONTRACT, contract)
+            for forbidden in (
+                "legacy context-map setting", "docs/CONTEXT-MAP.md", "select the first match",
+                "sort(", "filesystem search", "first match wins", "default map location",
+            ):
+                self.assertNotIn(forbidden, contract)
+
+    def test_context_map_lint_invocations_pass_root_and_selected_map(self):
+        invocation = re.compile(r"`(?:~/\.agents/bin/)?context-map-lint( [^`]*)`")
+        found = []
+        for root in (REPO_ROOT / "home/common/agent-skills/skills",
+                     REPO_ROOT / "home/common/claude-code/skills"):
+            for path in sorted(root.rglob("*.md")):
+                for match in invocation.finditer(path.read_text(encoding="utf-8")):
+                    arguments = match.group(1)
+                    with self.subTest(path=path.relative_to(REPO_ROOT), arguments=arguments):
+                        found.append(path.relative_to(REPO_ROOT).as_posix())
+                        self.assertRegex(arguments, r"^ --repo-root \S.* --context-map \S")
+        self.assertIn("home/common/agent-skills/skills/grill-with-docs/SKILL.md", found)
+        self.assertIn("home/common/agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md", found)
+
+    def test_build_delivery_callers_name_the_sanctioned_resolution_exception(self):
+        exception = ("only sanctioned exception is `workflow-state build-delivery`, "
+                     "which performs its own sealed, read-only resolution")
+        callers = []
+        for root in (REPO_ROOT / "home/common/agent-skills/skills",
+                     REPO_ROOT / "home/common/claude-code/skills"):
+            for path in sorted(root.rglob("*.md")):
+                text = normalized(path.read_text(encoding="utf-8"))
+                if "build-delivery" not in text:
+                    continue
+                callers.append(path.relative_to(REPO_ROOT).as_posix())
+                with self.subTest(path=path.relative_to(REPO_ROOT)):
+                    self.assertIn(exception, text)
+        self.assertEqual(sorted(callers), [
+            "home/common/agent-skills/skills/from-issue/SKILL.md",
+            "home/common/agent-skills/skills/from-issue/ship-handoff.md",
+            "home/common/agent-skills/skills/ship-issue/SKILL.md",
+            "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
+        ])
+
+
+def assert_configured_code_review_pair(case, owner, support):
+    owner_text = normalized(owner.read_text(encoding="utf-8"))
+    support_text = normalized(support.read_text(encoding="utf-8"))
+    case.assert_ordered(owner_text, "bindings.workflow.review.code", "capabilities.review.code", "bindings.commands[review_id].argv")
+    case.assert_ordered(support_text, "exec", "--sandbox read-only", "--model gpt-6-astra", 'model_reasoning_effort="xhigh"', "--json", "--output-last-message", "--ephemeral", "selected model", "selected reasoning effort", "terminal agent-message", "last-message", "capacity rejection", "no retry", "no native fallback")
+    for text in (owner_text, support_text):
+        case.assertNotIn("command -v codex-companion", text)
+        case.assertNotIn('subagent_type="codex:codex-reviewer"', text)
+
+
+def assert_codex_operation_pair(case, support, review_field, headings):
+    owner = normalized(COLLABORATION.read_text(encoding="utf-8"))
+    support_text = normalized(support.read_text(encoding="utf-8"))
+    case.assert_ordered(
+        owner,
+        review_field, "bindings.commands[review_id].argv",
+        "exec", "--sandbox read-only", "--model gpt-6-astra",
+        'model_reasoning_effort="xhigh"', "--json",
+        "--output-last-message", "--ephemeral",
+        "selected model", "selected reasoning effort",
+        "terminal agent-message", "last-message", "capacity rejection",
+        "no retry", "no native fallback",
+    )
+    case.assertIn("retained `ResolvedProject`", support_text)
+    case.assertIn(review_field, support_text)
+    for heading in headings:
+        case.assertIn(heading, support_text)
+    case.assertNotIn("resolve-project resolve", support_text)
+
+
 def corpus_documents():
     """Every skill document in both skill trees, as (path, text) pairs."""
     for root in SKILL_ROOTS:
@@ -183,6 +706,13 @@ def nested_workflow_documents():
     for directory in (FROM_ISSUE_DIR, SDD_DIR):
         for path in sorted(directory.glob("*.md")):
             yield path, path.read_text(encoding="utf-8")
+
+
+def json_block(text):
+    match = re.search(r"```json\n(\{.*?\})\n```", text, re.DOTALL)
+    if match is None:
+        raise AssertionError("missing json block")
+    return json.loads(match.group(1))
 
 
 class WorkflowSkillContractsTest(unittest.TestCase):
@@ -197,7 +727,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.grill = GRILL.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
         cls.diff_review = DIFF_REVIEW.read_text(encoding="utf-8")
-        cls.certification = CERTIFICATION.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
@@ -235,6 +764,197 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertGreater(next_position, position, f"out-of-order anchor: {anchor!r}")
             position = next_position
 
+    def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
+        documents = {
+            str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
+            for path in (FROM_ISSUE, AUTO, FROM_ISSUE.parent / "ship-handoff.md",
+                         SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE,
+                         ORCHESTRATE)
+        }
+        corpus = " ".join(documents.values())
+        for phrase in ("workflow-response", "validate before decoding", "custody",
+                       "current-launch", "requested_scope", "bind the actual invocation",
+                       "ship-checkpoint/v2", "ship-summary/v2", "delivery_remainder"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, corpus)
+        self.assertIn("workflow_bootstrap", normalized(self.orchestrate))
+        self.assertIn("bootstrap requirement", normalized(self.orchestrate))
+        self.assertIn("checkpoint-delivery", corpus)
+        self.assertNotIn("infer the next stage from tracker", corpus.lower())
+        self.assertNotIn("unfinished delivery as failed", corpus.lower())
+        terminal = normalized(self.section(
+            FROM_ISSUE.read_text(encoding="utf-8"),
+            "## Terminal return procedure", "## Suspension procedure"
+        ))
+        self.assertIn("--summary-file", terminal)
+        self.assertIn("historical input only", terminal)
+        self.assertNotIn("--result-file <path>", terminal)
+
+    def test_direct_and_control_requests_are_interface_two(self):
+        direct = self.section(self.from_issue, "### Direct autonomous acquisition",
+                              "### Interactive direct acquisition")
+        request = json_block(direct)
+        self.assertEqual((set(request), request["interface_version"]),
+                         (V2_DIRECT_REQUEST_KEYS, 2))
+        for anchor in ("`delivery_contract`", "--kind contract", "`authorization_intents`",
+                       "kind: delivery_remainder", "--request-file -"):
+            self.assertIn(anchor, normalized(direct))
+        decide = self.section(self.orchestrate, "## 3. Decide", "## 4. Execute control actions")
+        request = json_block(decide)
+        self.assertEqual((set(request), request["interface_version"], request["host_route"]),
+                         (V3_CONTROL_REQUEST_KEYS, 3, "claude-code"))
+        for anchor in ("workflow-state build-delivery",
+                       "while its latest summary carries `delivery_contract_required`",
+                       "report the refusal", "--request-file -",
+                       "only when this invocation created the run"):
+            self.assertIn(anchor, normalized(decide))
+        durable = self.section(self.from_issue, "### Explicit durable interactive acquisition",
+                               "The `workflow-state` executable")
+        self.assertIn("only when this invocation created the run", normalized(durable))
+        self.assertIn('`host_route: "direct"`', normalized(durable))
+
+    def test_contract_builders_state_the_resolution_root_and_relay_refusals(self):
+        direct = normalized(self.section(self.from_issue, "### Direct autonomous acquisition",
+                                         "### Interactive direct acquisition"))
+        decide = normalized(self.section(self.orchestrate, "## 3. Decide",
+                                         "## 4. Execute control actions"))
+        for skill, text in (("from-issue", direct), ("orchestrate-issues", decide)):
+            with self.subTest(skill=skill):
+                self.assertIn(BUILD_ROOT_CLAUSE, text)
+                self.assertIn(BUILD_REFUSAL_RELAY, text)
+
+    def test_orchestrate_bootstrap_actions_and_projected_owner(self):
+        observe = normalized(self.section(self.orchestrate, "## 2. Bootstrap and observe",
+                                          "## 3. Decide"))
+        for anchor in ("workflow_bootstrap", "`contract_digest`", "`forge_pr`",
+                       "never a candidate for it"):
+            self.assertIn(anchor, observe)
+        execute = normalized(self.section(self.orchestrate, "## 4. Execute control actions",
+                                          "## 5. Final report"))
+        for anchor in ("`spawn`, `resume`, `retry`, `delivery_remainder`, `wait`, or `finalize`",
+                       "rename `id` to `action_id` and `kind` to `launch_kind`",
+                       "`kind: owner`", "`interface_version: 2`", "canonical JSON",
+                       "--boundary workflow-response"):
+            self.assertIn(anchor, execute)
+        self.assertNotIn("Interface_version 2 control adapter", self.orchestrate)
+
+    def test_ship_handoff_v2_ship_summary_v2_and_remainder_prompt(self):
+        line = next(item for item in self.ship_handoff.splitlines()
+                    if item.startswith('{"interface_version":2'))
+        self.assertLessEqual(SHIP_HANDOFF_V2_KEYS, set(re.findall(r'"([a-z_]+)":', line)))
+        for key in SHIP_SUMMARY_V2_KEYS:
+            self.assertIn(f"`{key}`", self.ship_handoff)
+        for anchor in ("--kind initial-intent", "--boundary ship-summary",
+                       "## Remainder owner prompt"):
+            self.assertIn(anchor, self.ship_handoff)
+        self.assertNotIn("## Delivery handoff v2", self.ship_handoff)
+
+    def test_ship_issue_writer_rule_delivery_loop_and_remainder_mode(self):
+        self.assertIn(WRITER_RULE, normalized(self.ship_issue))
+        self.assertNotIn("never writes workflow-state itself", normalized(self.ship_issue))
+        loop = normalized(self.section(self.ship_issue, "## Delivery loop", "## Remainder mode"))
+        self.assert_ordered(loop, "pre-merge selection gate", "--kind selected-output",
+            "`selected_output`, `branch_published` and `pr_opened`", "checkpoint-delivery",
+            "equal the scope", "current-launch", "current-launch", "authority-observation",
+            "observation-only", "`human_gate`", "`delivery_complete`")
+        self.assert_ordered(loop, "the denied stage's scope as `requested_scope`",
+                            "`state: suspended`", "`blocked_on: human_gate`", "fail loudly")
+        remainder = normalized(self.ship_issue.split("## Remainder mode", 1)[1])
+        for anchor in ("`delivery_remainder`", "ready stage", "finish --summary-file -",
+                       "`delivery_stalled`"):
+            self.assertIn(anchor, remainder)
+        for text in (self.ship_handoff.split("## Remainder owner prompt", 1)[1],
+                     self.section(self.from_issue, "### Dispatcher-owned acquisition",
+                                  "### Direct autonomous acquisition"),
+                     self.section(self.from_issue, "3. **`kind: delivery_remainder`**",
+                                  "4. **`kind: terminal`**")):
+            self.assertIn("re-entry line", normalized(text))
+        for appendix in (self.ship_review, self.ship_human_gate):
+            self.assertIn("## Delivery loop", appendix)
+
+    def test_auto_continuation_and_bookkeeper_are_interface_two(self):
+        transfer = self.section(self.auto, "#### Mandatory transfer gate",
+                                "#### Fresh delegated owner")
+        owner = json_block(transfer)["owner"]
+        self.assertEqual((set(owner), owner["interface_version"]), (V2_OWNER_KEYS, 2))
+        self.assert_ordered(normalized(self.auto), "workflow-state check-launch",
+                            "workflow-state finish --summary-file -")
+
+    def test_lifecycle_calls_are_single_stdin_commands_on_interface_two(self):
+        for path in LIFECYCLE_DOCS:
+            text = normalized(path.read_text(encoding="utf-8"))
+            with self.subTest(path=path.name):
+                for forbidden in ('"interface_version": 1', "version-1",
+                                  "temporary request file", "temporary `ship-summary/v2` file"):
+                    self.assertNotIn(forbidden, text)
+                for flag, value in INPUT_FLAG_RE.findall(text):
+                    self.assertEqual(value.strip("`.,;"), "-", flag)
+                self.assertLessEqual(text.count("--result-file"), 1)
+        for path in (FROM_ISSUE, ORCHESTRATE, SHIP_ISSUE):
+            with self.subTest(clause=path.name):
+                self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
+        expected = " ".join(case["expected_output"] for case in self.orchestrate_evals["evals"])
+        for anchor in ("interface_version 2", "delivery_remainder", "contract_digest",
+                       "build-delivery", "only when this invocation created the run",
+                       "interface_version 3", "host-route", "launch_refused"):
+            self.assertIn(anchor, expected)
+        self.assertNotIn("version-1", expected)
+
+    def test_orchestration_eval_covers_denial_partial_progress_and_remainder(self):
+        text = json.dumps(self.orchestrate_evals, sort_keys=True)
+        for phrase in ("partial effect", "host rejection", "same custody",
+                       "delivery_remainder", "zero external effect",
+                       "implementation_delivered", "pr_merged", "actual scope",
+                       "fresh proposal"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_orchestrate_asks_the_host_route_first_and_never_retries_a_refusal(self):
+        resolve = normalized(self.section(self.orchestrate,
+            "## 1. Resolve issue set and bindings", "## 2. Bootstrap and observe"))
+        self.assert_ordered(resolve, "workflow-state host-route --route claude-code",
+                            "--boundary workflow-response",
+                            "`unsupported` answer ends the run", "`alternative`",
+                            '`host_route: "claude-code"`', "never calculates slots")
+        for retired in ("Treat known host capacity as a capability boundary",
+                        "This does not add reservation"):
+            self.assertNotIn(retired, normalized(self.orchestrate))
+        observe = normalized(self.section(self.orchestrate,
+            "## 2. Bootstrap and observe", "## 3. Decide"))
+        self.assertIn("`launch_refused` for an owner launch the host refused", observe)
+        decide = normalized(self.section(self.orchestrate,
+            "## 3. Decide", "## 4. Execute control actions"))
+        self.assertIn("interface_version 3 control response", decide)
+        self.assertIn("`admission`", decide)
+        execute = normalized(self.section(self.orchestrate,
+            "## 4. Execute control actions", "## 5. Final report"))
+        self.assert_ordered(execute, "host refuses an owner launch, never retry it",
+                            "exactly one control call", "`launch_refused`",
+                            "the controller's `finalized` release",
+                            "resumes on the next orchestrate invocation")
+        report = normalized(self.orchestrate.split("## 5. Final report", 1)[1])
+        self.assertIn("`admission.waiting` as queued for agent slots", report)
+        self.assertIn("bounded summaries in the same interface_version 3 control response",
+                      report)
+        self.assertNotIn("interface_version 2 summaries", report)
+
+    def test_codex_orchestrate_stub_relays_the_unsupported_route(self):
+        raw = CODEX_ORCHESTRATE.read_text(encoding="utf-8")
+        self.assertTrue(raw.startswith("---\nname: orchestrate-issues\n"))
+        text = normalized(raw)
+        self.assert_ordered(text, "workflow-state host-route --route codex",
+                            "--boundary workflow-response", "verbatim",
+                            "/from-issue <n> --auto", "one at a time")
+        self.assertIn("Never spawn owners, count threads, archive sessions, start an "
+                      "app-server, or retry", text)
+        for forbidden in ("workflow-state control", "init-run", "run_in_background",
+                          "agent-dispatch"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn('home.file.".agents/skills/orchestrate-issues".source = '
+                      './skills/orchestrate-issues;', CODEX_MODULE.read_text(encoding="utf-8"))
+        self.assertFalse((REPO_ROOT / "home/common/agent-skills/skills/orchestrate-issues")
+                         .exists())
+
     def section(self, text, heading, next_heading):
         start = text.index(heading)
         end = text.index(next_heading, start + len(heading))
@@ -260,7 +980,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertRegex(observe, r"never omit the recorded-path\s+observation")
         self.assertNotIn("tracker-ready", observe)
         self.assertNotIn("classify tracker readiness", observe)
-        self.assert_ordered(decide, "--request-file <absolute-json-path>",
+        self.assert_ordered(decide, "--request-file -",
                             "workflow-state control",
                             "only source of action order, kind, and lifecycle identity")
         for retired in ("workflow-state launch", "workflow-state reconcile"):
@@ -314,11 +1034,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "## 2. Bootstrap and observe",
         )
         self.assertIn(
-            "resolved `agentBudgetMinutes` as request `attempt_budget_minutes`",
+            "bindings.workflow.orchestration.attempt_budget_minutes` as\n  request `attempt_budget_minutes`",
             resolve,
         )
         self.assertIn(
-            "resolved `maxParallel` as request `max_parallel`",
+            "bindings.workflow.orchestration.max_parallel` as request `max_parallel`",
             resolve,
         )
         self.assertNotIn("--budget-minutes <budget>", resolve)
@@ -453,44 +1173,28 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         text = normalized(self.writing_plans)
         self.assertIn("resolve-project resolve", text)
         self.assertIn("bindings.paths.artifacts.plans", text)
-        self.assertIn("planDir", self.writing_plans)
+        self.assertIn(RESOLUTION_SENTENCE, text)
 
     def test_writing_plans_no_longer_calls_the_fail_soft_helper(self):
-        self.assertNotIn("resolve-bindings", self.writing_plans)
-        self.assertNotIn("skills.config.json", self.writing_plans)
+        self.assertNotIn("resolve-bindings", self.writing_plans)  # policy-gate-pattern
+        self.assertNotIn("skills.config.json", self.writing_plans)  # policy-gate-pattern
 
-    def test_writing_plans_treats_only_not_onboarded_as_non_fatal(self):
+    def test_writing_plans_treats_every_resolver_error_as_fatal(self):
         text = normalized(self.writing_plans)
-        self.assertIn("not_onboarded", text)
-        self.assertIn("`.claude/plans`", text)
-        self.assertIn("Every other error code is fatal", text)
-        # An unonboarded repository is not licence to relocate the plan: the
-        # caller's own `planDir` outranks the literal default, which is reached
-        # only when the caller supplied none.
-        self.assert_ordered(
-            text, "not_onboarded", "`planDir` your caller handed you",
-            "only to the literal `.claude/plans` when it handed you none")
-        for code in ("invalid_contract", "unsupported_schema",
-                     "invalid_projection", "capability_unavailable",
-                     "resolver_failure"):
-            with self.subTest(code=code):
-                self.assertNotIn(f"{code} → ", text)
+        self.assertIn(RESOLUTION_SENTENCE, text)
+        for forbidden in ("not_onboarded", ".claude/plans"):
+            self.assertNotIn(forbidden, text)
 
-    def test_only_writing_plans_migrated_off_resolve_bindings(self):
-        still_calling = (
-            "research", "doc-grounded-questions", "design",
-            "ship-issue", "to-issues",
-        )
-        for name in still_calling:
+    def test_shared_entries_use_the_project_resolver(self):
+        for name in (
+            "research", "doc-grounded-questions", "design", "ship-issue",
+            "to-issues", "from-issue", "grill-with-docs", "ship-release",
+            "wayfind", "worktrees", "writing-plans",
+        ):
             path = (REPO_ROOT / "home/common/agent-skills/skills"
                     / name / "SKILL.md")
             with self.subTest(skill=name):
-                self.assertIn("resolve-bindings", path.read_text(encoding="utf-8"))
-        orchestrate = (REPO_ROOT / "home/common/claude-code/skills"
-                       / "orchestrate-issues" / "SKILL.md")
-        self.assertIn("resolve-bindings", orchestrate.read_text(encoding="utf-8"))
-        self.assertTrue(
-            (REPO_ROOT / "home/common/agent-skills/scripts/resolve-bindings").is_file())
+                self.assertIn("resolve-project resolve", path.read_text(encoding="utf-8"))
 
     def test_design_and_grill_measure_after_last_write_and_stop_truthfully(self):
         for producer in (self.design, self.grill):
@@ -594,35 +1298,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
-    def assert_every_carrier_states_the_temp_home(self, invocation, home, minimum):
-        carriers = [
-            (str(path.relative_to(REPO_ROOT)), normalized(text))
-            for path, text in corpus_documents()
-            if invocation in normalized(text)
-        ]
-        names = [name for name, _ in carriers]
-        # Non-vacuity: the rule must have something to police.
-        self.assertGreaterEqual(len(carriers), minimum, names)
-        missing = [name for name, text in carriers if home not in text]
-        self.assertEqual(missing, [])
-
-    def test_request_file_prescriptions_name_the_temp_home(self):
-        self.assertEqual(normalized(self.from_issue).count(REQUEST_FILE_HOME), 2)
-        self.assertEqual(normalized(self.orchestrate).count(REQUEST_FILE_HOME), 1)
-
-    def test_result_file_prescription_names_the_temp_home(self):
-        self.assertEqual(normalized(self.from_issue).count(RESULT_FILE_HOME), 1)
-
-    def test_every_request_file_invocation_names_the_temp_home(self):
-        self.assert_every_carrier_states_the_temp_home(
-            REQUEST_FILE_INVOCATION, REQUEST_FILE_HOME, 2
-        )
-
-    def test_every_result_file_invocation_names_the_temp_home(self):
-        self.assert_every_carrier_states_the_temp_home(
-            RESULT_FILE_INVOCATION, RESULT_FILE_HOME, 1
-        )
-
     def test_from_issue_validates_artifacts_before_every_phase_advance(self):
         self.assert_ordered(self.from_issue, "validate the returned state", "artifact-budget check",
                             "compare all four metrics", "workflow-state progress")
@@ -692,6 +1367,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("validate-report --boundary producer --input -", text)
             self.assertIn("before any state access or reviewer dispatch", text)
 
+    def test_standards_review_stops_a_blocked_plan_review_capability(self):
+        self.assert_ordered(
+            self.standards_review,
+            "capabilities.review.plan", "**Blocked** stops", "reason_code",
+            "repair_id", "never takes a fallback",
+        )
+        self.assertIn(
+            "Authored unsupported, or the completed non-capacity runtime/output failure",
+            self.standards_review,
+        )
+
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
         self.assert_ordered(self.sdd, "delivery-detail", "artifact-budget check",
@@ -728,6 +1414,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "validate-report --boundary ship-summary",
         )
         self.assertIn("do not forge", cleanup)
+        self.assert_ordered(normalized(self.section(self.ship_issue, "## Delivery loop",
+                                                    "## Remainder mode")),
+                            "Only after the last cycle",
+                            "validate-report --boundary ship-summary")
 
     def test_review_package_failure_before_dispatch_has_no_fabricated_detail(self):
         self.assert_ordered(self.sdd, "base_sha and head_sha", "review-package",
@@ -857,20 +1547,19 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assert_ordered(
             owner_return_section,
-            "--result-file",
+            "--summary-file",
             "workflow-state finish",
-            "send the exact JSON",
+            "send those canonical bytes",
         )
         for field in (
-            "issue",
-            "state",
-            "pr_url",
-            "merge_sha",
-            "issue_closed",
-            "discussion_items",
-            "notes",
+            "custody",
+            "contract digest",
+            "historical_owner_result",
+            "delivery",
+            "authority",
+            "reevaluation",
         ):
-            self.assertIn(field, self.from_issue)
+            self.assertIn(field, owner_return_section)
         self.assertIn("failure to persist is a failure to finish", owner_return_section)
         self.assertIn("never report the issue as merged or completed", owner_return_section)
 
@@ -910,11 +1599,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(set(continuation), {
             "owner", "reviewed_head_sha", "spec_artifact", "plan_artifact",
         })
-        self.assertEqual(set(continuation["owner"]), {
-            "interface_version", "kind", "ledger_repo_root", "run_id", "issue",
-            "attempt", "owner", "action_id", "launch_kind", "worktree",
-            "handoff_path", "deadline_at",
-        })
+        self.assertEqual(set(continuation["owner"]), V2_OWNER_KEYS)
         self.assertEqual(continuation["owner"]["kind"], "owner")
         self.assertRegex(continuation["reviewed_head_sha"], r"^[0-9a-f]{40}$")
         artifact_fields = {"kind", "path", "metrics", "budget_status"}
@@ -942,7 +1627,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             delegated,
             "Before reading either artifact",
-            "`branchPattern` and `worktreePrefix`",
+            "caller-passed `bindings.vcs` branch and",
             "decimal `owner.issue`",
             "final path component",
             "binding-derived accepted branch regex",
@@ -979,10 +1664,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             earlier,
             "received bytes",
-            "artifact-budget validate-report --boundary ship-summary",
+            "artifact-budget validate-report --boundary workflow-response",
             "relay the canonical bytes unchanged",
             "stop",
         )
+        self.assertNotIn("--boundary ship-summary", earlier)
         self.assertIn(
             "post-delegation action set is exactly validate, relay, and stop",
             earlier,
@@ -1054,7 +1740,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "--force",
             "--force-with-lease",
             "git merge",
-            "git push origin <integrationBranch>",
+            "git push origin <integration>",
             "git reset",
             "git rebase",
         ):
@@ -1102,14 +1788,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
         self.assertIn("lifecycle identity", phase_zero)
         self.assertIn("workflow-state finish", phase_zero)
-        self.assertIn("execution failure", self.from_issue)
+        self.assertIn("execution failure", normalized(self.from_issue))
         phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
         self.assert_ordered(
             phase_seven,
             "ledger_repo_root",
             "receiving the ship report",
             "workflow-state finish",
-            "send the exact JSON",
+            "canonical JSON unchanged",
         )
 
     def test_from_issue_revalidates_its_launch_before_the_terminal_finish(self):
@@ -1286,7 +1972,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn("workflow-state direct-owner", direct)
         self.assertIn("--repo-root <ledger_repo_root>", direct)
-        self.assertIn("--request-file <absolute-json-path>", direct)
+        self.assertIn("--request-file -", direct)
         self.assertNotIn("workflow-state init-run", direct)
         self.assertNotIn("workflow-state control", direct)
         self.assertNotIn("wait envelope", direct)
@@ -1455,14 +2141,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             case["expected_output"] for case in self.orchestrate_evals["evals"]
         )
         for anchor in (
-            "workflow-state init-run", "action_id", "recorded_worktree",
-            "workflow-state control",
-            "normalized", "spawn", "resume", "retry", "wait", "finalize",
-            "bounded summaries", "unknown action kind", "cancel the old wait",
-            "stale wake ID", "already-exited wait", "no wake is installed",
-            "unexpected cancellation failure", "restore the old wait ID/handle",
-            "do not arm replacement", "never pair the new wait ID with the old handle",
-            "retry replacement", "reap inherited detached wait observers",
+            "ResolvedProject", "bindings.tracker", "bindings.vcs",
+            "attempt_budget_minutes", "max_parallel", "workflow-state init-run",
+            "workflow-state control", "current_wait_id", "finalize",
         ):
             self.assertIn(anchor, expected)
         for retired in ("workflow-state launch", "workflow-state reconcile"):
@@ -1531,12 +2212,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # coverage sentence and no fragment spanning its line wrap can match.
         contract = " ".join(self.diff_review.replace("\n> ", "\n").split())
         for fragment in (
-            "resolve policy, capability pre-flight, packet by paths",
+            "retained `ResolvedProject` and validated direct-command result",
             "the size pre-flight below",
             "`~/.agents/bin/diff-scope`",
-            "--artifact-path <specDir> --artifact-path <planDir>",
+            "--artifact-path <specification-directory> --artifact-path <plan-directory>",
             "--format json",
-            "`.claude/specs` and `.claude/plans`",
+            "paths passed from the caller's retained snapshot, without fallback locations",
             "`product.changed_files`",
             "`files[].path`",
             "`files[].changed_lines`",
@@ -1603,7 +2284,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # The capability check is named as running first, and the size
         # pre-flight is defined before the packet it changes.
         self.assertIn(
-            "capability pre-flight and runs first", contract
+            "retained `capabilities.review.code` selection runs first", contract
         )
         self.assert_ordered(
             contract,
@@ -1618,17 +2299,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
         # SKILL.md is narrowed in the same breath, or the two contracts
         # contradict each other (D12).
-        self.assertIn(
-            "Capability pre-flight first, one sub-second call", self.collaboration
-        )
-        self.assertNotIn(
-            "Pre-flight first, one sub-second call", self.collaboration
-        )
-        self.assertIn("skip the capability pre-flight", self.collaboration)
-        self.assertIn(
-            "an additional pre-flight of its own in its reference file",
-            self.collaboration,
-        )
+        self.assertIn("retained `capabilities.review.code` selection runs first", contract)
 
     def test_diff_review_makes_the_scoped_coverage_disclosure_mandatory(self):
         # Review-package transport stays bounded even when this axis scopes its
@@ -1644,7 +2315,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(review_package_fragment=fragment):
                 self.assertIn(fragment, contract)
 
-        # The omission case can only be pinned here. `agent-evidence.py` sees a
+        # The omission case can only be pinned here. `agent-evidence` sees a
         # result, never the packet that produced it, so it cannot tell a scoped
         # dispatch that dropped its coverage from an unscoped one — its own test
         # covers placement only. The obligation therefore has to be stated in
@@ -1816,69 +2487,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(mirror=fragment):
                 self.assertIn(fragment, packet)
 
-    def test_collaboration_requires_fresh_validated_bridge_evidence(self):
-        # The certification block lives in CERTIFICATION.md, referenced from
-        # SKILL.md's Launch section.
-        self.assertIn("CERTIFICATION.md", self.collaboration)
-        evidence = " ".join(self.certification.split())
-        for fragment in (
-            "`schema_version`",
-            "`bridge-smoke`",
-            "`skill`",
-            "`agent`",
-            "`plugin`",
-            "`started_at`",
-            "plan-review",
-            "diff-review",
-            "`direct`",
-            "`agent_mediated`",
-            "agent-evidence bridge",
-            "Reject stale",
-            "direct-only evidence cannot certify",
-            "immutable deployment receipt",
-            "authoritative deployed paths",
-            "assigned session ID",
-            "immutable session envelope",
-            "same assigned session ID",
-            "actual `started_at`",
-            "consumes both",
-            "loaded revisions match the deployment receipt",
-            "absent or mismatched receipt or envelope rejects certification",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, evidence)
-        self.assert_ordered(
-            evidence,
-            "Deploy the candidate",
-            "immutable deployment receipt",
-            "At actual launch",
-            "immutable session envelope",
-            "externally started fresh Claude session",
-        )
-        self.assert_ordered(
-            evidence,
-            "exactly one `plan-review`",
-            "exactly one `diff-review`",
-        )
-        self.assertIn("Keep `agent_mediated` distinct from `direct`", evidence)
-        self.assert_ordered(evidence, "terminal failure", "native fallback")
-        self.assert_ordered(
-            evidence,
-            "agent-evidence bridge <artifact.json>",
-            "exits 0",
-            "call the bridge current",
-        )
-
     def test_codex_collaboration_dispatch_carries_operation_envelope(self):
-        launch = self.section(
-            self.collaboration,
-            "Build the operation's packet",
-            "Parallel reviews are valid.",
-        )
-        self.assertIn("first two lines", launch)
-        self.assertIn("`WORKTREE_ROOT: <absolute worktree root>`", launch)
-        self.assertIn("`REVIEW_OPERATION: <plan-review|diff-review>`", launch)
-        self.assert_ordered(launch, "WORKTREE_ROOT:", "REVIEW_OPERATION:", "Launch mechanics")
+        self.assertIn("bindings.commands[review_id].argv", self.collaboration)
+        self.assertIn("--output-last-message", self.collaboration)
+        self.assertIn("terminal agent-message", self.collaboration)
 
     def test_codex_collaboration_states_a_per_operation_wall_clock(self):
         # A deliberate second copy of the runtime's per-operation budget: callers
@@ -1889,51 +2501,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # negative guards below only bite on normalized text — a retired figure
         # that came back across a line wrap (`~14\nmin`) would otherwise slip
         # past the very check that exists to catch it.
-        launch = " ".join(
-            self.section(
-                self.collaboration,
-                "Build the operation's packet",
-                "Parallel reviews are valid.",
-            ).split()
-        )
-        collaboration = " ".join(self.collaboration.split())
-        self.assertIn("roughly 28 minutes of wall clock for `plan-review`", launch)
-        self.assertIn("roughly 14 minutes for `diff-review`", launch)
-        for stale in ("~14 min", "~15 min"):
-            with self.subTest(stale=stale, doc="SKILL.md"):
-                self.assertNotIn(stale, collaboration)
-        # The bridge's own wait is wider than either budget, so the caller is
-        # given that figure too (D8/D15, D20). Pin the arithmetic rather than
-        # the literal: the total is the wait count times the per-call bound, so
-        # retuning one number without the others goes red instead of shipping a
-        # sentence that no longer adds up.
-        bounded = re.search(
-            r"wait is uniform and wider than either budget: it returns "
-            r"`CODEX_REVIEW_FAILURE` only after roughly (\d+) s of bounded "
-            r"waiting[^.]*four bounded (\d+) s calls",
-            launch,
-        )
-        self.assertIsNotNone(bounded, launch)
-        self.assertEqual(int(bounded.group(1)), 4 * int(bounded.group(2)))
-        # Restated once as the figure to plan against — and it must be the same
-        # figure the sentence above derived.
-        restated = re.search(r"plan for the ~(\d+) s bounded-wait figure", launch)
-        self.assertIsNotNone(restated, launch)
-        self.assertEqual(restated.group(1), bounded.group(1))
-        # It bounds the bridge's waiting, not the hold: each of those four
-        # waits sits under a wider outer tool cap, so the total is never a
-        # guaranteed ceiling on how long a caller can be held (D20).
-        self.assertNotIn("the worst case you can be held for", collaboration)
-        # The eval grades a model against this same number; unpinned, it would
-        # keep grading against a figure the skill no longer states (D15). JSON
-        # cannot carry a raw newline inside a string, so the wrap arrives as the
-        # two-character escape `\n` — collapse that first, then whitespace.
-        evals = " ".join(
-            json.dumps(self.codex_collaboration_evals).replace("\\n", " ").split()
-        )
-        self.assertIn("~28 min of external wall clock", evals)
-        self.assertIn("~28 minutes for plan-review", evals)
-        self.assertNotIn("~15 min", evals)
+        self.assertIn("--model gpt-6-astra", self.collaboration)
+        self.assertIn('model_reasoning_effort="xhigh"', self.collaboration)
 
     def test_codex_collaboration_never_reports_sandbox_limits_as_findings(self):
         # The rule lives in the packet-borne shared rules, not in the Launch
@@ -1943,8 +2512,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         rules = " ".join(
             self.section(
                 self.collaboration,
-                "## Read-only rules (both operations)",
-                "## Launch",
+                "## Read-only packet rules",
+                "## Direct configured review",
             ).split()
         )
         self.assert_ordered(
@@ -1986,7 +2555,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
         # The gate states a policy and calls the helper; the accounting itself
-        # lives in diff-scope.py and is not restated here.
+        # lives in `agent_tools.diff_scope` and is not restated here.
         gate = self.section(
             self.ship_issue,
             "**Pick the path first.**",
@@ -2018,7 +2587,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "needed no manual conflict escalation",
             GATE_LINE_BOUNDARY,
             "does NOT carry the `risky` label",
-            "`review.criticalPaths` glob",
+            "`capabilities.review.code` state",
         )
 
     def test_ship_issue_eval_restates_the_gate_boundary_it_grades(self):
@@ -2044,12 +2613,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
         optional_subject = (
-            'gh pr merge <pr-num> --repo <repoSlug> --merge '
-            '[--subject "<rendered mergeSubjectTemplate>"] --delete-branch'
+            'gh pr merge <pr-num> --repo <resolved-repository> --merge '
+            '[--subject "<rendered subject>"] --delete-branch'
         )
         rendered_subject = (
-            'gh pr merge <pr-num> --repo <repoSlug> --merge '
-            '--subject "<rendered mergeSubjectTemplate>" --delete-branch'
+            'gh pr merge <pr-num> --repo <resolved-repository> --merge '
+            '--subject "<rendered subject>" --delete-branch'
         )
         expected_occurrences = [
             "7. Merge                   → "
@@ -2067,14 +2636,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         phase_lines = [line.strip() for line in phase.splitlines()]
         self.assertIn(rendered_subject, phase_lines)
         guard_and_fallback = (
-            "Use the `repoSlug` binding resolved in Phase 0. Build the subject "
-            "from `mergeSubjectTemplate` (substituting "
-            "`<feature>`/`<desc>`/`<num>`/`<integrationBranch>`). Emit the "
+            "Use retained `bindings.tracker.repo_slug` and `bindings.vcs` values to build the subject. Emit the "
             "subject form only when the rendered result is nonempty and "
             "representable by D18's quoted-subject grammar: it contains none "
             "of double quote, dollar, backtick, backslash, NUL, LF, or CR; "
-            "otherwise omit `--subject` and its value and let the forge default "
-            "stand. Never pass `--no-ff` (rejected by recent `gh`; `--merge` "
+            "otherwise omit `--subject` and its value and let the forge choose its normal subject. "
+            "Never pass `--no-ff` (rejected by recent `gh`; `--merge` "
             "already produces a true merge commit)."
         )
         self.assertIn(guard_and_fallback, phase_lines)
@@ -2099,8 +2666,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             phase7,
             "Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md)",
             "Run `check-launch` (see `## Launch guard`) immediately before the merge",
-            "gh pr merge <pr-num> --repo <repoSlug> --merge",
+            "gh pr merge <pr-num> --repo <resolved-repository> --merge",
         )
+        self.assertIn("the `merge_pr` cycle of `## Delivery loop`", normalized(phase7))
+        self.assertIn("current-launch", phase7)
         # D6/D10: the new Phase-4 pointer introduces no merge spelling, so
         # Phase 4 stays free of `gh pr merge` exactly as it is today.
         self.assertNotIn("gh pr merge", phase4)
@@ -2174,7 +2743,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             normalized(gate_1),
             "git push -u origin <branch>",
-            'gh pr create --base <integrationBranch> --title "<title>" --body',
+            'gh pr create --repo <resolved-repository> --base <integration-branch> --head <branch> --title "<title>" --body',
             "Closes #<num>",
         )
         gate_2 = self.section(
@@ -2213,8 +2782,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             ban,
             "On this path the session must not:",
-            "- merge the feature branch into `<integrationBranch>` locally;",
-            "- push to `<integrationBranch>`;",
+            "- merge the feature branch into the passed `<integration-branch>` locally;",
+            "- push to the passed `<integration-branch>`;",
             "- push to any remote other than `origin`;",
             "- pass `--admin`, `--force`, `--force-with-lease`, or any "
             "hook-bypass flag;",
@@ -2239,7 +2808,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # The one rule is indifferent to the tracker binding: a `kind=none`
         # invocation skips Phase 4's PR but still pushes the branch to `origin`,
         # and that push is a guarded write like any other.
-        self.assertIn("regardless of `issueTracker.kind`", collapsed)
+        self.assertIn("regardless of tracker capability", collapsed)
         self.assertIn("Proceed only on `current: true`", collapsed)
         # Every refusal trigger, so a guard that degraded to "on a false answer"
         # would fail here rather than pass with a hole.
@@ -2252,8 +2821,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("/from-issue <num> --auto", collapsed)
         self.assertIn("`stopped` ship summary", collapsed)
         self.assertNotIn("workflow-state suspend", guard)
-        # The post-merge exemption and the ledger-free skip.
-        self.assertIn("after the merge is verified", collapsed)
+        # The post-merge effects are loop cycles (D29), and the ledger-free skip.
+        self.assertIn("each post-merge effect is a `## Delivery loop` cycle", collapsed)
         self.assertIn("skip the guard silently", collapsed)
 
         # Phase 4: the query immediately precedes each of its two forge writes.
@@ -2316,16 +2885,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertNotIn("repeats the headRefOid equality check", apply_push)
         self.assertIn("the reviewed `HEAD_SHA`", apply_push)
 
-    def test_ship_owner_reads_the_ledger_but_never_writes_it(self):
-        # AC3's invariant, previously unpinned. The read-only exception is named
-        # so a reader cannot take the sentence as a ban on consulting the ledger.
-        self.assertIn(
-            "A fresh ship owner never writes workflow-state itself; the "
-            "read-only `check-launch` query of `## Launch guard` is the one "
-            "ledger call it makes.",
-            normalized(self.ship_issue),
-        )
-
     def test_phase0_size_note_delegates_counting_to_diff_scope(self):
         # Issues #21-#22 made diff-scope the accounting authority and retired the
         # hand-counted numstat arithmetic; this note is the only restatement of
@@ -2340,7 +2899,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             # Both directions of the carve-out: this run's artifacts are named
             # one file at a time, and the directories themselves never are.
             "one `--artifact-path` per file",
-            "never `<specDir>`/`<planDir>` themselves",
+            "never an entire retained artifact directory",
             "still count",
             # The estimate/count split: Phase 0 has no range, so its number is an
             # estimate; the helper is authoritative only once a range exists.
@@ -2369,7 +2928,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                            ("ship-issue", self.ship_issue)):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/workflow-state", text)
-        for name, text in (("research", self.research), ("certification", self.certification)):
+        for name, text in (("research", self.research),):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/agent-evidence", text)
         with self.subTest(skill="ship-issue"):
@@ -3444,6 +4003,25 @@ path_unchanged_since() { return 0; }
             ).returncode,
             0,
         )
+
+
+class InstalledOrchestrateRoutesTest(unittest.TestCase):
+    """D25: each agent's installed tree holds its own orchestrate-issues."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = os.environ.get("AGENT_SKILLS_INSTALLED_HOME")
+        if root is None:
+            raise unittest.SkipTest("AGENT_SKILLS_INSTALLED_HOME is unset; run "
+                                    "`just agent-installed-skill-tests`")
+        cls.root = Path(root)
+
+    def test_codex_tree_holds_the_stub_and_claude_tree_the_adapter(self):
+        installed = lambda tree: (self.root / tree / "orchestrate-issues/SKILL.md"
+                                  ).read_text(encoding="utf-8")
+        self.assertEqual(installed(".agents/skills"),
+                         CODEX_ORCHESTRATE.read_text(encoding="utf-8"))
+        self.assertEqual(installed(".claude/skills"), ORCHESTRATE.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

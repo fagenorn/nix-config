@@ -1,17 +1,17 @@
 """Contracts for the diff-scope product-accounting helper.
 
 Two layers, per the design's Test seams section. The classifier layer imports
-scripts/diff-scope.py directly and drives the pure classifier over synthetic
+`agent_tools.diff_scope` and drives the pure classifier over synthetic
 rows shaped the way the git layer actually emits them -- a binary row carrying
 absent counts rather than zeros, a rename row already reduced to its
-destination path. The CLI layer (added with the git layer) runs the script as a
-subprocess against scratch git repositories under a TemporaryDirectory; it
-talks to no network and touches no repository but its own.
+destination path. The CLI layer (added with the git layer) runs the module with
+`python -m` as a subprocess against scratch git repositories under a
+TemporaryDirectory; it talks to no network and touches no repository but its
+own.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import os
@@ -24,27 +24,7 @@ import unittest
 import unittest.mock
 
 
-REPO_ROOT = Path(__file__).parents[4]
-SCRIPT = REPO_ROOT / "home/common/agent-skills/scripts/diff-scope.py"
-
-
-def load_module():
-    """Import scripts/diff-scope.py as a module.
-
-    The sys.modules registration is required, not decorative: the script uses
-    `from __future__ import annotations`, so its dataclass field annotations are
-    strings, and dataclasses resolves them through sys.modules[cls.__module__].
-    Without the registration every dataclass in the module raises AttributeError
-    at import. test_agent_model_matrix.py omits this line only because the script
-    it loads defines no dataclass.
-    """
-    spec = importlib.util.spec_from_file_location("diff_scope", SCRIPT)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot import {SCRIPT}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+from agent_tools import diff_scope
 
 
 class DiffScopeClassifierTest(unittest.TestCase):
@@ -52,7 +32,7 @@ class DiffScopeClassifierTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.module = load_module()
+        cls.module = diff_scope
 
     def row(self, path, additions=1, deletions=1, header=None):
         return self.module.DiffRow(
@@ -461,7 +441,7 @@ def write(root, relative_path: bytes, content: bytes) -> None:
 def run_helper(root, *arguments):
     """Invoke the script the way a caller does, capturing raw bytes."""
     return subprocess.run(
-        [sys.executable, str(SCRIPT), *arguments],
+        [sys.executable, "-m", "agent_tools.diff_scope", *arguments],
         cwd=root,
         env=git_env(),
         capture_output=True,
@@ -708,7 +688,7 @@ class DiffScopeCommandTest(unittest.TestCase):
     def test_a_root_outside_a_work_tree_exits_one(self):
         with tempfile.TemporaryDirectory() as outside:
             completed = subprocess.run(
-                [sys.executable, str(SCRIPT), self.range, "--root", outside],
+                [sys.executable, "-m", "agent_tools.diff_scope", self.range, "--root", outside],
                 env=git_env(),
                 capture_output=True,
                 check=False,
@@ -834,7 +814,7 @@ class DiffScopeHeaderScanBoundTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.module = load_module()
+        cls.module = diff_scope
         cls.temporary = tempfile.TemporaryDirectory()
         cls.root = cls.temporary.name
         build_large_blob_repo(cls.root)
@@ -891,7 +871,7 @@ class DiffScopeBatchDeathTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.module = load_module()
+        self.module = diff_scope
 
     def _failure(self, stdout_bytes, returncode, stderr_bytes=b"", broken_stdin=False):
         def fake_popen(argv, **kwargs):

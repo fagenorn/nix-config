@@ -1,24 +1,21 @@
-"""Offline tests for scripts/agent-gate-bundle.py.
+"""Offline tests for agent_tools.agent_gate_bundle.
 
-Run: python3 -m unittest -v tests/test_agent_gate_bundle.py
+Run: just agent-workflow-tests
 """
 
 import contextlib
-import importlib.util
 import inspect
 import io
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "agent-gate-bundle.py"
-
-_spec = importlib.util.spec_from_file_location("agent_gate_bundle", SCRIPT)
-gate = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(gate)
+from agent_tools import agent_gate_bundle as gate
+from agent_tools.canonical import telemetry_digest
 
 IDENTITY = {
     "bound": {"commit": {"base": "aaa", "candidate": "bbb"},
@@ -53,7 +50,7 @@ def make_record(tmp, name, runs):
                    for s, v in runs.items()},
         "fleet": {"informative": True, "totals": {}}, "notes": "n",
     }
-    document = dict(body, record_id=gate.canonical_digest(body),
+    document = dict(body, record_id=telemetry_digest(body),
                     generated_at="2026-09-02T00:00:00Z")
     path = tmp / name
     path.write_text(json.dumps(document), encoding="utf-8")
@@ -278,7 +275,7 @@ class ResolveTrialsTest(unittest.TestCase):
             body = {k: v for k, v in dict(document, **mutate).items()
                     if k not in ("record_id", "generated_at")}
             document = dict(document, **mutate)
-            document["record_id"] = gate.canonical_digest(body)  # re-digested!
+            document["record_id"] = telemetry_digest(body)  # re-digested!
             entry["record_id"] = document["record_id"]
             path.write_text(json.dumps(document), encoding="utf-8")
             evidence, codes = self.codes(manifest)
@@ -301,7 +298,7 @@ class ResolveTrialsTest(unittest.TestCase):
             mutate(document["strata"]["claude"]["runs"][0])
             body = {k: v for k, v in document.items()
                     if k not in ("record_id", "generated_at")}
-            document["record_id"] = gate.canonical_digest(body)
+            document["record_id"] = telemetry_digest(body)
             entry["record_id"] = document["record_id"]
             path.write_text(json.dumps(document), encoding="utf-8")
             evidence, codes = self.codes(manifest)   # must not raise
@@ -680,7 +677,7 @@ class BundleCliTest(unittest.TestCase):
         self.assertEqual(first["bundle_id"], second["bundle_id"])
         body = {k: v for k, v in first.items()
                 if k not in ("bundle_id", "generated_at")}
-        self.assertEqual(first["bundle_id"], gate.canonical_digest(body))
+        self.assertEqual(first["bundle_id"], telemetry_digest(body))
         other = run_cli("--trials", self.manifest_file(self.flat_manifest(), "b.json"))[1]
         self.assertNotEqual(first["bundle_id"], other["bundle_id"])
 
@@ -819,7 +816,7 @@ class NoUpgradeTableTest(unittest.TestCase):
                         kind="agent-gate-bundle")
         body = {k: v for k, v in document.items()
                 if k not in ("record_id", "generated_at")}
-        document["record_id"] = entry["record_id"] = gate.canonical_digest(body)
+        document["record_id"] = entry["record_id"] = telemetry_digest(body)
         cited.write_text(json.dumps(document), encoding="utf-8")
 
         # per D34: a rubric value outside [0, 100] is a document fault
@@ -901,6 +898,18 @@ class NoUpgradeStructureTest(unittest.TestCase):
 
     def test_the_emitter_re_decides_before_it_writes(self):
         self.assertIn("decide(", inspect.getsource(gate.assemble_bundle))
+
+
+class ModuleEntryPointTest(unittest.TestCase):
+    """The recipe runs the tool with `-m`; every other test calls main() in process."""
+
+    def test_the_module_run_reaches_main_under_the_command_name(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "agent_tools.agent_gate_bundle", "--help"],
+            capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.startswith("usage: agent-gate-bundle "),
+                        completed.stdout[:200])
 
 
 if __name__ == "__main__":

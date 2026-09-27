@@ -68,6 +68,8 @@ jobs:
 
   agent-workflow-tests:
     name: Agent Workflow Tests (advisory)
+    # Hosted Ubuntu checks out sources but does not activate the managed local
+    # skill surfaces, so this advisory observation is explicitly source-only.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -90,7 +92,7 @@ jobs:
       - name: Run agent workflow tests
         id: suite
         continue-on-error: true
-        run: nix shell --inputs-from . nixpkgs#just --command just agent-workflow-tests
+        run: WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just --command just agent-workflow-tests
       - name: Record advisory observation
         if: always()
         run: |

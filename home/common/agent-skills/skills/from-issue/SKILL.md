@@ -1,17 +1,18 @@
 ---
 name: from-issue
 description: Drive one tracker issue through investigate → spec → plan → review → execute in a worktree. Use for "work on issue #X"; pass --auto for autonomous mode.
-argument-hint: "<issue number or URL> [--auto]"
 ---
 
 # From Issue
+
+Run `resolve-project resolve --repo-root <checkout>` once at phase entry and retain the full `ResolvedProject` in memory. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery contract; this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.paths.artifacts`, and `bindings.workflow`; required blocked capabilities stop and authored unsupported capabilities take only documented no-capability routes.
 
 Counterpart to `to-issues`. Take one tracker issue from triage to merged code by chaining the canonical skills, carrying the caller's scoped authorization across phase boundaries.
 
 ## Files beside this one
 
 - **`AUTO.md`** — autonomous-mode rules. Read it *once*, now, only if the invocation contains the literal token `--auto`.
-- **`bindings.md`** — project bindings. Read it now and resolve them first; `<tracker-cli>`, `<integration-branch>`, `specDir`, `planDir`, and the tracker-cli hygiene rule come from there.
+- **`bindings.md`** — phase binding notes. Included routines receive values from this phase's retained snapshot; use `bindings.tracker`, `bindings.vcs`, and `bindings.paths.artifacts`.
 - **`grounding.md`** (Phases 2–5), **`decision-ledger.md`**, **`investigate.md`** (Phase 0), **`standards-review.md`** (Phase 5), **`ship-handoff.md`** (Phase 7) — loaded at the named phase.
 - **`REVIEW-CONTRACT.md`** — the Phase-5 reviewer contract. Hand it over **by absolute path**, never read it into this conversation.
 
@@ -32,13 +33,40 @@ current checkout or owner worktree. `action_id` is the one identity field that
 changes when the attempt is relaunched; pass it through verbatim and never
 recompute it.
 
+Every lifecycle call is one command that reads its input from stdin through a
+quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`,
+`--summary-file -` or `--input -`, with the helper named bare or as
+`~/.agents/bin/workflow-state`, optionally piped into or out of
+`artifact-budget validate-report --input -`. No request or summary file is
+written. Treat every `workflow-state` reply as untrusted transport: pipe its
+raw bytes through `artifact-budget validate-report --boundary workflow-response
+--input -` and validate before decoding. The ledger, not tracker or intent
+data, selects the next delivery stage: follow the returned `owner`,
+`delivery_remainder`, requirement, or terminal variant without manufacturing
+authority, a retry, or another permission ritual. Every delivery effect runs
+through ship-issue's `## Delivery loop`.
+
 ### Dispatcher-owned acquisition
 
 When a dispatcher supplies the optional lifecycle envelope, require
 all six dispatcher fields: `ledger_repo_root`, `run_id`, `attempt`,
-`owner`, `action_id`, and normalized `worktree`. Validate and adopt them
-unchanged. A partial envelope fails loudly; this route does not perform
-any other acquisition.
+`owner`, `action_id`, and normalized `worktree`, plus the canonical-JSON owner
+object the envelope carries. Pipe that object through `artifact-budget
+validate-report --boundary workflow-response --input -` before decoding it, and
+require its identity to equal the six fields (for a `delivery_remainder`,
+`attempt` is its `source_attempt` and `action_id` its custody's `action_id`).
+A validated `kind: owner` object is this invocation's lifecycle identity and
+delivery envelope: adopt it unchanged, with its `custody`, `contract`,
+`contract_digest`, `pending_stage_ids`, `requirements`, `authority_evaluation`
+and `requested_scope`. A validated `kind: delivery_remainder` object is no
+implementation owner: skip Phases 0–6 and hand it verbatim to the Phase-7
+remainder launch, then relay that remainder owner's validated reply
+unchanged — its `finish` response, or a `delivery_stalled` checkpoint reply —
+except that a return of only the re-entry line `/from-issue <num> --auto`
+(a checkpointed denial, which already suspended the remainder) is relayed as
+that line without validation. This invocation writes no `finish` of its own. A partial
+envelope, a missing or invalid object, or an identity mismatch fails loudly;
+this route does not perform any other acquisition.
 
 ### Direct autonomous acquisition
 
@@ -46,33 +74,45 @@ When the invocation contains literal `--auto` and no dispatcher envelope,
 resolve through the existing bindings and adapters the immutable absolute ledger
 repository root (`ledger_repo_root`), positive issue and configured positive
 attempt budget. Resolve a fresh current RFC3339 UTC instant for every request,
-including before the first call. For every call, write a new absolute temporary
-request file beneath `${TMPDIR:-/tmp}` containing exactly this version-1 shape.
-For each request, populate
+including before the first call. Every call sends exactly this interface_version
+2 shape. For each request, populate
 every observation kind the helper has requested at least once during this acquisition;
 keep an observation kind `null` until the helper requests it:
 
 ```json
 {
-  "interface_version": 1,
+  "interface_version": 2,
   "issue": 73,
-  "now": "2026-08-20T10:00:00Z",
+  "now": "2026-09-24T10:00:00Z",
   "attempt_budget_minutes": 180,
   "new_run": false,
   "owner_unavailable": false,
   "tracker": null,
   "worktree": null,
-  "forge": null
+  "forge": null,
+  "delivery_contract": null,
+  "authorization_intents": [],
+  "authority_observations": [],
+  "reevaluation_evidence": [],
+  "delivery_observations": [],
+  "requested_scope": null,
+  "recovery": null
 }
 ```
 
 The concrete `issue`, `now`, and `attempt_budget_minutes` values above stand for
 the values just resolved; they are not fixed literals. Keep every unrequested
-nullable observation slot (`tracker`, `worktree`, `forge`) `null`, and add no
-keys. Invoke only:
+nullable observation slot (`tracker`, `worktree`, `forge`, `delivery_contract`)
+`null`, keep `authorization_intents` `[]` until a contract is sent, keep
+`authority_observations`, `reevaluation_evidence` and `delivery_observations`
+`[]` and `requested_scope` and `recovery` `null`, and add no keys. Invoke only
+this one command; it feeds the request on stdin as `--request-file -` and
+validates the reply before decoding.
 
 ```text
-workflow-state direct-owner --repo-root <ledger_repo_root> --request-file <absolute-json-path>
+workflow-state direct-owner --repo-root <ledger_repo_root> --request-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
+<request JSON>
+EOF
 ```
 
 Always send both flags. Both default to
@@ -88,32 +128,68 @@ Validate the response as exactly one closed discriminator and continue as
 follows:
 
 1. **`kind: observe`** — require exactly `interface_version`, `kind`, `issue`,
-   nullable `run_id`, and `requirements`, then accept only the four exact
+   nullable `run_id`, and `requirements`, then accept only the five exact
    requirement shapes, in the returned order: `{"kind":"tracker"}`;
    `{"kind":"recorded_worktree", "path":"<absolute-path>"}`;
-   `{"kind":"candidate_worktree"}`; or
-   `{"kind":"forge_pr", "path":"<issue-branch-prefix>"}`. For
+   `{"kind":"candidate_worktree"}`;
+   `{"kind":"forge_pr", "path":"<issue-branch-prefix>"}`; or
+   `{"kind":"delivery_contract", "subject_id":"<issue>",
+   "reason_code":"delivery_contract_required", "detail_pointer":null}`. For
    `tracker`, query the existing tracker adapter only. For
    `recorded_worktree`, inspect exactly the returned path only. For
    `candidate_worktree`, reserve and verify one absent issue-branch candidate
    only. For `forge_pr`, observe only the issue branch's pull request at the
-   returned prefix and populate the request's `forge` slot. For the duration of this acquisition, retain every fact previously requested during this acquisition;
+   returned prefix and populate the request's `forge` slot. For
+   `delivery_contract`, which the helper asks last, where a dispatch would
+   follow, build the contract with one command:
+
+   ```text
+   workflow-state build-delivery --repo-root <ledger_repo_root> --kind contract --input - <<'EOF'
+   {"issue": <num>, "worktree": "<absolute-worktree>", "source_kind": "explicit_user", "source_reference": "invocation:/from-issue <num> --auto", "now": "<RFC3339-now>"}
+   EOF
+   ```
+
+   `worktree` is the recorded worktree when the helper named one, else the
+   reserved candidate: the contract binds custody to that exact path, and the
+   helper refuses a contract naming any other. The builder seals the policy
+   `resolve-project` resolves at `--repo-root`, the ledger repository root;
+   when `worktree` already exists, it also resolves there and refuses if any
+   sealed policy member differs. Put the printed `contract` in
+   `delivery_contract` and its `initial_intent` as the only member of
+   `authorization_intents`. A builder refusal (exit 2, empty stdout) fails
+   loudly; report the builder's stderr line verbatim: for a resolver refusal
+   it carries the resolver's `error.code`, `repair_id` and ordered
+   `violations` exactly. For the duration of this acquisition, retain every fact previously requested during this acquisition;
    carry all collected facts into each later strict request, refreshing a value
    when its external state may have changed; never send a fact kind before the helper requests it.
-   Write a new absolute temporary request file beneath `${TMPDIR:-/tmp}` and
-   call `direct-owner` again. Unknown, duplicate, or malformed requirements
-   fail loudly.
+   Resend with every retained fact and call `direct-owner` again. Unknown,
+   duplicate, or malformed requirements fail loudly.
 2. **`kind: owner`** — validate the exact closed response shape, then adopt its
    `ledger_repo_root`, `run_id`, `issue`, `attempt`, `owner`, `action_id`,
    `launch_kind`, `worktree`, `handoff_path`, and `deadline_at` as this
-   invocation's complete persisted lifecycle identity. Continue the existing
-   Phase 0–7 owner flow. Do not spawn or reserve another owner or worktree.
-3. **`kind: terminal`** — require exactly `interface_version`, `kind`, `issue`,
+   invocation's complete persisted lifecycle identity, and keep its `custody`,
+   installed `contract`, `contract_digest`, `pending_stage_ids`,
+   `requirements`, `authority_evaluation` and `requested_scope` for the Phase-7
+   handoff. Continue the existing Phase 0–7 owner flow. Do not spawn or reserve
+   another owner or worktree.
+3. **`kind: delivery_remainder`** — the validated object names a delivery
+   remainder, not an implementation owner. Skip Phases 0–6: launch ship-issue
+   remainder mode through the existing `from-issue-ship-owner` site with
+   `ship-handoff.md`'s `## Remainder owner prompt`, carrying the object
+   verbatim. The remainder owner writes its own `finish --summary-file -`;
+   validate its returned bytes at the `workflow-response` boundary (a
+   `finish` response or a `delivery_stalled` checkpoint reply) and relay them
+   unchanged. A return of only the re-entry line `/from-issue <num> --auto`
+   means a checkpointed denial already suspended the remainder: relay that
+   line without validation. This invocation writes no `finish` of its own.
+4. **`kind: terminal`** — require exactly `interface_version`, `kind`, `issue`,
    nullable `run_id`, `source`, `reason`, `blockers`, nullable `result`, and
    `reentry`; return the compact response unchanged to the caller, stop before
    Phase 1, and install no waiter.
 
-Clear the retained observation set on `owner`, `terminal`, or any failure.
+Clear the retained observation set on `owner`, `delivery_remainder`,
+`terminal`, or any failure. A later re-entry sends `delivery_contract` null
+again: once installed, the ledger's contract governs.
 
 An unknown response kind, invalid shape, or loud helper error fails loudly and
 ends acquisition. It is never a signal to fall back to another lifecycle or
@@ -130,13 +206,24 @@ return.
 
 Only when an interactive user explicitly requests durable standalone orchestration,
 resolve an immutable `ledger_repo_root` and stable run ID, call
-bounded `workflow-state init-run`, and consume only its bounded `requirements`.
-Gather normalized tracker facts and a verified worktree observation for this one
-issue, then write a strict version-1 request with `max_parallel: 1` and the
-resolved attempt budget and call `workflow-state control`. Require exactly one
-dispatch action and require that the first `spawn` envelope is for this issue,
-then adopt its run, issue, attempt, owner token, action ID, and exact worktree as
-this invocation's lifecycle identity; do not spawn another owner. Missing,
+bounded `workflow-state init-run`, and consume only its bounded `requirements`
+from the validated `workflow_bootstrap`. Gather normalized tracker and forge
+facts and a verified worktree observation for this one issue. Build its
+contract with `workflow-state build-delivery --kind contract` (source
+`explicit_user`, reference `invocation:/from-issue <num>`) under
+orchestrate-issues' per-issue contract rule: from the requirement's
+`recorded_worktree` when the bootstrap requirement's `contract_digest` is null;
+with no requirement, from the reserved candidate, on the first call only when this invocation created the run,
+and on a reused run only once a control summary carries
+`delivery_contract_required` (send null until then). Then send the interface-3 control request — orchestrate-issues' exact
+18-key shape, with `host_route: "direct"`, `max_parallel: 1`, `human_directed: true`, the resolved
+attempt budget, the contract and `[initial_intent]` (null and `[]` once a
+contract is installed) — and call `workflow-state control` with
+`--request-file -`. Require exactly one dispatch action and require that the
+first `spawn` envelope is for this issue, then project it into the owner object
+as orchestrate-issues does and adopt its run, issue, attempt, owner token,
+action ID, custody, contract and exact worktree as this invocation's lifecycle
+identity; do not spawn another owner. Missing,
 wrong-kind, wrong-issue, or multiple dispatch actions fail loudly before Phase
 1. The helper may also return its one trailing `wait` action; this
 already-running owner does not install the dispatcher's observer.
@@ -149,9 +236,9 @@ name does not resolve on PATH, invoke it by that full path.
 ```
 0. Investigate        → summary + open questions (no files yet)
 1. Worktree (skill)   → isolated workspace off origin/<integration-branch>
-2. Brainstorm (skill) → <specDir>/<date>-<topic>-design.md
+2. Brainstorm (skill) → <specification-directory>/<date>-<topic>-design.md
 3. Grill (skill)      → spec refinements + context-doc / ADR updates
-4. Plan (skill)       → <planDir>/<date>-<feature>.md
+4. Plan (skill)       → <plan-directory>/<date>-<feature>.md
 5. Standards review   → Codex plan review, native fallback, or self-grade
 6. Execute (skill)    → subagent-driven-development
 7. Ship (skill)       → ship-issue: PR, review, CI, merge, cleanup
@@ -188,6 +275,10 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 ## Dispatch, phase-budget and attempt-budget rules
 
 **Structured report-backs.** A subagent's final message is re-read by its caller on every later turn, so every `Agent` dispatch states the applicable fixed JSON return schema; details live in budgeted worktree files. Prefer the tiered agent types over `general-purpose`.
+
+**Leaf-agent clauses.** Every prompt this skill or a file beside it composes for an `Agent` dispatch carries these two sentences verbatim, as a paragraph of their own; a prompt built from `ship-handoff.md` already carries them:
+
+> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see.
 
 **Artifact report boundary (D5, D6, D11, D14).** At every producer boundary,
 preserve the received stdout bytes and pipe them unchanged through
@@ -282,19 +373,37 @@ Without lifecycle identity, apply the same action order locally with the
 
 ## Terminal return procedure
 
-Use this one procedure for Phase-0 content stops, attempt budget stops, execution failure,
-and Phase-7 success whenever lifecycle identity exists. Assemble a new absolute
-temporary result file beneath `${TMPDIR:-/tmp}`, removed under an unconditional
-cleanup that runs on every outcome, including validation rejection and failure:
-a shell `trap` on `EXIT HUP INT TERM`, or the equivalent `finally`. Its JSON
-holds exactly `issue`, `state`, `pr_url`, `merge_sha`, `issue_closed`,
-`discussion_items`, `detail_state`, `report_path`, and `notes`. Validate the
-candidate with `artifact-budget validate-report --boundary ship-summary`; use
-only its canonical stdout as the `--result-file` bytes. The policy's
-`phase_reports.notes_max_characters` is authoritative. Pass it with
-`--result-file <path>` to `workflow-state finish` using the exact run, issue,
-attempt, and current time. Capture stdout; only after that durable write succeeds,
-send the exact JSON from stdout unchanged to the caller.
+Use this one procedure for Phase-0 content stops, attempt budget stops, execution
+failure, and Phase-7 success whenever lifecycle identity exists. The terminal
+result is one `ship-summary/v2` bound to the exact current custody and
+contract digest. After Phase 7 it is the ship owner's returned summary, which
+carries the fresh delivery, authority, and reevaluation observations that establish the
+reported delivery state (`delivery_complete` with the legacy `merged` row as
+`historical_owner_result`, or `terminal_failed` with a `stopped`/`failed` row
+and its partial observations). For a stop before Phase 7, assemble it here:
+`state: terminal_failed`, the owner object's `custody`, its `contract_digest` as
+`delivery_contract_digest`, the validated legacy `stopped` or `failed` row only
+as `historical_owner_result`, and empty delivery, authority, and reevaluation
+arrays. Validate the raw candidate with `artifact-budget validate-report
+--boundary ship-summary --input -` before decoding, and use only its canonical
+stdout as the summary bytes. The policy's `phase_reports.notes_max_characters`
+is authoritative. After the `check-launch` fence of this owner's own
+`action_id`, feed those bytes on stdin as `--summary-file -` to
+`workflow-state finish` using the exact run and current time, in one command
+whose reply is validated before decoding:
+
+```text
+workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --summary-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
+<canonical ship-summary/v2>
+EOF
+```
+
+Only after that durable write succeeds, send those canonical bytes — the
+validated `finish` reply — unchanged to the caller. A `terminal_failed` summary
+after selection may come back as a `delivery_remainder` reply: delivery
+continues under a remainder custody. Relay it unchanged all the same; the next
+acquisition or control sweep launches it.
+The legacy `--issue/--attempt/--result-file` transport is historical input only: it records a v1 owner's result for an attempt launched before interface 2 and is never used by a new run.
 
 The earlier direct-autonomous controller that delegated at the mandatory
 Phase-5 rollover does not run this procedure after receiving the fresh owner's
@@ -333,17 +442,17 @@ Handoff is the deliberate context rollover with a handoff document; suspension i
 
 ## Phase 0 — Investigate
 
-Build a shared mental model *before* the brainstorm. No files yet. Read `investigate.md` for the pre-flight queries and the note structure. (When `issueTracker.kind=none`, skip the fetch and PR pre-flight.)
+Build a shared mental model *before* the brainstorm. No files yet. Read `investigate.md` for the pre-flight queries and the note structure. (When the retained tracker capability is unsupported, skip the fetch and PR pre-flight.)
 
-**Pre-flight** — two sessions racing on one issue is the most expensive failure this flow produces. Run the PR pre-flight per `investigate.md`: exact matching open or merged work is reconciled within existing authorization; unknown, competing, or differently scoped work stops for the specific missing decision. Then `git worktree list | grep <worktreePrefix>issue-<num>-`:
+**Pre-flight** — two sessions racing on one issue is the most expensive failure this flow produces. Run the PR pre-flight per `investigate.md`: exact matching open or merged work is reconciled within existing authorization; unknown, competing, or differently scoped work stops for the specific missing decision. Then run `git worktree list` and keep the entries whose bracketed branch field starts with `<bindings.vcs.worktree.prefix>issue-<num>-`:
 
 - none → continue;
-- one → **inspect before touching it**; a "clean" tree can still hold committed work that only ships at Phase 7. Check four signals: unpushed commits (`git log origin/<integration-branch>..<branch> --oneline`); workflow-state ledger attempts naming it that are `active` or `handed_off`; tracker/PR state referencing the branch; spec/plan artifacts under `specDir`/`planDir` inside it. If **any** exist → prefer resume: resume that worktree when existing authorization covers the exact continuation; otherwise ask for the missing decision. On conflicting signals stop as blocked through the terminal return procedure. Deletion (`git worktree remove` + `git branch -D`) only when **provably disposable**: zero commits ahead, no active or handed-off ledger attempt, no spec/plan artifacts, no uncommitted work;
+- one → **inspect before touching it**; a "clean" tree can still hold committed work that only ships at Phase 7. Check four signals: unpushed commits (`git log origin/<integration-branch>..<branch> --oneline`); workflow-state ledger attempts naming it that are `active` or `handed_off`; tracker/PR state referencing the branch; spec/plan artifacts under the retained specification and plan directories inside it. If **any** exist → prefer resume: resume that worktree when existing authorization covers the exact continuation; otherwise ask for the missing decision. On conflicting signals stop as blocked through the terminal return procedure. Deletion (`git worktree remove` + `git branch -D`) only when **provably disposable**: zero commits ahead, no active or handed-off ledger attempt, no spec/plan artifacts, no uncommitted work;
 - one with uncommitted work → **stop and ask the user**; their in-progress state isn't yours to discard;
 - several → stop and ask which to resume or discard.
 
 Investigate per `investigate.md` and post the note. Several issues bundled → stop, suggest `to-issues`. Question or duplicate → report and stop. Every Phase-0 early stop uses the terminal return procedure when lifecycle identity
-exists: write a `stopped` or `failed` result through `workflow-state finish` before notifying the caller.
+exists: write a `terminal_failed` summary carrying the `stopped` or `failed` row through `workflow-state finish` before notifying the caller.
 
 **Open questions is mandatory even in `--auto`** — self-answering happens in the spec's `## Decision ledger`, not by dropping the section. With nothing open, write "None — Phase 2 will surface anything missed".
 
@@ -381,7 +490,7 @@ stays bound to this path through shipping and cleanup. No lifecycle acquisition 
 
 A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
 
-1. `git fetch origin`. Invoke `worktrees` (it encodes the destructive-ops carve-out, the prefix contract, and the position checks before `EnterWorktree`/`ExitWorktree`). Branch = `branchNaming.pattern`; the on-disk branch carries `branchNaming.worktreePrefix` — both forms are accepted downstream, don't strip it.
+1. `git fetch origin`. Invoke `worktrees` (it encodes the destructive-ops carve-out, the prefix contract, and the position checks before `EnterWorktree`/`ExitWorktree`). Branch names come from retained `bindings.vcs`; both configured forms are accepted downstream, don't strip them.
 2. **Base on `origin/<integration-branch>`**, never the local branch, which may carry other agents' in-flight commits. The merge happens later, in `ship-issue`.
 3. `cd` into the worktree; every later phase runs inside it. Verify `git rev-parse --git-common-dir` ≠ `git rev-parse --git-dir`.
 
@@ -389,7 +498,7 @@ A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
 
 ## Phase 2 — Brainstorm
 
-Invoke `design` for a design doc under `specDir`, committed in the worktree. Ground first per `grounding.md`. Resolve every Phase-0 carryover before opening a new question.
+Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Ground first per `grounding.md`. Resolve every Phase-0 carryover before opening a new question.
 
 **CHECKPOINT** — Record the spec path and approval source. Apply the shared checkpoint rule; existing authorization for autonomous design decisions suffices within its scope.
 
@@ -401,7 +510,7 @@ Invoke `grill-with-docs`. It sharpens the spec against the context doc, surfaces
 
 ## Phase 4 — Plan
 
-Invoke `writing-plans` for a plan under `planDir`, committed in the worktree. The plan header carries a `## Task index` — one line per task: ID, title, files touched, and risk lane assigned here per §Risk lanes. The plan cites ledger rows by ID and appends new non-obvious plan-level decisions to the spec's ledger.
+Invoke `writing-plans` for a plan under the retained plans directory, committed in the worktree. The plan header carries a `## Task index` — one line per task: ID, title, files touched, and risk lane assigned here per §Risk lanes. The plan cites ledger rows by ID and appends new non-obvious plan-level decisions to the specification's ledger.
 
 **Plan-prose ≠ code-prose.** Prose the plan dictates verbatim into the codebase (docstrings, comments, doc sentences, ADR clauses) must describe how the live code *will actually behave*; if you can't say precisely yet, write a TODO and let the execute phase rewrite it from the implemented code.
 
@@ -445,15 +554,20 @@ degradation decision reads them.
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow; a fresh ~10k subagent returns one summary instead of ~100 turns over a 200–300k prefix.
 
-Read `ship-handoff.md` for the exact subagent prompt — it carries the lifecycle envelope (`ledger_repo_root`, run, attempt, owner, `action_id`), branch, worktree, artifact paths, `review_state`, and the fixed report schema. When `ship-issue` is absent, the same file's inline fallback applies.
+Read `ship-handoff.md` for the exact subagent prompt — with lifecycle identity it carries the `ship-handoff/v2` candidate built from the owner object (`ledger_repo_root`, run, owner, `custody`, the installed contract and its builder-regenerated initial intent), branch, worktree, artifact paths, `review_state`, and the fixed `ship-summary/v2` report schema; ledger-free it carries the legacy handoff. When `ship-issue` is absent, the same file's inline fallback applies. The same site launches ship-issue remainder mode for a validated `delivery_remainder` object, with that file's `## Remainder owner prompt`; the remainder owner writes its own `finish`, so its validated reply is relayed unchanged and none of the terminal write below applies to it.
 
 After receiving the ship report, from-issue owns the terminal durable write.
+A report that is only the re-entry line `/from-issue <num> --auto` means the
+ship owner checkpointed a denial, which already suspended this attempt: relay
+that line and write nothing. A report that validates at `--boundary
+workflow-response` as `delivery_stalled` means the checkpoint already ended the
+custody: relay it and write nothing.
 Pipe its received bytes through `artifact-budget validate-report --boundary
 ship-summary --input -`, decode only canonical stdout, consume a durable
 `report_path` before advancing, and never inline either durable or retained
 detail; never inline the report. For `unpublished`, independently re-read the retained candidate through
 `validate-detail-input`, require non-empty findings, keep the worktree, and accept
-only `stopped`/`failed`. Resolve that `report_path` against the owner worktree,
+only `terminal_failed` with a `stopped`/`failed` historical row. Resolve that `report_path` against the owner worktree,
 not `ledger_repo_root` — only a `present` path is primary-checkout-relative, and
 `workflow-state finish` resolves the two the same way.
 Before that terminal write, run
@@ -462,9 +576,10 @@ with this owner's own `action_id`: the ship owner and this parent share one
 launch identity, so a ship report from a superseded launch means this launch is
 superseded too. On `current: false` or any helper failure, write nothing, print
 the canonical re-entry line `/from-issue <num> --auto` on its own line, and
-stop. Then call `workflow-state finish` and send the exact JSON printed on
-stdout unchanged. A fresh ship agent never writes the owner's final ledger
-result. Apply the same procedure to any Phase-6 execution
+stop. Then call `workflow-state finish --summary-file -` with the validated
+`ship-summary/v2` bytes on stdin, per the terminal return procedure, and
+validate its raw response before sending the canonical JSON unchanged. A fresh
+ship agent writes only `checkpoint-delivery` under this custody, never the owner's final ledger result. Apply the same procedure to any Phase-6 execution
 failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating so the two sequences stay distinguishable.
 
 ## Notes
@@ -475,6 +590,6 @@ failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8;
   actions. When neither source grants the action, suspend with
   `blocked_on=human_gate` and print the re-entry line. An actual permission or
   launch-guard denial stops the action and is never routed around.
-- Append `Co-Authored-By` unless `commit.coAuthoredBy` is false. **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
-- **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`**; derive the slug from `repoSlug` if configured, else `git remote get-url origin`.
+- Append `Co-Authored-By` when retained `bindings.vcs.commit.co_authored_by` is true. **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
+- **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`**; use retained `bindings.tracker.repo_slug`.
 - If a phase reveals the previous one was wrong, back up to that phase and redo it. Don't paper over it.

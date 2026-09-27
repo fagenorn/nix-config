@@ -9,13 +9,13 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "agent-evidence.py"
+MODULE = "agent_tools.agent_evidence"
 FIXTURES = Path(__file__).parent / "fixtures" / "evidence"
 
 
 def run_validator(kind: str, fixture: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(SCRIPT), kind, str(FIXTURES / fixture)],
+        [sys.executable, "-m", MODULE, kind, str(FIXTURES / fixture)],
         text=True,
         capture_output=True,
         check=False,
@@ -35,7 +35,20 @@ class AgentEvidenceTest(unittest.TestCase):
             json.dump(document, artifact)
             artifact.flush()
             return subprocess.run(
-                [sys.executable, str(SCRIPT), kind, artifact.name],
+                [sys.executable, "-m", MODULE, kind, artifact.name],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+    def run_text(self, kind: str, text: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".json"
+        ) as artifact:
+            artifact.write(text)
+            artifact.flush()
+            return subprocess.run(
+                [sys.executable, "-m", MODULE, kind, artifact.name],
                 text=True,
                 capture_output=True,
                 check=False,
@@ -395,6 +408,28 @@ class AgentEvidenceTest(unittest.TestCase):
         self.assertNotIn("Traceback", completed.stderr)
         lines = completed.stderr.splitlines()
         self.assertEqual(lines, sorted(lines))
+
+    def test_a_duplicate_key_is_a_parse_error(self):
+        # Evidence composes the shared duplicate-key hook (#175 D3).
+        text = json.dumps(self.fixture("research-corroborated.json"))
+        duplicated = text[:-1] + ', "kind": "research-observations"}'
+
+        completed = self.run_text("research", duplicated)
+
+        self.assert_diagnostic(completed, "JSON_INVALID")
+        self.assertIn("JSON_INVALID $: duplicate JSON key 'kind'", completed.stderr)
+
+    def test_a_nan_literal_parses_and_is_left_to_the_validator(self):
+        # Evidence does not compose the non-finite hook (#175 D3): NaN parses,
+        # and the validator judges it like any other wrong-typed value.
+        document = self.fixture("research-corroborated.json")
+        document["schema_version"] = float("nan")
+
+        completed = self.run_document("research", document)
+
+        self.assert_diagnostic(completed, "FIELD_TYPE")
+        self.assertIn("FIELD_TYPE $.schema_version: expected an integer", completed.stderr)
+        self.assertNotIn("JSON_INVALID", completed.stderr)
 
 
 if __name__ == "__main__":

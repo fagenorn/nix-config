@@ -1,12 +1,15 @@
 # Phase-5 plan review contract
 
-Operational contract for `from-issue` Phase 5. The Phase-5 caller executes the
-caller sections in order. Only after the pre-dispatch boundary passes does it
-hand this file's **path** to the reviewer (or to `codex-collaboration`, which
+Operational contract for `from-issue` Phase 5. This included document receives
+the phase owner's retained `ResolvedProject`; it uses passed
+`bindings.workflow.review`, `bindings.commands`, and capability states without
+resolving or inferring policy. The Phase-5 caller executes the caller sections
+in order. Only after the pre-dispatch boundary passes does it hand this file's
+**path** to the reviewer (or to `codex-collaboration`, which
 passes it by path in the review packet). It supplies concrete values for every
 `<placeholder>` and binding named below — plan root path, its four checker
-metrics, spec path, issue number, `<tracker-cli>`, `unsetGithubToken`,
-`docPaths.*`, `projectHints`, and the optional review focus. The orchestrator
+metrics, spec path, issue number, passed `bindings.tracker`, `bindings.paths`,
+and the configured review capability. The orchestrator
 never inlines this text into its own context.
 
 ## Caller pre-dispatch boundary
@@ -35,17 +38,13 @@ Before reviewing, read the root and every indexed member in checker discovery
 order. Explicitly report an unreadable member as a blocking contract failure;
 never fall back to monolithic task parsing.
 
-First ground in the project's docs: invoke `doc-grounded-questions` if available, else ground
-map-first — read the context map (`docPaths.contextMap`, else `docs/CONTEXT-MAP.md`, else legacy root `CONTEXT-MAP.md`) and open only
-the area `CONTEXT.md` files whose `governs:` globs intersect the plan's touched paths or whose terms
-appear in the issue; ADRs (the loaded areas' `adr/` dirs, plus `system`; `docPaths.adrDir` only in legacy
-repos) only when cited; the standards layers that apply
-(`~/.agents/standards/the-bar.md`, its `stacks/` shards matching the diff's file types, and the
-project's `docs/standards/` shards whose globs intersect). Only when the project has no map, fall
-back to reading `docPaths.{context,standards,architecture}` whole. Then
-read the issue body (`<tracker-cli> issue view <num>` — prefix with `unset GITHUB_TOKEN &&` only if
-`unsetGithubToken` is true), the spec at `<spec-path>`, and the validated plan
-root plus every member.
+First ground with the retained `bindings.paths.context`, `bindings.paths.standards`,
+and `bindings.paths.architecture` lists plus `capabilities.knowledge.*`: the caller
+passes the selected map (if any), its selected areas and ADR paths, and the
+standards paths that apply. With no selected map, use only those passed context
+paths. Read the issue body through `bindings.tracker.cli` after unsetting only
+names in `bindings.tracker.credential_env.unset_before_invocation`, then read the
+spec at `<spec-path>` and the validated plan root plus every member.
 
 When checking specific findings, **read the live file at HEAD** rather than relying on snapshot/diff
 views — code may have been edited since the plan was written, and stale snapshots produce
@@ -58,9 +57,8 @@ framework-first (custom executors/state machines where a framework primitive alr
 production-grade-by-default (half-finished branches, missing error paths at boundaries), DI rules, and
 the test-fixture conventions in the project's standards shards (or legacy coding-standards doc).
 
-If `projectHints` is configured and present (a directory → its `review.md`; a single file → itself), read it for project-specific review
-hints/examples and fold those into this pass (e.g. recurring repo-specific plan bugs that have escaped
-review before).
+If the caller passes applicable `bindings.paths.hints` paths, read them for
+project-specific review hints and fold those into this pass.
 
 ## Common-miss checklist
 

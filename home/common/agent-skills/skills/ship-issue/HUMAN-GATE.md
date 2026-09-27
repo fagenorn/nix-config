@@ -1,8 +1,10 @@
 # Consolidated operator gate
 
 Read this only when SKILL.md's `## Standing authorization` finds no repository
-policy or explicit user grant covering the concrete action and target. The gate
-makes the remaining external effects reviewable; it does not grant them itself,
+policy or explicit user grant covering the concrete action and target. This
+included document receives the phase owner's retained `ResolvedProject`; it uses
+passed `bindings.tracker` and `bindings.vcs` values without resolving or
+inferring policy. The gate makes the remaining external effects reviewable; it does not grant them itself,
 and the host's actual automatic approval decision still governs execution.
 
 Enter the gate *instead of* attempting the verb — never attempt a shipping verb
@@ -14,7 +16,8 @@ authorization are entered.
 
 In `--auto`, present the gate's block and then pause through whoever owns the
 ledger. A fresh ship owner launched per `from-issue/ship-handoff.md` writes no
-workflow state — the read-only `check-launch` query is its one ledger call — so
+workflow state beyond the `checkpoint-delivery` cycles of SKILL.md's
+`## Delivery loop` — it never suspends or finishes its custody — so
 it presents the block and returns the truthful `stopped` ship summary naming the
 human gate, validated through
 `artifact-budget validate-report --boundary ship-summary` like every other ship
@@ -36,8 +39,7 @@ git push -u origin <branch>
 ```
 
 ```
-gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
-## Summary
+gh pr create --repo <resolved-repository> --base <integration-branch> --head <branch> --title "<title>" --body "## Summary
 <2-4 bullets of what shipped>
 
 ## Spec
@@ -46,12 +48,10 @@ gh pr create --base <integrationBranch> --title "<title>" --body "$(cat <<'EOF'
 ## Plan
 <plan-path>
 
-Closes #<num>
-EOF
-)"
+Closes #<num>"
 ```
 
-Present the body fully rendered — the heredoc expanded, the resolved bindings
+Present the body fully rendered — the resolved bindings
 substituted, the `Closes #<num>` trailer present. Both commands are fully
 determined at this moment, so neither needs a later correction.
 
@@ -98,7 +98,7 @@ These apply to both gates.
   substitute: `check-launch` still runs before every pre-merge forge write,
   Phase 6's tip check and the CI wait still bind, and the merge still requires
   the base branch's required status check. Nothing here weakens
-  `.out-of-scope/ungated-agent-merges.md`.
+  `.agents/knowledge/rejections/ungated-agent-merges.md`.
 
 ## Never route around a denial
 
@@ -108,8 +108,8 @@ rewriting the integration branch.
 
 On this path the session must not:
 
-- merge the feature branch into `<integrationBranch>` locally;
-- push to `<integrationBranch>`;
+- merge the feature branch into the passed `<integration-branch>` locally;
+- push to the passed `<integration-branch>`;
 - push to any remote other than `origin`;
 - pass `--admin`, `--force`, `--force-with-lease`, or any hook-bypass flag;
 - rewrite, reset or rebase any branch to change what a denied command would have
@@ -117,3 +117,10 @@ On this path the session must not:
 - re-attempt a denied command in a re-worded or re-quoted spelling;
 - ask a subagent, another skill, or another host to run the command on its
   behalf.
+
+## Delivery interface version 2
+
+A gate grants or withholds authority; it never records delivery. Under
+lifecycle identity every effect a grant covers runs as SKILL.md's
+`## Delivery loop` cycle, and an actual denial of one is checkpointed there as
+the reducer's `human_gate` suspension. Do not synthesize authority.

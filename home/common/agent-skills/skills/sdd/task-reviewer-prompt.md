@@ -161,6 +161,11 @@ Subagent (reviewer, Opus/high as selected above):
     Acknowledge what was done well before listing issues — accurate praise
     helps the implementer trust the rest of the feedback.
 
+    Launch any subagent by type only, never by name: a subagent cannot spawn a
+    named teammate, and a named launch returns an error instead of work. Read an
+    existing file before writing to it: overwriting content you have not read
+    destroys work you cannot see.
+
     ## Output Format
 
     ### Spec Compliance

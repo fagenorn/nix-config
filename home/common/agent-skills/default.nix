@@ -36,23 +36,25 @@ let
       source = ./skills + "/${name}";
     }
   ) localSkillSources;
+
+  # Each command-table row of lib/agent-tools.nix becomes ~/.agents/bin/<name>.
+  # It enters home.file as a separate definition, so a leftover hand-written
+  # entry for the same command is a conflicting definition, not a silent win.
+  agentTools = import ../../../lib/agent-tools.nix { inherit pkgs; };
+  agentToolFiles = lib.mapAttrs' (
+    name: launcher: lib.nameValuePair ".agents/bin/${name}" { source = launcher; }
+  ) agentTools.launchers;
 in
 {
   # Keep ~/.agents/skills writable while linking each complete skill directory.
   # Claude Code consumes the same authored sources through skillsDir below.
-  home.file = localSkillFiles // {
+  home.file = lib.mkMerge [ (localSkillFiles // {
     ".agents/skills/ui-ux-pro-max".source = uiUxSkill;
 
     # Layers 0 and 1 of the standards architecture, machine-global so every
     # project inherits the bar and its stack's trap library. Layer 2 (project
     # deltas) stays in each repo under docs/standards/.
     ".agents/standards".source = ./standards;
-
-    # Stable path project CIs can call without vendoring the script.
-    ".agents/bin/context-map-lint" = {
-      source = ../../../scripts/context-map-lint.py;
-      executable = true;
-    };
 
     ".agents/bin/workflow-state" = {
       source = ./scripts/workflow-state.py;
@@ -82,23 +84,8 @@ in
       executable = false;
     };
 
-    ".agents/bin/agent-model-matrix" = {
-      source = ./scripts/agent-model-matrix.py;
-      executable = true;
-    };
-
-    ".agents/bin/resolve-bindings" = {
-      source = ./scripts/resolve-bindings;
-      executable = true;
-    };
-
-    ".agents/bin/agent-evidence" = {
-      source = ./scripts/agent-evidence.py;
-      executable = true;
-    };
-
-    ".agents/bin/diff-scope" = {
-      source = ./scripts/diff-scope.py;
+    ".agents/bin/adopt-project" = {
+      source = ./scripts/adopt-project.py;
       executable = true;
     };
 
@@ -125,7 +112,39 @@ in
     };
 
     ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
+    ".agents/lib/python/workflow_delivery.py".source = ./scripts/workflow_delivery.py;
+    ".agents/lib/python/workflow_delivery_wire.py".source = ./scripts/workflow_delivery_wire.py;
+    ".agents/lib/python/workflow_delivery_build.py".source = ./scripts/workflow_delivery_build.py;
+    ".agents/lib/python/delivery_model" = {
+      source = ./scripts/delivery_model;
+      recursive = false;
+    };
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
+
+    # The shared platform library and the manifest it reads. The library is
+    # imported, never run, so it gets no `executable = true`; the manifest is
+    # authored data with nothing templated, so this store copy is byte-identical
+    # to the repository's (D1).
+    ".agents/lib/python/agent_platform.py".source = ./scripts/agent_platform.py;
+    ".agents/share/platform-manifest.json".source = ./platform-manifest.json;
+
+    # The host admission library and the host declaration it reads. The
+    # declaration is authored host policy -- per route, whether it is supported
+    # and how many agent slots one root session may hold -- read by
+    # `workflow-state` and the conformance check through that library, which is
+    # imported, never run (D2, D18).
+    ".agents/lib/python/host_admission.py".source = ./scripts/host_admission.py;
+    ".agents/share/host-declaration.json".source = ./host-declaration.json;
+
+    # The four layers `adopt-project` is built from: the bounded inspection and
+    # its closed vocabulary, the planning derived from it, the apply mechanics
+    # and the verify mechanics. Imported, never run, so none gets
+    # `executable = true`; they install beside `agent_platform.py` because the
+    # binary binds all five from that one directory with no fallback ladder.
+    ".agents/lib/python/adopt_inspection.py".source = ./scripts/adopt_inspection.py;
+    ".agents/lib/python/adopt_planning.py".source = ./scripts/adopt_planning.py;
+    ".agents/lib/python/adopt_apply.py".source = ./scripts/adopt_apply.py;
+    ".agents/lib/python/adopt_verify.py".source = ./scripts/adopt_verify.py;
 
     # Claude accepts Home Manager's recursive file links, so its generated
     # multi-file skill can continue to use that layout.
@@ -133,7 +152,7 @@ in
       source = uiUxSkill;
       recursive = true;
     };
-  };
+  }) agentToolFiles ];
 
   # One-time migration from the previous `recursive = true` layout. Those
   # generations leave a real directory at each target, which would collide

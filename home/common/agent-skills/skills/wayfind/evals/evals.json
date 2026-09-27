@@ -1,12 +1,12 @@
 {
   "skill_name": "wayfind",
-  "notes": "Pipeline evals, all in the markdown-tracker mode: the fixture's `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the map and its decision tickets are files under `.claude/wayfind/<effort>/` rather than issues. The fixture ships one pre-charted effort, `concurrent-shells` (a map, an unblocked `wayfinder:task` ticket, a `wayfinder:grilling` ticket blocked by it, and two fog entries), which eval 2 works and evals 1 and 3 must leave alone \u2014 the chart-mode asserts therefore ignore that directory and grade whatever new effort dir appears beside it. Asserts read file content rather than `git diff HEAD`, so they hold whether or not the run commits; where a diff is needed the ref is `origin/main`, which the harness pushed before the run and the session has no reason to move.",
+  "notes": "Pipeline evals use a retained ResolvedProject. Its tracker capability is unsupported, so maps and tickets are markdown under `.claude/wayfind/<effort>/`; refusal is fatal and policy is never defaulted or inferred. The fixture ships the pre-charted `concurrent-shells` effort, which eval 2 works and evals 1 and 3 leave alone.",
   "evals": [
     {
       "id": 1,
       "name": "chart-a-foggy-effort",
       "mode": "pipeline",
-      "prompt": "/wayfind tinytask should be able to keep one backlog in sync across my laptop and my desktop\n\nContext you need before you start:\n\n- This project has no issue tracker \u2014 `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so whatever you chart is markdown in this repo.\n- `docs/areas/backlog/CONTEXT.md` lists sync between machines under \"Deliberately out of scope\" and says proposals in that direction need an ADR before code. Working out what that ADR would have to settle is the point of this session.\n- An unrelated effort is already charted under `.claude/wayfind/concurrent-shells/` \u2014 two shells racing on one machine. Leave it where it is.\n\nIn your final message say where you put the map and list what you created.\n- Nobody is present to answer questions in this session. Where a grilling round would normally wait for a human, adopt your own \u27a1\ufe0f recommendations and keep going (the same way from-issue --auto self-resolves rounds) \u2014 charting must complete within this session.",
+      "prompt": "/wayfind tinytask should be able to keep one backlog in sync across my laptop and my desktop\n\nResolve once into a retained ResolvedProject. Its tracker capability is unsupported, so chart markdown; refusal is fatal and policy is never defaulted or inferred. `docs/areas/backlog/CONTEXT.md` requires an ADR. Leave `.claude/wayfind/concurrent-shells/` alone. Adopt recommendations autonomously and report the map and created files.",
       "expected_output": "A new effort directory beside `concurrent-shells/` holding a map with a destination, a sketched fog section and an out-of-scope section, plus a handful of typed decision tickets \u2014 transport, conflict resolution, task identity across machines, whether the single-file store survives \u2014 wired into a frontier and a blocked set. Nothing is resolved: charting is one session's work and it answers none of its own questions. No source file is touched.",
       "asserts": [
         {
@@ -47,7 +47,7 @@
       "id": 2,
       "name": "work-one-ticket-off-the-frontier",
       "mode": "pipeline",
-      "prompt": "/wayfind work the map at `.claude/wayfind/concurrent-shells/map.md`\n\nThis project has no issue tracker \u2014 `.claude/skills.config.json` sets `issueTracker.kind` to `none`, so the markdown files under `.claude/wayfind/concurrent-shells/` are the whole tracker for this effort.\n\nIn your final message name the ticket you took and how you resolved it.",
+      "prompt": "/wayfind work the map at `.claude/wayfind/concurrent-shells/map.md`\n\nResolve once into a retained ResolvedProject. Its tracker capability is unsupported, so the markdown files are this effort's tracker; refusal is fatal and policy is never defaulted or inferred.\n\nName the ticket and resolution.",
       "expected_output": "The session takes the one frontier ticket \u2014 `001-name-the-failure-mode`, an AFK `wayfinder:task` \u2014 claims it, drives two mutations at one task file to observe the lost update, records the facts as its resolution and closes it, then appends a one-line gist to the map's Decisions so far and clears the fog entry that resolution answered. `002` stays open and unresolved: it is blocked, it is HITL, and one session resolves one ticket. `tinytask/` is not modified \u2014 the ticket asks for facts, not a fix.",
       "asserts": [
         {
@@ -81,7 +81,7 @@
       "name": "no-fog-declines-to-chart",
       "mode": "pipeline",
       "note": "guards step 2 of Chart the map: no fog surfaced means no map, route onward",
-      "prompt": "/wayfind tinytask's `list` output should end with a line saying how many tasks it printed\n\nThis project has no issue tracker \u2014 `.claude/skills.config.json` sets `issueTracker.kind` to `none`. An unrelated effort is already charted under `.claude/wayfind/concurrent-shells/`; this idea has nothing to do with it.\n\nIn your final message say whether this needs a map, and what you would do next.",
+      "prompt": "/wayfind tinytask's `list` output should end with a line saying how many tasks it printed\n\nResolve once into a retained ResolvedProject. Its tracker capability is unsupported; refusal is fatal and policy is never defaulted or inferred. Leave the unrelated `.claude/wayfind/concurrent-shells/` effort alone.\n\nSay whether this needs a map and what comes next.",
       "expected_output": "No map. The change is one session's work against a documented output contract, so the breadth-first pass surfaces no fog and the skill says so and routes the idea to `design` or `to-issues` instead of charting it. The existing effort is untouched and no source file changes.",
       "asserts": [
         {

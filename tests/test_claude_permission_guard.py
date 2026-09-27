@@ -15,7 +15,9 @@ EXPECTED_ALLOW = [
     "Bash(git worktree add:*)", "Bash(git worktree list:*)",
     "Bash(git worktree remove:*)", "Bash(git worktree prune:*)",
     "Bash(git push:*)", "Bash(gh pr create:*)",
-    "Bash(git branch -d:*)", "Bash(gh pr merge:*)", "Agent",
+    "Bash(git branch -d:*)", "Bash(gh pr merge:*)",
+    "Bash(workflow-state:*)", "Bash(~/.agents/bin/workflow-state:*)",
+    "Bash(artifact-budget:*)", "Bash(~/.agents/bin/artifact-budget:*)", "Agent",
 ]
 
 # Stand-in for `gh`. Answers the two lookups the guard makes for any slug and
@@ -192,6 +194,19 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_unrelated_bash_and_exact_branch_delete_pass(self):
         for command in ("git status --short", "git branch -d issue-30-safe"):
             with self.subTest(command=command):
+                result = self.invoke_command(command)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_single_command_lifecycle_calls_pass_the_guard(self):
+        for command in (
+            "workflow-state control --repo-root /r --run-id run --request-file - <<'JSON' "
+            "| artifact-budget validate-report --boundary workflow-response --input -\n"
+            '{"interface_version": 2}\nJSON',
+            "artifact-budget validate-report --boundary ship-summary --input - <<'JSON' "
+            "| ~/.agents/bin/workflow-state finish --repo-root /r --run-id run "
+            "--now 2026-09-24T00:00:00Z --summary-file -\n{}\nJSON",
+        ):
+            with self.subTest(command=command.split()[0]):
                 result = self.invoke_command(command)
                 self.assertEqual(0, result.returncode, result.stderr)
 
@@ -519,7 +534,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_merge_accepts_the_exact_unset_token_prefix(self):
-        # `unsetGithubToken` repositories run the merge as
+        # A resolved exhaustive credential-name list yields the merge prefix
         # `unset GITHUB_TOKEN && gh pr merge ...` so gh falls back to the
         # keyring credential; exactly that literal prefix is grammatical.
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
@@ -742,6 +757,30 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         )
         self.assertEqual(2, result.returncode)
         self.assertIn("lifecycle guard: unexpected failure:", result.stderr)
+
+    def test_hostile_interpreter_environment_is_ignored(self):
+        # Each plant exits 0 before the guard can judge: a BASH_ENV file that the
+        # wrapper's bash would source, a `json` package reached through PYTHONPATH,
+        # and a .pth line reached through NIX_PYTHONPATH, which nixpkgs'
+        # sitecustomize honours even under -I. Seeing any one would turn a refusal
+        # into an allow, so the registered hook must ignore all three.
+        hostile = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        (hostile / "bash_env").write_text("exit 0\n", encoding="utf-8")
+        (hostile / "json").mkdir()
+        (hostile / "json" / "__init__.py").write_text(
+            "import os\nos._exit(0)\n", encoding="utf-8"
+        )
+        (hostile / "hostile.pth").write_text("import os; os._exit(0)\n", encoding="utf-8")
+        result = self.invoke_command(
+            "git branch -d -f topic",
+            env={
+                "BASH_ENV": str(hostile / "bash_env"),
+                "PYTHONPATH": str(hostile),
+                "NIX_PYTHONPATH": str(hostile),
+            },
+        )
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("lifecycle guard: unsafe branch deletion:", result.stderr)
 
 
 if __name__ == "__main__":

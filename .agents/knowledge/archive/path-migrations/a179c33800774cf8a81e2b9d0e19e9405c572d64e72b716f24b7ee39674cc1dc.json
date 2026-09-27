@@ -1,0 +1,1046 @@
+{
+  "migration_id": "sha256:a179c33800774cf8a81e2b9d0e19e9405c572d64e72b716f24b7ee39674cc1dc",
+  "moves": [
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-10-c4g2-review-ladder.md",
+      "old_path": ".claude/plans/2026-08-10-c4g2-review-ladder.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-10-wayfind-skill-hardening.md",
+      "old_path": ".claude/plans/2026-08-10-wayfind-skill-hardening.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-11-detached-reviewer-bridge.md",
+      "old_path": ".claude/plans/2026-08-11-detached-reviewer-bridge.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-11-detached-reviewer-plan-sync.md",
+      "old_path": ".claude/plans/2026-08-11-detached-reviewer-plan-sync.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-11-truthful-job-terminal-states.md",
+      "old_path": ".claude/plans/2026-08-11-truthful-job-terminal-states.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-12-broker-reaping.md",
+      "old_path": ".claude/plans/2026-08-12-broker-reaping.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-12-range-scoped-gates.md",
+      "old_path": ".claude/plans/2026-08-12-range-scoped-gates.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-12-worker-post-mortem.md",
+      "old_path": ".claude/plans/2026-08-12-worker-post-mortem.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-13-durable-workflow-lifecycle.md",
+      "old_path": ".claude/plans/2026-08-13-durable-workflow-lifecycle.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-14-agent-skill-evidence-freshness.md",
+      "old_path": ".claude/plans/2026-08-14-agent-skill-evidence-freshness.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-14-cost-aware-model-matrix.md",
+      "old_path": ".claude/plans/2026-08-14-cost-aware-model-matrix.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-16-codex-collection-budget.md",
+      "old_path": ".claude/plans/2026-08-16-codex-collection-budget.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-16-diff-scope-helper.md",
+      "old_path": ".claude/plans/2026-08-16-diff-scope-helper.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-16-issue-23-scoped-codex-dispatch.md",
+      "old_path": ".claude/plans/2026-08-16-issue-23-scoped-codex-dispatch.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-16-ship-issue-degradation-gate.md",
+      "old_path": ".claude/plans/2026-08-16-ship-issue-degradation-gate.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-17-agent-lifecycle-permissions.md",
+      "old_path": ".claude/plans/2026-08-17-agent-lifecycle-permissions.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-17-ci-required-check.md",
+      "old_path": ".claude/plans/2026-08-17-ci-required-check.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-17-diff-scope-residuals.md",
+      "old_path": ".claude/plans/2026-08-17-diff-scope-residuals.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-17-issue-32-spec-doc-alignment.md",
+      "old_path": ".claude/plans/2026-08-17-issue-32-spec-doc-alignment.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-17-issue-42-shared-design-vocabulary.md",
+      "old_path": ".claude/plans/2026-08-17-issue-42-shared-design-vocabulary.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-17-workflow-lifecycle-hardening.md",
+      "old_path": ".claude/plans/2026-08-17-workflow-lifecycle-hardening.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-18-improve-codebase-architecture.md",
+      "old_path": ".claude/plans/2026-08-18-improve-codebase-architecture.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-19-enforce-artifact-budgets.md",
+      "old_path": ".claude/plans/2026-08-19-enforce-artifact-budgets.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-19-enforce-artifact-budgets.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-19-enforce-artifact-budgets.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-19-enforce-artifact-budgets.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-19-enforce-artifact-budgets.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-19-enforce-artifact-budgets.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-08-19-enforce-artifact-budgets.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-19-enforce-artifact-budgets.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-08-19-enforce-artifact-budgets.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-19-enforce-artifact-budgets.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-08-19-enforce-artifact-budgets.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-19-workflow-control-plane.md",
+      "old_path": ".claude/plans/2026-08-19-workflow-control-plane.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-controller-budget.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-controller-budget.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-controller-budget.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-controller-budget.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-controller-budget.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-controller-budget.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-implementation-owner-rollover.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-implementation-owner-rollover.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-implementation-owner-rollover.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-implementation-owner-rollover.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-implementation-owner-rollover.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-implementation-owner-rollover.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-implementation-owner-rollover.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-implementation-owner-rollover.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-issue-durability.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-issue-durability.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-issue-durability.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-issue-durability.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-direct-autonomous-issue-durability.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-20-direct-autonomous-issue-durability.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-review-orchestration-telemetry.md",
+      "old_path": ".claude/plans/2026-08-20-review-orchestration-telemetry.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-review-orchestration-telemetry.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-20-review-orchestration-telemetry.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-20-review-orchestration-telemetry.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-20-review-orchestration-telemetry.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-claude-md-agent-surface-reconciliation.md",
+      "old_path": ".claude/plans/2026-08-23-claude-md-agent-surface-reconciliation.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-claude-md-agent-surface-reconciliation.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-23-claude-md-agent-surface-reconciliation.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-claude-md-agent-surface-reconciliation.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-23-claude-md-agent-surface-reconciliation.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-codex-reviewer-bridge.md",
+      "old_path": ".claude/plans/2026-08-23-codex-reviewer-bridge.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-codex-reviewer-bridge.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-23-codex-reviewer-bridge.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-codex-reviewer-bridge.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-23-codex-reviewer-bridge.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-codex-reviewer-bridge.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-08-23-codex-reviewer-bridge.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-quota-suspension-and-ship-gate.md",
+      "old_path": ".claude/plans/2026-08-23-quota-suspension-and-ship-gate.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-6.md",
+      "old_path": ".claude/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-6.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-7.md",
+      "old_path": ".claude/plans/2026-08-23-quota-suspension-and-ship-gate.tasks/task-7.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-workflow-scratch-containment.md",
+      "old_path": ".claude/plans/2026-08-23-workflow-scratch-containment.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-workflow-scratch-containment.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-workflow-scratch-containment.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-workflow-scratch-containment.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-workflow-scratch-containment.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-workflow-scratch-containment.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-23-workflow-scratch-containment.tasks/task-6.md",
+      "old_path": ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-6.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-132-superseded-launch-guard.md",
+      "old_path": ".claude/plans/2026-08-25-issue-132-superseded-launch-guard.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-6.md",
+      "old_path": ".claude/plans/2026-08-25-issue-132-superseded-launch-guard.tasks/task-6.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-133-expiry-resume-in-place.md",
+      "old_path": ".claude/plans/2026-08-25-issue-133-expiry-resume-in-place.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-133-expiry-resume-in-place.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-08-25-issue-133-expiry-resume-in-place.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-133-expiry-resume-in-place.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-08-25-issue-133-expiry-resume-in-place.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-133-expiry-resume-in-place.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-08-25-issue-133-expiry-resume-in-place.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-08-25-issue-133-expiry-resume-in-place.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-08-25-issue-133-expiry-resume-in-place.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-agent-cost-telemetry.md",
+      "old_path": ".claude/plans/2026-09-02-agent-cost-telemetry.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-agent-cost-telemetry.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-02-agent-cost-telemetry.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-agent-cost-telemetry.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-02-agent-cost-telemetry.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-agent-cost-telemetry.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-02-agent-cost-telemetry.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-agent-cost-telemetry.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-09-02-agent-cost-telemetry.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-agent-cost-telemetry.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-09-02-agent-cost-telemetry.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-codex-ship-handoff.md",
+      "old_path": ".claude/plans/2026-09-02-codex-ship-handoff.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-codex-ship-handoff.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-02-codex-ship-handoff.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-codex-ship-handoff.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-02-codex-ship-handoff.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-codex-ship-handoff.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-02-codex-ship-handoff.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-issue-115-recovered-wayfind-findings.md",
+      "old_path": ".claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-6.md",
+      "old_path": ".claude/plans/2026-09-02-issue-115-recovered-wayfind-findings.tasks/task-6.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-resolver-v1.md",
+      "old_path": ".claude/plans/2026-09-02-resolver-v1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-resolver-v1.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-02-resolver-v1.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-resolver-v1.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-02-resolver-v1.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-resolver-v1.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-02-resolver-v1.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-resolver-v1.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-09-02-resolver-v1.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-02-resolver-v1.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-09-02-resolver-v1.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-03-issue-122-conformance-engine-v1.md",
+      "old_path": ".claude/plans/2026-09-03-issue-122-conformance-engine-v1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-6.md",
+      "old_path": ".claude/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-6.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-7.md",
+      "old_path": ".claude/plans/2026-09-03-issue-122-conformance-engine-v1.tasks/task-7.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-harness-accounting-correction.md",
+      "old_path": ".claude/plans/2026-09-19-harness-accounting-correction.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-harness-accounting-correction.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-19-harness-accounting-correction.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-harness-workflow-safeguards.md",
+      "old_path": ".claude/plans/2026-09-19-harness-workflow-safeguards.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-harness-workflow-safeguards.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-19-harness-workflow-safeguards.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-issue-100-strict-project-resolver.md",
+      "old_path": ".claude/plans/2026-09-19-issue-100-strict-project-resolver.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-6.md",
+      "old_path": ".claude/plans/2026-09-19-issue-100-strict-project-resolver.tasks/task-6.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-ci-minors.md",
+      "old_path": ".claude/plans/2026-09-20-ci-minors.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-ci-minors.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-20-ci-minors.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-116-permission-guard-core.md",
+      "old_path": ".claude/plans/2026-09-20-issue-116-permission-guard-core.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-116-permission-guard-core.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-20-issue-116-permission-guard-core.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-160-review-publication-identity.md",
+      "old_path": ".claude/plans/2026-09-20-issue-160-review-publication-identity.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-160-review-publication-identity.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-20-issue-160-review-publication-identity.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-160-review-publication-identity.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-20-issue-160-review-publication-identity.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-37-advisory-workflow-ci.md",
+      "old_path": ".claude/plans/2026-09-20-issue-37-advisory-workflow-ci.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-37-advisory-workflow-ci.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-20-issue-37-advisory-workflow-ci.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-37-advisory-workflow-ci.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-20-issue-37-advisory-workflow-ci.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-38-artifact-path-validation.md",
+      "old_path": ".claude/plans/2026-09-20-issue-38-artifact-path-validation.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-38-artifact-path-validation.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-20-issue-38-artifact-path-validation.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-98-model-effort-drift.md",
+      "old_path": ".claude/plans/2026-09-20-issue-98-model-effort-drift.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-09-20-issue-98-model-effort-drift.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-21-issue-151-delivery-reconciliation.md",
+      "old_path": ".claude/plans/2026-09-21-issue-151-delivery-reconciliation.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-21-issue-151-delivery-reconciliation.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-21-issue-151-delivery-reconciliation.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-21-issue-151-delivery-reconciliation.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-21-issue-151-delivery-reconciliation.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-23-issue-147-platform-manifest-status.md",
+      "old_path": ".claude/plans/2026-09-23-issue-147-platform-manifest-status.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-23-issue-147-platform-manifest-status.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-23-issue-147-platform-manifest-status.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-23-issue-147-platform-manifest-status.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-23-issue-147-platform-manifest-status.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-23-issue-153-dispatch-contracts.md",
+      "old_path": ".claude/plans/2026-09-23-issue-153-dispatch-contracts.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-23-issue-153-dispatch-contracts.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-23-issue-153-dispatch-contracts.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-23-issue-153-dispatch-contracts.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-23-issue-153-dispatch-contracts.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-23-issue-153-dispatch-contracts.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-23-issue-153-dispatch-contracts.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-148-adoption-plan-apply-verify.md",
+      "old_path": ".claude/plans/2026-09-24-issue-148-adoption-plan-apply-verify.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-148-adoption-plan-apply-verify.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-24-issue-148-adoption-plan-apply-verify.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-149-adopt-and-register.md",
+      "old_path": ".claude/plans/2026-09-24-issue-149-adopt-and-register.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-149-adopt-and-register.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-24-issue-149-adopt-and-register.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-149-adopt-and-register.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-24-issue-149-adopt-and-register.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-171-delivery-contract-source.md",
+      "old_path": ".claude/plans/2026-09-24-issue-171-delivery-contract-source.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-6.md",
+      "old_path": ".claude/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-6.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-7.md",
+      "old_path": ".claude/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-7.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-8.md",
+      "old_path": ".claude/plans/2026-09-24-issue-171-delivery-contract-source.tasks/task-8.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-175-agent-tools-foundation.md",
+      "old_path": ".claude/plans/2026-09-24-issue-175-agent-tools-foundation.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-6.md",
+      "old_path": ".claude/plans/2026-09-24-issue-175-agent-tools-foundation.tasks/task-6.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-176-lifecycle-guard-extraction.md",
+      "old_path": ".claude/plans/2026-09-24-issue-176-lifecycle-guard-extraction.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-176-lifecycle-guard-extraction.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-24-issue-176-lifecycle-guard-extraction.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-176-lifecycle-guard-extraction.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-24-issue-176-lifecycle-guard-extraction.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-176-lifecycle-guard-extraction.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-24-issue-176-lifecycle-guard-extraction.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-179-model-matrix-tools-move.md",
+      "old_path": ".claude/plans/2026-09-24-issue-179-model-matrix-tools-move.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-1.md",
+      "old_path": ".claude/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-1.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-2.md",
+      "old_path": ".claude/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-2.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-3.md",
+      "old_path": ".claude/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-3.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-4.md",
+      "old_path": ".claude/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-4.md"
+    },
+    {
+      "new_path": ".agents/artifacts/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-5.md",
+      "old_path": ".claude/plans/2026-09-24-issue-179-model-matrix-tools-move.tasks/task-5.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-08-docs-structure-adr-design.md",
+      "old_path": ".claude/specs/2026-08-08-docs-structure-adr-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-10-c4g2-evidence.md",
+      "old_path": ".claude/specs/2026-08-10-c4g2-evidence.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-10-c4g2-review-ladder-design.md",
+      "old_path": ".claude/specs/2026-08-10-c4g2-review-ladder-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-10-truthful-job-terminal-states-design.md",
+      "old_path": ".claude/specs/2026-08-10-truthful-job-terminal-states-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-10-wayfind-skill-hardening-design.md",
+      "old_path": ".claude/specs/2026-08-10-wayfind-skill-hardening-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-11-detached-reviewer-bridge-design.md",
+      "old_path": ".claude/specs/2026-08-11-detached-reviewer-bridge-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-11-detached-reviewer-bridge-evidence.md",
+      "old_path": ".claude/specs/2026-08-11-detached-reviewer-bridge-evidence.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-11-detached-reviewer-plan-sync-design.md",
+      "old_path": ".claude/specs/2026-08-11-detached-reviewer-plan-sync-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-12-broker-reaping-design.md",
+      "old_path": ".claude/specs/2026-08-12-broker-reaping-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-12-range-scoped-gates-design.md",
+      "old_path": ".claude/specs/2026-08-12-range-scoped-gates-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-12-worker-post-mortem-design.md",
+      "old_path": ".claude/specs/2026-08-12-worker-post-mortem-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-13-durable-workflow-lifecycle-design.md",
+      "old_path": ".claude/specs/2026-08-13-durable-workflow-lifecycle-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-14-agent-skill-evidence-freshness-design.md",
+      "old_path": ".claude/specs/2026-08-14-agent-skill-evidence-freshness-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-14-cost-aware-model-matrix-design.md",
+      "old_path": ".claude/specs/2026-08-14-cost-aware-model-matrix-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-16-c4g2-post-deploy-evidence.md",
+      "old_path": ".claude/specs/2026-08-16-c4g2-post-deploy-evidence.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-16-codex-collection-budget-design.md",
+      "old_path": ".claude/specs/2026-08-16-codex-collection-budget-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-16-codex-worker-death-research.md",
+      "old_path": ".claude/specs/2026-08-16-codex-worker-death-research.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-16-diff-scope-helper-design.md",
+      "old_path": ".claude/specs/2026-08-16-diff-scope-helper-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-16-issue-23-scoped-codex-dispatch-design.md",
+      "old_path": ".claude/specs/2026-08-16-issue-23-scoped-codex-dispatch-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-16-ship-issue-degradation-gate-design.md",
+      "old_path": ".claude/specs/2026-08-16-ship-issue-degradation-gate-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-16-ship-issue-degradation-gate-evidence.md",
+      "old_path": ".claude/specs/2026-08-16-ship-issue-degradation-gate-evidence.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-17-agent-lifecycle-permissions-design.md",
+      "old_path": ".claude/specs/2026-08-17-agent-lifecycle-permissions-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-17-ci-required-check-design.md",
+      "old_path": ".claude/specs/2026-08-17-ci-required-check-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-17-diff-scope-residuals-design.md",
+      "old_path": ".claude/specs/2026-08-17-diff-scope-residuals-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-17-improve-codebase-architecture-design.md",
+      "old_path": ".claude/specs/2026-08-17-improve-codebase-architecture-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-17-issue-32-spec-doc-alignment-design.md",
+      "old_path": ".claude/specs/2026-08-17-issue-32-spec-doc-alignment-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-17-issue-42-shared-design-vocabulary-design.md",
+      "old_path": ".claude/specs/2026-08-17-issue-42-shared-design-vocabulary-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-17-issue-43-improve-codebase-architecture-design.md",
+      "old_path": ".claude/specs/2026-08-17-issue-43-improve-codebase-architecture-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-17-workflow-lifecycle-hardening-design.md",
+      "old_path": ".claude/specs/2026-08-17-workflow-lifecycle-hardening-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-19-artifact-budget-policy-design.md",
+      "old_path": ".claude/specs/2026-08-19-artifact-budget-policy-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-19-workflow-control-plane-design.md",
+      "old_path": ".claude/specs/2026-08-19-workflow-control-plane-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-agent-fallback-inventory-research.evidence/measured-ranges-and-adjudication.md",
+      "old_path": ".claude/specs/2026-08-20-agent-fallback-inventory-research.evidence/measured-ranges-and-adjudication.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-agent-fallback-inventory-research.md",
+      "old_path": ".claude/specs/2026-08-20-agent-fallback-inventory-research.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-cross-agent-project-surfaces-research.md",
+      "old_path": ".claude/specs/2026-08-20-cross-agent-project-surfaces-research.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-direct-autonomous-controller-budget-design.md",
+      "old_path": ".claude/specs/2026-08-20-direct-autonomous-controller-budget-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-direct-autonomous-controller-budget-evidence.md",
+      "old_path": ".claude/specs/2026-08-20-direct-autonomous-controller-budget-evidence.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-direct-autonomous-implementation-owner-rollover-design.md",
+      "old_path": ".claude/specs/2026-08-20-direct-autonomous-implementation-owner-rollover-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-direct-autonomous-issue-durability-design.md",
+      "old_path": ".claude/specs/2026-08-20-direct-autonomous-issue-durability-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-project-knowledge-inventory-research.md",
+      "old_path": ".claude/specs/2026-08-20-project-knowledge-inventory-research.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-release-lifecycle-seams-research.evidence/enforcement-guard-mechanics.md",
+      "old_path": ".claude/specs/2026-08-20-release-lifecycle-seams-research.evidence/enforcement-guard-mechanics.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-release-lifecycle-seams-research.evidence/release-unit-mechanics.md",
+      "old_path": ".claude/specs/2026-08-20-release-lifecycle-seams-research.evidence/release-unit-mechanics.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-release-lifecycle-seams-research.md",
+      "old_path": ".claude/specs/2026-08-20-release-lifecycle-seams-research.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-20-review-orchestration-telemetry-design.md",
+      "old_path": ".claude/specs/2026-08-20-review-orchestration-telemetry-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-23-claude-md-agent-surface-reconciliation-design.md",
+      "old_path": ".claude/specs/2026-08-23-claude-md-agent-surface-reconciliation-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-23-codex-reviewer-bridge-design.md",
+      "old_path": ".claude/specs/2026-08-23-codex-reviewer-bridge-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-23-quota-suspension-and-ship-gate-design.md",
+      "old_path": ".claude/specs/2026-08-23-quota-suspension-and-ship-gate-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-23-workflow-scratch-containment-design.md",
+      "old_path": ".claude/specs/2026-08-23-workflow-scratch-containment-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-25-issue-132-superseded-launch-guard-design.md",
+      "old_path": ".claude/specs/2026-08-25-issue-132-superseded-launch-guard-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-08-25-issue-133-expiry-resume-in-place-design.md",
+      "old_path": ".claude/specs/2026-08-25-issue-133-expiry-resume-in-place-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-02-agent-cost-telemetry-design.md",
+      "old_path": ".claude/specs/2026-09-02-agent-cost-telemetry-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-02-codex-ship-handoff-design.md",
+      "old_path": ".claude/specs/2026-09-02-codex-ship-handoff-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-02-issue-115-recovered-wayfind-findings-design.md",
+      "old_path": ".claude/specs/2026-09-02-issue-115-recovered-wayfind-findings-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-02-resolver-v1-design.md",
+      "old_path": ".claude/specs/2026-09-02-resolver-v1-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-03-issue-122-conformance-engine-v1-design.md",
+      "old_path": ".claude/specs/2026-09-03-issue-122-conformance-engine-v1-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-19-agent-costs-acceptance.md",
+      "old_path": ".claude/specs/2026-09-19-agent-costs-acceptance.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-19-agent-harness-retrospective.md",
+      "old_path": ".claude/specs/2026-09-19-agent-harness-retrospective.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-19-harness-accounting-correction.md",
+      "old_path": ".claude/specs/2026-09-19-harness-accounting-correction.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-19-harness-backlog-audit.md",
+      "old_path": ".claude/specs/2026-09-19-harness-backlog-audit.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-19-harness-backlog-followthrough.md",
+      "old_path": ".claude/specs/2026-09-19-harness-backlog-followthrough.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-19-harness-session-cases.md",
+      "old_path": ".claude/specs/2026-09-19-harness-session-cases.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-19-harness-session-metrics.md",
+      "old_path": ".claude/specs/2026-09-19-harness-session-metrics.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-19-harness-workflow-safeguards.md",
+      "old_path": ".claude/specs/2026-09-19-harness-workflow-safeguards.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-19-issue-100-strict-project-resolver-design.md",
+      "old_path": ".claude/specs/2026-09-19-issue-100-strict-project-resolver-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-20-ci-minors-design.md",
+      "old_path": ".claude/specs/2026-09-20-ci-minors-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-20-host-admission-prep.md",
+      "old_path": ".claude/specs/2026-09-20-host-admission-prep.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-20-issue-116-permission-guard-core-design.md",
+      "old_path": ".claude/specs/2026-09-20-issue-116-permission-guard-core-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-20-issue-160-review-publication-identity-design.md",
+      "old_path": ".claude/specs/2026-09-20-issue-160-review-publication-identity-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-20-issue-37-advisory-workflow-ci-design.md",
+      "old_path": ".claude/specs/2026-09-20-issue-37-advisory-workflow-ci-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-20-issue-38-artifact-path-validation-design.md",
+      "old_path": ".claude/specs/2026-09-20-issue-38-artifact-path-validation-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-20-issue-98-model-effort-drift-design.md",
+      "old_path": ".claude/specs/2026-09-20-issue-98-model-effort-drift-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-21-issue-151-delivery-reconciliation-design.md",
+      "old_path": ".claude/specs/2026-09-21-issue-151-delivery-reconciliation-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-23-issue-147-platform-manifest-status-design.md",
+      "old_path": ".claude/specs/2026-09-23-issue-147-platform-manifest-status-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-23-issue-153-dispatch-contracts-design.md",
+      "old_path": ".claude/specs/2026-09-23-issue-153-dispatch-contracts-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-23-issue-171-delivery-contract-source-design.md",
+      "old_path": ".claude/specs/2026-09-23-issue-171-delivery-contract-source-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-24-agent-tools-package-design.md",
+      "old_path": ".claude/specs/2026-09-24-agent-tools-package-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-24-issue-148-adoption-plan-apply-verify-design.md",
+      "old_path": ".claude/specs/2026-09-24-issue-148-adoption-plan-apply-verify-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-24-issue-149-adopt-and-register-design.md",
+      "old_path": ".claude/specs/2026-09-24-issue-149-adopt-and-register-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-24-issue-175-agent-tools-foundation-design.md",
+      "old_path": ".claude/specs/2026-09-24-issue-175-agent-tools-foundation-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-24-issue-176-lifecycle-guard-extraction-design.md",
+      "old_path": ".claude/specs/2026-09-24-issue-176-lifecycle-guard-extraction-design.md"
+    },
+    {
+      "new_path": ".agents/artifacts/specs/2026-09-24-issue-179-model-matrix-tools-move-design.md",
+      "old_path": ".claude/specs/2026-09-24-issue-179-model-matrix-tools-move-design.md"
+    },
+    {
+      "new_path": ".agents/knowledge/rejections/cross-repo-parent-transactions-build.md",
+      "old_path": ".out-of-scope/cross-repo-parent-transactions-build.md"
+    },
+    {
+      "new_path": ".agents/knowledge/rejections/host-contention-scheduling.md",
+      "old_path": ".out-of-scope/host-contention-scheduling.md"
+    },
+    {
+      "new_path": ".agents/knowledge/rejections/ungated-agent-merges.md",
+      "old_path": ".out-of-scope/ungated-agent-merges.md"
+    }
+  ],
+  "schema_version": 1
+}

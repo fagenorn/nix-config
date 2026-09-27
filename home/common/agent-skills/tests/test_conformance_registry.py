@@ -16,7 +16,8 @@ from pathlib import Path
 # already on sys.path; the shared support module lives beside them.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from conformance_test_support import (  # noqa: E402
-    REPO_ROOT, ReportAssertions, doctor, fixture, load_module, make_root, run,
+    MANIFEST, REPO_ROOT, ReportAssertions, doctor, fixture, load_module,
+    make_root, run,
 )
 
 
@@ -81,6 +82,7 @@ class RequiredCapabilitySelectionTest(unittest.TestCase):
 
 REGISTERED_CHECK_IDS = (
     "compatibility.contract.schema_supported",
+    "host.admission.declaration",
     "host.capability.required",
     "host.executor.helper_on_path",
     "host.policy_path.no_follow_readable",
@@ -120,7 +122,7 @@ PURPOSE_SELECTION = {
 
 
 class RegistryClosureTest(unittest.TestCase):
-    def test_the_registry_is_exactly_the_seventeen_declared_checks(self):
+    def test_the_registry_is_exactly_the_eighteen_declared_checks(self):
         module = load_module()
         self.assertEqual(sorted(c.id for c in module.REGISTRY),
                          sorted(REGISTERED_CHECK_IDS))
@@ -204,6 +206,18 @@ class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
         self.assertEqual(by_id["host.tracker.credential"]["reason_code"],
                          "offline_constraint")
         self.assertEqual(report["outcome"]["status"], "incomplete")
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        contract = json.loads(
+            (REPO_ROOT / ".agents/project.json").read_text(encoding="utf-8"))
+        schema = by_id["compatibility.contract.schema_supported"]
+        self.assertEqual([schema["status"], schema["facts"]], ["passed", {
+            "platform_version": manifest["platform_version"],
+            "supported_project_schemas":
+                [str(version) for version in manifest["project_schema_versions"]],
+            "project_schema_version": contract["schema_version"],
+            "platform_min_inclusive": contract["platform"]["min_inclusive"],
+            "platform_max_exclusive": contract["platform"]["max_exclusive"],
+        }])
         for repair in report["repairs"]:
             self.assertNotEqual(repair["safety_class"], "destructive")
         self.assert_validates(report)
