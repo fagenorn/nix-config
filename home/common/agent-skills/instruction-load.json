@@ -104,9 +104,9 @@
         "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation"
       },
       "ceiling_bytes": {
-        "claude": 149820
+        "claude": 151021
       },
-      "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7)."
+      "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19)."
     },
     {
       "id": "design-and-grill-owner",
@@ -208,10 +208,10 @@
         "codex-collaboration/PLAN-REVIEW.md": "plan-review ran at Phase 5"
       },
       "ceiling_bytes": {
-        "claude": 140866,
-        "codex": 140866
+        "claude": 142146,
+        "codex": 142146
       },
-      "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7)."
+      "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md`, `sdd/correctness-reviewer-prompt.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19)."
     },
     {
       "id": "ship-owner",
@@ -241,10 +241,10 @@
         "codex-collaboration/PLAN-REVIEW.md": "plan-review is not a ship operation"
       },
       "ceiling_bytes": {
-        "claude": 54302,
-        "codex": 54302
+        "claude": 55347,
+        "codex": 55347
       },
-      "note": "ship-issue from ship-handoff.md's prompt, with its sync, review and consolidation files. The lifecycle stdin clause stays per entry (#155 D5). Ceiling raised for #198: ship-issue probes reviewer dispatch before any write and returns the gap line (#155 D10)."
+      "note": "ship-issue from ship-handoff.md's prompt, with its sync, review and consolidation files. The lifecycle stdin clause stays per entry (#155 D5). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `ship-issue/REVIEW.md` and `ship-issue/SKILL.md` (#155 D10). Ceiling raised for #198: ship-issue probes reviewer dispatch before any write and returns the gap line (#155 D10). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19)."
     },
     {
       "id": "release-owner",

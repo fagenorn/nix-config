@@ -23,11 +23,12 @@ For `plan-review`, select `bindings.workflow.review.plan` and
 `capabilities.review.plan`; for `diff-review`, select
 `bindings.workflow.review.code` and `capabilities.review.code`. Route that
 retained capability before dereferencing any command entry: `blocked` stops with
-its capability reason and repair ID; `unsupported` takes that operation's
-documented native route. Only for `available`, retain the selected `review_id`
-and dereference `bindings.commands[review_id]`. Do not use a default, a plugin bridge,
-or a second resolver. `bindings.paths.hints` is the only project-hint input and
-is supplied by path when it is available.
+its capability reason and repair ID; `unsupported` makes no Codex call and
+returns the operation, with no result and no fallback verdict, to its calling
+controller's documented native route. Only for `available`, retain the selected
+`review_id` and dereference `bindings.commands[review_id]`. Do not use a default,
+a plugin bridge, or a second resolver. `bindings.paths.hints` is the only
+project-hint input and is supplied by path when it is available.
 
 ## Read-only packet rules
 
@@ -62,11 +63,13 @@ exactly one terminal agent-message; require a non-empty last-message file whose
 UTF-8 bytes equal that terminal agent-message byte-for-byte; then validate the
 operation headings. Only that success establishes reviewer identity `Codex`.
 
-A daemon, slot, or capacity rejection is a binding capacity rejection: surface
-it verbatim, stop, make no retry, and take no native fallback. A completed
-available-command runtime failure, malformed or mismatched metadata/output, or
-operation-schema failure uses exactly one native fallback with the same packet;
-never retry Codex. The fallback is not route-establishment evidence.
+On the `available` route, a daemon, slot, or capacity rejection is a binding
+capacity rejection: surface it verbatim, stop, make no retry, and take no native
+fallback. A Codex call made under `unsupported` is a routing error, never a
+capacity rejection. A completed available-command runtime failure, malformed or
+mismatched metadata/output, or operation-schema failure uses exactly one native
+fallback with the same packet; never retry Codex. The fallback is not
+route-establishment evidence.
 
 ## Disposition
 
