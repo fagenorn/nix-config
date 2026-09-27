@@ -93,6 +93,9 @@ BUILD_REFUSAL_RELAY = ("report the builder's stderr line verbatim: for a resolve
 WRITER_RULE = ("Under implementation custody a ship owner writes only "
                "`checkpoint-delivery`, never `finish`; a remainder owner writes its "
                "own `finish --summary-file -`.")
+# The closed capability-gap line ship-issue returns when its Phase-0 probe finds
+# no subagent-launch tool, spelled once for the module (per D4).
+CAPABILITY_GAP_LINE = "capability_gap: agent_dispatch"
 INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
 V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "now", "attempt_budget_minutes",
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
@@ -1163,6 +1166,152 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("re-entry line", normalized(text))
         for appendix in (self.ship_review, self.ship_human_gate):
             self.assertIn("## Delivery loop", appendix)
+
+    def test_ship_issue_probes_reviewer_dispatch_before_any_write(self):
+        # The probe is Phase 0's first step, so a context that cannot launch
+        # the reviewers stops before the synchronizing checkpoint, the Phase-1
+        # sync and every other write (per D3, D13). It has one home (per D9).
+        heading = "## Phase 0 — Pre-flight"
+        phase_zero = self.section(self.ship_issue, heading, "## Phase 1")
+        body = phase_zero[len(heading):].lstrip()
+        self.assertTrue(body.startswith("**Reviewer-dispatch probe"), body[:80])
+        self.assert_ordered(
+            normalized(phase_zero),
+            "Reviewer-dispatch probe",
+            "synchronizing null-scope checkpoint",
+            "the Phase-1 sync",
+            "`ToolSearch` `select:Agent`",
+            "never a host by name",
+            "launches nothing, writes nothing",
+            "Remainder mode skips",
+            CAPABILITY_GAP_LINE,
+            "Standalone",
+            "git rev-parse --git-common-dir",
+        )
+        review = normalized(self.ship_review)
+        self.assertNotIn("nested dispatch works even inside", review)
+        self.assertNotIn("ToolSearch", review)
+        self.assertIn("Phase-0 reviewer-dispatch probe", review)
+
+    def test_ship_handoff_returns_the_gap_line_before_either_loop_exit(self):
+        # The prompt stops promising nested dispatch, points at the probe, and
+        # returns the closed gap line before the two exits that end the
+        # Delivery loop (per D4, D9).
+        self.assertNotIn("Nested Agent calls are supported.", self.ship_handoff)
+        prompt = normalized(self.ship_handoff.split("## Inline fallback", 1)[0])
+        self.assert_ordered(
+            prompt,
+            "reviewer subagents",
+            "Phase-0 reviewer-dispatch probe confirms",
+            "Return exactly canonical JSON",
+            f"return only `{CAPABILITY_GAP_LINE}`",
+            "Two exceptions end the loop without a summary",
+        )
+        remainder = self.ship_handoff.split("## Remainder owner prompt", 1)[1]
+        self.assertNotIn("capability_gap", remainder)
+
+    def test_capability_gap_line_is_spelled_identically_everywhere(self):
+        # One closed line, compared byte for byte and never decoded: every
+        # spelling in every carrier is exactly that line (per D4).
+        for name, text in (
+            ("ship-issue/SKILL.md", self.ship_issue),
+            ("from-issue/ship-handoff.md", self.ship_handoff),
+            ("from-issue/SKILL.md", self.from_issue),
+            ("from-issue/AUTO.md", self.auto),
+        ):
+            with self.subTest(document=name):
+                self.assertIn(CAPABILITY_GAP_LINE, text)
+                self.assertEqual(
+                    set(re.findall(r"capability_gap[^`\n]*", text)),
+                    {CAPABILITY_GAP_LINE},
+                )
+
+    def test_from_issue_phase_seven_ships_inline_on_the_dispatch_gap(self):
+        # A ship owner that cannot launch reviewers returns the closed gap line
+        # from Phase 0 with nothing changed. The owner re-checks its launch,
+        # ships inline through `Skill`, and only a gap from that inline run
+        # suspends (per D2, D5, D6). The verb stays in the suspension
+        # procedure: Phase 7 never spells it (see the launch-revalidation test).
+        phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
+        self.assert_ordered(
+            normalized(phase_seven),
+            "receiving the ship report",
+            "only the re-entry line `/from-issue <num> --auto`",
+            f"only the line `{CAPABILITY_GAP_LINE}`",
+            "no subagent-launch tool",
+            "never decode or validate it",
+            "`delivery_stalled`",
+            "**Dispatch-gap fallback.**",
+            "same `check-launch` fence",
+            "the canonical re-entry line `/from-issue <num> --auto` on its own line",
+            "through your own `Skill` tool",
+            "writing only `checkpoint-delivery`",
+            "never starts a second inline run",
+            "suspension procedure with `<value>` = `agent_dispatch`",
+            "`delivery_remainder` launch",
+        )
+        self.assertNotIn("workflow-state suspend", phase_seven)
+        self.assertIn("After Phase 7 it is the ship report's summary",
+                      normalized(self.from_issue))
+
+    def test_suspension_procedure_admits_agent_dispatch(self):
+        suspension = normalized(self.section(
+            self.from_issue, "## Suspension procedure", "## Phase 0"))
+        self.assertIn("a context that cannot launch the agents a phase needs",
+                      suspension)
+        self.assert_ordered(
+            suspension, "`human_gate`", "`external`", "`agent_dispatch`",
+            "(the reaper alone owns `unknown`)",
+        )
+
+    def test_auto_names_the_dispatch_gap_fallback_and_relays_closed_lines(self):
+        # The rollover owner keeps its fresh Phase-7 ship owner and names the
+        # one departure after it; the earlier controller relays a delegated
+        # owner's re-entry or suspension line instead of mistaking it for a
+        # dispatch failure (per D5, D10).
+        delegated = normalized(self.section(
+            self.auto, "#### Fresh delegated owner", "#### Earlier controller stop"))
+        self.assert_ordered(
+            delegated,
+            "fresh Phase-7 ship owner",
+            "must not dispatch a second issue owner",
+            "Phase-7 dispatch-gap fallback",
+            f"`{CAPABILITY_GAP_LINE}`",
+            "After validating the ship report's `ship-summary/v2` bytes",
+            "completed Phase 7",
+            "with the validated ship summary inline",
+        )
+        self.assertNotIn("ship owner's `ship-summary/v2`", self.auto)
+        self.assertNotIn("ship owner's validated summary", self.auto)
+        earlier = normalized(self.section(
+            self.auto, "#### Earlier controller stop", "### Other Phase 5–7 routes"))
+        self.assert_ordered(
+            earlier,
+            "exactly validate, relay, and stop",
+            "only the canonical re-entry line `/from-issue <num> --auto`",
+            "only a canonical `Suspended (blocked_on=<value>). Resume: "
+            "/from-issue <num> --auto` line",
+            "relayed unchanged to its caller with no validation",
+            "writes nothing",
+            "Neither line is a dispatch failure.",
+            "received bytes",
+            "artifact-budget validate-report --boundary workflow-response",
+            "relay the canonical bytes unchanged",
+        )
+
+    def test_orchestrate_report_names_every_cause_a_label_sweep_leaves_parked(self):
+        # A label or milestone sweep never resumes these causes, so the
+        # per-issue re-entry line is the instruction that works (per D10).
+        final = normalized(self.section(
+            self.orchestrate, "## 5. Final report", "## Notes"))
+        self.assert_ordered(
+            final,
+            "`/from-issue <issue> --auto` for an issue suspended on a cause",
+            "`--label` or `--milestone` sweep does not resume",
+            "`human_gate`", "`external`", "`agent_dispatch`",
+            "the orchestrate re-invocation itself",
+        )
+        self.assertNotIn("for an issue suspended on a human gate", final)
 
     def test_auto_continuation_and_bookkeeper_are_interface_two(self):
         transfer = self.section(self.auto, "#### Mandatory transfer gate",

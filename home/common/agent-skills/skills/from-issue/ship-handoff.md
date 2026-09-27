@@ -61,8 +61,9 @@ Your task:
      every phase 0 → 8 in order. The pre-flight checks still run — the handoff is a
      hint, the worktree state is ground truth.
   2. In Phase 5 (PR review), follow ship-issue's path selection — it may dispatch
-     zero (empty merge-delta), one, or two reviewer subagents.
-     Nested Agent calls are supported.
+     zero (empty merge-delta), one, or two reviewer subagents. Before that,
+     ship-issue's Phase-0 reviewer-dispatch probe confirms that this context
+     can launch them.
   3. In Phase 6, block on `<tracker-cli> pr checks --watch` per ship-issue's
      instructions.
   4. If auto is true, apply ship-issue's auto-mode rules throughout: apply Blocking
@@ -82,6 +83,10 @@ file before writing to it: overwriting content you have not read destroys work
 you cannot see.
 
 Return exactly canonical JSON from `artifact-budget validate-report --boundary ship-summary`.
+One exception comes first, before any change: when ship-issue's Phase-0
+reviewer-dispatch probe reports the capability gap, nothing was launched or
+written, so with or without lifecycle identity return only
+`capability_gap: agent_dispatch`.
 With a `ship-handoff/v2`, validate a `ship-summary/v2` with exactly these keys:
 `interface_version` (2), `issue`, `state` (`delivery_complete` or
 `terminal_failed`), `custody` (the handoff's), `historical_owner_result`,
