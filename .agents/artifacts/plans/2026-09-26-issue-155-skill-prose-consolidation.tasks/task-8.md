@@ -27,7 +27,8 @@ before this task by the plan root's `### Resume` R1 (D35).
   "conditional": T, "ceiling_bytes"}}}]}`, where
   `T = {"members", "base", "head", "delta": {"bytes", "words"}, "affected"}`.
 - Consumes (Task 5, in `IL`): `MODEL_PATH`, `tree_reader(root)`,
-  `load_model(data)`, `validate(model, read)` and `measure(model, read)`.
+  `revision_reader(root, revision)`, `load_model(data)`,
+  `validate(model, read)` and `measure(model, read)`.
 - Consumes (Task 7): the model and `LiveModelTest`.
 - Produces: the committed report. Its header records the base and head SHAs.
 
@@ -45,7 +46,8 @@ before this task by the plan root's `### Resume` R1 (D35).
   tracked, the new one (D34).
 - The report is generated after the last content change. Any later commit
   that changes a measured member, the model or the matrix repeats Steps 3–5
-  (D19).
+  (D19). Step 3 resets only what `<sync>` moved and exits 1 on growth the
+  branch made (D36).
 - No ceiling is raised to pass a gate (D10). Nothing is recovered from
   `worktree-issue-99-skill-prose-fixes` (D15).
 
@@ -75,21 +77,31 @@ time, it is `17da7f2d53c33886073a107ce72627f9e1ec5ce1`.
 No merge, or a merge-base other than `<sync>^2`, means R1 is missing. Stop
 with BLOCKED and name R1. Do not fetch or merge inside this task.
 
-- [ ] **Step 3: Re-measure after the sync (D19, D29)**
+- [ ] **Step 3: Re-measure after the sync (D19, D29, D36)**
 
 This step always runs on the resume, because `<sync>` changed the measured
-`from-issue/ship-handoff.md`. Save this script as
-`<scratch>/i155-remeasure.py`:
+`from-issue/ship-handoff.md`. The script moves only what the merge moved
+(D36): a profile's ceiling is reset to its hot total **as measured at
+`<merge>`**, and only when one of its hot members is a file
+`git diff --name-only <merge>^1 <merge>` lists. It then checks the working
+tree against every ceiling. A breach the merge did not cause is growth this
+branch made: the script prints it, exits 1 and writes nothing. Save this
+script as `<scratch>/i155-remeasure.py`:
 
 ```python
-"""Scratch, outside the working tree: reset the ceilings a sync moved (#155 D19)."""
+"""Scratch, outside the working tree: reset the ceilings a sync moved (#155 D19, D36)."""
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 from agent_tools import instruction_load
 
 root, merge = Path(sys.argv[1]), sys.argv[2]
+moved_paths = set(subprocess.run(
+    ["git", "-C", str(root), "diff", "--name-only", f"{merge}^1", merge],
+    check=True, capture_output=True, text=True,
+).stdout.split())
 path = root / instruction_load.MODEL_PATH
 model = instruction_load.load_model(path.read_bytes())
 read = instruction_load.tree_reader(root)
@@ -97,24 +109,35 @@ violations = instruction_load.validate(model, read)
 if violations:
     print("\n".join(violations))
     raise SystemExit(1)
-measurement = instruction_load.measure(model, read)
+_, merge_read = instruction_load.revision_reader(root, merge)
+at_merge = instruction_load.measure(model, merge_read)
+live = instruction_load.measure(model, read)
+note = f" Ceiling re-measured after merging origin/main at {merge} (#155 D19)."
+growth = []
 for profile in model["profiles"]:
     moved = False
     for host in profile["hosts"]:
-        measured = measurement["profiles"][profile["id"]][host]["hot"]["bytes"]
-        if profile["ceiling_bytes"][host] != measured:
-            print(f"{profile['id']} on {host}: {profile['ceiling_bytes'][host]} -> {measured}")
-            profile["ceiling_bytes"][host] = measured
+        merged = at_merge["profiles"][profile["id"]][host]["hot"]
+        touched = any(at_merge["documents"][m]["path"] in moved_paths for m in merged["members"])
+        if touched and profile["ceiling_bytes"][host] != merged["bytes"]:
+            print(f"{profile['id']} on {host}: {profile['ceiling_bytes'][host]} -> {merged['bytes']}")
+            profile["ceiling_bytes"][host] = merged["bytes"]
             moved = True
-    if moved:
-        profile["note"] += f" Ceiling re-measured after merging origin/main at {merge} (#155 D19)."
+        measured = live["profiles"][profile["id"]][host]["hot"]["bytes"]
+        if measured > profile["ceiling_bytes"][host]:
+            growth.append(f"{profile['id']} on {host}: {measured} exceeds {profile['ceiling_bytes'][host]}, not moved by {merge}")
+    if moved and note not in profile["note"]:
+        profile["note"] += note
+if growth:
+    print("\n".join(growth))
+    raise SystemExit(1)
 path.write_text(json.dumps(model, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 ```
 
 Run: `env PYTHONPATH=<worktree>/python python3 <scratch>/i155-remeasure.py <worktree> <merge>`,
 where `<merge>` is what `git rev-parse --short <sync>` prints.
-Expected: exit 0. With `origin/main` at `17da7f2`, the planning probe printed
-exactly these three lines:
+Expected: exit 0. With `origin/main` at `17da7f2`, the planning probe and a
+Phase-5 dry run at `7c21ebe` printed exactly these three lines:
 
 ```text
 orchestrated-issue-owner on claude: 146629 -> 146623
@@ -122,7 +145,14 @@ implementation-owner on claude: 137675 -> 137669
 implementation-owner on codex: 137675 -> 137669
 ```
 
-If R1 merged a later `origin/main`, the lines can differ.
+If R1 merged a later `origin/main`, the lines can differ. A repeat run after
+a later commit prints no reset line, because the ceilings already equal the
+`<merge>` measurement, and it appends no second note.
+
+An exit 1 whose lines end `not moved by <merge>` is growth the branch made
+after the sync. This script never absorbs it. Shrink the member, or raise
+that ceiling in its own commit whose note states the real reason (D10). Then
+rerun the script. Neither path is ever a D19 reset.
 
 The script may print violations instead. That means the merge added a
 dispatch site or a named document that the model does not cover. Extend

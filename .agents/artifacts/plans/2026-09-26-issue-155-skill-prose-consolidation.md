@@ -55,7 +55,8 @@ Spec (source of truth, read it whole):
 - Never run `just switch`. `just build` runs in Task 8 only.
 - A commit after Task 8's report commit that changes a measured member, the
   model or the matrix regenerates the report per Task 8 and commits it alone
-  (D19).
+  (D19). A ceiling rises only for what a sync merged, or in its own commit
+  with its real reason (D10, D36).
 - Commits are conventional and SSH-signed. Never disable signing, and surface a
   signing failure. Each message ends with the trailer
   `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>`, passed
@@ -107,7 +108,7 @@ planning probe applied every task to a scratch clone. The four contract suites
 passed, and the 30 new instruction-load tests passed against the probe
 implementation.
 
-### Resume: attempt 2 (D34, D35)
+### Resume: attempt 2 (D34, D35, D36)
 
 Run `direct-155-000001` executed all eight tasks on this branch and finished
 sdd with `review_state: clean`. Its durable review package, relative to the
@@ -145,12 +146,19 @@ Setup runs in this order, before sdd pins `DELIVERY_BASE`:
   `git rev-parse <sync>^2` prints. Then
   `git diff --name-only cd7ded7 HEAD -- python justfile home/common/claude-code/skills home/common/agent-skills/instruction-load.json "home/common/agent-skills/skills/*/SKILL.md" home/common/agent-skills/skills/from-issue/AUTO.md "home/common/agent-skills/tests/test_*_contracts.py" home/common/agent-skills/tests/test_instruction_load.py`
   prints nothing. The 22 files Tasks 1–7 changed are then byte for byte what
-  attempt 1 reviewed. If any check fails, the controller pins nothing and
-  stops with BLOCKED, naming R1.
-- **R3: seed the ledger (D34).** After the identity line, the controller
-  appends `Task <N>: complete (commits <range>, review clean)` for N = 1 to 7,
-  with the ranges above. It then appends
-  `Resume: Tasks 1–7 adopted from run direct-155-000001; attempt-1 findings in its package`.
+  attempt 1 reviewed. The pathspec is deliberately wider than those 22 files,
+  so a later sync that touches any neighbouring contract suite, module or
+  `SKILL.md` blocks conservatively, and a person rules on it. If any check
+  fails, the controller pins nothing and stops with BLOCKED, naming R1.
+- **R3: seed the ledger (D34).** The workspace `scripts/sdd-workspace` prints
+  for this plan must hold no `progress.md`, or one whose identity line names
+  this plan and which records no `Task 8: complete` line. A ledger that
+  already records Task 8 complete is attempt 1's, and would silently skip the
+  re-run. In that case the controller stops with BLOCKED and names R3. After
+  the identity line, the controller appends
+  `Task <N>: complete (commits <range>, review clean)` for N = 1 to 7, with the
+  ranges above, skipping any line already present. It then appends
+  `Resume: Tasks 1–7 adopted from run direct-155-000001; attempt-1 findings in /Users/anis/tmp/nix-config/.superpowers/issue-delivery/155/direct-155-000001/sdd-58cb1955adca9025bce5777dcacae2b467b76b52.json`.
   It dispatches no implementer or reviewer for Tasks 1–7.
 
 After setup, sdd runs as written. The `DELIVERY_BASE` it pins,
@@ -161,6 +169,17 @@ the ledger pointer lets the conformance axis triage the attempt-1 findings.
 The planning probe replayed R1 and Task 8 against `17da7f2`. From `17da7f2`,
 the cumulative package was 361,207 bytes in 8 files, within budget. From
 `affa05e`, it was already 605,512 bytes in 12 files at the merge, over budget.
+
+R1 ran at Phase 5, before any sdd invocation, as `7c21ebe`: a signed merge of
+`origin/main` at `17da7f2`. It is `<sync>`, and R2 already passes on it.
+
+**Ship-time sync (D36).** A later advance of `origin/main` is merged by
+ship-issue's Phase-1 sync, not by this plan. When the from-issue owner builds
+the ship handoff, its `notes` carry this obligation: "#155 D19/D36: if ship
+Phase 1's sync changes a measured member, `instruction-load.json` or the
+model matrix, re-run plan Task 8 Steps 2–5 at the new head with that merge as
+`<sync>`, commit the report alone, then continue". A Step 3 exit 1 on that
+re-run stops shipping.
 
 ## Task index
 
@@ -206,7 +225,7 @@ and grill. Planning added D22–D30:
 - **D27:** gates run as `WORKFLOW_POLICY_SURFACE=source`.
 - **D28:** D20's anchor move covers three tests, and E3 needs a whitespace-normalized union.
 - **D29:** ceilings are written only by scratch scripts over `measure`.
-- **D30:** Task 8 syncs by a signed merge, and a conflict is reported BLOCKED.
+- **D30:** the sync is a signed merge, and a conflict is reported BLOCKED. D35 moves it before sdd, as Resume R1.
 
 Phase-5 standards review added D31–D33:
 
@@ -218,6 +237,10 @@ The attempt-2 resume added D34–D35:
 
 - **D34:** Tasks 1–7 are adopted from git evidence, and attempt 1's report is retired in its own commit.
 - **D35:** the sync runs before sdd entry, so `DELIVERY_BASE` is the post-sync merge-base.
+
+Phase-5 standards review of the resume added D36:
+
+- **D36:** Step 3 resets only the ceilings `<sync>` moved and refuses growth the branch made. A ship-time sync that moves a measured member re-runs Task 8 through the handoff notes.
 
 ## Standards review provenance
 
@@ -236,5 +259,24 @@ The attempt-2 resume added D34–D35:
   count. S4 is D33, as Task 6's row literals. S5 fixes Task 1's red-phase
   list. D1 is D33, Task 7's two conditional members. D2 is D33, Task 5's
   shared `SUBAGENT_TYPE`.
+
+Attempt-2 resume review (run `direct-155-000002`):
+
+- Reviewer: Claude fallback (one fresh native `reviewer`, Opus/high), isolated
+  and read-only, against `REVIEW-CONTRACT.md`. Codex `plan-review` ran first on
+  the same packet and exited 0, but no JSONL event reported the selected model
+  `gpt-6-astra` and effort `xhigh`. That is a metadata mismatch, not a
+  capacity rejection, so the one-time native fallback ran. Codex was not
+  retried.
+- Base `17da7f2d53c33886073a107ce72627f9e1ec5ce1`, after R1's sync `7c21ebe`.
+  The plan was reviewed at `73751dd`, focused on the resume amendment.
+- Findings: 0 Blocking, 2 Should-fix, 3 Discussion. All 5 were verified
+  against the live worktree and accepted: 0 rejected, 0 deferred.
+  - S1 is D36: Step 3 now scopes resets to `<sync>` and refuses branch growth.
+    A dry run at `7c21ebe` reproduced the three expected lines.
+  - S2 is D36: the ship-time sync obligation travels in the handoff notes.
+  - Of the Discussion items, D1 makes R3 conditional and names the absolute
+    package path, D2 states that R2's pathspec is conservative, and D3 aligns
+    the D30 summary with D35.
 
 ---
