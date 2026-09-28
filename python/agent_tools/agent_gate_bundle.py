@@ -930,7 +930,8 @@ def verify_bundle(document: object) -> str:
         raise BundleIntegrityError("bundle_id does not match the bundle body")
     try:
         earned = decide(document["evidence"])
-    except (TypeError, KeyError, AttributeError, ValueError) as error:
+    except (TypeError, KeyError, AttributeError, ValueError,
+            ArithmeticError) as error:
         raise BundleIntegrityError(
             f"the bundle's evidence cannot be decided: {error!r}") from error
     if earned != document["state"]:

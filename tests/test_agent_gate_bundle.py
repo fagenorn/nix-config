@@ -961,6 +961,23 @@ class VerifyBundleTest(unittest.TestCase):
         with self.assertRaises(gate.BundleIntegrityError):
             gate.verify_bundle(bundle)
 
+    def test_arithmetic_failure_in_evidence_is_an_integrity_error(self):
+        bundle = bundle_for(self.APPROVED(), "approved")
+        pair = bundle["evidence"]["cases"][0]["strata"]["claude"]["context"]["trials"]
+        pair["base"][0]["input_total"] = 1
+        pair["candidate"][0]["input_total"] = 10 ** 400
+        bundle["bundle_id"] = body_digest(bundle)
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(bundle)
+
+    def test_a_member_decide_never_reads_is_still_bound_by_the_digest(self):
+        for key, value in (("diagnostics", ["forged"]), ("gates", {})):
+            with self.subTest(key=key):
+                bundle = bundle_for(self.APPROVED(), "approved")
+                bundle[key] = value
+                with self.assertRaises(gate.BundleIntegrityError):
+                    gate.verify_bundle(bundle)
+
     def test_an_override_never_changes_the_verified_state(self):
         override = gate.build_override("explore", "fagenorn", "2026-09-28T00:00:00Z")
         bundle = bundle_for(self.REJECTED(), "rejected", override)
