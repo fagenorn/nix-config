@@ -135,7 +135,7 @@ class CreateTest(StoreCase):
         self.assertEqual(set(document), {"schema", "transaction_id", "creation_key", "subject",
                                          "state", "parked_from", "revision", "events",
                                          "concurrency_keys", "custody"})
-        self.assertEqual(document["schema"], "transaction-state/v2")
+        self.assertEqual(document["schema"], "transaction-state/v3")
         self.assertEqual((document["concurrency_keys"], document["custody"]), (KEYS, None))
         self.assertEqual(created.concurrency_keys, tuple(KEYS))
         self.assertEqual(document["transaction_id"], transaction_id)
@@ -241,7 +241,7 @@ class LoadTest(StoreCase):
         cases = {
             "extra key": lambda d: {**d, "extra": 1},
             "missing key": lambda d: {k: v for k, v in d.items() if k != "parked_from"},
-            "wrong schema": lambda d: {**d, "schema": "transaction-state/v3"},
+            "wrong schema": lambda d: {**d, "schema": "transaction-state/v2"},
             "forged state": lambda d: {**d, "state": "ready"},
             "bool revision": lambda d: {**d, "revision": True},
             "seq gap": gap,

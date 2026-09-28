@@ -1,15 +1,17 @@
-"""The transaction-state/v2 document model of the transaction core (#205 D33): the
+"""The transaction-state/v3 document model of the transaction core (#205 D33, #206 D2): the
 lifecycle vocabularies, the `Custody` credential and `Transaction` snapshot types, the
-credential shape checks, the pure history validator and the snapshot fold. It reads no
+credential shape checks, the pure history validator and the snapshot fold. The validator
+hands each action event to `agent_tools.transaction_invocation`, whose fold also derives the
+snapshot's per-action `actions` view on every load. It reads no
 file, lock or clock: `validate_state` takes the creation-key index lookup as a callable,
 which `agent_tools.transaction_core` binds to its store root. It also composes what a reap
 appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
-answers whether an executor and fence were ever issued a span (`span_issued`), and holds the
-strict JSON object rule (`json_object_violation`) that a created `subject` and a late `result`
-share.
+and answers whether an executor and fence were ever issued a span (`span_issued`). The
+`at`-timestamp codec (`format_at`, `parse_at`) and the strict JSON object rule
+(`json_object_violation`) that a created `subject` and a late `result` share are imported
+from `agent_tools.transaction_storage`, not held here.
 """
 
-import calendar
 import copy
 import dataclasses
 import datetime
@@ -19,12 +21,15 @@ from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
-from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import (
     CUSTODY_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
-from agent_tools.transaction_storage import StateInvalid, serialize, strict_loads
+from agent_tools.transaction_invocation import (
+    ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event, status,
+    unresolved)
+from agent_tools.transaction_storage import (
+    StateInvalid, format_at, json_object_violation, parse_at, serialize)
 
-SCHEMA = "transaction-state/v2"
+SCHEMA = "transaction-state/v3"
 
 FORWARD = ("created", "awaiting_verification", "ready", "publishing", "published",
            "activating", "proving")
@@ -103,7 +108,8 @@ class Transaction:
     `types.MappingProxyType` views over deep copies. Only those levels are
     read-only: nested values stay mutable, but they are copies, so mutating
     them cannot reach disk. `evidence` and `grants` entries carry verdicts
-    derived from the history on every load; they are never stored.
+    derived from the history on every load, and `actions` holds one read-only view per
+    declared action, in declaration order (#206 D2); none of them is ever stored.
     """
 
     transaction_id: str
@@ -117,6 +123,7 @@ class Transaction:
     custody: Custody | None
     evidence: tuple[Mapping[str, Any], ...]
     grants: tuple[Mapping[str, Any], ...]
+    actions: tuple[Mapping[str, Any], ...]
 
 
 def edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
@@ -133,19 +140,6 @@ def is_id(value: object) -> bool:
     return type(value) is str and _ID_PATTERN.fullmatch(value) is not None
 
 
-def format_at(ms: int) -> str:
-    """Epoch milliseconds as UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`."""
-    seconds = datetime.datetime.fromtimestamp(ms // 1000, tz=datetime.timezone.utc)
-    return seconds.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
-
-
-def _parse_at(at: str) -> int:
-    """Epoch milliseconds of a `YYYY-MM-DDTHH:MM:SS.mmmZ` stamp; `format_at`'s inverse."""
-    seconds, millis = at[:-1].split(".")
-    parsed = datetime.datetime.strptime(seconds, "%Y-%m-%dT%H:%M:%S")
-    return calendar.timegm(parsed.timetuple()) * 1000 + int(millis)
-
-
 def parked_since(events: list[dict]) -> int | None:
     """Epoch ms of the transition that entered the current parked run from an unparked
     state, or None when the history is not parked (D28)."""
@@ -154,7 +148,7 @@ def parked_since(events: list[dict]) -> int | None:
         if event["type"] != "transitioned":
             continue
         if event["to"] in PARKINGS and event["from"] not in PARKINGS:
-            start = _parse_at(event["at"])
+            start = parse_at(event["at"])
         elif event["to"] not in PARKINGS:
             start = None
     return start
@@ -416,7 +410,9 @@ def _fold_custody(event: dict, seq: int, fold: _CustodyFold, state: str,
 
 def validate_state(document: Any, transaction_id: str,
                    indexed: Callable[[str], str | None]) -> None:
-    """Refuse (StateInvalid) any document that is not a valid transaction-state/v2."""
+    """Refuse (StateInvalid) any document that is not a valid transaction-state/v3; each
+    action event is checked by `action_event_violation` against the actions before it, and
+    a transition into a terminal while `unresolved` names an action is refused (#206 D20)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -459,6 +455,7 @@ def validate_state(document: Any, transaction_id: str,
         raise refuse("event 1 at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
     state, parked, entered_terminal = "created", None, None
     fold = _CustodyFold(keys)
+    actions: dict = {}
     for seq, event in enumerate(events[1:], start=2):
         if state in TERMINALS and not (
                 entered_terminal == seq - 1 and type(event) is dict
@@ -471,6 +468,10 @@ def validate_state(document: Any, transaction_id: str,
             case "transitioned":
                 state, parked = _fold_transitioned(event, seq, state, parked, refuse)
                 if state in TERMINALS:
+                    blocker = unresolved(actions)
+                    if blocker is not None:
+                        raise refuse(f"event {seq} reaches terminal {state} over unresolved "
+                                     f"action {blocker.action_id} ({status(blocker)})")
                     entered_terminal = seq
             case str() if event_type in CUSTODY_EVENTS:
                 _fold_custody(event, seq, fold, state, entered_terminal, refuse)
@@ -478,6 +479,15 @@ def validate_state(document: Any, transaction_id: str,
                 _fold_fenced(event, seq, fold, refuse)
             case str() if event_type in _OUTCOME_EVENTS:
                 _fold_outcome(event, seq, events[seq - 2], fold, refuse)
+            case str() if event_type in ACTION_EVENT_KEYS:
+                _check_envelope(event, seq, ACTION_EVENT_KEYS[event_type], refuse)
+                violation = action_event_violation(
+                    event, actions, transaction_id=transaction_id, keys=keys,
+                    open_fence=None if fold.custody is None else fold.custody["fence"],
+                    state=state)
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
+                apply_action_event(event, actions)
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
     custody = fold.custody
@@ -522,6 +532,7 @@ def snapshot(document: dict) -> Transaction:
         custody=custody,
         evidence=tuple(MappingProxyType(entry) for entry in evidence),
         grants=tuple(MappingProxyType(entry) for entry in grants),
+        actions=tuple(MappingProxyType(view) for view in action_views(document["events"])),
     )
 
 
@@ -558,20 +569,6 @@ def bound_path(document: dict) -> str | None:
     for event in document["events"]:
         if event["type"] == "lease_acquired":
             return event["subject_path"]
-    return None
-
-
-def json_object_violation(value: Any) -> str | None:
-    """How `value` fails to be a JSON object that survives a strict JSON round trip, or
-    None: the rule a created `subject` and a late owner `result` share (D34)."""
-    if type(value) is not dict:
-        return "is not a JSON object"
-    try:
-        loaded = strict_loads(serialize(value))
-    except (TypeError, ValueError) as error:
-        return f"is not strict JSON ({error})"
-    if loaded != value or telemetry_digest(loaded) != telemetry_digest(value):
-        return "does not survive a strict JSON round trip"
     return None
 
 

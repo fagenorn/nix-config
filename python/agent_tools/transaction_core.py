@@ -1,4 +1,4 @@
-"""The transaction core (#204, #205).
+"""The transaction core (#204, #205, #206).
 
 A caller-rooted store of closed-schema transactions with a closed lifecycle:
 `TransactionStore(root, clock=...)` creates deduplicated transactions under an
@@ -17,12 +17,19 @@ custody is held, and entering a terminal releases custody. `record_evidence`,
 custody, `check_grant` checks one read-only, and every snapshot re-derives their
 verdicts from the history. `reap` records a lapsed span's lapse and synthesized stop,
 parking the transaction unless it is already parked, and `record_owner_result` keeps an
-authentic late owner result beside that stop without changing state or custody. The
-durable-file
-primitives and the refusal hierarchy live in `agent_tools.transaction_storage`, and
-the document model — vocabularies, `Custody`, `Transaction`, the validator and the
-snapshot fold — in `agent_tools.transaction_history`; this module re-exports the
-errors and the public model names. The module has no command and no caller yet.
+authentic late owner result beside that stop without changing state or custody.
+`inspect_action` observes one declared action through a caller-passed effect with no lock
+held across the call, and records the observation fence-stamped (#206); the two protocol
+operations are that and `invoke_action`, which calls the effect only after a fresh `absent`
+inspection, behind a durable intent and within the retry budget. An action observed in
+flight (`open`, or last read `in_progress`) keeps `renew` from quiescing a parked
+transaction, and `advance` enters no terminal while an action is `open`, `in_progress` or
+`unknown`. The durable-file primitives and the refusal hierarchy live in
+`agent_tools.transaction_storage`, and the document model — vocabularies, `Custody`,
+`Transaction`, the validator and the snapshot fold — in `agent_tools.transaction_history`;
+this module re-exports the errors and the public model names. `action_id` and the retry
+constants live in `agent_tools.transaction_invocation`, which this module re-exports too.
+The module has no command and no caller yet.
 """
 
 import contextlib
@@ -48,16 +55,20 @@ from agent_tools.transaction_history import (
     is_subject_path, json_object_violation, key_set_violation, owner_result_event,
     parked_since, reaped, require_custody_shape, require_texts, snapshot, span_issued,
     validate_state)
+from agent_tools.transaction_invocation import (
+    EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, ActionFold, action_id,
+    action_violation, effect_request, fold_actions, inspect_result_violation,
+    invoke_result_violation, observed, refusal, refused_error, satisfied, status, unresolved)
 from agent_tools.transaction_storage import (
-    CreationConflict, CustodyMisbound, FenceViolation, GrantInvalid, LeaseUnavailable,
-    StaleCustody, StateInvalid, TransactionBusy, TransactionError, TransitionRefused,
-    UnknownTransaction, atomic_write, fsync_directory, lstat_mode, open_lock, read_json,
-    require_directory)
+    LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
+    GrantInvalid, InvocationRefused, LeaseUnavailable, StaleCustody, StateInvalid,
+    TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction, atomic_write,
+    fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 
 INDEX_SCHEMA = "transaction-creation-key/v1"
 PARKED_CUSTODY_WINDOW_MS = 900_000  # the core cap on custody held through a parking (D19)
 _INDEX_KEYS = frozenset({"schema", "creation_key", "transaction_id"})
-_MAX_CLOCK_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
+_MAX_CLOCK_MS = LAST_AT_MS  # the clock ceiling: the last `at` that fits
 
 
 def _mint_id() -> str:
@@ -100,7 +111,7 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
 
 def _require_creatable(root: Path, creation_key: Any, subject: Any,
                        concurrency_keys: Any) -> None:
-    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v2 document."""
+    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v3 document."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -114,6 +125,18 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any,
     violation = key_set_violation(concurrency_keys)
     if violation is not None:
         raise StateInvalid(f"{where}: {violation}")
+
+
+def _refuse_in_flight(prior: dict, identity: str, entry: ActionFold | None,
+                      latest_seq: int | None = None) -> None:
+    """Refuse `attempt_in_flight` when the action's latest attempt is open under the held
+    fence or, given the latest event seq an earlier hold read, the action recorded any
+    event since, a changed attempt count or a newer inspection alike (D14, D16)."""
+    seq = 0 if entry is None else entry.latest_seq
+    if ((latest_seq is not None and seq != latest_seq)
+            or (entry is not None and entry.open
+                and entry.intent_fence == prior["custody"]["fence"])):
+        raise refused_error(prior["transaction_id"], identity, "attempt_in_flight")
 
 
 class TransactionStore:
@@ -165,16 +188,19 @@ class TransactionStore:
                 external_state: str | None = None,
                 custody: Custody | None = None) -> Transaction:
         """Move one transaction along one allowed edge under its lock (#204; #205 D14,
-        D26, D27).
+        D26, D27; #206 D9).
 
         A terminal source is `TransitionRefused` before any custody check. Custody
         is required when the target is `publishing`, when the history has ever
         entered `publishing`, or when the transaction holds custody; a required
         custody that is None is `StaleCustody`. A presented custody is always
-        fenced-checked, required or not, before the lifecycle refusals. Entering a
-        terminal while custody is held appends the transition and a `lease_released`
-        reason `terminal` in one `state.json` write, then clears the lease records.
-        Every refusal happens before any write; the lock file is never created.
+        fenced-checked, required or not, before the lifecycle refusals. The last of
+        those refuses a terminal target while some action is `open`, `in_progress` or
+        `unknown` (`TransitionRefused` naming the first such action and its status),
+        whatever `external_state` the caller passes. Entering a terminal while custody
+        is held appends the transition and a `lease_released` reason `terminal` in one
+        `state.json` write, then clears the lease records. Every refusal happens
+        before any write; the lock file is never created.
         """
         if custody is not None:
             require_custody_shape(custody)
@@ -232,6 +258,10 @@ class TransactionStore:
             raise TransitionRefused(f"{where}: external_state is not known, unknown or None")
         if target in TERMINALS and external_state != "known":
             raise TransitionRefused(f"{where}: terminal target needs known external state")
+        blocker = unresolved(fold_actions(prior["events"])) if target in TERMINALS else None
+        if blocker is not None:
+            raise TransitionRefused(f"{where}: terminal target over unresolved action "
+                                    f"{blocker.action_id} ({status(blocker)})")
         at = format_at(now)
         candidate = copy.deepcopy(prior)
         candidate["events"].append({
@@ -428,19 +458,22 @@ class TransactionStore:
         return snapshot(candidate)
 
     def renew(self, custody: Custody) -> Transaction:
-        """The core's renewal duty, a tick the holder's host loop calls (D13, D19, D27, D28).
+        """The core's renewal duty, a tick the holder's host loop calls (D13, D19, D27, D28;
+        #206 D9).
 
         A terminal transaction is `TransitionRefused` before the fenced check; a
         failed check (a lapsed lease included) refuses without reacquiring. While
         the transaction is parked longer than `PARKED_CUSTODY_WINDOW_MS`, measured
-        from the transition that entered the parked run, it quiesces instead:
-        `lease_released` reason `quiesced` in `state.json`, then the records are
-        cleared, and the snapshot has no custody. Otherwise it never appends an
-        event or writes `state.json`: under the lease lock it judges the records
-        again at the same clock reading, so a key a successor took after the
-        lock-free check is `StaleCustody` with nothing written; it then extends
-        every record by its recorded TTL only when the earliest remaining validity
-        is inside the renewal margin, and writes nothing at all outside it.
+        from the transition that entered the parked run, and no action is observed
+        in flight (`open`, or last read `in_progress`; `unknown` and `diverged` hold
+        nothing), it quiesces instead: `lease_released` reason `quiesced` in
+        `state.json`, then the records are cleared, and the snapshot has no custody.
+        Otherwise, an observed action included, it never appends an event or writes
+        `state.json`: under the lease lock it judges the records again at the same
+        clock reading, so a key a successor took after the lock-free check is
+        `StaleCustody` with nothing written; it then extends every record by its
+        recorded TTL only when the earliest remaining validity is inside the renewal
+        margin, and writes nothing at all outside it.
         """
         require_custody_shape(custody)
         transaction_id = custody.transaction_id
@@ -452,8 +485,9 @@ class TransactionStore:
             now = self._now()
             self._check_custody(prior, custody, now)
             with self._leases.locked():
-                if prior["state"] in PARKINGS \
-                        and now - parked_since(prior["events"]) > PARKED_CUSTODY_WINDOW_MS:
+                if (prior["state"] in PARKINGS
+                        and now - parked_since(prior["events"]) > PARKED_CUSTODY_WINDOW_MS
+                        and not observed(fold_actions(prior["events"]))):
                     return self._released(prior, now, "quiesced")
                 if not self._leases.extend_if_due(prior["custody"]["fence"], now):
                     raise StaleCustody(f"{transaction_id}: renew: custody lapsed before the "
@@ -526,19 +560,144 @@ class TransactionStore:
     def _append_fenced(self, prior: dict, now: int, operation: str,
                        fields: dict) -> Transaction:
         """Append one record stamped with the held fence to `state.json` alone (D8, D27)."""
-        transaction_id = prior["transaction_id"]
-        event = {"seq": prior["revision"] + 1, "at": format_at(now), **fields,
-                 "fence": prior["custody"]["fence"]}
+        event = {**fields, "fence": prior["custody"]["fence"]}
         violation = fenced_id_violation(prior["events"], event)
         if violation is not None:
-            raise StateInvalid(f"{transaction_id}: {operation}: {violation}")
+            raise StateInvalid(f"{prior['transaction_id']}: {operation}: {violation}")
+        return self._append(prior, now, [event])
+
+    def _append(self, prior: dict, now: int, events: list[dict]) -> Transaction:
+        """Append `events` numbered from `prior`'s revision, each stamped `at` `now`, in one
+        validated `state.json` write; the caller holds the transaction lock."""
+        transaction_id = prior["transaction_id"]
         candidate = copy.deepcopy(prior)
-        candidate["events"].append(event)
+        at = format_at(now)
+        for fields in events:
+            candidate["events"].append(
+                {"seq": len(candidate["events"]) + 1, "at": at, **fields})
         candidate["revision"] = len(candidate["events"])
         _validate_state(candidate, transaction_id, self.root)
         directory = self.root / transaction_id
         atomic_write(directory, directory / "state.json", candidate)
         return snapshot(candidate)
+
+    @staticmethod
+    def _action_arguments(custody: Any, operation: str, name: Any, parameters: Any,
+                          effect: Any) -> str:
+        """The action id, after refusing (StateInvalid), before any lock, a malformed
+        credential, name or parameters, or an effect without callable `inspect` and
+        `invoke` (#206 D3, D4)."""
+        require_custody_shape(custody)
+        where = f"{custody.transaction_id}: {operation}"
+        violation = action_violation(name, parameters)
+        if violation is not None:
+            raise StateInvalid(f"{where}: {violation}")
+        if not (callable(getattr(effect, "inspect", None))
+                and callable(getattr(effect, "invoke", None))):
+            raise StateInvalid(f"{where}: effect has no callable inspect and invoke")
+        return action_id(custody.transaction_id, name, parameters)
+
+    def inspect_action(self, custody: Custody, *, name: str, parameters: dict,
+                       effect: Any) -> Transaction:
+        """Observe one action through `effect.inspect` and record what it saw (#206 D3, D5,
+        D8, D14, D16).
+
+        Argument shapes are refused first, before any lock. The first lock hold refuses a
+        terminal (`TransitionRefused`), runs the fenced check, then refuses an action whose
+        latest attempt is open under the held fence (`InvocationRefused`
+        `attempt_in_flight`) before any call, reads the action's attempt count (0 when
+        undeclared) and builds the request, whose `attempt` is that count; the lock is then
+        released and `effect.inspect` runs with no lock held. A result outside the closed
+        shape is `EffectResultInvalid` with nothing written. The second lock hold repeats
+        the terminal refusal and the fenced check, so a lapse during the call is
+        `StaleCustody` with nothing written, then re-folds the action and refuses
+        `attempt_in_flight` when it recorded any event since the first hold (a new attempt
+        or a newer inspection) or an attempt is open under the held fence, so an
+        observation older than the history is never appended: that refusal follows the
+        read-only `effect.inspect` call and records nothing from it. Otherwise it appends,
+        in one `state.json` write, `action_declared` when the history has no event of this
+        action yet and `action_inspected` stamped with the held fence. Any state but a
+        terminal may inspect, parkings included. Whatever the effect raises propagates.
+        """
+        identity = self._action_arguments(custody, "inspect_action", name, parameters,
+                                          effect)
+        with self._fenced(custody, "inspect_action", writes=True) as (prior, _):
+            entry = fold_actions(prior["events"]).get(identity)
+            _refuse_in_flight(prior, identity, entry)
+            attempts = 0 if entry is None else entry.attempts
+            latest_seq = 0 if entry is None else entry.latest_seq
+            request = effect_request(prior, identity, name, parameters, attempts)
+        result = effect.inspect(request)
+        violation = inspect_result_violation(result)
+        if violation is not None:
+            raise EffectResultInvalid(f"{custody.transaction_id}: inspect_action: "
+                                      f"{violation}")
+        with self._fenced(custody, "inspect_action", writes=True) as (prior, now):
+            entry = fold_actions(prior["events"]).get(identity)
+            _refuse_in_flight(prior, identity, entry, latest_seq)
+            events = []
+            if entry is None:
+                events.append({"type": "action_declared", "action_id": identity,
+                               "name": name, "parameters": copy.deepcopy(parameters)})
+            events.append({"type": "action_inspected", "action_id": identity,
+                           "outcome": result["outcome"], "reference": result["reference"],
+                           "fence": prior["custody"]["fence"]})
+            return self._append(prior, now, events)
+
+    def invoke_action(self, custody: Custody, *, name: str, parameters: dict,
+                      effect: Any) -> Transaction:
+        """Make the next attempt of one action through `effect.invoke`, then inspect it
+        (#206 D3, D5-D8).
+
+        Argument shapes are refused first, before any lock. The first lock hold refuses a
+        terminal (`TransitionRefused`), runs the fenced check, then refuses a state other
+        than `publishing` or `activating` (`InvocationRefused` `state_not_effectful`).
+        An action whose latest inspection reads `satisfied` returns the unchanged snapshot
+        with no write and no call. Otherwise the admission rules refuse, in order,
+        `inspection_required`, `not_absent`, `not_retryable`, `budget_exhausted` and
+        `window_closed`, each before any write or call. An admitted attempt `n` appends
+        `invocation_intended` stamped with the held fence, and the lock is released.
+        `effect.invoke` and then `effect.inspect` run with no lock held, on one request
+        whose `attempt` is `n`; a result outside its closed shape is `EffectResultInvalid`
+        and whatever the effect raises propagates, leaving the intent open. The second lock
+        hold repeats the terminal refusal and the fenced check, so a lapse during the calls
+        is `StaleCustody` with the intent open and the effect possibly applied, then
+        appends `invocation_returned` and the closing `action_inspected` in one
+        `state.json` write.
+        """
+        identity = self._action_arguments(custody, "invoke_action", name, parameters,
+                                          effect)
+        transaction_id = custody.transaction_id
+        with self._fenced(custody, "invoke_action", writes=True) as (prior, now):
+            if prior["state"] not in EFFECT_STATES:
+                raise refused_error(transaction_id, identity, "state_not_effectful")
+            entry = fold_actions(prior["events"]).get(identity)
+            if satisfied(entry):
+                return snapshot(prior)
+            fence = prior["custody"]["fence"]
+            reason = refusal(entry, held_fence=fence, now_ms=now)
+            if reason is not None:
+                raise refused_error(transaction_id, identity, reason)
+            attempt = entry.attempts + 1
+            self._append(prior, now, [{"type": "invocation_intended", "action_id": identity,
+                                       "attempt": attempt, "fence": fence}])
+            request = effect_request(prior, identity, name, parameters, attempt)
+        returned = effect.invoke(request)
+        violation = invoke_result_violation(returned)
+        if violation is None:
+            inspected = effect.inspect(request)
+            violation = inspect_result_violation(inspected)
+        if violation is not None:
+            raise EffectResultInvalid(f"{transaction_id}: invoke_action: {violation}")
+        with self._fenced(custody, "invoke_action", writes=True) as (prior, now):
+            fence = prior["custody"]["fence"]
+            return self._append(prior, now, [
+                {"type": "invocation_returned", "action_id": identity, "attempt": attempt,
+                 "result": returned["result"], "error_class": returned["error_class"],
+                 "reference": returned["reference"], "fence": fence},
+                {"type": "action_inspected", "action_id": identity,
+                 "outcome": inspected["outcome"], "reference": inspected["reference"],
+                 "fence": fence}])
 
     def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:
         """The fenced check (D12, D25): credential, then path, then live records at `now`.

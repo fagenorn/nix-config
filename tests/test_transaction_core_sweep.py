@@ -21,6 +21,7 @@ from agent_tools.transaction_core import TransactionStore
 
 from .transaction_core_shapes import SHAPES
 from .transaction_core_sweep_support import SCENARIOS, drive
+from .transaction_core_world import World
 
 WITH_ACTIVATION = ("created", "awaiting_verification", "ready", "publishing", "published",
                    "activating", "proving", "succeeded")
@@ -29,24 +30,43 @@ WITHOUT_ACTIVATION = tuple(s for s in WITH_ACTIVATION if s != "activating")
 LAPSED = WITH_ACTIVATION[:-1] + ("attention_required", "proving", "succeeded")
 LAPSED_LIBRARY = WITHOUT_ACTIVATION[:-1] + ("attention_required", "proving", "succeeded")
 
+RESUMED = WITH_ACTIVATION[:4] + ("attention_required", "publishing") + WITH_ACTIVATION[4:]
+RESUMED_LIBRARY = (WITHOUT_ACTIVATION[:4] + ("attention_required", "publishing")
+                   + WITHOUT_ACTIVATION[4:])
+
 # (shape, scenario) -> (final state, states the history passes through,
-#                       temporal forms voided by the scenario)
+#                       temporal forms voided, (first action's attempts, others' attempts))
 SWEEP = {
-    **{(shape, scenario): ("succeeded", path, frozenset())
+    **{(shape, scenario): ("succeeded", path, frozenset(), attempts)
        for shape, path in (("platform", WITH_ACTIVATION), ("product", WITH_ACTIVATION),
                            ("daemon", WITH_ACTIVATION), ("library", WITHOUT_ACTIVATION))
-       for scenario in ("success", "lease_renewal")},
-    ("platform", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot"})),
-    ("product", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot"})),
-    ("daemon", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot", "interval"})),
-    ("library", "lease_lapse"): ("succeeded", LAPSED_LIBRARY, frozenset({"snapshot"})),
+       for scenario, attempts in (("success", (1, 1)), ("lease_renewal", (1, 1)),
+                                  ("throttled_retry", (2, 2)))},
+    ("platform", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot"}), (1, 1)),
+    ("product", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot"}), (1, 1)),
+    ("daemon", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot", "interval"}),
+                                (1, 1)),
+    ("library", "lease_lapse"): ("succeeded", LAPSED_LIBRARY, frozenset({"snapshot"}),
+                                 (1, 1)),
+    **{(shape, "resume_after_crash"): (
+        "succeeded", RESUMED_LIBRARY if shape == "library" else RESUMED, frozenset(), (2, 1))
+       for shape in ("platform", "product", "daemon", "library")},
 }
+LAPSING = ("lease_lapse_detected", "lease_reacquired")
 CUSTODY_EVENTS = {
     "success": ["lease_acquired", "lease_released"],
     "lease_renewal": ["lease_acquired", "lease_released"],
-    "lease_lapse": ["lease_acquired", "lease_lapse_detected", "lease_reacquired",
-                    "lease_released"],
+    "throttled_retry": ["lease_acquired", "lease_released"],
+    "lease_lapse": ["lease_acquired", *LAPSING, "lease_released"],
+    "resume_after_crash": ["lease_acquired", *LAPSING, "lease_released"],
 }
+
+
+def declared_nodes(shape):
+    """Every publication and activation node id the shape's profile declares."""
+    _, profile, _ = SHAPES[shape](World())
+    activation = [] if profile["activation"] == "none" else profile["activation"]
+    return sorted(node["id"] for node in [*profile["publication"], *activation])
 
 
 def transitions(transaction):
@@ -63,11 +83,12 @@ class SweepTableTest(unittest.TestCase):
                                       for scenario in SCENARIOS})
 
     def test_every_cell_lands_where_the_table_says(self):
-        for (shape, scenario), (final, path, voided) in SWEEP.items():
+        for (shape, scenario), (final, path, voided, (first, rest)) in SWEEP.items():
             with self.subTest(shape=shape, scenario=scenario), \
                     tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                transaction_id = drive(root, shape, scenario)
+                world = World()
+                transaction_id = drive(root, shape, scenario, world=world)
                 persisted = TransactionStore(root).load(transaction_id)
                 self.assertEqual(persisted.creation_key, f"{shape}:{scenario}")
                 self.assertEqual(persisted.state, final)
@@ -95,8 +116,52 @@ class SweepTableTest(unittest.TestCase):
                     self.assertIsNone(persisted.custody)
                 for key in persisted.concurrency_keys:
                     record = TransactionStore(root).inspect_lease(key)
-                    self.assertEqual((record["epoch"], record["holder"]),
-                                     (2 if scenario == "lease_lapse" else 1, None))
+                    self.assertEqual(
+                        (record["epoch"], record["holder"]),
+                        (2 if CUSTODY_EVENTS[scenario][1] == "lease_lapse_detected" else 1,
+                         None))
+                declared = [e["action_id"] for e in persisted.events
+                            if e["type"] == "action_declared"]
+                attempts = {e["action_id"]: e["attempt"] for e in persisted.events
+                            if e["type"] == "invocation_intended"}
+                self.assertEqual([attempts[a] for a in declared],
+                                 [first] + [rest] * (len(declared) - 1))
+                self.assertEqual(sorted(e["name"] for e in persisted.actions),
+                                 declared_nodes(shape))
+                self.assertEqual({e["status"] for e in persisted.actions}, {"satisfied"})
+                self.assertEqual(set(world.invokes), set(declared))
+                self.assertEqual(set(world.invokes.values()),
+                                 {2 if scenario == "throttled_retry" else 1})
+                if scenario == "throttled_retry":
+                    for identity in declared:
+                        self.assertEqual(
+                            [(e["attempt"], e["result"], e["error_class"])
+                             for e in persisted.events if e["type"] == "invocation_returned"
+                             and e["action_id"] == identity],
+                            [(1, "rejected", "provider_throttled"), (2, "accepted", None)])
+
+    def test_the_crashed_action_reads_intent_inspection_then_retry(self):
+        def epoch(event):
+            return min(v["epoch"] for v in event["fence"].values()) if "fence" in event else None
+
+        for shape in SHAPES:
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                world = World()
+                transaction_id = drive(Path(tmp), shape, "resume_after_crash", world=world)
+                persisted = TransactionStore(Path(tmp)).load(transaction_id)
+                first = next(e["action_id"] for e in persisted.events
+                             if e["type"] == "action_declared")
+                trail = [(e["type"], e.get("attempt"), e.get("outcome"), epoch(e))
+                         for e in persisted.events if e.get("action_id") == first]
+                self.assertEqual(trail, [
+                    ("action_declared", None, None, None),
+                    ("action_inspected", None, "absent", 1),
+                    ("invocation_intended", 1, None, 1),
+                    ("action_inspected", None, "absent", 2),
+                    ("invocation_intended", 2, None, 2),
+                    ("invocation_returned", 2, None, 2),
+                    ("action_inspected", None, "satisfied", 2)])
+                self.assertEqual(world.invokes[first], 1)
 
     def test_the_lapse_row_exercises_every_temporal_form_before_the_lapse(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -163,10 +228,11 @@ def neutrality_findings(source):
     return findings
 
 
-from agent_tools import transaction_custody, transaction_history, transaction_storage
+from agent_tools import (transaction_custody, transaction_history, transaction_invocation,
+                         transaction_storage)
 
-NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_custody,
-                   transaction_storage)
+NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_invocation,
+                   transaction_custody, transaction_storage)
 
 
 class NeutralityTest(unittest.TestCase):

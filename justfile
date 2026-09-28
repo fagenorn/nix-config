@@ -92,6 +92,7 @@ agent-workflow-tests:
     tests/test_agent_tools_canonical.py \
     tests/test_transaction_core.py \
     tests/test_transaction_custody.py \
+    tests/test_transaction_invocation.py \
     tests/test_transaction_core_sweep.py \
     tests/test_agent_costs.py \
     tests/test_agent_model_drift_schema.py \
