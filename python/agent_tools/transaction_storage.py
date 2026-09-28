@@ -17,7 +17,8 @@ class TransactionError(Exception):
 
 
 class StateInvalid(TransactionError):
-    """A stored file, the layout, or an operation's arguments fail the closed schema."""
+    """A stored file, the layout, an operation's arguments, or a reused evidence or grant id
+    fails the closed schema."""
 
 
 class TransactionBusy(TransactionError):

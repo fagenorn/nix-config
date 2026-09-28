@@ -5,14 +5,16 @@ One closed `transaction-lease/v1` record per concurrency key under
 nullable holder; a holder is live while the clock reads below its `expires_at`.
 Every record write happens under `<root>/leases.lock`, which the caller takes
 through `LeaseAuthority.locked()` after its transaction lock. Reads take no lock.
+`admissibility` is the pure fold that judges fenced evidence and grants (D15, D16, D20).
 """
 
 import contextlib
+import copy
 import hashlib
 import os
 import re
 import secrets
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ LEASE_SCHEMA = "transaction-lease/v1"
 CUSTODY_EVENTS = frozenset({"lease_acquired", "lease_reacquired", "lease_released",
                             "lease_lapse_detected"})
 INSTANCE_PATTERN = re.compile(r"lin_[0-9a-f]{32}")
+EVIDENCE_FORMS = ("event", "snapshot", "interval")
 
 _RECORD_KEYS = frozenset({"schema", "key", "epoch", "holder"})
 _HOLDER_KEYS = frozenset({"transaction_id", "executor_id", "instance", "term", "ttl_ms",
@@ -63,6 +66,47 @@ def fence_violation(fence: Any, keys: Iterable[str] | None = None) -> str | None
     if len({entry["instance"] for entry in fence.values()}) != 1:
         return "fence entries do not share one instance"
     return None
+
+
+def admissibility(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], list[dict]]:
+    """The evidence and grant entries a validated history derives, in `seq` order (D20).
+
+    The latest fence is the last opening's. `event` evidence is always
+    admissible; `snapshot` needs the latest fence (else `fence_changed`);
+    `interval` needs no custody event strictly between its open and its record
+    (else `fence_discontinuity`) and then the latest fence (else `fence_changed`).
+    A grant is valid while its fence is the latest and that span is still open.
+    Pure: fresh dicts, no I/O.
+    """
+    custody_seqs, opened_at = [], {}
+    latest, span_open = None, False
+    for event in events:
+        if event["type"] in CUSTODY_EVENTS:
+            custody_seqs.append(event["seq"])
+            span_open = event["type"] in ("lease_acquired", "lease_reacquired")
+            if span_open:
+                latest = event["fence"]
+        elif event["type"] == "interval_opened":
+            opened_at[event["evidence_id"]] = event["seq"]
+    evidence, grants = [], []
+    for event in events:
+        if event["type"] == "evidence_recorded":
+            void = None
+            if event["form"] == "interval" and any(
+                    opened_at[event["evidence_id"]] < seq < event["seq"] for seq in custody_seqs):
+                void = "fence_discontinuity"
+            elif event["form"] != "event" and event["fence"] != latest:
+                void = "fence_changed"
+            evidence.append({
+                "evidence_id": event["evidence_id"], "form": event["form"],
+                "reference": event["reference"], "fence": copy.deepcopy(event["fence"]),
+                "seq": event["seq"], "admissible": void is None, "void_reason": void})
+        elif event["type"] == "grant_issued":
+            grants.append({
+                "grant_id": event["grant_id"], "actor": event["actor"],
+                "fence": copy.deepcopy(event["fence"]), "seq": event["seq"],
+                "valid": span_open and event["fence"] == latest})
+    return evidence, grants
 
 
 def _holder_violation(holder: Any) -> str | None:

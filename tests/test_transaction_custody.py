@@ -472,5 +472,164 @@ class FencedAdvanceTest(CustodyCase):
                     self.assertRefusedUnchanged(TransitionRefused, call)
 
 
+class EvidenceTest(CustodyCase):
+    def test_evidence_is_stamped_with_the_current_fence(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        after = self.store.record_evidence(custody, evidence_id="e1", form="snapshot",
+                                           reference="evidence://a")
+        event = dict(after.events[-1])
+        self.assertEqual(set(event), {"seq", "type", "at", "evidence_id", "form",
+                                      "reference", "fence"})
+        self.assertEqual(event["fence"], plain(custody.fence))
+        [entry] = after.evidence
+        self.assertEqual(dict(entry), {
+            "evidence_id": "e1", "form": "snapshot", "reference": "evidence://a",
+            "fence": plain(custody.fence), "seq": 3, "admissible": True,
+            "void_reason": None})
+        self.assertEqual(TransactionStore(self.root).load(transaction_id).evidence,
+                         after.evidence)
+
+    def test_a_lapse_advances_the_epoch_and_voids_snapshots_while_renewal_does_neither(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        self.store.record_evidence(custody, evidence_id="s1", form="snapshot",
+                                   reference="r")
+        self.store.record_evidence(custody, evidence_id="e1", form="event", reference="r")
+        self.store.open_interval(custody, evidence_id="i1")
+        self.store.issue_grant(custody, grant_id="g0", actor="publisher")
+        self.clock.advance(TTL // 2 + 1)
+        self.store.renew(custody)
+        self.store.record_evidence(custody, evidence_id="i1", form="interval",
+                                   reference="r")
+        self.store.issue_grant(custody, grant_id="g1", actor="publisher")
+        renewed = self.store.load(transaction_id)
+        self.assertEqual([e["admissible"] for e in renewed.evidence], [True, True, True])
+        self.assertEqual([g["valid"] for g in renewed.grants], [True, True])
+        for grant_id in ("g0", "g1"):  # a grant issued before the renewal survives it
+            self.assertEqual(self.store.check_grant(custody, grant_id)["grant_id"], grant_id)
+        self.assertEqual((self.store.inspect_lease(KEYS[0])["epoch"],
+                          self.store.inspect_lease(KEYS[0])["holder"]["term"]), (1, 2))
+        self.assertEqual([t for t in self.types(transaction_id) if t.startswith("lease_")],
+                         ["lease_acquired"])
+
+        self.clock.advance(TTL)
+        successor = self.acquire(transaction_id, executor="exec-b")
+        self.assertEqual(self.store.inspect_lease(KEYS[0])["epoch"], 2)
+        lapsed = self.store.load(transaction_id)
+        self.assertEqual([(e["evidence_id"], e["admissible"], e["void_reason"])
+                          for e in lapsed.evidence],
+                         [("s1", False, "fence_changed"), ("e1", True, None),
+                          ("i1", False, "fence_changed")])
+        self.assertEqual([g["valid"] for g in lapsed.grants], [False, False])
+        for grant_id in ("g0", "g1"):
+            self.assertRefusedUnchanged(
+                GrantInvalid, lambda: self.store.check_grant(successor, grant_id))
+            self.assertRefusedUnchanged(
+                StaleCustody, lambda: self.store.check_grant(custody, grant_id))
+
+    def test_an_interval_broken_by_a_custody_event_reads_fence_discontinuity(self):
+        transaction_id = self.new()
+        first = self.acquire(transaction_id)
+        self.store.open_interval(first, evidence_id="i1")
+        self.store.release(first)
+        second = self.acquire(transaction_id)
+        self.store.record_evidence(second, evidence_id="i1", form="interval", reference="r")
+        self.store.open_interval(second, evidence_id="i2")
+        after = self.store.record_evidence(second, evidence_id="i2", form="interval",
+                                           reference="r")
+        self.assertEqual([(e["evidence_id"], e["admissible"], e["void_reason"])
+                          for e in after.evidence],
+                         [("i1", False, "fence_discontinuity"), ("i2", True, None)])
+
+    def test_a_released_span_invalidates_its_grants(self):
+        custody = self.acquire(self.new())
+        self.store.issue_grant(custody, grant_id="g1", actor="a")
+        self.assertEqual([g["valid"] for g in self.store.release(custody).grants], [False])
+
+    def test_reused_ids_and_unopened_intervals_are_refused_before_any_write(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        self.store.record_evidence(custody, evidence_id="e1", form="event", reference="r")
+        self.store.open_interval(custody, evidence_id="i1")
+        self.store.issue_grant(custody, grant_id="g1", actor="a")
+        for call in (
+                lambda: self.store.record_evidence(custody, evidence_id="e1", form="event",
+                                                   reference="r"),
+                lambda: self.store.open_interval(custody, evidence_id="e1"),
+                lambda: self.store.open_interval(custody, evidence_id="i1"),
+                lambda: self.store.record_evidence(custody, evidence_id="e1",
+                                                   form="interval", reference="r"),
+                lambda: self.store.record_evidence(custody, evidence_id="i1",
+                                                   form="snapshot", reference="r"),
+                lambda: self.store.issue_grant(custody, grant_id="g1", actor="a"),
+                lambda: self.store.record_evidence(custody, evidence_id="x", form="guess",
+                                                   reference="r"),
+                lambda: self.store.record_evidence(custody, evidence_id="", form="event",
+                                                   reference="r"),
+                lambda: self.store.issue_grant(custody, grant_id="g2", actor="")):
+            self.assertRefusedUnchanged(StateInvalid, call)
+        self.assertRefusedUnchanged(GrantInvalid,
+                                    lambda: self.store.check_grant(custody, "nope"))
+        self.assertTrue(issubclass(GrantInvalid, FenceViolation))
+
+    def test_stale_or_terminal_writers_are_refused_before_any_write(self):
+        transaction_id = self.new()
+        stale = self.acquire(transaction_id)
+
+        def writes(credential):
+            return (
+                lambda: self.store.record_evidence(credential, evidence_id="s",
+                                                   form="snapshot", reference="r"),
+                lambda: self.store.open_interval(credential, evidence_id="i"),
+                lambda: self.store.issue_grant(credential, grant_id="g", actor="a"))
+
+        self.clock.advance(TTL)
+        for call in writes(stale):
+            self.assertRefusedUnchanged(StaleCustody, call)
+        fresh = self.acquire(transaction_id, executor="exec-b")
+        for call in writes(stale) + (
+                lambda: self.store.advance(transaction_id, "awaiting_verification",
+                                           reason="r", custody=stale),
+                lambda: self.store.renew(stale),
+                lambda: self.store.release(stale)):
+            self.assertRefusedUnchanged(StaleCustody, call)  # epoch 1 after epoch 2
+        self.store.advance(transaction_id, "abandoned", reason="r", external_state="known",
+                           custody=fresh)
+        for call in writes(fresh):
+            self.assertRefusedUnchanged(TransitionRefused, call)
+
+    def test_hand_edited_evidence_histories_fail_the_named_rule(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        self.store.open_interval(custody, evidence_id="i1")
+        self.store.record_evidence(custody, evidence_id="i1", form="interval", reference="r")
+        self.store.issue_grant(custody, grant_id="g1", actor="a")
+        base = self.state_doc(transaction_id)
+        _, acquired, opened, closed, granted = base["events"]
+        held = span(acquired)
+        foreign = {k: {**v, "epoch": 9} for k, v in opened["fence"].items()}
+        cases = {
+            "evidence outside a span": (
+                history(base, {**closed, "form": "snapshot"}, custody=None),
+                "outside an open custody span"),
+            "foreign fence": (
+                history(base, acquired, {**opened, "fence": foreign}, closed, granted,
+                        custody=held), "fence does not equal the open span's fence"),
+            "close without open": (
+                history(base, acquired, closed, granted, custody=held),
+                "closes no opened interval"),
+            "duplicate grant": (
+                history(base, acquired, opened, closed, granted, granted, custody=held),
+                "grant_id 'g1' is reused"),
+            "unknown form": (
+                history(base, acquired, opened, {**closed, "form": "guess"}, granted,
+                        custody=held), "form is not event, snapshot or interval"),
+        }
+        for name, (document, fragment) in cases.items():
+            with self.subTest(case=name):
+                self.assertRuleRefuses(transaction_id, copy.deepcopy(document), fragment)
+
+
 if __name__ == "__main__":
     unittest.main()

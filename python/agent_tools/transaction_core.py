@@ -12,7 +12,10 @@ the wall clock. `acquire` takes custody of the whole key set from the lease
 authority in `agent_tools.transaction_custody`, returning a `Custody` credential
 that `renew`, `release` and every fenced write check against the stored projection
 and the live lease records; `advance` is fenced from `publishing` on and while
-custody is held, and entering a terminal releases custody. The durable-file
+custody is held, and entering a terminal releases custody. `record_evidence`,
+`open_interval` and `issue_grant` append fence-stamped records under the held
+custody, `check_grant` checks one read-only, and every snapshot re-derives their
+verdicts from the history. The durable-file
 primitives and the refusal hierarchy live in `agent_tools.transaction_storage`,
 whose error classes this module re-exports.
 The module has no command and no caller yet.
@@ -31,13 +34,14 @@ import secrets
 import stat
 import time
 import uuid
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_custody import CUSTODY_EVENTS, LeaseAuthority, fence_violation
+from agent_tools.transaction_custody import (
+    CUSTODY_EVENTS, EVIDENCE_FORMS, LeaseAuthority, admissibility, fence_violation)
 from agent_tools.transaction_storage import (
     CreationConflict, CustodyMisbound, FenceViolation, GrantInvalid, LeaseUnavailable,
     StaleCustody, StateInvalid, TransactionBusy, TransactionError, TransitionRefused,
@@ -89,7 +93,11 @@ _EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
     "lease_reacquired": _OPENING_KEYS | {"prior_executor_id", "prior_fence", "reason"},
     "lease_released": _ENVELOPE_KEYS | {"fence", "reason"},
     "lease_lapse_detected": _ENVELOPE_KEYS | {"fence", "executor_id"},
+    "evidence_recorded": _ENVELOPE_KEYS | {"evidence_id", "form", "reference", "fence"},
+    "interval_opened": _ENVELOPE_KEYS | {"evidence_id", "fence"},
+    "grant_issued": _ENVELOPE_KEYS | {"grant_id", "actor", "fence"},
 })
+_FENCED_EVENTS = frozenset({"evidence_recorded", "interval_opened", "grant_issued"})
 _RELEASE_REASONS = ("released", "quiesced", "terminal")
 _EXTERNAL_STATES = ("known", "unknown", None)
 _MAX_CLOCK_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
@@ -117,7 +125,8 @@ class Transaction:
     `subject`, each event and `custody.fence` (with each fence entry) are
     `types.MappingProxyType` views over deep copies. Only those levels are
     read-only: nested values stay mutable, but they are copies, so mutating
-    them cannot reach disk.
+    them cannot reach disk. `evidence` and `grants` entries carry verdicts
+    derived from the history on every load; they are never stored.
     """
 
     transaction_id: str
@@ -129,6 +138,8 @@ class Transaction:
     events: tuple[Mapping[str, Any], ...]
     concurrency_keys: tuple[str, ...]
     custody: Custody | None
+    evidence: tuple[Mapping[str, Any], ...]
+    grants: tuple[Mapping[str, Any], ...]
 
 
 def _edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
@@ -278,6 +289,32 @@ class _CustodyFold:
     bound_path: str | None = None
     spans: list[tuple[str, dict]] = dataclasses.field(default_factory=list)
     last_close: str | None = None
+    evidence_ids: dict[str, str] = dataclasses.field(default_factory=dict)
+    grant_ids: set[str] = dataclasses.field(default_factory=set)
+
+
+def _id_violation(event: dict, fold: _CustodyFold) -> str | None:
+    """The id rule a fenced record breaks against the ids folded before it, or None (D27)."""
+    if event["type"] == "grant_issued":
+        grant_id = event["grant_id"]
+        return f"grant_id {grant_id!r} is reused" if grant_id in fold.grant_ids else None
+    evidence_id = event["evidence_id"]
+    seen = fold.evidence_ids.get(evidence_id)
+    if event["type"] == "evidence_recorded" and event["form"] == "interval":
+        if seen is None:
+            return f"evidence_id {evidence_id!r} closes no opened interval"
+        if seen == "opened":
+            return None
+    return None if seen is None else f"evidence_id {evidence_id!r} is reused"
+
+
+def _note_id(event: dict, fold: _CustodyFold) -> None:
+    """Fold one fenced record's id: a grant, an opened interval or a recorded item."""
+    if event["type"] == "grant_issued":
+        fold.grant_ids.add(event["grant_id"])
+    else:
+        fold.evidence_ids[event["evidence_id"]] = (
+            "opened" if event["type"] == "interval_opened" else "recorded")
 
 
 def _fold_closing(event: dict, seq: int, fold: _CustodyFold, state: str,
@@ -339,6 +376,33 @@ def _fold_opening(event: dict, seq: int, fold: _CustodyFold,
     fold.spans.append((event["executor_id"], event["fence"]))
     fold.custody = {"executor_id": event["executor_id"],
                     "subject_path": event["subject_path"], "fence": event["fence"]}
+
+
+def _fold_fenced(event: dict, seq: int, fold: _CustodyFold,
+                 refuse: Callable[[str], StateInvalid]) -> None:
+    """Check one evidence, interval or grant record against the open span, then fold its
+    id (D10, D15, D16, D27)."""
+    event_type = event["type"]
+    if set(event) != _EVENT_KEYS[event_type]:
+        raise refuse(f"event {seq} is not the closed {event_type} event")
+    if type(event["seq"]) is not int or event["seq"] != seq:
+        raise refuse(f"event {seq} does not carry seq {seq}")
+    if not _is_timestamp(event["at"]):
+        raise refuse(f"event {seq} at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
+    for name in sorted(_EVENT_KEYS[event_type] - _ENVELOPE_KEYS - {"form", "fence"}):
+        if type(event[name]) is not str or not event[name]:
+            raise refuse(f"event {seq} {name} is not a non-empty string")
+    if event_type == "evidence_recorded" and (type(event["form"]) is not str
+                                              or event["form"] not in EVIDENCE_FORMS):
+        raise refuse(f"event {seq} form is not event, snapshot or interval")
+    if fold.custody is None:
+        raise refuse(f"event {seq} {event_type} sits outside an open custody span")
+    if event["fence"] != fold.custody["fence"]:
+        raise refuse(f"event {seq} {event_type} fence does not equal the open span's fence")
+    violation = _id_violation(event, fold)
+    if violation is not None:
+        raise refuse(f"event {seq} {violation}")
+    _note_id(event, fold)
 
 
 def _fold_custody(event: dict, seq: int, fold: _CustodyFold, state: str,
@@ -419,6 +483,8 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
                     entered_terminal = seq
             case str() if event_type in CUSTODY_EVENTS:
                 _fold_custody(event, seq, fold, state, entered_terminal, refuse)
+            case str() if event_type in _FENCED_EVENTS:
+                _fold_fenced(event, seq, fold, refuse)
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
     custody = fold.custody
@@ -449,6 +515,7 @@ def _snapshot(document: dict) -> Transaction:
             subject_path=projection["subject_path"],
             fence=MappingProxyType({key: MappingProxyType(copy.deepcopy(entry))
                                     for key, entry in projection["fence"].items()}))
+    evidence, grants = admissibility(document["events"])
     return Transaction(
         transaction_id=document["transaction_id"],
         creation_key=document["creation_key"],
@@ -460,6 +527,8 @@ def _snapshot(document: dict) -> Transaction:
                      for event in document["events"]),
         concurrency_keys=tuple(document["concurrency_keys"]),
         custody=custody,
+        evidence=tuple(MappingProxyType(entry) for entry in evidence),
+        grants=tuple(MappingProxyType(entry) for entry in grants),
     )
 
 
@@ -476,6 +545,16 @@ def _require_custody_shape(custody: Any) -> None:
     violation = fence_violation(custody.fence)
     if violation is not None:
         raise StateInvalid(f"{where} {violation}")
+
+
+def _require_texts(custody: Any, operation: str, **values: Any) -> None:
+    """Refuse (StateInvalid), before any lock, a malformed credential or any argument that
+    is not a non-empty string (D21)."""
+    _require_custody_shape(custody)
+    for name, value in values.items():
+        if type(value) is not str or not value:
+            raise StateInvalid(f"{custody.transaction_id}: {operation}: {name} {value!r} is "
+                               f"not a non-empty string")
 
 
 def _bound_path(document: dict) -> str | None:
@@ -853,6 +932,90 @@ class TransactionStore:
                     return _snapshot(candidate)
                 self._leases.extend_if_due(fence, now)
         return _snapshot(prior)
+
+    def record_evidence(self, custody: Custody, *, evidence_id: str, form: str,
+                        reference: str) -> Transaction:
+        """Append `evidence_recorded` stamped with the held fence (D10, D15, D27).
+
+        Form `interval` closes the interval opened under the same id; any other
+        form needs an unused id. A reused id or an unopened interval is
+        `StateInvalid` under the lock before any write.
+        """
+        _require_texts(custody, "record_evidence", evidence_id=evidence_id,
+                       reference=reference)
+        if type(form) is not str or form not in EVIDENCE_FORMS:
+            raise StateInvalid(f"{custody.transaction_id}: record_evidence: form {form!r} is "
+                               f"not event, snapshot or interval")
+        with self._fenced(custody, "record_evidence", writes=True) as (prior, now):
+            return self._append_fenced(prior, now, "record_evidence", {
+                "type": "evidence_recorded", "evidence_id": evidence_id, "form": form,
+                "reference": reference})
+
+    def open_interval(self, custody: Custody, *, evidence_id: str) -> Transaction:
+        """Append `interval_opened`: the core witnesses where an interval starts (D15)."""
+        _require_texts(custody, "open_interval", evidence_id=evidence_id)
+        with self._fenced(custody, "open_interval", writes=True) as (prior, now):
+            return self._append_fenced(prior, now, "open_interval", {
+                "type": "interval_opened", "evidence_id": evidence_id})
+
+    def issue_grant(self, custody: Custody, *, grant_id: str, actor: str) -> Transaction:
+        """Append `grant_issued` for the held custody only, stamped with its fence (D16)."""
+        _require_texts(custody, "issue_grant", grant_id=grant_id, actor=actor)
+        with self._fenced(custody, "issue_grant", writes=True) as (prior, now):
+            return self._append_fenced(prior, now, "issue_grant", {
+                "type": "grant_issued", "grant_id": grant_id, "actor": actor})
+
+    def check_grant(self, custody: Custody, grant_id: str) -> Mapping[str, Any]:
+        """The grant's entry when its fence is the presented, current one (D16).
+
+        Fenced and read-only: writes nothing and never re-stamps. An unknown grant,
+        or one minted under another fence, is `GrantInvalid`.
+        """
+        _require_texts(custody, "check_grant", grant_id=grant_id)
+        with self._fenced(custody, "check_grant", writes=False) as (prior, _):
+            presented = {key: dict(entry) for key, entry in custody.fence.items()}
+            for grant in admissibility(prior["events"])[1]:
+                if grant["grant_id"] == grant_id and grant["fence"] == presented:
+                    return MappingProxyType(grant)
+        raise GrantInvalid(f"{custody.transaction_id}: check_grant: grant_id {grant_id!r} is "
+                           f"unknown or not minted under the presented fence")
+
+    @contextlib.contextmanager
+    def _fenced(self, custody: Custody, operation: str, *,
+                writes: bool) -> Iterator[tuple[dict, int]]:
+        """Under the transaction lock, the validated prior document and the one clock reading
+        the fenced check passed at; a writer on a terminal is `TransitionRefused` first
+        (D25, D27)."""
+        transaction_id = custody.transaction_id
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if writes and prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{transaction_id}: {operation}: state "
+                                        f"{prior['state']} is terminal")
+            now = self._now()
+            self._check_custody(prior, custody, now)
+            yield prior, now
+
+    def _append_fenced(self, prior: dict, now: int, operation: str,
+                       fields: dict) -> Transaction:
+        """Append one record stamped with the held fence to `state.json` alone (D8, D27)."""
+        transaction_id = prior["transaction_id"]
+        fold = _CustodyFold(prior["concurrency_keys"])
+        for event in prior["events"]:
+            if event["type"] in _FENCED_EVENTS:
+                _note_id(event, fold)
+        event = {"seq": prior["revision"] + 1, "at": _format_at(now), **fields,
+                 "fence": prior["custody"]["fence"]}
+        violation = _id_violation(event, fold)
+        if violation is not None:
+            raise StateInvalid(f"{transaction_id}: {operation}: {violation}")
+        candidate = copy.deepcopy(prior)
+        candidate["events"].append(event)
+        candidate["revision"] = len(candidate["events"])
+        _validate_state(candidate, transaction_id, self.root)
+        directory = self.root / transaction_id
+        atomic_write(directory, directory / "state.json", candidate)
+        return _snapshot(candidate)
 
     def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:
         """The fenced check (D12, D25): credential, then path, then live records at `now`.
