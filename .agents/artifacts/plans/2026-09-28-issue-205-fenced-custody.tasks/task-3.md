@@ -144,6 +144,13 @@ class CustodyCase(unittest.TestCase):
     def state_doc(self, transaction_id):
         return json.loads((self.root / transaction_id / "state.json").read_text())
 
+    def assertRuleRefuses(self, transaction_id, document, fragment):
+        (self.root / transaction_id / "state.json").write_text(serialize(document))
+        with self.assertRaises(StateInvalid) as caught:
+            self.store.load(transaction_id)
+        self.assertIn(transaction_id, str(caught.exception))
+        self.assertIn(fragment, str(caught.exception))
+
 
 class AcquireTest(CustodyCase):
     def test_a_first_acquisition_grants_epoch_one_and_appends_one_event(self):
@@ -309,50 +316,75 @@ class FenceCheckTest(CustodyCase):
         self.assertRefusedUnchanged(TransitionRefused, lambda: self.acquire(transaction_id))
 
 
+def span(event):
+    """The custody projection an opening event folds to."""
+    return {"executor_id": event["executor_id"], "subject_path": event["subject_path"],
+            "fence": event["fence"]}
+
+
+def history(base, *events, custody):
+    """`base` with `events` after its created event, seqs, revision and projection honest."""
+    numbered = [base["events"][0]] + [{**event, "seq": seq}
+                                      for seq, event in enumerate(events, start=2)]
+    return {**base, "events": numbered, "revision": len(numbered), "custody": custody}
+
+
 class CustodyValidatorTest(CustodyCase):
-    def test_hand_edited_custody_histories_are_state_invalid(self):
+    def test_hand_edited_custody_histories_fail_the_named_rule(self):
         transaction_id = self.new()
         first = self.acquire(transaction_id)
         self.store.release(first)
         self.acquire(transaction_id, executor="exec-b")
         base = self.state_doc(transaction_id)
         acquired, released, reacquired = base["events"][1:4]
-
-        def events(*replacement):
-            return lambda d: {**d, "events": [d["events"][0], *replacement],
-                              "revision": 1 + len(replacement)}
-
         low = {k: {**v, "epoch": 1} for k, v in reacquired["fence"].items()}
+        rebound = {**reacquired, "subject_path": "/work/beta"}
+        lowered = {**reacquired, "fence": low}
         cases = {
-            "custody projection forged": lambda d: {**d, "custody": None},
-            "second open span": events(acquired, {**acquired, "seq": 3}),
-            "prior fence mismatch": events(acquired, released, {
-                **reacquired, "prior_fence": reacquired["fence"]}),
-            "epoch not increasing": events(acquired, released, {**reacquired, "fence": low}),
-            "rebound path": events(acquired, released, {
-                **reacquired, "subject_path": "/work/beta"}),
-            "false reason": events(acquired, released, {**reacquired, "reason": "expired"}),
-            "false prior executor": events(acquired, released, {
-                **reacquired, "prior_executor_id": "exec-z"}),
-            "release without span": events({**released, "seq": 2}),
-            "unknown type": events({**acquired, "type": "lease_renewed"}),
-            "extra field": events({**acquired, "term": 2}),
+            "custody projection forged": (
+                {**base, "custody": None}, "custody does not equal the folded custody"),
+            "second open span": (
+                history(base, acquired, acquired, custody=span(acquired)),
+                "follows an earlier custody span"),
+            "prior fence mismatch": (
+                history(base, acquired, released, {**reacquired,
+                                                   "prior_fence": reacquired["fence"]},
+                        custody=span(reacquired)), "prior_fence"),
+            "epoch not increasing": (
+                history(base, acquired, released, lowered, custody=span(lowered)),
+                "epoch does not increase"),
+            "rebound path": (
+                history(base, acquired, released, rebound, custody=span(rebound)),
+                "subject_path differs from the bound path"),
+            "false reason": (
+                history(base, acquired, released, {**reacquired, "reason": "expired"},
+                        custody=span(reacquired)),
+                "reason does not match how the prior span closed"),
+            "false prior executor": (
+                history(base, acquired, released, {**reacquired,
+                                                   "prior_executor_id": "exec-z"},
+                        custody=span(reacquired)), "prior_executor_id"),
+            "release without span": (
+                history(base, released, custody=None), "closes no open custody span"),
+            "unknown type": (
+                history(base, {**acquired, "type": "lease_renewed"}, custody=None),
+                "unknown event type 'lease_renewed'"),
+            "extra field": (
+                history(base, {**acquired, "term": 2}, custody=span(acquired)),
+                "is not the closed lease_acquired event"),
         }
-        for name, mutate in cases.items():
+        for name, (document, fragment) in cases.items():
             with self.subTest(case=name):
-                (self.root / transaction_id / "state.json").write_text(
-                    serialize(mutate(copy.deepcopy(base))))
-                with self.assertRaises(StateInvalid) as caught:
-                    self.store.load(transaction_id)
-                self.assertIn(transaction_id, str(caught.exception))
+                self.assertRuleRefuses(transaction_id, copy.deepcopy(document), fragment)
 
 
 if __name__ == "__main__":
     unittest.main()
 ```
 
-Note: some mutated histories fail an earlier rule than their name (e.g. the projection);
-every case only needs `StateInvalid`.
+Each case keeps seqs, `revision` and the `custody` projection honest (`history`), so only
+the named rule can fire; the fragment is part of that rule's message (step 3.4). `span`,
+`history` and `CustodyCase.assertRuleRefuses` are reused by Tasks 5 and 6.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
@@ -392,6 +424,13 @@ Expected: FAIL — `ImportError: cannot import name 'Custody'`.
    and executor. After a terminal, the only event allowed is that one `terminal`
    release; a terminal with custody still open at the end is refused. The folded
    custody `{executor_id, subject_path, fence}` must equal `document["custody"]`.
+   Messages follow slice 1's `f"event {seq} …"` shape and contain these exact fragments,
+   which the tests assert: `custody does not equal the folded custody`, `follows an
+   earlier custody span`, `prior_fence`, `prior_executor_id`, `epoch does not increase`,
+   `subject_path differs from the bound path`, `reason does not match how the prior span
+   closed`, `closes no open custody span`, and `is not the closed <type> event` for a
+   key-set mismatch. The dispatch's default branch (Task 2) already refuses
+   `unknown event type '<type>'`.
 5. `acquire`: shape checks → `_transaction_locked` → `prior` → terminal refusal →
    `bound_path` (from the first `lease_acquired`) differs → `CustodyMisbound` →
    `LeaseAuthority.locked()` → `now = self._now()` → if `prior["custody"]` is open and
@@ -406,6 +445,12 @@ Expected: FAIL — `ImportError: cannot import name 'Custody'`.
 7. `inspect_lease(key)`: non-empty `str` else `StateInvalid`; returns
    `MappingProxyType(copy.deepcopy(record))` or `None`; no lock, no write.
 8. `_snapshot` builds `Custody(transaction_id, **projection)` when the projection is set.
+   Rewrite the `Transaction` docstring's second paragraph to: "`subject`, each event and
+   `custody.fence` (with each fence entry) are `types.MappingProxyType` views over deep
+   copies. Only those levels are read-only: nested values stay mutable, but they are
+   copies, so mutating them cannot reach disk." Rewrite the `StateInvalid` docstring (in
+   `transaction_storage`) to: "A stored file, the layout, or an operation's arguments fail
+   the closed schema."
 9. Add `transaction_custody` to `NEUTRAL_MODULES`; add the test file to the justfile.
 
 - [ ] **Step 4: Verify**

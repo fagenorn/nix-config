@@ -26,7 +26,7 @@ fenced advances, evidence and grants, and reap/late results; Task 7 grows the sw
 check, unchanged).
 
 Spec (source of truth, read it whole):
-`.agents/artifacts/specs/2026-09-28-issue-205-fenced-custody-design.md`, D1–D31.
+`.agents/artifacts/specs/2026-09-28-issue-205-fenced-custody-design.md`, D1–D32.
 Slice 1: `.agents/artifacts/specs/2026-09-27-issue-204-transaction-core-skeleton-design.md`
 and `python/agent_tools/transaction_core.py` at the base commit.
 
@@ -54,8 +54,9 @@ and `python/agent_tools/transaction_core.py` at the base commit.
 - Constants, exact: lease schema `transaction-lease/v1`; state schema
   `transaction-state/v2`; instance `lin_` + 32 lowercase hex (`secrets.token_hex(16)`);
   margin `min(ttl_ms, max(ttl_ms // 2, 60000))`; `PARKED_CUSTODY_WINDOW_MS = 900000`.
-- Lock order is transaction lock then `<root>/leases.lock`, both non-blocking; fenced
-  writes never take the lease lock (per D8, D25).
+- Lock order is transaction lock then `<root>/leases.lock`, both non-blocking. The fenced
+  check, and fenced writes that touch only `state.json`, never take the lease lock;
+  operations that write lease records take it after the transaction lock (per D8, D25).
 - Fixtures (provider names allowed) live only under `tests/`.
 - Commits are signed (never `--no-gpg-sign`) and end with the two trailer lines the
   caller supplies.
@@ -79,14 +80,17 @@ Estimates only: ~9 changed files — `transaction_core.py` (542 → ~950 lines),
 `transaction_storage.py` (~200, mostly moved), `transaction_custody.py` (~300), new
 `tests/test_transaction_custody.py` (~700), `tests/test_transaction_core.py` (+~60),
 sweep support and sweep test (+~150), `justfile` (+1), `CLAUDE.md` (1 sentence).
-Aggregate-growth risk sits in the custody test file and the v2 validator. Tasks 1–6 each
-leave a working store; Task 7 adds only fixture and docs.
+Aggregate-growth risk sits in the custody test file and the v2 validator. Each task
+leaves the suite green, with one known gap: between Tasks 3 and 4 an advance into a
+terminal while custody is held raises `StateInvalid` (the validator forbids open custody
+after a terminal) until Task 4's terminal release lands; no test reaches it. Task 7 adds
+only fixture and docs.
 
 ## Task index
 
 Task 1 — Move storage primitives and errors; inject the lease-authority clock — `python/agent_tools/transaction_storage.py`, `python/agent_tools/transaction_core.py`, `tests/test_transaction_core.py`, `tests/test_transaction_core_sweep.py` — low-risk — [task-1.md](2026-09-28-issue-205-fenced-custody.tasks/task-1.md)
 
-Task 2 — Schema v2: immutable concurrency keys, custody projection, v1 refused — `python/agent_tools/transaction_core.py`, `tests/test_transaction_core.py`, `tests/transaction_core_sweep_support.py`, `tests/test_transaction_core_sweep.py` — full — [task-2.md](2026-09-28-issue-205-fenced-custody.tasks/task-2.md)
+Task 2 — Schema v2: immutable concurrency keys, custody projection, v1 refused — `python/agent_tools/transaction_core.py`, `python/agent_tools/transaction_storage.py`, `tests/test_transaction_core.py`, `tests/transaction_core_sweep_support.py`, `tests/test_transaction_core_sweep.py` — full — [task-2.md](2026-09-28-issue-205-fenced-custody.tasks/task-2.md)
 
 Task 3 — Lease authority, `acquire`/`release`/`inspect_lease`, the fenced check and custody validation — `python/agent_tools/transaction_custody.py`, `python/agent_tools/transaction_storage.py`, `python/agent_tools/transaction_core.py`, `tests/test_transaction_custody.py`, `tests/test_transaction_core_sweep.py`, `justfile` — full — [task-3.md](2026-09-28-issue-205-fenced-custody.tasks/task-3.md)
 
@@ -100,7 +104,22 @@ Task 7 — Renewal and lapse sweep rows, voided-forms column, CLAUDE.md — `tes
 
 ## Decisions
 
-The spec's `## Decision ledger` owns every decision. Tasks cite: D1, D3, D31 (Task 1);
-D4, D9 (Task 2); D2, D5–D8, D10–D12, D21, D24, D25, D27, D30 (Task 3); D13, D14, D19,
+The spec's `## Decision ledger` owns every decision. Tasks cite: D1, D3, D31, D32 (Task 1);
+D4, D9, D32 (Task 2); D2, D5–D8, D10–D12, D21, D24, D25, D27, D30 (Task 3); D13, D14, D19,
 D26, D27, D28 (Task 4); D10, D15, D16, D20, D27, D30 (Task 5); D17, D18, D27, D30
-(Task 6); D22, D29 (Task 7). Planning added D27–D31.
+(Task 6); D22, D29 (Task 7). Planning added D27–D31; the standards review added D32.
+
+---
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (isolated, read-only). Codex ran, but its JSONL carried no
+  runtime-selection event naming the model and effort, so its result failed metadata
+  validation and one native fallback took the same packet.
+- Base SHA: 66ccba5844eab2af9c68962c54a28f874585ee80.
+- Counts: 7 accepted (SF1–SF6, DI3), 1 rejected (DI1: stricter `owner_result`
+  cross-checks beyond D30), 1 deferred (DI2: test-structure duplication, left to
+  execution). SF1's fail-loud unknown event type and SF6's clock upper bound are recorded
+  as D32; the rest are routine corrections: rule-specific validator cases, a grant issued
+  before renewal, stale-epoch writes after reacquisition, scheduled docstring rewrites,
+  the lease-lock wording and the Task 3→4 gap note.

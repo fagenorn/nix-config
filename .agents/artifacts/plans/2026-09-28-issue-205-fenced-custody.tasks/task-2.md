@@ -2,6 +2,7 @@
 
 **Files:**
 - Modify: `python/agent_tools/transaction_core.py`
+- Modify: `python/agent_tools/transaction_storage.py` (the `CreationConflict` docstring)
 - Modify: `tests/test_transaction_core.py`
 - Modify: `tests/transaction_core_sweep_support.py` (one `create` call)
 - Modify: `tests/test_transaction_core_sweep.py` (`test_recreating_a_driven_cell_…`)
@@ -86,6 +87,16 @@ class ConcurrencyKeysTest(StoreCase):
             self.store.load(transaction_id)
         self.assertIn("transaction-state/v1", str(caught.exception))
         self.assertIn(transaction_id, str(caught.exception))
+
+    def test_an_unknown_event_type_is_refused_by_name(self):
+        transaction_id = self.store.create("k", SUBJECT, concurrency_keys=KEYS).transaction_id
+        document = self.document(transaction_id)
+        document["events"].append({"seq": 2, "type": "lease_renewed",
+                                   "at": document["events"][0]["at"]})
+        self.write(transaction_id, {**document, "revision": 2})
+        with self.assertRaises(StateInvalid) as caught:
+            self.store.load(transaction_id)
+        self.assertIn("unknown event type 'lease_renewed'", str(caught.exception))
 ```
 
 5. `tests/transaction_core_sweep_support.py`: `store.create(f"{shape}:{scenario}", subject,
@@ -111,15 +122,23 @@ Expected: FAIL — `TypeError: … unexpected keyword argument 'concurrency_keys
    `schema != SCHEMA` with `f"schema {document.get('schema')!r} is not {SCHEMA}"`. Add
    the `concurrency_keys` rule. Introduce a local fold variable `custody = None` beside
    `state, parked` and, after the loop, refuse unless `document["custody"] == custody`
-   (compare with `type(...) is dict or is None` first so `False`/`0` never equal `None`).
-   Task 3 extends this fold; keep the event loop a per-type dispatch so new types slot in.
+   (compare with `type(...) is dict or is None` first so `False`/`0` never equal `None`),
+   with a message containing `custody does not equal the folded custody`. Turn the event
+   loop into a per-type dispatch keyed by `event["type"]` so Tasks 3, 5 and 6 slot new
+   types in; its default branch refuses with `f"event {seq} has unknown event type
+   {event_type!r}"` (fail loud, per D32) before any key-set check.
+6. Docstrings: `CreationConflict` (in `transaction_storage`) → "The same creation key was requested with a
+   different subject or concurrency key set."; `_require_creatable` → "Refuse
+   (StateInvalid) arguments that cannot form a valid transaction-state/v2 document.";
+   `_validate_state` → "Refuse (StateInvalid) any document that is not a valid
+   transaction-state/v2."
 5. `_snapshot` fills `concurrency_keys=tuple(document["concurrency_keys"])` and
    `custody=None`.
 
 - [ ] **Step 4: Verify**
 
 Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_core.py tests/test_transaction_core_sweep.py 2>&1 | tail -3`
-Expected: `OK` (Task 1 count + 4 tests).
+Expected: `OK` (Task 1 count + 5 tests).
 
 Run: `if grep -n 'transaction-state/v1' python/agent_tools/transaction_core.py; then exit 1; fi`
 Expected: no output (no v1 constant or migration remains).
@@ -129,7 +148,8 @@ Run: `just agent-workflow-tests 2>&1 | tail -3` — Expected: `OK`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/agent_tools/transaction_core.py tests/test_transaction_core.py \
+git add python/agent_tools/transaction_core.py python/agent_tools/transaction_storage.py \
+  tests/test_transaction_core.py \
   tests/transaction_core_sweep_support.py tests/test_transaction_core_sweep.py
 git commit -m "feat(transaction-core): add immutable concurrency keys under state v2 (#205)"
 ```

@@ -11,7 +11,8 @@
   `_EVENT_KEYS`, `record_evidence`, `advance(..., custody=)`, `StaleCustody`,
   `CustodyMisbound`, `TransitionRefused`, `StateInvalid`; slice 1's strict-JSON
   round-trip rule used by `_require_creatable` for `subject`; test helpers
-  `CustodyCase`, `plain`, `TTL`, `KEYS`, `PATH`, `serialize`.
+  `CustodyCase` (with `assertRuleRefuses`), `span`, `history`, `plain`, `TTL`, `KEYS`,
+  `PATH`, `serialize`.
 - Produces: `TransactionStore.reap(self, transaction_id: str, *, reason: str) -> Transaction`
   and `TransactionStore.record_owner_result(self, transaction_id: str, *, executor_id: str, subject_path: str, fence: Mapping[str, Mapping[str, Any]], result: dict) -> Transaction`.
   Task 7's reaper step calls `reap` exactly so.
@@ -85,6 +86,17 @@ class ReapTest(CustodyCase):
                 lambda: self.store.record_evidence(custody, evidence_id="x",
                                                    form="snapshot", reference="r")):
             self.assertRefusedUnchanged(StaleCustody, call)
+        fresh = self.acquire(transaction_id, executor="exec-b")
+        for call in (
+                lambda: self.store.advance(transaction_id, "proving", reason="r",
+                                           custody=custody),
+                lambda: self.store.record_evidence(custody, evidence_id="x",
+                                                   form="snapshot", reference="r"),
+                lambda: self.store.renew(custody),
+                lambda: self.store.release(custody)):
+            self.assertRefusedUnchanged(StaleCustody, call)  # epoch 1 after epoch 2
+        self.assertEqual(self.store.advance(transaction_id, "proving", reason="r",
+                                            custody=fresh).state, "proving")
 
     def test_reaping_a_parked_lapse_adds_no_transition(self):
         transaction_id = self.new()
@@ -149,33 +161,33 @@ class OwnerResultTest(ReapTest):
         self.assertRefusedUnchanged(TransitionRefused,
                                     lambda: self.late(transaction_id, custody))
 
-    def test_hand_edited_stop_and_result_histories_are_state_invalid(self):
+    def test_hand_edited_stop_and_result_histories_fail_the_named_rule(self):
         transaction_id, custody = self.proving()
         self.clock.advance(TTL)
         self.store.reap(transaction_id, reason="lease expired")
         self.late(transaction_id, custody)
         base = self.state_doc(transaction_id)
-        *head, lapse, stop, park, result = base["events"]
-
-        def events(*tail):
-            return lambda d: {**d, "events": [*head, *tail],
-                              "revision": len(head) + len(tail)}
-
+        _, acquired, *middle, lapse, stop, park, result = base["events"]
+        early = [acquired, *middle]
+        unlapsed = history(base, *early, stop, park, result, custody=span(acquired))
+        unlapsed["events"][-1]["supersedes"] = unlapsed["events"][-3]["seq"]
         cases = {
-            "stop without lapse": events({**stop, "seq": lapse["seq"]}, park, result),
-            "result names no span": events(lapse, stop, park, {**result,
-                                                               "executor_id": "exec-z"}),
-            "supersedes no stop": events(lapse, stop, park, {**result,
-                                                             "supersedes": park["seq"]}),
-            "unknown custody word": events(lapse, stop, park, {**result,
-                                                               "custody": "maybe"}),
+            "stop without lapse": (unlapsed, "does not follow a lease_lapse_detected"),
+            "result names no span": (
+                history(base, *early, lapse, stop, park,
+                        {**result, "executor_id": "exec-z"}, custody=None),
+                "names no custody span"),
+            "supersedes no stop": (
+                history(base, *early, lapse, stop, park,
+                        {**result, "supersedes": park["seq"]}, custody=None),
+                "supersedes names no earlier stop_synthesized"),
+            "unknown custody word": (
+                history(base, *early, lapse, stop, park, {**result, "custody": "maybe"},
+                        custody=None), "custody is not current or stale"),
         }
-        for name, mutate in cases.items():
+        for name, (document, fragment) in cases.items():
             with self.subTest(case=name):
-                (self.root / transaction_id / "state.json").write_text(
-                    serialize(mutate(copy.deepcopy(base))))
-                with self.assertRaises(StateInvalid):
-                    self.store.load(transaction_id)
+                self.assertRuleRefuses(transaction_id, copy.deepcopy(document), fragment)
 ```
 
 `OwnerResultTest` subclasses `ReapTest` only to reuse `proving`; it therefore also
@@ -199,7 +211,10 @@ Expected: FAIL — `AttributeError: 'TransactionStore' object has no attribute '
 3. `record_owner_result`: shapes → lock → `prior` → terminal refusal → authenticity →
    bound path → `now` → `custody` word and `supersedes` → append → validate → write. The
    `result` stored is a deep copy.
-4. Docstrings of both methods describe these rules as implemented.
+4. Validator messages contain the fragments the tests assert: `does not follow a
+   lease_lapse_detected`, `names no custody span`, `supersedes names no earlier
+   stop_synthesized`, `custody is not current or stale`.
+5. Docstrings of both methods describe these rules as implemented.
 
 - [ ] **Step 4: Verify**
 

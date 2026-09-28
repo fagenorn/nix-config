@@ -3,13 +3,15 @@
 **Files:**
 - Modify: `python/agent_tools/transaction_custody.py`
 - Modify: `python/agent_tools/transaction_core.py`
+- Modify: `python/agent_tools/transaction_storage.py` (the `StateInvalid` docstring)
 - Modify: `tests/test_transaction_custody.py` (append classes before `if __name__`)
 
 **Interfaces:**
 - Consumes (Tasks 3–4): `CUSTODY_EVENTS`, `self._check_custody(prior, custody, now)`,
   `_require_custody_shape`, `self._transaction_locked`, `self._now()`, `_format_at`,
   the v2 validator's per-type dispatch and `_EVENT_KEYS`, `GrantInvalid`, `renew`,
-  `acquire`, `release`; test helpers `CustodyCase`, `plain`, `TTL`, `KEYS`, `PATH`.
+  `acquire`, `release`; test helpers `CustodyCase` (with `assertRuleRefuses`), `span`,
+  `history`, `plain`, `TTL`, `KEYS`, `PATH`.
 - Produces, `transaction_custody`: `EVIDENCE_FORMS = ("event", "snapshot", "interval")`
   and the pure fold
   `admissibility(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], list[dict]]`.
@@ -74,6 +76,7 @@ class EvidenceTest(CustodyCase):
                                    reference="r")
         self.store.record_evidence(custody, evidence_id="e1", form="event", reference="r")
         self.store.open_interval(custody, evidence_id="i1")
+        self.store.issue_grant(custody, grant_id="g0", actor="publisher")
         self.clock.advance(TTL // 2 + 1)
         self.store.renew(custody)
         self.store.record_evidence(custody, evidence_id="i1", form="interval",
@@ -81,8 +84,9 @@ class EvidenceTest(CustodyCase):
         self.store.issue_grant(custody, grant_id="g1", actor="publisher")
         renewed = self.store.load(transaction_id)
         self.assertEqual([e["admissible"] for e in renewed.evidence], [True, True, True])
-        self.assertEqual([g["valid"] for g in renewed.grants], [True])
-        self.assertEqual(self.store.check_grant(custody, "g1")["grant_id"], "g1")
+        self.assertEqual([g["valid"] for g in renewed.grants], [True, True])
+        for grant_id in ("g0", "g1"):  # a grant issued before the renewal survives it
+            self.assertEqual(self.store.check_grant(custody, grant_id)["grant_id"], grant_id)
         self.assertEqual((self.store.inspect_lease(KEYS[0])["epoch"],
                           self.store.inspect_lease(KEYS[0])["holder"]["term"]), (1, 2))
         self.assertEqual([t for t in self.types(transaction_id) if t.startswith("lease_")],
@@ -96,11 +100,12 @@ class EvidenceTest(CustodyCase):
                           for e in lapsed.evidence],
                          [("s1", False, "fence_changed"), ("e1", True, None),
                           ("i1", False, "fence_changed")])
-        self.assertEqual([g["valid"] for g in lapsed.grants], [False])
-        self.assertRefusedUnchanged(GrantInvalid,
-                                    lambda: self.store.check_grant(successor, "g1"))
-        self.assertRefusedUnchanged(StaleCustody,
-                                    lambda: self.store.check_grant(custody, "g1"))
+        self.assertEqual([g["valid"] for g in lapsed.grants], [False, False])
+        for grant_id in ("g0", "g1"):
+            self.assertRefusedUnchanged(
+                GrantInvalid, lambda: self.store.check_grant(successor, grant_id))
+            self.assertRefusedUnchanged(
+                StaleCustody, lambda: self.store.check_grant(custody, grant_id))
 
     def test_an_interval_broken_by_a_custody_event_reads_fence_discontinuity(self):
         transaction_id = self.new()
@@ -149,49 +154,60 @@ class EvidenceTest(CustodyCase):
 
     def test_stale_or_terminal_writers_are_refused_before_any_write(self):
         transaction_id = self.new()
-        custody = self.acquire(transaction_id)
-        writes = (
-            lambda: self.store.record_evidence(custody, evidence_id="s", form="snapshot",
-                                               reference="r"),
-            lambda: self.store.open_interval(custody, evidence_id="i"),
-            lambda: self.store.issue_grant(custody, grant_id="g", actor="a"))
+        stale = self.acquire(transaction_id)
+
+        def writes(credential):
+            return (
+                lambda: self.store.record_evidence(credential, evidence_id="s",
+                                                   form="snapshot", reference="r"),
+                lambda: self.store.open_interval(credential, evidence_id="i"),
+                lambda: self.store.issue_grant(credential, grant_id="g", actor="a"))
+
         self.clock.advance(TTL)
-        for call in writes:
+        for call in writes(stale):
             self.assertRefusedUnchanged(StaleCustody, call)
-        custody = self.acquire(transaction_id)
+        fresh = self.acquire(transaction_id, executor="exec-b")
+        for call in writes(stale) + (
+                lambda: self.store.advance(transaction_id, "awaiting_verification",
+                                           reason="r", custody=stale),
+                lambda: self.store.renew(stale),
+                lambda: self.store.release(stale)):
+            self.assertRefusedUnchanged(StaleCustody, call)  # epoch 1 after epoch 2
         self.store.advance(transaction_id, "abandoned", reason="r", external_state="known",
-                           custody=custody)
-        for call in writes:
+                           custody=fresh)
+        for call in writes(fresh):
             self.assertRefusedUnchanged(TransitionRefused, call)
 
-    def test_hand_edited_evidence_histories_are_state_invalid(self):
+    def test_hand_edited_evidence_histories_fail_the_named_rule(self):
         transaction_id = self.new()
         custody = self.acquire(transaction_id)
         self.store.open_interval(custody, evidence_id="i1")
         self.store.record_evidence(custody, evidence_id="i1", form="interval", reference="r")
         self.store.issue_grant(custody, grant_id="g1", actor="a")
         base = self.state_doc(transaction_id)
-        created, acquired, opened, closed, granted = base["events"]
+        _, acquired, opened, closed, granted = base["events"]
+        held = span(acquired)
         foreign = {k: {**v, "epoch": 9} for k, v in opened["fence"].items()}
-
-        def events(*replacement):
-            return lambda d: {**d, "events": [created, *replacement],
-                              "revision": 1 + len(replacement)}
-
         cases = {
-            "evidence outside a span": events({**closed, "seq": 2, "form": "snapshot"}),
-            "foreign fence": events(acquired, {**opened, "fence": foreign}, closed, granted),
-            "close without open": events(acquired, {**closed, "seq": 3}),
-            "duplicate grant": events(acquired, opened, closed, granted,
-                                      {**granted, "seq": 6}),
-            "unknown form": events(acquired, opened, {**closed, "form": "guess"}, granted),
+            "evidence outside a span": (
+                history(base, {**closed, "form": "snapshot"}, custody=None),
+                "outside an open custody span"),
+            "foreign fence": (
+                history(base, acquired, {**opened, "fence": foreign}, closed, granted,
+                        custody=held), "fence does not equal the open span's fence"),
+            "close without open": (
+                history(base, acquired, closed, granted, custody=held),
+                "closes no opened interval"),
+            "duplicate grant": (
+                history(base, acquired, opened, closed, granted, granted, custody=held),
+                "grant_id 'g1' is reused"),
+            "unknown form": (
+                history(base, acquired, opened, {**closed, "form": "guess"}, granted,
+                        custody=held), "form is not event, snapshot or interval"),
         }
-        for name, mutate in cases.items():
+        for name, (document, fragment) in cases.items():
             with self.subTest(case=name):
-                (self.root / transaction_id / "state.json").write_text(
-                    serialize(mutate(copy.deepcopy(base))))
-                with self.assertRaises(StateInvalid):
-                    self.store.load(transaction_id)
+                self.assertRuleRefuses(transaction_id, copy.deepcopy(document), fragment)
 ```
 
 - [ ] **Step 2: Run the tests and watch them fail**
@@ -208,12 +224,20 @@ Expected: FAIL — `AttributeError: 'TransactionStore' object has no attribute '
 2. Extend `_EVENT_KEYS` and the validator dispatch with the three types and the rules
    above. A write-time duplicate or unopened-interval check runs before building the
    candidate so its message names the id; the validator stays the backstop.
+   Validator messages contain the fragments the tests assert: `outside an open custody
+   span`, `fence does not equal the open span's fence`, `closes no opened interval`,
+   `grant_id '<id>' is reused` (and `evidence_id '<id>' is reused`), `form is not event,
+   snapshot or interval`.
 3. The four operations share one private helper that performs: shape checks → lock →
    `prior` → (writers) terminal refusal → `now` → `_check_custody` → operation rule →
    append one event stamped `_format_at(now)` with `fence = plain(prior custody fence)`
    → validate → `atomic_write`. `check_grant` stops after `_check_custody`, finds the grant
    in `admissibility(prior["events"])`, and returns it as a `MappingProxyType` when its
    fence equals the presented fence, else raises `GrantInvalid` naming the id.
+4. Docstrings: append to the `Transaction` docstring "`evidence` and `grants` entries
+   carry verdicts derived from the history on every load; they are never stored." and
+   rewrite `StateInvalid`'s (in `transaction_storage`) to "A stored file, the layout, an
+   operation's arguments, or a reused evidence or grant id fails the closed schema."
 
 - [ ] **Step 4: Verify**
 
@@ -229,6 +253,6 @@ Run: `just agent-workflow-tests 2>&1 | tail -3` — Expected: `OK`.
 
 ```bash
 git add python/agent_tools/transaction_custody.py python/agent_tools/transaction_core.py \
-  tests/test_transaction_custody.py
+  python/agent_tools/transaction_storage.py tests/test_transaction_custody.py
 git commit -m "feat(transaction-core): fence evidence, intervals and grants (#205)"
 ```

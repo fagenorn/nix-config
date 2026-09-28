@@ -33,9 +33,11 @@
   test in `tests/test_transaction_core.py` and the sweep passes unmodified (D1).
 - Every event `at` equals `_format_at(clock())` read once per write; `clock=None` means
   `time.time_ns() // 1_000_000` (D3). Ids still come from the wall clock (D31).
-- A clock reading that is not a non-negative `int` (a `bool` counts as not an int) raises
-  `TransactionError` naming the store root, before any write of that call.
-- `_parse_at(_format_at(ms)) == ms` for every `ms >= 0`.
+- A clock reading that is not an `int` in `[0, MAX_CLOCK_MS]` (a `bool` counts as not an
+  int), where `MAX_CLOCK_MS = 253_402_300_799_999` (`9999-12-31T23:59:59.999Z`, the last
+  instant `_AT_PATTERN`'s four-digit year can hold), raises `TransactionError` naming the
+  store root, before any write of that call (D32).
+- `_parse_at(_format_at(ms)) == ms` for every `0 <= ms <= MAX_CLOCK_MS`.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_transaction_core.py`
   (add `from agent_tools import transaction_core, transaction_storage` to the imports):
@@ -72,7 +74,7 @@ class ClockTest(unittest.TestCase):
         self.assertEqual(moved.events[-1]["at"], "2027-01-15T08:00:01.234Z")
 
     def test_a_malformed_clock_reading_is_refused_before_any_state_exists(self):
-        for reading in (1.5, True, -1, "0", None):
+        for reading in (1.5, True, -1, "0", None, 253_402_300_800_000):
             with self.subTest(reading=reading), tempfile.TemporaryDirectory() as tmp:
                 store = TransactionStore(Path(tmp), clock=lambda value=reading: value)
                 with self.assertRaises(TransactionError) as caught:
@@ -87,6 +89,11 @@ class ClockTest(unittest.TestCase):
         stamp = datetime.datetime.strptime(at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
             tzinfo=datetime.timezone.utc)
         self.assertTrue(before <= int(stamp.timestamp() * 1000 + 0.5) <= after)
+
+    def test_the_largest_representable_reading_is_accepted(self):
+        store = TransactionStore(self.root, clock=lambda: 253_402_300_799_999)
+        self.assertEqual(store.create("k", SUBJECT).events[0]["at"],
+                         "9999-12-31T23:59:59.999Z")
 
 
 class StorageModuleTest(unittest.TestCase):
@@ -133,7 +140,8 @@ Expected: FAIL — `ImportError: cannot import name 'transaction_storage'`.
 2. `TransactionStore.__init__(self, root, *, clock=None)`: keep the root check; store
    `self._clock = clock if clock is not None else lambda: time.time_ns() // 1_000_000`.
    A non-callable `clock` raises `TransactionError` naming the root.
-3. `_now()`: read the clock once; refuse per the invariant; return the int.
+3. `_now()`: read the clock once; refuse per the invariant (the module-private constant
+   `_MAX_CLOCK_MS`); return the int.
 4. `_format_at(ms)`: `datetime.datetime.fromtimestamp(ms // 1000, tz=utc)` formatted
    `%Y-%m-%dT%H:%M:%S` + `f".{ms % 1000:03d}Z"`. `_parse_at(at)`: `strptime` the seconds
    part, `calendar.timegm`-style integer seconds `* 1000 + int(millis)`. Delete
@@ -149,7 +157,7 @@ Expected: FAIL — `ImportError: cannot import name 'transaction_storage'`.
 - [ ] **Step 4: Verify**
 
 Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_core.py tests/test_transaction_core_sweep.py 2>&1 | tail -3`
-Expected: `OK` (base count + 4 tests).
+Expected: `OK` (base count + 5 tests).
 
 Run: `if grep -nE '^def _(serialize|strict_loads|read_json|atomic_write|open_lock)\b' python/agent_tools/transaction_core.py; then exit 1; fi`
 Expected: no output, exit 0 (the moved bodies are gone).

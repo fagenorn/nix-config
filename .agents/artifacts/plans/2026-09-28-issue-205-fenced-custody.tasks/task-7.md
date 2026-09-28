@@ -165,6 +165,13 @@ cells fail because `drive` still takes a store.
 5. `lease_renewal`: before `advance("succeeded", …)`, raise `_Parked` unless every
    key's `inspect_lease(key)["holder"]["term"] == 3`.
 
+6. Replace the comment above `SCENARIOS` with: "# `success` is ported from
+   prototype-release-transactions/scenarios.py at dc98ba9; `lease_renewal` and
+   `lease_lapse` are new in #205 (D22, D29)." In `tests/test_transaction_core_sweep.py`
+   rewrite the module docstring's second paragraph to: "The prototype's autopilot printed
+   where each (shape, scenario) cell landed; this table asserts it against persisted
+   history, including each scenario's custody events and the evidence forms it voids."
+
 In `CLAUDE.md`, replace the sentence beginning "`agent_tools.transaction_core` is the
 transaction core's first slice (#204)" with: "`agent_tools.transaction_core` is the
 transaction core's library surface, with no command-table row and no caller until #125's
