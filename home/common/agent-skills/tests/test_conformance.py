@@ -16,17 +16,12 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import shutil
 import subprocess
-import sys
 import unittest
 from pathlib import Path
 
-# The suite modules are imported by path, so the tests directory is not
-# already on sys.path; the shared support module lives beside them.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from conformance_test_support import (  # noqa: E402
-    COMMITTED, REPO_ROOT, HERMETIC_ENV, SCRIPT, PlatformHome, ReportAssertions,
+from .conformance_test_support import (
+    REPO_ROOT, HERMETIC_ENV, PlatformHome, ReportAssertions,
     Rebinding, doctor, fixture, load_module, make_root, make_stub_bin,
     mutated_manifest, platform_env, run,
 )
@@ -386,12 +381,11 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
         return [check["id"] for check in report["checks"]]
 
     def test_a_broken_installation_fails_resolvable_at_the_platform_stage(self):
-        cases = (("library", COMMITTED, False, "platform.library.missing"),
-                 ("manifest", None, True, "platform.manifest.missing"))
-        for missing, manifest, library, repair_id in cases:
+        cases = (("manifest", None, "platform.manifest.missing"),)
+        for missing, manifest, repair_id in cases:
             with self.subTest(missing=missing), fixture() as tmp:
                 root = make_root(tmp)
-                env = platform_env(tmp, manifest, library=library)
+                env = platform_env(tmp, manifest)
                 report, by_id = doctor(self, root, env=env)
                 resolvable = by_id["repository.contract.resolvable"]
                 self.assertEqual(
@@ -810,17 +804,15 @@ class FactBoundingTest(unittest.TestCase):
 
 
 class EvaluatorResolutionTest(PlatformHome, Rebinding, unittest.TestCase):
-    """S3: an evaluator is resolved through the module that declared it.
+    """S3: an evaluator is resolved through the checks module at call time.
 
-    `load_module` builds a fresh instance per call under one shared
-    `sys.modules` key, so resolving an evaluator through that key would fetch
-    the newest instance's function and silently bypass a rebind made on the
-    instance under test — the very thing S3 is reserved for.
+    `evaluator` looks each check's function up on `CHECKS_MODULE` when it
+    runs, so a rebind made on that module under test is the function
+    `evaluate` calls.
     """
 
     def test_a_rebound_evaluator_is_the_one_evaluate_calls(self):
         module = load_module()
-        load_module()  # a second instance now owns the shared sys.modules name
         self.rebind(module.CHECKS_MODULE, "check_contract_present",
                     lambda _context: module.Outcome(
             "failed", "not_onboarded", "onboarding.contract.missing"))
@@ -875,33 +867,6 @@ class EngineFailureTest(PlatformHome, Rebinding, unittest.TestCase):
         # this case would fail at `platform` for a reason it does not test.
         self.assertEqual([check["status"], check["reason_code"], check["facts"]],
                          ["failed", "resolver_failure", {"stage": "present"}])
-
-
-class BootstrapFailureTest(unittest.TestCase):
-    """S1: the entry module with no siblings beside it (D40).
-
-    The decomposition put two modules between the engine and its own code, so
-    a sibling that will not load is a new way for the engine to fail. The
-    bootstrap captures that failure and `main` re-raises it inside the single
-    D15/D29 boundary; only a run of the entry module *alone* reaches it.
-    """
-
-    def test_a_missing_sibling_refuses_in_the_boundary_shape(self):
-        with fixture() as tmp:
-            lone = tmp / "conformance.py"
-            shutil.copy2(SCRIPT, lone)
-            code, out, err = run("run", "--purpose", "doctor", "--offline",
-                                 "--repo-root", str(REPO_ROOT), script=lone)
-            self.assertEqual(code, 2, err)
-            # The whole payload: the refusal carries no report, and the
-            # violation is the fixed sentence rather than the exception text,
-            # which names the directory the siblings were looked for in.
-            self.assertEqual(json.loads(out), {"error": {
-                "code": "resolver_failure",
-                "repair_id": "conformance.internal",
-                "violations": [{
-                    "pointer": "",
-                    "message": "the conformance engine failed unexpectedly"}]}})
 
 
 def gh_env(tmp: Path, exit_code: int) -> dict:
@@ -1086,58 +1051,3 @@ class AdmissionDeclarationCheckTest(ReportAssertions, unittest.TestCase):
         module = load_module()
         self.assertIn(self.CHECK_ID, [c.id for c in module.select("local")])
         self.assertNotIn(self.CHECK_ID, [c.id for c in module.select("workflow_entry")])
-
-    def deployed_run(self, tmp, library):
-        """One `local` run of the engine from a deployed layout (#150 M1).
-
-        The engine and its siblings sit in a directory not named `scripts`,
-        so the check loads the installed `~/.agents/lib/python` copy of the
-        host admission library, which `library` writes: `None` installs none,
-        `COMMITTED` the repository's own, any `str` as the file's text.
-        """
-        deployed = tmp / "deployed"
-        deployed.mkdir()
-        for name in ("conformance.py", "conformance-checks.py",
-                     "conformance-registry.py", "resolve-project.py"):
-            shutil.copy2(SCRIPT.parent / name, deployed / name)
-        env = platform_env(tmp)
-        installed = Path(env["HOME"]) / ".agents/lib/python/host_admission.py"
-        source = SCRIPT.parent / "host_admission.py"
-        if library is COMMITTED:
-            shutil.copy2(source, installed)
-        elif library is not None:
-            installed.write_text(library, encoding="utf-8")
-        code, out, err = run("run", "--purpose", "local", "--offline",
-                             "--repo-root", str(make_root(tmp)), env=env,
-                             script=deployed / "conformance.py")
-        self.assertEqual(code, 0, err)
-        report = json.loads(out)
-        self.assert_validates(report)
-        return report, {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
-
-    def test_the_installed_library_is_loaded_from_a_deployed_layout(self):
-        with fixture() as tmp:
-            _, check = self.deployed_run(tmp, COMMITTED)
-        self.assertEqual(check["status"], "passed")
-        self.assertEqual(check["facts"], {"supported_routes": ["claude-code=7"],
-                                          "unsupported_routes": ["codex"]})
-
-    def test_an_unusable_installed_library_fails_only_this_check(self):
-        """M1: a missing, unimportable or stale-interface library is this
-        optional check's own finding, never the whole run's resolver_failure,
-        and a library `workflow-state` would refuse is never used here."""
-        current = (SCRIPT.parent / "host_admission.py").read_text(encoding="utf-8")
-        stale = current.replace("HOST_ADMISSION_INTERFACE_VERSION = 1",
-                                "HOST_ADMISSION_INTERFACE_VERSION = 2")
-        self.assertNotEqual(stale, current)
-        for label, library in (("absent", None),
-                               ("unimportable", "raise ImportError('broken')\n"),
-                               ("stale interface", stale)):
-            with self.subTest(label), fixture() as tmp:
-                report, check = self.deployed_run(tmp, library)
-                self.assertNotIn("error", report)
-                self.assertEqual(
-                    [check["status"], check["reason_code"], check["repair_id"]],
-                    ["failed", "library_unavailable", "host.admission.declare"])
-                self.assertEqual(check["facts"], {"library_path": str(
-                    Path(tmp) / "home/.agents/lib/python/host_admission.py")})

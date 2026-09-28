@@ -61,34 +61,6 @@ in
       executable = true;
     };
 
-    ".agents/bin/resolve-project" = {
-      source = ./scripts/resolve-project.py;
-      executable = true;
-    };
-
-    ".agents/bin/conformance" = {
-      source = ./scripts/conformance.py;
-      executable = true;
-    };
-
-    # Loaded by path as siblings of the entry module (D40), never invoked: a
-    # library module on PATH is a command that cannot run. `load_sibling` only
-    # needs `is_file()`, so they stay beside `conformance` unexecutable.
-    ".agents/bin/conformance-registry" = {
-      source = ./scripts/conformance-registry.py;
-      executable = false;
-    };
-
-    ".agents/bin/conformance-checks" = {
-      source = ./scripts/conformance-checks.py;
-      executable = false;
-    };
-
-    ".agents/bin/adopt-project" = {
-      source = ./scripts/adopt-project.py;
-      executable = true;
-    };
-
     ".agents/bin/artifact-budget" = {
       source = ./scripts/artifact-budget;
       executable = true;
@@ -121,30 +93,19 @@ in
     };
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
 
-    # The shared platform library and the manifest it reads. The library is
-    # imported, never run, so it gets no `executable = true`; the manifest is
-    # authored data with nothing templated, so this store copy is byte-identical
-    # to the repository's (D1).
-    ".agents/lib/python/agent_platform.py".source = ./scripts/agent_platform.py;
+    # The platform manifest: authored data with nothing templated, so this
+    # store copy is byte-identical to the repository's (D1).
     ".agents/share/platform-manifest.json".source = ./platform-manifest.json;
 
     # The host admission library and the host declaration it reads. The
     # declaration is authored host policy -- per route, whether it is supported
     # and how many agent slots one root session may hold -- read by
-    # `workflow-state` and the conformance check through that library, which is
-    # imported, never run (D2, D18).
-    ".agents/lib/python/host_admission.py".source = ./scripts/host_admission.py;
+    # `workflow-state` and the conformance check through that library (D2, D18).
+    # The library lives in the agent_tools package; this copy serves only
+    # `workflow-state`'s transitional installed-layout load, and #178 deletes it
+    # (#177 D6).
+    ".agents/lib/python/host_admission.py".source = ../../../python/agent_tools/host_admission.py;
     ".agents/share/host-declaration.json".source = ./host-declaration.json;
-
-    # The four layers `adopt-project` is built from: the bounded inspection and
-    # its closed vocabulary, the planning derived from it, the apply mechanics
-    # and the verify mechanics. Imported, never run, so none gets
-    # `executable = true`; they install beside `agent_platform.py` because the
-    # binary binds all five from that one directory with no fallback ladder.
-    ".agents/lib/python/adopt_inspection.py".source = ./scripts/adopt_inspection.py;
-    ".agents/lib/python/adopt_planning.py".source = ./scripts/adopt_planning.py;
-    ".agents/lib/python/adopt_apply.py".source = ./scripts/adopt_apply.py;
-    ".agents/lib/python/adopt_verify.py".source = ./scripts/adopt_verify.py;
 
     # Claude accepts Home Manager's recursive file links, so its generated
     # multi-file skill can continue to use that layout.

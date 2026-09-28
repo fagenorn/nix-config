@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Adopt a repository into the shared agent platform.
 
 `plan` inspects a target checkout inside a bounded, read-only boundary,
@@ -37,11 +36,13 @@ only once the adoption commit derived from that record is an ancestor of the
 contract's declared integration branch (D19); what it stores is an identity
 and a location and nothing else (D18).
 
-The resolver is consumed **only** as a subprocess at the absolute path
-`$HOME/.agents/bin/resolve-project`, never imported (D26): contract validation
-has one home, and a stale generation earlier on `PATH` cannot answer. The
-shared platform library `agent_platform` is imported directly — it is the one
-home for the manifest loader, the state root and the atomic writer (D37).
+The resolver is consumed **only** as a child process, never imported (D26):
+`run_resolver` runs `agent_tools.resolve_project` under this process's own
+interpreter through `agent_tools.siblings.sibling_argv` (#177 D5), so
+contract validation has one home and an installed run is answered by the
+resolver of its own store environment. The shared platform library
+`agent_platform` is imported directly — it is the one home for the manifest
+loader, the state root and the atomic writer (D37).
 
 A structural refusal prints exactly one JSON object carrying an `error` member
 on stdout and exits 2 (D12). An argparse usage error also exits 2 but prints no
@@ -52,206 +53,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
 
-# The shared platform library, bound by `bootstrap_platform_library` before any
-# subcommand runs, exactly as `resolve-project.py` binds it. It is deliberately
-# not imported at module scope: an absent library is a platform installation
-# defect and has to reach the caller as the D12 error object on stdout, not as
-# an import traceback on stderr.
-agent_platform = None
-
-PLATFORM_LIBRARY_MEMBERS = (
-    "PlatformManifestError",
-    "ensure_directory",
-    "load_manifest",
-    "parse_semver",
-    "read_registry",
-    "registry_transaction",
-    "state_root",
-    "write_atomically",
-    "write_registry",
-)
-PLATFORM_LIBRARY_REPAIR_ID = "platform.library.missing"
-
-
-def library_dir() -> Path | None:
-    """The one directory every platform library is bound from, or None.
-
-    Without `HOME` there is no installed platform at all, which is the same
-    installation defect an absent library is and refuses the same way.
-    """
-    home = os.environ.get("HOME")
-    return Path(home) / ".agents" / "lib" / "python" if home else None
-
-
-def loaded_from(module: object, directory: Path) -> bool:
-    """Whether `module` was loaded from its own installed file in `directory`.
-
-    Importing by name is not the guard: `sys.path` still carries this script's
-    own directory behind the insertion, and a `PYTHONPATH` entry or a
-    site-packages install of the same name answers the import just as
-    willingly. Only the resolved `__file__` says *which* file answered, so an
-    absent installation refuses here instead of being silently substituted by
-    whatever else the interpreter can reach.
-
-    Both sides are resolved, because Home Manager installs each library as a
-    symlink into the Nix store: the module reports the symlink's path and the
-    comparison has to be made over the file they both name.
-    """
-    origin = getattr(module, "__file__", None)
-    if not origin:
-        return False
-    try:
-        return (Path(origin).resolve()
-                == (directory / f"{module.__name__}.py").resolve())
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-
-def bootstrap_platform_library() -> bool:
-    """Bind the shared library from its one installed path, or report failure."""
-    global agent_platform
-    directory = library_dir()
-    if directory is None:
-        return False
-    sys.path.insert(0, str(directory))
-    try:
-        import agent_platform as loaded
-    except Exception:
-        return False
-    if (not loaded_from(loaded, directory)
-            or any(not hasattr(loaded, name)
-                   for name in PLATFORM_LIBRARY_MEMBERS)):
-        return False
-    agent_platform = loaded
-    return True
-
-# The four adoption libraries, bound by `bootstrap_adopt_libraries` before
-# any subcommand runs. They install beside `agent_platform.py` and are
-# separately installed files, so an older library can pair with a newer
-# binary; naming every member this script reads is what makes that pairing
-# refuse as `adopt.library.missing` through the D12 error object rather than
-# surface as an `AttributeError` swallowed into `adopt.internal`. What each
-# library reads from the others is guarded the same way, by naming it in
-# that library's own `from` imports.
-adopt_inspection = None
-adopt_planning = None
-adopt_apply = None
-adopt_verify = None
-
-ADOPT_INSPECTION_MEMBERS = (
-    "ADOPT_SCHEMA_VERSION",
-    "AdoptError",
-    "COMMIT_GATES",
-    "CONTRACT_FILENAME",
-    "Inventory",
-    "METADATA_ONLY_IGNORED",
-    "NOTES",
-    "OUTCOMES",
-    "PLAN_STATES",
-    "READY_GATES",
-    "TARGETED_IGNORED",
-    "canonical_json",
-    "classify_inventory",
-    "dirty_targets",
-    "evidence_entry",
-    "gate_entry",
-    "git_or_fail",
-    "head_revision",
-    "outcome_is_appliable",
-    "overlap_targets",
-    "read_bytes_bounded",
-    "refuse",
-    "registered_worktrees",
-    "require_repository",
-    "resolver_error_code",
-    "resolver_repair_id",
-    "resolver_violation_pointers",
-    "run_git",
-    "targeted_ignored",
-    "tracked_inventory",
-    "untracked_under",
-)
-
-ADOPT_PLANNING_MEMBERS = (
-    "adoption_records",
-    "blockers_for",
-    "bookkeeping_operations",
-    "build_operations",
-    "compute_plan_id",
-    "derive_identity",
-    "evaluate_ready_gates",
-    "next_command_for",
-    "require_unclaimed_digest",
-    "route_outcome",
-    "store_document",
-    "store_plan_path",
-)
-
-ADOPT_APPLY_MEMBERS = (
-    "GateRun",
-    "commit_message",
-    "dirty_overlap",
-    "execute_operation",
-    "load_stored_plan",
-    "plan_digest",
-    "prove_branch_carries_commit",
-    "prove_commit_content",
-    "retain_failure",
-    "run_commit_gates",
-    "signing_requested",
-    "validate_operations",
-)
-
-ADOPT_VERIFY_MEMBERS = (
-    "register_project",
-    "registration_allowed",
-    "verify_exit_code",
-    "verify_repository",
-)
-ADOPT_LIBRARY_REPAIR_ID = "adopt.library.missing"
-
-
-def bootstrap_adopt_libraries() -> bool:
-    """Bind all four adoption libraries, or report failure.
-
-    `bootstrap_platform_library` has already put the one installed library
-    directory on `sys.path`, so this adds no second lookup path and no
-    fallback ladder: the modules are found exactly where Nix installs them or
-    they are not found at all — `loaded_from` holds each of the four to that
-    directory for the same reason it holds `agent_platform` there, since the
-    path behind the insertion can satisfy these imports too. A library whose
-    own `from` import of a sibling cannot be satisfied fails this import too,
-    so the guard reaches the names the libraries read from each other as well
-    as the ones read here.
-    """
-    global adopt_inspection, adopt_planning, adopt_apply, adopt_verify
-    directory = library_dir()
-    if directory is None:
-        return False
-    try:
-        import adopt_inspection as inspection
-        import adopt_planning as planning
-        import adopt_apply as applying
-        import adopt_verify as verifying
-    except Exception:
-        return False
-    for module, members in ((inspection, ADOPT_INSPECTION_MEMBERS),
-                            (planning, ADOPT_PLANNING_MEMBERS),
-                            (applying, ADOPT_APPLY_MEMBERS),
-                            (verifying, ADOPT_VERIFY_MEMBERS)):
-        if (not loaded_from(module, directory)
-                or any(not hasattr(module, name) for name in members)):
-            return False
-    adopt_inspection = inspection
-    adopt_planning = planning
-    adopt_apply = applying
-    adopt_verify = verifying
-    return True
+from agent_tools import adopt_apply, adopt_inspection, adopt_planning, adopt_verify, agent_platform
+from agent_tools.siblings import sibling_argv
 
 
 # --------------------------------------------------------------------------
@@ -278,15 +85,6 @@ def emit_error(code: str, repair_id: str, violations: list[dict]) -> int:
 # --------------------------------------------------------------------------
 
 
-def resolver_path() -> Path:
-    """The one absolute path the resolver is consumed at (D26).
-
-    No `PATH` search: a stale generation earlier on `PATH` must never be able
-    to answer a contract question on this platform's behalf.
-    """
-    return Path(os.environ["HOME"]) / ".agents" / "bin" / "resolve-project"
-
-
 def run_resolver(root: Path, *args: str) -> tuple[int, object]:
     """The resolver's exit code and parsed JSON, or a refusal.
 
@@ -294,9 +92,8 @@ def run_resolver(root: Path, *args: str) -> tuple[int, object]:
     D12 error object; any other exit, or output that will not parse, is an
     adoption failure rather than a guess.
     """
-    binary = resolver_path()
     try:
-        proc = subprocess.run([str(binary), *args, "--repo-root", str(root)],
+        proc = subprocess.run([*sibling_argv("resolve_project"), *args, "--repo-root", str(root)],
                               capture_output=True, timeout=300)
     except (OSError, subprocess.SubprocessError):
         raise adopt_inspection.refuse(
@@ -838,35 +635,6 @@ def dispatch(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not bootstrap_platform_library():
-        return emit_error(
-            "adopt_failure",
-            PLATFORM_LIBRARY_REPAIR_ID,
-            [{
-                "pointer": "",
-                "message": (
-                    "the shared platform library was not found at "
-                    "~/.agents/lib/python/agent_platform.py"
-                ),
-            }],
-        )
-    # After the platform library, whose path insertion these two share, and
-    # before dispatch: one refusal shape for every half of the installation.
-    if not bootstrap_adopt_libraries():
-        return emit_error(
-            "adopt_failure",
-            ADOPT_LIBRARY_REPAIR_ID,
-            [{
-                "pointer": "",
-                "message": (
-                    "the adoption libraries were not found at "
-                    "~/.agents/lib/python/adopt_inspection.py, "
-                    "~/.agents/lib/python/adopt_planning.py, "
-                    "~/.agents/lib/python/adopt_apply.py and "
-                    "~/.agents/lib/python/adopt_verify.py"
-                ),
-            }],
-        )
     try:
         return dispatch(args)
     except adopt_inspection.AdoptError as error:

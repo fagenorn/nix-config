@@ -8,13 +8,11 @@ the inspection inside the target root and away from secret-shaped paths, and
 the four bounded git queries that are the whole of R4.2.
 
 It is imported, never run: no `main`, no argparse, and nothing that writes. It
-does not import `resolve-project.py` and never will (D26) — the resolver is
+does not import `agent_tools.resolve_project` and never will (D26) — the resolver is
 reached only as a subprocess, by the entry point.
 
-Installed beside `agent_platform.py` at `$HOME/.agents/lib/python/`, and bound
-by the entry point's guarded bootstrap, so an installation missing this module
-or one of its members refuses through the same D12 error object as a missing
-platform library rather than as an import traceback.
+A module of the `agent_tools` package, imported by `agent_tools.adopt_project` and
+its sibling adoption modules.
 """
 
 from __future__ import annotations
@@ -353,7 +351,7 @@ def plan_state_is_terminal(state: str) -> bool:
 # The resolver's answer, read
 #
 # Pure readers over an already-parsed resolver payload: no subprocess, no
-# import of `resolve-project.py` (D26), nothing written. They live here rather
+# import of `agent_tools.resolve_project` (D26), nothing written. They live here rather
 # than beside either caller because `plan` and `verify` read the same refusal
 # and this module is the one layer both are built on.
 # --------------------------------------------------------------------------

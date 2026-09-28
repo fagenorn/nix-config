@@ -23,17 +23,11 @@ import json
 import os
 import shutil
 import stat
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-# The sibling suite is imported as a module, so its directory has to be
-# importable however this file was invoked — `python3 <path>` supplies it,
-# `python3 -m unittest <path>` does not.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from test_resolve_project import (
+from .test_resolve_project import (
     ResolverTestCase,
     committed_manifest,
     git,

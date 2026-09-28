@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Resolve this repository's authored project contract into a ResolvedProject.
 
 `.agents/project.json` is the only input. `resolve` loads it, validates its
@@ -50,82 +49,7 @@ import re
 import shutil
 import sys
 
-# The shared platform library, bound by `bootstrap_platform_library` before any
-# subcommand runs. It is deliberately not imported at module scope: an absent
-# library is a platform installation defect and has to reach the caller as the
-# D12 error object on stdout, not as an import traceback on stderr (R1.3).
-agent_platform = None
-
-# Exactly the library members this script uses. The library and this binary are
-# two separately installed files, so an older library can pair with a newer
-# resolver; naming every member here is what makes that pairing refuse as
-# `platform.library.missing` (R1.3, D12) rather than surface as an
-# `AttributeError` swallowed into `resolver.internal`.
-PLATFORM_LIBRARY_MEMBERS = (
-    "PlatformManifestError",
-    "SCHEMA_REASON_CODES",
-    "compare_semver",
-    "interval_verdict",
-    "load_manifest",
-    "parse_semver",
-    "read_registry",
-    "write_atomically",
-)
-PLATFORM_LIBRARY_REPAIR_ID = "platform.library.missing"
-
-
-def loaded_from(module: object, library_dir: Path) -> bool:
-    """Whether `module` was loaded from its own installed file in `library_dir`.
-
-    Importing by name is not the guard: `sys.path` still carries this script's
-    own directory behind the insertion, and a `PYTHONPATH` entry or a
-    site-packages install of the same name answers the import just as
-    willingly. Only the resolved `__file__` says *which* file answered, so an
-    absent installation refuses here instead of being silently substituted by
-    whatever else the interpreter can reach.
-
-    Both sides are resolved, because Home Manager installs the library as a
-    symlink into the Nix store: the module reports the symlink's path and the
-    comparison has to be made over the file they both name.
-    """
-    origin = getattr(module, "__file__", None)
-    if not origin:
-        return False
-    try:
-        return (Path(origin).resolve()
-                == (library_dir / f"{module.__name__}.py").resolve())
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-
-def bootstrap_platform_library() -> bool:
-    """Bind the shared library from its one installed path, or report failure.
-
-    `$HOME/.agents/lib/python` — the same directory the `artifact-budget` pair
-    installs into (D23) — goes on `sys.path` at position 0, so the installed
-    copy wins whenever it exists. The script's own directory stays on the path
-    behind it, which is how the repository checkout imports the sibling in
-    `scripts/`; in the deployed layout that directory is `~/.agents/bin` and
-    holds no library, so an uninstalled one is caught here — by `loaded_from`,
-    which is what makes "caught here" true of every other importable
-    `agent_platform` as well.
-    """
-    global agent_platform
-    home = os.environ.get("HOME")
-    if not home:
-        return False
-    library_dir = Path(home) / ".agents" / "lib" / "python"
-    sys.path.insert(0, str(library_dir))
-    try:
-        import agent_platform as loaded
-    except Exception:
-        return False
-    if (not loaded_from(loaded, library_dir)
-            or any(not hasattr(loaded, name)
-                   for name in PLATFORM_LIBRARY_MEMBERS)):
-        return False
-    agent_platform = loaded
-    return True
+from agent_tools import agent_platform
 
 
 CAPABILITY_NAMES = (
@@ -1757,23 +1681,6 @@ def dispatch(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    # After argparse, so a usage error stays argparse's own (D16), and before
-    # dispatch, so the library half of the installation refuses exactly like
-    # the manifest half: one JSON object on stdout, exit 2 (R1.3, D12). The
-    # message names the fixed installed path and embeds nothing variable, so
-    # two runs refusing for this reason emit identical bytes.
-    if not bootstrap_platform_library():
-        return emit_error(
-            "resolver_failure",
-            PLATFORM_LIBRARY_REPAIR_ID,
-            [{
-                "pointer": "",
-                "message": (
-                    "the shared platform library was not found at "
-                    "~/.agents/lib/python/agent_platform.py"
-                ),
-            }],
-        )
     try:
         return dispatch(args)
     except ContractError as error:

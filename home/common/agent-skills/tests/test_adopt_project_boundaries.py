@@ -24,9 +24,7 @@ The invariants:
    what stops an approval given for one from being applied to the other.
 4. A git path is a byte string. One that is not UTF-8 is still a path this
    planner classifies, fingerprints and moves, not an internal failure.
-5. The library guard is only as wide as its member tuple and only as strict as
-   what it checks about the module it found.
-6. An authored JSON file is rewritten only when its value changes. A contract
+5. An authored JSON file is rewritten only when its value changes. A contract
    or a legacy binding config that already holds the amended value, in any
    formatting, is not work: counting it as work would make `no_change`
    unreachable for every hand-formatted checkout.
@@ -35,28 +33,15 @@ The invariants:
 from __future__ import annotations
 
 import json
-import os
-import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-# The sibling suite is imported as a module, so its directory has to be
-# importable however this file was invoked — `python3 <path>` supplies it,
-# `python3 -m unittest <path>` does not.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from test_adopt_project import (
-    ADOPT_LIBRARIES,
-    LIBRARY,
-    SCRIPT,
+from .test_adopt_project import (
     adopted_repo,
-    bootstrap_repo,
     commit,
-    declared_members,
     git,
     make_home,
     nix_config_shape_repo,
@@ -351,103 +336,6 @@ class UndecodablePathTest(BoundaryTestCase):
         self.assertNotIn("API_TOKEN", out)
         self.assertNotIn(secret, [op["sources"][0] for op in doc["changes"]
                                   if op["op"] == "git-mv"])
-
-
-class LibraryBindingTest(unittest.TestCase):
-    """The member guard is only as wide as its tuple and only as strict as
-    what it checks about the module the import found.
-
-    Both cases run a copy of the binary from `$HOME/.agents/bin`, the deployed
-    layout, because in the repository checkout every library is the script's
-    own sibling and a run from `scripts/` imports them whatever `HOME` says.
-    """
-
-    def run_deployed(self, home: Path, root: Path,
-                     pythonpath: str | None = None) -> tuple[int, str, str]:
-        binary = home / ".agents" / "bin" / "adopt-project"
-        binary.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(SCRIPT, binary)
-        env = {**os.environ, "HOME": str(home)}
-        # The runner's own `PYTHONPATH` is not the deployed machine's; each
-        # case states the one it means to present.
-        env.pop("PYTHONPATH", None)
-        if pythonpath is not None:
-            env["PYTHONPATH"] = pythonpath
-        proc = subprocess.run(
-            [sys.executable, str(binary), "plan", "--repo-root", str(root)],
-            capture_output=True, text=True, timeout=300, cwd=str(home),
-            env=env)
-        return proc.returncode, proc.stdout, proc.stderr
-
-    def uninstall(self, home: Path, names: tuple[str, ...]) -> Path:
-        """Move the named libraries out of the installed directory, and return
-        the importable directory they were moved to."""
-        elsewhere = Path(tempfile.mkdtemp()).resolve()
-        installed = home / ".agents" / "lib" / "python"
-        for name in names:
-            shutil.move(str(installed / f"{name}.py"),
-                        str(elsewhere / f"{name}.py"))
-        return elsewhere
-
-    def assert_refusal(self, code: int, out: str, err: str,
-                       repair_id: str) -> None:
-        self.assertEqual(code, 2, err or out)
-        self.assertEqual(err, "")
-        error = json.loads(out)["error"]
-        self.assertEqual(sorted(error), ["code", "repair_id", "violations"])
-        self.assertEqual(error["code"], "adopt_failure")
-        self.assertEqual(error["repair_id"], repair_id)
-        self.assertTrue(error["violations"])
-
-    def test_the_platform_tuple_is_exactly_the_members_the_five_files_use(self):
-        """`resolve-project.py` pins its own tuple this way; the adoption
-        binary declares one for itself and its four libraries, every one of
-        which imports `agent_platform` directly."""
-        used: set[str] = set()
-        for path in (SCRIPT, *ADOPT_LIBRARIES.values()):
-            used |= set(re.findall(
-                r"\bagent_platform\.([A-Za-z_][A-Za-z0-9_]*)",
-                path.read_text("utf-8")))
-        # The library's file name appears in the refusal message, not as an
-        # attribute read.
-        used.discard("py")
-        self.assertEqual(sorted(declared_members("PLATFORM_LIBRARY_MEMBERS")),
-                         sorted(used))
-
-    def test_an_importable_platform_library_is_not_an_installed_one(self):
-        """Nothing is installed at the one path, and an `agent_platform` the
-        interpreter can still reach must not answer in its place."""
-        home = make_home()
-        root = bootstrap_repo(home)
-        elsewhere = self.uninstall(home, ("agent_platform",))
-        self.assert_refusal(
-            *self.run_deployed(home, root, pythonpath=str(elsewhere)),
-            repair_id="platform.library.missing")
-
-    def test_importable_adoption_libraries_are_not_installed_ones(self):
-        """The same for the four, with the platform library left installed so
-        only their own half of the guard can refuse."""
-        home = make_home()
-        root = bootstrap_repo(home)
-        elsewhere = self.uninstall(home, tuple(ADOPT_LIBRARIES))
-        self.assert_refusal(
-            *self.run_deployed(home, root, pythonpath=str(elsewhere)),
-            repair_id="adopt.library.missing")
-
-    def test_the_installed_libraries_still_answer(self):
-        """The control: the same run with everything installed, and the
-        importable copies still on `PYTHONPATH` behind them."""
-        home = make_home()
-        root = bootstrap_repo(home)
-        elsewhere = Path(tempfile.mkdtemp()).resolve()
-        for name, source in (("agent_platform", LIBRARY),
-                             *ADOPT_LIBRARIES.items()):
-            shutil.copy(source, elsewhere / f"{name}.py")
-        code, out, err = self.run_deployed(home, root,
-                                           pythonpath=str(elsewhere))
-        self.assertEqual(code, 0, err or out)
-        self.assertEqual(json.loads(out)["plan"]["outcome"], "bootstrap")
-
 
 
 if __name__ == "__main__":

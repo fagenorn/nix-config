@@ -13,17 +13,15 @@ operation: the plan id authenticates the plan's *inputs*, and the entry point
 re-derives the operation list before any of this runs (D33).
 
 The resolver is not reached from this module. `adopt-project` owns the one
-seam it is consumed through — invoked as a child process at the absolute path
-`$HOME/.agents/bin/resolve-project`, never imported (D26) — and hands that
+seam it is consumed through — invoked as a child process through
+`agent_tools.siblings.sibling_argv`, never imported (D26) — and hands that
 call in, so a second, differently-bounded way to ask the resolver a question
 cannot exist here.
 
 Like `adopt_inspection` and `adopt_planning` it is imported, never run: no
-`main` and no argparse. It is installed at `$HOME/.agents/lib/python/` behind
-the entry point's member guard, and every name it reads from its two sibling
-libraries is named in the `from` imports below, so an installation pairing an
-older library with a newer binary refuses as `adopt.library.missing` through
-the D12 error object rather than as an `AttributeError`.
+`main` and no argparse. It is a module of the `agent_tools` package, and every
+name it reads from its two sibling modules is named in the `from` imports
+below.
 """
 
 from __future__ import annotations
@@ -36,8 +34,8 @@ import subprocess
 import tarfile
 import tempfile
 
-import agent_platform
-from adopt_inspection import (
+from agent_tools import agent_platform
+from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     AdoptError,
     COMMIT_GATES,
@@ -56,7 +54,7 @@ from adopt_inspection import (
     sha256_hash,
     tracked_inventory,
 )
-from adopt_planning import store_document, stored_plan_path
+from agent_tools.adopt_planning import store_document, stored_plan_path
 
 # The entry point's resolver call, as this layer receives it: `(root, *args)`
 # to the resolver's exit code and its parsed JSON, or an `AdoptError`.
