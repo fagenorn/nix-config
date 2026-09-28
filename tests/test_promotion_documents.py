@@ -127,7 +127,8 @@ class ValidateTest(PromotionCase):
                 self.assert_fault(document, pointer)
 
     def test_unloadable_input_is_refused_with_the_empty_pointer(self):
-        for text in ('{"kind": 1, "kind": 2}', '{"x": NaN}', "[]", "{ broken"):
+        for text in ('{"kind": 1, "kind": 2}', '{"x": NaN}', "[]", "{ broken",
+                     "[" * 100000):
             with self.subTest(text=text):
                 code, payload, _ = self.validate(text=text)
                 self.assertEqual((code, payload["error"]["code"]), (2, "invalid_document"))

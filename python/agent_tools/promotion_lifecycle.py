@@ -138,7 +138,7 @@ def resolve_bundle(root: Path, relative: str | None) -> tuple[str, str]:
         raise _refuse("evidence_unresolvable", pointer, "the bundle cannot be read")
     try:
         document = load_strict(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise _refuse("evidence_unresolvable", pointer, "the bundle is not strict JSON")
     try:
         state = verify_bundle(document)

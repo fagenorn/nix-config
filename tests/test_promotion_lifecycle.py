@@ -5,8 +5,11 @@ import subprocess
 import sys
 import unittest
 
+from agent_tools import agent_gate_bundle as gate
+
 from .promotion_test_support import (LifecycleFixture, citation, draft, run, write_bundle,
                                      write_json)
+from .test_agent_gate_bundle import context, flat, stratum
 
 HEADING = "### Investigate before changing"
 DESTINATION = "home/common/agent-skills/standards/the-bar.md"
@@ -162,6 +165,21 @@ class EvidenceGateTest(LifecycleFixture, unittest.TestCase):
                                 bundle_id="sha256:" + "0" * 64))
         self.assert_refused(path, "authorized", "evidence_unresolvable",
                             "--authorized-by", "fagenorn")
+
+    def test_a_different_approved_bundle_at_the_path_is_not_the_recorded_bundle(self):
+        path = self.capture()
+        self.walk(path, "decision_ready", "approved")
+        recorded = json.loads(path.read_text(encoding="utf-8"))["evidence"]["bundle_id"]
+        manifest = {"identity": {"bound": {}, "pinned": {}},
+                    "expansion": {"expanded": False, "checkpoint_ref": None}}
+        other = gate.assemble_bundle(manifest, flat(stratum(context(1000, 700))), [], None,
+                                     "approved")
+        self.assertNotEqual(other["bundle_id"], recorded)
+        self.assertEqual(gate.verify_bundle(other), "approved")
+        write_json(self.root / self.BUNDLE, other)
+        payload = self.assert_refused(path, "authorized", "evidence_unresolvable",
+                                      "--authorized-by", "fagenorn")
+        self.assertEqual(payload["error"]["violations"][0]["pointer"], "/evidence/bundle_id")
 
     def test_a_native_extension_needs_admission(self):
         destination = dict(draft()["destination"], layer="native_extension",

@@ -163,7 +163,7 @@ def read_document(path: str) -> dict:
         raise Refusal("unreadable_input", [violation("", "the input file cannot be read")])
     try:
         document = load_strict(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise Refusal("invalid_document", [violation("", "the input is not strict JSON")])
     if not isinstance(document, dict):
         raise Refusal("invalid_document", [violation("", "must be an object")])
