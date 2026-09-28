@@ -8,7 +8,10 @@ whose `state`/`parked_from`/`custody`/`revision` are a projection the validator
 re-folds from the events, beside the immutable sorted `concurrency_keys` fixed at
 creation. Every event `at` is read from the injected clock (integer
 epoch milliseconds, the wall clock by default); transaction ids still come from
-the wall clock. The durable-file primitives and the refusal hierarchy live in
+the wall clock. `acquire` takes custody of the whole key set from the lease
+authority in `agent_tools.transaction_custody`, returning a `Custody` credential
+that `release` and every fenced write check against the stored projection and the
+live lease records. The durable-file primitives and the refusal hierarchy live in
 `agent_tools.transaction_storage`, whose error classes this module re-exports.
 The module has no command and no caller yet.
 """
@@ -32,8 +35,10 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
+from agent_tools.transaction_custody import CUSTODY_EVENTS, LeaseAuthority, fence_violation
 from agent_tools.transaction_storage import (
-    CreationConflict, StateInvalid, TransactionBusy, TransactionError, TransitionRefused,
+    CreationConflict, CustodyMisbound, FenceViolation, GrantInvalid, LeaseUnavailable,
+    StaleCustody, StateInvalid, TransactionBusy, TransactionError, TransitionRefused,
     UnknownTransaction, atomic_write, fsync_directory, lstat_mode, open_lock, read_json,
     require_directory, serialize, strict_loads)
 
@@ -73,17 +78,43 @@ _INDEX_KEYS = frozenset({"schema", "creation_key", "transaction_id"})
 _CREATED_KEYS = frozenset({"seq", "type", "at"})
 _TRANSITIONED_KEYS = frozenset({"seq", "type", "at", "from", "to", "reason",
                                 "external_state"})
+_ENVELOPE_KEYS = frozenset({"seq", "type", "at"})
+_OPENING_KEYS = _ENVELOPE_KEYS | {"executor_id", "subject_path", "fence"}
+_EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
+    "transitioned": _TRANSITIONED_KEYS,
+    "lease_acquired": _OPENING_KEYS,
+    "lease_reacquired": _OPENING_KEYS | {"prior_executor_id", "prior_fence", "reason"},
+    "lease_released": _ENVELOPE_KEYS | {"fence", "reason"},
+    "lease_lapse_detected": _ENVELOPE_KEYS | {"fence", "executor_id"},
+})
+_RELEASE_REASONS = ("released", "quiesced", "terminal")
 _EXTERNAL_STATES = ("known", "unknown", None)
 _MAX_CLOCK_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
+
+
+@dataclasses.dataclass(frozen=True)
+class Custody:
+    """The credential of one custody span (#205 D12).
+
+    An ordering token, not a secret: a holder may persist and rebuild it, and
+    every fenced write compares it with the stored custody and the live lease
+    records. `fence` maps each concurrency key to its `{epoch, instance}`.
+    """
+
+    transaction_id: str
+    executor_id: str
+    subject_path: str
+    fence: Mapping[str, Mapping[str, Any]]
 
 
 @dataclasses.dataclass(frozen=True)
 class Transaction:
     """A validated snapshot of one transaction.
 
-    `subject` and each event are `types.MappingProxyType` views over deep
-    copies. Only the top level is read-only: nested values stay mutable, but
-    they are copies, so mutating them cannot reach disk.
+    `subject`, each event and `custody.fence` (with each fence entry) are
+    `types.MappingProxyType` views over deep copies. Only those levels are
+    read-only: nested values stay mutable, but they are copies, so mutating
+    them cannot reach disk.
     """
 
     transaction_id: str
@@ -94,7 +125,7 @@ class Transaction:
     revision: int
     events: tuple[Mapping[str, Any], ...]
     concurrency_keys: tuple[str, ...]
-    custody: Any
+    custody: Custody | None
 
 
 def _edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
@@ -216,6 +247,102 @@ def _fold_transitioned(event: dict, seq: int, state: str, parked: str | None,
     return target, parked
 
 
+def _is_subject_path(value: object) -> bool:
+    """An absolute path string equal to its own normalization (D5)."""
+    return type(value) is str and os.path.isabs(value) and value == os.path.normpath(value)
+
+
+@dataclasses.dataclass
+class _CustodyFold:
+    """What the validator folds from the custody events (D11, D30)."""
+
+    keys: list[str]
+    custody: dict | None = None
+    bound_path: str | None = None
+    spans: list[tuple[str, dict]] = dataclasses.field(default_factory=list)
+    last_close: str | None = None
+
+
+def _fold_closing(event: dict, seq: int, fold: _CustodyFold, state: str,
+                  entered_terminal: int | None, refuse: Callable[[str], StateInvalid]) -> None:
+    """Check one lease_released or lease_lapse_detected event and close the open span."""
+    event_type = event["type"]
+    if fold.custody is None:
+        raise refuse(f"event {seq} {event_type} closes no open custody span")
+    if event["fence"] != fold.custody["fence"]:
+        raise refuse(f"event {seq} {event_type} fence does not equal the open span's fence")
+    if event_type == "lease_lapse_detected":
+        if event["executor_id"] != fold.custody["executor_id"]:
+            raise refuse(f"event {seq} executor_id does not equal the open span's executor")
+        fold.last_close = "lapsed"
+    else:
+        reason = event["reason"]
+        if type(reason) is not str or reason not in _RELEASE_REASONS:
+            raise refuse(f"event {seq} reason is not released, quiesced or terminal")
+        if reason == "quiesced" and state not in PARKINGS:
+            raise refuse(f"event {seq} quiesced release happens outside a parking")
+        if reason == "terminal" and entered_terminal != seq - 1:
+            raise refuse(f"event {seq} terminal release does not immediately follow a "
+                         f"transition into a terminal")
+        fold.last_close = "released"
+    fold.custody = None
+
+
+def _fold_opening(event: dict, seq: int, fold: _CustodyFold,
+                  refuse: Callable[[str], StateInvalid]) -> None:
+    """Check one lease_acquired or lease_reacquired event and open its span (D5, D7, D30)."""
+    event_type = event["type"]
+    if type(event["executor_id"]) is not str or not event["executor_id"]:
+        raise refuse(f"event {seq} executor_id is not a non-empty string")
+    if not _is_subject_path(event["subject_path"]):
+        raise refuse(f"event {seq} subject_path is not an absolute normalized path")
+    if event_type == "lease_acquired":
+        if fold.spans:
+            raise refuse(f"event {seq} lease_acquired follows an earlier custody span")
+        fold.bound_path = event["subject_path"]
+    else:
+        if fold.custody is not None:
+            raise refuse(f"event {seq} lease_reacquired opens a span while one is open")
+        if not fold.spans:
+            raise refuse(f"event {seq} lease_reacquired follows no earlier custody span")
+        prior_executor, prior_fence = fold.spans[-1]
+        if event["subject_path"] != fold.bound_path:
+            raise refuse(f"event {seq} subject_path differs from the bound path")
+        if event["prior_executor_id"] != prior_executor:
+            raise refuse(f"event {seq} prior_executor_id does not name the prior span's "
+                         f"executor")
+        if fence_violation(event["prior_fence"], fold.keys) is not None \
+                or event["prior_fence"] != prior_fence:
+            raise refuse(f"event {seq} prior_fence does not equal the prior span's fence")
+        if any(event["fence"][key]["epoch"] <= prior_fence[key]["epoch"] for key in fold.keys):
+            raise refuse(f"event {seq} fence epoch does not increase over the prior span")
+        expected = "expired" if fold.last_close == "lapsed" else "released"
+        if event["reason"] != expected:
+            raise refuse(f"event {seq} reason does not match how the prior span closed")
+    fold.spans.append((event["executor_id"], event["fence"]))
+    fold.custody = {"executor_id": event["executor_id"],
+                    "subject_path": event["subject_path"], "fence": event["fence"]}
+
+
+def _fold_custody(event: dict, seq: int, fold: _CustodyFold, state: str,
+                  entered_terminal: int | None, refuse: Callable[[str], StateInvalid]) -> None:
+    """Check one custody event's envelope and fence, then fold it (D11)."""
+    event_type = event["type"]
+    if set(event) != _EVENT_KEYS[event_type]:
+        raise refuse(f"event {seq} is not the closed {event_type} event")
+    if type(event["seq"]) is not int or event["seq"] != seq:
+        raise refuse(f"event {seq} does not carry seq {seq}")
+    if not _is_timestamp(event["at"]):
+        raise refuse(f"event {seq} at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
+    violation = fence_violation(event["fence"], fold.keys)
+    if violation is not None:
+        raise refuse(f"event {seq} {violation}")
+    if event_type in ("lease_acquired", "lease_reacquired"):
+        _fold_opening(event, seq, fold, refuse)
+    else:
+        _fold_closing(event, seq, fold, state, entered_terminal, refuse)
+
+
 def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
     """Refuse (StateInvalid) any document that is not a valid transaction-state/v2."""
     def refuse(rule: str) -> StateInvalid:
@@ -258,9 +385,12 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
         raise refuse("event 1 is not seq 1 of type created")
     if not _is_timestamp(first["at"]):
         raise refuse("event 1 at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
-    state, parked, custody = "created", None, None
+    state, parked, entered_terminal = "created", None, None
+    fold = _CustodyFold(keys)
     for seq, event in enumerate(events[1:], start=2):
-        if state in TERMINALS:
+        if state in TERMINALS and not (
+                entered_terminal == seq - 1 and type(event) is dict
+                and event.get("type") == "lease_released" and event.get("reason") == "terminal"):
             raise refuse(f"event {seq} follows the terminal state {state}")
         if type(event) is not dict:
             raise refuse(f"event {seq} is not a JSON object")
@@ -268,8 +398,15 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
         match event_type:
             case "transitioned":
                 state, parked = _fold_transitioned(event, seq, state, parked, refuse)
+                if state in TERMINALS:
+                    entered_terminal = seq
+            case str() if event_type in CUSTODY_EVENTS:
+                _fold_custody(event, seq, fold, state, entered_terminal, refuse)
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
+    custody = fold.custody
+    if state in TERMINALS and custody is not None:
+        raise refuse(f"terminal state {state} still holds custody")
     if type(document["state"]) is not str or document["state"] != state:
         raise refuse(f"state does not equal the folded state {state}")
     stored_parked = document["parked_from"]
@@ -277,14 +414,24 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
             or type(stored_parked) is str and stored_parked == parked):
         raise refuse("parked_from does not equal the folded parked_from")
     stored_custody = document["custody"]
-    if not (type(stored_custody) is dict or stored_custody is None) \
-            or stored_custody != custody:
+    if not (stored_custody is None and custody is None
+            or type(stored_custody) is dict and custody is not None
+            and serialize(stored_custody) == serialize(custody)):
         raise refuse("custody does not equal the folded custody")
     if type(document["revision"]) is not int or document["revision"] != len(events):
         raise refuse("revision does not equal the number of events")
 
 
 def _snapshot(document: dict) -> Transaction:
+    projection = document["custody"]
+    custody = None
+    if projection is not None:
+        custody = Custody(
+            transaction_id=document["transaction_id"],
+            executor_id=projection["executor_id"],
+            subject_path=projection["subject_path"],
+            fence=MappingProxyType({key: MappingProxyType(copy.deepcopy(entry))
+                                    for key, entry in projection["fence"].items()}))
     return Transaction(
         transaction_id=document["transaction_id"],
         creation_key=document["creation_key"],
@@ -295,8 +442,31 @@ def _snapshot(document: dict) -> Transaction:
         events=tuple(MappingProxyType(copy.deepcopy(event))
                      for event in document["events"]),
         concurrency_keys=tuple(document["concurrency_keys"]),
-        custody=None,
+        custody=custody,
     )
+
+
+def _require_custody_shape(custody: Any) -> None:
+    """Refuse (StateInvalid), before any lock, a credential that is not a well-formed
+    `Custody` (D21)."""
+    if not isinstance(custody, Custody):
+        raise StateInvalid(f"{custody!r}: not a Custody credential")
+    where = f"{custody.transaction_id!r}: custody"
+    for name in ("transaction_id", "executor_id"):
+        value = getattr(custody, name)
+        if type(value) is not str or not value:
+            raise StateInvalid(f"{where} {name} is not a non-empty string")
+    violation = fence_violation(custody.fence)
+    if violation is not None:
+        raise StateInvalid(f"{where} {violation}")
+
+
+def _bound_path(document: dict) -> str | None:
+    """The subject path the first acquisition bound, or None before any (D5)."""
+    for event in document["events"]:
+        if event["type"] == "lease_acquired":
+            return event["subject_path"]
+    return None
 
 
 def _require_creatable(root: Path, creation_key: Any, subject: Any,
@@ -332,6 +502,7 @@ class TransactionStore:
             raise TransactionError(f"{root}: clock is not callable")
         self.root = root
         self._clock = clock if clock is not None else lambda: time.time_ns() // 1_000_000
+        self._leases = LeaseAuthority(root)
 
     def _now(self) -> int:
         """One clock reading, refused unless an int in [0, _MAX_CLOCK_MS] (D3, D32)."""
@@ -499,3 +670,129 @@ class TransactionStore:
             return _snapshot(document)
         finally:
             os.close(descriptor)
+
+    def acquire(self, transaction_id: str, *, executor_id: str, subject_path: str,
+                ttl_ms: int) -> Transaction:
+        """Take custody of the whole key set, all or nothing (D5, D7, D8).
+
+        Any live key, including this transaction's own live custody, is
+        `LeaseUnavailable`. Every acquisition advances each key's epoch under one
+        fresh instance; lease records are written before `state.json`.
+        """
+        where = f"{transaction_id}: acquire"
+        if type(executor_id) is not str or not executor_id:
+            raise StateInvalid(f"{where}: executor_id is not a non-empty string")
+        if not _is_subject_path(subject_path):
+            raise StateInvalid(f"{where}: subject_path {subject_path!r} is not an absolute "
+                               f"normalized path")
+        if type(ttl_ms) is not int or ttl_ms < 1:
+            raise StateInvalid(f"{where}: ttl_ms {ttl_ms!r} is not a positive integer")
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{where}: state {prior['state']} is terminal")
+            bound = _bound_path(prior)
+            if bound is not None and subject_path != bound:
+                raise CustodyMisbound(f"{where}: subject_path {subject_path!r} differs from "
+                                      f"the bound path {bound!r}")
+            with self._leases.locked():
+                now = self._now()
+                candidate = self._acquisition(prior, executor_id, subject_path, now)
+                self._leases.hold(candidate["custody"]["fence"], transaction_id=transaction_id,
+                                  executor_id=executor_id, ttl_ms=ttl_ms, now=now)
+                directory = self.root / transaction_id
+                atomic_write(directory, directory / "state.json", candidate)
+        return _snapshot(candidate)
+
+    def _acquisition(self, prior: dict, executor_id: str, subject_path: str,
+                     now: int) -> dict:
+        """The validated candidate an acquisition at `now` writes; refuses a live key."""
+        transaction_id = prior["transaction_id"]
+        candidate = copy.deepcopy(prior)
+        events = candidate["events"]
+        at = _format_at(now)
+        held = prior["custody"]
+        if held is not None:
+            if not self._leases.span_lapsed(held["fence"], now):
+                raise LeaseUnavailable(f"{transaction_id}: its own custody by "
+                                       f"{held['executor_id']!r} is still live")
+            events.append({"seq": len(events) + 1, "type": "lease_lapse_detected", "at": at,
+                           "fence": held["fence"], "executor_id": held["executor_id"]})
+        live = self._leases.first_live_key(prior["concurrency_keys"], now)
+        if live is not None:
+            raise LeaseUnavailable(f"{transaction_id}: concurrency key {live!r} is live-held")
+        fence = self._leases.next_fence(prior["concurrency_keys"])
+        opening = {"seq": len(events) + 1, "type": "lease_acquired", "at": at,
+                   "executor_id": executor_id, "subject_path": subject_path, "fence": fence}
+        openings = [e for e in events if e["type"] in ("lease_acquired", "lease_reacquired")]
+        if openings:
+            closing = [e for e in events
+                       if e["type"] in ("lease_released", "lease_lapse_detected")][-1]
+            opening.update({
+                "type": "lease_reacquired", "prior_executor_id": openings[-1]["executor_id"],
+                "prior_fence": openings[-1]["fence"],
+                "reason": ("expired" if closing["type"] == "lease_lapse_detected"
+                           else "released")})
+        events.append(opening)
+        candidate["custody"] = {"executor_id": executor_id, "subject_path": subject_path,
+                                "fence": fence}
+        candidate["revision"] = len(events)
+        _validate_state(candidate, transaction_id, self.root)
+        return candidate
+
+    def release(self, custody: Custody) -> Transaction:
+        """Give custody up voluntarily: `state.json` first, then the records (D8, D24)."""
+        _require_custody_shape(custody)
+        transaction_id = custody.transaction_id
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{transaction_id}: release: state {prior['state']} "
+                                        f"is terminal")
+            now = self._now()
+            self._check_custody(prior, custody, now)
+            fence = prior["custody"]["fence"]
+            with self._leases.locked():
+                candidate = copy.deepcopy(prior)
+                candidate["events"].append({
+                    "seq": prior["revision"] + 1, "type": "lease_released",
+                    "at": _format_at(now), "fence": fence, "reason": "released"})
+                candidate["custody"] = None
+                candidate["revision"] = len(candidate["events"])
+                _validate_state(candidate, transaction_id, self.root)
+                directory = self.root / transaction_id
+                atomic_write(directory, directory / "state.json", candidate)
+                self._leases.clear(fence)
+        return _snapshot(candidate)
+
+    def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:
+        """The fenced check (D12, D25): credential, then path, then live records at `now`.
+
+        Runs under the transaction lock before any write; reads the lease records
+        without the lease lock and records nothing when it refuses.
+        """
+        transaction_id = prior["transaction_id"]
+        held = prior["custody"]
+        if held is None:
+            raise StaleCustody(f"{transaction_id}: holds no custody")
+        presented = {key: dict(entry) for key, entry in custody.fence.items()}
+        if (custody.transaction_id != transaction_id
+                or custody.executor_id != held["executor_id"] or presented != held["fence"]):
+            raise StaleCustody(f"{transaction_id}: presented custody is not the held custody")
+        if custody.subject_path != held["subject_path"]:
+            raise CustodyMisbound(f"{transaction_id}: subject_path {custody.subject_path!r} "
+                                  f"differs from the bound path {held['subject_path']!r}")
+        if self._leases.span_lapsed(held["fence"], now):
+            raise StaleCustody(f"{transaction_id}: custody has lapsed")
+
+    def inspect_lease(self, key: str) -> Mapping[str, Any] | None:
+        """A read-only view of `key`'s lease record, or None; no lock, no write (D6)."""
+        if type(key) is not str or not key:
+            raise StateInvalid(f"{self.root}: lease key {key!r} is not a non-empty string")
+        try:
+            key.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise StateInvalid(f"{self.root}: lease key {key!r} is not encodable as "
+                               f"UTF-8") from error
+        record = self._leases.record(key)
+        return None if record is None else MappingProxyType(copy.deepcopy(record))

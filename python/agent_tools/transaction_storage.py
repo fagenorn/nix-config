@@ -17,7 +17,7 @@ class TransactionError(Exception):
 
 
 class StateInvalid(TransactionError):
-    """A stored file, the layout, or a create argument fails the closed schema."""
+    """A stored file, the layout, or an operation's arguments fail the closed schema."""
 
 
 class TransactionBusy(TransactionError):
@@ -34,6 +34,26 @@ class CreationConflict(TransactionError):
 
 class UnknownTransaction(TransactionError):
     """No transaction with that id exists under this root."""
+
+
+class FenceViolation(TransactionError):
+    """A presented custody credential does not fence the write."""
+
+
+class StaleCustody(FenceViolation):
+    """No, stale or lapsed custody, or an unissued late-result credential."""
+
+
+class CustodyMisbound(FenceViolation):
+    """The presented subject path differs from the one the first acquisition bound."""
+
+
+class GrantInvalid(FenceViolation):
+    """An unknown grant, or a grant whose fence is not the current one."""
+
+
+class LeaseUnavailable(TransactionError):
+    """A concurrency key is live-held."""
 
 
 def serialize(document: dict) -> str:
