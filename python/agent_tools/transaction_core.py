@@ -1,123 +1,63 @@
-"""The transaction core's first slice (#204).
+"""The transaction core (#204, #205).
 
 A caller-rooted store of closed-schema transactions with a closed lifecycle:
-`TransactionStore(root)` creates deduplicated transactions under an absolute,
-pre-existing root and loads validated snapshots of them. Each transaction's
-whole state and typed event history live in one `state.json` whose
-`state`/`parked_from`/`revision` are a projection the validator re-folds from
-the events. The module has no command and no caller yet.
+`TransactionStore(root, clock=...)` creates deduplicated transactions under an
+absolute, pre-existing root and loads validated snapshots of them. Each
+transaction's whole state and typed event history live in one `state.json`
+whose `state`/`parked_from`/`custody`/`revision` are a projection the validator
+re-folds from the events, beside the immutable sorted `concurrency_keys` fixed at
+creation. Every event `at` is read from the injected clock (integer
+epoch milliseconds, the wall clock by default); transaction ids still come from
+the wall clock. `acquire` takes custody of the whole key set from the lease
+authority in `agent_tools.transaction_custody`, returning a `Custody` credential
+that `renew`, `release` and every fenced write check against the stored projection
+and the live lease records; `advance` is fenced from `publishing` on and while
+custody is held, and entering a terminal releases custody. `record_evidence`,
+`open_interval` and `issue_grant` append fence-stamped records under the held
+custody, `check_grant` checks one read-only, and every snapshot re-derives their
+verdicts from the history. `reap` records a lapsed span's lapse and synthesized stop,
+parking the transaction unless it is already parked, and `record_owner_result` keeps an
+authentic late owner result beside that stop without changing state or custody. The
+durable-file
+primitives and the refusal hierarchy live in `agent_tools.transaction_storage`, and
+the document model — vocabularies, `Custody`, `Transaction`, the validator and the
+snapshot fold — in `agent_tools.transaction_history`; this module re-exports the
+errors and the public model names. The module has no command and no caller yet.
 """
 
+import contextlib
 import copy
-import dataclasses
-import datetime
 import fcntl
 import hashlib
-import json
-import math
 import os
-import re
 import secrets
 import stat
-import tempfile
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from agent_tools.canonical import (
-    reject_duplicate_keys, reject_nonfinite_literal, telemetry_digest)
+from agent_tools.canonical import telemetry_digest
+from agent_tools.transaction_custody import (
+    EVIDENCE_FORMS, LeaseAuthority, admissibility, fence_violation)
+from agent_tools.transaction_history import (
+    EXTERNAL_STATES, FORWARD, PARKINGS, SCHEMA, STATES, TERMINALS, TRANSITIONS, Custody,
+    Transaction, bound_path, edge_allowed, fenced_id_violation, format_at, is_id,
+    is_subject_path, json_object_violation, key_set_violation, owner_result_event,
+    parked_since, reaped, require_custody_shape, require_texts, snapshot, span_issued,
+    validate_state)
+from agent_tools.transaction_storage import (
+    CreationConflict, CustodyMisbound, FenceViolation, GrantInvalid, LeaseUnavailable,
+    StaleCustody, StateInvalid, TransactionBusy, TransactionError, TransitionRefused,
+    UnknownTransaction, atomic_write, fsync_directory, lstat_mode, open_lock, read_json,
+    require_directory)
 
-SCHEMA = "transaction-state/v1"
 INDEX_SCHEMA = "transaction-creation-key/v1"
-
-FORWARD = ("created", "awaiting_verification", "ready", "publishing", "published",
-           "activating", "proving")
-PARKINGS = ("attention_required", "recovering")
-TERMINALS = frozenset({"succeeded", "abandoned", "rolled_back", "failed"})
-STATES = frozenset(FORWARD) | frozenset(PARKINGS) | TERMINALS
-
-TRANSITIONS: Mapping[str, frozenset[str]] = MappingProxyType({
-    "created": frozenset({"awaiting_verification", "attention_required", "abandoned"}),
-    "awaiting_verification": frozenset({"ready", "attention_required", "abandoned"}),
-    "ready": frozenset({"publishing", "attention_required", "abandoned"}),
-    "publishing": frozenset({"published", "attention_required"}),
-    "published": frozenset({"activating", "proving", "attention_required"}),
-    "activating": frozenset({"proving", "attention_required"}),
-    "proving": frozenset({"succeeded", "attention_required"}),
-    "attention_required": frozenset(FORWARD) | frozenset({"recovering", "abandoned",
-                                                          "failed"}),
-    "recovering": frozenset({"rolled_back", "attention_required", "abandoned", "failed"}),
-    "succeeded": frozenset(),
-    "abandoned": frozenset(),
-    "rolled_back": frozenset(),
-    "failed": frozenset(),
-})
-
-_ID_PATTERN = re.compile(
-    r"rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-_AT_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
-_STATE_KEYS = frozenset({"schema", "transaction_id", "creation_key", "subject", "state",
-                         "parked_from", "revision", "events"})
+PARKED_CUSTODY_WINDOW_MS = 900_000  # the core cap on custody held through a parking (D19)
 _INDEX_KEYS = frozenset({"schema", "creation_key", "transaction_id"})
-_CREATED_KEYS = frozenset({"seq", "type", "at"})
-_TRANSITIONED_KEYS = frozenset({"seq", "type", "at", "from", "to", "reason",
-                                "external_state"})
-_EXTERNAL_STATES = ("known", "unknown", None)
-
-
-class TransactionError(Exception):
-    """Base of every refusal the transaction core raises."""
-
-
-class StateInvalid(TransactionError):
-    """A stored file, the layout, or a create argument fails the closed schema."""
-
-
-class TransactionBusy(TransactionError):
-    """A lock the call needs is held elsewhere."""
-
-
-class TransitionRefused(TransactionError):
-    """An illegal edge, a terminal source, or an ungrounded terminal."""
-
-
-class CreationConflict(TransactionError):
-    """The same creation key was requested with a different subject."""
-
-
-class UnknownTransaction(TransactionError):
-    """No transaction with that id exists under this root."""
-
-
-@dataclasses.dataclass(frozen=True)
-class Transaction:
-    """A validated snapshot of one transaction.
-
-    `subject` and each event are `types.MappingProxyType` views over deep
-    copies. Only the top level is read-only: nested values stay mutable, but
-    they are copies, so mutating them cannot reach disk.
-    """
-
-    transaction_id: str
-    creation_key: str
-    subject: Mapping[str, Any]
-    state: str
-    parked_from: str | None
-    revision: int
-    events: tuple[Mapping[str, Any], ...]
-
-
-def _edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
-    """Contract: `target` is in TRANSITIONS[source]; from a parking, a forward-state
-    target must be the recorded `parked_from` (D15)."""
-    if target not in TRANSITIONS.get(source, frozenset()):
-        return False
-    if source == "attention_required" and target in FORWARD:
-        return target == parked_from
-    return True
+_MAX_CLOCK_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
 
 
 def _mint_id() -> str:
@@ -128,254 +68,39 @@ def _mint_id() -> str:
     return "rel_" + str(uuid.UUID(int=value))
 
 
-def _is_id(value: object) -> bool:
-    return type(value) is str and _ID_PATTERN.fullmatch(value) is not None
-
-
-def _timestamp() -> str:
-    """UTC now as `YYYY-MM-DDTHH:MM:SS.mmmZ`."""
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
-
-
-def _is_timestamp(value: object) -> bool:
-    if type(value) is not str or _AT_PATTERN.fullmatch(value) is None:
-        return False
-    try:
-        datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
-    except ValueError:
-        return False
-    return True
-
-
-def _serialize(document: dict) -> str:
-    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-                      allow_nan=False) + "\n"
-
-
-def _finite_float(literal: str) -> float:
-    """`parse_float` hook: an overflowing literal such as `1e400` decodes to infinity."""
-    value = float(literal)
-    if not math.isfinite(value):
-        raise ValueError(f"JSON number {literal} is not finite")
-    return value
-
-
-def _strict_loads(text: str) -> Any:
-    return json.loads(text, object_pairs_hook=reject_duplicate_keys,
-                      parse_constant=reject_nonfinite_literal, parse_float=_finite_float)
-
-
-def _lstat_mode(path: Path) -> int | None:
-    """The `lstat` mode of `path`, or None when nothing is there."""
-    try:
-        return os.lstat(path).st_mode
-    except FileNotFoundError:
-        return None
-
-
-def _read_json(path: Path) -> Any:
-    """Strictly load one regular, non-symlinked JSON file, else StateInvalid."""
-    mode = _lstat_mode(path)
-    if mode is None:
-        raise StateInvalid(f"{path}: file is missing")
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise StateInvalid(f"{path}: not a regular file")
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        with open(descriptor, "rb") as handle:
-            raw = handle.read()
-    except OSError as error:
-        raise StateInvalid(f"{path}: unreadable ({error.strerror})") from error
-    try:
-        return _strict_loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
-        raise StateInvalid(f"{path}: not strict JSON ({error})") from error
-
-
-def _fsync_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _atomic_write(directory: Path, path: Path, document: dict) -> None:
-    """Replace `path` by a fsynced temporary sibling, then fsync `directory`."""
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=directory,
-            prefix="." + path.name + ".",
-            suffix=".tmp",
-            delete=False,
-        ) as output:
-            temporary_path = Path(output.name)
-            output.write(_serialize(document))
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary_path, path)
-        temporary_path = None
-        _fsync_directory(directory)
-    except BaseException as original_error:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                raise cleanup_error from original_error
-        raise
-
-
 def _index_path(root: Path, creation_key: str) -> Path:
     digest = hashlib.sha256(creation_key.encode("utf-8")).hexdigest()
     return root / "creation-keys" / f"{digest}.json"
 
 
-def _require_directory(path: Path, missing_ok: bool) -> bool:
-    """Refuse a symlinked or non-directory `path` by `lstat`; report whether it exists."""
-    mode = _lstat_mode(path)
-    if mode is None:
-        if missing_ok:
-            return False
-        raise StateInvalid(f"{path}: directory is missing")
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-        raise StateInvalid(f"{path}: not a directory")
-    return True
-
-
 def _read_index(root: Path, creation_key: str) -> str | None:
     """The id the key's index entry names, or None when there is no entry."""
     index_directory = root / "creation-keys"
-    if not _require_directory(index_directory, missing_ok=True):
+    if not require_directory(index_directory, missing_ok=True):
         return None
     path = _index_path(root, creation_key)
-    if _lstat_mode(path) is None:
+    if lstat_mode(path) is None:
         return None
-    entry = _read_json(path)
+    entry = read_json(path)
     if type(entry) is not dict or set(entry) != _INDEX_KEYS:
         raise StateInvalid(f"{path}: index entry is not the closed {INDEX_SCHEMA} object")
     if entry["schema"] != INDEX_SCHEMA:
         raise StateInvalid(f"{path}: index schema is not {INDEX_SCHEMA}")
     if entry["creation_key"] != creation_key:
         raise StateInvalid(f"{path}: index entry names a different creation key")
-    if not _is_id(entry["transaction_id"]):
+    if not is_id(entry["transaction_id"]):
         raise StateInvalid(f"{path}: index entry transaction_id is not a rel_ UUIDv7")
     return entry["transaction_id"]
 
 
 def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
-    """Refuse (StateInvalid) any document that is not a valid transaction-state/v1."""
-    def refuse(rule: str) -> StateInvalid:
-        return StateInvalid(f"{transaction_id}: {rule}")
-
-    if type(document) is not dict or set(document) != _STATE_KEYS:
-        raise refuse(f"state.json is not the closed {SCHEMA} key set")
-    if document["schema"] != SCHEMA:
-        raise refuse(f"schema is not {SCHEMA}")
-    if not _is_id(document["transaction_id"]) or document["transaction_id"] != transaction_id:
-        raise refuse("transaction_id is not a rel_ UUIDv7 equal to its directory name")
-    creation_key = document["creation_key"]
-    if type(creation_key) is not str or not creation_key:
-        raise refuse("creation_key is not a non-empty string")
-    try:
-        indexed = _read_index(root, creation_key)
-    except UnicodeEncodeError as error:
-        raise refuse("creation_key is not encodable as UTF-8") from error
-    if indexed != transaction_id:
-        raise refuse("creation_key index entry does not point back to this transaction")
-    if type(document["subject"]) is not dict:
-        raise refuse("subject is not a JSON object")
-    events = document["events"]
-    if type(events) is not list or not events:
-        raise refuse("events is not a non-empty list")
-    first = events[0]
-    if type(first) is not dict or set(first) != _CREATED_KEYS:
-        raise refuse("event 1 is not the closed created event")
-    if type(first["seq"]) is not int or first["seq"] != 1 or first["type"] != "created":
-        raise refuse("event 1 is not seq 1 of type created")
-    if not _is_timestamp(first["at"]):
-        raise refuse("event 1 at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
-    state, parked = "created", None
-    for position, event in enumerate(events[1:], start=1):
-        seq = position + 1
-        if state in TERMINALS:
-            raise refuse(f"event {seq} follows the terminal state {state}")
-        if type(event) is not dict or set(event) != _TRANSITIONED_KEYS:
-            raise refuse(f"event {seq} is not the closed transitioned event")
-        if event["type"] != "transitioned":
-            raise refuse(f"event {seq} is not of type transitioned")
-        if type(event["seq"]) is not int or event["seq"] != seq:
-            raise refuse(f"event {seq} does not carry seq {seq}")
-        if not _is_timestamp(event["at"]):
-            raise refuse(f"event {seq} at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
-        target = event["to"]
-        if event["from"] != state:
-            raise refuse(f"event {seq} from does not equal the folded state {state}")
-        if type(target) is not str or target not in STATES:
-            raise refuse(f"event {seq} to is not a known state")
-        if not _edge_allowed(state, parked, target):
-            raise refuse(f"event {seq} edge {state} -> {target} is not allowed")
-        if type(event["reason"]) is not str or not event["reason"]:
-            raise refuse(f"event {seq} reason is not a non-empty string")
-        external_state = event["external_state"]
-        if external_state is not None and (type(external_state) is not str
-                                           or external_state not in _EXTERNAL_STATES):
-            raise refuse(f"event {seq} external_state is not known, unknown or null")
-        if target in TERMINALS and external_state != "known":
-            raise refuse(f"event {seq} reaches terminal {target} without known external state")
-        if target == "attention_required":
-            parked = state
-        elif state == "attention_required":
-            parked = None
-        state = target
-    if type(document["state"]) is not str or document["state"] != state:
-        raise refuse(f"state does not equal the folded state {state}")
-    stored_parked = document["parked_from"]
-    if not (stored_parked is None and parked is None
-            or type(stored_parked) is str and stored_parked == parked):
-        raise refuse("parked_from does not equal the folded parked_from")
-    if type(document["revision"]) is not int or document["revision"] != len(events):
-        raise refuse("revision does not equal the number of events")
+    """`validate_state` with the creation-key index read from under `root`."""
+    validate_state(document, transaction_id, lambda key: _read_index(root, key))
 
 
-def _snapshot(document: dict) -> Transaction:
-    return Transaction(
-        transaction_id=document["transaction_id"],
-        creation_key=document["creation_key"],
-        subject=MappingProxyType(copy.deepcopy(document["subject"])),
-        state=document["state"],
-        parked_from=document["parked_from"],
-        revision=document["revision"],
-        events=tuple(MappingProxyType(copy.deepcopy(event))
-                     for event in document["events"]),
-    )
-
-
-def _open_lock(path: Path) -> int:
-    """Open (creating) a regular, non-symlinked lock file and take it non-blocking."""
-    mode = _lstat_mode(path)
-    if mode is not None and (stat.S_ISLNK(mode) or not stat.S_ISREG(mode)):
-        raise StateInvalid(f"{path}: lock is not a regular file")
-    try:
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    except OSError as error:
-        raise StateInvalid(f"{path}: lock cannot be opened ({error.strerror})") from error
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as error:
-        os.close(descriptor)
-        raise TransactionBusy(f"{path}: lock is held elsewhere") from error
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return descriptor
-
-
-def _require_creatable(root: Path, creation_key: Any, subject: Any) -> None:
-    """Refuse (StateInvalid) arguments that cannot form a valid v1 state (D16)."""
+def _require_creatable(root: Path, creation_key: Any, subject: Any,
+                       concurrency_keys: Any) -> None:
+    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v2 document."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -383,30 +108,40 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any) -> None:
         creation_key.encode("utf-8")
     except UnicodeEncodeError as error:
         raise StateInvalid(f"{where}: not encodable as UTF-8") from error
-    if type(subject) is not dict:
-        raise StateInvalid(f"{where}: subject is not a JSON object")
-    try:
-        loaded = _strict_loads(_serialize(subject))
-    except (TypeError, ValueError) as error:
-        raise StateInvalid(f"{where}: subject is not strict JSON ({error})") from error
-    if loaded != subject or telemetry_digest(loaded) != telemetry_digest(subject):
-        raise StateInvalid(f"{where}: subject does not survive a strict JSON round trip")
+    violation = json_object_violation(subject)
+    if violation is not None:
+        raise StateInvalid(f"{where}: subject {violation}")
+    violation = key_set_violation(concurrency_keys)
+    if violation is not None:
+        raise StateInvalid(f"{where}: {violation}")
 
 
 class TransactionStore:
     """Transactions under one absolute, pre-existing `root` the caller owns (D2)."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, clock: Callable[[], int] | None = None) -> None:
         if not isinstance(root, Path) or not root.is_absolute() or not root.is_dir():
             raise TransactionError(f"{root}: store root is not an absolute existing directory")
+        if clock is not None and not callable(clock):
+            raise TransactionError(f"{root}: clock is not callable")
         self.root = root
+        self._clock = clock if clock is not None else lambda: time.time_ns() // 1_000_000
+        self._leases = LeaseAuthority(root)
+
+    def _now(self) -> int:
+        """One clock reading, refused unless an int in [0, _MAX_CLOCK_MS] (D3, D32)."""
+        reading = self._clock()
+        if type(reading) is not int or not 0 <= reading <= _MAX_CLOCK_MS:
+            raise TransactionError(f"{self.root}: clock reading {reading!r} is not an integer "
+                                   f"millisecond count in [0, {_MAX_CLOCK_MS}]")
+        return reading
 
     def _existing_directory(self, transaction_id: str) -> Path:
         """The transaction's real directory, else UnknownTransaction; creates nothing (D16)."""
-        if not _is_id(transaction_id):
+        if not is_id(transaction_id):
             raise UnknownTransaction(f"{transaction_id!r}: not a rel_ UUIDv7 transaction id")
         directory = self.root / transaction_id
-        mode = _lstat_mode(directory)
+        mode = lstat_mode(directory)
         if mode is None or stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
             raise UnknownTransaction(f"{transaction_id}: no transaction directory under "
                                      f"{self.root}")
@@ -415,26 +150,44 @@ class TransactionStore:
     def _validated_document(self, transaction_id: str) -> dict:
         """Read and fully validate `state.json` without writing or locking (D13, D16)."""
         directory = self._existing_directory(transaction_id)
-        lock_mode = _lstat_mode(directory / "lock")
+        lock_mode = lstat_mode(directory / "lock")
         if lock_mode is None or stat.S_ISLNK(lock_mode) or not stat.S_ISREG(lock_mode):
             raise StateInvalid(f"{transaction_id}: lock file is missing or not a regular file")
-        document = _read_json(directory / "state.json")
+        document = read_json(directory / "state.json")
         _validate_state(document, transaction_id, self.root)
         return document
 
     def load(self, transaction_id: str) -> Transaction:
         """A validated snapshot; writes nothing, creates nothing, takes no lock."""
-        return _snapshot(self._validated_document(transaction_id))
+        return snapshot(self._validated_document(transaction_id))
 
     def advance(self, transaction_id: str, target: str, *, reason: str,
-                external_state: str | None = None) -> Transaction:
-        """Move one transaction along one allowed edge under its lock (D5, D7-D10, D13).
+                external_state: str | None = None,
+                custody: Custody | None = None) -> Transaction:
+        """Move one transaction along one allowed edge under its lock (#204; #205 D14,
+        D26, D27).
 
+        A terminal source is `TransitionRefused` before any custody check. Custody
+        is required when the target is `publishing`, when the history has ever
+        entered `publishing`, or when the transaction holds custody; a required
+        custody that is None is `StaleCustody`. A presented custody is always
+        fenced-checked, required or not, before the lifecycle refusals. Entering a
+        terminal while custody is held appends the transition and a `lease_released`
+        reason `terminal` in one `state.json` write, then clears the lease records.
         Every refusal happens before any write; the lock file is never created.
         """
+        if custody is not None:
+            require_custody_shape(custody)
+        with self._transaction_locked(transaction_id):
+            return self._advance_locked(transaction_id, target, reason, external_state,
+                                        custody)
+
+    @contextlib.contextmanager
+    def _transaction_locked(self, transaction_id: str):
+        """Hold the transaction's existing lock, taken non-blocking; never creates it."""
         directory = self._existing_directory(transaction_id)
         lock = directory / "lock"
-        mode = _lstat_mode(lock)
+        mode = lstat_mode(lock)
         if mode is None or stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
             raise StateInvalid(f"{transaction_id}: lock file {lock} is missing or not a "
                                f"regular file")
@@ -449,31 +202,40 @@ class TransactionStore:
             except BlockingIOError as error:
                 raise TransactionBusy(f"{transaction_id}: lock file {lock} is held "
                                       f"elsewhere") from error
-            return self._advance_locked(transaction_id, target, reason, external_state)
+            yield
         finally:
             os.close(descriptor)
 
     def _advance_locked(self, transaction_id: str, target: Any, reason: Any,
-                        external_state: Any) -> Transaction:
+                        external_state: Any, custody: Custody | None) -> Transaction:
         prior = self._validated_document(transaction_id)
         source = prior["state"]
         where = f"{transaction_id}: {source} -> {target!r}"
         if source in TERMINALS:
             raise TransitionRefused(f"{where}: source is terminal")
+        now = self._now()
+        required = (target == "publishing" or prior["custody"] is not None
+                    or any(event["type"] == "transitioned" and event["to"] == "publishing"
+                           for event in prior["events"]))
+        if required and custody is None:
+            raise StaleCustody(f"{where}: custody is required and none was presented")
+        if custody is not None:
+            self._check_custody(prior, custody, now)
         if type(target) is not str or target not in STATES:
             raise TransitionRefused(f"{where}: target is not a known state")
-        if not _edge_allowed(source, prior["parked_from"], target):
+        if not edge_allowed(source, prior["parked_from"], target):
             raise TransitionRefused(f"{where}: edge is not allowed")
         if type(reason) is not str or not reason:
             raise TransitionRefused(f"{where}: reason is not a non-empty string")
         if external_state is not None and (type(external_state) is not str
-                                           or external_state not in _EXTERNAL_STATES):
+                                           or external_state not in EXTERNAL_STATES):
             raise TransitionRefused(f"{where}: external_state is not known, unknown or None")
         if target in TERMINALS and external_state != "known":
             raise TransitionRefused(f"{where}: terminal target needs known external state")
+        at = format_at(now)
         candidate = copy.deepcopy(prior)
         candidate["events"].append({
-            "seq": prior["revision"] + 1, "type": "transitioned", "at": _timestamp(),
+            "seq": prior["revision"] + 1, "type": "transitioned", "at": at,
             "from": source, "to": target, "reason": reason,
             "external_state": external_state})
         if target == "attention_required":
@@ -481,62 +243,408 @@ class TransactionStore:
         elif source == "attention_required":
             candidate["parked_from"] = None
         candidate["state"] = target
+        fence = prior["custody"]["fence"] if prior["custody"] is not None else None
+        if target in TERMINALS and fence is not None:
+            candidate["events"].append({
+                "seq": len(candidate["events"]) + 1, "type": "lease_released", "at": at,
+                "fence": fence, "reason": "terminal"})
+            candidate["custody"] = None
         candidate["revision"] = len(candidate["events"])
-        if candidate["events"][:-1] != prior["events"]:
+        if candidate["events"][:len(prior["events"])] != prior["events"]:
             raise StateInvalid(f"{transaction_id}: prior events are not the new history's "
                                f"prefix")
         _validate_state(candidate, transaction_id, self.root)
         directory = self.root / transaction_id
-        _atomic_write(directory, directory / "state.json", candidate)
-        return _snapshot(candidate)
+        if candidate["custody"] is None and fence is not None:
+            with self._leases.locked():
+                atomic_write(directory, directory / "state.json", candidate)
+                self._leases.clear(fence)
+        else:
+            atomic_write(directory, directory / "state.json", candidate)
+        return snapshot(candidate)
 
-    def create(self, creation_key: str, subject: dict) -> Transaction:
-        """Create the transaction for `creation_key`, or return the one it already names."""
-        _require_creatable(self.root, creation_key, subject)
-        descriptor = _open_lock(self.root / "creation.lock")
+    def create(self, creation_key: str, subject: dict, *,
+               concurrency_keys: Collection[str]) -> Transaction:
+        """Create the transaction for `creation_key`, or return the one it already names.
+
+        The concurrency key set is fixed here, stored sorted, and compared with the
+        subject when the key already names a transaction (D4).
+        """
+        _require_creatable(self.root, creation_key, subject, concurrency_keys)
+        keys = sorted(concurrency_keys)
+        at = format_at(self._now())
+        descriptor = open_lock(self.root / "creation.lock")
         try:
-            return self._create_locked(creation_key, subject)
+            return self._create_locked(creation_key, subject, keys, at)
         finally:
             os.close(descriptor)
 
-    def _create_locked(self, creation_key: str, subject: dict) -> Transaction:
+    def _create_locked(self, creation_key: str, subject: dict, keys: list[str],
+                       at: str) -> Transaction:
         transaction_id = _read_index(self.root, creation_key)
         if transaction_id is None:
             transaction_id = _mint_id()
             index_directory = self.root / "creation-keys"
-            if not _require_directory(index_directory, missing_ok=True):
+            if not require_directory(index_directory, missing_ok=True):
                 index_directory.mkdir(exist_ok=True)
-                _require_directory(index_directory, missing_ok=False)
-                _fsync_directory(self.root)
-            _atomic_write(index_directory, _index_path(self.root, creation_key), {
+                require_directory(index_directory, missing_ok=False)
+                fsync_directory(self.root)
+            atomic_write(index_directory, _index_path(self.root, creation_key), {
                 "schema": INDEX_SCHEMA, "creation_key": creation_key,
                 "transaction_id": transaction_id})
         directory = self.root / transaction_id
-        if not _require_directory(directory, missing_ok=True):
+        if not require_directory(directory, missing_ok=True):
             directory.mkdir(exist_ok=True)
-            _require_directory(directory, missing_ok=False)
-            _fsync_directory(self.root)
-        descriptor = _open_lock(directory / "lock")
+            require_directory(directory, missing_ok=False)
+            fsync_directory(self.root)
+        descriptor = open_lock(directory / "lock")
         try:
-            if _lstat_mode(directory / "state.json") is not None:
+            if lstat_mode(directory / "state.json") is not None:
                 document = self._validated_document(transaction_id)
                 if document["creation_key"] != creation_key:
                     raise StateInvalid(
                         f"{transaction_id}: creation_key index {creation_key!r} names a "
                         f"transaction created under a different creation_key")
-                if telemetry_digest(document["subject"]) != telemetry_digest(subject):
+                differs = [name for name, differ in (
+                    ("subject", telemetry_digest(document["subject"])
+                     != telemetry_digest(subject)),
+                    ("concurrency key set", document["concurrency_keys"] != keys)) if differ]
+                if differs:
                     raise CreationConflict(
                         f"{transaction_id}: creation_key {creation_key!r} already names a "
-                        f"different subject")
-                return _snapshot(document)
+                        f"transaction with a different {' and '.join(differs)}")
+                return snapshot(document)
             document = {
                 "schema": SCHEMA, "transaction_id": transaction_id,
                 "creation_key": creation_key, "subject": copy.deepcopy(subject),
                 "state": "created", "parked_from": None, "revision": 1,
-                "events": [{"seq": 1, "type": "created", "at": _timestamp()}],
+                "events": [{"seq": 1, "type": "created", "at": at}],
+                "concurrency_keys": keys, "custody": None,
             }
             _validate_state(document, transaction_id, self.root)
-            _atomic_write(directory, directory / "state.json", document)
-            return _snapshot(document)
+            atomic_write(directory, directory / "state.json", document)
+            return snapshot(document)
         finally:
             os.close(descriptor)
+
+    def acquire(self, transaction_id: str, *, executor_id: str, subject_path: str,
+                ttl_ms: int) -> Transaction:
+        """Take custody of the whole key set, all or nothing (D5, D7, D8).
+
+        Any live key, including this transaction's own live custody, is
+        `LeaseUnavailable`. Every acquisition advances each key's epoch under one
+        fresh instance; lease records are written before `state.json`.
+        """
+        where = f"{transaction_id}: acquire"
+        if type(executor_id) is not str or not executor_id:
+            raise StateInvalid(f"{where}: executor_id is not a non-empty string")
+        if not is_subject_path(subject_path):
+            raise StateInvalid(f"{where}: subject_path {subject_path!r} is not an absolute "
+                               f"normalized path")
+        if type(ttl_ms) is not int or ttl_ms < 1:
+            raise StateInvalid(f"{where}: ttl_ms {ttl_ms!r} is not a positive integer")
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{where}: state {prior['state']} is terminal")
+            bound = bound_path(prior)
+            if bound is not None and subject_path != bound:
+                raise CustodyMisbound(f"{where}: subject_path {subject_path!r} differs from "
+                                      f"the bound path {bound!r}")
+            with self._leases.locked():
+                now = self._now()
+                candidate = self._acquisition(prior, executor_id, subject_path, now)
+                self._leases.hold(candidate["custody"]["fence"], transaction_id=transaction_id,
+                                  executor_id=executor_id, ttl_ms=ttl_ms, now=now)
+                directory = self.root / transaction_id
+                atomic_write(directory, directory / "state.json", candidate)
+        return snapshot(candidate)
+
+    def _acquisition(self, prior: dict, executor_id: str, subject_path: str,
+                     now: int) -> dict:
+        """The validated candidate an acquisition at `now` writes; refuses a live key."""
+        transaction_id = prior["transaction_id"]
+        candidate = copy.deepcopy(prior)
+        events = candidate["events"]
+        at = format_at(now)
+        held = prior["custody"]
+        if held is not None:
+            if not self._leases.span_lapsed(held["fence"], now):
+                raise LeaseUnavailable(f"{transaction_id}: its own custody by "
+                                       f"{held['executor_id']!r} is still live")
+            events.append({"seq": len(events) + 1, "type": "lease_lapse_detected", "at": at,
+                           "fence": held["fence"], "executor_id": held["executor_id"]})
+        live = self._leases.first_live_key(prior["concurrency_keys"], now)
+        if live is not None:
+            raise LeaseUnavailable(f"{transaction_id}: concurrency key {live!r} is live-held")
+        fence = self._leases.next_fence(prior["concurrency_keys"])
+        opening = {"seq": len(events) + 1, "type": "lease_acquired", "at": at,
+                   "executor_id": executor_id, "subject_path": subject_path, "fence": fence}
+        openings = [e for e in events if e["type"] in ("lease_acquired", "lease_reacquired")]
+        if openings:
+            closing = [e for e in events
+                       if e["type"] in ("lease_released", "lease_lapse_detected")][-1]
+            opening.update({
+                "type": "lease_reacquired", "prior_executor_id": openings[-1]["executor_id"],
+                "prior_fence": openings[-1]["fence"],
+                "reason": ("expired" if closing["type"] == "lease_lapse_detected"
+                           else "released")})
+        events.append(opening)
+        candidate["custody"] = {"executor_id": executor_id, "subject_path": subject_path,
+                                "fence": fence}
+        candidate["revision"] = len(events)
+        _validate_state(candidate, transaction_id, self.root)
+        return candidate
+
+    def release(self, custody: Custody) -> Transaction:
+        """Give custody up voluntarily: `state.json` first, then the records (D8, D24)."""
+        require_custody_shape(custody)
+        transaction_id = custody.transaction_id
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{transaction_id}: release: state {prior['state']} "
+                                        f"is terminal")
+            now = self._now()
+            self._check_custody(prior, custody, now)
+            with self._leases.locked():
+                return self._released(prior, now, "released")
+
+    def _released(self, prior: dict, now: int, reason: str) -> Transaction:
+        """Append `lease_released` with `reason` to `state.json`, then clear the records;
+        the caller holds both locks and has passed the fenced check (D8, D24)."""
+        transaction_id = prior["transaction_id"]
+        fence = prior["custody"]["fence"]
+        candidate = copy.deepcopy(prior)
+        candidate["events"].append({
+            "seq": prior["revision"] + 1, "type": "lease_released", "at": format_at(now),
+            "fence": fence, "reason": reason})
+        candidate["custody"] = None
+        candidate["revision"] = len(candidate["events"])
+        _validate_state(candidate, transaction_id, self.root)
+        directory = self.root / transaction_id
+        atomic_write(directory, directory / "state.json", candidate)
+        self._leases.clear(fence)
+        return snapshot(candidate)
+
+    def renew(self, custody: Custody) -> Transaction:
+        """The core's renewal duty, a tick the holder's host loop calls (D13, D19, D27, D28).
+
+        A terminal transaction is `TransitionRefused` before the fenced check; a
+        failed check (a lapsed lease included) refuses without reacquiring. While
+        the transaction is parked longer than `PARKED_CUSTODY_WINDOW_MS`, measured
+        from the transition that entered the parked run, it quiesces instead:
+        `lease_released` reason `quiesced` in `state.json`, then the records are
+        cleared, and the snapshot has no custody. Otherwise it never appends an
+        event or writes `state.json`: under the lease lock it judges the records
+        again at the same clock reading, so a key a successor took after the
+        lock-free check is `StaleCustody` with nothing written; it then extends
+        every record by its recorded TTL only when the earliest remaining validity
+        is inside the renewal margin, and writes nothing at all outside it.
+        """
+        require_custody_shape(custody)
+        transaction_id = custody.transaction_id
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{transaction_id}: renew: state {prior['state']} "
+                                        f"is terminal")
+            now = self._now()
+            self._check_custody(prior, custody, now)
+            with self._leases.locked():
+                if prior["state"] in PARKINGS \
+                        and now - parked_since(prior["events"]) > PARKED_CUSTODY_WINDOW_MS:
+                    return self._released(prior, now, "quiesced")
+                if not self._leases.extend_if_due(prior["custody"]["fence"], now):
+                    raise StaleCustody(f"{transaction_id}: renew: custody lapsed before the "
+                                       f"lease lock was taken")
+        return snapshot(prior)
+
+    def record_evidence(self, custody: Custody, *, evidence_id: str, form: str,
+                        reference: str) -> Transaction:
+        """Append `evidence_recorded` stamped with the held fence (D10, D15, D27).
+
+        Form `interval` closes the interval opened under the same id; any other
+        form needs an unused id. A reused id or an unopened interval is
+        `StateInvalid` under the lock before any write.
+        """
+        require_texts(custody, "record_evidence", evidence_id=evidence_id,
+                       reference=reference)
+        if type(form) is not str or form not in EVIDENCE_FORMS:
+            raise StateInvalid(f"{custody.transaction_id}: record_evidence: form {form!r} is "
+                               f"not event, snapshot or interval")
+        with self._fenced(custody, "record_evidence", writes=True) as (prior, now):
+            return self._append_fenced(prior, now, "record_evidence", {
+                "type": "evidence_recorded", "evidence_id": evidence_id, "form": form,
+                "reference": reference})
+
+    def open_interval(self, custody: Custody, *, evidence_id: str) -> Transaction:
+        """Append `interval_opened`: the core witnesses where an interval starts (D15)."""
+        require_texts(custody, "open_interval", evidence_id=evidence_id)
+        with self._fenced(custody, "open_interval", writes=True) as (prior, now):
+            return self._append_fenced(prior, now, "open_interval", {
+                "type": "interval_opened", "evidence_id": evidence_id})
+
+    def issue_grant(self, custody: Custody, *, grant_id: str, actor: str) -> Transaction:
+        """Append `grant_issued` for the held custody only, stamped with its fence (D16)."""
+        require_texts(custody, "issue_grant", grant_id=grant_id, actor=actor)
+        with self._fenced(custody, "issue_grant", writes=True) as (prior, now):
+            return self._append_fenced(prior, now, "issue_grant", {
+                "type": "grant_issued", "grant_id": grant_id, "actor": actor})
+
+    def check_grant(self, custody: Custody, grant_id: str) -> Mapping[str, Any]:
+        """The grant's entry when its fence is the presented, current one (D16).
+
+        Fenced and read-only: writes nothing and never re-stamps. An unknown grant,
+        or one minted under another fence, is `GrantInvalid`.
+        """
+        require_texts(custody, "check_grant", grant_id=grant_id)
+        with self._fenced(custody, "check_grant", writes=False) as (prior, _):
+            presented = {key: dict(entry) for key, entry in custody.fence.items()}
+            for grant in admissibility(prior["events"])[1]:
+                if grant["grant_id"] == grant_id and grant["fence"] == presented:
+                    return MappingProxyType(grant)
+        raise GrantInvalid(f"{custody.transaction_id}: check_grant: grant_id {grant_id!r} is "
+                           f"unknown or not minted under the presented fence")
+
+    @contextlib.contextmanager
+    def _fenced(self, custody: Custody, operation: str, *,
+                writes: bool) -> Iterator[tuple[dict, int]]:
+        """Under the transaction lock, the validated prior document and the one clock reading
+        the fenced check passed at; a writer on a terminal is `TransitionRefused` first
+        (D25, D27)."""
+        transaction_id = custody.transaction_id
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if writes and prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{transaction_id}: {operation}: state "
+                                        f"{prior['state']} is terminal")
+            now = self._now()
+            self._check_custody(prior, custody, now)
+            yield prior, now
+
+    def _append_fenced(self, prior: dict, now: int, operation: str,
+                       fields: dict) -> Transaction:
+        """Append one record stamped with the held fence to `state.json` alone (D8, D27)."""
+        transaction_id = prior["transaction_id"]
+        event = {"seq": prior["revision"] + 1, "at": format_at(now), **fields,
+                 "fence": prior["custody"]["fence"]}
+        violation = fenced_id_violation(prior["events"], event)
+        if violation is not None:
+            raise StateInvalid(f"{transaction_id}: {operation}: {violation}")
+        candidate = copy.deepcopy(prior)
+        candidate["events"].append(event)
+        candidate["revision"] = len(candidate["events"])
+        _validate_state(candidate, transaction_id, self.root)
+        directory = self.root / transaction_id
+        atomic_write(directory, directory / "state.json", candidate)
+        return snapshot(candidate)
+
+    def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:
+        """The fenced check (D12, D25): credential, then path, then live records at `now`.
+
+        Runs under the transaction lock before any write; reads the lease records
+        without the lease lock and records nothing when it refuses.
+        """
+        transaction_id = prior["transaction_id"]
+        held = prior["custody"]
+        if held is None:
+            raise StaleCustody(f"{transaction_id}: holds no custody")
+        presented = {key: dict(entry) for key, entry in custody.fence.items()}
+        if (custody.transaction_id != transaction_id
+                or custody.executor_id != held["executor_id"] or presented != held["fence"]):
+            raise StaleCustody(f"{transaction_id}: presented custody is not the held custody")
+        if custody.subject_path != held["subject_path"]:
+            raise CustodyMisbound(f"{transaction_id}: subject_path {custody.subject_path!r} "
+                                  f"differs from the bound path {held['subject_path']!r}")
+        if self._leases.span_lapsed(held["fence"], now):
+            raise StaleCustody(f"{transaction_id}: custody has lapsed")
+
+    def reap(self, transaction_id: str, *, reason: str) -> Transaction:
+        """The reaper's entry: record a lapsed span, taking no custody (D17, D24).
+
+        With no held custody, a terminal, or a span still live on one clock reading,
+        it writes nothing and returns the unchanged snapshot, so a sweep may call it
+        on every transaction. On a lapsed span one `state.json` write appends
+        `lease_lapse_detected`, `stop_synthesized` with `reason` and, outside a
+        parking, a transition to `attention_required` with `reason` and external
+        state `unknown`; custody becomes None. Lease records are not touched: an
+        expired or re-held record is already inert.
+        """
+        if type(reason) is not str or not reason:
+            raise StateInvalid(f"{transaction_id}: reap: reason {reason!r} is not a "
+                               f"non-empty string")
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS or prior["custody"] is None:
+                return snapshot(prior)
+            now = self._now()
+            if not self._leases.span_lapsed(prior["custody"]["fence"], now):
+                return snapshot(prior)
+            candidate = reaped(prior, format_at(now), reason)
+            _validate_state(candidate, transaction_id, self.root)
+            directory = self.root / transaction_id
+            atomic_write(directory, directory / "state.json", candidate)
+        return snapshot(candidate)
+
+    def record_owner_result(self, transaction_id: str, *, executor_id: str,
+                            subject_path: str, fence: Mapping[str, Mapping[str, Any]],
+                            result: dict) -> Transaction:
+        """Keep a late owner result as evidence, never as authority (D18, D27, D34).
+
+        A terminal is `TransitionRefused` first; then the executor and fence must
+        equal some span's opening event (else `StaleCustody`: the core never issued
+        that credential), and the path the bound one (else `CustodyMisbound`). One
+        `state.json` write appends `owner_result` with `custody` `current` when the
+        projection holds that executor and fence and the span has not lapsed, else
+        `stale`, and `supersedes` naming the latest `stop_synthesized` of that fence
+        or None. It never changes state, `parked_from` or custody, and never
+        touches lease records.
+        """
+        where = f"{transaction_id}: record_owner_result"
+        if type(executor_id) is not str or not executor_id:
+            raise StateInvalid(f"{where}: executor_id {executor_id!r} is not a non-empty "
+                               f"string")
+        if not is_subject_path(subject_path):
+            raise StateInvalid(f"{where}: subject_path {subject_path!r} is not an absolute "
+                               f"normalized path")
+        violation = fence_violation(fence)
+        if violation is not None:
+            raise StateInvalid(f"{where}: {violation}")
+        violation = json_object_violation(result)
+        if violation is not None:
+            raise StateInvalid(f"{where}: result {violation}")
+        presented = {key: dict(entry) for key, entry in fence.items()}
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{where}: state {prior['state']} is terminal")
+            if not span_issued(prior["events"], executor_id, presented):
+                raise StaleCustody(f"{where}: executor {executor_id!r} and the presented "
+                                   f"fence name no custody span the core issued")
+            bound = bound_path(prior)
+            if subject_path != bound:
+                raise CustodyMisbound(f"{where}: subject_path {subject_path!r} differs from "
+                                      f"the bound path {bound!r}")
+            now = self._now()
+            candidate = copy.deepcopy(prior)
+            candidate["events"].append(owner_result_event(
+                prior, at=format_at(now), executor_id=executor_id, fence=presented,
+                result=result, lapsed=self._leases.span_lapsed(presented, now)))
+            candidate["revision"] = len(candidate["events"])
+            _validate_state(candidate, transaction_id, self.root)
+            directory = self.root / transaction_id
+            atomic_write(directory, directory / "state.json", candidate)
+        return snapshot(candidate)
+
+    def inspect_lease(self, key: str) -> Mapping[str, Any] | None:
+        """A read-only view of `key`'s lease record, or None; no lock, no write (D6)."""
+        if type(key) is not str or not key:
+            raise StateInvalid(f"{self.root}: lease key {key!r} is not a non-empty string")
+        try:
+            key.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise StateInvalid(f"{self.root}: lease key {key!r} is not encodable as "
+                               f"UTF-8") from error
+        record = self._leases.record(key)
+        return None if record is None else MappingProxyType(copy.deepcopy(record))
