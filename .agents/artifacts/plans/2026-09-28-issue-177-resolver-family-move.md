@@ -133,3 +133,13 @@ design and the parent's rows as "parent D*n*". Planning added three rows:
   carries D6's lookups. It lands in Task 2.
 - **D14** corrects the prose the move makes false. It lands in Task 2.
 - **D15** points Task 1's real helper run at `diff_scope`.
+
+## Standards review provenance
+
+Reviewer: Claude fallback (isolated, read-only), base 488e95f. Codex ran, but its
+event stream carried no runtime model-selection event, so the route could not be
+established and the one native fallback reviewed the same packet. Accepted 3
+(two Should-fix: orphaned test imports and the checker expectation; the
+`agent_platform` banner still naming `resolve-project.py`; one Discussion: the
+`install_home` span is six lines), rejected 0, deferred 0. The fake
+`agent_platform.py` control stays as spec D9 decides.

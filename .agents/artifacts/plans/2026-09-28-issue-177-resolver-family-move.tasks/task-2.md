@@ -122,7 +122,7 @@ import only when Step 10's checker reports it.
   `from agent_tools import resolve_project` as its own group, one blank line
   after `from pathlib import Path`.
 - `install_home`: delete the `library: bool = True,` parameter, keeping
-  `declaration` keyword-only, and delete the five lines from
+  `declaration` keyword-only, and delete the six lines from
   `library_dir = home / ".agents" / "lib" / "python"` through
   `shutil.copy(LIBRARY, installed_library)`. In its docstring, the second
   paragraph becomes `Every invocation in this suite runs under a temporary \`HOME\`,
@@ -155,8 +155,8 @@ def load_module():
 `T/test_resolve_platform.py`:
 - Docstring: `The\nplatform installation — the manifest under \`$HOME/.agents/share\` and the\nlibrary under \`$HOME/.agents/lib/python\` — has to be present` becomes
   `The\nplatform installation — the manifest under \`$HOME/.agents/share\` — has\nto be present`.
-- Drop the path insert. Use a relative import, dropping `LIBRARY`, `SCRIPT`
-  and `library_members`.
+- Drop the path insert. Use a relative import, dropping `LIBRARY`, `SCRIPT`,
+  `library_members` and `make_home` (its only users are in `PlatformLibraryTest`).
 - Delete `class PlatformLibraryTest` whole (L414–547) and the two blank lines
   after it.
 - In `SchemaReasonDispatchTest.setUp`, delete
@@ -226,7 +226,8 @@ def load_module():
   `A case that needs another\nmanifest or declaration runs under \`platform_env\` instead. HERMETIC_ENV's\nPYTHONPATH is the recipe's, made absolute.`
 
 `T/test_conformance.py`:
-- Drop the path insert and use a relative import, dropping `SCRIPT`.
+- Drop the path insert and use a relative import, dropping `SCRIPT` and
+  `COMMITTED` (its only users are the deleted `library` subcase and `deployed_run`).
 - In `PlatformLadderTest.test_a_broken_installation_fails_resolvable_at_the_platform_stage`,
   `cases` becomes `(("manifest", None, "platform.manifest.missing"),)`, the
   loop becomes `for missing, manifest, repair_id in cases:`, and the
@@ -316,7 +317,8 @@ platform library refuses before the router would see it (#177 D7).
 `T/test_adopt_project_boundaries.py`:
 - Docstring: delete invariant `5.` (two lines), and renumber `6.` to `5.`.
 - Drop the path insert. Use a relative import, dropping `ADOPT_LIBRARIES`,
-  `LIBRARY`, `SCRIPT` and `declared_members`.
+  `LIBRARY`, `SCRIPT`, `declared_members` and `bootstrap_repo` (its only users
+  are in `LibraryBindingTest`).
 - Delete `class LibraryBindingTest` whole, and leave two blank lines before
   `if __name__`.
 
@@ -421,6 +423,9 @@ that line: `resolve_project`, `conformance`, `conformance_registry`,
 `PK/agent_platform.py` (D4):
 - Its docstring's `\`adopt-project\`\nmust not import \`resolve-project.py\` (D26)`
   becomes `\`adopt-project\`\nmust not import \`agent_tools.resolve_project\` (D26)`.
+- In the atomic-writing banner above the shared helpers, `may not import
+  \`resolve-project.py\` (D26)` becomes `may not import
+  \`agent_tools.resolve_project\` (D26)`.
 - In `load_manifest`, insert before `path = manifest_path()`:
 
 ```python
@@ -649,7 +654,10 @@ Nothing else in `workflow-state.py` changes.
 - [ ] **Step 10: Verify**
 
 Run: `git add -A python home/common/agent-skills lib tests && python3 "$B/unused.py" python/agent_tools/{resolve_project,agent_platform,conformance,conformance_registry,conformance_checks,adopt_project,adopt_inspection,adopt_planning,adopt_apply,adopt_verify,host_admission}.py home/common/agent-skills/tests/{test_resolve_project,test_resolve_platform,test_resolve_platform_status,conformance_test_support,test_conformance,test_conformance_checks,test_conformance_registry,test_adopt_project,test_adopt_project_boundaries,test_adopt_apply,test_adopt_verify,test_delivery_workflow}.py`
-Expected: exactly one line,
+The checker sees only absolute imports, so relative re-exports it cannot
+report are covered by the drop lists in Steps 1–3. The first run also names
+standard-library imports the deletions orphan (e.g. `shutil`, `re`, `sys`,
+`Path`); remove each. Expected after removing them and re-running: exactly one line,
 `home/common/agent-skills/tests/test_adopt_apply.py:25: unused import subprocess`.
 That line predates this task. Remove any other import the checker names, then
 re-run the checker.
