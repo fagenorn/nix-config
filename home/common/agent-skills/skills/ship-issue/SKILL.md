@@ -292,7 +292,8 @@ read afresh. Two attempts of one issue share this checkout, so live local HEAD
 is not evidence about what was reviewed.
 
 Diverged → the PR head carries **unreviewed commits** on the branch. Never
-resolve it by re-pushing, resetting, re-reviewing or merging. In `--auto` this
+resolve it by re-pushing, resetting, re-reviewing or merging, except for a head
+that CI-MERGE.md's `## Post-selection sync` admits. In `--auto` this
 is the genuinely-blocked stop: stop before the CI wait and before the merge,
 make no further forge write, run no cleanup, keep the worktree and the branch,
 and return a truthful `stopped` ship summary naming both SHAs — the reviewed
@@ -461,7 +462,9 @@ never compose one. Validate each reply before decoding and treat its
    the PR number, URL and head), and checkpoint them through
    `checkpoint-delivery` with the `--kind scope` for `merge_pr`, the ready stage
    once they fold. Selection has no cycle of its own: its effect is that
-   checkpoint write.
+   checkpoint write. Before the merge, run the trigger check of CI-MERGE.md's
+   `## Post-selection sync`: a later sync of the integration branch extends
+   this selection with a sync selection and never replaces it.
 4. **Each post-selection effect is one cycle.** Checkpoint the stage's
    `--kind scope` as `requested_scope` (for the merge, the selection checkpoint
    already did); require the validated echo to equal the scope you sent, and
@@ -480,7 +483,10 @@ never compose one. Validate each reply before decoding and treat its
    already made true is recorded by its observation alone, without a proposal:
    remote deletion by the merge's `--delete-branch`, and closure by a merge
    that closes the issue. Fold it into the next checkpoint.
-6. **Denials.** A guard, host or provider denial of an effect is checkpointed
+6. **Denials.** A merge the provider refuses because the PR cannot merge into
+   its base is not a denial: record no authority observation for it, and take
+   CI-MERGE.md's `## Post-selection sync`. A guard, host or provider denial of
+   an effect is checkpointed
    with the denied stage's scope as `requested_scope` — the reducer weighs a
    rejection only against a proposed scope — carrying the
    `authority-observation` with verdict `rejected` for that scope, plus the
@@ -496,7 +502,7 @@ never compose one. Validate each reply before decoding and treat its
 7. **Completion.** Do not checkpoint the last cycle: once delivery is complete
    `check-launch` reports the attempt inactive, which would make the parent's
    fence refuse. Build the last stage's absence, `implementation_delivered`
-   (the selection, merge SHA, integrated ref and the `pr_merged` observation
+   (the current selection, merge SHA, integrated ref and the `pr_merged` observation
    id) and `cleanup_complete` (the three absence observation ids, the detail
    pointer and its read evidence), and return them with the last cycle's
    authority observation in a `ship-summary/v2` whose `state` is
@@ -522,7 +528,12 @@ refs — `acceptance_ref` the issue URL
 (`https://github.com/<resolved-repository>/issues/<num>`), `review_ref` `unknown`,
 `test_ref` `checks` — so a relaunched remainder owner re-derives the identical
 selection; then build its observations. When the merge is pending, start at the merge gate: Phase 6's CI
-wait and Phase 7's gate and fence still bind. Otherwise start at the first
+wait and Phase 7's gate and fence still bind, and so does CI-MERGE.md's
+`## Post-selection sync`, which also folds a merge that already landed at a
+sync run. A selection this owner did not build, such as that route's first
+`prior_selection` or the one `implementation_delivered` names, is the ledger's
+current selection: read it with `--kind current-selection`, fed the installed
+contract. Otherwise start at the first
 pending cleanup cycle. `## Launch guard` fences with this custody's
 `action_id`.
 
