@@ -91,6 +91,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_tools_canonical.py \
     tests/test_transaction_core.py \
+    tests/test_transaction_core_sweep.py \
     tests/test_agent_costs.py \
     tests/test_agent_model_drift_schema.py \
     tests/test_agent_model_drift_routing.py \
