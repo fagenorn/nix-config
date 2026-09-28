@@ -22,7 +22,9 @@ durable-file
 primitives and the refusal hierarchy live in `agent_tools.transaction_storage`, and
 the document model — vocabularies, `Custody`, `Transaction`, the validator and the
 snapshot fold — in `agent_tools.transaction_history`; this module re-exports the
-errors and the public model names. The module has no command and no caller yet.
+errors and the public model names. `action_id` and the retry constants live in
+`agent_tools.transaction_invocation`, which this module re-exports too. The module has no
+command and no caller yet.
 """
 
 import contextlib
@@ -48,11 +50,13 @@ from agent_tools.transaction_history import (
     is_subject_path, json_object_violation, key_set_violation, owner_result_event,
     parked_since, reaped, require_custody_shape, require_texts, snapshot, span_issued,
     validate_state)
+from agent_tools.transaction_invocation import (
+    MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, action_id)
 from agent_tools.transaction_storage import (
-    CreationConflict, CustodyMisbound, FenceViolation, GrantInvalid, LeaseUnavailable,
-    StaleCustody, StateInvalid, TransactionBusy, TransactionError, TransitionRefused,
-    UnknownTransaction, atomic_write, fsync_directory, lstat_mode, open_lock, read_json,
-    require_directory)
+    CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation, GrantInvalid,
+    InvocationRefused, LeaseUnavailable, StaleCustody, StateInvalid, TransactionBusy,
+    TransactionError, TransitionRefused, UnknownTransaction, atomic_write, fsync_directory,
+    lstat_mode, open_lock, read_json, require_directory)
 
 INDEX_SCHEMA = "transaction-creation-key/v1"
 PARKED_CUSTODY_WINDOW_MS = 900_000  # the core cap on custody held through a parking (D19)

@@ -1,5 +1,11 @@
-"""Durable-file primitives and the refusal hierarchy shared by the transaction modules (#205 D1)."""
+"""Durable-file primitives, the refusal hierarchy and the pure codecs shared by the
+transaction modules (#205 D1, #206 D15): the `at`-timestamp codec (`format_at`,
+`parse_at`) and the strict JSON object rule (`json_object_violation`) live here so that
+every transaction module can import them without importing another's model.
+"""
 
+import calendar
+import datetime
 import fcntl
 import json
 import math
@@ -9,7 +15,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.canonical import (
+    reject_duplicate_keys, reject_nonfinite_literal, telemetry_digest)
 
 
 class TransactionError(Exception):
@@ -57,6 +64,34 @@ class LeaseUnavailable(TransactionError):
     """A concurrency key is live-held."""
 
 
+class InvocationRefused(TransactionError):
+    """An administrative-protocol refusal; `reason` names the rule. An admission refusal
+    comes before any write or effect call; `attempt_in_flight` at an operation's second
+    lock hold follows the call and records nothing from it (#206 D7, D19)."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class EffectResultInvalid(TransactionError):
+    """An effect result outside the closed shapes; nothing from
+    that call is recorded (#206 D11)."""
+
+
+def format_at(ms: int) -> str:
+    """Epoch milliseconds as UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`."""
+    seconds = datetime.datetime.fromtimestamp(ms // 1000, tz=datetime.timezone.utc)
+    return seconds.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
+
+
+def parse_at(at: str) -> int:
+    """Epoch milliseconds of a `YYYY-MM-DDTHH:MM:SS.mmmZ` stamp; `format_at`'s inverse."""
+    seconds, millis = at[:-1].split(".")
+    parsed = datetime.datetime.strptime(seconds, "%Y-%m-%dT%H:%M:%S")
+    return calendar.timegm(parsed.timetuple()) * 1000 + int(millis)
+
+
 def serialize(document: dict) -> str:
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
                       allow_nan=False) + "\n"
@@ -73,6 +108,20 @@ def _finite_float(literal: str) -> float:
 def strict_loads(text: str) -> Any:
     return json.loads(text, object_pairs_hook=reject_duplicate_keys,
                       parse_constant=reject_nonfinite_literal, parse_float=_finite_float)
+
+
+def json_object_violation(value: Any) -> str | None:
+    """How `value` fails to be a JSON object that survives a strict JSON round trip, or
+    None: the rule a created `subject` and a late owner `result` share (D34)."""
+    if type(value) is not dict:
+        return "is not a JSON object"
+    try:
+        loaded = strict_loads(serialize(value))
+    except (TypeError, ValueError) as error:
+        return f"is not strict JSON ({error})"
+    if loaded != value or telemetry_digest(loaded) != telemetry_digest(value):
+        return "does not survive a strict JSON round trip"
+    return None
 
 
 def lstat_mode(path: Path) -> int | None:

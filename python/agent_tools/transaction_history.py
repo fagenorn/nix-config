@@ -4,12 +4,12 @@ credential shape checks, the pure history validator and the snapshot fold. It re
 file, lock or clock: `validate_state` takes the creation-key index lookup as a callable,
 which `agent_tools.transaction_core` binds to its store root. It also composes what a reap
 appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
-answers whether an executor and fence were ever issued a span (`span_issued`), and holds the
-strict JSON object rule (`json_object_violation`) that a created `subject` and a late `result`
-share.
+and answers whether an executor and fence were ever issued a span (`span_issued`). The
+`at`-timestamp codec (`format_at`, `parse_at`) and the strict JSON object rule
+(`json_object_violation`) that a created `subject` and a late `result` share are imported
+from `agent_tools.transaction_storage`, not held here.
 """
 
-import calendar
 import copy
 import dataclasses
 import datetime
@@ -19,10 +19,10 @@ from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
-from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import (
     CUSTODY_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
-from agent_tools.transaction_storage import StateInvalid, serialize, strict_loads
+from agent_tools.transaction_storage import (
+    StateInvalid, format_at, json_object_violation, parse_at, serialize)
 
 SCHEMA = "transaction-state/v2"
 
@@ -133,19 +133,6 @@ def is_id(value: object) -> bool:
     return type(value) is str and _ID_PATTERN.fullmatch(value) is not None
 
 
-def format_at(ms: int) -> str:
-    """Epoch milliseconds as UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`."""
-    seconds = datetime.datetime.fromtimestamp(ms // 1000, tz=datetime.timezone.utc)
-    return seconds.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
-
-
-def _parse_at(at: str) -> int:
-    """Epoch milliseconds of a `YYYY-MM-DDTHH:MM:SS.mmmZ` stamp; `format_at`'s inverse."""
-    seconds, millis = at[:-1].split(".")
-    parsed = datetime.datetime.strptime(seconds, "%Y-%m-%dT%H:%M:%S")
-    return calendar.timegm(parsed.timetuple()) * 1000 + int(millis)
-
-
 def parked_since(events: list[dict]) -> int | None:
     """Epoch ms of the transition that entered the current parked run from an unparked
     state, or None when the history is not parked (D28)."""
@@ -154,7 +141,7 @@ def parked_since(events: list[dict]) -> int | None:
         if event["type"] != "transitioned":
             continue
         if event["to"] in PARKINGS and event["from"] not in PARKINGS:
-            start = _parse_at(event["at"])
+            start = parse_at(event["at"])
         elif event["to"] not in PARKINGS:
             start = None
     return start
@@ -558,20 +545,6 @@ def bound_path(document: dict) -> str | None:
     for event in document["events"]:
         if event["type"] == "lease_acquired":
             return event["subject_path"]
-    return None
-
-
-def json_object_violation(value: Any) -> str | None:
-    """How `value` fails to be a JSON object that survives a strict JSON round trip, or
-    None: the rule a created `subject` and a late owner `result` share (D34)."""
-    if type(value) is not dict:
-        return "is not a JSON object"
-    try:
-        loaded = strict_loads(serialize(value))
-    except (TypeError, ValueError) as error:
-        return f"is not strict JSON ({error})"
-    if loaded != value or telemetry_digest(loaded) != telemetry_digest(value):
-        return "does not survive a strict JSON round trip"
     return None
 
 
