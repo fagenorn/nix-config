@@ -35,6 +35,8 @@ constants live in `agent_tools.transaction_invocation`, which this module re-exp
 constants, which this module re-exports as well. `collect_obligation` records one proof
 observation around the pure halves in `agent_tools.transaction_proof` (re-exported too);
 `start_cohort` opens a convergence cohort and `settle_proof` judges it in one write.
+`agent_tools.transaction_recovery_plan` compiles, binds and materializes the recovery
+declaration (#208); this module re-exports its constants and those three functions.
 The module has no command and no caller yet.
 """
 
@@ -74,10 +76,13 @@ from agent_tools.transaction_proof import (
     PROOF_REFUSAL_REASONS, advance_violation, cohort_start, collection_refusal,
     next_evidence_id, obligation, observation_request, observation_violation, open_cohort,
     proof_refused, settlement)
+from agent_tools.transaction_recovery_plan import (
+    EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, bind_recovery,
+    compile_recovery, materialize_recovery)
 from agent_tools.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
     GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, ProofRefused,
-    StaleCustody,
+    RecoveryPlanRejected, StaleCustody,
     StateInvalid, TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction,
     atomic_write, fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 

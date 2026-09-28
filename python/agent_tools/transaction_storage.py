@@ -91,6 +91,16 @@ class ProofPlanRejected(TransactionError):
         self.reason = reason
 
 
+class RecoveryPlanRejected(TransactionError):
+    """A recovery declaration the core refuses to compile or bind to its proof declaration;
+    `reason` is one of the closed recovery rejection reasons, and it is raised before any
+    lock or write (#208 D5)."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class ProofRefused(TransactionError):
     """A proof operation the core refuses; `reason` names the closed rule. An admission
     refusal precedes any write or observer call; one at `collect_obligation`'s second hold

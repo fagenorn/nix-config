@@ -365,10 +365,12 @@ def neutrality_findings(source):
 
 
 from agent_tools import (transaction_custody, transaction_history, transaction_invocation,
-                         transaction_plan, transaction_proof, transaction_storage)
+                         transaction_plan, transaction_proof, transaction_recovery_plan,
+                         transaction_storage)
 
-NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_proof, transaction_plan,
-                   transaction_invocation, transaction_custody, transaction_storage)
+NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_recovery_plan,
+                   transaction_proof, transaction_plan, transaction_invocation,
+                   transaction_custody, transaction_storage)
 
 
 class NeutralityTest(unittest.TestCase):
