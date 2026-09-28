@@ -407,6 +407,17 @@ class InvokeActionTest(InvokeCase):
         self.invoke(name="exact")
         self.assertEqual(self.views()["exact"]["status"], "satisfied")
 
+    def test_a_deadline_past_the_last_representable_at_is_the_last_at(self):
+        self.clock.now = 253_402_300_799_999 - 100_000  # 9999-12-31T23:59:59.999Z - 100 s
+        self.transaction_id = self.new("late", keys=("key:late",))
+        self.custody = self.acquire(self.transaction_id)
+        self.publishing()
+        self.inspect()
+        self.invoke(self.effect(results=[THROTTLED]))
+        view = self.view()
+        self.assertEqual((view["status"], view["retry_deadline_at"]),
+                         ("absent", "9999-12-31T23:59:59.999Z"))
+
     def test_a_non_retry_safe_class_or_an_accepted_absent_attempt_is_not_retryable(self):
         for name, result in (("denied", ("rejected", "invalid_input")),
                              ("vanished", ("accepted", None))):
@@ -564,6 +575,18 @@ class CrashSeamTest(InvokeCase):
                          "satisfied")
         self.assertEqual((self.view()["status"], self.world.invokes),
                          ("satisfied", {self.act(): 1}))
+
+    def test_an_observation_overtaken_by_a_newer_inspection_is_not_recorded(self):
+        self.crash("after")
+        self.reacquire()
+        with self.assertRaises(InvocationRefused) as caught:
+            self.inspect(self.effect(inspect_outcome="absent", during=lambda: self.inspect()))
+        self.assertEqual(caught.exception.reason, "attempt_in_flight")
+        self.assertEqual(self.action_types(), ["action_declared", "action_inspected",
+                                               "invocation_intended", "action_inspected"])
+        self.assertEqual(self.view()["status"], "satisfied")
+        self.invoke(self.effect(during=self.fail))
+        self.assertEqual((self.attempts(), self.world.invokes), ([1], {self.act(): 1}))
 
     def test_a_return_less_attempt_closed_under_its_own_fence_is_refused(self):
         self.crash("before")

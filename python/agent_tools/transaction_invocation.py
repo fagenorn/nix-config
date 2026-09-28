@@ -32,7 +32,7 @@ from typing import Any
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import fence_violation
 from agent_tools.transaction_storage import (
-    InvocationRefused, StateInvalid, format_at, json_object_violation, parse_at)
+    LAST_AT_MS, InvocationRefused, StateInvalid, format_at, json_object_violation, parse_at)
 
 OUTCOMES = ("absent", "in_progress", "satisfied", "diverged", "unknown")
 RESULTS = ("accepted", "rejected", "unknown")
@@ -64,8 +64,9 @@ class ActionFold:
     """What the history says about one declared action (#206 D2, D6).
 
     `returned` is the latest attempt's `invocation_returned`, `inspection` the latest
-    `action_inspected` as `{outcome, fence, at}`, and `first_failure_ms` the `at` of the
-    first `absent` inspection after attempt 1, in epoch milliseconds.
+    `action_inspected` as `{outcome, fence, at}`, `first_failure_ms` the `at` of the
+    first `absent` inspection after attempt 1, in epoch milliseconds, and `latest_seq` the
+    `seq` of the action's latest event.
     """
 
     action_id: str
@@ -76,6 +77,7 @@ class ActionFold:
     returned: dict | None = None
     inspection: dict | None = None
     first_failure_ms: int | None = None
+    latest_seq: int = 0
 
 
 def action_violation(name: Any, parameters: Any) -> str | None:
@@ -209,9 +211,11 @@ def apply_action_event(event: dict, actions: dict[str, ActionFold]) -> None:
     """Fold one valid action event into `actions` (#206 D2, D6)."""
     event_type = event["type"]
     if event_type == "action_declared":
-        actions[event["action_id"]] = ActionFold(event["action_id"], event["name"])
+        actions[event["action_id"]] = ActionFold(event["action_id"], event["name"],
+                                                 latest_seq=event["seq"])
         return
     entry = actions[event["action_id"]]
+    entry.latest_seq = event["seq"]
     if event_type == "action_inspected":
         entry.inspection = {"outcome": event["outcome"], "fence": event["fence"],
                             "at": event["at"]}
@@ -303,7 +307,8 @@ def unresolved(actions: dict[str, ActionFold]) -> ActionFold | None:
 
 def action_views(events: Sequence[Mapping[str, Any]]) -> list[dict]:
     """One view per declared action, in declaration order; derived, never stored
-    (#206 D2, D17)."""
+    (#206 D2, D17). A `retry_deadline_at` past the last `at` that fits reads as that `at`:
+    no clock reading can pass it, so the window stays open through it."""
     views = []
     for entry in fold_actions(events).values():
         current = status(entry)
@@ -315,7 +320,7 @@ def action_views(events: Sequence[Mapping[str, Any]]) -> list[dict]:
             "retry_eligible": (current == "absent" and entry.attempts < MAX_ATTEMPTS
                                and (entry.attempts == 0 or retry_safe(entry))),
             "retry_deadline_at": None if entry.first_failure_ms is None
-            else format_at(entry.first_failure_ms + RETRY_WINDOW_MS),
+            else format_at(min(entry.first_failure_ms + RETRY_WINDOW_MS, LAST_AT_MS)),
         })
     return views
 

@@ -60,15 +60,15 @@ from agent_tools.transaction_invocation import (
     action_violation, effect_request, fold_actions, inspect_result_violation,
     invoke_result_violation, observed, refusal, refused_error, satisfied, status, unresolved)
 from agent_tools.transaction_storage import (
-    CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation, GrantInvalid,
-    InvocationRefused, LeaseUnavailable, StaleCustody, StateInvalid, TransactionBusy,
-    TransactionError, TransitionRefused, UnknownTransaction, atomic_write, fsync_directory,
-    lstat_mode, open_lock, read_json, require_directory)
+    LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
+    GrantInvalid, InvocationRefused, LeaseUnavailable, StaleCustody, StateInvalid,
+    TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction, atomic_write,
+    fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 
 INDEX_SCHEMA = "transaction-creation-key/v1"
 PARKED_CUSTODY_WINDOW_MS = 900_000  # the core cap on custody held through a parking (D19)
 _INDEX_KEYS = frozenset({"schema", "creation_key", "transaction_id"})
-_MAX_CLOCK_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
+_MAX_CLOCK_MS = LAST_AT_MS  # the clock ceiling: the last `at` that fits
 
 
 def _mint_id() -> str:
@@ -128,11 +128,12 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any,
 
 
 def _refuse_in_flight(prior: dict, identity: str, entry: ActionFold | None,
-                      attempts: int | None = None) -> None:
+                      latest_seq: int | None = None) -> None:
     """Refuse `attempt_in_flight` when the action's latest attempt is open under the held
-    fence or, given the count an earlier hold read, its attempt count changed (D14, D16)."""
-    count = 0 if entry is None else entry.attempts
-    if ((attempts is not None and count != attempts)
+    fence or, given the latest event seq an earlier hold read, the action recorded any
+    event since, a changed attempt count or a newer inspection alike (D14, D16)."""
+    seq = 0 if entry is None else entry.latest_seq
+    if ((latest_seq is not None and seq != latest_seq)
             or (entry is not None and entry.open
                 and entry.intent_fence == prior["custody"]["fence"])):
         raise refused_error(prior["transaction_id"], identity, "attempt_in_flight")
@@ -610,12 +611,13 @@ class TransactionStore:
         shape is `EffectResultInvalid` with nothing written. The second lock hold repeats
         the terminal refusal and the fenced check, so a lapse during the call is
         `StaleCustody` with nothing written, then re-folds the action and refuses
-        `attempt_in_flight` when its attempt count differs from the first hold's or an
-        attempt is open under the held fence: that refusal follows the read-only
-        `effect.inspect` call and records nothing from it. Otherwise it appends, in one
-        `state.json` write, `action_declared` when the history has no event of this action
-        yet and `action_inspected` stamped with the held fence. Any state but a terminal
-        may inspect, parkings included. Whatever the effect raises propagates.
+        `attempt_in_flight` when it recorded any event since the first hold (a new attempt
+        or a newer inspection) or an attempt is open under the held fence, so an
+        observation older than the history is never appended: that refusal follows the
+        read-only `effect.inspect` call and records nothing from it. Otherwise it appends,
+        in one `state.json` write, `action_declared` when the history has no event of this
+        action yet and `action_inspected` stamped with the held fence. Any state but a
+        terminal may inspect, parkings included. Whatever the effect raises propagates.
         """
         identity = self._action_arguments(custody, "inspect_action", name, parameters,
                                           effect)
@@ -623,6 +625,7 @@ class TransactionStore:
             entry = fold_actions(prior["events"]).get(identity)
             _refuse_in_flight(prior, identity, entry)
             attempts = 0 if entry is None else entry.attempts
+            latest_seq = 0 if entry is None else entry.latest_seq
             request = effect_request(prior, identity, name, parameters, attempts)
         result = effect.inspect(request)
         violation = inspect_result_violation(result)
@@ -631,7 +634,7 @@ class TransactionStore:
                                       f"{violation}")
         with self._fenced(custody, "inspect_action", writes=True) as (prior, now):
             entry = fold_actions(prior["events"]).get(identity)
-            _refuse_in_flight(prior, identity, entry, attempts)
+            _refuse_in_flight(prior, identity, entry, latest_seq)
             events = []
             if entry is None:
                 events.append({"type": "action_declared", "action_id": identity,
@@ -682,8 +685,8 @@ class TransactionStore:
         returned = effect.invoke(request)
         violation = invoke_result_violation(returned)
         if violation is None:
-            observed = effect.inspect(request)
-            violation = inspect_result_violation(observed)
+            inspected = effect.inspect(request)
+            violation = inspect_result_violation(inspected)
         if violation is not None:
             raise EffectResultInvalid(f"{transaction_id}: invoke_action: {violation}")
         with self._fenced(custody, "invoke_action", writes=True) as (prior, now):
@@ -693,7 +696,7 @@ class TransactionStore:
                  "result": returned["result"], "error_class": returned["error_class"],
                  "reference": returned["reference"], "fence": fence},
                 {"type": "action_inspected", "action_id": identity,
-                 "outcome": observed["outcome"], "reference": observed["reference"],
+                 "outcome": inspected["outcome"], "reference": inspected["reference"],
                  "fence": fence}])
 
     def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:

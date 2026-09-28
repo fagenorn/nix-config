@@ -81,8 +81,11 @@ class EffectResultInvalid(TransactionError):
     that call is recorded (#206 D11)."""
 
 
+LAST_AT_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
+
+
 def format_at(ms: int) -> str:
-    """Epoch milliseconds as UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`."""
+    """Epoch milliseconds, at most `LAST_AT_MS`, as UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`."""
     seconds = datetime.datetime.fromtimestamp(ms // 1000, tz=datetime.timezone.utc)
     return seconds.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
 
