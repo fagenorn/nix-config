@@ -1,10 +1,11 @@
-"""Installed-layout seam for the agent_tools launchers (#175 D8, D11; #179 D8; parent D9).
+"""Installed-layout seam for the agent_tools launchers (#175 D8, D11; #179 D8; #177 D9; parent D9).
 
 Run: just agent-installed-skill-tests. That recipe builds first and passes the
 built home-manager-files tree as AGENT_SKILLS_INSTALLED_HOME. Every
 `.agents/bin` entry that names the package, other than `NOT_LAUNCHERS`, must be a
 generated launcher, and
-each launcher must run its store module even with a fake `agent_tools` on the
+each launcher must run its store module even with a fake `agent_tools` and a fake
+top-level `agent_platform` on the
 `PYTHONPATH`, `NIX_PYTHONPATH` (with a `.pth` file) and working-directory
 channels.
 """
@@ -34,9 +35,10 @@ TIMEOUT_SECONDS = 60
 # and import `agent_tools.host_admission` from source (#177 D6, D13). #178
 # deletes this entry with them.
 NOT_LAUNCHERS = ("workflow-state",)
-# The commands #175 and #179 accepted as launchers: a floor, not the full set,
-# which the command table in lib/agent-tools.nix owns (#175 D8).
-LAUNCHER_FLOOR = ("agent-evidence", "agent-model-matrix", "context-map-lint", "diff-scope")
+# The commands #175, #179 and #177 accepted as launchers: a floor, not the full
+# set, which the command table in lib/agent-tools.nix owns (#175 D8).
+LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
+                  "context-map-lint", "diff-scope", "resolve-project")
 # Commands without an argparse parser answer `--help` as misuse, with the
 # module docstring on stderr and exit 2. Their CLI is promised unchanged
 # (parent D15), so the probe pins that answer by a line only the module's own
@@ -74,6 +76,13 @@ class AgentToolsLauncherTest(unittest.TestCase):
         # the fake package ahead of the environment's site-packages.
         (self.hostile / "hostile.pth").write_text(
             f"import sys; sys.path.insert(0, {str(self.hostile)!r})\n",
+            encoding="utf-8",
+        )
+        # A bare `import agent_platform` was the old resolver bootstrap's
+        # adversary; a launcher must never reach this one (#177 D9).
+        (self.hostile / "agent_platform.py").write_text(
+            f"import sys\nsys.stderr.write({MARKER!r} + '\\n')\n"
+            f"raise SystemExit({HOSTILE_EXIT})\n",
             encoding="utf-8",
         )
 
