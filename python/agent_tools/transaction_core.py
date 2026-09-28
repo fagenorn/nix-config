@@ -511,6 +511,10 @@ class TransactionStore:
         try:
             if _lstat_mode(directory / "state.json") is not None:
                 document = self._validated_document(transaction_id)
+                if document["creation_key"] != creation_key:
+                    raise StateInvalid(
+                        f"{transaction_id}: creation_key index {creation_key!r} names a "
+                        f"transaction created under a different creation_key")
                 if telemetry_digest(document["subject"]) != telemetry_digest(subject):
                     raise CreationConflict(
                         f"{transaction_id}: creation_key {creation_key!r} already names a "

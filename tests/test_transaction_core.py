@@ -162,6 +162,18 @@ class CreateTest(StoreCase):
             with self.subTest(other=other), self.assertRaises(CreationConflict):
                 self.store.create("k", other)
 
+    def test_an_index_naming_another_keys_transaction_is_state_invalid_and_unchanged(self):
+        other = self.store.create("b", SUBJECT)
+        self.index_path("a").write_text(serialize({
+            "schema": "transaction-creation-key/v1", "creation_key": "a",
+            "transaction_id": other.transaction_id}))
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        with self.assertRaises(StateInvalid) as caught:
+            self.store.create("a", copy.deepcopy(SUBJECT))
+        after = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        self.assertIn(other.transaction_id, str(caught.exception))
+        self.assertEqual(before, after)
+
     def test_an_index_without_state_is_completed_under_the_indexed_id(self):
         first = self.store.create("k", SUBJECT)
         shutil.rmtree(self.root / first.transaction_id)

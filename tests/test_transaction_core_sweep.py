@@ -100,7 +100,9 @@ def neutrality_findings(source):
             continue
         if token.type == tokenize.STRING and token.start in docstrings:
             continue
-        for word in re.split(r"[^0-9a-z]+", token.string.lower()):
+        text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", token.string)
+        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+        for word in re.split(r"[^0-9a-z]+", text.lower()):
             if word in FORBIDDEN_WORDS:
                 findings.append((token.start[0], word))
     return findings
@@ -126,6 +128,13 @@ class NeutralityTest(unittest.TestCase):
     def test_matching_is_by_whole_word_and_covers_string_literals(self):
         self.assertEqual(neutrality_findings("associated = 'pushed'\n"), [])
         self.assertEqual(neutrality_findings("where = 'git-tag'\n"), [(1, "git"), (1, "tag")])
+
+    def test_camel_case_identifiers_are_split_on_case_boundaries(self):
+        planted = ("class DeployRefused(Exception):\n    pass\n\n"
+                   "x = GitPush\ny = HTTPServerRebase\n")
+        self.assertEqual(neutrality_findings(planted),
+                         [(1, "deploy"), (4, "git"), (4, "push"), (5, "rebase")])
+        self.assertEqual(neutrality_findings("Pushed = Associated\n"), [])
 
 
 if __name__ == "__main__":
