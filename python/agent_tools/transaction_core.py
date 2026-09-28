@@ -4,8 +4,9 @@ A caller-rooted store of closed-schema transactions with a closed lifecycle:
 `TransactionStore(root, clock=...)` creates deduplicated transactions under an
 absolute, pre-existing root and loads validated snapshots of them. Each
 transaction's whole state and typed event history live in one `state.json`
-whose `state`/`parked_from`/`revision` are a projection the validator re-folds
-from the events. Every event `at` is read from the injected clock (integer
+whose `state`/`parked_from`/`custody`/`revision` are a projection the validator
+re-folds from the events, beside the immutable sorted `concurrency_keys` fixed at
+creation. Every event `at` is read from the injected clock (integer
 epoch milliseconds, the wall clock by default); transaction ids still come from
 the wall clock. The durable-file primitives and the refusal hierarchy live in
 `agent_tools.transaction_storage`, whose error classes this module re-exports.
@@ -25,7 +26,7 @@ import secrets
 import stat
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -36,7 +37,7 @@ from agent_tools.transaction_storage import (
     UnknownTransaction, atomic_write, fsync_directory, lstat_mode, open_lock, read_json,
     require_directory, serialize, strict_loads)
 
-SCHEMA = "transaction-state/v1"
+SCHEMA = "transaction-state/v2"
 INDEX_SCHEMA = "transaction-creation-key/v1"
 
 FORWARD = ("created", "awaiting_verification", "ready", "publishing", "published",
@@ -66,7 +67,8 @@ _ID_PATTERN = re.compile(
     r"rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 _AT_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
 _STATE_KEYS = frozenset({"schema", "transaction_id", "creation_key", "subject", "state",
-                         "parked_from", "revision", "events"})
+                         "parked_from", "revision", "events", "concurrency_keys", "custody"})
+_KEY_COLLECTIONS = (list, tuple, set, frozenset)
 _INDEX_KEYS = frozenset({"schema", "creation_key", "transaction_id"})
 _CREATED_KEYS = frozenset({"seq", "type", "at"})
 _TRANSITIONED_KEYS = frozenset({"seq", "type", "at", "from", "to", "reason",
@@ -91,6 +93,8 @@ class Transaction:
     parked_from: str | None
     revision: int
     events: tuple[Mapping[str, Any], ...]
+    concurrency_keys: tuple[str, ...]
+    custody: Any
 
 
 def _edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
@@ -138,6 +142,24 @@ def _is_timestamp(value: object) -> bool:
     return True
 
 
+def _key_set_violation(keys: Any) -> str | None:
+    """The first concurrency key set rule `keys` breaks, or None when it breaks none (D4)."""
+    if type(keys) not in _KEY_COLLECTIONS:
+        return "concurrency_keys is not a list, tuple, set or frozenset"
+    if not keys:
+        return "concurrency_keys is empty"
+    for key in keys:
+        if type(key) is not str or not key:
+            return f"concurrency key {key!r} is not a non-empty string"
+        try:
+            key.encode("utf-8")
+        except UnicodeEncodeError:
+            return f"concurrency key {key!r} is not encodable as UTF-8"
+    if len(set(keys)) != len(keys):
+        return "concurrency_keys holds a duplicate key"
+    return None
+
+
 def _index_path(root: Path, creation_key: str) -> Path:
     digest = hashlib.sha256(creation_key.encode("utf-8")).hexdigest()
     return root / "creation-keys" / f"{digest}.json"
@@ -163,15 +185,48 @@ def _read_index(root: Path, creation_key: str) -> str | None:
     return entry["transaction_id"]
 
 
+def _fold_transitioned(event: dict, seq: int, state: str, parked: str | None,
+                      refuse: Callable[[str], StateInvalid]) -> tuple[str, str | None]:
+    """Check one transitioned event against the fold; the folded (state, parked_from)."""
+    if set(event) != _TRANSITIONED_KEYS:
+        raise refuse(f"event {seq} is not the closed transitioned event")
+    if type(event["seq"]) is not int or event["seq"] != seq:
+        raise refuse(f"event {seq} does not carry seq {seq}")
+    if not _is_timestamp(event["at"]):
+        raise refuse(f"event {seq} at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
+    target = event["to"]
+    if event["from"] != state:
+        raise refuse(f"event {seq} from does not equal the folded state {state}")
+    if type(target) is not str or target not in STATES:
+        raise refuse(f"event {seq} to is not a known state")
+    if not _edge_allowed(state, parked, target):
+        raise refuse(f"event {seq} edge {state} -> {target} is not allowed")
+    if type(event["reason"]) is not str or not event["reason"]:
+        raise refuse(f"event {seq} reason is not a non-empty string")
+    external_state = event["external_state"]
+    if external_state is not None and (type(external_state) is not str
+                                       or external_state not in _EXTERNAL_STATES):
+        raise refuse(f"event {seq} external_state is not known, unknown or null")
+    if target in TERMINALS and external_state != "known":
+        raise refuse(f"event {seq} reaches terminal {target} without known external state")
+    if target == "attention_required":
+        parked = state
+    elif state == "attention_required":
+        parked = None
+    return target, parked
+
+
 def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
-    """Refuse (StateInvalid) any document that is not a valid transaction-state/v1."""
+    """Refuse (StateInvalid) any document that is not a valid transaction-state/v2."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
-    if type(document) is not dict or set(document) != _STATE_KEYS:
+    if type(document) is not dict:
+        raise refuse("state.json is not a JSON object")
+    if document.get("schema") != SCHEMA:
+        raise refuse(f"schema {document.get('schema')!r} is not {SCHEMA}")
+    if set(document) != _STATE_KEYS:
         raise refuse(f"state.json is not the closed {SCHEMA} key set")
-    if document["schema"] != SCHEMA:
-        raise refuse(f"schema is not {SCHEMA}")
     if not _is_id(document["transaction_id"]) or document["transaction_id"] != transaction_id:
         raise refuse("transaction_id is not a rel_ UUIDv7 equal to its directory name")
     creation_key = document["creation_key"]
@@ -185,6 +240,14 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
         raise refuse("creation_key index entry does not point back to this transaction")
     if type(document["subject"]) is not dict:
         raise refuse("subject is not a JSON object")
+    keys = document["concurrency_keys"]
+    if type(keys) is not list:
+        raise refuse("concurrency_keys is not a list")
+    violation = _key_set_violation(keys)
+    if violation is not None:
+        raise refuse(violation)
+    if keys != sorted(keys):
+        raise refuse("concurrency_keys is not sorted")
     events = document["events"]
     if type(events) is not list or not events:
         raise refuse("events is not a non-empty list")
@@ -195,45 +258,28 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
         raise refuse("event 1 is not seq 1 of type created")
     if not _is_timestamp(first["at"]):
         raise refuse("event 1 at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
-    state, parked = "created", None
-    for position, event in enumerate(events[1:], start=1):
-        seq = position + 1
+    state, parked, custody = "created", None, None
+    for seq, event in enumerate(events[1:], start=2):
         if state in TERMINALS:
             raise refuse(f"event {seq} follows the terminal state {state}")
-        if type(event) is not dict or set(event) != _TRANSITIONED_KEYS:
-            raise refuse(f"event {seq} is not the closed transitioned event")
-        if event["type"] != "transitioned":
-            raise refuse(f"event {seq} is not of type transitioned")
-        if type(event["seq"]) is not int or event["seq"] != seq:
-            raise refuse(f"event {seq} does not carry seq {seq}")
-        if not _is_timestamp(event["at"]):
-            raise refuse(f"event {seq} at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
-        target = event["to"]
-        if event["from"] != state:
-            raise refuse(f"event {seq} from does not equal the folded state {state}")
-        if type(target) is not str or target not in STATES:
-            raise refuse(f"event {seq} to is not a known state")
-        if not _edge_allowed(state, parked, target):
-            raise refuse(f"event {seq} edge {state} -> {target} is not allowed")
-        if type(event["reason"]) is not str or not event["reason"]:
-            raise refuse(f"event {seq} reason is not a non-empty string")
-        external_state = event["external_state"]
-        if external_state is not None and (type(external_state) is not str
-                                           or external_state not in _EXTERNAL_STATES):
-            raise refuse(f"event {seq} external_state is not known, unknown or null")
-        if target in TERMINALS and external_state != "known":
-            raise refuse(f"event {seq} reaches terminal {target} without known external state")
-        if target == "attention_required":
-            parked = state
-        elif state == "attention_required":
-            parked = None
-        state = target
+        if type(event) is not dict:
+            raise refuse(f"event {seq} is not a JSON object")
+        event_type = event.get("type")
+        match event_type:
+            case "transitioned":
+                state, parked = _fold_transitioned(event, seq, state, parked, refuse)
+            case _:
+                raise refuse(f"event {seq} has unknown event type {event_type!r}")
     if type(document["state"]) is not str or document["state"] != state:
         raise refuse(f"state does not equal the folded state {state}")
     stored_parked = document["parked_from"]
     if not (stored_parked is None and parked is None
             or type(stored_parked) is str and stored_parked == parked):
         raise refuse("parked_from does not equal the folded parked_from")
+    stored_custody = document["custody"]
+    if not (type(stored_custody) is dict or stored_custody is None) \
+            or stored_custody != custody:
+        raise refuse("custody does not equal the folded custody")
     if type(document["revision"]) is not int or document["revision"] != len(events):
         raise refuse("revision does not equal the number of events")
 
@@ -248,11 +294,14 @@ def _snapshot(document: dict) -> Transaction:
         revision=document["revision"],
         events=tuple(MappingProxyType(copy.deepcopy(event))
                      for event in document["events"]),
+        concurrency_keys=tuple(document["concurrency_keys"]),
+        custody=None,
     )
 
 
-def _require_creatable(root: Path, creation_key: Any, subject: Any) -> None:
-    """Refuse (StateInvalid) arguments that cannot form a valid v1 state (D16)."""
+def _require_creatable(root: Path, creation_key: Any, subject: Any,
+                       concurrency_keys: Any) -> None:
+    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v2 document."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -268,6 +317,9 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any) -> None:
         raise StateInvalid(f"{where}: subject is not strict JSON ({error})") from error
     if loaded != subject or telemetry_digest(loaded) != telemetry_digest(subject):
         raise StateInvalid(f"{where}: subject does not survive a strict JSON round trip")
+    violation = _key_set_violation(concurrency_keys)
+    if violation is not None:
+        raise StateInvalid(f"{where}: {violation}")
 
 
 class TransactionStore:
@@ -384,17 +436,24 @@ class TransactionStore:
         atomic_write(directory, directory / "state.json", candidate)
         return _snapshot(candidate)
 
-    def create(self, creation_key: str, subject: dict) -> Transaction:
-        """Create the transaction for `creation_key`, or return the one it already names."""
-        _require_creatable(self.root, creation_key, subject)
+    def create(self, creation_key: str, subject: dict, *,
+               concurrency_keys: Collection[str]) -> Transaction:
+        """Create the transaction for `creation_key`, or return the one it already names.
+
+        The concurrency key set is fixed here, stored sorted, and compared with the
+        subject when the key already names a transaction (D4).
+        """
+        _require_creatable(self.root, creation_key, subject, concurrency_keys)
+        keys = sorted(concurrency_keys)
         at = _format_at(self._now())
         descriptor = open_lock(self.root / "creation.lock")
         try:
-            return self._create_locked(creation_key, subject, at)
+            return self._create_locked(creation_key, subject, keys, at)
         finally:
             os.close(descriptor)
 
-    def _create_locked(self, creation_key: str, subject: dict, at: str) -> Transaction:
+    def _create_locked(self, creation_key: str, subject: dict, keys: list[str],
+                       at: str) -> Transaction:
         transaction_id = _read_index(self.root, creation_key)
         if transaction_id is None:
             transaction_id = _mint_id()
@@ -419,16 +478,21 @@ class TransactionStore:
                     raise StateInvalid(
                         f"{transaction_id}: creation_key index {creation_key!r} names a "
                         f"transaction created under a different creation_key")
-                if telemetry_digest(document["subject"]) != telemetry_digest(subject):
+                differs = [name for name, differ in (
+                    ("subject", telemetry_digest(document["subject"])
+                     != telemetry_digest(subject)),
+                    ("concurrency key set", document["concurrency_keys"] != keys)) if differ]
+                if differs:
                     raise CreationConflict(
                         f"{transaction_id}: creation_key {creation_key!r} already names a "
-                        f"different subject")
+                        f"transaction with a different {' and '.join(differs)}")
                 return _snapshot(document)
             document = {
                 "schema": SCHEMA, "transaction_id": transaction_id,
                 "creation_key": creation_key, "subject": copy.deepcopy(subject),
                 "state": "created", "parked_from": None, "revision": 1,
                 "events": [{"seq": 1, "type": "created", "at": at}],
+                "concurrency_keys": keys, "custody": None,
             }
             _validate_state(document, transaction_id, self.root)
             atomic_write(directory, directory / "state.json", document)

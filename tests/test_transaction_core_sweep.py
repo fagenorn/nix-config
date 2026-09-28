@@ -61,7 +61,8 @@ class SweepTableTest(unittest.TestCase):
             store = TransactionStore(Path(tmp))
             first = drive(store, "library", "success")
             subject = dict(store.load(first).subject)
-            again = store.create("library:success", subject)
+            again = store.create("library:success", subject,
+                                 concurrency_keys=list(store.load(first).concurrency_keys))
             self.assertEqual(again.transaction_id, first)
             self.assertEqual(len(again.events), len(store.load(first).events))
 

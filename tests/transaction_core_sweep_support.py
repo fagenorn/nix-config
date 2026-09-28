@@ -41,7 +41,9 @@ def drive(store, shape, scenario):
     world = World()
     world.faults = set(SCENARIOS[scenario]["faults"])
     subject, profile, registry = SHAPES[shape](world)
-    transaction_id = store.create(f"{shape}:{scenario}", subject).transaction_id
+    transaction_id = store.create(
+        f"{shape}:{scenario}", subject,
+        concurrency_keys=profile["target"]["concurrency_keys"]).transaction_id
     definite = {"all": True}
 
     def adapter(alias):
