@@ -510,8 +510,8 @@ class CohortValidatorTest(CohortCase):
         self.settle()
         return self.state_doc(self.transaction_id)
 
-    def assertEditRefused(self, document):
-        self.assertRuleRefuses(self.transaction_id, document, self.transaction_id)
+    def assertEditRefused(self, document, rule=""):
+        self.assertRuleRefuses(self.transaction_id, document, rule or self.transaction_id)
 
     def test_hand_edited_cohorts_and_seals_are_state_invalid(self):
         pristine = self.sealed()
@@ -524,8 +524,8 @@ class CohortValidatorTest(CohortCase):
 
         cases = {
             "skipped number": lambda ev: ev[index["proof_cohort_started"]].update(cohort=2),
-            "unobserved member": lambda ev: [e.update(cohort=None) for e in ev
-                                             if e.get("obligation_id") == "health"],
+            "unobserved member": lambda ev: ev.remove(next(
+                e for e in ev if e.get("obligation_id") == "health" and e.get("cohort") == 1)),
             "wrong makespan": lambda ev: ev[index["proof_sealed"]].update(makespan_ms=1),
             "wrong cutoff": lambda ev: ev[index["proof_sealed"]].update(
                 proof_cutoff_at="2000-01-01T00:00:00.000Z"),
@@ -535,9 +535,10 @@ class CohortValidatorTest(CohortCase):
                 **copy.deepcopy(ev[index["proof_cohort_started"]]),
                 "type": "proof_cohort_failed", "reason": "tired"}),
         }
+        rules = {"unobserved member": "cohort member health has no observation in cohort 1"}
         for name, change in cases.items():
             with self.subTest(edit=name):
-                self.assertEditRefused(edit(change))
+                self.assertEditRefused(edit(change), rules.get(name, ""))
 
     def test_a_seal_over_unproved_required_evidence_is_state_invalid(self):
         pristine = self.sealed()

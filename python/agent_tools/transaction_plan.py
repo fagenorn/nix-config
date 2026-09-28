@@ -326,7 +326,9 @@ def cohort_schedule(obligations: Sequence[Mapping], collectors: Mapping) -> dict
     members = [entry for entry in obligations
                if entry["required"] and entry["form"] == "snapshot"]
     finish: dict[str, int] = {}
-    slots: dict[str, list[int]] = {}
+    uses = [member["collector"] for member in members]
+    slots = {name: [0] * min(collectors[name]["max_concurrent_collections"], uses.count(name))
+             for name in set(uses)}
     for member in members:
         ready, stack, seen = 0, list(member["deps"]), set()
         while stack:
@@ -337,8 +339,7 @@ def cohort_schedule(obligations: Sequence[Mapping], collectors: Mapping) -> dict
             ready = max(ready, finish.get(dep, 0))
             stack.extend(by_id[dep]["deps"] if dep in by_id else ())
         spec = collectors[member["collector"]]
-        free = slots.setdefault(member["collector"],
-                                [0] * spec["max_concurrent_collections"])
+        free = slots[member["collector"]]
         slot = free.index(min(free))
         done = max(ready, free[slot]) + spec["max_collection_latency_ms"]
         free[slot] = finish[member["obligation_id"]] = done
