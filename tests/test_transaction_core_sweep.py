@@ -1,7 +1,8 @@
 """Asserted sweep of the transaction core across four unlike project shapes (#204 D6, D17).
 
 The prototype's autopilot printed where each (shape, scenario) cell landed; this table
-asserts it against persisted history. Only the success row exists in this slice.
+asserts it against persisted history, including each scenario's custody events and the
+evidence forms it voids.
 
 Run: just agent-workflow-tests
 """
@@ -25,12 +26,26 @@ WITH_ACTIVATION = ("created", "awaiting_verification", "ready", "publishing", "p
                    "activating", "proving", "succeeded")
 WITHOUT_ACTIVATION = tuple(s for s in WITH_ACTIVATION if s != "activating")
 
-# (shape, scenario) -> (final state, every state the persisted history passes through)
+LAPSED = WITH_ACTIVATION[:-1] + ("attention_required", "proving", "succeeded")
+LAPSED_LIBRARY = WITHOUT_ACTIVATION[:-1] + ("attention_required", "proving", "succeeded")
+
+# (shape, scenario) -> (final state, states the history passes through,
+#                       temporal forms voided by the scenario)
 SWEEP = {
-    ("platform", "success"): ("succeeded", WITH_ACTIVATION),
-    ("product", "success"): ("succeeded", WITH_ACTIVATION),
-    ("daemon", "success"): ("succeeded", WITH_ACTIVATION),
-    ("library", "success"): ("succeeded", WITHOUT_ACTIVATION),
+    **{(shape, scenario): ("succeeded", path, frozenset())
+       for shape, path in (("platform", WITH_ACTIVATION), ("product", WITH_ACTIVATION),
+                           ("daemon", WITH_ACTIVATION), ("library", WITHOUT_ACTIVATION))
+       for scenario in ("success", "lease_renewal")},
+    ("platform", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot"})),
+    ("product", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot"})),
+    ("daemon", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot", "interval"})),
+    ("library", "lease_lapse"): ("succeeded", LAPSED_LIBRARY, frozenset({"snapshot"})),
+}
+CUSTODY_EVENTS = {
+    "success": ["lease_acquired", "lease_released"],
+    "lease_renewal": ["lease_acquired", "lease_released"],
+    "lease_lapse": ["lease_acquired", "lease_lapse_detected", "lease_reacquired",
+                    "lease_released"],
 }
 
 
@@ -48,27 +63,62 @@ class SweepTableTest(unittest.TestCase):
                                       for scenario in SCENARIOS})
 
     def test_every_cell_lands_where_the_table_says(self):
-        for (shape, scenario), (final, path) in SWEEP.items():
+        for (shape, scenario), (final, path, voided) in SWEEP.items():
             with self.subTest(shape=shape, scenario=scenario), \
                     tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                transaction_id = drive(TransactionStore(root), shape, scenario)
+                transaction_id = drive(root, shape, scenario)
                 persisted = TransactionStore(root).load(transaction_id)
                 self.assertEqual(persisted.creation_key, f"{shape}:{scenario}")
                 self.assertEqual(persisted.state, final)
                 self.assertEqual(states_passed(persisted), path)
-                self.assertEqual({e["external_state"] for e in transitions(persisted)},
-                                 {"known"})
+                self.assertEqual({e["external_state"] for e in transitions(persisted)
+                                  if e["to"] != "attention_required"}, {"known"})
+                self.assertEqual([e["type"] for e in persisted.events
+                                  if e["type"].startswith("lease_")],
+                                 CUSTODY_EVENTS[scenario])
+                self.assertEqual({e["form"] for e in persisted.evidence
+                                  if not e["admissible"]}, voided)
+                latest = {}
+                for entry in persisted.evidence:
+                    latest[entry["evidence_id"].rsplit("@", 1)[0]] = entry
+                self.assertTrue(latest)
+                self.assertTrue(all(entry["admissible"] for entry in latest.values()))
+                if scenario == "lease_lapse":
+                    lapse = next(e["seq"] for e in persisted.events
+                                 if e["type"] == "lease_lapse_detected")
+                    for entry in persisted.evidence:
+                        if entry["seq"] < lapse:
+                            self.assertEqual(entry["admissible"], entry["form"] == "event")
+                            if not entry["admissible"]:
+                                self.assertEqual(entry["void_reason"], "fence_changed")
+                    self.assertIsNone(persisted.custody)
+                for key in persisted.concurrency_keys:
+                    record = TransactionStore(root).inspect_lease(key)
+                    self.assertEqual((record["epoch"], record["holder"]),
+                                     (2 if scenario == "lease_lapse" else 1, None))
+
+    def test_the_lapse_row_exercises_every_temporal_form_before_the_lapse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            forms = set()
+            for shape in ("product", "daemon"):
+                (Path(tmp) / shape).mkdir()
+                transaction_id = drive(Path(tmp) / shape, shape, "lease_lapse")
+                persisted = TransactionStore(Path(tmp) / shape).load(transaction_id)
+                lapse = next(e["seq"] for e in persisted.events
+                             if e["type"] == "lease_lapse_detected")
+                forms |= {e["form"] for e in persisted.evidence if e["seq"] < lapse}
+            self.assertEqual(forms, {"event", "snapshot", "interval"})
 
     def test_recreating_a_driven_cell_returns_its_transaction(self):
         with tempfile.TemporaryDirectory() as tmp:
+            first = drive(Path(tmp), "library", "success")
             store = TransactionStore(Path(tmp))
-            first = drive(store, "library", "success")
-            subject = dict(store.load(first).subject)
-            again = store.create("library:success", subject,
-                                 concurrency_keys=list(store.load(first).concurrency_keys))
+            persisted = store.load(first)
+            again = store.create("library:success", dict(persisted.subject),
+                                 concurrency_keys=list(persisted.concurrency_keys))
             self.assertEqual(again.transaction_id, first)
-            self.assertEqual(len(again.events), len(store.load(first).events))
+            self.assertEqual(len(again.events), len(persisted.events))
 
 
 PROJECT_NAMES = frozenset({"nix", "nixos", "darwin", "fagenorn", "palmier", "nodo", "argus"})

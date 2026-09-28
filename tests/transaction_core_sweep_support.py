@@ -1,20 +1,35 @@
 """Scenario fixture and fixture executor for the transaction core sweep (#204 D6, D17).
 
 The executor is a happy-path walker over the simulated world that asks the shipped core
-to advance at each lifecycle boundary through the public store API. It deliberately
-carries none of the prototype's lease, retry, authorization or recovery logic; later
-slices move that into the core and this walker shrinks. Any observation other than
-satisfied parks the transaction in attention_required with the observation as reason.
+to advance at each lifecycle boundary through the public store API, on a store whose
+clock is the world clock (#205 D22, D29). It acquires custody before publishing and
+presents it on every later advance; while proving it records one fenced evidence item
+per obligation in the obligation's temporal form, opening an interval first, and skips
+an obligation whose latest record is still admissible. Scenario hooks move the world
+clock: `lease_renewal` renews in place twice, and `lease_lapse` lets the lease expire,
+has the reaper park the transaction, reacquires, resumes proving and recollects what the
+new fence voided. It still carries none of the prototype's retry, authorization or
+recovery logic. Any observation other than satisfied parks the transaction in
+attention_required with the observation as reason.
 """
+
+from agent_tools.transaction_core import StaleCustody, TransactionStore
 
 from .transaction_core_shapes import SHAPES
 from .transaction_core_world import World
 
-# Ported from prototype-release-transactions/scenarios.py at dc98ba9: only the scenarios
-# whose sweep rows this slice asserts.
+TTL_MS = 600_000
+
+# `success` is ported from prototype-release-transactions/scenarios.py at dc98ba9;
+# `lease_renewal` and `lease_lapse` are new in #205 (D22, D29).
 SCENARIOS = {
     "success": {"faults": frozenset(),
                 "note": "clean path: publish, activate, prove, seal a terminal receipt."},
+    "lease_renewal": {"faults": frozenset(),
+                      "note": "the lease is renewed twice in place during proving."},
+    "lease_lapse": {"faults": frozenset(),
+                    "note": "the lease lapses before the last obligation; reap, reacquire, "
+                            "recollect."},
 }
 
 
@@ -37,13 +52,14 @@ def _in_dependency_order(nodes):
     return ordered
 
 
-def drive(store, shape, scenario):
+def drive(root, shape, scenario):
     world = World()
     world.faults = set(SCENARIOS[scenario]["faults"])
+    store = TransactionStore(root, clock=lambda: world.clock * 1000)
     subject, profile, registry = SHAPES[shape](world)
-    transaction_id = store.create(
-        f"{shape}:{scenario}", subject,
-        concurrency_keys=profile["target"]["concurrency_keys"]).transaction_id
+    keys = profile["target"]["concurrency_keys"]
+    transaction_id = store.create(f"{shape}:{scenario}", subject,
+                                  concurrency_keys=keys).transaction_id
     definite = {"all": True}
     held = {"custody": None}
 
@@ -78,6 +94,46 @@ def drive(store, shape, scenario):
                               f"{invoked.get('error_class')}")
             observe(unit.inspect(node["mode"], env), f"{node['id']} post-inspect")
 
+    def acquire():
+        held["custody"] = store.acquire(transaction_id, executor_id="fixture-executor",
+                                        subject_path=f"/fixture/{shape}",
+                                        ttl_ms=TTL_MS).custody
+
+    def records(obligation_id):
+        return [entry for entry in store.load(transaction_id).evidence
+                if entry["evidence_id"].rsplit("@", 1)[0] == obligation_id]
+
+    def renew():
+        world.tick(301)
+        store.renew(held["custody"])
+
+    def prove(obligations, first_pass):
+        if scenario == "lease_renewal":
+            renew()
+        accepted, recorded = set(), 0
+        for obligation_id, predicate, source, deps, form in obligations:
+            earlier = records(obligation_id)
+            if earlier and earlier[-1]["admissible"]:
+                accepted.add(obligation_id)
+                continue
+            unmet = [dep for dep in deps if dep not in accepted]
+            if unmet:
+                raise _Parked(f"{obligation_id}: prerequisite not accepted {unmet}")
+            evidence_id = f"{obligation_id}@{len(earlier) + 1}"
+            if form == "interval":
+                store.open_interval(held["custody"], evidence_id=evidence_id)
+            result = adapter(source["binding"]).inspect(
+                predicate, {"expected_subject": source["expected_subject"]})
+            observe(result, obligation_id)
+            store.record_evidence(held["custody"], evidence_id=evidence_id, form=form,
+                                  reference=result["payload_ref"])
+            accepted.add(obligation_id)
+            recorded += 1
+            if scenario == "lease_renewal" and recorded == len(obligations) // 2:
+                renew()
+            if scenario == "lease_lapse" and first_pass and recorded == len(obligations) - 1:
+                world.tick(601)
+
     try:
         advance("awaiting_verification", "candidate verification requested")
         check = profile["target"]["verification"]
@@ -85,9 +141,7 @@ def drive(store, shape, scenario):
                                                   {"expected_subject": subject}),
                 "candidate verification")
         advance("ready", "candidate verification satisfied")
-        held["custody"] = store.acquire(transaction_id, executor_id="fixture-executor",
-                                        subject_path=f"/fixture/{shape}",
-                                        ttl_ms=600_000).custody
+        acquire()
         advance("publishing", "publication started")
         run_phase(profile["publication"])
         advance("published", "every publication unit satisfied")
@@ -99,20 +153,22 @@ def drive(store, shape, scenario):
         else:
             advance("proving", "profile declares activation none")
         obligations = (
-            [("floor:publication:" + n["id"], "publication_visible", n, [])
+            [("floor:publication:" + n["id"], "publication_visible", n, [], "snapshot")
              for n in profile["publication"]]
-            + [("floor:activation:" + n["id"], "running_subject_identity", n, [])
+            + [("floor:activation:" + n["id"], "running_subject_identity", n, [], "snapshot")
                for n in activation]
-            + [(o["id"], o["predicate"], o, o.get("deps", []))
+            + [(o["id"], o["predicate"], o, o.get("deps", []), o["temporal"])
                for o in profile["proof"] if o["required"]])
-        accepted = set()
-        for obligation_id, predicate, source, deps in obligations:
-            unmet = [dep for dep in deps if dep not in accepted]
-            if unmet:
-                raise _Parked(f"{obligation_id}: prerequisite not accepted {unmet}")
-            observe(adapter(source["binding"]).inspect(
-                predicate, {"expected_subject": source["expected_subject"]}), obligation_id)
-            accepted.add(obligation_id)
+        try:
+            prove(obligations, first_pass=True)
+        except StaleCustody:
+            store.reap(transaction_id, reason="lease expired during proving")
+            acquire()
+            advance("proving", "resumed after reacquisition")
+            prove(obligations, first_pass=False)
+        if scenario == "lease_renewal" and any(
+                store.inspect_lease(key)["holder"]["term"] != 3 for key in keys):
+            raise _Parked("lease was not renewed to term 3 before sealing")
         advance("succeeded", "every required obligation satisfied")
     except _Parked as parked:
         advance("attention_required", str(parked))
