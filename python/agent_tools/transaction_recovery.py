@@ -1,7 +1,8 @@
 """Recovery (#208): the closed `RecoveryRefused` reasons and their one construction path, the
-anchor and compatibility check requests and their result check, the effect classes and the
-selection, the admission and decision halves of `verify_anchors` and `begin_recovery`, the
-recovery event and pairing rules, the gates and the derived `recovery` view.
+anchor and compatibility check requests and their result check, the effect classes, the
+selection and which actions it admits (`selection_refusal`), the admission and decision
+halves of `verify_anchors` and `begin_recovery`, the recovery event and pairing rules, the
+gates and the derived `recovery` view.
 
 A check request is a read-only mapping naming the unit by action id, the check, its
 predicate and parameters, the unit's proof collector and the held fence; its result is the
@@ -159,6 +160,18 @@ def selection(plan: Mapping, actions: Mapping[str, ActionFold]) -> list[str]:
     """The edge action ids of every affected unit, in plan order, then declaration order
     (D8)."""
     return [edge["action_id"] for unit in _affected(plan, actions) for edge in unit["edges"]]
+
+
+def selection_refusal(recovery_plan: Mapping, events: Sequence[Mapping], state: str,
+                      identity: str) -> str | None:
+    """`not_selected` for an action `identity` outside the latest `recovery_started`'s
+    `selected` in `recovering`, or for one of the plan's edge action ids in any other state;
+    else None, so an undeclared action stays invocable in the effect states (D15, D22)."""
+    if state == "recovering":
+        started = [event for event in events if event["type"] == "recovery_started"]
+        return None if identity in started[-1]["selected"] else "not_selected"
+    edges = {edge["action_id"] for unit in recovery_plan["units"] for edge in unit["edges"]}
+    return "not_selected" if identity in edges else None
 
 
 def effecting_action(events: Sequence[Mapping]) -> ActionFold | None:

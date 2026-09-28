@@ -361,7 +361,7 @@ class InvokeActionTest(InvokeCase):
                 self.inspect(self.effect(inspect_outcome=outcome))
                 self.refused("not_absent", lambda: self.invoke(self.effect(during=self.fail)))
 
-    def test_only_publishing_and_activating_may_invoke(self):
+    def test_only_effect_states_may_invoke(self):
         self.inspect()
         self.to("attention_required")
         self.refused("state_not_effectful", lambda: self.invoke(self.effect(during=self.fail)))
@@ -484,7 +484,7 @@ class InvokeActionTest(InvokeCase):
         cases = {
             "attempt 3 does not follow attempt 1": lambda ev: ev[10].update(attempt=3),
             "does not follow an absent inspection under its fence": lambda ev: ev.pop(9),
-            "invocation_intended sits outside publishing and activating":
+            "invocation_intended sits outside publishing, activating and recovering":
                 lambda ev: ev.insert(7, dict(parked)),
             "retry follows an attempt that is not retry-safe":
                 lambda ev: ev[8].update(error_class="invalid_input"),
@@ -697,7 +697,8 @@ class LifecycleTest(InvokeCase):
 
 # Every reason some `refused(...)` call in this file asserts; pinned to the vocabulary.
 OBSERVED_REASONS = {"inspection_required", "not_absent", "not_retryable", "budget_exhausted",
-                    "window_closed", "state_not_effectful", "attempt_in_flight"}
+                    "window_closed", "state_not_effectful", "attempt_in_flight",
+                    "not_selected"}  # asserted in test_transaction_recovery.py
 
 
 class RefusalVocabularyTest(unittest.TestCase):

@@ -46,7 +46,7 @@ from agent_tools.transaction_proof import (
     proof_event_violation, proof_view)
 from agent_tools.transaction_recovery import (
     RECOVERY_EVENT_KEYS, recovery_event_violation, recovery_pairing_violation,
-    recovery_transition_violation, recovery_view)
+    recovery_transition_violation, recovery_view, selection_refusal)
 from agent_tools.transaction_recovery_plan import recovery_plan_violation
 from agent_tools.transaction_storage import (
     StateInvalid, format_at, json_object_violation, parse_at, serialize)
@@ -448,7 +448,8 @@ def validate_state(document: Any, transaction_id: str,
     the `created` event must pin its `telemetry_digest` (#207 D3, D24); so must the stored
     `recovery_plan`, bound to the proof plan's declaration, and the `created` event's
     `recovers` is null or another transaction's id (#208 D6, D12); each action event is
-    checked by `action_event_violation` against the actions before it, and a transition into
+    checked by `action_event_violation` against the actions before it, and each
+    `invocation_intended` then by `selection_refusal` (#208 D15), and a transition into
     a terminal while `unresolved` names an action is refused (#206 D20). Each proof event is
     checked by `proof_event_violation` against the history before it and then, for an
     `obligation_observed`, by the evidence-id fold (#207 D25). Cohorts are numbered from 1,
@@ -560,6 +561,11 @@ def validate_state(document: Any, transaction_id: str,
                     event, actions, transaction_id=transaction_id, keys=keys,
                     open_fence=None if fold.custody is None else fold.custody["fence"],
                     state=state)
+                if (violation is None and event_type == "invocation_intended"
+                        and selection_refusal(document["recovery_plan"], events[:seq - 1],
+                                              state, event["action_id"])):
+                    violation = (f"invocation_intended of {event['action_id']} is "
+                                 f"not_selected in {state}")
                 if violation is not None:
                     raise refuse(f"event {seq} {violation}")
                 apply_action_event(event, actions)

@@ -81,7 +81,8 @@ from agent_tools.transaction_proof import (
     proof_refused, settlement)
 from agent_tools.transaction_recovery import (
     EFFECT_CLASSES, RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, begin_events,
-    begin_requests, check_result_violation, recovery_advance_violation, recovery_refused)
+    begin_requests, check_result_violation, recovery_advance_violation, recovery_refused,
+    selection_refusal)
 from agent_tools.transaction_recovery_plan import (
     EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, bind_recovery,
     compile_recovery, materialize_recovery)
@@ -711,8 +712,9 @@ class TransactionStore:
         (#206 D3, D5-D8).
 
         Argument shapes are refused first, before any lock. The first lock hold refuses a
-        terminal (`TransitionRefused`), runs the fenced check, then refuses a state other
-        than `publishing` or `activating` (`InvocationRefused` `state_not_effectful`).
+        terminal (`TransitionRefused`), runs the fenced check, then refuses a state outside
+        `EFFECT_STATES` (`InvocationRefused` `state_not_effectful`) and then `not_selected`
+        (`selection_refusal`, #208 D15, D22).
         An action whose latest inspection reads `satisfied` returns the unchanged snapshot
         with no write and no call. Otherwise the admission rules refuse, in order,
         `inspection_required`, `not_absent`, `not_retryable`, `budget_exhausted` and
@@ -732,6 +734,10 @@ class TransactionStore:
         with self._fenced(custody, "invoke_action", writes=True) as (prior, now):
             if prior["state"] not in EFFECT_STATES:
                 raise refused_error(transaction_id, identity, "state_not_effectful")
+            reason = selection_refusal(prior["recovery_plan"], prior["events"], prior["state"],
+                                       identity)
+            if reason is not None:
+                raise refused_error(transaction_id, identity, reason)
             entry = fold_actions(prior["events"]).get(identity)
             if satisfied(entry):
                 return snapshot(prior)

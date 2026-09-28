@@ -7,8 +7,8 @@ import copy
 import unittest
 
 from agent_tools.transaction_core import (
-    RECOVERY_REFUSAL_REASONS, EffectResultInvalid, RecoveryRefused, StaleCustody,
-    TransactionError, TransitionRefused, action_id)
+    RECOVERY_REFUSAL_REASONS, EffectResultInvalid, InvocationRefused, RecoveryRefused,
+    StaleCustody, TransactionError, TransitionRefused, action_id)
 
 from .test_transaction_custody import KEYS, SUBJECT, TTL, CustodyCase, plain, serialize
 from .test_transaction_invocation import Crash, FakeEffect, FakeWorld, renumbered
@@ -374,6 +374,70 @@ class AbandonAndReservedTest(RecoveryCase):
                 edited = copy.deepcopy(begun)
                 edited["events"][-2][field] = value
                 self.assertRuleRefuses(self.transaction_id, edited, fragment)
+
+
+class EdgeTest(RecoveryCase):
+    def recovering(self):
+        self.parked()
+        self.grant()
+        return self.begin()
+
+    def invoke(self, name, parameters):
+        return self.store.invoke_action(self.custody, name=name, parameters=parameters,
+                                        effect=FakeEffect(self.world))
+
+    def not_selected(self, call):
+        error = self.assertRefusedUnchanged(InvocationRefused, call)
+        self.assertEqual(error.reason, "not_selected")
+
+    def test_a_selected_edge_runs_through_intent_and_inspection(self):
+        self.recovering()
+        after = self.run_action("restore", {"unit": "start"})
+        view = next(v for v in after.actions if v["action_id"] == self.act("restore", unit="start"))
+        self.assertEqual((view["status"], view["attempts"]), ("satisfied", 1))
+        again = self.invoke("restore", {"unit": "start"})
+        self.assertEqual(again.revision, after.revision)
+
+    def test_forward_or_unselected_actions_are_refused_in_recovering(self):
+        self.recovering()
+        for name, parameters in (("build", {"n": 1}), ("pin", {"n": 3}),
+                                 ("extra", {"n": 9})):
+            with self.subTest(name=name):
+                self.store.inspect_action(self.custody, name=name, parameters=parameters,
+                                          effect=FakeEffect(self.world))
+                self.not_selected(lambda: self.invoke(name, parameters))
+
+    def test_a_plan_edge_is_refused_outside_recovering(self):
+        self.published()
+        self.store.inspect_action(self.custody, name="compensate",
+                                  parameters={"unit": "build"}, effect=FakeEffect(self.world))
+        self.not_selected(lambda: self.invoke("compensate", {"unit": "build"}))
+        self.store.inspect_action(self.custody, name="extra", parameters={"n": 9},
+                                  effect=FakeEffect(self.world))
+        self.assertEqual(self.invoke("extra", {"n": 9}).state, "publishing")
+
+    def test_a_hand_built_intent_of_an_unselected_edge_is_state_invalid(self):
+        self.published()
+        self.store.inspect_action(self.custody, name="compensate",
+                                  parameters={"unit": "build"}, effect=FakeEffect(self.world))
+        document = self.state_doc(self.transaction_id)
+        document["events"].append({
+            "seq": 0, "type": "invocation_intended", "at": document["events"][-1]["at"],
+            "action_id": self.act("compensate", unit="build"), "attempt": 1,
+            "fence": plain(self.custody.fence)})
+        self.assertRuleRefuses(self.transaction_id, renumbered(document), "not_selected")
+
+    def test_a_hand_built_intent_of_an_unselected_action_in_recovering_is_state_invalid(self):
+        self.recovering()
+        self.store.inspect_action(self.custody, name="pin", parameters={"n": 3},
+                                  effect=FakeEffect(self.world))
+        document = self.state_doc(self.transaction_id)
+        document["events"].append({
+            "seq": 0, "type": "invocation_intended", "at": document["events"][-1]["at"],
+            "action_id": self.act("pin", n=3), "attempt": 1,
+            "fence": plain(self.custody.fence)})
+        self.assertRuleRefuses(self.transaction_id, renumbered(document),
+                               "is not_selected in recovering")
 
 
 class RecoveryVocabularyTest(unittest.TestCase):
