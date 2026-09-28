@@ -39,8 +39,8 @@ It is the source of truth; every "per Dn" below cites its `## Decision ledger`.
 - Every file the branch adds or changes keeps a whole-file diff under 65536 bytes; target 48 KiB
   per new file (D20).
 - Commits are SSH-signed (never disable signing), subject `feat(issue-127/T<n>): …`, and end with
-  the two trailer lines `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>`
-  and `Claude-Session: https://claude.ai/code/session_016QhEZr26rekbj4fAU8PNDA`.
+  the attribution trailer lines supplied to the executing session (never a session URL copied
+  from this plan).
 - Run package suites as `PYTHONPATH=python python3 -m unittest <file> 2>&1 | tail -5`, from
   the worktree root, the way the `agent-workflow-tests` recipe runs them.
 
@@ -100,3 +100,11 @@ The spec's ledger holds every choice; this plan appended D27–D32. Task coverag
 | D22 (not a `transaction_core` consumer) | 4 |
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (Opus reviewer). The configured Codex `plan-review` run completed, but its output failed the metadata contract (no runtime-selection event reporting the model and effort, and several agent messages instead of one terminal message), so one native fallback ran with the same packet and Codex was not retried.
+- Base SHA `66ccba5844eab2af9c68962c54a28f874585ee80`, plan reviewed at `f576297`; isolated, read-only; no focus.
+- Accepted 7: B1 (task-4 unique capture names per loop iteration), B2 (task-2 one resolver stub directory per case), S1–S3 (per D33), Discussion D2 (spec purpose-selection prose), Discussion D3 (trailer from the executing session).
+- Rejected 1: Discussion D4. The `bin` listing assertion is redundant but harmless; the exit-0 run without `gh` on `PATH` carries the evidence.
+- Deferred 1: Discussion D1 (overflowing-float hook in `agent_tools.canonical`). Out of #127's scope, because promotion documents carry no floats and bundle verification is #120's code.

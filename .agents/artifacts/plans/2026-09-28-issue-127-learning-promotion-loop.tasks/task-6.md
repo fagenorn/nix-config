@@ -56,7 +56,10 @@ PROMOTED_DUPLICATE_FINDINGS = (
 - For each promoted candidate, each `local_duplicates` object in order: `disposition ==
   PROJECT_ONLY_RESIDUE` → `retained_count += 1`; else `disposition == REMOVE` and
   `repository != context.contract["project"]["id"]` → `deferred_count += 1`; else
-  `disposition == REMOVE` → judged; anything else is ignored.
+  `disposition == REMOVE` → judged; anything else is ignored. A promoted candidate whose
+  `local_duplicates` is not a list contributes nothing, and a non-object entry, or one whose
+  `repository`, `disposition` or `path` member is absent, is ignored like an unparseable file:
+  the evaluator never raises on a hand-edited document (per D33).
 - A judged entry is **drifted** when its `path` is not a non-empty, non-absolute string free of
   `..` parts, when `first_symlinked_component(root, path)` is not `None`, when something exists
   (`os.path.lexists`) but is not a regular file, when reading fails, or when `sha256` is not a
@@ -197,6 +200,8 @@ class PromotedDuplicateResidueTest(ReportAssertions, unittest.TestCase):
             promoted(root, [dup()], name="c.txt")
             broken = root / ".agents/knowledge/promotions/candidates/d.json"
             broken.write_text("{ broken", encoding="utf-8")
+            promoted(root, "not-a-list", name="e.json")
+            promoted(root, ["not-an-object", {"path": "docs/lesson.md"}], name="f.json")
             _, check = self.judge(root)
             self.assertEqual([check["status"], check["facts"]["count"]], ["passed", 0])
 ```

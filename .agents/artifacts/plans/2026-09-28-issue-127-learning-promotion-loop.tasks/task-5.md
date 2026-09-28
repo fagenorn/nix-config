@@ -148,6 +148,9 @@ class DeploymentTest(LifecycleFixture, unittest.TestCase):
         document = json.loads(path.read_text(encoding="utf-8"))
         classification = {"rule": 4, "rule_id": "standard_layer",
                           "declared_layer": "standard_layer", "overridden_by_rule_1": False}
+        write_json(path, dict(document, state="authorized", classification=None))
+        payload = self.assert_refused(path, "promoted", "transition_not_permitted")
+        self.assertEqual(payload["error"]["violations"][0]["pointer"], "/classification")
         write_json(path, dict(document, state="authorized", classification=classification))
         self.assert_refused(path, "promoted", "evidence_unresolvable")
         bundle = json.loads(write_bundle(self.root, self.BUNDLE, "unmeasured")

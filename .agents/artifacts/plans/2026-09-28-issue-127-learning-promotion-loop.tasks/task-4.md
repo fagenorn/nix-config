@@ -181,8 +181,8 @@ DESTINATION = "home/common/agent-skills/standards/the-bar.md"
 
 
 class ClassificationTest(LifecycleFixture, unittest.TestCase):
-    def classification(self, document=None):
-        path = self.capture(document)
+    def classification(self, document=None, name="c.json"):
+        path = self.capture(document, name=name)
         return self.step(path, "evaluating", "--tracker-ref", "7")["classification"]
 
     def test_binding_requires_a_tracker_ref_and_records_it(self):
@@ -210,9 +210,9 @@ class ClassificationTest(LifecycleFixture, unittest.TestCase):
         (self.root / DESTINATION).parent.mkdir(parents=True)
         (self.root / DESTINATION).write_text(HEADING + " code\n", encoding="utf-8")
         linked = dict(draft()["destination"], path="linked/the-bar.md")
-        for document in (draft(), draft(destination=linked)):
+        for i, document in enumerate((draft(), draft(destination=linked))):
             with self.subTest(path=document["destination"]["path"]):
-                self.assertEqual(self.classification(document)["rule"], 4)
+                self.assertEqual(self.classification(document, name=f"{i}.json")["rule"], 4)
 
     def test_each_declared_layer_matches_its_own_rule(self):
         admission = {"gate": "issue-64", "decision": "pending", "irreducible_scenario": "s"}
@@ -226,7 +226,7 @@ class ClassificationTest(LifecycleFixture, unittest.TestCase):
                                    name=names.get(layer, "the-bar"))
                 document = draft(destination=destination, native_admission=(
                     admission if layer == "native_extension" else None))
-                got = self.classification(document)
+                got = self.classification(document, name=f"{rule}.json")
                 self.assertEqual([got["rule"], got["rule_id"], got["overridden_by_rule_1"]],
                                  [rule, layer, False])
 

@@ -383,14 +383,25 @@ In `lib/agent-tools.nix` append `"promotion"` to `commands`. In the `justfile`, 
 
 ```
 # Capture, evaluate, validate and advance promotion candidates (#127)
+[positional-arguments]
 promotion *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.promotion {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.promotion "$@"
 ```
+
+The recipe is `[positional-arguments]` and forwards `"$@"` so a quoted value such as
+`--command 'gh issue list --label promotion-candidate'` or `--rationale "two words"` reaches
+argparse as one argument (per D33); the neighbouring `{{args}}` recipes re-split on spaces.
 
 and add `tests/test_promotion_documents.py \` to `agent-workflow-tests` after
 `tests/test_agent_gate_bundle.py \`.
 
 - [ ] **Step 6: Verify**
+
+Run: `just --dry-run promotion validate --candidate 'a b.json' 2>&1 | tail -1` and confirm the
+echoed line still passes `"$@"` (not a re-split `a b.json`); then
+`just promotion validate --candidate 'no such file.json'; echo $?` must exit 2 with the
+module's own one-object JSON refusal on stdout, never argparse's "unrecognized arguments"
+usage error for a re-split `file.json` (per D33).
 
 Run: `PYTHONPATH=python python3 -m unittest tests/test_promotion_documents.py 2>&1 | tail -3`
 Expected: `OK`, 6 tests.

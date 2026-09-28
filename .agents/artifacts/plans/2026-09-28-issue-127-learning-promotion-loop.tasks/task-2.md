@@ -152,10 +152,19 @@ class CaptureTest(PromotionCase):
 
     def test_resolver_failures_are_contract_unresolvable(self):
         refused = '{"error":{"code":"not_onboarded","repair_id":"x","violations":[]}}'
+
+        def own(name):
+            # One stub directory per case: make_env writes a fixed stub path, so
+            # sharing self.tmp would let the last case's stub serve every case.
+            sub = self.tmp / name
+            sub.mkdir()
+            return sub
+
         cases = {
-            "not_onboarded": make_env(self.tmp, resolver_exit=2, resolver_stdout=refused),
-            "garbage": make_env(self.tmp, resolver_stdout="nope"),
-            "gitlab": make_env(self.tmp, resolved_project(self.root, kind="gitlab")),
+            "not_onboarded": make_env(own("not_onboarded"), resolver_exit=2,
+                                      resolver_stdout=refused),
+            "garbage": make_env(own("garbage"), resolver_stdout="nope"),
+            "gitlab": make_env(own("gitlab"), resolved_project(self.root, kind="gitlab")),
             "absent": dict(self.env, PATH=str(self.tmp / "empty-bin")),
         }
         for name, env in cases.items():
