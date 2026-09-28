@@ -904,6 +904,41 @@ def assemble_bundle(manifest, evidence, diagnostics, override, state):
                 generated_at=_generated_at())
 
 
+def verify_bundle(document: object) -> str:
+    """Contract: the recorded `state` of a bundle this module emitted, or
+    BundleIntegrityError. The id is recomputed over the body without `bundle_id`
+    and `generated_at`, and the state is re-decided from the bundle's own evidence."""
+    if not isinstance(document, dict):
+        raise BundleIntegrityError("a bundle is a JSON object")
+    if document.get("kind") != BUNDLE_KIND:
+        raise BundleIntegrityError(f"kind is not {BUNDLE_KIND!r}")
+    if (type(document.get("schema_version")) is not int
+            or document["schema_version"] != SCHEMA_VERSION):
+        raise BundleIntegrityError(f"schema_version is not {SCHEMA_VERSION}")
+    if document.get("gate_contract") != GATE_CONTRACT:
+        raise BundleIntegrityError(f"gate_contract is not {GATE_CONTRACT!r}")
+    if (type(document.get("gate_version")) is not int
+            or document["gate_version"] != GATE_VERSION):
+        raise BundleIntegrityError(f"gate_version is not {GATE_VERSION}")
+    missing = [key for key in ("bundle_id", "state", "evidence")
+               if key not in document]
+    if missing:
+        raise BundleIntegrityError(f"bundle lacks {', '.join(missing)}")
+    body = {key: value for key, value in document.items()
+            if key not in ("bundle_id", "generated_at")}
+    if document["bundle_id"] != telemetry_digest(body):
+        raise BundleIntegrityError("bundle_id does not match the bundle body")
+    try:
+        earned = decide(document["evidence"])
+    except (TypeError, KeyError, AttributeError, ValueError) as error:
+        raise BundleIntegrityError(
+            f"the bundle's evidence cannot be decided: {error!r}") from error
+    if earned != document["state"]:
+        raise BundleIntegrityError(
+            f"the bundle's own evidence earns {earned!r}, not {document['state']!r}")
+    return document["state"]
+
+
 def main(argv=None):
     """Contract: one bundle to stdout and an exit code — 0 approved, 3 rejected
     or unmeasured, 2 tool failure. A non-zero exit is never an approval (D16).
