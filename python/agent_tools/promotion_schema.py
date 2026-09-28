@@ -223,7 +223,7 @@ def _exact_int(value: object, pointer: str, expected: int, out: list) -> bool:
 
 def _pattern(value: object, pointer: str, pattern, message: str, out: list,
              nullable: bool = False) -> bool:
-    if (nullable and value is None) or (isinstance(value, str) and pattern.match(value)):
+    if (nullable and value is None) or (isinstance(value, str) and pattern.fullmatch(value)):
         return True
     out.append(violation(pointer, ("must be null or " if nullable else "must be ") + message))
     return False
@@ -282,7 +282,7 @@ def _destination(value: object, out: list) -> object:
     name = value.get("name")
     if _text(name, "/destination/name", out) and known and layer in NAME_PATTERNS:
         pattern = NAME_PATTERNS[layer]
-        if not pattern.match(name):
+        if not pattern.fullmatch(name):
             out.append(violation("/destination/name", f"must match {pattern.pattern}"))
     _path(value.get("path"), "/destination/path", out)
     _text(value.get("anchor"), "/destination/anchor", out, ANCHOR_MAX)

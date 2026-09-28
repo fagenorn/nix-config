@@ -71,7 +71,21 @@ class ValidateTest(PromotionCase):
             "/extra": draft(extra=1),
             "/lesson/generated_at": draft(lesson=dict(d["lesson"], generated_at="x")),
         }
-        for pointer, document in faults.items():
+        # A trailing newline must never pass an anchored pattern.
+        trailing_newline = [
+            ("/lesson/source/revision", draft(lesson=dict(d["lesson"], source=dict(
+                citation(), revision="a" * 40 + "\n")))),
+            ("/local_duplicates/0/sha256",
+             draft(local_duplicates=[duplicate(sha256="a" * 64 + "\n")])),
+            ("/destination/name", draft(destination=dict(
+                d["destination"], layer="native_adapter", name="adapter.claude.x\n"))),
+            ("/destination/name", draft(
+                destination=dict(d["destination"], layer="native_extension",
+                                 name="native.codex.op\n"),
+                native_admission={"gate": "issue-64", "decision": "pending",
+                                  "irreducible_scenario": "x"})),
+        ]
+        for pointer, document in [*faults.items(), *trailing_newline]:
             with self.subTest(pointer=pointer):
                 self.assert_fault(document, pointer)
 
@@ -96,7 +110,16 @@ class ValidateTest(PromotionCase):
             "/scope/revision": evaluation_document(scope={
                 "repository": "fagenorn/nix-config", "revision": "xyz"}),
         }
-        for pointer, document in faults.items():
+        # A trailing newline must never pass an anchored pattern.
+        newline_id = "sha256:" + "e" * 64 + "\n"
+        trailing_newline = [
+            ("/candidate_id", candidate_document(candidate_id=newline_id)),
+            ("/evidence/bundle_id", candidate_document(evidence=dict(
+                evidence, gate_contract="issue-70", bundle_id=newline_id))),
+            ("/candidates/0", evaluation_document(candidates=[newline_id], outcome="found")),
+            ("/evaluation_id", evaluation_document(evaluation_id=newline_id)),
+        ]
+        for pointer, document in [*faults.items(), *trailing_newline]:
             with self.subTest(pointer=pointer):
                 self.assert_fault(document, pointer)
 
