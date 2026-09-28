@@ -535,6 +535,9 @@ def require_custody_shape(custody: Any) -> None:
         value = getattr(custody, name)
         if type(value) is not str or not value:
             raise StateInvalid(f"{where} {name} is not a non-empty string")
+    if not is_subject_path(custody.subject_path):
+        raise StateInvalid(f"{where} subject_path {custody.subject_path!r} is not an absolute "
+                           f"normalized path")
     violation = fence_violation(custody.fence)
     if violation is not None:
         raise StateInvalid(f"{where} {violation}")

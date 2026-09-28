@@ -407,18 +407,24 @@ class TransactionStore:
                                         f"is terminal")
             now = self._now()
             self._check_custody(prior, custody, now)
-            fence = prior["custody"]["fence"]
             with self._leases.locked():
-                candidate = copy.deepcopy(prior)
-                candidate["events"].append({
-                    "seq": prior["revision"] + 1, "type": "lease_released",
-                    "at": format_at(now), "fence": fence, "reason": "released"})
-                candidate["custody"] = None
-                candidate["revision"] = len(candidate["events"])
-                _validate_state(candidate, transaction_id, self.root)
-                directory = self.root / transaction_id
-                atomic_write(directory, directory / "state.json", candidate)
-                self._leases.clear(fence)
+                return self._released(prior, now, "released")
+
+    def _released(self, prior: dict, now: int, reason: str) -> Transaction:
+        """Append `lease_released` with `reason` to `state.json`, then clear the records;
+        the caller holds both locks and has passed the fenced check (D8, D24)."""
+        transaction_id = prior["transaction_id"]
+        fence = prior["custody"]["fence"]
+        candidate = copy.deepcopy(prior)
+        candidate["events"].append({
+            "seq": prior["revision"] + 1, "type": "lease_released", "at": format_at(now),
+            "fence": fence, "reason": reason})
+        candidate["custody"] = None
+        candidate["revision"] = len(candidate["events"])
+        _validate_state(candidate, transaction_id, self.root)
+        directory = self.root / transaction_id
+        atomic_write(directory, directory / "state.json", candidate)
+        self._leases.clear(fence)
         return snapshot(candidate)
 
     def renew(self, custody: Custody) -> Transaction:
@@ -430,9 +436,11 @@ class TransactionStore:
         from the transition that entered the parked run, it quiesces instead:
         `lease_released` reason `quiesced` in `state.json`, then the records are
         cleared, and the snapshot has no custody. Otherwise it never appends an
-        event or writes `state.json`: it extends every record by its recorded TTL
-        only when the earliest remaining validity is inside the renewal margin,
-        and writes nothing at all outside it.
+        event or writes `state.json`: under the lease lock it judges the records
+        again at the same clock reading, so a key a successor took after the
+        lock-free check is `StaleCustody` with nothing written; it then extends
+        every record by its recorded TTL only when the earliest remaining validity
+        is inside the renewal margin, and writes nothing at all outside it.
         """
         require_custody_shape(custody)
         transaction_id = custody.transaction_id
@@ -443,22 +451,13 @@ class TransactionStore:
                                         f"is terminal")
             now = self._now()
             self._check_custody(prior, custody, now)
-            fence = prior["custody"]["fence"]
             with self._leases.locked():
                 if prior["state"] in PARKINGS \
                         and now - parked_since(prior["events"]) > PARKED_CUSTODY_WINDOW_MS:
-                    candidate = copy.deepcopy(prior)
-                    candidate["events"].append({
-                        "seq": prior["revision"] + 1, "type": "lease_released",
-                        "at": format_at(now), "fence": fence, "reason": "quiesced"})
-                    candidate["custody"] = None
-                    candidate["revision"] = len(candidate["events"])
-                    _validate_state(candidate, transaction_id, self.root)
-                    directory = self.root / transaction_id
-                    atomic_write(directory, directory / "state.json", candidate)
-                    self._leases.clear(fence)
-                    return snapshot(candidate)
-                self._leases.extend_if_due(fence, now)
+                    return self._released(prior, now, "quiesced")
+                if not self._leases.extend_if_due(prior["custody"]["fence"], now):
+                    raise StaleCustody(f"{transaction_id}: renew: custody lapsed before the "
+                                       f"lease lock was taken")
         return snapshot(prior)
 
     def record_evidence(self, custody: Custody, *, evidence_id: str, form: str,
