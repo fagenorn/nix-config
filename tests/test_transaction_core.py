@@ -260,7 +260,8 @@ class LoadTest(StoreCase):
     def test_duplicate_keys_and_nonfinite_literals_are_state_invalid(self):
         transaction_id = self.store.create("k", SUBJECT).transaction_id
         raw = self.state_path(transaction_id).read_text()
-        for text in ('{"schema":"x",' + raw[1:], raw.replace('"n":1', '"n":NaN')):
+        for text in ('{"schema":"x",' + raw[1:], raw.replace('"n":1', '"n":NaN'),
+                     raw.replace('"n":1', '"n":1e400'), raw.replace('"n":1', '"n":-1e400')):
             with self.subTest(text=text[:30]):
                 self.state_path(transaction_id).write_text(text)
                 with self.assertRaises(StateInvalid):

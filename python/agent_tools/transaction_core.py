@@ -14,6 +14,7 @@ import datetime
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -152,9 +153,17 @@ def _serialize(document: dict) -> str:
                       allow_nan=False) + "\n"
 
 
+def _finite_float(literal: str) -> float:
+    """`parse_float` hook: an overflowing literal such as `1e400` decodes to infinity."""
+    value = float(literal)
+    if not math.isfinite(value):
+        raise ValueError(f"JSON number {literal} is not finite")
+    return value
+
+
 def _strict_loads(text: str) -> Any:
     return json.loads(text, object_pairs_hook=reject_duplicate_keys,
-                      parse_constant=reject_nonfinite_literal)
+                      parse_constant=reject_nonfinite_literal, parse_float=_finite_float)
 
 
 def _lstat_mode(path: Path) -> int | None:
