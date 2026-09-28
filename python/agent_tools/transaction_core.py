@@ -29,6 +29,8 @@ transaction, and `advance` enters no terminal while an action is `open`, `in_pro
 `Transaction`, the validator and the snapshot fold — in `agent_tools.transaction_history`;
 this module re-exports the errors and the public model names. `action_id` and the retry
 constants live in `agent_tools.transaction_invocation`, which this module re-exports too.
+`agent_tools.transaction_plan` is the home of the proof declaration's compiler and the plan
+constants, which this module re-exports as well.
 The module has no command and no caller yet.
 """
 
@@ -59,11 +61,16 @@ from agent_tools.transaction_invocation import (
     EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, ActionFold, action_id,
     action_violation, effect_request, fold_actions, inspect_result_violation,
     invoke_result_violation, observed, refusal, refused_error, satisfied, status, unresolved)
+from agent_tools.transaction_plan import (
+    COHORT_MARGIN_FLOOR_MS, COHORT_MARGIN_PERCENT, DEFAULT_CONVERGENCE_WINDOW_MS,
+    MAX_COHORT_ATTEMPTS, MAX_COLLECTION_LATENCY_MS, MAX_CONVERGENCE_WINDOW_MS, MAX_FRESHNESS_MS,
+    PLAN_REJECTION_REASONS, PLAN_SCHEMA, RUNNING_IDENTITY_FRESHNESS_MS, compile_proof,
+    materialize_plan)
 from agent_tools.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
-    GrantInvalid, InvocationRefused, LeaseUnavailable, StaleCustody, StateInvalid,
-    TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction, atomic_write,
-    fsync_directory, lstat_mode, open_lock, read_json, require_directory)
+    GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, StaleCustody,
+    StateInvalid, TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction,
+    atomic_write, fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 
 INDEX_SCHEMA = "transaction-creation-key/v1"
 PARKED_CUSTODY_WINDOW_MS = 900_000  # the core cap on custody held through a parking (D19)
