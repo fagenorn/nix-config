@@ -160,6 +160,58 @@ def candidate_id_of(document: dict) -> str:
     return telemetry_digest(authored_section(document))
 
 
+def _citation_text(citation: dict, pinned: bool) -> str:
+    """`<repository> <path>[@<revision|unpinned>]#<anchor>` for the issue body."""
+    revision = f"@{citation['revision'] or 'unpinned'}" if pinned else ""
+    return f"{citation['repository']} {citation['path']}{revision}#{citation['anchor']}"
+
+
+def create_command(repo_slug: str, document_path: str, draft: dict,
+                   candidate_id: str) -> list[str]:
+    """The labelled `gh issue create` argv `capture` prints as data (D1).
+
+    The body is bounded fields and links, never the statement (#68, D30).
+    """
+    lesson, destination = draft["lesson"], draft["destination"]
+    corroboration = draft["corroboration"]
+    lines = [f"candidate: {candidate_id}",
+             f"document: {document_path}",
+             f"source: {_citation_text(lesson['source'], pinned=True)}",
+             f"destination: {destination['layer']} {destination['owner']}/"
+             f"{destination['name']} {destination['path']}#{destination['anchor']}"]
+    lines += [f"corroboration: {_citation_text(item, pinned=False)}"
+              for item in corroboration["repositories"]]
+    if corroboration["platform_governance"] is not None:
+        lines.append("platform_governance: provided")
+    return ["gh", "issue", "create", "--repo", repo_slug, "--label", TRACKER_LABEL,
+            "--title", "promotion: " + lesson["title"], "--body", "\n".join(lines)]
+
+
+def mint_candidate(draft: dict, repo_slug: str, document_path: str) -> dict:
+    """The `captured` candidate: the authored section verbatim plus a fresh lifecycle."""
+    candidate_id = candidate_id_of(draft)
+    return {"schema_version": SCHEMA_VERSION, "kind": CANDIDATE_KIND,
+            "candidate_id": candidate_id, "state": "captured", **authored_section(draft),
+            "classification": None, "evidence": None, "deployment": None,
+            "tracker": {"ref": None, "label": TRACKER_LABEL,
+                        "create_command": create_command(repo_slug, document_path, draft,
+                                                         candidate_id)},
+            "history": [{"from": None, "to": "captured", "actor": None, "rationale": None}]}
+
+
+def mint_evaluation(repository: str, revision: str | None, commands: list[str],
+                    candidates: list[str]) -> dict:
+    """The evaluation record; `commands` are kept verbatim and never run (D19).
+
+    `evaluation_id` digests the document without itself (D13).
+    """
+    body = {"schema_version": SCHEMA_VERSION, "kind": EVALUATION_KIND,
+            "scope": {"repository": repository, "revision": revision},
+            "commands": list(commands), "candidates": list(candidates),
+            "outcome": "found" if candidates else "empty"}
+    return {**body, "evaluation_id": telemetry_digest(body)}
+
+
 # Each checker appends violations and reports whether the value passed, so a
 # caller can stop descending into a member it already refused.
 

@@ -43,7 +43,10 @@ def make_env(tmp: Path, resolved=None, *, resolver_exit=0, resolver_stdout=None)
         f"sys.stdout.write(open({str(payload)!r}).read())\n"
         f"raise SystemExit({resolver_exit})\n", encoding="utf-8")
     stub.chmod(0o755)
-    return {"PATH": str(bin_dir), "PYTHONPATH": os.environ["PYTHONPATH"],
+    # Absolute, so a run with its own `cwd` still imports the package under test.
+    package_path = os.pathsep.join(os.path.abspath(entry) for entry
+                                   in os.environ["PYTHONPATH"].split(os.pathsep))
+    return {"PATH": str(bin_dir), "PYTHONPATH": package_path,
             "HOME": str(tmp), "TMPDIR": str(tmp), "LANG": "C"}
 
 
