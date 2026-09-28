@@ -100,7 +100,9 @@ TransactionStore.invoke_action(custody, *, name, parameters, effect) -> Transact
   lock it performs the fenced check and releases the lock. It then calls `effect.inspect` and
   re-takes the lock. A second fenced check follows, which a lapse in between turns into
   `StaleCustody` with nothing recorded. On success it appends `action_declared` if this is the
-  action's first event, then `action_inspected` stamped with the held fence.
+  action's first event, then `action_inspected` stamped with the held fence. While the action's
+  latest attempt is open under the **held** fence, `inspect_action` is refused
+  `attempt_in_flight` before any call (D14).
 - **`invoke_action`** is fenced and runs only in `publishing` or `activating`, the lifecycle's
   effect states; a parked transaction cannot invoke (D8). When the action's latest inspection is
   `satisfied`, it returns the unchanged snapshot without calling or writing: the protocol records
@@ -108,6 +110,15 @@ TransactionStore.invoke_action(custody, *, name, parameters, effect) -> Transact
   first write appends `invocation_intended` for attempt *n*, and the lock is released. The core
   then calls `effect.invoke` and `effect.inspect` and re-takes the lock. After a second fenced
   check, the second write appends `invocation_returned` and the post-invoke `action_inspected` (D3).
+
+**Closing an open attempt takes a new custody span (D14).** Within one span, only
+`invoke_action`'s own second write closes the attempt it opened. The core cannot tell a dead
+runner from a slow one, because the credential is an ordering token that any process may rebuild
+(#205). Only a fence change proves the old call's runner lost custody. A runner that stays alive
+after an effect raised therefore releases and reacquires, or lets the lease lapse, before it
+inspects. A late landing of the old call on the provider side is the remaining race. The
+idempotency key is stable across attempts, so the provider sees the same key, and fence
+enforcement on the mutation route belongs to the adapter slice (#117 seam 3).
 
 The core catches nothing an effect raises. An exception from `invoke` or `inspect` propagates to
 the caller, and the intent stays open. That uncaught exception is also the crash seam: an effect
@@ -136,8 +147,9 @@ in this order under the lock on one clock reading (D5, D6):
    failure**: the `at` of the first `absent` inspection after attempt 1. Otherwise it is
    `window_closed`.
 
-Every refusal is `InvocationRefused`, carrying one `reason` from that closed set plus
-`state_not_effectful` for an invoke outside the effect states. It is raised before any write and
+Every refusal is `InvocationRefused`, carrying one `reason` from that closed set, plus
+`state_not_effectful` for an invoke outside the effect states and `attempt_in_flight` for an
+inspection of an attempt still open under the held fence. It is raised before any write and
 before any effect call (D7). The protocol never moves the lifecycle itself: the caller parks, as
 every other advance in slices 1–2 is caller-driven, and the refusal reason is the typed attention
 cause #82 names (`retry_exhausted` is `budget_exhausted` here). Every retry through
@@ -147,7 +159,8 @@ schedules and observation deadlines are out of scope (D10).
 The validator re-checks everything in the history that does not depend on a clock. Attempts are
 numbered consecutively from 1 and never exceed 3. Each intent follows an `absent` inspection of
 that action under the same fence. At most one `invocation_returned` follows each intent, before
-the attempt's closing inspection, and under the intent's fence. Each retry follows a retry-safe
+the attempt's closing inspection, and under the intent's fence. An inspection that closes an
+attempt with no return carries a fence other than the intent's. Each retry follows a retry-safe
 predecessor. `action_declared` precedes every other event of its id, and its id re-derives from
 its `name` and `parameters`. Every fenced action event sits inside an open custody span whose fence
 it equals. The fifteen-minute window is enforced only at invoke time on the store clock, because
@@ -199,7 +212,7 @@ Rule 4 needs the clock, so the view states the deadline rather than a verdict.
 Two refusals join the hierarchy under `TransactionError` (D7):
 
 - `InvocationRefused`, with `reason` in `inspection_required`, `not_absent`, `not_retryable`,
-  `budget_exhausted`, `window_closed` and `state_not_effectful`.
+  `budget_exhausted`, `window_closed`, `state_not_effectful` and `attempt_in_flight`.
 - `EffectResultInvalid`, for an effect result outside the closed shapes.
 
 `transaction_core` re-exports both.
@@ -253,8 +266,9 @@ The slice keeps the three seams of #204 and #205 and adds none (D13):
    - A simulated crash, an effect raising before it touches its world, leaves `state.json` holding
      an open intent and the world unchanged. `invoke_action` then refuses `inspection_required`, and
      after `inspect_action` reads `absent` it retries as attempt 2.
-   - An effect that applies the change and then raises is resumed by `inspect_action` reading
-     `satisfied`. `invoke_action` then returns without a call, and the world count stays 1.
+   - An effect that applies the change and then raises leaves `inspect_action` refused
+     `attempt_in_flight` under the same span. After a reacquisition, `inspect_action` reads
+     `satisfied`, `invoke_action` returns without a call, and the world count stays 1.
    - A fourth automatic try is refused `budget_exhausted`, and a retry 900 001 ms after the first
      retryable failure is refused `window_closed`, while one at exactly 900 000 ms is admitted.
    - A non-retry-safe class is refused `not_retryable`, and an inspection from before a
@@ -294,10 +308,11 @@ where the schema string and the new required pre-inspection demand it.
 | D4 | `action_id` = `act_` + first 32 hex of `telemetry_digest([transaction_id, name, parameters])`, which is also the idempotency key; attempts are per-action ordinals folded from history, so the (action id, attempt) attempt id increases monotonically across runners and crashes. | #82 deterministic action ids, monotonic attempt ids, stable idempotency key; agent-helpers rule 4 (one digest home); #117 invocation ordinals separate from workflow attempts. | A caller-chosen id (no re-derivation guarantee), a separate idempotency key (two identities that must agree), or a transaction-global attempt counter (couples unrelated actions' budgets). |
 | D5 | Every invoke, the first included, needs the action's latest event to be an `absent` inspection under the held fence; the post-invoke inspection closes an attempt, and a reacquisition voids an older inspection. | #82 re-entry inspects first, only proven absent retries; prototype pre-inspection (no-clobber); #92/#205 snapshot evidence voided by an epoch change. | An implicit inspect inside `invoke_action` (the "retry without inspect is refused" criterion becomes untestable) or accepting an inspection from an earlier custody span. |
 | D6 | A retry needs a retry-safe predecessor — `rejected`/`unknown` with `transient_transport`, `provider_throttled` or `provider_unavailable`, or an interrupted attempt with no recorded return, now proved `absent` — at most 3 attempts, and a clock at most 900 000 ms past the `at` of the first `absent` inspection after attempt 1 (inclusive); the window is judged at invoke time, and the validator checks the rest. | #82 budget and retry-safe classes; #206 demo "resumes through inspect"; prototype `<=` window; #205 D3 (`at` not monotonic). | Interrupted attempts not retryable (a crash before the call could never resume, contradicting #206) or validating the window from stored `at` (a clock step would invalidate honest history). |
-| D7 | Protocol refusals are one `InvocationRefused` with a closed `reason` (`inspection_required`, `not_absent`, `not_retryable`, `budget_exhausted`, `window_closed`, `state_not_effectful`) raised before any write or call; a malformed effect result is `EffectResultInvalid`; invoking a satisfied action is a no-op that returns the snapshot. | #204 D9/#205 D21 typed refusals before any write; the-bar fail loud and token economy; #206 "records success instead of calling again". | One error class per reason (six classes for one decision point) or refusing a satisfied invoke (callers re-running after resume would have to special-case success). |
+| D7 | Protocol refusals are one `InvocationRefused` with a closed `reason` (`inspection_required`, `not_absent`, `not_retryable`, `budget_exhausted`, `window_closed`, `state_not_effectful`, `attempt_in_flight` per D14) raised before any write or call; a malformed effect result is `EffectResultInvalid`; invoking a satisfied action is a no-op that returns the snapshot. | #204 D9/#205 D21 typed refusals before any write; the-bar fail loud and token economy; #206 "records success instead of calling again". | One error class per reason (six classes for one decision point) or refusing a satisfied invoke (callers re-running after resume would have to special-case success). |
 | D8 | The protocol never moves the lifecycle; the caller parks with the refusal reason as the typed cause; `invoke_action` runs only in `publishing`/`activating`, `inspect_action` in any nonterminal state with custody. | Slices 1–2: every transition but `reap`'s is caller-driven; #82 lease loss and attention stop effects; #117 resume reconciles before resuming. | Auto-parking inside the protocol (a second transition authority beside `advance`) or invoking from a parking (a parked transaction would still cause effects). |
 | D9 | `renew` does not quiesce a parked transaction while any action is `open` or `in_progress`; `advance` into a terminal is refused while any action is `open`, `in_progress` or `unknown`. | #205 D19 hands slice 3 #92's exception; #117 "observe an issued call before release"; #82 "unknown external reality is never terminal". | Deferring the exception (custody could drop while a call is in flight) or trusting the caller's `external_state` over the history. |
 | D10 | Only automatic retries are in scope; the #82 authorized extra attempt, profile-lowered limits, backoff and observation deadlines are deferred. | #206 scope (retry budget 1 + 2 in fifteen minutes); #84 owns authorization, #124 profiles; YAGNI. | Shipping the extra-attempt grant now (needs #84 grant scopes that do not exist yet). |
 | D11 | Effect results are closed: inspect `outcome` of five values, invoke `result` of three, and `error_class` null exactly when accepted, otherwise one of seven classes, of which three are retry-safe; only a secret-free `reference` string is recorded. | #82 and #85 vocabularies and non-retryable classes; #72 secret-free state; the-bar fail loud. | Free-form error classes (a typo would silently be non-retryable) or recording raw provider payloads (#85 keeps them in their owning facility). |
 | D12 | The sweep adds `throttled_retry` (every action throttled once, one automatic retry) and `resume_after_crash` (crash between intent and call on the first publication action, reap, reacquire, refused invoke, inspect, retry) for all four shapes; the world counts invokes and gains `crash_before_invoke`; the table gains an attempts column. | #206 demo and acceptance; prototype `dc98ba9` scenarios; #205 D22 (the executor grows with the core). | Porting the prototype's crash-after-invoke (#206 names the intent-to-call gap) or a single-shape fixture. |
 | D13 | Keep the three seams; fake effects are in-memory worlds asserted by their effects and invoke counts, never by a call log. | #205 D23; the-bar tests assert observable behavior. | Unit tests over the invocation module's internals (they bind the tests to the module split). |
+| D14 | Grill: within one custody span only `invoke_action`'s own post-invoke write closes the attempt it opened; `inspect_action` on an attempt open under the held fence is refused `attempt_in_flight`, so an interrupted attempt is closed only under a new fence, and the validator requires that of any return-less closing inspection. | Grill scenario: the same credential inspects mid-flight, reads `absent`, and D6's interrupted rule admits a duplicate while call 1 is still landing; #92 fencing is the only proof a runner lost custody; #205 the credential is a rebuildable ordering token. | Letting any holder inspect an open attempt (a live runner's own in-flight call becomes retryable) or a same-span in-flight marker (a process-local fact the core cannot persist truthfully). |
