@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "kind": "promotion-candidate-draft",
+  "lesson": {
+    "title": "Investigate before changing",
+    "statement": "Investigate before changing: read what already governs the code a change touches before changing it. Observed in two fleet repositories with no global home: Argus AGENTS.md lead 2 (\"Investigate before changing.\") and Nodo CLAUDE.md lead 2 (\"Investigate before changing code.\").",
+    "source": {"repository": "fagenorn/argus", "path": "AGENTS.md",
+               "revision": "20d6655223e9497c2668f67dd016e1111b3a78cb",
+               "anchor": "## How we collaborate (lead 2)"}
+  },
+  "destination": {"layer": "standard_layer", "owner": "standards", "name": "the-bar",
+                  "path": "home/common/agent-skills/standards/the-bar.md",
+                  "anchor": "### Investigate before changing"},
+  "corroboration": {
+    "repositories": [
+      {"repository": "fagenorn/argus", "path": "AGENTS.md",
+       "revision": "20d6655223e9497c2668f67dd016e1111b3a78cb",
+       "anchor": "## How we collaborate (lead 2)"},
+      {"repository": "elevenyellow/nodocom", "path": "CLAUDE.md",
+       "revision": "cc98ed0e65d66a01895f53659e291303d8e475f3",
+       "anchor": "## How we collaborate (lead 2)"}
+    ],
+    "platform_governance": null
+  },
+  "local_duplicates": [
+    {"repository": "fagenorn/argus", "path": "AGENTS.md", "sha256": null, "disposition": "remove"},
+    {"repository": "elevenyellow/nodocom", "path": "CLAUDE.md", "sha256": null, "disposition": "remove"}
+  ],
+  "native_admission": null
+}

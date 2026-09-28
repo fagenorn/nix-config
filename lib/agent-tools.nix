@@ -42,6 +42,7 @@ let
     "agent-model-matrix"
     "context-map-lint"
     "diff-scope"
+    "promotion"
   ];
 
   # -I drops every PYTHON* variable, the working directory and the user site.

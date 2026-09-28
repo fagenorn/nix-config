@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import fcntl
 import fnmatch
+import hashlib
 import importlib.util
 import json
 import os
@@ -25,6 +26,11 @@ import subprocess
 from conformance_registry import (
     CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER,
     NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,
+    PROMOTED_DUPLICATE_DRIFTED, PROMOTED_DUPLICATE_FINDINGS,
+    PROMOTED_DUPLICATE_PRESENT, PROMOTION_CANDIDATE_KIND,
+    PROMOTION_CANDIDATES_RELATIVE, PROMOTION_DUPLICATE_MEMBERS,
+    PROMOTION_DUPLICATES_MEMBER, PROMOTION_PROJECT_ONLY_RESIDUE,
+    PROMOTION_PROMOTED_STATE, PROMOTION_REMOVE_DISPOSITION,
     REGISTRY_BY_ID, RESOLVABLE_CHECK_ID, STAGE_CHECKS, STAGE_ORDER,
     TERMINAL_RESIDUE, TOOL_REASON_CODES, UNACKNOWLEDGED_RESIDUE, bound_fact,
     bound_facts,
@@ -813,6 +819,95 @@ def check_residue_root_scratch(context: "Context") -> "Outcome":
         return Outcome("passed")
     return Outcome("warning", "root_scratch_present", "lifecycle.residue.root_scratch",
                    {"files": bound_facts(names), "count": len(names)})
+
+
+def promoted_candidates(context: "Context") -> list:
+    """Contract: every promoted candidate document, in file-name order.
+
+    Only a regular, non-symlinked `*.json` file directly in the candidates
+    directory is read. One that cannot be read or parsed, is not an object, or
+    names another kind or state is skipped: judging it is `promotion
+    validate`'s job, not this check's (D33).
+    """
+    candidates = []
+    for entry in listed(context.root.joinpath(*PROMOTION_CANDIDATES_RELATIVE)):
+        if (not entry.name.endswith(".json") or entry.is_symlink()
+                or not entry.is_file()):
+            continue
+        try:
+            document = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if (isinstance(document, dict)
+                and document.get("kind") == PROMOTION_CANDIDATE_KIND
+                and document.get("state") == PROMOTION_PROMOTED_STATE):
+            candidates.append(document)
+    return candidates
+
+
+def judge_promoted_duplicate(root: Path, path, sha256) -> str | None:
+    """Contract: the finding one of this project's removable copies yields —
+    drifted, present, or None when nothing exists at its path (D15)."""
+    if (not isinstance(path, str) or not path or os.path.isabs(path)
+            or ".." in Path(path).parts):
+        return PROMOTED_DUPLICATE_DRIFTED
+    if first_symlinked_component(root, path) is not None:
+        return PROMOTED_DUPLICATE_DRIFTED
+    target = root / path
+    if not os.path.lexists(target):
+        return None
+    if not target.is_file():
+        return PROMOTED_DUPLICATE_DRIFTED
+    try:
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    except OSError:
+        return PROMOTED_DUPLICATE_DRIFTED
+    if not isinstance(sha256, str) or sha256 != digest:
+        return PROMOTED_DUPLICATE_DRIFTED
+    return PROMOTED_DUPLICATE_PRESENT
+
+
+def check_residue_promoted_duplicate(context: "Context") -> "Outcome":
+    """Contract: failed when a promoted lesson's declared local copy in this
+    repository still exists.
+
+    Each promoted candidate's `local_duplicates` is walked in order. Project-only
+    residue is counted as retained and another repository's copy as deferred,
+    so a passing report states its own scope; this repository's `remove`
+    entries are judged. Nothing is spawned, imported or removed (D10, D11).
+    """
+    repository_key, path_key, sha_key, disposition_key = PROMOTION_DUPLICATE_MEMBERS
+    project_id = context.contract["project"]["id"]
+    counts = {code: 0 for code, _ in PROMOTED_DUPLICATE_FINDINGS}
+    offenders, deferred, retained = [], 0, 0
+    for candidate in promoted_candidates(context):
+        duplicates = candidate.get(PROMOTION_DUPLICATES_MEMBER)
+        if not isinstance(duplicates, list):
+            continue
+        for entry in duplicates:
+            if (not isinstance(entry, dict)
+                    or not {repository_key, path_key, disposition_key} <= entry.keys()):
+                continue
+            disposition = entry[disposition_key]
+            if disposition == PROMOTION_PROJECT_ONLY_RESIDUE:
+                retained += 1
+            elif disposition != PROMOTION_REMOVE_DISPOSITION:
+                continue
+            elif entry[repository_key] != project_id:
+                deferred += 1
+            else:
+                finding = judge_promoted_duplicate(
+                    context.root, entry[path_key], entry.get(sha_key))
+                if finding is not None:
+                    counts[finding] += 1
+                    offenders.append(str(entry[path_key]))
+    facts = {"duplicates": bound_facts(offenders), "count": len(offenders),
+             "deferred_count": deferred, "retained_count": retained}
+    if not offenders:
+        return Outcome("passed", facts=facts)
+    reason_code, repair_id = next(
+        finding for finding in PROMOTED_DUPLICATE_FINDINGS if counts[finding[0]])
+    return Outcome("failed", reason_code, repair_id, facts)
 
 
 # --------------------------------------------------------------------------

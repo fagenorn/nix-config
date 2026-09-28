@@ -900,6 +900,90 @@ class NoUpgradeStructureTest(unittest.TestCase):
         self.assertIn("decide(", inspect.getsource(gate.assemble_bundle))
 
 
+def bundle_for(evidence_value, state, override=None):
+    manifest = {"identity": json.loads(json.dumps(IDENTITY)),
+                "expansion": {"expanded": False, "checkpoint_ref": None}}
+    return gate.assemble_bundle(manifest, evidence_value, [], override, state)
+
+
+def body_digest(bundle):
+    return telemetry_digest({k: v for k, v in bundle.items()
+                             if k not in ("bundle_id", "generated_at")})
+
+
+class VerifyBundleTest(unittest.TestCase):
+    """D8 (#127): the one verifier of an emitted bundle's id and verdict."""
+
+    APPROVED = staticmethod(lambda: flat(stratum(context(1000, 800))))
+    REJECTED = staticmethod(lambda: flat(stratum(context(1000, 999))))
+
+    def test_each_emitted_state_verifies_to_itself(self):
+        for state, value in (("approved", self.APPROVED()), ("rejected", self.REJECTED()),
+                             ("unmeasured", None)):
+            with self.subTest(state=state):
+                self.assertEqual(gate.verify_bundle(bundle_for(value, state)), state)
+
+    def test_generated_at_is_outside_the_digest(self):
+        bundle = bundle_for(self.APPROVED(), "approved")
+        bundle["generated_at"] = "1999-01-01T00:00:00Z"
+        self.assertEqual(gate.verify_bundle(bundle), "approved")
+
+    def test_a_relabelled_state_is_refused_by_the_digest(self):
+        bundle = bundle_for(self.REJECTED(), "rejected")
+        bundle["state"] = "approved"
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(bundle)
+
+    def test_a_relabelled_state_with_a_recomputed_id_is_refused_by_decide(self):
+        bundle = bundle_for(self.REJECTED(), "rejected")
+        bundle["state"] = "approved"
+        bundle["bundle_id"] = body_digest(bundle)
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(bundle)
+
+    def test_constants_and_shape_are_checked(self):
+        for key, value in (("kind", "agent-gate-trials"), ("schema_version", True),
+                           ("gate_contract", "issue-71"), ("gate_version", 2)):
+            with self.subTest(key=key):
+                bundle = bundle_for(self.APPROVED(), "approved")
+                bundle[key] = value
+                bundle["bundle_id"] = body_digest(bundle)
+                with self.assertRaises(gate.BundleIntegrityError):
+                    gate.verify_bundle(bundle)
+        for broken in ([], {"kind": "agent-gate-bundle"}):
+            with self.subTest(broken=broken), self.assertRaises(gate.BundleIntegrityError):
+                gate.verify_bundle(broken)
+
+    def test_malformed_evidence_is_an_integrity_error(self):
+        bundle = bundle_for(self.APPROVED(), "approved")
+        bundle["evidence"] = {"cases": [{"strata": 7}]}
+        bundle["bundle_id"] = body_digest(bundle)
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(bundle)
+
+    def test_arithmetic_failure_in_evidence_is_an_integrity_error(self):
+        bundle = bundle_for(self.APPROVED(), "approved")
+        pair = bundle["evidence"]["cases"][0]["strata"]["claude"]["context"]["trials"]
+        pair["base"][0]["input_total"] = 1
+        pair["candidate"][0]["input_total"] = 10 ** 400
+        bundle["bundle_id"] = body_digest(bundle)
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(bundle)
+
+    def test_a_member_decide_never_reads_is_still_bound_by_the_digest(self):
+        for key, value in (("diagnostics", ["forged"]), ("gates", {})):
+            with self.subTest(key=key):
+                bundle = bundle_for(self.APPROVED(), "approved")
+                bundle[key] = value
+                with self.assertRaises(gate.BundleIntegrityError):
+                    gate.verify_bundle(bundle)
+
+    def test_an_override_never_changes_the_verified_state(self):
+        override = gate.build_override("explore", "fagenorn", "2026-09-28T00:00:00Z")
+        bundle = bundle_for(self.REJECTED(), "rejected", override)
+        self.assertEqual(gate.verify_bundle(bundle), "rejected")
+
+
 class ModuleEntryPointTest(unittest.TestCase):
     """The recipe runs the tool with `-m`; every other test calls main() in process."""
 

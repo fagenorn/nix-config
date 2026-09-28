@@ -37,7 +37,7 @@ CHECK_MEMBERS = ("id", "domain", "subject_kind", "requirement", "status",
                  "reason_code", "repair_id", "facts")
 REPAIR_MEMBERS = ("repair_id", "module", "safety_class", "operation")
 OPERATION_MEMBERS = ("subcommand", "args")
-REPAIR_MODULES = ("conformance", "resolve-project")
+REPAIR_MODULES = ("conformance", "resolve-project", "promotion")
 FORBIDDEN_MEMBER_NAMES = ("created_at", "generated_at", "time", "timestamp")
 MAX_FACT_KEYS = 8
 MAX_FACT_STRING = 200
@@ -57,6 +57,19 @@ TOOL_REASON_CODES = ("command_missing", "tracker_cli_missing")
 NIX_STORE_PREFIX = "/nix/store/"
 
 CHILD_TIMEOUT_SECONDS = 15
+
+# The promotion-candidate vocabulary the promoted-duplicate check reads. These
+# literals mirror the helper package's `promotion_schema` module and are pinned
+# to it by test_conformance_registry: the engine is installed standalone and
+# imports no package module, so it restates them rather than importing them.
+PROMOTION_CANDIDATES_RELATIVE = (".agents", "knowledge", "promotions", "candidates")
+PROMOTION_CANDIDATE_KIND = "promotion-candidate"
+PROMOTION_PROMOTED_STATE = "promoted"
+PROMOTION_DUPLICATES_MEMBER = "local_duplicates"
+PROMOTION_DUPLICATE_MEMBERS = ("repository", "path", "sha256", "disposition")
+PROMOTION_REMOVE_DISPOSITION = "remove"
+PROMOTION_PROJECT_ONLY_RESIDUE = "project_only_residue"
+PROMOTION_REPAIR_MODULE = "promotion"
 
 
 # --------------------------------------------------------------------------
@@ -259,6 +272,15 @@ REPAIRS = {
     # Every release-profile repair is an edit to an authored profile this
     # engine neither reads nor writes, so all three are `user_action` with a
     # null operation (D25).
+    # A promoted lesson's leftover local copy. Removing an unchanged copy
+    # touches only the worktree; a drifted one needs the reader to reconcile
+    # the edit with the promoted text first. Neither is executed here (D11).
+    "promotion.duplicate.remove": {
+        "module": PROMOTION_REPAIR_MODULE, "safety_class": "worktree",
+        "operation": None},
+    "promotion.duplicate.reconcile": {
+        "module": PROMOTION_REPAIR_MODULE, "safety_class": "user_action",
+        "operation": None},
     "release_profile.compensate.add": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
@@ -286,6 +308,15 @@ NESTED_LEDGER_FINDINGS = (
     (LIVE_OWNER, "lifecycle.residue.nested_ledger.retain"),
     (UNACKNOWLEDGED_RESIDUE, "lifecycle.residue.nested_ledger.retain"),
     (TERMINAL_RESIDUE, "lifecycle.residue.nested_ledger.remove"),
+)
+
+PROMOTED_DUPLICATE_DRIFTED = "promoted_duplicate_drifted"
+PROMOTED_DUPLICATE_PRESENT = "promoted_duplicate_present"
+# Severity order again: a drifted copy outranks an unchanged one, so a report
+# never offers the removal repair while an edited copy would be lost (D11).
+PROMOTED_DUPLICATE_FINDINGS = (
+    (PROMOTED_DUPLICATE_DRIFTED, "promotion.duplicate.reconcile"),
+    (PROMOTED_DUPLICATE_PRESENT, "promotion.duplicate.remove"),
 )
 
 
@@ -361,6 +392,9 @@ REGISTRY: tuple[Check, ...] = (
           ("repository.contract.present",),
           (("root_scratch_present", "lifecycle.residue.root_scratch"),),
           "check_residue_root_scratch"),
+    Check("repository.residue.promoted_duplicate", "repository", "residue", "required",
+          ("repository.contract.valid",), PROMOTED_DUPLICATE_FINDINGS,
+          "check_residue_promoted_duplicate"),
     # The third code of each trio is emitted by the compiler slice; declaring
     # it now is what closes the registry rather than growing it later (D5).
     Check("repository.release_profile.rolled_back_reachable", "repository",

@@ -99,6 +99,10 @@ agent-workflow-tests:
     tests/test_agent_model_drift_scheduling.py \
     tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
+    tests/test_promotion_documents.py \
+    tests/test_promotion_lifecycle.py \
+    tests/test_promotion_deployment.py \
+    tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
     tests/test_branch_protection.py
 
@@ -123,7 +127,8 @@ agent-installed-skill-tests: build
       home/common/agent-skills/tests/test_dispatch_contracts.py \
       home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
-      tests/test_agent_tools_launchers.py
+      tests/test_agent_tools_launchers.py \
+      tests/test_promotion_installed.py
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
@@ -183,6 +188,11 @@ agent-model-drift *args:
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_gate_bundle {{args}}
+
+# Capture, evaluate, validate and advance promotion candidates (#127)
+[positional-arguments]
+promotion *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.promotion "$@"
 
 # Garbage collect old OS generations and remove stale packages from the nix store
 gc generations="5":

@@ -8,6 +8,7 @@ the report schema are in test_conformance.py."""
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -570,3 +571,137 @@ class ReleaseProfileLintTest(ReportAssertions, unittest.TestCase):
         self.addCleanup(setattr, checks, "find_release_profile", original)
         with self.assertRaises(ValueError):
             checks.check_release_profile_restore_anchor(object())
+
+
+LEFTOVER = b"Investigate before changing.\n"
+LEFTOVER_SHA = hashlib.sha256(LEFTOVER).hexdigest()
+HERE = "fagenorn/nix-config"
+
+
+# `make_root` already creates `docs/standards` (a standards knowledge path), so
+# the leftover copies live under a directory the fixture does not own.
+def promoted(root, duplicates, *, state="promoted", kind="promotion-candidate",
+             name="c.json"):
+    """A candidate file carrying only the members the evaluator reads."""
+    target = root / ".agents/knowledge/promotions/candidates" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"kind": kind, "state": state,
+                                  "local_duplicates": duplicates}), encoding="utf-8")
+    return target
+
+
+def dup(path="notes/lesson.md", sha=LEFTOVER_SHA, repository=HERE, disposition="remove"):
+    return {"repository": repository, "path": path, "sha256": sha,
+            "disposition": disposition}
+
+
+class PromotedDuplicateResidueTest(ReportAssertions, unittest.TestCase):
+    """#127 AC4: a promoted lesson's leftover local copy fails a required check."""
+
+    CHECK_ID = "repository.residue.promoted_duplicate"
+    REMOVE_ID = "promotion.duplicate.remove"
+    RECONCILE_ID = "promotion.duplicate.reconcile"
+
+    def judge(self, root):
+        report, by_id = doctor(self, root)
+        self.assert_validates(report)
+        return report, by_id[self.CHECK_ID]
+
+    def test_no_candidates_directory_passes_with_zero_facts(self):
+        with fixture() as tmp:
+            _, check = self.judge(make_root(tmp))
+            self.assertEqual(
+                [check["domain"], check["subject_kind"], check["requirement"],
+                 check["status"], check["reason_code"], check["repair_id"], check["facts"]],
+                ["repository", "residue", "required", "passed", None, None,
+                 {"duplicates": [], "count": 0, "deferred_count": 0, "retained_count": 0}])
+
+    def test_absent_foreign_and_retained_duplicates_pass_with_scope_facts(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "notes/keep.md")
+            promoted(root, [dup(), dup(repository="fagenorn/argus"),
+                            dup("notes/keep.md", disposition="project_only_residue")])
+            _, check = self.judge(root)
+            self.assertEqual([check["status"], check["facts"]], ["passed", {
+                "duplicates": [], "count": 0, "deferred_count": 1, "retained_count": 1}])
+
+    def test_an_unchanged_leftover_fails_with_the_remove_repair(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            (root / "notes").mkdir()
+            (root / "notes/lesson.md").write_bytes(LEFTOVER)
+            promoted(root, [dup()])
+            report, check = self.judge(root)
+            self.assertEqual([check["status"], check["reason_code"], check["repair_id"],
+                              check["facts"]["duplicates"], check["facts"]["count"]],
+                             ["failed", "promoted_duplicate_present", self.REMOVE_ID,
+                              ["notes/lesson.md"], 1])
+            repair = {r["repair_id"]: r for r in report["repairs"]}[self.REMOVE_ID]
+            self.assertEqual([repair["module"], repair["safety_class"], repair["operation"]],
+                             ["promotion", "worktree", None])
+            self.assertEqual(report["outcome"]["status"], "failed")
+
+    def test_drift_outranks_presence(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            (root / "notes").mkdir()
+            (root / "notes/lesson.md").write_bytes(LEFTOVER)
+            (root / "notes/other.md").write_bytes(b"edited\n")
+            promoted(root, [dup(), dup("notes/other.md")])
+            report, check = self.judge(root)
+            self.assertEqual([check["reason_code"], check["repair_id"],
+                              check["facts"]["count"]],
+                             ["promoted_duplicate_drifted", self.RECONCILE_ID, 2])
+            repair = {r["repair_id"]: r for r in report["repairs"]}[self.RECONCILE_ID]
+            self.assertEqual(repair["safety_class"], "user_action")
+
+    def test_every_drift_shape_is_drifted(self):
+        def other_bytes(root):
+            (root / "notes/lesson.md").write_bytes(b"edited\n")
+
+        def directory(root):
+            (root / "notes/lesson.md").mkdir()
+
+        def leaf_link(root):
+            (root / "real.md").write_bytes(LEFTOVER)
+            (root / "notes/lesson.md").symlink_to(root / "real.md")
+
+        def parent_link(root):
+            (root / "real").mkdir()
+            (root / "real/lesson.md").write_bytes(LEFTOVER)
+            (root / "notes").rmdir()
+            (root / "notes").symlink_to(root / "real", target_is_directory=True)
+
+        def leftover(root):
+            (root / "notes/lesson.md").write_bytes(LEFTOVER)
+
+        cases = {"other_bytes": (other_bytes, dup()), "null_digest": (leftover, dup(sha=None)),
+                 "directory": (directory, dup()), "leaf_link": (leaf_link, dup()),
+                 "parent_link": (parent_link, dup()),
+                 "traversal": (leftover, dup("../outside.md")),
+                 "absolute": (leftover, dup("/etc/hosts"))}
+        for name, (make, entry) in cases.items():
+            with self.subTest(case=name), fixture() as tmp:
+                root = make_root(tmp)
+                (root / "notes").mkdir()
+                make(root)
+                promoted(root, [entry])
+                _, check = self.judge(root)
+                self.assertEqual([check["status"], check["reason_code"]],
+                                 ["failed", "promoted_duplicate_drifted"])
+
+    def test_only_promoted_candidate_files_are_judged(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            (root / "notes").mkdir()
+            (root / "notes/lesson.md").write_bytes(LEFTOVER)
+            promoted(root, [dup()], state="authorized", name="a.json")
+            promoted(root, [dup()], kind="promotion-evaluation", name="b.json")
+            promoted(root, [dup()], name="c.txt")
+            broken = root / ".agents/knowledge/promotions/candidates/d.json"
+            broken.write_text("{ broken", encoding="utf-8")
+            promoted(root, "not-a-list", name="e.json")
+            promoted(root, ["not-an-object", {"path": "notes/lesson.md"}], name="f.json")
+            _, check = self.judge(root)
+            self.assertEqual([check["status"], check["facts"]["count"]], ["passed", 0])
